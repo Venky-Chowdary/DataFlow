@@ -37,7 +37,6 @@ from .tools import (
     _looks_like_product_howto,
     format_tool_results_for_llm,
     get_pilot_tools,
-    infer_tools_from_message,
     asks_about_product_capacity,
     plan_tools_tolerant,
 )
@@ -4097,7 +4096,7 @@ Navigate to any screen when asked (including schedules/pipelines, contracts, que
             if ex and ex != "your connector":
                 prompts.extend([
                     f"List tables on {ex}",
-                    f"Give me a workspace briefing",
+                    "Give me a workspace briefing",
                 ])
             else:
                 prompts.extend([

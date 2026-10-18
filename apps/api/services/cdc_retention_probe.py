@@ -562,7 +562,7 @@ def classify_binlog_retention(
             retained=retained_label,
             cursor_key=cursor_key,
             message=(
-                f"Resume GTID is contained in gtid_purged. "
+                "Resume GTID is contained in gtid_purged. "
                 "Reset watermark and re-snapshot — continuous CDC across the gap is not claimed."
             ),
             details={"gtid_purged": str(gtid_purged)[:200], "resume_gtid": resume_g[:200]},

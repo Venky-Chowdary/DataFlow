@@ -6,7 +6,6 @@ import hashlib
 import json
 import os
 import sys
-import time
 import uuid
 from pathlib import Path
 from unittest.mock import patch
@@ -23,7 +22,6 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 from connectors.cdc_eos_sa import sa_dest_watermark_view  # noqa: E402
 from connectors.generic_sql import get_connection  # noqa: E402
 from connectors.lsn_guards import (  # noqa: E402
-    compare_lsn,
     extract_cdc_commit_position,
 )
 from connectors.postgresql_conn import get_connection as pg_connection  # noqa: E402

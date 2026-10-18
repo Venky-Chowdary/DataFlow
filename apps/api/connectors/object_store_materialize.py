@@ -27,7 +27,6 @@ not exactly-once. Quarantine stays per-row. Catalog tiles ≠ transfer-live.
 from __future__ import annotations
 
 import csv
-import io
 import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Sequence
@@ -92,6 +91,29 @@ class ObjectStoreMaterializeResult:
     batch_sizes: list[int] = field(default_factory=list)
 
 
+class _SpoolTextSink:
+    """Text sink for ``csv.DictWriter`` over a binary ``SpooledTemporaryFile``.
+
+    The spool is not a buffered binary object, so ``io.TextIOWrapper`` cannot
+    wrap it. Encoding here keeps the same UTF-8 / CRLF output the wrapper
+    produced.
+    """
+
+    def __init__(self, spool: tempfile.SpooledTemporaryFile) -> None:
+        self._spool = spool
+
+    def write(self, text: str) -> int:
+        return self._spool.write(text.encode("utf-8"))
+
+    def flush(self) -> None:
+        self._spool.flush()
+
+    def detach(self) -> None:
+        """Release the sink, mirroring ``TextIOWrapper.detach``."""
+        self.flush()
+        self._spool = None
+
+
 class ObjectStoreEncoder:
     """Streaming encoder onto a ``SpooledTemporaryFile``.
 
@@ -117,7 +139,7 @@ class ObjectStoreEncoder:
         )
         self._records_written = 0
         self._header_written = False
-        self._text: io.TextIOWrapper | None = None
+        self._text: _SpoolTextSink | None = None
         self._csv: csv.DictWriter | None = None
         self._pq_writer: Any = None
         self._arrow_schema: Any = None
@@ -165,9 +187,7 @@ class ObjectStoreEncoder:
         if self._csv is not None:
             return self._csv
         delim = "\t" if self.key_l.endswith(".tsv") else ","
-        self._text = io.TextIOWrapper(
-            self._spool, encoding="utf-8", newline="", write_through=True
-        )
+        self._text = _SpoolTextSink(self._spool)
         self._csv = csv.DictWriter(
             self._text,
             fieldnames=self.target_cols,

@@ -747,8 +747,6 @@ def plan_create_new_fidelity(
     if dest in {"postgres", "redshift"}:
         dest = "postgresql"
     src_to_tgt = dict(source_to_target or {})
-    # Invert for target→source when needed.
-    tgt_to_src = {v: k for k, v in src_to_tgt.items() if v}
 
     # Collision policy on the target column names we are about to emit.
     # Case is preserved on every dialect because every create-new writer emits
@@ -1449,7 +1447,7 @@ def certify_collation_on_destination(
     ]
     if not items:
         return
-    from services.collation_carry import classify_equality, destination_column_collations
+    from services.collation_carry import classify_equality
 
     found = destination_column_collations(
         dialect=dialect, schema=schema, table=table, fetchall=fetchall

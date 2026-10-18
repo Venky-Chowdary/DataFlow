@@ -1672,7 +1672,6 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         )
 
     stored_details = job.get("rejected_details") or job.get("destination_summary", {}).get("rejected_details") or []
-    from services.quarantine_from_preflight import merge_job_quarantine
     from services.quarantine_dlq import (
         compact_replay_closure,
         job_quarantine_closure,

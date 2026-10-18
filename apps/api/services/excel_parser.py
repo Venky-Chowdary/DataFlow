@@ -346,6 +346,27 @@ def _peek_magic(content: bytes | Any) -> tuple[bytes, bytes | Any]:
     return magic, content
 
 
+class _SeekableSpoolView:
+    """Seekable binary view over a stream that seeks but lacks ``seekable``.
+
+    ``tempfile.SpooledTemporaryFile`` is not an ``IOBase``: it seeks and reads
+    fine but does not expose the capability methods ``zipfile`` checks before
+    it treats a handle as random-access.
+    """
+
+    def __init__(self, inner: Any) -> None:
+        self._inner = inner
+
+    def seekable(self) -> bool:
+        return True
+
+    def readable(self) -> bool:
+        return True
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
 def _load_workbook(content: bytes | Any):
     """Workbook from bytes, a path, or a seekable binary handle.
 
@@ -377,6 +398,10 @@ def _load_workbook(content: bytes | Any):
             if closer is not None:
                 closer()
             raise ValueError("Excel workbook source is not seekable") from exc
+        if not hasattr(file_stream, "seekable"):
+            # tempfile.SpooledTemporaryFile seeks and reads but lacks the
+            # IOBase capability methods zipfile/openpyxl call.
+            file_stream = _SeekableSpoolView(file_stream)
     try:
         from openpyxl import load_workbook
     except ImportError as exc:

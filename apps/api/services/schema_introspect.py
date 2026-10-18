@@ -10,14 +10,11 @@ import sys
 from collections.abc import Sequence
 from typing import Any
 
-from services.engine_pool import release_engine
 from services.unique_key_introspect import (
     _mysql_fetch_unique_keys,
-    _oracle_fetch_unique_keys,
     _pg_fetch_unique_keys,
     _snowflake_fetch_unique_keys,
     _sqlite_fetch_unique_keys,
-    _sqlserver_fetch_unique_keys,
 )
 from services.catalog_defaults import normalize_catalog_default
 from services.check_constraints import probe_check_constraints

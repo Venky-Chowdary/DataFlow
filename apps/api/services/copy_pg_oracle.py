@@ -194,7 +194,6 @@ def copy_postgres_to_oracle(
     source_conn = _pg_connect(source_cfg)
     dest_conn = _oracle_connect(dest_cfg)
     created_here = False
-    existed_before = False
     pk_map: tuple[str, str] | None = None
     preserve_dest_on_failure = False
     try:
@@ -223,7 +222,6 @@ def copy_postgres_to_oracle(
             pk_map = mapped_single_pk(list(shape.primary_key or []), pairs)
 
             exists = _ora_table_exists(dst_cur, dst_schema, dest_table)
-            existed_before = bool(exists)
             dest_occupied = False
             if replace_destination and exists:
                 dst_cur.execute(_ora_drop_sql(dest_ref))

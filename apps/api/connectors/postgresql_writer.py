@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import io
 import tempfile
 import json
 import logging
@@ -40,34 +39,16 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _is_nullish_conflict_key,
     _rejected_row_count,
-    assert_sparse_upsert_has_pk,
     flush_normalized_child_batches,
-    dedupe_rows,
-    dedupe_rows_by_pk_and_lsn,
     filter_stale_lsn_rows,
     postgres_lsn_update_guard_sql,
-    quarantine_currency_markers_into_numeric,
-    quarantine_unfit_binaries,
-    quarantine_unfit_bitstrings,
-    quarantine_unfit_booleans,
-    quarantine_unfit_decimals,
-    quarantine_unfit_arrays,
-    quarantine_unfit_enum_set,
-    quarantine_unfit_integers,
-    quarantine_unfit_json,
-    quarantine_unfit_specialty_types,
-    quarantine_unfit_strings,
-    quarantine_unfit_temporals,
-    quarantine_unfit_years,
     bind_sql_mapped_rows_with_quarantine,
     overlay_physical_bind_types,
     require_physical_types_for_existing_table,
     resolve_conflict_targets,
     resolve_target_columns,
-    row_checksum,
     sanitize_identifier,
     reject_on_strict_policy,
-    sparse_present_bindings,
     transform_error_policy,
 )
 from connectors.writer_common import (

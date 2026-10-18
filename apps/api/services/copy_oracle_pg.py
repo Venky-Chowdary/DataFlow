@@ -32,7 +32,6 @@ from services.copy_mysql_pg import (
     _pg_connect,
     _pg_create_sql,
     _pg_range_count,
-    fast_copy_text_value,
 )
 from services.copy_oracle_oracle import (
     _count as _ora_count,

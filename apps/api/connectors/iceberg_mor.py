@@ -400,11 +400,11 @@ def _schema_field_names(meta: dict[str, Any]) -> dict[int, str]:
     if not isinstance(schema, dict):
         schema = {}
     out: dict[int, str] = {}
-    for field in schema.get("fields") or []:
-        if not isinstance(field, dict):
+    for schema_field in schema.get("fields") or []:
+        if not isinstance(schema_field, dict):
             continue
-        fid = field.get("id")
-        name = field.get("name")
+        fid = schema_field.get("id")
+        name = schema_field.get("name")
         if fid is None or not name:
             continue
         try:

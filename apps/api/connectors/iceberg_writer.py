@@ -822,7 +822,6 @@ def _mor_upsert_delta(
     still validates sparse/null PK rules and produces the merged images.
     """
     from connectors.writer_common import compare_lsn, _is_nullish_conflict_key
-    from services.value_serializer import is_missing_sentinel
 
     merged = _merge_upsert_rows(
         existing, incoming, pk_cols=pk_cols, lsn_col=lsn_col

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from services import reflection_cache
-from services.decision_kernel import ddl_type, materialize_dest_ddl
+from services.decision_kernel import materialize_dest_ddl
 
 from connectors.mysql_conn import get_connection
 from connectors.schema_drift import widen_existing_columns_native
@@ -34,26 +34,11 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _rejected_row_count,
     flush_normalized_child_batches,
-    dedupe_rows,
-    dedupe_rows_by_pk_and_lsn,
     filter_stale_lsn_rows,
-    quarantine_currency_markers_into_numeric,
-    quarantine_unfit_binaries,
-    quarantine_unfit_bitstrings,
-    quarantine_unfit_booleans,
-    quarantine_unfit_decimals,
-    quarantine_unfit_enum_set,
-    quarantine_unfit_integers,
-    quarantine_unfit_json,
-    quarantine_unfit_specialty_types,
-    quarantine_unfit_strings,
-    quarantine_unfit_temporals,
-    quarantine_unfit_years,
     bind_sql_mapped_rows_with_quarantine,
     quote_sql_identifier,
     resolve_conflict_targets,
     resolve_target_columns,
-    row_checksum,
     reject_on_strict_policy,
     sanitize_identifier,
     transform_error_policy,

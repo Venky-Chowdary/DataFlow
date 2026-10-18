@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import time
 
-import pytest
 from cryptography.fernet import Fernet
 
 from services.confirmed_transfer import transfer_request_from_ack
@@ -21,7 +20,8 @@ from services.transform_engine import apply_transform, normalize_engine_transfor
 from services.transform_resolver import resolve_transform, write_plan_transform
 
 
-def test_plan_and_runtime_share_one_transform_registry():
+def test_plan_and_runtime_share_one_transform_registry(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "test-pii-key")
     aliases = {
         "cast_decimal": "decimal",
         "hash": "hash_pii",

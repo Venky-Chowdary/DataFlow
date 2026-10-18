@@ -109,7 +109,6 @@ def resolve_duplicate_policy(
     explicit = normalize_duplicate_policy(duplicate_policy)
     if allow_duplicates and not explicit:
         explicit = "append"
-    mode = (sync_mode or "").strip().lower().replace("-", "_")
     caller = (write_mode or "").strip().lower()
 
     if explicit == "append":

@@ -8,7 +8,6 @@ import functools
 import hashlib
 import hmac
 import json
-import os
 from services.brand_env import getenv_brand
 import re
 import unicodedata
@@ -859,6 +858,11 @@ def _parse_datetime_worker(value: str, date_locale: str) -> str | None:
         return _to_utc_z(datetime.fromtimestamp(int(text), tz=timezone.utc))
     try:
         iso = text.replace("Z", "+00:00")
+        # Hour-only offsets ("+00") are valid wire spellings; fromisoformat
+        # wants "+00:00". Only rewrite when a time part exists — a bare date
+        # like "2026-01-01" must not read its day as an offset.
+        if re.search(r"\d{2}:\d{2}", iso):
+            iso = re.sub(r"([+-]\d{2})$", r"\1:00", iso)
         return _to_utc_z(datetime.fromisoformat(iso))
     except ValueError:
         pass

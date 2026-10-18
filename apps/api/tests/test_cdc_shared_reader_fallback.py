@@ -223,4 +223,3 @@ def test_e_health_step_failure_after_close_reraises_without_fallback(tmp_path, m
     assert raised.value is boom
     assert capture.named("cdc.reader.fallback") == []
     assert capture.named("cdc.cycle.completed") == []
-

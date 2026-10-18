@@ -75,5 +75,3 @@ def test_no_saved_contract_is_add_column_review_not_drift() -> None:
     assert gate["details"]["remediation_kind"] == "review_add_column"
     blob = str(result.get("blockers")).lower() + str(result.get("schema_drift")).lower()
     assert "acknowledge drift" not in blob
-
-

@@ -5427,7 +5427,7 @@ def require_physical_types_for_existing_table(
 
 # SQL Server IDENTITY_INSERT lives in identity_insert (Phase F8 size freeze).
 # sqlserver_identity re-exports the same names for the studio import path.
-from connectors.identity_insert import (  # noqa: E402
+from connectors.identity_insert import (  # noqa: E402,F401
     IdentityInsertSession,
     begin_identity_insert,
     sqlserver_identity_columns,

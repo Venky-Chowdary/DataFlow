@@ -1071,7 +1071,6 @@ def fingerprint_parsed_file(
             continue
         if use_source_spool:
             from connectors.engine_record_spill import (
-                fingerprints_from_spool,
                 spill_engine_write_records,
             )
 
