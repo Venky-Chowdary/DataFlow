@@ -243,17 +243,9 @@ def _dedupe_step_preview(recipe, engine, shaped) -> dict[int, dict[str, Any]]:
             continue
         opts = step.options or {}
         keys = [str(c) for c in opts.get("keys") or []]
-        rule_bits = [f"keep={opts.get('keep') or 'first'}"]
-        if opts.get("order_by"):
-            rule_bits.append(f"order_by={opts['order_by']} {opts.get('order_dir') or 'desc'}")
-        for entry in opts.get("then_by") or []:
-            if isinstance(entry, dict):
-                rule_bits.append(f"then_by={entry.get('column')} {entry.get('dir') or 'desc'}")
-            else:
-                rule_bits.append(f"then_by={entry}")
-        if opts.get("merge") == "non_null":
-            rule_bits.append("merge=non_null")
-        rule_bits.append(f"tie={opts.get('tie_break') or 'first_seen'}")
+        from services.shape_engine import _dedupe_rule
+
+        rule_bits = [_dedupe_rule(opts)]
         losers = [
             {
                 "row": d.get("loser_row"),

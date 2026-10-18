@@ -266,7 +266,7 @@ def test_dd1_gate8_catches_winner_tamper_pg(tmp_path, monkeypatch):
     }
     ext = _dedupe_source_extrema(
         count_dialect("postgresql"), cfg, schema="public", table="dd1_tam_src",
-        keys=["id"], order_cols=[("ts", "desc")],
+        keys=["id"], order_cols=[("ts", "desc", "last")],
     )
     assert ext == [(1, 10)]
     dest = _dedupe_dest_winner_tuples(
@@ -307,3 +307,120 @@ def test_dd1_volume_vs_distinct_on_pg(tmp_path, monkeypatch):
     checks = (res.reconciliation or {}).get("dedupe_checks") or []
     ordering = [c for c in checks if c.get("check") == "winner_ordering"]
     assert ordering and ordering[0]["status"] == "passed", checks
+
+
+def test_dd4_null_ordering_value_never_wins_pg(tmp_path, monkeypatch):
+    """DD-4: NULL ts must never outrank a real ts under desc OR asc —
+    'keep the latest' cannot let an unknown stamp displace a known one."""
+    fake = _engine_env(monkeypatch)
+    conn = _pg()
+    cur = conn.cursor()
+    _mk_typed_src(
+        cur, "dd4_null_src",
+        "id INT, v TEXT, ts INT, email TEXT",
+        [
+            ("1", "real", 5, "a@x"),
+            ("1", "nullts", None, "a2@x"),
+            ("2", "nullfirst", None, "b@x"),
+            ("2", "real2", 3, "b2@x"),
+        ],
+    )
+    cur.execute("DROP TABLE IF EXISTS dd4_null_dst CASCADE")
+    recipe = _dedupe_recipe(keys=["id"], keep="last", order_by="ts")
+    req = _req("dd4_null_src", "dd4_null_dst", recipe, COLS, mode="strict")
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute("SELECT id, v FROM dd4_null_dst ORDER BY id")
+    assert cur.fetchall() == [(1, "real"), (2, "real2")]
+    # Gate-8 mirrors the same null rule — the run must verify, not merely
+    # agree with a wrong business answer.
+    checks = (res.reconciliation or {}).get("dedupe_checks") or []
+    ordering = [c for c in checks if c.get("check") == "winner_ordering"]
+    assert ordering and ordering[0].get("status") == "passed", checks
+
+    # asc direction: NULL still never wins.
+    cur.execute("DROP TABLE IF EXISTS dd4_null_dst2 CASCADE")
+    recipe = _dedupe_recipe(
+        keys=["id"], keep="last", order_by="ts", order_dir="asc"
+    )
+    req = _req("dd4_null_src", "dd4_null_dst2", recipe, COLS, mode="strict")
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute("SELECT id, v FROM dd4_null_dst2 ORDER BY id")
+    assert cur.fetchall() == [(1, "real"), (2, "real2")]
+
+    # Every member NULL: the NULL row wins (all-NULL key group).
+    _mk_typed_src(
+        cur, "dd4_allnull_src",
+        "id INT, v TEXT, ts INT, email TEXT",
+        [
+            ("9", "n1", None, "a@x"),
+            ("9", "n2", None, "b@x"),
+        ],
+    )
+    cur.execute("DROP TABLE IF EXISTS dd4_allnull_dst CASCADE")
+    recipe = _dedupe_recipe(keys=["id"], keep="last", order_by="ts")
+    req = _req(
+        "dd4_allnull_src", "dd4_allnull_dst", recipe, COLS, mode="strict"
+    )
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute("SELECT COUNT(*) FROM dd4_allnull_dst")
+    assert cur.fetchone()[0] == 1
+    conn.close()
+
+
+def test_dd4_nulls_first_opt_in_pg(tmp_path, monkeypatch):
+    """DD-4: nulls='first' is the explicit opt-in that restores NULLS FIRST."""
+    fake = _engine_env(monkeypatch)
+    conn = _pg()
+    cur = conn.cursor()
+    _mk_typed_src(
+        cur, "dd4_nf_src",
+        "id INT, v TEXT, ts INT, email TEXT",
+        [("1", "real", 5, "a@x"), ("1", "nullts", None, "a2@x")],
+    )
+    cur.execute("DROP TABLE IF EXISTS dd4_nf_dst CASCADE")
+    recipe = _dedupe_recipe(
+        keys=["id"], keep="last", order_by="ts", nulls="first"
+    )
+    req = _req("dd4_nf_src", "dd4_nf_dst", recipe, COLS, mode="strict")
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute("SELECT v FROM dd4_nf_dst WHERE id = 1")
+    assert cur.fetchone()[0] == "nullts"
+    conn.close()
+
+
+def test_dd5_dd6_unverified_dedupe_keeps_dest_readback_pg(
+    tmp_path, monkeypatch
+):
+    """DD-5/DD-6: an unverifiable winner rule still measures dest COUNT(*)
+    and balances — with a 'partial' verdict, never 'Transfer verified'."""
+    fake = _engine_env(monkeypatch)
+    conn = _pg()
+    cur = conn.cursor()
+    _mk_typed_src(
+        cur, "dd5_src",
+        "id INT, v TEXT, ts INT, email TEXT",
+        [("1", "a", 1, "a@x"), ("1", "b", 2, "b@x"), ("2", "c", 3, "c@x")],
+    )
+    cur.execute("DROP TABLE IF EXISTS dd5_dst CASCADE")
+    recipe = {"steps": [{"op": "dedupe_rows",
+                         "options": {"keys": ["id"], "keep": "first"}}]}
+    req = _req("dd5_src", "dd5_dst", recipe, COLS, mode="balanced")
+    res = _exec(fake, req)
+    assert res.success, res.error
+    recon = res.reconciliation or {}
+    # DD-6: partial verdict, message leads with the unverified aspect.
+    assert recon.get("verification_verdict") == "partial", recon.get("message")
+    assert str(recon.get("message") or "").startswith(
+        "Dedupe winners unverified"
+    ), recon.get("message")
+    # DD-5: the independent dest COUNT(*) and conservation are restored.
+    ra = recon.get("row_accounting") or {}
+    assert ra.get("dest_count") == 2, ra
+    assert ra.get("rows_written") == 2, ra
+    assert ra.get("balanced") is True, ra
+    assert ra.get("rows_written_source") == "gate8_dest_readback", ra
+    conn.close()

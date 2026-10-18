@@ -151,6 +151,10 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         recon_score = 82.0
     elif sample:
         recon_score = 68.0
+    elif str(recon.get("verification_verdict") or "").lower() == "partial":
+        # Row-count/checksum checks passed but a declared check (dedupe
+        # winner ordering) is unverifiable — honest partial, never Verified.
+        recon_score = 70.0
     elif is_append_delta_proof(recon):
         recon_score = 70.0
     elif has_full_checksum_proof(recon):
@@ -181,6 +185,11 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
         )
     elif sample:
         r_note = "Sample-verified Gate-8 — not full independent checksum."
+    elif str(recon.get("verification_verdict") or "").lower() == "partial":
+        r_note = (
+            "Gate-8 partially verified — row counts/checksums match but a "
+            "declared dedupe winner-ordering check is unverifiable."
+        )
     elif is_append_delta_proof(recon):
         r_note = (
             "Gate-8 append delta verified — whole-table checksums are not "

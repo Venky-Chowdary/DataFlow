@@ -1902,20 +1902,27 @@ def _dedupe_winner_ordering_check(
     honestly unverified — SQL cannot express them.
     """
     base = {"step": step_no, "check": "winner_ordering", "keys": keys}
-    order_cols: list[tuple[str, str]] = []
+    order_cols: list[tuple[str, str, str]] = []
     order_by = str(entry.get("order_by") or "")
+    opt_nulls = str(entry.get("nulls") or "last").casefold()
     if order_by:
-        order_cols.append((order_by, str(entry.get("order_dir") or "desc").casefold()))
+        order_cols.append(
+            (order_by, str(entry.get("order_dir") or "desc").casefold(), opt_nulls)
+        )
     for t in entry.get("then_by") or []:
         if isinstance(t, dict):
             order_cols.append(
-                (str(t.get("column") or ""), str(t.get("dir") or "desc").casefold())
+                (
+                    str(t.get("column") or ""),
+                    str(t.get("dir") or "desc").casefold(),
+                    str(t.get("nulls") or opt_nulls).casefold(),
+                )
             )
         else:
             order_cols.append(
-                (str(t), str(entry.get("order_dir") or "desc").casefold())
+                (str(t), str(entry.get("order_dir") or "desc").casefold(), opt_nulls)
             )
-    order_cols = [(c, d) for c, d in order_cols if c]
+    order_cols = [(c, d, n) for c, d, n in order_cols if c]
     if not order_cols:
         return {
             **base,
@@ -1964,7 +1971,7 @@ def _dedupe_winner_ordering_check(
         if isinstance(m, dict) and m.get("source") and m.get("target")
     }
     dest_keys = [target_of.get(k, k) for k in keys]
-    dest_ords = [target_of.get(c, c) for c, _ in order_cols]
+    dest_ords = [target_of.get(c, c) for c, _, _ in order_cols]
     try:
         expected = _dedupe_source_extrema(
             src_dialect,
@@ -2007,7 +2014,7 @@ def _dedupe_winner_ordering_check(
     expected_map = {
         _key_canon(tuple(erow[: len(keys)])): _canon(
             tuple(erow[len(keys):]),
-            [c for c, _ in order_cols],
+            [c for c, _, _ in order_cols],
             order_types,
         )
         for erow in expected
@@ -2022,7 +2029,7 @@ def _dedupe_winner_ordering_check(
         if exp is None:
             missing += 1
             continue
-        got = _canon(drow[len(keys):], [c for c, _ in order_cols], order_types)
+        got = _canon(drow[len(keys):], [c for c, _, _ in order_cols], order_types)
         if got != exp:
             mismatches += 1
     extra = len(expected_map) - len(expected_map.keys() & seen)
@@ -2054,14 +2061,15 @@ def _dedupe_source_extrema(
     schema: str,
     table: str,
     keys: list[str],
-    order_cols: list[tuple[str, str]],
+    order_cols: list[tuple[str, str, str]],
 ) -> list[tuple]:
     """Each key's extremal ordering tuple on the source, via ROW_NUMBER.
 
-    NULL ordering mirrors the shape engine's rank buckets: under desc the
-    null bucket sorts highest (SQL NULLS FIRST), under asc lowest (NULLS
-    LAST) — expressed dialect-agnostically as ``(col IS NULL)`` so MySQL
-    and MSSQL, which lack NULLS FIRST/LAST, order identically.
+    NULL ordering mirrors the shape engine's null rule (DD-4): default
+    nulls="last" — a NULL never outranks a real value under either
+    direction (``(col IS NULL) ASC``); nulls="first" restores SQL NULLS
+    FIRST (``(col IS NULL) DESC``). Expressed dialect-agnostically so
+    MySQL and MSSQL, which lack NULLS FIRST/LAST, order identically.
     """
     import sqlalchemy as sa
 
@@ -2079,11 +2087,11 @@ def _dedupe_source_extrema(
         )
         order_terms = []
         qo_parts = []
-        for col, direction in order_cols:
+        for col, direction, nulls in order_cols:
             qc = quote(require_safe_identifier(col, preserve_case=True))
             qo_parts.append(qc)
             dir_sql = "DESC" if direction == "desc" else "ASC"
-            null_sql = "DESC" if direction == "desc" else "ASC"
+            null_sql = "DESC" if nulls == "first" else "ASC"
             order_terms.append(f"({qc} IS NULL) {null_sql}")
             order_terms.append(f"{qc} {dir_sql}")
         qo = ", ".join(qo_parts)
@@ -2280,6 +2288,16 @@ def _run_reconciliation_impl(
                                     "run_started_at"
                                 )
                             ),
+                            # Exact stamps this run wrote — recount by
+                            # membership, not the whole window, so an
+                            # overlapping writer is never counted.
+                            "run_stamps": (
+                                _ds.get("run_stamps")
+                                or (_ds.get("scd2") or {}).get(
+                                    "run_stamps"
+                                )
+                                or []
+                            ),
                         },
                     )
                     stamped["scd2_history"] = _hist
@@ -2341,20 +2359,25 @@ def _run_reconciliation_impl(
                         )
                     )
                 if _ded_unv:
-                    stamped["unproven"] = True
-                    stamped["message"] = (
-                        (stamped.get("message") or "")
-                        + " Dedupe checks unverified: "
-                        + "; ".join(
+                    # DD-5/DD-6: an unverifiable winner-ordering identity
+                    # does not unmeasure the destination COUNT(*) or the
+                    # checksums — those stay independently proven. The
+                    # verdict is partial and the message LEADS with the
+                    # unverified aspect; nothing reads "verified".
+                    stamped["verification_verdict"] = "partial"
+                    _prior = (stamped.get("message") or "").strip()
+                    stamped["message"] = "Dedupe winners unverified: " + (
+                        "; ".join(
                             str(c.get("reason") or "")
                             for c in _ded_unv
                         )
-                    ).strip()
+                    ) + (f" — {_prior}" if _prior else "")
             except Exception as exc:  # noqa: BLE001
-                stamped["passed"] = False
-                stamped["unproven"] = True
+                stamped["verification_verdict"] = "partial"
+                _prior = (stamped.get("message") or "").strip()
                 stamped["message"] = (
-                    f"Dedupe verification unproven: {exc}"
+                    f"Dedupe winners unverified: check error {exc}"
+                    + (f" — {_prior}" if _prior else "")
                 )
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:

@@ -383,6 +383,7 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
                 "keep": str(opts.get("keep") or "first"),
                 "order_by": str(opts.get("order_by") or "") or None,
                 "order_dir": str(opts.get("order_dir") or "") or None,
+                "nulls": str(opts.get("nulls") or "last"),
                 "then_by": list(opts.get("then_by") or []),
                 "tie_break": str(opts.get("tie_break") or "first_seen"),
                 "merge": str(opts.get("merge") or "") or None,

@@ -281,7 +281,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         buffered=True,
         options=(
             "keys", "keep", "order_by", "order_dir", "then_by",
-            "tie_break", "merge", "max_keys",
+            "tie_break", "merge", "max_keys", "nulls",
         ),
         required=("keys",),
     ),
@@ -1085,6 +1085,12 @@ def _normalize_options(
         else:
             out.pop("order_by", None)
             out.pop("order_dir", None)
+        # nulls: 'last' (default) — a NULL stamp never displaces a real one
+        # under either direction (DD-4); 'first' restores SQL NULLS FIRST.
+        nulls = str(out.get("nulls") or "last").strip().casefold()
+        if nulls not in ("first", "last"):
+            raise ShapeError(f"{where}: dedupe nulls must be first or last")
+        out["nulls"] = nulls
         # then_by: extra ordering columns consulted in order before the
         # arrival tie-break — the declared tie-break order.
         then_by = out.get("then_by")
@@ -1105,8 +1111,17 @@ def _normalize_options(
                     direction = order_dir
                 if direction not in ("asc", "desc"):
                     raise ShapeError(f"{where}: dedupe then_by dir must be asc or desc")
+                tnulls = (
+                    str(entry.get("nulls") or nulls).strip().casefold()
+                    if isinstance(entry, Mapping)
+                    else nulls
+                )
+                if tnulls not in ("first", "last"):
+                    raise ShapeError(f"{where}: dedupe then_by nulls must be first or last")
                 _assert_columns_exist([col], columns, "then_by", where=where)
-                normalized_tb.append({"column": col, "dir": direction})
+                normalized_tb.append(
+                    {"column": col, "dir": direction, "nulls": tnulls}
+                )
             if normalized_tb:
                 out["then_by"] = normalized_tb
             else:

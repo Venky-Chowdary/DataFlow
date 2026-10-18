@@ -291,55 +291,97 @@ def _dedupe_sort_val(value: Any, decl: str | None = None) -> tuple[int, Any]:
     return _sort_val(value)
 
 
+#: Per-position class ranks — value direction compares only inside the
+#: winnable class. NULLs sort last by default in BOTH directions: "keep the
+#: latest" must never let an unknown stamp displace a known one (DD-4;
+#: dbt/Fivetran dedupe is NULLS LAST). nulls="first" restores SQL NULLS
+#: FIRST. Bucket 2 (a declared-typed value that failed to parse) is never
+#: winnable — it always sorts below parsed values, under either direction.
+_NULL_LAST_CLASS = {0: 0, 1: 0, 2: 1, 3: 2}
+_NULL_FIRST_CLASS = {0: 1, 1: 1, 2: 2, 3: 0}
+
+
+def _dedupe_position_cmp(
+    nv: tuple[int, Any], cv: tuple[int, Any], direction: str, nulls: str
+) -> int:
+    """Signed compare of one ordering position under direction + null rule.
+
+    The NULL/parse-failure class compares first — direction-independent so a
+    NULL never wins by accident of sign (DD-4). Same class compares the
+    (bucket, value) pair under the column's own direction.
+    """
+    classes = _NULL_FIRST_CLASS if nulls == "first" else _NULL_LAST_CLASS
+    nc = classes.get(nv[0] if isinstance(nv, tuple) else 0, 0)
+    cc = classes.get(cv[0] if isinstance(cv, tuple) else 0, 0)
+    if nc != cc:
+        return 1 if nc < cc else -1
+    if nv == cv:
+        return 0
+    return 1 if (nv > cv if direction == "desc" else nv < cv) else -1
+
+
 def _dedupe_rank(
     options: Mapping[str, Any],
     row: dict[str, Any],
     arrival: int,
     types: Mapping[str, str] | None = None,
-) -> tuple[tuple[Any, ...], tuple[str, ...]]:
-    """The ordering positions a member is ranked on, with each direction.
+) -> tuple[tuple[Any, ...], tuple[tuple[str, str], ...]]:
+    """The ordering positions a member is ranked on, with each spec.
 
     Order: order_by first, then each then_by column, then — only as the
     declared tie-break — arrival. keep=last with no ordering columns ranks on
     arrival alone (last-seen); keep=first always ranks earliest arrival best.
     ``types`` is the source column -> declared logical type map; ordering
     columns compare under their declared type so PG-carried text values like
-    '9' and '10' order numerically.
+    '9' and '10' order numerically. The spec pairs ``(direction, nulls)`` —
+    ``nulls`` is 'last' (default, NULL never wins) or 'first'.
     """
     keep = str(options.get("keep") or "first").casefold()
     if keep == "first":
-        return (arrival,), ("asc",)
+        return (arrival,), (("asc", "last"),)
     decls = types or {}
+    opt_nulls = str(options.get("nulls") or "last").casefold()
     parts: list[Any] = []
-    dirs: list[str] = []
+    spec: list[tuple[str, str]] = []
     order_col = str(options.get("order_by") or "")
     if order_col:
         parts.append(_dedupe_sort_val(row.get(order_col), decls.get(order_col)))
-        dirs.append(str(options.get("order_dir") or "desc").casefold())
+        spec.append(
+            (str(options.get("order_dir") or "desc").casefold(), opt_nulls)
+        )
     for entry in options.get("then_by") or []:
         if isinstance(entry, Mapping):
             tcol = str(entry.get("column") or "")
             parts.append(_dedupe_sort_val(row.get(tcol), decls.get(tcol)))
-            dirs.append(str(entry.get("dir") or "desc").casefold())
+            spec.append(
+                (
+                    str(entry.get("dir") or "desc").casefold(),
+                    str(entry.get("nulls") or opt_nulls).casefold(),
+                )
+            )
         else:
             tcol = str(entry)
             parts.append(_dedupe_sort_val(row.get(tcol), decls.get(tcol)))
-            dirs.append(str(options.get("order_dir") or "desc").casefold())
+            spec.append(
+                (str(options.get("order_dir") or "desc").casefold(), opt_nulls)
+            )
     if not parts:
         # No ordering columns: arrival is the rank — last-seen wins.
         parts.append(arrival)
-        dirs.append("desc")
-    return tuple(parts), tuple(dirs)
+        spec.append(("desc", "last"))
+    return tuple(parts), tuple(spec)
 
 
 def _dedupe_rank_cmp(
-    new_parts: tuple[Any, ...], cur_parts: tuple[Any, ...], dirs: tuple[str, ...]
+    new_parts: tuple[Any, ...],
+    cur_parts: tuple[Any, ...],
+    spec: tuple[tuple[str, str], ...],
 ) -> int:
-    """Signed compare of two rank tuples under their directions."""
-    for nv, cv, direction in zip(new_parts, cur_parts, dirs):
-        if nv == cv:
-            continue
-        return 1 if (nv > cv if direction == "desc" else nv < cv) else -1
+    """Signed compare of two rank tuples under their (direction, nulls) spec."""
+    for nv, cv, (direction, nulls) in zip(new_parts, cur_parts, spec):
+        result = _dedupe_position_cmp(nv, cv, direction, nulls)
+        if result:
+            return result
     return 0
 
 
@@ -348,7 +390,7 @@ def _dedupe_member_better(
     new_arrival: int,
     cur_parts: tuple[Any, ...],
     cur_arrival: int,
-    dirs: tuple[str, ...],
+    spec: tuple[tuple[str, str], ...],
     tie_last: bool,
 ) -> bool:
     """True when the challenger outranks the incumbent — including ties.
@@ -357,7 +399,7 @@ def _dedupe_member_better(
     tie resolves under the declared tie_break instead of assuming the
     challenger arrived later and won.
     """
-    cmp_ = _dedupe_rank_cmp(new_parts, cur_parts, dirs)
+    cmp_ = _dedupe_rank_cmp(new_parts, cur_parts, spec)
     if cmp_:
         return cmp_ > 0
     return new_arrival > cur_arrival if tie_last else new_arrival < cur_arrival
@@ -366,19 +408,19 @@ def _dedupe_member_better(
 def _dedupe_better(
     new_parts: tuple[Any, ...],
     cur_parts: tuple[Any, ...],
-    dirs: tuple[str, ...],
+    spec: tuple[tuple[str, str], ...],
     tie_last: bool,
 ) -> bool:
     """True when the challenger strictly outranks the incumbent.
 
-    Positions compare in order under their own direction; a full tie is
-    decided by the declared tie_break — first_seen keeps the incumbent,
-    last_seen replaces it.
+    Positions compare in order under their own (direction, nulls) spec; a
+    full tie is decided by the declared tie_break — first_seen keeps the
+    incumbent, last_seen replaces it.
     """
-    for nv, cv, direction in zip(new_parts, cur_parts, dirs):
-        if nv == cv:
-            continue
-        return nv > cv if direction == "desc" else nv < cv
+    for nv, cv, (direction, nulls) in zip(new_parts, cur_parts, spec):
+        result = _dedupe_position_cmp(nv, cv, direction, nulls)
+        if result:
+            return result > 0
     return tie_last
 
 
@@ -388,6 +430,10 @@ def _dedupe_rule(options: Mapping[str, Any]) -> str:
     bits = [f"keep={keep}"]
     if order_col:
         bits.append(f"order_by={order_col} {options.get('order_dir') or 'desc'}")
+    if order_col or options.get("then_by"):
+        # NULL ordering is part of the rule's identity — a NULL stamp never
+        # displaces a real one unless the recipe says NULLS FIRST (DD-4).
+        bits.append(f"nulls={options.get('nulls') or 'last'}")
     for entry in options.get("then_by") or []:
         if isinstance(entry, Mapping):
             bits.append(f"then_by={entry.get('column')} {entry.get('dir') or 'desc'}")
@@ -413,22 +459,22 @@ def _dedupe_feed_fallback(
     row: dict[str, Any],
     parts: tuple[Any, ...],
     arrival: int,
-    dirs: tuple[str, ...] = (),
+    spec: tuple[tuple[str, str], ...] = (),
     tie_last: bool = False,
 ) -> None:
     """Offer a member's non-null values as merge fill candidates.
 
     Per column the BEST-ranked member value wins the fill, under the same
-    directions and tie_break the winner election uses — ascending rules
-    (order_dir=asc, keep=first) fill from the smallest-ranked member, not
-    the largest (DD-2).
+    (direction, nulls) spec and tie_break the winner election uses —
+    ascending rules (order_dir=asc, keep=first) fill from the
+    smallest-ranked member, not the largest (DD-2).
     """
     for col, value in row.items():
         if _dedupe_is_null(value):
             continue
         current = fallbacks.get(col)
         if current is None or _dedupe_member_better(
-            parts, arrival, current[0], current[1], dirs, tie_last
+            parts, arrival, current[0], current[1], spec, tie_last
         ):
             fallbacks[col] = (parts, arrival, value)
 
@@ -1248,7 +1294,7 @@ class ShapeEngine:
                     f"dedupe_rows key space passed {cap} keys — "
                     "raise 'max_keys' only deliberately"
                 )
-            parts, dirs = _dedupe_rank(
+            parts, spec = _dedupe_rank(
                 options, row, self._row_index, self._column_types
             )
             tie_last = str(options.get("tie_break") or "first_seen").casefold() == "last_seen"
@@ -1258,9 +1304,9 @@ class ShapeEngine:
                 winners[key] = (parts, dict(row), self._row_index)
                 if merge:
                     _dedupe_feed_fallback(
-                        fallbacks, row, parts, self._row_index, dirs, tie_last
+                        fallbacks, row, parts, self._row_index, spec, tie_last
                     )
-            elif _dedupe_better(parts, current[0], dirs, tie_last):
+            elif _dedupe_better(parts, current[0], spec, tie_last):
                 # Displaced winner — it is a loser now, quarantined with the
                 # new winner's row number named.
                 self._dedupe_lose(
@@ -1274,12 +1320,12 @@ class ShapeEngine:
                 )
                 if merge:
                     _dedupe_feed_fallback(
-                        fallbacks, current[1], current[0], current[2], dirs, tie_last
+                        fallbacks, current[1], current[0], current[2], spec, tie_last
                     )
                 winners[key] = (parts, dict(row), self._row_index)
                 if merge:
                     _dedupe_feed_fallback(
-                        fallbacks, row, parts, self._row_index, dirs, tie_last
+                        fallbacks, row, parts, self._row_index, spec, tie_last
                     )
             else:
                 self._dedupe_lose(
@@ -1293,7 +1339,7 @@ class ShapeEngine:
                 )
                 if merge:
                     _dedupe_feed_fallback(
-                        fallbacks, row, parts, self._row_index, dirs, tie_last
+                        fallbacks, row, parts, self._row_index, spec, tie_last
                     )
             return _HELD
 
