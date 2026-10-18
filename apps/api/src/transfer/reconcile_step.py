@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+import os
 import hashlib
 import time
 from typing import Any
@@ -481,11 +482,16 @@ def _transform_applied_proof(
         try:
             if pin_meta.get("file"):
                 pin_map = {}
-                with open(str(pin_meta["file"])) as _fh:
+                _pin_path = str(pin_meta["file"])
+                with open(_pin_path) as _fh:
                     for line in _fh:
                         k, _, h = line.rstrip("\n").partition("\x00")
                         if k:
                             pin_map[k] = h
+                try:
+                    os.unlink(_pin_path)
+                except OSError:
+                    pass
             else:
                 pin_map = {
                     str(k): str(v)
@@ -854,6 +860,7 @@ def _transform_applied_proof(
             "status": "verified",
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
             "rows": exp_n,
+            "scoped_to_run_keys": scope_keys is not None,
             "provenance": (
                 "independent SQL oracle"
                 if oracle_ok and oracle_exprs
@@ -5070,6 +5077,27 @@ def run_reconciliation(
                     f"transform output verified — {prov} "
                     f"({proof.get('rows')} rows)"
                 )
+                if (
+                    proof.get("scoped_to_run_keys")
+                    and "per-cell fidelity is NOT proven"
+                    in str(recon.get("message") or "")
+                ):
+                    # M-2: the key-scoped read-back DID prove this run's
+                    # rows cell-for-cell — say so, and drop the stale
+                    # NOT-proven disclaimer + the overwrite upsell.
+                    msg = str(recon["message"])
+                    msg = msg.replace(
+                        "per-cell fidelity is NOT proven",
+                        f"{proof.get('rows')} row(s) proven "
+                        "cell-for-cell against the recipe; "
+                        "pre-existing rows untouched",
+                    )
+                    msg = msg.replace(
+                        " Use overwrite, or upsert with a primary key, "
+                        "for full_checksum proof.",
+                        "",
+                    )
+                    recon["message"] = msg
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"
             elif proof.get("status") == "unverifiable" or (

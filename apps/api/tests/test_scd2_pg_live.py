@@ -1334,9 +1334,12 @@ def test_g1c_append_into_populated_target_pg(tmp_path, monkeypatch):
     assert res.success, res.error
     recon = res.reconciliation or {}
     proof = recon.get("transform_applied") or {}
-    print("PROOF:", proof, "| verdict:", recon.get("verification_verdict"), "| msg:", recon.get("message"))
     assert proof.get("status") == "verified", proof
     assert proof.get("rows") == 3, proof
+    # M-2: a verified key-scoped proof must not keep the stale
+    # "per-cell fidelity is NOT proven" wording.
+    assert "proven cell-for-cell" in str(recon.get("message")), recon
+    assert "NOT proven" not in str(recon.get("message")), recon
 
     # Dropped step on an append → still fails, naming the step.
     cur.execute("DROP TABLE IF EXISTS app_g1c_dst2 CASCADE")
@@ -1592,6 +1595,73 @@ def test_g1d_wrong_op_impl_caught_by_sql_oracle_pg(tmp_path, monkeypatch):
     conn.close()
 
 
+
+def test_g1d_mixed_drift_and_wrong_value_fails_pg(tmp_path, monkeypatch):
+    """Acceptance: key 1 drifts in the source after the write (drift,
+    unverifiable bucket) while key 2 receives a wrong value on a STABLE
+    pinned row — the stable key is judged strictly so the run must FAIL
+    naming the step, not soften to unverifiable."""
+    import services.shape_apply as shape_apply_mod
+    import src.transfer.reconcile_step as rs
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="ovr_g1m_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1m_dst CASCADE")
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = TransferRequest(
+        source=ep("ovr_g1m_src"), destination=ep("ovr_g1m_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        stream_contracts=[
+            {"selected": True, "primary_key": "id",
+             "sync_mode": "full_refresh_overwrite"}
+        ],
+        skip_preflight=True, validation_mode="strict",
+    )
+
+    _orig = shape_apply_mod.ShapeRunner.matrix
+
+    def _wrong(self, headers, rows):
+        h, out = _orig(self, headers, rows)
+        out[1][headers.index("note")] = "WRONG!"  # stable key 2, wrong value
+        return h, out
+
+    monkeypatch.setattr(shape_apply_mod.ShapeRunner, "matrix", _wrong)
+
+    # key 1 drifts in the source AFTER the write (its pin no longer matches)
+    def _drifted(**kw):
+        yield [
+            {"id": "1", "name": "A", "price": "10.00", "note": "changed"},
+            {"id": "2", "name": "B", "price": "20.00", "note": "n2"},
+            {"id": "3", "name": "C", "price": "30.00", "note": "n3"},
+        ]
+
+    _patch_proof_source(monkeypatch, rs, _drifted)
+    res = _exec(fake, req, prefix="ovrg1m")
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert not res.success
+    assert proof.get("status") == "failed", proof
+    assert "step 1" in " ".join(proof.get("culprit_steps") or []), proof
+    conn.close()
+
 def test_g1e_proof_memory_bounded_pg(tmp_path, monkeypatch):
     """G-1e: the transform proof must not materialize the full expected
     output — at 250k rows the process RSS stays bounded (the old
@@ -1637,6 +1707,15 @@ def test_g1e_proof_memory_bounded_pg(tmp_path, monkeypatch):
     )
     res = _exec(fake, req, prefix="ovrg1e")
     assert res.success, res.error
+    # ledger spilled past 200k keys; the temp file must be cleaned up
+    import tempfile as _tf
+
+    leftovers = [
+        f
+        for f in os.listdir(_tf.gettempdir())
+        if f.startswith("df_pin_")
+    ]
+    assert not leftovers, leftovers
     recon = res.reconciliation or {}
     proof = recon.get("transform_applied") or {}
     assert proof.get("status") == "verified", proof
