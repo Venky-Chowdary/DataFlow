@@ -739,3 +739,37 @@ def test_scd2_recount_ignores_overlapping_writer_pg(tmp_path, monkeypatch):
     hist = recon.get("scd2_history") or {}
     assert "recount" in str(hist.get("violations") or res.error or "")
     conn.close()
+
+
+def test_scd2_close_missing_false_retained_keys_pg(tmp_path, monkeypatch):
+    """B1-E5: close_missing=False keeps deleted keys current — the
+    expected-current count must include the retained keys, and the
+    comparable digest covers only source-keyed rows."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="scd2_e5_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_e5_dst CASCADE")
+    recipe = _scd2_recipe(close_missing=False)
+    req = _engine_req("scd2_e5_src", "scd2_e5_dst", recipe, mode="strict")
+
+    res = _exec(fake, req)
+    assert res.success, res.error
+
+    # Delete key 2 at source — close_missing=off retains it as current.
+    cur.execute("DELETE FROM scd2_e5_src WHERE id = 2")
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute(
+        "SELECT COUNT(*) FROM scd2_e5_dst WHERE cur_flag"
+    )
+    # 2 source keys + 1 retained deleted key = 3 current rows.
+    assert cur.fetchone()[0] == 3
+    recon = res.reconciliation or {}
+    assert recon.get("passed") is True, recon.get("message")
+    hist = (res.destination_summary or {}).get("retained_missing_rows")
+    assert hist == 1, res.destination_summary
+    ra = recon.get("row_accounting") or {}
+    if ra:
+        assert ra.get("balanced") is True, ra.get("note")
+    conn.close()

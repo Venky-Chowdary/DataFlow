@@ -1599,11 +1599,17 @@ def extract_scd2_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
         return payload
     current = data.get(CURRENT_ROWS_KEY)
     history = data.get(HISTORY_ROWS_KEY)
-    if current is not None or history is not None:
-        return {
+    retained = data.get("retained_missing_rows")
+    if retained is None and isinstance(nested, dict):
+        retained = nested.get("retained_missing_rows")
+    if current is not None or history is not None or retained is not None:
+        payload = {
             "current_rows": current,
             "history_rows": history,
         }
+        if retained is not None:
+            payload["retained_missing_rows"] = retained
+        return payload
     return {}
 
 
@@ -1673,9 +1679,18 @@ def _account_scd2(
         if history is not None
         else " Physical history COUNT(*) is diagnostic."
     )
+    # close_missing=False: keys absent from the snapshot stay current —
+    # they are retained population, so the identity is
+    # read + retained == current + hold-outs + skipped + removed.
+    retained = int(payload.get("retained_missing_rows") or 0)
     ack_delta = (int(current) - ack) if ack is not None else None
     accounted = int(current) + quarantined + skipped + removed
-    unaccounted = read - accounted
+    unaccounted = read + retained - accounted
+    if retained:
+        history_note += (
+            f" {retained:,} deleted key(s) kept current "
+            "(close_missing=off)."
+        )
 
     if dest_count_before is None:
         return ConservationLedger(

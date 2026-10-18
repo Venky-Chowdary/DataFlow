@@ -379,6 +379,104 @@ def stream_scd2_mirror_transfer(
                                 )
                     finally:
                         release_engine(engine)
+                elif not scd2_block_error and not limit:
+                    # close_missing=False: keys absent from this snapshot stay
+                    # current — retained, not written. Count them (staging
+                    # holds the complete source population) and take a
+                    # source-scoped digest so Gate-8 compares populations
+                    # that actually overlap.
+                    from services.scd2_engine import (
+                        _active_checksum as _scd2_active_checksum,
+                        _compose_key,
+                        _qchar as _scd2_qchar,
+                        scd2_is_current_predicate,
+                    )
+                    from connectors.writer_common import quote_sql_identifier
+
+                    engine = get_sqlalchemy_engine(dest_cfg)
+                    try:
+                        with engine.connect() as conn:
+                            _q = _scd2_qchar(dest_type)
+                            _cpred = scd2_is_current_predicate(
+                                dest_type,
+                                quote_sql_identifier(_scd2_cols["is_current"], _q),
+                            )
+                            _join = " AND ".join(
+                                f"{staging_qualified}.{quote_sql_identifier(c, _q)}"
+                                f" = {target_qualified}.{quote_sql_identifier(c, _q)}"
+                                for c in conflict_columns
+                            )
+                            _pkq = ", ".join(
+                                quote_sql_identifier(c, _q) for c in conflict_columns
+                            )
+                            import sqlalchemy as sa
+                            from services.reconciliation_api import (
+                                iter_select_row_dicts,
+                            )
+
+                            retained = {
+                                _compose_key(row, conflict_columns)
+                                for batch in iter_select_row_dicts(
+                                    conn,
+                                    sa.text(
+                                        f"SELECT {_pkq} FROM {target_qualified} "  # nosec B608
+                                        f"WHERE {_cpred} AND NOT EXISTS "
+                                        f"(SELECT 1 FROM {staging_qualified} "
+                                        f"WHERE {_join})"
+                                    ),
+                                    conflict_columns,
+                                    itersize=max(1, int(batch_size)),
+                                )
+                                for row in batch
+                            }
+                            dest_summary["retained_missing_rows"] = len(retained)
+                            # Real source-side digest for the source-keyed
+                            # scope: the staging table IS the complete
+                            # snapshot — digest it over the attr columns.
+                            from services.scd2_engine import _stamp_set
+                            from services.reconciliation_api import (
+                                stream_select_checksum,
+                            )
+
+                            _attr = [
+                                c
+                                for c in target_cols
+                                if c not in _stamp_set(_scd2_cols)
+                            ]
+                            _attrq = ", ".join(
+                                quote_sql_identifier(c, _q) for c in _attr
+                            )
+                            _srows, _sdigest = stream_select_checksum(
+                                conn,
+                                sa.text(
+                                    f"SELECT {_attrq} FROM "  # nosec B608
+                                    f"{staging_qualified}"
+                                ),
+                                _attr,
+                                itersize=max(1, int(batch_size)),
+                                dest_db_type=dest_type,
+                                dest_types=digest_types,
+                            )
+                            dest_summary["source_snapshot_checksum"] = (
+                                _sdigest
+                            )
+                            if retained:
+                                s_rows, s_checksum = _scd2_active_checksum(
+                                    conn,
+                                    target_qualified,
+                                    target_cols,
+                                    batch_size,
+                                    dest_type,
+                                    dest_types=digest_types,
+                                    cols=_scd2_cols,
+                                    pk_columns=conflict_columns,
+                                    exclude_keys=retained,
+                                )
+                                dest_summary["source_scoped_rows"] = s_rows
+                                dest_summary["source_scoped_checksum"] = s_checksum
+                            conn.commit()
+                    finally:
+                        release_engine(engine)
                 dest_summary["active_rows"] = active_rows
                 dest_summary["active_checksum"] = active_checksum
                 dest_summary["updated_rows"] = updated_total

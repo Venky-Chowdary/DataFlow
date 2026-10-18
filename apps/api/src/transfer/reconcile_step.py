@@ -2238,7 +2238,25 @@ def _run_reconciliation_impl(
                 schema=str(scd2_stamp_ctx.get("schema") or ""),
                 table_name=str(scd2_stamp_ctx.get("table_name") or ""),
                 dest_engine=str(scd2_stamp_ctx.get("engine") or ""),
+                is_current_column=str(
+                    scd2_stamp_ctx.get("is_current") or ""
+                ),
             )
+            _retained_missing = int(
+                (dest_summary or {}).get("retained_missing_rows")
+                or (
+                    (dest_summary or {}).get("scd2") or {}
+                ).get("retained_missing_rows")
+                or 0
+            )
+            if _retained_missing:
+                # Ledger identity: read + retained == current for
+                # close_missing=off runs.
+                stamped["retained_missing_rows"] = _retained_missing
+                if isinstance(stamped.get("scd2"), dict):
+                    stamped["scd2"]["retained_missing_rows"] = (
+                        _retained_missing
+                    )
             # B1 Gate-8: read the destination history back row by row —
             # at most one is_current per key, contiguous non-overlapping
             # intervals per key, and 1..n versions when declared. A broken
@@ -2587,6 +2605,10 @@ def _run_reconciliation_impl(
             schema=schema,
             table_name=table_name,
             engine=db_type,
+            is_current=str(
+                (dest_summary.get("scd2_opts") or {}).get("is_current")
+                or ""
+            ),
         )
 
     if isinstance(dest_summary, dict) and dest_summary.get("shape_dedupe"):
@@ -3039,11 +3061,41 @@ def _run_reconciliation_impl(
             )
         )
     if active_checksum:
+        # B1-E5 — close_missing=False retains deleted keys as current: they
+        # are real target rows the run never wrote. Expected-current must
+        # count them, and the comparable digest covers only current rows
+        # keyed by this run's source.
+        _retained = int(
+            (dest_summary or {}).get("retained_missing_rows")
+            or ((dest_summary or {}).get("scd2") or {}).get(
+                "retained_missing_rows"
+            )
+            or 0
+        )
+        _scoped = (
+            (dest_summary or {}).get("source_scoped_checksum")
+            or ((dest_summary or {}).get("scd2") or {}).get(
+                "source_scoped_checksum"
+            )
+        )
+        _snapshot_digest = (
+            (dest_summary or {}).get("source_snapshot_checksum")
+            or ((dest_summary or {}).get("scd2") or {}).get(
+                "source_snapshot_checksum"
+            )
+        )
+        _scoped_pair = bool(
+            _retained and _scoped and _snapshot_digest
+        )
         report = reconcile(
             source_rows=source_rows,
             target_rows=int(active_rows or 0),
-            source_checksum=source_checksum,
-            target_checksum=active_checksum,
+            source_checksum=(
+                str(_snapshot_digest) if _scoped_pair else source_checksum
+            ),
+            target_checksum=(
+                str(_scoped) if _scoped_pair else str(active_checksum)
+            ),
             rejected_rows=rejected_rows,
             strict_checksum=True,
             allow_extra_rows=False,
@@ -3053,8 +3105,25 @@ def _run_reconciliation_impl(
             rows_shaped_out=rows_shaped_out,
             rows_source_filtered=rows_source_filtered,
             rows_expanded=rows_expanded,
+            retained_rows=_retained,
         )
-        return _finalize(report.to_dict())
+        out = report.to_dict()
+        if _retained:
+            out["message"] = (
+                str(out.get("message") or "")
+                + f" ({_retained} retained deleted key(s) kept current — "
+                "close_missing=off"
+                + (
+                    "; digest covers source-keyed rows only)"
+                    if _scoped_pair
+                    else ")"
+                )
+            ).strip()
+            if _scoped_pair:
+                out["source_checksum_provenance"] = (
+                    "staging_snapshot_digest"
+                )
+        return _finalize(out)
 
     # Request a real read-back; if the verifier is unavailable we will detect
     # the negative row count and surface a softer "writer only" result.

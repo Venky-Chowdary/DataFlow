@@ -1936,6 +1936,7 @@ def _warehouse_sql_scd2_populations(
     schema: str,
     table_name: str,
     dialect: str,
+    is_current_column: str = "",
 ) -> dict[str, int] | None:
     """Current vs history from dest-engine COUNT. BIT/NUMBER(1) use ``= 1``.
 
@@ -1949,7 +1950,10 @@ def _warehouse_sql_scd2_populations(
 
     qchar = quote_char_for(dialect) or '"'
     table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
-    col = denormalize_result_key(dialect, IS_CURRENT_COLUMN)
+    col = denormalize_result_key(
+        dialect,
+        str(is_current_column or "").strip() or IS_CURRENT_COLUMN,
+    )
     current_q = quote_sql_identifier(col, qchar)
     pred = scd2_is_current_predicate(dialect, current_q)
     history_sql = f"SELECT COUNT(*) FROM {table_ref}"  # nosec B608
@@ -5518,6 +5522,7 @@ def count_scd2_populations(
     *,
     schema: str,
     table_name: str,
+    is_current_column: str = "",
 ) -> dict[str, int] | None:
     """Current and history populations from one dest-engine session.
 
@@ -5528,23 +5533,42 @@ def count_scd2_populations(
     Redshift use the same ``COUNT(*)`` machine (BOOLEAN ``IS TRUE``),
     never catalog stats / ``to_regclass``.
     """
+    from services.scd2_engine import IS_CURRENT_COLUMN
+
     table = (table_name or "").strip()
     if not table:
         return None
     kind = str(db_type or "").strip().lower()
+    current_col = (
+        str(is_current_column or "").strip() or IS_CURRENT_COLUMN
+    )
     try:
         if kind == "sqlite":
-            return _sqlite_scd2_populations(cfg, table_name=table)
+            return _sqlite_scd2_populations(
+                cfg, table_name=table, is_current_column=current_col
+            )
         if kind == "postgresql":
-            return _pg_scd2_populations(cfg, schema=schema, table_name=table)
+            return _pg_scd2_populations(
+                cfg,
+                schema=schema,
+                table_name=table,
+                is_current_column=current_col,
+            )
         if kind in {"mysql", "mariadb"}:
-            return _mysql_scd2_populations(cfg, table_name=table)
+            return _mysql_scd2_populations(
+                cfg, table_name=table, is_current_column=current_col
+            )
         from services.dialect_profiles import warehouse_sql_quote_dialect
 
         dialect = warehouse_sql_quote_dialect(kind)
         if dialect:
             return _warehouse_sql_scd2_populations(
-                kind, cfg, schema=schema, table_name=table, dialect=dialect
+                kind,
+                cfg,
+                schema=schema,
+                table_name=table,
+                dialect=dialect,
+                is_current_column=current_col,
             )
     except Exception as exc:  # pragma: no cover - destination-specific failure
         logger.warning("SCD2 current-row count failed: %s", exc)
@@ -5556,12 +5580,16 @@ def _sqlite_scd2_populations(
     cfg: dict[str, Any],
     *,
     table_name: str,
+    is_current_column: str = "",
 ) -> dict[str, int] | None:
     import sqlite3
 
     from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
     from services.scd2_engine import IS_CURRENT_COLUMN
 
+    is_current = (
+        str(is_current_column or "").strip() or IS_CURRENT_COLUMN
+    )
     database = str(cfg.get("database") or "")
     if not database:
         return None
@@ -5572,10 +5600,10 @@ def _sqlite_scd2_populations(
         ).fetchone()
         if not exists:
             return {CURRENT_ROWS_KEY: 0, HISTORY_ROWS_KEY: 0}
-        if IS_CURRENT_COLUMN.lower() not in _sqlite_column_names(conn, table_name):
+        if is_current.lower() not in _sqlite_column_names(conn, table_name):
             return None
         table_ref = quote_table_ref(table_name, dialect="sqlite")
-        current_q = quote_sql_identifier(IS_CURRENT_COLUMN)
+        current_q = quote_sql_identifier(is_current)
         current = _count_where(
             conn, table_ref, _scd2_current_predicate("sqlite", current_q)
         )
@@ -5588,11 +5616,15 @@ def _pg_scd2_populations(
     *,
     schema: str,
     table_name: str,
+    is_current_column: str = "",
 ) -> dict[str, int] | None:
     from connectors.postgresql_conn import get_connection
     from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
     from services.scd2_engine import IS_CURRENT_COLUMN
 
+    is_current = (
+        str(is_current_column or "").strip() or IS_CURRENT_COLUMN
+    )
     conn = get_connection(
         host=str(cfg.get("host") or ""),
         port=int(cfg.get("port") or 5432),
@@ -5613,12 +5645,12 @@ def _pg_scd2_populations(
                 "SELECT 1 FROM information_schema.columns "
                 "WHERE table_schema = %s AND table_name = %s "
                 "AND column_name = %s",
-                (sch, table_name, IS_CURRENT_COLUMN),
+                (sch, table_name, is_current),
             )
             if cur.fetchone() is None:
                 return None
         table_ref = quote_table_ref(table_name, sch, dialect="postgresql")
-        current_q = quote_sql_identifier(IS_CURRENT_COLUMN)
+        current_q = quote_sql_identifier(is_current)
         current = _count_where(
             conn, table_ref, _scd2_current_predicate("postgresql", current_q)
         )
@@ -5632,11 +5664,15 @@ def _mysql_scd2_populations(
     cfg: dict[str, Any],
     *,
     table_name: str,
+    is_current_column: str = "",
 ) -> dict[str, int] | None:
     from connectors.mysql_conn import get_connection
     from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
     from services.scd2_engine import IS_CURRENT_COLUMN
 
+    is_current = (
+        str(is_current_column or "").strip() or IS_CURRENT_COLUMN
+    )
     conn = get_connection(
         host=str(cfg.get("host") or ""),
         port=int(cfg.get("port") or 3306),
@@ -5660,12 +5696,12 @@ def _mysql_scd2_populations(
                 "SELECT 1 FROM information_schema.columns "
                 "WHERE table_schema = DATABASE() AND table_name = %s "
                 "AND column_name = %s",
-                (table_name, IS_CURRENT_COLUMN),
+                (table_name, is_current),
             )
             if cur.fetchone() is None:
                 return None
         table_ref = quote_table_ref(table_name, dialect="mysql")
-        current_q = quote_sql_identifier(IS_CURRENT_COLUMN, "`")
+        current_q = quote_sql_identifier(is_current, "`")
         current = _count_where(
             conn, table_ref, _scd2_current_predicate("mysql", current_q)
         )
@@ -5682,6 +5718,7 @@ def stamp_scd2_census(
     schema: str,
     table_name: str,
     dest_engine: str,
+    is_current_column: str = "",
 ) -> dict[str, Any]:
     """Stamp COUNT(*) WHERE is_current. Never history COUNT(*) or writer ack.
 
@@ -5706,6 +5743,7 @@ def stamp_scd2_census(
         dict(dest_cfg),
         schema=str(schema or ""),
         table_name=str(table_name or ""),
+        is_current_column=is_current_column,
     )
     if pop is None:
         out[DEST_COUNT_SOURCE_KEY] = "skipped_current_readback"

@@ -652,12 +652,20 @@ def _active_checksum(
     dialect_name: str,
     dest_types: dict[str, str] | None = None,
     cols: dict[str, Any] | None = None,
+    pk_columns: list[str] | None = None,
+    exclude_keys: set[str] | None = None,
 ) -> tuple[int, str]:
     """Current-version digest: one streamed SELECT. Never OFFSET.
 
     SQL Server FETCH requires ORDER BY; Oracle/DB2 reject LIMIT; OFFSET is
     O(n²) and can skip/duplicate. Same streaming kernel as Gate-8 read-back,
     steered by the same column types the write pass fingerprinted against.
+
+    ``exclude_keys`` + ``pk_columns`` restrict the digest to current rows
+    whose key is NOT in the set (B1-E5: ``close_missing=False`` retains
+    deleted keys as current — the digest comparable to the source covers
+    only source-keyed rows). Exclusion predicates are chunked through
+    :func:`iter_pk_key_chunks` like every other key predicate.
     """
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
@@ -670,10 +678,21 @@ def _active_checksum(
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     attr_cols = [c for c in target_cols if c not in stamps]
     cols_quoted = ",".join(quote_sql_identifier(c, q) for c in attr_cols)
-    sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {current_pred}"  # nosec B608
+    where = current_pred
+    params: dict[str, Any] = {}
+    if exclude_keys and pk_columns:
+        not_clauses: list[str] = []
+        for i, chunk in enumerate(iter_pk_key_chunks(list(exclude_keys))):
+            clause, clause_params = _pk_or_clause(
+                pk_columns, chunk, prefix=f"x{i}", dialect=dialect_name,
+            )
+            not_clauses.append(f"NOT ({clause})")
+            params.update(clause_params)
+        where = f"{current_pred} AND {' AND '.join(not_clauses)}"
+    sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {where}"  # nosec B608
     return stream_select_checksum(
         conn,
-        sa.text(sql),
+        sa.text(sql).bindparams(**params),
         attr_cols,
         itersize=max(1, int(batch_size)),
         dest_db_type=dialect_name,
@@ -1306,6 +1325,25 @@ def apply_scd2(
             closed_missing = 0
             source_keys: set[str] = set()
             qualified = _qualified_name(table, schema_name, dialect_name)
+            # close_missing=off on a complete snapshot: the run's own rows
+            # are the only honest source-side digest for the source-keyed
+            # scope (the writer ack covers the whole current set, which
+            # includes retained rows). Accumulate it in the same pass.
+            source_fp_acc: Any = None
+            if complete_snapshot and not cols.get("close_missing", True):
+                from services.fingerprint_accumulator import (
+                    FingerprintAccumulator,
+                )
+                from services.reconciliation import _iter_fingerprints
+
+                _attr_cols = [
+                    c for c in target_cols if c not in _stamp_set(cols)
+                ]
+                source_fp_acc = (
+                    FingerprintAccumulator(),
+                    _iter_fingerprints,
+                    _attr_cols,
+                )
 
             with engine.begin() as conn:
                 for pk_ok, _details, _errors in iter_scd2_prepared_bundles(
@@ -1318,6 +1356,16 @@ def apply_scd2(
                         if complete_snapshot:
                             source_keys.update(
                                 _compose_key(row, pk_columns) for row in pk_ok
+                            )
+                        if source_fp_acc is not None:
+                            _acc, _iter_fp, _acols = source_fp_acc
+                            _acc.add_many(
+                                _iter_fp(
+                                    pk_ok,
+                                    _acols,
+                                    dest_db_type=dialect_name,
+                                    dest_types=ctx["dest_types"],
+                                )
                             )
                         inserted, expired, type1_updated = (
                             _merge_scd2_bundle(
@@ -1337,6 +1385,9 @@ def apply_scd2(
                         type1_total += type1_updated
                     del pk_ok
 
+                retained_missing = 0
+                scoped_rows = 0
+                scoped_checksum = ""
                 if complete_snapshot and cols.get("close_missing", True):
                     closed_missing = close_versions_missing_from_keys(
                         conn,
@@ -1350,6 +1401,38 @@ def apply_scd2(
                         cols=cols,
                     )
                     expired_total += closed_missing
+                elif complete_snapshot:
+                    # close_missing=False: keys absent from this snapshot stay
+                    # current — retained, not written. Count them so Gate-8's
+                    # expected-current identity (read + retained == current)
+                    # closes instead of failing on rows this run never wrote.
+                    retained_keys = {
+                        k
+                        for k in _iter_current_keys(
+                            conn,
+                            qualified,
+                            pk_columns,
+                            dialect_name,
+                            batch_size,
+                            cols,
+                        )
+                        if k and k not in source_keys
+                    }
+                    retained_missing = len(retained_keys)
+                    if retained_missing:
+                        # Source-scoped digest: only the current rows this
+                        # run's keys own are comparable to the source digest.
+                        scoped_rows, scoped_checksum = _active_checksum(
+                            conn,
+                            qualified,
+                            target_cols,
+                            batch_size,
+                            dialect_name,
+                            dest_types=ctx["dest_types"],
+                            cols=cols,
+                            pk_columns=pk_columns,
+                            exclude_keys=retained_keys,
+                        )
 
                 active_rows, active_checksum = _active_checksum(
                     conn,
@@ -1374,6 +1457,12 @@ def apply_scd2(
         "type1_updated_rows": type1_total,
         "active_rows": active_rows,
         "active_checksum": active_checksum,
+        "retained_missing_rows": retained_missing,
+        "source_scoped_rows": scoped_rows,
+        "source_scoped_checksum": scoped_checksum,
+        "source_snapshot_checksum": (
+            source_fp_acc[0].digest() if source_fp_acc is not None else ""
+        ),
         "mode": "scd2",
         "primary_key_columns": pk_columns,
         "target_columns": target_cols,

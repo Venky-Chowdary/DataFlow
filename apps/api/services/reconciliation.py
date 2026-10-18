@@ -911,6 +911,7 @@ def reconcile(
     keyed_expected_delta: int | None = None,
     route_digest_match: bool | None = None,
     rows_written: int | None = None,
+    retained_rows: int = 0,
 ) -> ReconciliationReport:
     """Compare source and destination evidence into one Gate-8 verdict.
 
@@ -951,10 +952,15 @@ def reconcile(
     # A declared source row filter removes rows on the read for the same reason:
     # they were counted in the source population and were never candidates for
     # the destination.
+    # SCD2 with close_missing=False: keys absent from the snapshot stay
+    # current on the destination — retained, not written by this run. The
+    # expected-current count is source rows plus those retained keys.
+    retained_rows = max(int(retained_rows or 0), 0)
     dropped_rows = max(max(rejected_rows, 0) - coerced_null_rows, 0)
     expected_rows = max(
         source_rows
         + rows_expanded
+        + retained_rows
         - dropped_rows
         - rows_skipped
         - rows_shaped_out
