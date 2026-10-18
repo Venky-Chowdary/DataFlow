@@ -3117,20 +3117,40 @@ def _run_reconciliation_impl(
         )
         out = report.to_dict()
         if _retained:
-            out["message"] = (
-                str(out.get("message") or "")
-                + f" ({_retained} retained deleted key(s) kept current — "
-                "close_missing=off"
-                + (
-                    "; digest covers source-keyed rows only)"
-                    if _scoped_pair
-                    else ")"
+            if _scoped_pair and bool(out.get("checksum_match")):
+                # B1-E5a: the digest covered source-keyed rows only — name
+                # that population, not the full current count.
+                _scoped_rows = int(
+                    (dest_summary or {}).get("source_scoped_rows")
+                    or ((dest_summary or {}).get("scd2") or {}).get(
+                        "source_scoped_rows"
+                    )
+                    or source_rows
                 )
-            ).strip()
-            if _scoped_pair:
+                out["message"] = (
+                    "Row fidelity verified — source and target checksums "
+                    f"match ({_scoped_rows} source-keyed rows; "
+                    f"{_retained} retained key(s) kept current — "
+                    "close_missing=off)"
+                )
                 out["source_checksum_provenance"] = (
                     "staging_snapshot_digest"
                 )
+            else:
+                out["message"] = (
+                    str(out.get("message") or "")
+                    + f" ({_retained} retained deleted key(s) kept current — "
+                    "close_missing=off"
+                    + (
+                        "; digest covers source-keyed rows only)"
+                        if _scoped_pair
+                        else ")"
+                    )
+                ).strip()
+                if _scoped_pair:
+                    out["source_checksum_provenance"] = (
+                        "staging_snapshot_digest"
+                    )
         return _finalize(out)
 
     # Request a real read-back; if the verifier is unavailable we will detect

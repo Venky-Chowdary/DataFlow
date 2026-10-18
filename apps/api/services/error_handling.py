@@ -212,6 +212,32 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
         },
     ),
     (
+        # A recipe-validation refusal raised before any write — a tracked /
+        # key / option column the recipe names but the recipe cannot see.
+        # It is not a missing destination column and not a capacity problem;
+        # without this rule the `column '` needle below sends the operator to
+        # Map and invents written rows that never happened.
+        (
+            "point in the recipe",
+            "is not a transform operation",
+            "shape recipe",
+            "transform recipe",
+        ),
+        {
+            "code": "shape_recipe_refusal",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "The transform recipe was refused before any write",
+            "fix": (
+                "The recipe named a column or option it cannot use (for example an "
+                "scd2 tracked column that is not in the source). Open Transform, fix "
+                "the named step, and re-run Validate: a changed recipe is a different "
+                "approved recipe. Nothing was written to the destination."
+            ),
+            "primary_action": "open_shape",
+        },
+    ),
+    (
         (
             "lock wait timeout",
             "lock wait timeout exceeded",
@@ -954,6 +980,12 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 f"{title}. Driver reported: {raw}. "
                 "Open Transform and fix that step, or change its error policy, "
                 "then re-run Validate."
+            )
+        elif matched.get("code") == "shape_recipe_refusal":
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "Open Transform and fix the recipe, then re-run Validate — "
+                "nothing was written to the destination."
             )
         else:
             message = (

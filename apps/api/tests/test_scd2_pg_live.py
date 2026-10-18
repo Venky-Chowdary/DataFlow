@@ -899,3 +899,89 @@ def test_scd2_untracked_prestep_applies_pg(tmp_path, monkeypatch):
     notes = {r[0]: r[1] for r in cur.fetchall()}
     assert notes == {1: "N1", 2: "N2", 3: "N3"}, notes
     conn.close()
+
+
+def test_scd2_close_missing_false_multi_source_pg(tmp_path, monkeypatch):
+    """B1-E8: two sources consolidate into one SCD2 dimension with
+    close_missing=false — the main reason the option exists. Source A
+    keys 1..5000, source B keys 100001..105000 into the same destination:
+    B's load must not fail Gate-8 on A's retained keys — the scoped
+    digest and row count exclude keys the source never had, and foreign
+    counts are reported."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_bulk(cur, _bulk_rows(5000), table="scd2_ms_srca")
+    _mk_src_bulk(
+        cur,
+        [
+            {
+                "id": 100000 + i,
+                "name": f"B{i}",
+                "price": f"{i}.50",
+                "note": f"bn{i}",
+            }
+            for i in range(1, 5001)
+        ],
+        table="scd2_ms_srcb",
+    )
+    cur.execute("DROP TABLE IF EXISTS scd2_ms_dst CASCADE")
+    recipe = _scd2_recipe(close_missing=False)
+    req_a = _engine_req("scd2_ms_srca", "scd2_ms_dst", recipe, mode="strict")
+    res_a = _exec(fake, req_a, prefix="scmsa")
+    assert res_a.success, res_a.error
+
+    req_b = _engine_req("scd2_ms_srcb", "scd2_ms_dst", recipe, mode="strict")
+    res_b = _exec(fake, req_b, prefix="scmsb")
+    assert res_b.success, res_b.error
+    recon_b = res_b.reconciliation or {}
+    assert recon_b.get("passed") is True, recon_b.get("message")
+    # A's 5000 keys are foreign to B's snapshot: reported, not digested —
+    # the message names the source-keyed population and the retained count
+    # separately, never a merged "10000 rows" (B1-E5a).
+    msg_b = str(recon_b.get("message") or "")
+    assert "5000 source-keyed rows" in msg_b, msg_b
+    assert "5000 retained key(s)" in msg_b, msg_b
+    ds_b = res_b.destination_summary or {}
+    assert ds_b.get("retained_missing_rows") == 5000
+    cur.execute("SELECT COUNT(*) FROM scd2_ms_dst WHERE cur_flag")
+    assert cur.fetchone()[0] == 10000
+    conn.close()
+
+
+def test_scd2_small_change_run_dq_gate_pg(tmp_path, monkeypatch):
+    """DQ gate: rate-based anomaly signals need a minimum sample.
+
+    A 5-row SCD2 change batch where one name goes NULL is a 20% null-rate
+    "shift" on pure noise — the gate must not fail the run. The same shift
+    on a >=25-row run must still block under strict.
+    """
+    monkeypatch.setenv("QUALITY_PROFILES_DIR", str(tmp_path / "qprof"))
+    fake = _engine_env(monkeypatch)
+    conn, _ = _pg()
+    cur = conn.cursor()
+
+    rows5 = _bulk_rows(5)
+    _mk_src(cur, rows5, table="scd2_dq_src")
+    req = _engine_req("scd2_dq_src", "scd2_dq_dst", None, mode="strict")
+    res1 = _exec(fake, req, prefix="scdq1")
+    assert res1.success, res1.error
+
+    # Change run: one tracked name -> NULL on a 5-row batch.
+    cur.execute("UPDATE scd2_dq_src SET name=NULL WHERE id='2'")
+    res2 = _exec(fake, req, prefix="scdq2")
+    assert res2.success, res2.error
+    assert not str(res2.error or "").startswith("Data quality anomaly")
+
+    # Above the minimum sample the same shift must still block under strict.
+    _mk_src_bulk(cur, _bulk_rows(30), table="scd2_dq_src2")
+    req2 = _engine_req("scd2_dq_src2", "scd2_dq_dst2", None, mode="strict")
+    res3 = _exec(fake, req2, prefix="scdq3")
+    assert res3.success, res3.error
+    cur.execute(
+        "UPDATE scd2_dq_src2 SET name=NULL WHERE id::int % 3 = 0"
+    )
+    res4 = _exec(fake, req2, prefix="scdq4")
+    assert not res4.success
+    assert "null-rate" in str(res4.error or "")
+    conn.close()

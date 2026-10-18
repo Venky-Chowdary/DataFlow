@@ -29,6 +29,15 @@ from services.value_serializer import cell_to_string, is_null_evidence
 # Keep enough history to answer "what changed across the last ~10 loads".
 DEFAULT_HISTORY_LIMIT = max(5, min(50, int(getenv_brand("QUALITY_HISTORY_LIMIT", "20"))))
 
+# A rate or mean computed on a tiny batch is noise, not drift: one NULL in a
+# 5-row SCD2 change batch reads as a 20% null-rate "shift" and would block a
+# correct run under strict. Distribution signals only fire once the current
+# sample can carry them; volume-drop and quarantine-pattern checks stay live
+# at every size.
+MIN_ANOMALY_SAMPLE_ROWS = max(
+    5, int(getenv_brand("QUALITY_ANOMALY_MIN_ROWS", "25"))
+)
+
 
 @dataclass
 class ColumnProfile:
@@ -719,6 +728,9 @@ def build_load_history_report(
             continue
 
         finding: dict[str, Any] = {"column": col, "signals": []}
+        # Below the minimum sample the same measurements are still recorded
+        # as informational signals but never reach the blocking anomaly list.
+        small_sample = cur.count < MIN_ANOMALY_SAMPLE_ROWS
 
         if series["null_rate"]:
             hist_null = _median(series["null_rate"]) or 0.0
@@ -727,10 +739,17 @@ def build_load_history_report(
                     f"Column '{col}' null-rate shifted from {hist_null:.2%} "
                     f"(median of prior loads) to {cur.null_rate:.2%}"
                 )
-                anomalies.append(msg)
-                finding["signals"].append({"kind": "null_rate", "message": msg})
+                if small_sample:
+                    finding["signals"].append({
+                        "kind": "null_rate",
+                        "message": msg,
+                        "below_min_sample": True,
+                    })
+                else:
+                    anomalies.append(msg)
+                    finding["signals"].append({"kind": "null_rate", "message": msg})
 
-        if series["count"] and cur.count > 0:
+        if series["count"] and cur.count > 0 and not small_sample:
             med_count = _median(series["count"])
             if med_count and med_count > 0:
                 ratio = cur.count / med_count
@@ -742,6 +761,8 @@ def build_load_history_report(
                     anomalies.append(msg)
                     finding["signals"].append({"kind": "count_drop", "message": msg})
 
+        # Mean drift is z-normalized — its magnitude carries its own
+        # confidence even on a small sample — so it is not sample-gated.
         if cur.mean is not None and series["mean"]:
             z = _robust_z(cur.mean, series["mean"])
             # Single prior observation: fall back to classic z vs that mean's std

@@ -207,7 +207,7 @@ def test_scd2_batch_above_sqlite_expression_depth_limit(composite):
     with pytest.raises(ValueError):
         _pk_or_clause(["id"], [str(i) for i in range(PK_CLAUSE_MAX_KEYS + 1)], prefix="k")
     single, _ = _pk_or_clause(["id"], ["1", "2"], prefix="k")
-    assert single == '"id" IN (:k0, :k1)'
+    assert single == '"id" IN (:k_0, :k_1)'
 
     fd, db_path = tempfile.mkstemp(suffix=".db")
     try:

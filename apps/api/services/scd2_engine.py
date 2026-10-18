@@ -212,7 +212,13 @@ def _pk_or_clause(
     if len(columns) == 1:
         names: list[str] = []
         for i, key in enumerate(keys):
-            pname = f"{prefix}{i}"
+            # ``prefix_i`` (not ``prefixi``): callers that merge chunked
+            # clauses into one statement index chunks by digits, and
+            # f"{prefix}{i}" collides across chunk boundaries —
+            # "x1"+"20" == "x12"+"0" — silently rebinding one chunk's keys
+            # to another's (B1-E8: 200 retained keys leaked from the
+            # exclusion at 13 chunks).
+            pname = f"{prefix}_{i}"
             params[pname] = typed_key_bind(key, types.get(columns[0]))
             names.append(f":{pname}")
         return f"{quoted[0]} IN ({', '.join(names)})", params
@@ -223,7 +229,7 @@ def _pk_or_clause(
             continue
         ands = []
         for j, col_q in enumerate(quoted):
-            pname = f"{prefix}{i}_{j}"
+            pname = f"{prefix}_{i}_{j}"
             ands.append(f"{col_q} = :{pname}")
             params[pname] = typed_key_bind(parts[j], types.get(columns[j]))
         if ands:
