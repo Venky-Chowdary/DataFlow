@@ -83,6 +83,34 @@ def test_union_option_validation_refuses(bad, msg):
         )
 
 
+def test_union_reference_columns_unmapped_extra_refuses_at_parse():
+    """R5: reference.columns declaring a column the union cannot place
+    (not an output column, not renamed by map) must refuse at design time
+    under extra=refuse — not at write time under the capacity wrapper."""
+    with pytest.raises(ShapeError, match="reference.columns declares mystery"):
+        ShapeRecipe.parse(
+            {"steps": [{"op": "union", "options": {
+                "reference": {
+                    "connector_id": "c", "table": "t",
+                    "columns": ["cc", "mystery"],
+                },
+                "extra": "refuse",
+            }}]},
+            source_columns=["cc"],
+        )
+    # Renaming it via map, or dropping it, stays legal.
+    ShapeRecipe.parse(
+        {"steps": [{"op": "union", "options": {
+            "reference": {
+                "connector_id": "c", "table": "t",
+                "columns": ["cc", "mystery"],
+            },
+            "map": {"mystery": "cc"}, "extra": "refuse",
+        }}]},
+        source_columns=["cc"],
+    )
+
+
 # --- join engine semantics --------------------------------------------------
 
 
@@ -310,6 +338,15 @@ def test_join_union_end_to_end_destination_readback(tmp_path, isolated):
     assert ("US", "10", "United States") in got
     assert ("ZZ", None, "Appended") in got
     assert not any(r[0] == "XX" for r in got)
+
+    # R2: the diverted row is quarantine, not a silent removal — the ledger
+    # must charge it to rejected_rows and say diverted, never rows_shaped_out.
+    summary = result.destination_summary or {}
+    assert int(summary.get("rows_diverted") or 0) == 1, summary
+    assert int(summary.get("rejected_rows") or 0) == 1, summary
+    assert not summary.get("rows_shaped_out"), (
+        "a diverted row sits in the DLQ — removal terms may not swallow it"
+    )
 
     import services.quarantine_dlq as dlq
     quarantined = dlq.canonical_replay_details({"id": job_id})

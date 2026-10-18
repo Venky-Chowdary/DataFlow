@@ -46,6 +46,11 @@ def align_reported_rejects(summary: dict[str, Any]) -> int:
         stored = len(replay_quarantine_details(details))
     except Exception:
         stored = rows_with_findings(details)
+    # Shape-diverted rows are quarantined in the control-plane DLQ per page
+    # (source="shape_divert") — they never sit in ``rejected_details``, but
+    # they ARE stored, with a reason. Excluding them would downgrade the
+    # headline back to 0 while Inspect shows the rows (R2).
+    stored += max(int(summary.get("rows_diverted") or 0), 0)
     if stored == 0:
         return split_refused_unit(details, reported, summary)
     if reported != stored:
@@ -220,8 +225,17 @@ def _persist_job_quarantine(
         dest_summary["rejected_details"] = display_details
     if not details:
         rejected = int(dest_summary.get("rejected_rows") or 0)
-        if rejected:
-            split_refused_unit(details, rejected, dest_summary)
+        # Rows the shape stage diverted were already quarantined in the
+        # control-plane DLQ per page — they are stored, with a reason. Only a
+        # residual (refused write unit with no findings) goes through
+        # split_refused_unit; diverted rows must not zero the headline.
+        refused = rejected - max(int(dest_summary.get("rows_diverted") or 0), 0)
+        if refused > 0:
+            dest_summary["rejected_rows"] = max(rejected - refused, 0)
+            split_refused_unit(details, refused, dest_summary)
+            dest_summary["rejected_rows"] = int(
+                dest_summary.get("rejected_rows") or 0
+            ) + max(int(dest_summary.get("rows_diverted") or 0), 0)
         dest_summary["rejected_details_total"] = 0
         dest_summary["quarantine_durable"] = True
         return

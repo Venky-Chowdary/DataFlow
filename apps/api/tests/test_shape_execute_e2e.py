@@ -29,7 +29,7 @@ import pytest
 from src.transfer import file_stream
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import EndpointConfig, TransferRequest
-from tests.typed_fidelity_helpers import pg_endpoint, require_ports, uniq
+from tests.typed_fidelity_helpers import pg_connect, pg_endpoint, require_ports, uniq
 
 pytestmark = pytest.mark.timeout(300)
 
@@ -89,13 +89,7 @@ def _request(
 
 
 def _connect():
-    return psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="dataflow",
-        user="dataflow",
-        password="dataflow",
-    )
+    return pg_connect()
 
 
 def _landed(table: str) -> list[tuple]:

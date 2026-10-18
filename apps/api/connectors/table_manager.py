@@ -1993,3 +1993,95 @@ def _delete_clickhouse(
         raise DestinationDeleteError(table_name, exc) from exc
     finally:
         release_engine(engine)
+
+
+def _pg_route_backup_connection(cfg: dict[str, Any]) -> Any:
+    from connectors.postgresql_conn import get_connection
+
+    conn = get_connection(
+        host=cfg.get("host", "") or "127.0.0.1",
+        port=int(cfg.get("port") or 5432),
+        database=cfg.get("database", ""),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=bool(cfg.get("ssl")),
+    )
+    conn.autocommit = True
+    return conn
+
+
+def pg_route_backup_name(table_name: str, job_id: str) -> str:
+    """Backup identifier for a routed run, at most 63 bytes (PostgreSQL limit)."""
+    suffix = f"__dfbak_{str(job_id or '')[:8]}"
+    base = str(table_name or "t")[: 63 - len(suffix)]
+    return f"{base}{suffix}"
+
+
+def restore_pg_route_backups(
+    cfg: dict[str, Any],
+    backups: dict[str, dict[str, str]],
+) -> list[str]:
+    """Put every renamed-aside route table back after a failed run.
+
+    ``backups`` maps route name -> {"table": live_name, "backup": bak_name}.
+    Each restore drops this run's partial/new table and renames the pre-run
+    table back to the live name. Returns the routes that were restored;
+    a route whose backup is missing reports its name as unrestored by staying
+    out of the list AND raising nothing — callers compare against the input.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    restored: list[str] = []
+    conn = None
+    try:
+        conn = _pg_route_backup_connection(cfg)
+        with conn.cursor() as cur:
+            for route, pair in (backups or {}).items():
+                table = str(pair.get("table") or "")
+                backup = str(pair.get("backup") or "")
+                if not table or not backup:
+                    continue
+                src_q = quote_sql_identifier(table, '"')
+                bak_q = quote_sql_identifier(backup, '"')
+                cur.execute(f"DROP TABLE IF EXISTS {src_q}")
+                cur.execute(
+                    "SELECT 1 FROM information_schema.tables "
+                    "WHERE table_name = %s",
+                    (backup,),
+                )
+                if cur.fetchone():
+                    cur.execute(f"ALTER TABLE {bak_q} RENAME TO {src_q}")
+                    restored.append(str(route))
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+    return restored
+
+
+def discard_pg_route_backups(
+    cfg: dict[str, Any],
+    backups: dict[str, dict[str, str]],
+) -> None:
+    """Drop the renamed-aside originals after a Gate-8-verified run."""
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    conn = None
+    try:
+        conn = _pg_route_backup_connection(cfg)
+        with conn.cursor() as cur:
+            for pair in (backups or {}).values():
+                backup = str(pair.get("backup") or "")
+                if backup:
+                    cur.execute(
+                        f"DROP TABLE IF EXISTS {quote_sql_identifier(backup, chr(34))}"
+                    )
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)

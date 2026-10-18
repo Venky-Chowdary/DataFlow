@@ -359,12 +359,43 @@ def test_shape_divert_null_cell_replay_writes_sql_null(tmp_path, isolated, monke
     resp = asyncio.run(replay_job_quarantine(job_id, QuarantineReplayRequest(), _replay_request()))
     assert resp.get("rows_written", 0) >= 1, resp
 
+    # R4: the operator-facing reconcile_sample shows real NULL too — the
+    # writer wire sentinel must not leak into the sample.
+    sample = ((resp.get("destination_summary") or {}).get("reconcile_sample")) or []
+    assert sample, "reconcile_sample expected on the child job summary"
+    assert not any(
+        str(v) == "__DF_SQL_NULL__" for row in sample for v in row.values()
+    ), sample
+    assert any(row.get("v") is None for row in sample), sample
+
     conn = sqlite3.connect(str(dst))
     try:
         got = conn.execute("SELECT v FROM t WHERE id = '2'").fetchall()
     finally:
         conn.close()
     assert got == [(None,)], f"sentinel text must never land in a destination: {got}"
+
+
+def test_mark_dlq_promoted_skips_missing_dest_quarantine_table(tmp_path):
+    """R3: shape-divert findings live in the control-plane DLQ, not a
+    <dest>_df_quarantine table — the promote stamp on an absent table is a
+    skip, not an error that would leave the replay closure diverging."""
+    import sqlite3
+
+    from services.dest_quarantine import mark_dlq_promoted
+    from src.transfer.models import EndpointConfig
+
+    db = tmp_path / "dst.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE t (id TEXT)")
+    conn.commit()
+    conn.close()
+
+    dest = EndpointConfig(
+        kind="database", format="sqlite", database=str(db), table="t"
+    )
+    meta = mark_dlq_promoted(dest, qids=[], job_id="r3job")
+    assert meta.get("skipped") and not meta.get("error"), meta
 
 
 def test_replay_strips_overwrite_flags_from_destination(tmp_path, isolated, monkeypatch):

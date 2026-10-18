@@ -47,12 +47,65 @@ def reachable(host: str, port: int, timeout: float = 1.0) -> bool:
         return False
 
 
+def pg_dsn_parts() -> dict[str, Any]:
+    """PostgreSQL connection parts, honoring DATAFLOW_PG_TEST_DSN.
+
+    Tests that drive a real PostgreSQL must not hardcode localhost:5432 — an
+    env where the project container lives elsewhere reads a probe failure as a
+    product failure. The DSN is the single override point; without it the
+    historical dev defaults apply.
+    """
+    import os
+    from urllib.parse import urlparse
+
+    dsn = os.environ.get("DATAFLOW_PG_TEST_DSN", "").strip()
+    if dsn:
+        u = urlparse(dsn)
+        return {
+            "host": u.hostname or "localhost",
+            "port": int(u.port or 5432),
+            "database": (u.path or "/postgres").lstrip("/"),
+            "username": u.username or "postgres",
+            "password": u.password or "",
+        }
+    return {
+        "host": "localhost",
+        "port": 5432,
+        "database": "dataflow",
+        "username": "dataflow",
+        "password": "dataflow",
+    }
+
+
+def pg_connect():
+    """psycopg2 connection to the test PostgreSQL (DSN-aware)."""
+    import psycopg2
+
+    p = pg_dsn_parts()
+    return psycopg2.connect(
+        host=p["host"],
+        port=p["port"],
+        database=p["database"],
+        user=p["username"],
+        password=p["password"],
+    )
+
+
 def require_ports(*ports: int, host: str = "localhost") -> None:
     import pytest
 
-    missing = [p for p in ports if not reachable(host, p)]
+    # When DATAFLOW_PG_TEST_DSN points elsewhere, port 5432 lives at that host
+    # and port, not localhost.
+    pg = pg_dsn_parts()
+    checked: dict[tuple[str, int], bool] = {}
+    missing: list[tuple[str, int]] = []
+    for p in ports:
+        h, pt = (pg["host"], pg["port"]) if int(p) == 5432 else (host, int(p))
+        if not checked.get((h, pt), reachable(h, pt)):
+            missing.append((h, pt))
+        checked.setdefault((h, pt), True)
     if missing:
-        pytest.skip(f"Emulator not reachable on {host}:{missing}")
+        pytest.skip(f"Emulator not reachable on {missing}")
 
 
 def uniq(prefix: str) -> str:
@@ -60,14 +113,15 @@ def uniq(prefix: str) -> str:
 
 
 def pg_endpoint(table: str) -> EndpointConfig:
+    p = pg_dsn_parts()
     return EndpointConfig(
         kind="database",
         format="postgresql",
-        host="localhost",
-        port=5432,
-        database="dataflow",
-        username="dataflow",
-        password="dataflow",
+        host=p["host"],
+        port=p["port"],
+        database=p["database"],
+        username=p["username"],
+        password=p["password"],
         schema="public",
         table=table,
     )

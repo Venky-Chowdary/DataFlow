@@ -329,3 +329,115 @@ def test_rt3_per_route_map_renames_columns_on_write(tmp_path, monkeypatch):
     )
     assert cur.fetchone()[0] == 2
     conn.close()
+
+
+def test_gate8_failure_restores_route_tables_to_pre_run_content(
+    tmp_path, monkeypatch
+):
+    """Failed-Gate-8 restore guard: an overwrite routed run into occupied
+    route tables must leave every route table exactly as it was before the
+    run when the post-write proof fails — the landed tables are restored,
+    not left holding this run's content.
+
+    Fails on cc1ef3d3: route tables kept the new rows (no restore path
+    existed for routed PG runs)."""
+    import src.transfer.reconcile_step as reconcile_step_mod
+    import services.reconciliation as recon_mod
+
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(
+        host=parsed["host"], port=parsed["port"], dbname=parsed["database"],
+        user=parsed["user"], password=parsed["password"],
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    for t in ("rt_high", "rt_mid", "rt_other"):
+        cur.execute(f"DROP TABLE IF EXISTS {t}")
+        cur.execute(f"DROP TABLE IF EXISTS {t}__dfbak_rtgrd")
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash)
+    res, _ = _run(fake, req)
+    assert res.success, res.error
+    before = {t: _fetch(cur, t) for t in ("rt_high", "rt_mid", "rt_other")}
+    assert before == {"rt_high": [1], "rt_mid": [2, 5], "rt_other": [3, 6]}
+
+    # Run 2 must land DIFFERENT content than run 1 — otherwise "kept the new
+    # rows" is indistinguishable from "restored the old rows".
+    cur.execute("INSERT INTO rt (id, amt, region) VALUES (7, '200', 'US')")
+
+    # Force the post-write proof to fail AFTER the writes commit — a row-count
+    # mismatch on the route read-back (a checksum-only divergence does not
+    # fail the job; a population mismatch does).
+    real_verify = recon_mod.verify_target
+
+    def _wrong_count(*a, **k):
+        rows, checksum = real_verify(*a, **k)
+        return rows + 1, checksum
+
+    monkeypatch.setattr(reconcile_step_mod, "verify_target", _wrong_count)
+    res2, job2 = _run(fake, req, prefix="rtgrd")
+    assert not res2.success
+    after = {t: _fetch(cur, t) for t in ("rt_high", "rt_mid", "rt_other")}
+    assert after == before, (
+        f"failed Gate-8 left run-2 content: {after} != {before}"
+    )
+    # No leaked backups after a successful restore.
+    cur.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name LIKE 'rt_%__dfbak_%'"
+    )
+    assert cur.fetchall() == []
+    conn.close()
+
+
+def test_gate8_success_discards_route_backups(tmp_path, monkeypatch):
+    """A verified overwrite rerun drops the renamed-aside backups — no
+    __dfbak_ tables may linger."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(
+        host=parsed["host"], port=parsed["port"], dbname=parsed["database"],
+        user=parsed["user"], password=parsed["password"],
+    )
+    conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash)
+    res, _ = _run(fake, req)
+    assert res.success, res.error
+    # Second overwrite into now-occupied tables -> backups armed + discarded.
+    res2, _ = _run(fake, req, prefix="rtok")
+    assert res2.success, res2.error
+    cur.execute(
+        "SELECT table_name FROM information_schema.tables "
+        "WHERE table_name LIKE 'rt_%__dfbak_%'"
+    )
+    assert cur.fetchall() == []
+    assert _fetch(cur, "rt_high") == [1]
+    assert _fetch(cur, "rt_mid") == [2, 5]
+    assert _fetch(cur, "rt_other") == [3, 6]
+    # The guard must have armed and recorded its backups (a pre-fix run never
+    # creates them, so "no __dfbak_ tables" alone proves nothing).
+    backups = (res2.destination_summary or {}).get("route_backups") or {}
+    assert set(backups) == {"high", "mid", "other"}, backups
+    assert all(
+        v["backup"].startswith(f"{v['table']}__dfbak_") for v in backups.values()
+    ), backups
+    conn.close()

@@ -397,6 +397,29 @@ def mark_dlq_promoted(
             updated = int(result.rowcount or 0)
         return {"updated": updated, "table": table, "promoted_at": promoted_at}
     except Exception as exc:
+        if re.search(
+            r"undefined.?table|does not exist|no such table|invalid object name",
+            str(exc),
+            re.I,
+        ):
+            # Shape-divert / DLQ-only findings live in the control-plane DLQ —
+            # the destination may never have had a {table}_df_quarantine.
+            # Absent table is not an error: the closure ledger must not
+            # diverge on an UPDATE to a store the finding never lived in (R3).
+            logger.info(
+                "mark_dlq_promoted: no destination quarantine table %s — "
+                "findings live in the control-plane DLQ",
+                table,
+            )
+            return {
+                "updated": 0,
+                "skipped": True,
+                "reason": (
+                    "no destination quarantine table — findings live in "
+                    "the control-plane DLQ"
+                ),
+                "table": table,
+            }
         logger.warning("mark_dlq_promoted failed: %s", exc)
         return {"updated": 0, "error": str(exc)[:300], "table": table}
 

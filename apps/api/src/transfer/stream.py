@@ -1579,6 +1579,12 @@ def _stream_database_transfer_impl(
     # population checksum for this run.
     resumed_pass = bool(written or offset)
     dest_summary: dict[str, Any] = {}
+    # Failed-Gate-8 restore guard: renamed-aside route tables (armed once,
+    # inside the held txn) — stamped onto dest_summary at stream end.
+    route_backup_state: dict[str, Any] = {}
+    # R2: shape-diverted rows are quarantine, not removal — counted here and
+    # stamped as rejected_rows so the ledger reads in = out + diverted.
+    shape_diverted_total: list[int] = [0]
     if copy_decline:
         dest_summary["copy_fast_path"] = "declined"
         dest_summary["copy_decline_reason"] = copy_decline[0]
@@ -1620,6 +1626,7 @@ def _stream_database_transfer_impl(
             rows_before = _rsum0
             if _rper0:
                 dest_summary["route_precount"] = dict(_rper0)
+                route_backup_state["precount"] = dict(_rper0)
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
             checkpoint.target_rows_before = int(rows_before)
@@ -2503,6 +2510,7 @@ def _stream_database_transfer_impl(
         if shape_runner is None:
             return
         diverted = shape_runner.take_diverted()
+        shape_diverted_total[0] += len(diverted or [])
         if not diverted or not job_id:
             return
         from services.quarantine_dlq import persist_rejected_rows
@@ -2899,6 +2907,49 @@ def _stream_database_transfer_impl(
                 _rheld = PgOverwriteTransaction()
                 bind_overwrite_transaction(_rconn, _rheld)
             _rheld.begin(job_id=job_id or "")
+            # Failed-Gate-8 restore guard: a replace-mode routed run into
+            # non-empty route tables renames each occupied table aside
+            # inside this transaction — a write failure rolls the renames
+            # back with the rows, and a post-write proof failure lets
+            # _settle_overwrite_backup rename the backups back onto the
+            # live names (the txn commits before Gate-8, so the backup is
+            # the only way to restore prior content).
+            _rsync_now = str(effective_sync or "")
+            if is_overwrite_sync(_rsync_now) and not route_backup_state.get(
+                "armed"
+            ):
+                route_backup_state["armed"] = True
+                from connectors.table_manager import pg_route_backup_name
+
+                _rprecount = route_backup_state.get("precount") or {}
+                _rbaks: dict[str, dict[str, str]] = {}
+                _rtargets_map = dict(router_step.options.get("targets") or {})
+                for _rr in router_step.options.get("routes") or []:
+                    _rrn = str(_rr.get("name") or "")
+                    if not _rrn or int(_rprecount.get(_rrn) or 0) <= 0:
+                        continue
+                    _rrt = str(
+                        _rtargets_map.get(_rrn) or f"{dest_table}__{_rrn}"
+                    )
+                    _rbak = pg_route_backup_name(_rrt, job_id or "")
+                    try:
+                        with _rconn.cursor() as _rcur:
+                            _rcur.execute(
+                                f'ALTER TABLE "{_rrt}" RENAME TO "{_rbak}"'
+                            )
+                        _rbaks[_rrn] = {"table": _rrt, "backup": _rbak}
+                    except Exception as _rbak_exc:
+                        logger.warning(
+                            "Route %s backup rename skipped (%s); "
+                            "post-write proof failure cannot restore it",
+                            _rrn,
+                            _rbak_exc,
+                        )
+                if _rbaks:
+                    route_backup_state["backups"] = dict(_rbaks)
+                    _dextra = dict(getattr(destination, "extra", None) or {})
+                    _dextra["route_backups"] = dict(_rbaks)
+                    destination.extra = _dextra
         write_calls: list[tuple[str | None, str, Any]] = []
         if row_apply_plan is not None:
             if router_step is not None:
@@ -3881,6 +3932,11 @@ def _stream_database_transfer_impl(
                 for _rn, _acc in route_fp_acc.items()
                 if _acc.total > 0
             }
+        if route_backup_state.get("backups"):
+            # Failed-Gate-8 restore guard armed: the renamed-aside route
+            # tables land on the job summary so a failed post-write proof
+            # can restore every route to pre-run content.
+            dest_summary["route_backups"] = dict(route_backup_state["backups"])
         if fp_accumulator.total:
             if write_pass_fp.total:
                 alignment = align_source_populations(write_pass_fp, fp_accumulator)
@@ -4090,11 +4146,27 @@ def _stream_database_transfer_impl(
         # Named apart: the operator's declared scope removed these before the
         # recipe was offered them, so they are not the recipe's effect.
         dest_summary["rows_source_filtered"] = int(filtered_on_read_total)
-        shaped_removed = max(0, removed_on_read_total - filtered_on_read_total)
+        diverted = int(shape_diverted_total[0] or 0)
+        shaped_removed = max(
+            0, removed_on_read_total - filtered_on_read_total - diverted
+        )
         if shaped_removed:
             # Every committed page's recipe removals, this pass and the passes
             # before it — the live runner only shaped the pages of this pass.
             dest_summary["rows_shaped_out"] = shaped_removed
+        else:
+            # The batch writer stamps its own rows_shaped_out including
+            # diverted rows; a fully-diverted removal count must be cleared,
+            # not left stale (the row is charged to rejected_rows instead).
+            dest_summary.pop("rows_shaped_out", None)
+        if diverted:
+            # A diverted row sits in the DLQ with a reason — it is quarantine,
+            # not removal (R2). Charge it to rejected_rows so the ledger's
+            # in = out + diverted holds literally.
+            dest_summary["rows_diverted"] = diverted
+            dest_summary["rejected_rows"] = int(
+                dest_summary.get("rejected_rows") or 0
+            ) + diverted
     if reconcile_sample:
         dest_summary["reconcile_sample"] = reconcile_sample[:_RECONCILE_SAMPLE_CAP]
     if load_methods_seen:

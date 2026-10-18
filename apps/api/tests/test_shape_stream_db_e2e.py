@@ -28,7 +28,7 @@ import pytest
 from src.transfer import stream as stream_mod
 from src.transfer.engine import UniversalTransferEngine
 from src.transfer.models import TransferRequest
-from tests.typed_fidelity_helpers import pg_endpoint, require_ports, uniq
+from tests.typed_fidelity_helpers import pg_connect, pg_endpoint, require_ports, uniq
 
 # amount carries more scale than the destination column keeps; "skip" rows are
 # the ones the recipe removes on the read. Row 5 is the tail: it only lands if
@@ -50,13 +50,7 @@ ROUND_AND_FILTER = {
 
 
 def _connect():
-    return psycopg2.connect(
-        host="localhost",
-        port=5432,
-        database="dataflow",
-        user="dataflow",
-        password="dataflow",
-    )
+    return pg_connect()
 
 
 def _seed(table: str) -> None:

@@ -255,6 +255,48 @@ def _note_failed_batch_undo(
         if note not in base:
             return f"{base} {note}"
         return base
+    # Routed replace-mode run: each occupied route table was renamed aside
+    # before the write — restoring them is the rollback (same pattern as the
+    # MySQL rename-aside above, one per route).
+    if extra.get("route_backups"):
+        restored = _engine._settle_overwrite_backup(destination, restore=True)
+        if restored:
+            note = (
+                "Every route table was restored to its pre-run content: "
+                "this run's replacement tables were dropped and the renamed "
+                "backups were put back."
+            )
+            dest_summary["partial_batch_undo"] = "restored"
+        else:
+            note = (
+                "One or more route tables could not be restored. "
+                "The __dfbak backup tables were left in place."
+            )
+            dest_summary["partial_batch_undo"] = "restore_failed"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        return base if note in base else f"{base} {note}"
+    # Routed append/incremental run: rows were ADDED to live route tables and
+    # cannot be selectively removed — report honestly which rows were added
+    # and that prior content is intact.
+    route_map = dest_summary.get("routes") or {}
+    if route_map and int(dest_summary.get("destination_row_count") or 0) > 0:
+        added = {
+            str(name): int(info.get("rows") or 0)
+            for name, info in route_map.items()
+            if isinstance(info, dict)
+        }
+        added_txt = ", ".join(f"{n}: {c}" for n, c in added.items()) or "unknown"
+        note = (
+            "The prior rows in every route table are intact. This run added "
+            f"the rows it routed ({added_txt}) and those added rows could "
+            "not be selectively removed — investigate the route tables "
+            "before re-running."
+        )
+        dest_summary["partial_batch_undo"] = "retained"
+        dest_summary["partial_batch_undo_note"] = note
+        base = message or "Reconciliation failed"
+        return base if note in base else f"{base} {note}"
     from services.batch_undo import undo_failed_batch_if_dest_was_empty
 
     note = undo_failed_batch_if_dest_was_empty(

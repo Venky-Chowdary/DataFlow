@@ -338,10 +338,11 @@ def shaped_schema(
 def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
     """The conservation terms a shaped run adds to the write ledger.
 
-    ``rows_shaped_out`` is every row the recipe removed — filtered *and*
-    diverted — because the conservation identity closes on rows that left the
-    read, and a diverted row left it just as a filtered one did. The two reasons
-    stay visible in their own terms so the report can say which.
+    ``rows_shaped_out`` is rows the recipe *removed* — drop/filter — while
+    ``rows_shape_diverted`` counts rows sent to quarantine. A diverted row is
+    not a removal: it sits in the DLQ with a reason and is charged to
+    ``rejected_rows`` so the ledger reads ``in = out + quarantined`` (R2) —
+    counting it in both terms double-subtracted it from conservation.
     """
     if runner is None:
         return {}
@@ -349,7 +350,7 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
     return {
         "shape_recipe_hash": runner.recipe_hash,
         "rows_shaped_in": effect.rows_in,
-        "rows_shaped_out": effect.rows_shaped_out + effect.rows_diverted,
+        "rows_shaped_out": effect.rows_shaped_out,
         "rows_shape_filtered": effect.rows_shaped_out,
         "rows_shape_diverted": effect.rows_diverted,
         "rows_expanded": effect.rows_expanded,

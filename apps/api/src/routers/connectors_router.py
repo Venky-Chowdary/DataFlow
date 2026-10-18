@@ -1848,6 +1848,7 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         "pg_overwrite_in_transaction",
         "overwrite_backup",
         "overwrite_backup_engine",
+        "route_backups",
     }
     dest_extra = dict(getattr(dest, "extra", None) or {})
     if _overwrite_extras & dest_extra.keys():
@@ -1964,7 +1965,18 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         dest_summary = dict(dest_summary or {})
         dest_summary["sync_mode"] = "incremental_deduped"
         dest_summary["source_row_count"] = len(records)
-        dest_summary["reconcile_sample"] = records[:50]
+        # reconcile_sample is operator-facing: records carry the
+        # ``__DF_SQL_NULL__`` wire sentinel for the writer, but the sample
+        # must show real NULL — the destination holds real NULL too (R4).
+        from services.value_serializer import SQL_NULL_SENTINEL as _SQL_NULL
+
+        dest_summary["reconcile_sample"] = [
+            {
+                k: (None if isinstance(v, str) and v == _SQL_NULL else v)
+                for k, v in rec.items()
+            }
+            for rec in records[:50]
+        ]
         recon: dict[str, Any] = {}
         try:
             from ..transfer.reconcile_step import run_reconciliation

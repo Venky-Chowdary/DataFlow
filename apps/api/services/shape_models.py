@@ -1240,6 +1240,26 @@ def _normalize_options(
         if extra not in ("refuse", "drop"):
             raise ShapeError(f"{where}: union extra must be refuse or drop")
         out["extra"] = extra
+        # A declared reference.columns contract that names columns the union
+        # cannot place (not an output column, not renamed by map) must refuse
+        # at design time under extra=refuse — refusing at run time surfaced
+        # the union error under the destination-capacity wrapper (R5).
+        ref_cols = ((out.get("reference") or {}).get("columns") or [])
+        if extra == "refuse" and ref_cols and columns is not None:
+            map_keys = {str(k) for k in (mapping or {})}
+            output_cols = {str(c) for c in columns}
+            unplaced = [
+                str(c)
+                for c in ref_cols
+                if str(c) not in output_cols and str(c) not in map_keys
+            ]
+            if unplaced:
+                raise ShapeError(
+                    f"{where}: union reference.columns declares "
+                    f"{', '.join(sorted(unplaced))} — not an output column "
+                    "and not renamed by union map; add it to map or set "
+                    "extra=drop"
+                )
 
     if op == "router":
         routes = out.get("routes")
