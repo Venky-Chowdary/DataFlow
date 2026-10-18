@@ -5,6 +5,7 @@ from __future__ import annotations
 import sqlite3
 import sys
 import tempfile
+from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -915,8 +916,14 @@ def test_scd2_close_missing_from_snapshot_table_is_set_based():
                 conn, '"products"', '"stg"', ["id"], dialect="sqlite"
             )
         engine.dispose()
-        assert out == {"closed_missing_rows": 1}
-        assert again == {"closed_missing_rows": 0}
+        assert out["closed_missing_rows"] == 1
+        assert again["closed_missing_rows"] == 0
+        # Every call stamps the instant it wrote so the run recount can
+        # attribute closes to this run exactly.
+        for stamped in (out, again):
+            stamp = stamped.get("run_stamp")
+            assert isinstance(stamp, str) and stamp
+            datetime.fromisoformat(stamp)
         current, history = _current_and_history(db_path)
         assert current == {"1"}
         assert history == 2
