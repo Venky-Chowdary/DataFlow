@@ -1232,6 +1232,7 @@ def _stream_database_transfer_impl(
         catalog_incremental_tiebreak,
         cursor_unique_evidence,
         incremental_read_needs_filtered_scan,
+        safe_keyset_unique_columns,
     )
 
     _cat_types, _cat_nulls, _cat_keys = _src_rich_catalog
@@ -1574,9 +1575,28 @@ def _stream_database_transfer_impl(
         )
     # G-1d: pin every keyed raw row the write consumed so the post-write
     # proof can pin source stability per key instead of inferring drift.
+    # The ledger key resolves the same way the engine keys elsewhere:
+    # the declared contract PK, then the source catalog PRIMARY KEY, then
+    # a fully non-null enforced unique key. Keyless sources keep the
+    # proof's multiset fallback (G-1f).
+    ledger_key_cols = [c for c in (pk_source_cols or []) if c in columns]
+    if not ledger_key_cols:
+        ledger_key_cols = [
+            c for c in (_cat_keys.get("primary_key_columns") or [])
+            if c in columns
+        ]
+    if not ledger_key_cols:
+        ledger_key_cols = list(
+            safe_keyset_unique_columns(
+                _cat_keys.get("unique_keys") or [],
+                list(columns or []),
+                _cat_nulls,
+            )
+            or []
+        )
     pin_ledger = (
-        _StepRawLedger(list(pk_source_cols or []))
-        if shape_runner is not None and pk_source_cols
+        _StepRawLedger(ledger_key_cols)
+        if shape_runner is not None and ledger_key_cols
         else None
     )
 

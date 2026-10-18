@@ -1713,7 +1713,7 @@ def test_g1e_proof_memory_bounded_pg(tmp_path, monkeypatch):
     leftovers = [
         f
         for f in os.listdir(_tf.gettempdir())
-        if f.startswith("df_pin_")
+        if f.startswith(("df_pin_", "df_pinmap_", "df_scope_"))
     ]
     assert not leftovers, leftovers
     recon = res.reconciliation or {}
@@ -1723,4 +1723,145 @@ def test_g1e_proof_memory_bounded_pg(tmp_path, monkeypatch):
         "SELECT COUNT(*) FROM ovr_g1e_dst WHERE note <> UPPER(note)"
     )
     assert cur.fetchone()[0] == 0
+    conn.close()
+
+
+def _mk_src_pk(cur, rows, table):
+    """Source with a real database PRIMARY KEY and no declared contract —
+    the catalog key the G-1f ledger must resolve on its own."""
+    cur.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
+    cur.execute(
+        f"CREATE TABLE {table} (id INT PRIMARY KEY, name TEXT, "
+        f"price TEXT, note TEXT)"
+    )
+    for r in rows:
+        cur.execute(
+            f"INSERT INTO {table} (id, name, price, note) "
+            "VALUES (%s, %s, %s, %s)",
+            (r["id"], r["name"], r["price"], r["note"]),
+        )
+
+
+def _g1f_req(src, dst, recipe, cols):
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    parsed = _pg()[1]
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    return TransferRequest(
+        source=ep(src), destination=ep(dst),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in cols
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=cols
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+
+
+def test_g1f_catalog_pk_wrong_values_fail_pg(tmp_path, monkeypatch):
+    """G-1f: no stream_contracts — the ledger must key on the catalog
+    PRIMARY KEY. A wrong value on a stable key fails naming the step."""
+    import services.shape_apply as shape_apply_mod
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_pk(cur, ROWS, table="ovr_g1f_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1f_dst CASCADE")
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = _g1f_req("ovr_g1f_src", "ovr_g1f_dst", recipe, COLS)
+
+    _orig = shape_apply_mod.ShapeRunner.matrix
+
+    def _wrong(self, headers, rows):
+        h, out = _orig(self, headers, rows)
+        out[1][headers.index("note")] = "WRONG!"
+        return h, out
+
+    monkeypatch.setattr(shape_apply_mod.ShapeRunner, "matrix", _wrong)
+    res = _exec(fake, req, prefix="ovrg1f")
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert not res.success
+    assert proof.get("status") == "failed", proof
+    assert "step 1" in " ".join(proof.get("culprit_steps") or []), proof
+    conn.close()
+
+
+def test_g1f_catalog_pk_mixed_drift_wrong_fails_pg(tmp_path, monkeypatch):
+    """G-1f: no contract — drift on key 1 plus a wrong value on stable
+    key 2 must still FAIL naming the step (the stable key is judged
+    strictly), not collapse to unverifiable."""
+    import services.shape_apply as shape_apply_mod
+    import src.transfer.reconcile_step as rs
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_pk(cur, ROWS, table="ovr_g1fm_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1fm_dst CASCADE")
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = _g1f_req("ovr_g1fm_src", "ovr_g1fm_dst", recipe, COLS)
+
+    _orig = shape_apply_mod.ShapeRunner.matrix
+
+    def _wrong(self, headers, rows):
+        h, out = _orig(self, headers, rows)
+        out[1][headers.index("note")] = "WRONG!"  # stable key 2
+        return h, out
+
+    monkeypatch.setattr(shape_apply_mod.ShapeRunner, "matrix", _wrong)
+
+    def _drifted(**kw):
+        yield [
+            {"id": "1", "name": "A", "price": "10.00", "note": "changed"},
+            {"id": "2", "name": "B", "price": "20.00", "note": "n2"},
+            {"id": "3", "name": "C", "price": "30.00", "note": "n3"},
+        ]
+
+    _patch_proof_source(monkeypatch, rs, _drifted)
+    res = _exec(fake, req, prefix="ovrg1fm")
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert not res.success
+    assert proof.get("status") == "failed", proof
+    assert "step 1" in " ".join(proof.get("culprit_steps") or []), proof
+    conn.close()
+
+
+def test_g1f_catalog_pk_drift_counts_pg(tmp_path, monkeypatch):
+    """G-1f: no contract — drift on a catalog-PK'd source reports the
+    pinned counts ("N of M keys changed in source during run; M-N
+    proven") instead of the bare multiset message."""
+    import src.transfer.reconcile_step as rs
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_pk(cur, ROWS, table="ovr_g1fd_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1fd_dst CASCADE")
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = _g1f_req("ovr_g1fd_src", "ovr_g1fd_dst", recipe, COLS)
+
+    def _drifted(**kw):
+        yield [
+            {"id": "1", "name": "A", "price": "10.00", "note": "changed"},
+            {"id": "2", "name": "B", "price": "20.00", "note": "n2"},
+            {"id": "3", "name": "C", "price": "30.00", "note": "n3"},
+        ]
+
+    _patch_proof_source(monkeypatch, rs, _drifted)
+    res = _exec(fake, req, prefix="ovrg1fd")
+    assert res.success, res.error  # drift must never roll back correct data
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert proof.get("status") in {"unverifiable", "partial"}, proof
+    assert "changed in source during run" in (proof.get("reason") or ""), proof
+    assert "1 of 3 keys" in (proof.get("reason") or ""), proof
     conn.close()
