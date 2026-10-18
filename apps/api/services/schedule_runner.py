@@ -461,6 +461,29 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
 
     mappings = assert_schedule_mappings_replayable(sched.mappings)
     schema_policy = sched.schema_policy or "manual_review"
+    sched_shape_recipe = (
+        dict(getattr(sched, "shape_recipe", None) or {})
+        if isinstance(getattr(sched, "shape_recipe", None), dict)
+        else {}
+    )
+    if (
+        str(getattr(sched, "transform_recipe_id", "") or "").strip()
+        and str(getattr(sched, "transform_recipe_version_mode", "") or "")
+        .strip()
+        .lower()
+        == "follow"
+    ):
+        # Follow-latest: resolve the newest library version for this run. If
+        # it compiles to a different recipe than Validate approved, the
+        # engine's hash gate refuses — the upgrade is visible, never silent.
+        from services.transform_binding import resolve_recipe_binding
+
+        bound = resolve_recipe_binding(
+            sched.transform_recipe_id,
+            params=getattr(sched, "transform_recipe_params", None),
+            workspace_id=sched.workspace_id or None,
+        )
+        sched_shape_recipe = bound.payload
     # Autopilot: a scheduled run has nobody at the keyboard, so it carries the
     # attestations a named human signed in advance — and only while the plan they
     # signed is still the plan being run. With no valid grant these stay False and
@@ -494,9 +517,7 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
         duplicate_policy=policy,
         date_locale=str(getattr(sched, "date_locale", "") or ""),
         number_locale=str(getattr(sched, "number_locale", "") or ""),
-        shape_recipe=dict(getattr(sched, "shape_recipe", None) or {})
-        if isinstance(getattr(sched, "shape_recipe", None), dict)
-        else {},
+        shape_recipe=sched_shape_recipe,
         approved_shape_recipe_hash=str(
             getattr(sched, "approved_shape_recipe_hash", "") or ""
         ),

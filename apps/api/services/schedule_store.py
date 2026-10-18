@@ -218,6 +218,14 @@ class PipelineSchedule:
     number_locale: str = ""
     shape_recipe: dict[str, Any] = field(default_factory=dict)
     approved_shape_recipe_hash: str = ""
+    #: Transform Library binding — the reusable-recipe side of the
+    #: two-transform model. The compiled steps land in ``shape_recipe``;
+    #: these fields record *which* library recipe produced them, at what
+    #: version, and whether runs re-resolve (follow) or stay baked (pin).
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = 0
+    transform_recipe_version_mode: str = "pin"
+    transform_recipe_params: dict[str, Any] = field(default_factory=dict)
     approved_set_hash: str = ""
     approved_decision_artifact_hash: str = ""
     approved_ddl_identity_hash: str = ""
@@ -378,6 +386,15 @@ class PipelineSchedule:
             if isinstance(data.get("shape_recipe"), dict)
             else {},
             approved_shape_recipe_hash=str(data.get("approved_shape_recipe_hash") or "").strip(),
+            transform_recipe_id=str(data.get("transform_recipe_id") or "").strip(),
+            transform_recipe_version=int(data.get("transform_recipe_version") or 0),
+            transform_recipe_version_mode=(
+                str(data.get("transform_recipe_version_mode") or "pin").strip().lower()
+                or "pin"
+            ),
+            transform_recipe_params=dict(data.get("transform_recipe_params") or {})
+            if isinstance(data.get("transform_recipe_params"), dict)
+            else {},
             approved_set_hash=str(data.get("approved_set_hash") or "").strip(),
             approved_decision_artifact_hash=str(
                 data.get("approved_decision_artifact_hash") or ""
@@ -1315,6 +1332,9 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
         assert_signed_contract(contract_id, require_signed=require_signed)
     _assert_callable_schedule_sync(payload, sync_mode)
     _assert_cursor_semantics(payload)
+    from services.transform_binding import apply_schedule_binding
+
+    payload = apply_schedule_binding(payload)
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     rows = persisted_mapping_rows(payload.get("mappings"))
@@ -1489,6 +1509,26 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
         data = {**data, "sync_mode": sync_mode}
         merged = {**s.to_dict(), **data, "id": schedule_id}
+        binding_keys = (
+            "transform_recipe_id",
+            "transform_recipe_version",
+            "transform_recipe_version_mode",
+            "transform_recipe_params",
+        )
+        if any(key in data for key in binding_keys):
+            # The operator touched the Library binding — re-resolve so the
+            # compiled shape_recipe always matches the binding it claims.
+            if str(merged.get("transform_recipe_id") or "").strip():
+                from services.transform_binding import apply_schedule_binding
+
+                merged = apply_schedule_binding(
+                    merged, workspace_id=merged.get("workspace_id") or None
+                )
+            else:
+                merged["shape_recipe"] = {}
+                merged["transform_recipe_version"] = 0
+                merged["transform_recipe_version_mode"] = "pin"
+                merged["transform_recipe_params"] = {}
         contract_id = (merged.get("contract_id") or "").strip()
         require_signed = bool(
             merged.get("require_signed_contract", bool(contract_id))

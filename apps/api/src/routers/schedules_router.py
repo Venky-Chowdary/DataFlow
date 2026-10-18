@@ -104,6 +104,12 @@ class ScheduleCreate(BaseModel):
     number_locale: str = ""
     shape_recipe: dict[str, Any] = Field(default_factory=dict)
     approved_shape_recipe_hash: str = ""
+    # Transform Library binding — pick a library recipe by id; pin a version
+    # or follow latest; pass parameter values (the only per-use override).
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = Field(default=0, ge=0)
+    transform_recipe_version_mode: Literal["pin", "follow"] = "pin"
+    transform_recipe_params: dict[str, Any] = Field(default_factory=dict)
     approved_set_hash: str = ""
     approved_decision_artifact_hash: str = ""
     approved_ddl_identity_hash: str = ""
@@ -174,6 +180,10 @@ class ScheduleUpdate(BaseModel):
     number_locale: Optional[str] = None
     shape_recipe: Optional[dict[str, Any]] = None
     approved_shape_recipe_hash: Optional[str] = None
+    transform_recipe_id: Optional[str] = None
+    transform_recipe_version: Optional[int] = Field(default=None, ge=0)
+    transform_recipe_version_mode: Optional[Literal["pin", "follow"]] = None
+    transform_recipe_params: Optional[dict[str, Any]] = None
     approved_set_hash: Optional[str] = None
     approved_decision_artifact_hash: Optional[str] = None
     approved_ddl_identity_hash: Optional[str] = None
@@ -229,6 +239,10 @@ class ScheduleResponse(BaseModel):
     number_locale: str = ""
     shape_recipe: dict[str, Any] = Field(default_factory=dict)
     approved_shape_recipe_hash: str = ""
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = 0
+    transform_recipe_version_mode: str = "pin"
+    transform_recipe_params: dict[str, Any] = Field(default_factory=dict)
     approved_set_hash: str = ""
     approved_decision_artifact_hash: str = ""
     approved_ddl_identity_hash: str = ""

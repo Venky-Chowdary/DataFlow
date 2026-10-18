@@ -49,6 +49,7 @@ from .routers.contracts_router import router as contracts_router
 from .routers.fidelity_router import router as fidelity_router
 from .routers.resource_acl_router import router as resource_acl_router
 from .routers.cdc_mapping_review_router import router as cdc_mapping_review_router
+from .routers.transform_library_router import router as transform_library_router
 from .routers.transforms_router import router as transforms_router
 from .routers.copilot_router import router as copilot_router
 from .routers.mcp_router import oauth_resource_router, router as mcp_router
@@ -664,6 +665,7 @@ app.include_router(contracts_router, prefix="/api/v1")
 app.include_router(fidelity_router, prefix="/api/v1")
 app.include_router(resource_acl_router, prefix="/api/v1")
 app.include_router(transforms_router, prefix="/api/v1")
+app.include_router(transform_library_router, prefix="/api/v1")
 app.include_router(query_router, prefix="/api/v1")
 app.include_router(usage_router, prefix="/api/v1")
 app.include_router(ops_router, prefix="/api/v1")
