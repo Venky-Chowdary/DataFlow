@@ -34,7 +34,7 @@ Missing = nothing in code yet.
 |23|Nest relational→JSON|Missing|—|
 |24|Repeating-field unpivot|Missing|—|
 |25|Unstructured→structured|Missing|—|
-|26|Schema change policy|Have|`schema_policy` gate + drift ack flow|
+|26|Schema change policy|Implemented|`schema_policy` gate + drift ack + recipe input_columns contract fails closed at compile|
 |27|Incremental cursor/CDC|Have|`incremental_append`/`incremental_deduped`/CDC engine + cursor-semantics verdicts|
 |28|Authored merge/upsert|Partial|Sync-mode-driven merge; no authored update-column override|
 |29|Surrogate keys|Implemented|`surrogate_key` op — stateful sequence across pages|
@@ -42,15 +42,15 @@ Missing = nothing in code yet.
 |31|Soft delete|Missing|—|
 |32|Sort/Rank top-N|Implemented|`sort_rows` multi-key mixed direction + `rank_rows` top/bottom-N per partition|
 |33|Union|Missing|—|
-|34|DQ authored reusable rules|Partial|rule_compiler statuses executable/needs_confirmation|
-|35|Design validation blocks run|Have|g9 sync-contract gate + validation_mode|
-|36|Preview before/after per step|Partial|shape preview/drafts exist; no per-step rows diff|
+|34|DQ authored reusable rules|Implemented|transform Library = named/versioned reusable rule assets + templates; rule_compiler executable status|
+|35|Design validation blocks run|Implemented|recipe.check() blocks runnability (Draft-invalid never binds) + g9 gate + validation_mode|
+|36|Preview before/after per step|Implemented|/preview?per_step=1 before/after per step incl. held/diverted/drained honesty|
 |37|Error metadata/reject routing|Have|quarantine + rejected_rows/coerced_null_rows counters|
 |38|Quarantine user-configured|Have|quarantine + `{model}_df_quarantine` + replay|
-|39|Reusable saved transform library|Partial|TransformProject named+versioned destination-bound; library recipes in progress|
+|39|Reusable saved transform library|Implemented|Library: named/versioned recipes, params, templates, where-used, pin/follow-latest binding|
 |40|One-off in-flow mapping|Have|per-mapping `transform` via uiTransformToEngine|
-|41|Versioning/sharing/governance|Partial|`expected_version` optimistic concurrency|
-|42|Parameters one def many runs|Missing|—|
+|41|Versioning/sharing/governance|Implemented|recipe versions + expected_version + pin vs follow-latest + where-used impact|
+|42|Parameters one def many runs|Implemented|`:param` declared/defaulted on recipe, bound per-transfer, substituted at compile|
 |43|Custom code Java/Python/SQL step|Missing|—|
 |44|Stored proc mid-flow|Missing|—|
 |45|ML/embedding/API mid-flow|Missing|—|
