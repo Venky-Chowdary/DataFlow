@@ -3024,6 +3024,14 @@ def _stream_database_transfer_impl(
                 else [(None, dest_table, batch.headers, batch.rows)]
             )
             created_tables = ddl_state.setdefault("created_tables", set())
+            _rmap_decls = (
+                {
+                    str(_rd.get("name") or ""): (_rd.get("map") or {})
+                    for _rd in (router_step.options.get("routes") or [])
+                }
+                if router_step is not None
+                else {}
+            )
             for _rname, _rtable, _rheaders, _rrows in splits:
                 create_this = (
                     _rtable not in created_tables
@@ -3036,17 +3044,39 @@ def _stream_database_transfer_impl(
                     # reach the writer (a "mapped source not in headers" risk
                     # contract would refuse the batch as a NULL-invent).
                     _rheader_set = set(_rheaders)
-                    _rmappings = [
-                        m for m in mappings
-                        if str(m.get("source") or "") in _rheader_set
-                    ]
-                    _rtargets = {
-                        str(m.get("target") or m.get("source") or "")
-                        for m in _rmappings
-                    }
-                    _rcol_types = {
-                        k: v for k, v in column_types.items() if k in _rtargets
-                    }
+                    if _rmap_decls.get(_rname):
+                        # A mapped route's headers are already the TARGET
+                        # names, so source->target lookup against the shared
+                        # mappings finds nothing — build identity mappings
+                        # keyed by target name and carry the SOURCE column's
+                        # type through the map so the route DDL keeps INT
+                        # instead of degrading to TEXT (RT-8).
+                        _rsrc_of = {
+                            str(t): str(s)
+                            for s, t in _rmap_decls[_rname].items()
+                        }
+                        _rmappings = [
+                            {"source": h, "target": h, "confidence": 0.95}
+                            for h in _rheaders
+                        ]
+                        _rtargets = set(_rheaders)
+                        _rcol_types = {
+                            h: column_types[_rsrc_of[h]]
+                            for h in _rheaders
+                            if _rsrc_of.get(h) in column_types
+                        }
+                    else:
+                        _rmappings = [
+                            m for m in mappings
+                            if str(m.get("source") or "") in _rheader_set
+                        ]
+                        _rtargets = {
+                            str(m.get("target") or m.get("source") or "")
+                            for m in _rmappings
+                        }
+                        _rcol_types = {
+                            k: v for k, v in column_types.items() if k in _rtargets
+                        }
                     if True:
                         # Value-level proof per route: fingerprint this route's
                         # mapped rows exactly as the non-routed path does, so

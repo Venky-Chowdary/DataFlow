@@ -322,7 +322,9 @@ def test_rt3_per_route_map_renames_columns_on_write(tmp_path, monkeypatch):
     res, _ = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash))
     assert res.success, res.error
     cur.execute("SELECT cust_id, amount FROM rt_us ORDER BY cust_id")
-    assert [tuple(r) for r in cur.fetchall()] == [("1", "150"), ("3", "10")]
+    # cust_id carries the source INT type through the map (RT-8) — a typed
+    # column, not TEXT strings.
+    assert [tuple(r) for r in cur.fetchall()] == [(1, "150"), (3, "10")]
     # Diverted rows still reach the DLQ — the 'us' table does not get them.
     cur.execute(
         "SELECT COUNT(*) FROM rt_us"
@@ -565,4 +567,45 @@ def test_rt7_deduped_rerun_reports_match_and_measured_rows_written(
     assert _fetch(cur, "rt_high") == [1]
     assert _fetch(cur, "rt_mid") == [2, 5]
     assert _fetch(cur, "rt_other") == [3, 6]
+    conn.close()
+
+
+def test_rt8_per_route_map_carries_source_column_type_to_ddl(
+    tmp_path, monkeypatch
+):
+    """RT-8: a per-route map renames columns but must carry the source
+    column's declared type into the route table DDL — cust_id created INT
+    (source id INT), not TEXT."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    cur.execute("DROP TABLE IF EXISTS rt_us")
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {
+                "name": "us",
+                "condition": "[region] == 'US'",
+                "map": {"id": "cust_id", "amt": "amount"},
+            },
+            {"name": "eu", "condition": "[region] == 'EU'"},
+        ],
+        targets={"us": "rt_us", "eu": "rt_rest"},
+        unmatched="divert",
+    )
+    res, _ = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash))
+    assert res.success, res.error
+    cur.execute(
+        "SELECT column_name, data_type FROM information_schema.columns "
+        "WHERE table_name = 'rt_us' ORDER BY ordinal_position"
+    )
+    types = dict(cur.fetchall())
+    assert set(types) == {"cust_id", "amount"}, types
+    assert types["cust_id"] in ("integer", "bigint", "smallint"), (
+        f"mapped column lost the source INT type: {types}"
+    )
+    assert types["amount"] in ("text", "character varying"), types
+    cur.execute("SELECT cust_id, amount FROM rt_us ORDER BY cust_id")
+    assert cur.fetchall() == [(1, "150"), (3, "10")]
     conn.close()
