@@ -1035,6 +1035,12 @@ class ShapeEngine:
             )
             return [row if nested is None else nested]
 
+        if op == "scd2":
+            # Declarative history contract — it declares the key, tracked
+            # columns and stamp names the destination merge honours; it does
+            # not rewrite the row. The merge applies it at write time.
+            return row
+
         # Everything else is a single-cell value transform.
         before = row.get(step.column)
         after = self._guarded(

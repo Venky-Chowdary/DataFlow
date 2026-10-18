@@ -1789,36 +1789,76 @@ def _run_reconciliation_impl(
                 dest_engine=str(scd2_stamp_ctx.get("engine") or ""),
             )
             # B1 Gate-8: read the destination history back row by row —
-            # exactly one is_current per key, contiguous non-overlapping
+            # at most one is_current per key, contiguous non-overlapping
             # intervals per key, and 1..n versions when declared. A broken
-            # history is a failed verification, never a verified run.
+            # history is a failed verification in every mode; a verifier
+            # that cannot run is "unproven", never silently skipped.
             try:
                 from services.scd2_engine import verify_scd2_history
 
-                _scd2_sum = (
-                    (dest_summary or {}).get("scd2") or {}
-                    if isinstance(dest_summary, dict)
-                    else {}
+                _ds = dest_summary if isinstance(dest_summary, dict) else {}
+                _pk_cols = list(
+                    (_ds.get("scd2") or {}).get("primary_key_columns")
+                    or _ds.get("primary_key_columns")
+                    or []
                 )
-                _pk_cols = list(_scd2_sum.get("primary_key_columns") or [])
                 if _pk_cols:
                     _hist = verify_scd2_history(
                         scd2_stamp_ctx.get("cfg"),
                         str(scd2_stamp_ctx.get("schema") or ""),
                         str(scd2_stamp_ctx.get("table_name") or ""),
                         _pk_cols,
-                        (dest_summary or {}).get("scd2_opts"),
+                        _ds.get("scd2_opts")
+                        or (_ds.get("scd2") or {}).get("scd2_opts"),
+                        expected={
+                            "inserted": int(
+                                _ds.get("scd2_rows_written")
+                                or (_ds.get("scd2") or {}).get("rows_written")
+                                or _ds.get("rows_written")
+                                or 0
+                            ),
+                            "closed": int(
+                                _ds.get("updated_rows")
+                                or (_ds.get("scd2") or {}).get("updated_rows")
+                                or 0
+                            ),
+                            "closed_missing": int(
+                                _ds.get("closed_missing_rows")
+                                or (_ds.get("scd2") or {}).get(
+                                    "closed_missing_rows"
+                                )
+                                or 0
+                            ),
+                        },
                     )
                     stamped["scd2_history"] = _hist
                     if _hist.get("ok") is False:
                         stamped["passed"] = False
-                        stamped["verification_verdict"] = "failed"
-                        stamped["message"] = (
-                            "SCD2 history verification failed: "
-                            + "; ".join(_hist.get("violations") or [])
-                        )
+                        if _hist.get("unproven"):
+                            stamped["unproven"] = True
+                            stamped["message"] = (
+                                "SCD2 history verification unproven: "
+                                + "; ".join(_hist.get("violations") or [])
+                            )
+                        else:
+                            stamped["verification_verdict"] = "failed"
+                            stamped["message"] = (
+                                "SCD2 history verification failed: "
+                                + "; ".join(_hist.get("violations") or [])
+                            )
+                else:
+                    stamped["passed"] = False
+                    stamped["unproven"] = True
+                    stamped["message"] = (
+                        "SCD2 history verification unproven: no primary "
+                        "key columns recorded for the run."
+                    )
             except Exception as exc:  # noqa: BLE001
-                _logger.warning("scd2 history verify skipped: %s", exc)
+                stamped["passed"] = False
+                stamped["unproven"] = True
+                stamped["message"] = (
+                    f"SCD2 history verification unproven: {exc}"
+                )
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
             stamped = _maybe_attach_verification_ladder(

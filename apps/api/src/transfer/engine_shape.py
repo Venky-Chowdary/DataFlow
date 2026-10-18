@@ -135,13 +135,64 @@ def _shape_stream_refusal(
     if runner is None:
         return ""
     sync = (effective_sync or "").lower()
-    if sync in ("cdc", "scd2", "full_refresh_mirror", "mirror"):
+    if sync in ("cdc", "full_refresh_mirror", "mirror"):
         return (
             f"Transform (pre-load) is not applied on the {sync} route: it merges "
             "each row against history already stored on the destination, which was "
             "not written by this recipe. Remove the transform recipe for this sync "
             "mode, or use full refresh / incremental append and transform on the read."
         )
+    if sync == "scd2":
+        # The scd2 step IS the history contract — it declares the business
+        # key, tracked columns and stamp names the merge honours, so a recipe
+        # carrying it runs on this route. Row-local steps before it are
+        # honoured only while they cannot move the history: they must not
+        # change the row population (a missing key would soft-close it) and
+        # must not rewrite a key, tracked or stamp column (stored history
+        # was hashed against different names).
+        recipe = runner.recipe
+        step = recipe.scd2_step
+        if step is None:
+            return (
+                "Transform (pre-load) is not applied on the scd2 route: it "
+                "merges each row against history already stored on the "
+                "destination, which was not written by this recipe. Declare "
+                "the history contract as an scd2 step, or remove the "
+                "transform recipe for this sync mode."
+            )
+        opts = step.options
+        guarded = (
+            {str(k) for k in (opts.get("keys") or [])}
+            | {str(t) for t in (opts.get("tracked") or [])}
+            | {
+                str(opts.get("effective_from") or "valid_from"),
+                str(opts.get("end_date") or "valid_to"),
+                str(opts.get("is_current") or "is_current"),
+                str(opts.get("row_hash") or "row_hash"),
+            }
+            | ({str(opts["version"])} if opts.get("version") else set())
+        )
+        for pre in recipe.enabled_steps:
+            if pre.op == "scd2":
+                continue
+            if pre.active:
+                return (
+                    f"Transform step {pre.op} is refused on the scd2 route: "
+                    "it changes the row population, and a row the stored "
+                    "history cannot see would be soft-closed on every "
+                    "snapshot. Only row-local steps that keep every row may "
+                    "precede the scd2 contract step."
+                )
+            hit = sorted(set(pre.writes) & guarded)
+            if hit:
+                return (
+                    f"Transform step {pre.op} is refused on the scd2 route: "
+                    f"it rewrites history column(s) {', '.join(hit)} — the "
+                    "stored versions were written and hashed under the "
+                    "declared key/tracked/stamp names. Transform other "
+                    "columns, or rename inside the scd2 step's own options."
+                )
+        return ""
     if multi_stream:
         return (
             "Transforming a multi-stream selection is refused: one recipe names "

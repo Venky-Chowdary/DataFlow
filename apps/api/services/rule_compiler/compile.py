@@ -1562,6 +1562,19 @@ def _refuse_preload_on_history(item: dict[str, Any], sync_mode: str) -> None:
         return
     if not item.get("shape_step") and not item.get("shape_steps"):
         return
+    if (sync_mode or "").strip().lower() == "scd2":
+        # An scd2 contract step IS allowed on the scd2 route (B1): it does
+        # not rewrite rows, it declares the history key/stamps. The engine's
+        # stream refusal re-validates every other step before writing.
+        steps = list(item.get("shape_steps") or [])
+        single = item.get("shape_step")
+        if isinstance(single, dict):
+            steps = [*steps, single]
+        if any(
+            isinstance(s, dict) and str(s.get("op") or "") == "scd2"
+            for s in steps
+        ):
+            return
     item["status"] = "needs_confirmation"
     item["shape_step"] = None
     item["shape_steps"] = []

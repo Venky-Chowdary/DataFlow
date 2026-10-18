@@ -286,7 +286,31 @@ def _note_failed_batch_undo(
     if route_map:
         _run_txids = dest_summary.get("route_run_txid")
         _run_tables = list(dest_summary.get("route_run_tables") or [])
-        if _run_txids and _run_tables:
+        # The keyed undo only runs when the run actually fails: under
+        # strict/maximum a Gate-8 failure removes this run's rows. Under
+        # balanced/lenient the rows are kept by contract — passed=False
+        # carries the failed verdict, never a delete.
+        _vmode = str(getattr(request, "validation_mode", "") or "").lower()
+        _undo_allowed = _vmode in ("strict", "maximum", "")
+        if _run_txids and _run_tables and not _undo_allowed:
+            added = {
+                str(name): int(info.get("rows") or 0)
+                for name, info in route_map.items()
+                if isinstance(info, dict)
+            }
+            added_txt = (
+                ", ".join(f"{n}: {c}" for n, c in added.items()) or "unknown"
+            )
+            note = (
+                "Verification failed but the run's rows are kept under "
+                f"{_vmode} validation — prior rows intact, this run added "
+                f"({added_txt}); reconcile before re-running."
+            )
+            dest_summary["partial_batch_undo"] = "retained"
+            dest_summary["partial_batch_undo_note"] = note
+            base = message or "Reconciliation failed"
+            return base if note in base else f"{base} {note}"
+        if _run_txids and _run_tables and _undo_allowed:
             try:
                 from .adapters import resolve_connector_config
                 from .connector_capabilities import resolve_driver_type

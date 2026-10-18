@@ -2870,9 +2870,11 @@ class UniversalTransferEngine:
                                     for t in _scd2_opts["tracked"]
                                 ]
                     except Exception as exc:  # noqa: BLE001
-                        logger.warning(
-                            "scd2 recipe step parse skipped: %s", exc
-                        )
+                        raise RuntimeError(
+                            "SCD2 recipe step refused — the declared history "
+                            f"contract does not parse against the source "
+                            f"columns: {exc}"
+                        ) from exc
                 if effective_sync_lower == "scd2" and conflict_columns:
                     from connectors.engine_record_spill import (
                         ENGINE_SPILL_SUMMARY_KEY,
@@ -4086,6 +4088,42 @@ class UniversalTransferEngine:
                         "Multi-stream SCD2/mirror is not supported yet — "
                         "select a single stream or use full/incremental/CDC"
                     )
+                _scd2_opts_stream = None
+                _scd2_keys_stream: list[str] | None = None
+                if effective_sync == "scd2" and getattr(
+                    request, "shape_recipe", None
+                ):
+                    # The recipe scd2 step IS the history contract (B1):
+                    # keys/tracked are source-space, translated to target
+                    # names through the mappings. A malformed contract is a
+                    # refusal — silently falling back to default stamps
+                    # would run history the operator did not approve.
+                    from services.shape_models import ShapeRecipe
+
+                    _rcp = ShapeRecipe.parse(
+                        request.shape_recipe,
+                        source_columns=columns,
+                    )
+                    if _rcp.scd2_step is not None:
+                        _scd2_opts_stream = _rcp.scd2_column_names() or {}
+                        _src2tgt = {
+                            str(m.get("source") or ""): str(
+                                m.get("target") or ""
+                            )
+                            for m in (mappings or [])
+                            if isinstance(m, dict)
+                        }
+                        _rkeys = [
+                            str(_src2tgt.get(k) or k)
+                            for k in _scd2_opts_stream.get("keys") or []
+                        ]
+                        if _rkeys:
+                            _scd2_keys_stream = _rkeys
+                        if _scd2_opts_stream.get("tracked"):
+                            _scd2_opts_stream["tracked"] = [
+                                str(_src2tgt.get(t) or t)
+                                for t in _scd2_opts_stream["tracked"]
+                            ]
                 rows_written, ddl_log, dest_summary, _ = stream_scd2_mirror_transfer(
                     request.source,
                     request.destination,
@@ -4100,6 +4138,8 @@ class UniversalTransferEngine:
                     backfill_new_fields=backfill_fields,
                     validation_mode=request.validation_mode,
                     limit=request.limit,
+                    scd2_opts=_scd2_opts_stream,
+                    key_columns=_scd2_keys_stream,
                 )
                 if isinstance(dest_summary, dict) and dest_summary.get("ok") is False:
                     block_msg = str(

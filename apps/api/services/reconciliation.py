@@ -301,15 +301,23 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         # *_verified phase. Balanced/lenient keeps the rows (passed stays
         # true) but anything reading passed/phase/verdict (UI badge,
         # get_job, MCP, alerting) must not see "verified".
+        _was_passed = bool(out.get("passed"))
         out["verification_verdict"] = (
-            "failed" if (_route_cm is False or not out.get("passed")) else "passed"
+            "failed" if (_route_cm is False or not _was_passed) else "passed"
         )
-        if not out.get("passed"):
-            out["phase"] = "post_write_failed"
-        elif _route_cm is False:
+        if _route_cm is False:
+            # A measured digest mismatch/key-duplication is a verification
+            # failure, never the writer-failure bucket.
             out["phase"] = "post_write_verification_failed"
+        elif not _was_passed:
+            out["phase"] = "post_write_failed"
         else:
             out["phase"] = "post_write_verified"
+        # P3: anything keying on `passed` (UI badge, get_job, MCP, schedule
+        # alerting) must see the failed verdict — the rows stay landed under
+        # balanced/lenient, but the run did NOT verify.
+        if out["verification_verdict"] == "failed":
+            out["passed"] = False
         out["post_write_pending"] = False
         out["preview"] = False
         out["coverage"] = ROUTE_PARTITIONED

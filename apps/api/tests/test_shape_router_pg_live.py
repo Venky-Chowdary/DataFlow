@@ -924,9 +924,13 @@ def test_p1a_balanced_digest_mismatch_carries_failed_verdict(
         monkeypatch.setattr(
             recon_mod, "verify_postgres_route_table", real_route_verify
         )
-        assert res.success, res.error  # rows kept under non-strict
+        # P3: passed=false now — callers (UI badge, get_job, MCP, alerting)
+        # see the failed verdict; the rows still stay landed and the undo
+        # gate keeps them under non-strict modes.
+        assert not res.success, res.error
         recon = res.reconciliation or {}
         assert recon.get("checksum_match") is False, recon
+        assert recon.get("passed") is False, recon
         assert recon.get("verification_verdict") == "failed", recon
         phase = str(recon.get("phase") or "")
         assert phase == "post_write_verification_failed", phase

@@ -1008,6 +1008,40 @@ def _type1_update_rows(
     return updated
 
 
+def _fetch_max_versions(
+    conn: Any,
+    qualified: str,
+    pk_columns: list[str],
+    keys: set[str] | list[str],
+    dialect_name: str,
+    cols: dict[str, Any],
+    pk_types: dict[str, str] | None = None,
+) -> dict[str, int]:
+    """max(version) per key across every version row — used to number a
+    reopened key after a soft close."""
+    import sqlalchemy as sa
+    from connectors.writer_common import quote_sql_identifier
+
+    q = _qchar(dialect_name)
+    pred, params = _pk_or_clause(
+        pk_columns, list(keys), prefix="mxv", dialect=dialect_name,
+        column_types=pk_types,
+    )
+    ver_q = quote_sql_identifier(cols["version"], q)
+    pk_sql = ", ".join(quote_sql_identifier(c, q) for c in pk_columns)
+    out: dict[str, int] = {}
+    for row in conn.execute(
+        sa.text(
+            f"SELECT {pk_sql}, MAX({ver_q}) AS _mx FROM {qualified} "  # nosec B608
+            f"WHERE {pred} GROUP BY {pk_sql}"
+        ),
+        params,
+    ):
+        m = dict(row._mapping)
+        out[_compose_key(m, pk_columns)] = int(m.get("_mx") or 0)
+    return out
+
+
 def _merge_scd2_bundle(
     conn: Any,
     table_obj: Any,
@@ -1053,6 +1087,18 @@ def _merge_scd2_bundle(
     to_expire: set[str] = set()
     to_type1: list[tuple[str, dict[str, Any]]] = []
 
+    # A key with no current version may still hold closed history (it was
+    # soft-closed on an earlier snapshot) — its reopened version is
+    # max(version)+1, never v1 again.
+    max_versions: dict[str, int] = {}
+    if cols.get("version"):
+        missing = [k for k in keys if k not in current_snaps]
+        if missing:
+            max_versions = _fetch_max_versions(
+                conn, qualified, pk_columns, missing, dialect_name, cols,
+                pk_types,
+            )
+
     for row in batch:
         key = _compose_key(row, pk_columns)
         if not key or all(p == "" for p in key.split(_KEY_SEP)):
@@ -1089,9 +1135,8 @@ def _merge_scd2_bundle(
         hydrated[cols["valid_to"]] = None
         hydrated[cols["is_current"]] = True
         if cols.get("version"):
-            hydrated[cols["version"]] = int(
-                ((snap or {}).get("version") or 0)
-            ) + 1
+            base = (snap or {}).get("version") or max_versions.get(key) or 0
+            hydrated[cols["version"]] = int(base) + 1
         to_insert.append(hydrated)
 
     expired = 0
@@ -1337,6 +1382,7 @@ def verify_scd2_history(
     table_name: str,
     pk_columns: list[str],
     cols: dict[str, Any] | None = None,
+    expected: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Gate-8 read-back of the SCD2 history invariants, row by row.
 
@@ -1425,28 +1471,107 @@ def verify_scd2_history(
                     violations.append(
                         f"key {label}: a non-final version has open valid_to"
                     )
-                elif _instant(vt_p) != _instant(vf_n):
+                elif _instant(vf_n) < _instant(vt_p):
                     violations.append(
-                        f"key {label}: gap/overlap — valid_to {vt_p} "
-                        f"!= next valid_from {vf_n}"
+                        f"key {label}: overlapping intervals — next "
+                        f"valid_from {vf_n} < prior valid_to {vt_p}"
                     )
+                elif _instant(vf_n) != _instant(vt_p):
+                    # Forward gap: the key's version closed at vt_p with no
+                    # paired open — a soft-close on source absence, whose
+                    # reopen later is legitimate history. A deleted middle
+                    # version is still caught by the 1..n version-sequence
+                    # check when the recipe declares a version column.
+                    pass
             if cols.get("version"):
                 seq = [m.get(cols["version"]) for m in ordered]
                 if seq != list(range(1, len(seq) + 1)):
                     violations.append(
                         f"key {label}: versions {seq} are not 1..{len(seq)}"
                     )
+        deltas: dict[str, Any] = {}
+        if expected and (
+            int(expected.get("inserted") or 0)
+            or int(expected.get("closed") or 0)
+        ):
+            # The run's writes share one timestamp: rows opened this run
+            # carry valid_from == max(valid_from); rows closed carry
+            # valid_to == the same instant. Recount them independently —
+            # opened == inserted, closed == closed, and the keys holding
+            # both an open and a close at the run timestamp are the
+            # changed keys counted from the destination, which must equal
+            # closed - closed_missing.
+            # The run's writes share one timestamp — opened rows stamp it
+            # as valid_from, closed rows as valid_to. A close-only run has
+            # no new valid_from, so the newest instant across both columns
+            # is the run's timestamp.
+            instants = [
+                _instant(m.get(c))
+                for rows in versions.values()
+                for m in rows
+                for c in (cols["valid_from"], cols["valid_to"])
+                if m.get(c) is not None
+            ]
+            run_ts = max(instants) if instants else None
+            opened_now = 0
+            closed_now = 0
+            changed_now = 0
+            for rows in versions.values():
+                opened = sum(
+                    1 for m in rows
+                    if _instant(m.get(cols["valid_from"])) == run_ts
+                )
+                closed = sum(
+                    1 for m in rows
+                    if m.get(cols["valid_to"]) is not None
+                    and _instant(m.get(cols["valid_to"])) == run_ts
+                )
+                opened_now += opened
+                closed_now += closed
+                if opened and closed:
+                    changed_now += 1
+            exp_changed = int(expected.get("closed") or 0) - int(
+                expected.get("closed_missing") or 0
+            )
+            deltas = {
+                "run_ts": str(run_ts),
+                "opened": opened_now,
+                "closed": closed_now,
+                "changed": changed_now,
+                "expected_inserted": int(expected.get("inserted") or 0),
+                "expected_closed": int(expected.get("closed") or 0),
+                "expected_changed": exp_changed,
+            }
+            if opened_now != deltas["expected_inserted"]:
+                violations.append(
+                    f"version recount: {opened_now} rows opened this run, "
+                    f"expected {deltas['expected_inserted']} inserted"
+                )
+            if closed_now != deltas["expected_closed"]:
+                violations.append(
+                    f"version recount: {closed_now} versions closed this "
+                    f"run, expected {deltas['expected_closed']}"
+                )
+            if changed_now != exp_changed:
+                violations.append(
+                    f"version recount: {changed_now} changed keys at the "
+                    f"run timestamp, expected {exp_changed} "
+                    "(closed - closed_missing)"
+                )
         return {
             "ok": not violations,
             "violations": violations[:20],
             "keys": len(versions),
             "current_rows": current_rows,
             "history_rows": history_rows,
+            "deltas": deltas,
             "scd2": True,
         }
-    except Exception as exc:  # noqa: BLE001 — history proof fails closed
+    except Exception as exc:  # noqa: BLE001 — a verifier that cannot run
+        # is "unproven", never a silent skip and never a hard failure.
         return {
             "ok": False,
+            "unproven": True,
             "violations": [f"scd2 history read-back failed: {exc}"],
             "keys": -1,
             "current_rows": -1,

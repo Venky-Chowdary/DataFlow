@@ -100,6 +100,8 @@ def stream_scd2_mirror_transfer(
     backfill_new_fields: bool = False,
     validation_mode: str = "strict",
     limit: int = 0,
+    scd2_opts: dict[str, Any] | None = None,
+    key_columns: list[str] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Stream a mirror or SCD2 database-to-database transfer through a staging table.
 
@@ -212,10 +214,17 @@ def stream_scd2_mirror_transfer(
             dest_summary[PRECOUNT_KEY] = int(rows_before)
 
         if effective_sync == "scd2":
-            from services.scd2_engine import apply_scd2, prepare_scd2_mapped_rows
+            from services.scd2_engine import (
+                apply_scd2,
+                prepare_scd2_mapped_rows,
+                resolve_scd2_cols,
+            )
 
+            _scd2_cols = resolve_scd2_cols(scd2_opts)
             batch_size = 1_000
-            if contract and contract.primary_key:
+            if key_columns:
+                conflict_columns = list(key_columns)
+            elif contract and contract.primary_key:
                 conflict_columns = [
                     map_source_to_target(col, mappings) for col in contract.primary_key_columns()
                 ]
@@ -226,6 +235,7 @@ def stream_scd2_mirror_transfer(
                 )
             written_total = 0
             updated_total = 0
+            type1_total = 0
             active_rows = 0
             active_checksum = ""
             batch_idx = 0
@@ -290,6 +300,7 @@ def stream_scd2_mirror_transfer(
                         conflict_columns=conflict_columns,
                         batch_size=batch_size,
                         validation_mode=validation_mode,
+                        scd2_opts=scd2_opts,
                     )
                     rejected_all.extend(list(summary.get("rejected_details") or []))
                     if summary.get("ok") is False:
@@ -304,6 +315,7 @@ def stream_scd2_mirror_transfer(
                         break
                     written_total += int(summary.get("rows_written", 0))
                     updated_total += int(summary.get("updated_rows", 0))
+                    type1_total += int(summary.get("type1_updated_rows") or 0)
                     active_rows = int(summary.get("active_rows", 0))
                     active_checksum = str(summary.get("active_checksum", ""))
                     batch_idx += 1
@@ -315,7 +327,11 @@ def stream_scd2_mirror_transfer(
                             checkpoint={"phase": "scd2"},
                         )
 
-                if not scd2_block_error and not limit:
+                if (
+                    not scd2_block_error
+                    and not limit
+                    and _scd2_cols.get("close_missing", True)
+                ):
                     # Staging is the complete source population, so a current
                     # version with no key in staging was deleted at the source.
                     from services.scd2_engine import (
@@ -332,6 +348,7 @@ def stream_scd2_mirror_transfer(
                                 staging_qualified,
                                 conflict_columns,
                                 dialect=dest_type,
+                                cols=_scd2_cols,
                             )
                             conn.commit()
                             dest_summary.update(closed)
@@ -344,12 +361,16 @@ def stream_scd2_mirror_transfer(
                                     batch_size,
                                     dest_type,
                                     dest_types=digest_types,
+                                    cols=_scd2_cols,
                                 )
                     finally:
                         release_engine(engine)
                 dest_summary["active_rows"] = active_rows
                 dest_summary["active_checksum"] = active_checksum
                 dest_summary["updated_rows"] = updated_total
+                dest_summary["type1_updated_rows"] = type1_total
+                dest_summary["scd2_rows_written"] = written_total
+                dest_summary["scd2_opts"] = _scd2_cols
                 _stamp_merge_source_digest(dest_summary, stage_summary)
                 dest_summary["rejected_details"] = stage_rejects + rejected_all
                 dest_summary["rejected_rows"] = len(stage_rejects) + len(rejected_all)

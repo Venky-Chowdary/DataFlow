@@ -80,6 +80,10 @@ class _PreviewBody(_RecipeBody):
     focus_table: str = ""
     source_tables: list[str] = Field(default_factory=list)
     source_catalog: dict[str, list[str]] = Field(default_factory=dict)
+    # Optional destination endpoint for history-affecting steps (scd2): the
+    # per-step preview then reports which keys would open/close versions
+    # against the live destination, not just shaped sample rows.
+    destination: dict[str, Any] | None = None
 
 
 class _ProfileBody(BaseModel):
@@ -202,6 +206,7 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     identity = _identity(recipe, output_columns=out_columns)
     if program_hash:
         identity["recipe_hash"] = program_hash
+    scd2_preview = _scd2_step_preview(body, recipe, shaped or rows, out_columns)
     return {
         "recipe": identity,
         "sampled_rows": len(rows),
@@ -216,6 +221,7 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         "suggestions": suggest_steps(profiles, target_schema=body.target_schema)
         if body.include_profile
         else [],
+        "scd2_preview": scd2_preview,
         "preview_note": preview_note,
     }
 
@@ -223,6 +229,58 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _scd2_step_preview(
+    body: "_PreviewBody",
+    recipe: "ShapeRecipe",
+    rows: list[dict[str, Any]],
+    columns: list[str],
+) -> dict[str, Any] | None:
+    """Per-step preview for the scd2 contract step.
+
+    Read-only: runs the merge's key/tracked-hash diff against the live
+    destination's current snapshots and names the keys that would open or
+    close a version. Absent without an scd2 step; honest "needs the
+    destination" when no endpoint is supplied.
+    """
+    step = recipe.scd2_step
+    if step is None:
+        return None
+    if not body.destination:
+        return {
+            "ok": False,
+            "note": (
+                "send the destination endpoint to preview which rows would "
+                "open or close SCD2 versions — the diff runs against the "
+                "history stored there"
+            ),
+            "keys": [str(k) for k in step.options.get("keys") or []],
+        }
+    try:
+        from services.scd2_engine import preview_scd2_merge
+        from src.transfer.models import EndpointConfig
+
+        names = recipe.scd2_column_names() or {}
+        dest = EndpointConfig(
+            **{
+                k: v
+                for k, v in body.destination.items()
+                if v is not None
+            }
+        )
+        return preview_scd2_merge(
+            dest,
+            rows,
+            list(columns),
+            dict(body.column_types or {}),
+            None,
+            list(names.get("keys") or []),
+            complete_snapshot=True,
+            scd2_opts=names,
+        )
+    except Exception as exc:  # noqa: BLE001 — preview reports, never throws
+        return {"ok": False, "error": str(exc)}
 
 
 def _recipe_for_preview(body: _PreviewBody, columns: list[str]) -> tuple[ShapeRecipe, str, str]:
