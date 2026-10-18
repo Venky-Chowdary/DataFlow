@@ -113,14 +113,30 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
         return _clear_object_store(
             dest_summary, store, cfg, schema=schema, table_name=table
         )
-    removed = _delete_all_rows(
-        db_type,
-        cfg,
-        schema=schema,
-        table_name=table,
-        job_id=str(dest_summary.get("job_id") or ""),
-    )
-    after = precount_table(db_type, cfg, table)
+    # A router partitioned the batch into per-route tables. Rolling back only
+    # ``dest_summary["table"]`` (the last write's table) would clear one route
+    # and leave the rest half-written — the failed batch spans every route
+    # table (RT-1).
+    route_tables = [
+        str(info.get("table") or "")
+        for info in (dest_summary.get("routes") or {}).values()
+        if isinstance(info, dict) and info.get("table")
+    ]
+    tables = route_tables or [table]
+    removed_any = False
+    remaining_after: list[int] = []
+    for _t in tables:
+        removed = _delete_all_rows(
+            db_type,
+            cfg,
+            schema=schema,
+            table_name=_t,
+            job_id=str(dest_summary.get("job_id") or ""),
+        )
+        removed_any = removed_any or removed
+        remaining_after.append(precount_table(db_type, cfg, _t))
+    removed = removed_any
+    after = max(remaining_after) if remaining_after else 0
     dest_summary["partial_batch_rows_after_undo"] = after
     if after == 0 and removed:
         dest_summary["partial_batch_removed"] = True

@@ -232,6 +232,7 @@ class PgOverwriteTransaction:
     def __init__(self) -> None:
         self.active = False
         self.truncated = False
+        self.truncated_tables: set[str] = set()
         self.job_id = ""
 
     def begin(self, *, job_id: str = "") -> None:
@@ -240,11 +241,24 @@ class PgOverwriteTransaction:
         if job_id and not self.job_id:
             self.job_id = str(job_id)
 
-    def note_truncated(self) -> None:
+    def was_truncated(self, table_name: str = "") -> bool:
+        """True once emptying is done for this table.
+
+        A routed overwrite writes several destination tables on one held
+        transaction — the flag must be per table or only the first route
+        table gets truncated and the others append (RT-2).
+        """
+        if table_name:
+            return table_name in self.truncated_tables
+        return self.truncated
+
+    def note_truncated(self, table_name: str = "") -> None:
         """Emptying is done for this load: an existing table was truncated, or
         this run is creating the table and must not truncate its own rows.
         """
         self.truncated = True
+        if table_name:
+            self.truncated_tables.add(table_name)
         self.active = True
 
     def finish(self, conn: Any, *, success: bool) -> None:
@@ -272,6 +286,7 @@ class PgOverwriteTransaction:
         finally:
             self.active = False
             self.truncated = False
+            self.truncated_tables.clear()
             self.job_id = ""
             unbind_overwrite_transaction(conn)
 

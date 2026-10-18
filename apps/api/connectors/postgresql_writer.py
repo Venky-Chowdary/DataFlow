@@ -2264,7 +2264,7 @@ def write_mapped_rows(
                     bind_overwrite_transaction(conn, held)
                 held.begin(job_id=job_id)
                 if not table_existed:
-                    held.note_truncated()
+                    held.note_truncated(table_name)
 
             # Create-new: partial Studio must not soft-bind Map VARCHAR.
             if not table_existed and studio_err:
@@ -2528,7 +2528,7 @@ def write_mapped_rows(
                 bool(_kwargs.get("pg_overwrite_in_transaction"))
                 and table_existed
                 and port != 5439
-                and not (held_before and held_before.truncated)
+                and not (held_before and held_before.was_truncated(table_name))
             ):
                 from connectors.sql_identifiers import quote_table_ref
                 from connectors.table_manager import overwrite_empty_statements
@@ -2569,7 +2569,7 @@ def write_mapped_rows(
                 if held is None:
                     held = PgOverwriteTransaction()
                     bind_overwrite_transaction(conn, held)
-                held.note_truncated()
+                held.note_truncated(table_name)
 
             use_copy = (
                 write_mode == "insert"

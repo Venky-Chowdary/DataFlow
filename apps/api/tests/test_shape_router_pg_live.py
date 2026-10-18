@@ -1,0 +1,184 @@
+"""RT-1/RT-2 router regressions on the real PostgreSQL write path.
+
+Gated on DATAFLOW_PG_TEST_DSN (e.g. postgresql://dataflow:dataflow@127.0.0.1:5432/dataflow)
+— SQLite hides these bugs because its writer ignores pg_overwrite_in_transaction
+and the route-tag column silently passes through writes.
+"""
+import os
+import uuid
+
+import pytest
+
+psycopg2 = pytest.importorskip("psycopg2")
+DSN = os.environ.get("DATAFLOW_PG_TEST_DSN")
+pytestmark = pytest.mark.skipif(not DSN, reason="DATAFLOW_PG_TEST_DSN unset")
+
+import src.transfer.engine as engine_mod  # noqa: E402
+from tests.test_property2_golden_path_never_blocked import _FakeMongo  # noqa: E402
+from src.transfer.engine import UniversalTransferEngine  # noqa: E402
+from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
+from services.shape_models import ShapeRecipe  # noqa: E402
+
+
+def _pg_env(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128,localhost,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16")
+    fake = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
+    return fake
+
+
+def _parse_dsn():
+    from urllib.parse import urlparse
+
+    u = urlparse(DSN)
+    return {
+        "host": u.hostname,
+        "port": u.port or 5432,
+        "database": (u.path or "/postgres").lstrip("/"),
+        "username": u.username or "postgres",
+        "user": u.username or "postgres",
+        "password": u.password or "",
+    }
+
+
+def _setup_source(cur, rows):
+    for t in ("rt", "rt_out", "rt_high", "rt_mid", "rt_other",
+              "rt_out__high", "rt_out__mid", "rt_out__other",
+              "rt__us", "rt__rest", "rt_us", "rt_rest"):
+        cur.execute(f"DROP TABLE IF EXISTS {t}")
+    cur.execute("CREATE TABLE rt (id INT, amt TEXT, region TEXT)")
+    for r in rows:
+        cur.execute("INSERT INTO rt (id, amt, region) VALUES (%s, %s, %s)", r)
+
+
+def _recipe(routes, targets=None, unmatched=None):
+    opts = {"routes": routes}
+    if targets:
+        opts["targets"] = targets
+    if unmatched:
+        opts["unmatched"] = unmatched
+    recipe = {"steps": [{"op": "router", "options": opts}]}
+    return recipe, ShapeRecipe.parse(recipe)
+
+
+def _req(parsed, recipe, recipe_hash, table="rt_out", sync="full_refresh_overwrite"):
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    return TransferRequest(
+        source=ep("rt"), destination=ep(table), sync_mode=sync,
+        shape_recipe=recipe, approved_shape_recipe_hash=recipe_hash,
+        skip_preflight=True, validation_mode="strict")
+
+
+def _run(fake, req, prefix="rtp"):
+    job_id = prefix + uuid.uuid4().hex[:12]
+    fake.update_job_status(job_id, "pending", transfer_request={})
+    return UniversalTransferEngine().execute_tracked(req, job_id), job_id
+
+
+def _fetch(cur, table):
+    cur.execute(f"SELECT id FROM {table} ORDER BY id")
+    return [r[0] for r in cur.fetchall()]
+
+
+ROWS = [(1, "150", "US"), (2, "75", "EU"), (3, "10", "US"), (5, "60", "EU"), (6, "1", "AP")]
+
+
+def test_rt1_three_routes_default_lands_all_rows(tmp_path, monkeypatch):
+    """Every input row lands in exactly one route table — the default route
+    included — and Gate-8 verifies per-route tables without the tag column."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    res, _ = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash))
+    assert res.success, res.error
+    assert _fetch(cur, "rt_high") == [1]
+    assert _fetch(cur, "rt_mid") == [2, 5]
+    assert _fetch(cur, "rt_other") == [3, 6]
+    conn.close()
+
+
+def test_rt1_two_routes_default_naming(tmp_path, monkeypatch):
+    """Default naming (<base>__<route>): default route gets unmatched rows."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "us", "condition": "[region] = 'US'"},
+            {"name": "rest", "default": True},
+        ],
+        targets={"us": "rt__us", "rest": "rt__rest"},
+    )
+    res, _ = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash))
+    assert res.success, res.error
+    assert _fetch(cur, "rt__us") == [1, 3]
+    assert _fetch(cur, "rt__rest") == [2, 5, 6]
+    conn.close()
+
+
+def test_rt2_overwrite_rerun_replaces_every_route_table(tmp_path, monkeypatch):
+    """A second overwrite run replaces ALL route tables — no route may append."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    res1, _ = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash), prefix="rtp1")
+    assert res1.success, res1.error
+    res2, _ = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash), prefix="rtp2")
+    assert res2.success, res2.error
+    assert _fetch(cur, "rt_high") == [1]
+    assert _fetch(cur, "rt_mid") == [2, 5]
+    assert _fetch(cur, "rt_other") == [3, 6]
+    conn.close()
+
+
+def test_rt1_unmatched_divert_sends_rows_to_dlq(tmp_path, monkeypatch):
+    """unmatched=divert: rows matching no route go to the DLQ with a reason,
+    and the route tables still land every matched row."""
+    import services.quarantine_dlq as dlq
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid"},
+        unmatched="divert",
+    )
+    res, job_id = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash))
+    assert res.success, res.error
+    assert _fetch(cur, "rt_high") == [1]
+    assert _fetch(cur, "rt_mid") == [2, 5]
+    dlq_rows = dlq.canonical_replay_details({"id": job_id})
+    assert len(dlq_rows) == 2  # ids 3 (amt<50) and 6 — no route matched
+    conn.close()

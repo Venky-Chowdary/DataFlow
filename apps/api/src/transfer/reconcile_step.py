@@ -2684,7 +2684,12 @@ def _run_reconciliation_impl(
         )
 
     sample_compare = None
-    if sample_records and table_name and target_cols:
+    # A router partitioned the run into per-route tables — there is no single
+    # destination table to compare against, and ``target_cols`` still carries
+    # the recipe's internal ROUTE_COLUMN tag, which is never a destination
+    # column. Per-route verify_target above already proved each table's rows
+    # and checksum (RT-1).
+    if sample_records and table_name and target_cols and not routed_tables:
         sort_key = _sort_key_for_columns(target_cols, mapping_dicts)
         key_values = _source_key_values(
             sample_records,

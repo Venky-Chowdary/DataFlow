@@ -986,8 +986,8 @@ def reconcile(
             message=(
                 f"Routed output verified: {target_rows:,} row(s) across the "
                 f"route tables vs expected {expected_rows:,}. Each route "
-                "table was read back independently; per-route digests are in "
-                "the route ledger."
+                "table's row count was read back independently; per-route "
+                "digests are in the route ledger."
                 if ok
                 else f"Row count mismatch across route tables: {target_rows:,} "
                 f"vs expected {expected_rows:,}."
