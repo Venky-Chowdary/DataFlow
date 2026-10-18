@@ -1037,6 +1037,34 @@ def reconcile(
         ok = target_rows == expected_rows or (
             allow_extra_rows and target_rows >= expected_rows
         )
+        if ok and route_digest_match is False and strict_checksum:
+            # A measured route digest mismatch under strict validation is a
+            # failed post-write proof — the job must fail (and the restore
+            # guard rolls the write back), never report a clean success
+            # alongside checksum_match=false (P1-A).
+            return ReconciliationReport(
+                passed=False,
+                source_rows=source_rows,
+                target_rows=target_rows,
+                source_checksum=source_checksum,
+                target_checksum=target_checksum,
+                message=(
+                    f"Gate-8 refused under strict validation: at least one "
+                    f"route table's value digest does not equal what this "
+                    f"run wrote ({target_rows:,} row(s) across route "
+                    f"tables vs expected {expected_rows:,})."
+                ),
+                rejected_rows=rejected_rows,
+                coerced_null_rows=coerced_null_rows,
+                rows_skipped=rows_skipped,
+                sample_compare=sample_compare,
+                checksum_match=False,
+                population_proof=True,
+                assurance_level=ROUTE_PARTITIONED,
+                checksum_scope=ROUTE_PARTITIONED,
+                target_rows_before=target_rows_before,
+                rows_written=rows_written,
+            )
         return ReconciliationReport(
             passed=ok,
             source_rows=source_rows,
@@ -1051,7 +1079,13 @@ def reconcile(
                     " and every comparable route's value digest matched the "
                     "write-pass fingerprint"
                     if route_digest_match
-                    else "; per-route digests are in the route ledger"
+                    else (
+                        " — VALUE VERIFICATION FAILED: at least one route "
+                        "table's digest does not equal what this run wrote "
+                        "(see the route ledger)"
+                        if route_digest_match is False
+                        else "; per-route digests are in the route ledger"
+                    )
                 )
                 if ok
                 else f"Row count mismatch across route tables: {target_rows:,} "
@@ -1683,12 +1717,15 @@ def verify_postgres_route_table(
     ssl: bool,
     table_name: str,
     dest_types: dict[str, str] | None = None,
+    target_columns: list[str] | None = None,
 ) -> tuple[int, str, str]:
     """(count, canonical checksum, additive checksum) for one route table.
 
     One read-back scan produces both digests — the additive form proves an
     append into an occupied route table (post − pre == this run), which the
-    canonical whole-table digest cannot (RT-6).
+    canonical whole-table digest cannot (RT-6). ``target_columns`` narrows the
+    digested population to the columns the run wrote; pre- and post-write
+    scans must pass the same list for the additive delta to hold.
     """
     try:
         from connectors.postgresql_conn import get_connection
@@ -1713,7 +1750,11 @@ def verify_postgres_route_table(
         with streaming_readback_cursor(conn, engine="postgresql") as cur:
             cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
             names, rows = dbapi_streaming_rows(cur)
-            columns, projected = project_readback(names, None, rows)
+            # Restrict the digest to the columns the run wrote — a
+            # customer-owned route table may carry extra columns (defaults,
+            # generated values) that were never part of the write and must
+            # not enter the compared digest (P0-G1 loaded_at case).
+            columns, projected = project_readback(names, target_columns, rows)
             acc = FingerprintAccumulator()
             for rk, fp in _iter_fingerprints(
                 projected,
@@ -1729,6 +1770,71 @@ def verify_postgres_route_table(
     except Exception as exc:
         logger.warning("Route read-back failed: %s", exc, exc_info=exc)
         return -1, "", ""
+
+
+def verify_pg_route_key_uniqueness(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    route_tables: list[tuple[str, list[str]]],
+    limit: int = 25,
+) -> list[tuple] | None:
+    """Keys present in more than one route table, or ``None`` when unproven.
+
+    A keyed routed run (incremental_deduped/upsert/mirror) must hold each key
+    in exactly one route table — the engine deletes the key from every other
+    route in the same transaction before upserting (P1-B). ``route_tables``
+    is ``[(table_name, [pk column names in that table]), ...]``; tables where
+    the pk is absent (a mapped route that drops the key column) are excluded
+    by the caller. Returns [] when every key lives in one route table, a
+    bounded list of duplicate key tuples otherwise, and ``None`` when the
+    check itself could not run — never silently "unique".
+    """
+    parts = [(t, [str(c) for c in cols]) for t, cols in route_tables if t and all(cols)]
+    if not parts:
+        return []
+    try:
+        from connectors.postgresql_conn import get_connection
+        from connectors.sql_identifiers import quote_table_ref
+
+        conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
+        try:
+            selects = []
+            for tbl, cols in parts:
+                col_list = ", ".join(f'"{c}"' for c in cols)
+                selects.append(
+                    f"SELECT {col_list} FROM "
+                    + quote_table_ref(tbl, schema or "public", dialect="postgresql")
+                )
+            union = " UNION ALL ".join(selects)
+            nkey = len(parts[0][1])
+            key_sel = ", ".join(f"k{i}" for i in range(nkey))
+            with conn.cursor() as cur:
+                cur.execute(
+                    f"SELECT {key_sel}, COUNT(*) FROM ({union}) q({key_sel}) "
+                    f"GROUP BY {key_sel} HAVING COUNT(*) > 1 "
+                    f"LIMIT {int(limit)}"
+                )  # nosec B608
+                return [tuple(r) for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as exc:
+        logger.warning("Route key-uniqueness check failed: %s", exc, exc_info=exc)
+        return None
 
 
 def verify_pgvector_table(

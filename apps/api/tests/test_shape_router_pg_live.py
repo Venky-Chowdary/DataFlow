@@ -699,9 +699,11 @@ def test_p0g1_customer_route_ddl_survives_overwrite_guard(tmp_path, monkeypatch)
         "SELECT definition FROM pg_views WHERE viewname='rt_high_v'"
     )
     assert "__dfbak_" not in cur.fetchone()[0]
+    # Scope the leftover check to THIS test's tables — a stray backup from
+    # an unrelated run must not fail this test (P3).
     cur.execute(
         "SELECT table_schema, table_name FROM information_schema.tables "
-        "WHERE table_name LIKE '%__dfbak_%'"
+        "WHERE table_name LIKE 'rt_%__dfbak_%'"
     )
     assert cur.fetchall() == []
 
@@ -726,7 +728,7 @@ def test_p0g1_customer_route_ddl_survives_overwrite_guard(tmp_path, monkeypatch)
     assert cur.fetchone()[0] == 1
     cur.execute(
         "SELECT table_schema, table_name FROM information_schema.tables "
-        "WHERE table_name LIKE '%__dfbak_%'"
+        "WHERE table_name LIKE 'rt_%__dfbak_%'"
     )
     assert cur.fetchall() == []
     cur.execute("DROP VIEW IF EXISTS rt_high_v")
@@ -802,4 +804,206 @@ def test_p0g2_nonpublic_schema_routed_overwrite_rerun(tmp_path, monkeypatch):
     )
     assert cur.fetchall() == []
     cur.execute("DROP SCHEMA dfqb_g2 CASCADE")
+    conn.close()
+
+
+def _fetchrows(cur, table):
+    cur.execute(f"SELECT id, amt, region FROM {table} ORDER BY id")
+    return [(r[0], r[1], r[2]) for r in cur.fetchall()]
+
+
+def _deduped_req(parsed, recipe, recipe_hash, validation="strict"):
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl,
+        extra={"primary_key_columns": ["id"]})
+    return TransferRequest(
+        source=ep("rt"), destination=ep("rt_out"),
+        sync_mode="incremental_deduped",
+        shape_recipe=recipe, approved_shape_recipe_hash=recipe_hash,
+        skip_preflight=True, validation_mode=validation)
+
+
+def test_p1a_strict_route_digest_mismatch_fails_and_restores(
+    tmp_path, monkeypatch
+):
+    """P1-A: validation_mode=strict + a measured route digest mismatch must
+    fail Gate-8 — never report success alongside checksum_match=false — and
+    the copy-restore guard puts the pre-run route contents back."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash)
+    res1, _ = _run(fake, req, prefix="p1a1")
+    assert res1.success, res1.error
+    before = {t: _fetchrows(cur, t) for t in ("rt_high", "rt_mid", "rt_other")}
+
+    import services.reconciliation as recon_mod
+
+    real_route_verify = recon_mod.verify_postgres_route_table
+
+    def _corrupt_digest(*a, **k):
+        rows, checksum, additive = real_route_verify(*a, **k)
+        return rows, "0" * 64, "0" * 64
+
+    monkeypatch.setattr(
+        recon_mod, "verify_postgres_route_table", _corrupt_digest
+    )
+    # Land DIFFERENT rows so "restored" is distinguishable from "landed".
+    cur.execute("INSERT INTO rt (id, amt, region) VALUES (9, '999', 'US')")
+    res2, _ = _run(fake, req, prefix="p1a2")
+    assert not res2.success, (
+        "strict run must fail when its own read-back proves a digest mismatch"
+    )
+    for t, want in before.items():
+        assert _fetchrows(cur, t) == want, f"{t} not restored to pre-run content"
+    conn.close()
+
+
+def test_p1a_balanced_digest_mismatch_carries_failed_verdict(
+    tmp_path, monkeypatch
+):
+    """P1-A (non-strict): a digest mismatch may keep the rows but the job must
+    carry a verification-failed verdict — checksum_match false and an
+    explicit message, never a clean verified success."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash, sync="full_refresh_append")
+    req.validation_mode = "balanced"
+
+    import services.reconciliation as recon_mod
+
+    real_route_verify = recon_mod.verify_postgres_route_table
+
+    def _corrupt_digest(*a, **k):
+        rows, checksum, additive = real_route_verify(*a, **k)
+        return rows, "0" * 64, "0" * 64
+
+    monkeypatch.setattr(
+        recon_mod, "verify_postgres_route_table", _corrupt_digest
+    )
+    res, _ = _run(fake, req, prefix="p1b2")
+    recon = res.reconciliation or {}
+    assert recon.get("checksum_match") is False, recon
+    assert "VERIFICATION FAILED" in str(recon.get("message") or ""), recon.get("message")
+    conn.close()
+
+
+def test_p1b_deduped_route_move_leaves_no_stale_copy(
+    tmp_path, monkeypatch
+):
+    """P1-B: a keyed routed upsert holds each key in exactly one route table.
+    A row that changes route loses its copy in the previous table — checked
+    in both directions and for a named->default move."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    for t in ("rt", "rt_out", "rt_high", "rt_mid", "rt_other"):
+        cur.execute(f"DROP TABLE IF EXISTS {t}")
+    cur.execute("CREATE TABLE rt (id INT PRIMARY KEY, amt TEXT, region TEXT)")
+    for r in ROWS:
+        cur.execute("INSERT INTO rt (id, amt, region) VALUES (%s, %s, %s)", r)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _deduped_req(parsed, recipe, parsed_recipe.recipe_hash)
+    for p in ("pm1", "pm2"):
+        res, _ = _run(fake, req, prefix=p)
+        assert res.success, res.error
+    assert _fetchrows(cur, "rt_high") == [(1, "150", "US")]
+    assert _fetchrows(cur, "rt_mid") == [(2, "75", "EU"), (5, "60", "EU")]
+    assert _fetchrows(cur, "rt_other") == [(3, "10", "US"), (6, "1", "AP")]
+
+    # default -> named: id 3 moves from 'other' to 'mid'.
+    cur.execute("UPDATE rt SET amt = '55' WHERE id = 3")
+    res3, job3 = _run(fake, req, prefix="pm3")
+    assert res3.success, res3.error
+    assert _fetchrows(cur, "rt_mid") == [(2, "75", "EU"), (3, "55", "US"), (5, "60", "EU")]
+    assert _fetchrows(cur, "rt_other") == [(6, "1", "AP")], (
+        "stale copy of key 3 left in 'other' after it moved to 'mid'"
+    )
+
+    # named -> default: id 3 moves back to 'other'; named -> named is the
+    # same code path (the delete runs on every route table).
+    cur.execute("UPDATE rt SET amt = '10' WHERE id = 3")
+    res4, _ = _run(fake, req, prefix="pm4")
+    assert res4.success, res4.error
+    assert _fetchrows(cur, "rt_mid") == [(2, "75", "EU"), (5, "60", "EU")]
+    assert _fetchrows(cur, "rt_other") == [(3, "10", "US"), (6, "1", "AP")]
+
+    # Union still equals the source set exactly — 5 rows, each key once.
+    cur.execute(
+        "SELECT id FROM rt_high UNION ALL SELECT id FROM rt_mid "
+        "UNION ALL SELECT id FROM rt_other"
+    )
+    assert sorted(r[0] for r in cur.fetchall()) == [1, 2, 3, 5, 6]
+    doc3 = fake.jobs.get(job3) or {}
+    holder = _find_key(doc3, "route_verification") or {}
+    assert holder.get("route_digest_match") is True, holder
+    conn.close()
+
+
+def test_p1b_deduped_diverted_key_leaves_route_tables(
+    tmp_path, monkeypatch
+):
+    """P1-B: a key that stops matching every route (unmatched=divert) is
+    removed from its old route table in the same transaction as the run."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    for t in ("rt", "rt_out", "rt_high", "rt_mid"):
+        cur.execute(f"DROP TABLE IF EXISTS {t}")
+    cur.execute("CREATE TABLE rt (id INT PRIMARY KEY, amt TEXT, region TEXT)")
+    for r in ((1, "150", "US"), (2, "75", "EU"), (5, "60", "EU")):
+        cur.execute("INSERT INTO rt (id, amt, region) VALUES (%s, %s, %s)", r)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid"},
+        unmatched="divert",
+    )
+    req = _deduped_req(parsed, recipe, parsed_recipe.recipe_hash)
+    res1, _ = _run(fake, req, prefix="pd1")
+    assert res1.success, res1.error
+    assert _fetchrows(cur, "rt_high") == [(1, "150", "US")]
+    assert _fetchrows(cur, "rt_mid") == [(2, "75", "EU"), (5, "60", "EU")]
+
+    # id 5 stops matching every route -> diverted; its stale copy must go.
+    cur.execute("UPDATE rt SET amt = '5' WHERE id = 5")
+    res2, _ = _run(fake, req, prefix="pd2")
+    assert res2.success, res2.error
+    assert _fetchrows(cur, "rt_mid") == [(2, "75", "EU")], (
+        "diverted key 5 left a stale copy in 'mid'"
+    )
     conn.close()

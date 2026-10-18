@@ -263,8 +263,8 @@ def _note_failed_batch_undo(
         if restored:
             note = (
                 "Every route table was restored to its pre-run content: "
-                "this run's replacement tables were dropped and the renamed "
-                "backups were put back."
+                "this run's new rows were removed and the pre-run rows were "
+                "restored from the backup copies."
             )
             dest_summary["partial_batch_undo"] = "restored"
         else:

@@ -2573,6 +2573,15 @@ def _run_reconciliation_impl(
                     ssl=bool(cfg.get("ssl") or cfg.get("sslmode")),
                     table_name=_rtable,
                     dest_types=None,
+                    # Compare only the columns this run wrote — a route table
+                    # owned by the customer may carry extra columns (a
+                    # default, a generated value) that were never part of the
+                    # write (P0-G1 loaded_at case).
+                    target_columns=(
+                        (dest_summary.get("route_expected") or {})
+                        .get(_rname, {})
+                        .get("columns")
+                    ) or None,
                 )
             else:
                 _r_additive = ""
@@ -2674,6 +2683,60 @@ def _run_reconciliation_impl(
                 route_digest_all = False
         if _route_digest_compared == 0:
             route_digest_all = None  # unproven — not a false alarm
+        # Keyed modes (deduped/upsert/mirror): each key must live in exactly
+        # one route table. A row that changed route keeps a stale copy in its
+        # previous table unless the write purged it — assert uniqueness
+        # across all route tables so Gate-8 catches any that survive (P1-B).
+        if _r_idempotent and pk_cols and db_type == "postgresql" and readback_ok:
+            from services.primary_key import identity_source_columns
+            from services.reconciliation import verify_pg_route_key_uniqueness
+
+            _pk_srcs = identity_source_columns(
+                [str(c) for c in pk_cols], mapping_dicts
+            ) or [str(c) for c in pk_cols]
+            _routes_meta = dest_summary.get("routes") or {}
+            _key_tables: list[tuple[str, list[str]]] = []
+            for _rname3, _rtable3 in routed_tables:
+                _rmap3 = (
+                    (_routes_meta.get(_rname3) or {}).get("map") or {}
+                    if isinstance(_routes_meta.get(_rname3), dict)
+                    else {}
+                )
+                if _rmap3:
+                    _rpk = [
+                        str(_rmap3.get(s) or "") for s in _pk_srcs
+                    ]
+                else:
+                    _rpk = [str(c) for c in pk_cols]
+                if all(_rpk):
+                    _key_tables.append((_rtable3, _rpk))
+            if _key_tables:
+                _dups = verify_pg_route_key_uniqueness(
+                    host=str(cfg.get("host") or ""),
+                    port=int(cfg.get("port") or 5432),
+                    database=str(cfg.get("database") or ""),
+                    username=str(cfg.get("username") or cfg.get("user") or ""),
+                    password=str(cfg.get("password") or ""),
+                    schema=schema,
+                    connection_string=str(cfg.get("connection_string") or ""),
+                    ssl=bool(cfg.get("ssl") or cfg.get("sslmode")),
+                    route_tables=_key_tables,
+                )
+                if _dups is None:
+                    dest_summary["route_key_uniqueness"] = "unproven"
+                elif _dups:
+                    route_digest_all = False
+                    dest_summary["route_key_duplicates"] = [
+                        [str(v) for v in d] for d in _dups[:5]
+                    ]
+                    for _rinfo3 in route_readback.values():
+                        _rinfo3["key_uniqueness"] = False
+                        _rinfo3["digest_note"] = (
+                            "a key exists in more than one route table — a "
+                            "stale copy survived a route move"
+                        )
+                else:
+                    dest_summary["route_key_uniqueness"] = "verified"
         dest_summary["route_verification"] = route_readback
         dest_summary["route_digest_match"] = route_digest_all
         if not readback_ok:

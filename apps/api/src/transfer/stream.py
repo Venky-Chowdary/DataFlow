@@ -303,6 +303,107 @@ def _split_routed_batch(
     return splits
 
 
+def _purge_route_key_tuples(
+    conn: Any,
+    *,
+    router_step: Any,
+    recipe: Any,
+    dest_table: str,
+    dest_cfg: dict[str, Any],
+    batch: Any,
+    pk_source_cols: list[str],
+    pk_target_cols: list[str],
+    pk_audit_cols: list[str],
+    diverted_keys: list[tuple],
+    max_keys_per_statement: int = 500,
+) -> int:
+    """Delete this batch's keys from every route table (dedupe-by-partition).
+
+    A keyed routed upsert lands each row in exactly one route; a row that
+    changed route must not keep a stale copy in its previous table (P1-B).
+    Deleting the batch's keys — plus the keys of rows the recipe diverted —
+    from EVERY route table inside the held transaction, before the upserts,
+    is what makes the final union equal the source set. Returns the number
+    of rows removed. Tables that do not exist yet or lack the key columns
+    are skipped — they cannot hold a stale keyed copy.
+    """
+    from connectors.sql_identifiers import quote_table_ref, split_qualified_table
+
+    key_ix = [
+        batch.headers.index(c) if c in batch.headers else -1
+        for c in pk_source_cols
+    ]
+    if any(i < 0 for i in key_ix):
+        # The recipe renamed a key component earlier — audit names are the
+        # source-side spelling for the same key.
+        key_ix = [
+            batch.headers.index(c) if c in batch.headers else -1
+            for c in (pk_audit_cols or [])
+        ]
+    keys: set[tuple] = set(diverted_keys or [])
+    if key_ix and not any(i < 0 for i in key_ix):
+        keys.update(tuple(r[i] for i in key_ix) for r in batch.rows)
+    if not keys:
+        return 0
+    # This route table's key columns: a mapped route renames source columns;
+    # a pass-through route emits the shared output columns. Either way the
+    # key column name lives in the route's own emitted header set.
+    targets = dict(router_step.options.get("targets") or {})
+    purge_tables: list[tuple[str, str, list[str]]] = []  # (schema, table, pkcols)
+    for decl in router_step.options.get("routes") or []:
+        rname = str(decl.get("name") or "")
+        if not rname:
+            continue
+        rmap = dict(decl.get("map") or {})
+        if rmap:
+            rpk = [str(rmap.get(s) or "") for s in pk_source_cols]
+        else:
+            emitted = set(recipe.route_output_columns(rname))
+            rpk = [
+                str(pk_target_cols[i] if i < len(pk_target_cols) else s)
+                for i, s in enumerate(pk_source_cols)
+                if str(pk_target_cols[i] if i < len(pk_target_cols) else s)
+                in emitted
+            ]
+            if len(rpk) != len(pk_source_cols):
+                rpk = []
+        if not rpk or not all(rpk):
+            continue
+        table = str(targets.get(rname) or f"{dest_table}__{rname}")
+        schema, tbl = split_qualified_table(
+            table, str(dest_cfg.get("schema") or "public")
+        )
+        purge_tables.append((schema, tbl, rpk))
+    if not purge_tables:
+        return 0
+    removed = 0
+    key_list = sorted(keys, key=repr)
+    with conn.cursor() as cur:
+        for schema, tbl, rpk in purge_tables:
+            qualified = f"{schema}.{tbl}"
+            cur.execute("SELECT to_regclass(%s)", (qualified,))
+            if not cur.fetchone()[0]:
+                continue
+            ref = quote_table_ref(tbl, schema, dialect="postgresql")
+            # The batch carries source-side values (often text) while the
+            # route table typed the key (bigint etc.) — compare as text so
+            # the purge never needs the column's declared type.
+            cols = ", ".join(f'"{c}"::text' for c in rpk)
+            nkey = len(rpk)
+            for off in range(0, len(key_list), max_keys_per_statement):
+                chunk = key_list[off : off + max_keys_per_statement]
+                ph = ",".join("(" + ",".join(["%s"] * nkey) + ")" for _ in chunk)
+                params = [
+                    None if v is None else str(v) for kt in chunk for v in kt
+                ]
+                cur.execute(
+                    f"DELETE FROM {ref} WHERE ({cols}) IN (VALUES {ph})",  # nosec B608
+                    params,
+                )
+                removed += cur.rowcount if cur.rowcount and cur.rowcount > 0 else 0
+    return removed
+
+
 def _merge_chunk_write_summaries(
     merged: dict[str, Any], incoming: dict[str, Any]
 ) -> dict[str, Any]:
@@ -1585,6 +1686,14 @@ def _stream_database_transfer_impl(
     # R2: shape-diverted rows are quarantine, not removal — counted here and
     # stamped as rejected_rows so the ledger reads in = out + diverted.
     shape_diverted_total: list[int] = [0]
+    # Keys of rows the recipe diverted (unmatched=divert etc.): keyed routed
+    # runs delete these from every route table so a key that stopped matching
+    # loses its stale copy (P1-B).
+    shape_divert_key_tuples: list[tuple] = []
+    # Defensive early binding — _persist_shape_diverts is a closure that can
+    # run before the pk-audit assignment later in this function
+    # (pk_source_cols is already bound unconditionally near line 630).
+    pk_audit_cols: list[str] = []
     if copy_decline:
         dest_summary["copy_fast_path"] = "declined"
         dest_summary["copy_decline_reason"] = copy_decline[0]
@@ -1667,6 +1776,12 @@ def _stream_database_transfer_impl(
                             ),
                             ssl=bool(dest_cfg.get("ssl") or dest_cfg.get("sslmode")),
                             table_name=_ptable,
+                            # Digest only the columns the run writes — a
+                            # customer column (default/generated) must not
+                            # enter the additive delta.
+                            target_columns=list(
+                                shape_runner.recipe.route_output_columns(_rname1)
+                            ),
                         )
                         if _padd:
                             _rpred[_rname1] = {
@@ -2559,6 +2674,19 @@ def _stream_database_transfer_impl(
             return
         diverted = shape_runner.take_diverted()
         shape_diverted_total[0] += len(diverted or [])
+        # Keyed routed runs purge diverted keys from every route table —
+        # a row that stopped matching any route must lose its stale copy
+        # (P1-B). Records carry the shaped row; try the contract pk names
+        # then the identity source names.
+        for _d in diverted or []:
+            _rec = getattr(_d, "record", None) or {}
+            _key = None
+            for _names in (pk_source_cols, pk_audit_cols):
+                if _names and all(n in _rec for n in _names):
+                    _key = tuple(_rec[n] for n in _names)
+                    break
+            if _key is not None and all(v is not None for v in _key):
+                shape_divert_key_tuples.append(_key)
         if not diverted or not job_id:
             return
         from services.quarantine_dlq import persist_rejected_rows
@@ -2706,6 +2834,7 @@ def _stream_database_transfer_impl(
     # each route table should show on read-back (Gate-8 compares it against
     # verify_target's checksum per route, tag column never written).
     route_fp_acc: dict[str, Any] = {}
+    route_fp_cols: dict[str, list[str]] = {}
     batches_completed = 0
     # Only the distinct set matters (the summary asks "did any batch COPY?"),
     # so dedupe instead of appending one entry per batch.
@@ -2932,6 +3061,7 @@ def _stream_database_transfer_impl(
             if shape_runner is not None and shape_runner.recipe is not None
             else None
         )
+        _rconn = None
         if (
             router_step is not None
             and dest_type in ("postgresql", "redshift")
@@ -3059,6 +3189,28 @@ def _stream_database_transfer_impl(
                 if router_step is not None
                 else [(None, dest_table, batch.headers, batch.rows)]
             )
+            if (
+                router_step is not None
+                and write_mode == "upsert"
+                and _rconn is not None
+                and pk_source_cols
+            ):
+                # Dedupe-by-partition (P1-B): a keyed row that changed route
+                # must not keep its old copy — delete every batch/diverted
+                # key from EVERY route table, inside this held transaction,
+                # before the route's upsert lands its current copy.
+                _purge_route_key_tuples(
+                    _rconn,
+                    router_step=router_step,
+                    recipe=shape_runner.recipe,
+                    dest_table=dest_table,
+                    dest_cfg=dest_cfg,
+                    batch=batch,
+                    pk_source_cols=pk_source_cols,
+                    pk_target_cols=pk_target_cols,
+                    pk_audit_cols=pk_audit_cols,
+                    diverted_keys=shape_divert_key_tuples,
+                )
             created_tables = ddl_state.setdefault("created_tables", set())
             _rmap_decls = (
                 {
@@ -3143,6 +3295,9 @@ def _stream_database_transfer_impl(
 
                                 acc = route_fp_acc.setdefault(
                                     _rname, FingerprintAccumulator()
+                                )
+                                route_fp_cols.setdefault(
+                                    _rname, sorted(_rtargets)
                                 )
                                 acc.add_many(
                                     row_fingerprints(
@@ -4053,6 +4208,10 @@ def _stream_database_transfer_impl(
                     # occupied route table: post-read-back sum minus the
                     # pre-write sum must equal this value (RT-6).
                     "additive": _acc.additive_digest(),
+                    # The columns the fingerprint covers — the read-back is
+                    # projected to exactly these so customer-owned extra
+                    # columns (defaults, generated) never enter the digest.
+                    "columns": route_fp_cols.get(_rn) or [],
                 }
                 for _rn, _acc in route_fp_acc.items()
                 if _acc.total > 0
