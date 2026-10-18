@@ -142,6 +142,13 @@ class TestConnectionRequest(BaseModel):
     path_style: Optional[bool] = False
     auth_source: Optional[str] = None
     private_key: Optional[str] = None
+    # SFTP host-key trust and SQL Server self-signed TLS — the saved connector
+    # stores these under ``extra``; the in-form probe must see them too or the
+    # Test button fails where a saved transfer would pass.
+    host_key: Optional[str] = None
+    known_hosts: Optional[str] = None
+    host_key_policy: Optional[str] = None
+    trust_server_certificate: Optional[bool] = None
 
 
 class TransferRequest(BaseModel):
@@ -242,6 +249,10 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "endpoint_url": request.endpoint_url or "",
             "path_style": bool(request.path_style),
             "auth_source": request.auth_source or "",
+            "host_key": request.host_key or "",
+            "known_hosts": request.known_hosts or "",
+            "host_key_policy": request.host_key_policy or "",
+            "trust_server_certificate": bool(request.trust_server_certificate),
         }
         ok, msg = run_probe(driver, cfg)
         payload: dict[str, Any] = {

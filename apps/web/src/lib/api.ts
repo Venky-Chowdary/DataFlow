@@ -2180,6 +2180,9 @@ export async function testConnection(payload: {
   private_key?: string;
   endpoint_url?: string;
   path_style?: boolean;
+  host_key?: string;
+  host_key_policy?: string;
+  trust_server_certificate?: boolean;
 }): Promise<{ success: boolean; message: string; source_ha?: Record<string, unknown> }> {
   const res = await apiFetch(`${API_BASE}/connectors/test`, {
     method: "POST",
@@ -2223,6 +2226,10 @@ export async function saveConnector(payload: {
   private_key?: string;
   endpoint_url?: string;
   path_style?: boolean;
+  /** SFTP host-key pin — stored under extra; the probe refuses untrusted keys. */
+  host_key?: string;
+  /** SQL Server only: operator opt-in for self-signed / private-CA TLS. */
+  trust_server_certificate?: boolean;
   /** Persist form Test result so the list matches (true/false). */
   last_test_ok?: boolean;
 }): Promise<Connector> {

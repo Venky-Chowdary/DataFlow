@@ -65,6 +65,9 @@ class ConnectorSaveDTO(BaseModel):
     host_key: str = ""
     known_hosts: str = ""
     host_key_policy: str = ""
+    # SQL Server (generic_sql/ODBC): operator-declared skip of chain
+    # verification for self-signed / private-CA servers. None = unchanged.
+    trust_server_certificate: bool | None = None
     # Optional: persist an in-form Test result so the list matches on first save.
     last_test_ok: bool | None = None
 

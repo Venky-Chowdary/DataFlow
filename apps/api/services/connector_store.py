@@ -259,9 +259,14 @@ def _now() -> str:
 
 _SFTP_TRUST_KEYS = ("host_key", "known_hosts", "host_key_policy")
 
+#: Other connector options saved under ``extra`` — SQL Server's operator-
+#: declared ``trust_server_certificate`` (generic_sql merges ``extra`` into the
+#: driver cfg for connection_options).
+_EXTRA_LIFT_KEYS = _SFTP_TRUST_KEYS + ("trust_server_certificate",)
+
 
 def connector_extra_from_payload(data: Mapping[str, Any] | None) -> dict[str, Any]:
-    """Persist operator extras, lifting SFTP trust off the payload root.
+    """Persist operator extras, lifting declared trust fields off the payload root.
 
     Studio / the API may send ``host_key`` next to host/port rather than
     nested under ``extra``. A schedule that later rebuilds the endpoint
@@ -269,7 +274,7 @@ def connector_extra_from_payload(data: Mapping[str, Any] | None) -> dict[str, An
     """
     payload = data or {}
     extra = dict(payload.get("extra") or {}) if isinstance(payload.get("extra"), dict) else {}
-    for key in _SFTP_TRUST_KEYS:
+    for key in _EXTRA_LIFT_KEYS:
         value = payload.get(key)
         if value not in (None, ""):
             extra[key] = value

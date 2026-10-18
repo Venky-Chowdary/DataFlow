@@ -143,6 +143,7 @@ function genericSqlPlaceholder(type: string): string {
   if (base === "sqlite" || base === "duckdb") return "sqlite:////path/to/db.sqlite";
   if (base === "duckdb") return "duckdb:////path/to/file.duckdb";
   if (base === "mssql+pyodbc") return `mssql+pyodbc://user:pass@host:${port}/db?driver=ODBC+Driver+17+for+SQL+Server`;
+
   if (base === "oracle+oracledb") return `oracle+oracledb://user:pass@host:${port}/SERVICE`;
   if (base === "ibm_db_sa") return `ibm_db_sa://user:pass@host:${port}/db`;
   if (base === "clickhouse+native") return `clickhouse+native://user:pass@host:${port}/db`;
@@ -157,6 +158,14 @@ function genericSqlPlaceholder(type: string): string {
   if (base.startsWith("postgresql")) return `${base}://user:pass@host:${port}/db`;
 
   return `${base}://user:pass@host:${port}/db`;
+}
+
+/** True when the resolved type maps to a SQL Server (mssql-family) dialect —
+ * the only generic SQL family where a self-signed-TLS operator opt-in exists. */
+function isMssqlFamily(resolved: string): boolean {
+  if (resolved === "sqlserver") return true;
+  const base = GENERIC_SQL_INFO[resolved]?.base || "";
+  return base.startsWith("mssql");
 }
 
 /** Build the form configuration for a connector type. */
@@ -270,6 +279,11 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       password("password", "Password"),
       checkbox("ssl", "Use SSL / TLS", { hint: "Encrypt the connection to the server." })
     );
+    if (isMssqlFamily(resolved)) {
+      userPassFields.push(
+        checkbox("trustServerCertificate", "Trust server certificate", { optional: true, hint: "For self-signed or private-CA servers only — skips TLS chain verification." })
+      );
+    }
   } else if (isMongo) {
     userPassFields.push(
       text("host", "Host", { placeholder: "cluster0.mongodb.net" }),
@@ -314,7 +328,8 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("username", "Username"),
       password("password", "Password (optional if using key)", { optional: true }),
       text("database", "Remote path / directory", { optional: true, placeholder: "/uploads" }),
-      textarea("privateKey", "SSH private key (optional)", { rows: 4, optional: true, placeholder: "-----BEGIN OPENSSH PRIVATE KEY----- ...", hint: "Paste the private key text. If provided, password is optional." })
+      textarea("privateKey", "SSH private key (optional)", { rows: 4, optional: true, placeholder: "-----BEGIN OPENSSH PRIVATE KEY----- ...", hint: "Paste the private key text. If provided, password is optional." }),
+      textarea("hostKey", "SSH host key pin (optional)", { rows: 2, optional: true, placeholder: "SHA256:… or an ssh-keyscan line", hint: "Pin the server's host key. A failed Test prints the fingerprint — paste it here after verifying it with the server admin." })
     );
   } else if (isEmail) {
     userPassFields.push(

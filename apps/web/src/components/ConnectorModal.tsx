@@ -145,6 +145,12 @@ export function ConnectorModal({
   const [endpointUrl, setEndpointUrl] = useState(editing?.endpoint_url ?? "");
   const [pathStyle, setPathStyle] = useState(editing?.path_style ?? false);
   const [ssl, setSsl] = useState(editing?.ssl ?? false);
+  const [hostKey, setHostKey] = useState(
+    String((editing as { extra?: Record<string, unknown> } | null)?.extra?.host_key ?? "")
+  );
+  const [trustServerCertificate, setTrustServerCertificate] = useState(
+    Boolean((editing as { extra?: Record<string, unknown> } | null)?.extra?.trust_server_certificate)
+  );
   const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
   const [helpOpen, setHelpOpen] = useState(false);
 
@@ -229,6 +235,8 @@ export function ConnectorModal({
     setEndpointUrl("");
     setPathStyle(false);
     setSsl(false);
+    setHostKey("");
+    setTrustServerCertificate(false);
     setAuthMode(cfg.defaultAuthMode);
     setTestResult(null);
     setStep("configure");
@@ -282,8 +290,10 @@ export function ConnectorModal({
       endpointUrl,
       pathStyle,
       ssl,
+      hostKey,
+      trustServerCertificate,
     }),
-    [name, host, port, database, username, password, connectionString, schema, warehouse, authRole, authSource, apiKey, serviceAccount, privateKey, endpointUrl, pathStyle, ssl]
+    [name, host, port, database, username, password, connectionString, schema, warehouse, authRole, authSource, apiKey, serviceAccount, privateKey, endpointUrl, pathStyle, ssl, hostKey, trustServerCertificate]
   );
 
   const [testing, setTesting] = useState(false);
@@ -394,6 +404,13 @@ export function ConnectorModal({
     if (resolvedType === "snowflake" || resolvedType === "iceberg") {
       payload.warehouse = warehouse || undefined;
     }
+    if (resolvedType === "sftp" && hostKey.trim()) {
+      payload.host_key = hostKey.trim();
+    }
+    if (resolvedType === "sqlserver" || isGenericSql(resolvedType)) {
+      // Always sent for mssql-family so unchecking clears a stored opt-in.
+      payload.trust_server_certificate = trustServerCertificate;
+    }
     if (isGcpConnector(resolvedType) && !serviceAccount.trim() && connectionString.trim()) {
       payload.connection_string = connectionString || undefined;
     }
@@ -428,6 +445,8 @@ export function ConnectorModal({
         endpoint_url: built.endpoint_url as string | undefined,
         path_style: built.path_style as boolean | undefined,
         ssl: Boolean(built.ssl),
+        host_key: built.host_key as string | undefined,
+        trust_server_certificate: built.trust_server_certificate as boolean | undefined,
       });
       setTestResult(result);
       if (resolvedType === "mongodb" && result.success) {
@@ -524,6 +543,12 @@ export function ConnectorModal({
         break;
       case "ssl":
         setSsl(Boolean(value));
+        break;
+      case "hostKey":
+        setHostKey(value as string);
+        break;
+      case "trustServerCertificate":
+        setTrustServerCertificate(Boolean(value));
         break;
     }
   };
