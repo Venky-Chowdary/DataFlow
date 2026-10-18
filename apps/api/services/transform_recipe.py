@@ -505,12 +505,10 @@ def _preview_via_engine(
             entry["removed"] = True
         if per_step:
             trace: list[dict[str, Any]] = []
-            current: dict[str, Any] = dict(row)
             for k, wire in enumerate(wires):
                 step_errors: list[str] = []
                 try:
                     stepped = engines[k].apply_records(dict(row))
-                    current = stepped[0] if stepped else {}
                 except ShapeRowError as exc:
                     step_errors.append(str(exc))
                     stepped = None

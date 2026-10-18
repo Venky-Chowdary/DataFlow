@@ -305,6 +305,68 @@ def delete_recipe(
     return Response(status_code=204)
 
 
+class CompileRequest(BaseModel):
+    """Parameter values overriding the recipe's declared defaults."""
+    params: Optional[dict[str, Any]] = None
+    """Source column names to check the recipe's input contract against."""
+    source_columns: Optional[list[str]] = None
+
+
+@router.post("/{recipe_id}/compile")
+def compile_for_transfer(
+    recipe_id: str,
+    body: CompileRequest,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+    version: Optional[int] = None,
+) -> dict[str, Any]:
+    """Resolve a library recipe into the engine-ready shape payload.
+
+    The in-flow Transform dropdown uses this: pick recipe + version + params
+    → get the exact steps the transfer will run and the identity hash that
+    pins them. A draft recipe or an unbound parameter refuses here, at
+    design time — never mid-run.
+    """
+    ws = resolve_read_workspace(request, workspace_id)
+    recipe = get_transform_library().get(
+        recipe_id, workspace_id=ws, version=version
+    )
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Transform recipe not found")
+    assert_resource_workspace(request, recipe.workspace_id or "")
+    if recipe.status != "active":
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Transform recipe '{recipe.name}' is a draft and cannot run — "
+                "fix and validate it in the Library first"
+            ),
+        )
+    if not recipe.enabled:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Transform recipe '{recipe.name}' is disabled",
+        )
+    try:
+        from services.transform_recipe import compile_recipe
+
+        payload, shape = compile_recipe(
+            recipe, source_columns=body.source_columns, params=body.params
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return {
+        "recipe_id": recipe.id,
+        "recipe_name": recipe.name,
+        "bound_version": recipe.version,
+        "shape_recipe": payload,
+        "recipe_hash": shape.recipe_hash,
+        "parameters": recipe.parameters,
+        "input_columns": list(recipe.input_columns),
+        "output_columns": list(shape.output_columns),
+    }
+
+
 @router.post("/{recipe_id}/preview")
 def preview(
     recipe_id: str,

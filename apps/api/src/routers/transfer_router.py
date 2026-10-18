@@ -304,6 +304,12 @@ class ExecuteTransferRequest(BaseModel):
     shape_recipe: dict = Field(default_factory=dict)
     # The recipe identity Validate approved; a different recipe is refused.
     approved_shape_recipe_hash: str = ""
+    # Transform Library provenance — which recipe/version/params produced the
+    # shape_recipe. Proof-pack only; the engine executes shape_recipe.
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = 0
+    transform_recipe_version_mode: str = "pin"
+    transform_recipe_params: dict = Field(default_factory=dict)
     # Set-graph identity. Empty matches a recipe with no set nodes.
     approved_set_hash: str = ""
 
@@ -962,6 +968,13 @@ async def execute_transfer_json(
         approved_shape_recipe_hash=str(
             body.approved_shape_recipe_hash or ""
         ).strip(),
+        transform_recipe_id=str(body.transform_recipe_id or "").strip(),
+        transform_recipe_version=int(body.transform_recipe_version or 0),
+        transform_recipe_version_mode=str(
+            body.transform_recipe_version_mode or "pin"
+        ).strip().lower()
+        or "pin",
+        transform_recipe_params=dict(body.transform_recipe_params or {}),
         approved_set_hash=str(body.approved_set_hash or "").strip(),
     )
     from services.batch_progress import effective_backfill_new_fields

@@ -122,6 +122,13 @@ class TransferRequest:
     # Recipe identity approved at Validate. Execute refuses when the recipe it was
     # handed hashes to anything else (Validate≡Execute).
     approved_shape_recipe_hash: str = ""
+    # Transform Library provenance: which library recipe produced shape_recipe,
+    # at what version, and under which parameters. Proof-pack material — the
+    # engine executes shape_recipe; it never re-reads the library mid-run.
+    transform_recipe_id: str = ""
+    transform_recipe_version: int = 0
+    transform_recipe_version_mode: str = "pin"
+    transform_recipe_params: dict = field(default_factory=dict)
     # Set-graph identity approved at Validate. Empty matches a recipe with no
     # set nodes. A different graph is refused, the same way a different row
     # recipe is refused.
@@ -320,6 +327,11 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "read_options": request.read_options,
         "shape_recipe": dict(request.shape_recipe or {}),
         "approved_shape_recipe_hash": request.approved_shape_recipe_hash or "",
+        "transform_recipe_id": request.transform_recipe_id or "",
+        "transform_recipe_version": int(request.transform_recipe_version or 0),
+        "transform_recipe_version_mode": request.transform_recipe_version_mode
+        or "pin",
+        "transform_recipe_params": dict(request.transform_recipe_params or {}),
         "approved_set_hash": request.approved_set_hash or "",
         "priority_column": request.priority_column,
         "priority_direction": request.priority_direction,
@@ -457,6 +469,15 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         approved_shape_recipe_hash=str(
             data.get("approved_shape_recipe_hash") or ""
         ).strip(),
+        transform_recipe_id=str(data.get("transform_recipe_id") or "").strip(),
+        transform_recipe_version=int(data.get("transform_recipe_version") or 0),
+        transform_recipe_version_mode=(
+            str(data.get("transform_recipe_version_mode") or "pin").strip().lower()
+            or "pin"
+        ),
+        transform_recipe_params=dict(data.get("transform_recipe_params") or {})
+        if isinstance(data.get("transform_recipe_params"), dict)
+        else {},
         approved_set_hash=str(data.get("approved_set_hash") or "").strip(),
         priority_column=(data.get("priority_column") or "").strip(),
         priority_direction=(data.get("priority_direction") or "desc").lower(),
