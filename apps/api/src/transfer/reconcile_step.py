@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import re
 from collections import Counter
+import hashlib
 import time
 from typing import Any
 
@@ -458,6 +459,48 @@ def _transform_applied_proof(
     def _fp(row: dict[str, Any]) -> tuple:
         return tuple(_key_norm(row.get(c)) for c in digest_cols)
 
+    def _fph(row: dict[str, Any]) -> str:
+        return hashlib.sha256(
+            "\x1f".join(_key_norm(row.get(c)) for c in digest_cols).encode()
+        ).hexdigest()[:16]
+
+    # G-1d part 1: write-time raw-pin ledger. key -> hash of the raw row
+    # the write consumed. A key whose re-read hash matches is pinned and
+    # judged strictly (dest != expected fails naming the step); a moved,
+    # new or missing key is drift -> unverifiable with counts.
+    pin_meta = dest_summary.get("shape_raw_ledger")
+    pin_map: dict[str, str] | None = None
+    pin_key_cols: list[str] = []
+    pin_hash_cols: list[str] = []
+    if isinstance(pin_meta, dict) and pin_meta.get("keys"):
+        pin_key_cols = [
+            map_source_to_target(c, mappings)
+            for c in (pin_meta.get("key_columns") or [])
+        ]
+        pin_hash_cols = list(pin_meta.get("hashed_columns") or [])
+        try:
+            if pin_meta.get("file"):
+                pin_map = {}
+                with open(str(pin_meta["file"])) as _fh:
+                    for line in _fh:
+                        k, _, h = line.rstrip("\n").partition("\x00")
+                        if k:
+                            pin_map[k] = h
+            else:
+                pin_map = {
+                    str(k): str(v)
+                    for k, v in (pin_meta.get("entries") or {}).items()
+                }
+            if pin_map and not all(c in digest_cols for c in pin_key_cols):
+                pin_map = None
+        except Exception:
+            pin_map = None
+    exp_fp_by_key: dict[str, str] = {}
+    exp_decl_by_key: dict[str, tuple] = {}
+    raw_hash_by_key: dict[str, str] = {}
+    dest_fp_by_key: dict[str, str] = {}
+    bad_dest: dict[str, dict] = {}
+
     def _expected_iter():
         nonlocal raw_count
         for batch in _proof_source_batches(
@@ -476,12 +519,30 @@ def _transform_applied_proof(
                 raw_fp[_fp(trow)] += 1
                 for sc in raw_col:
                     raw_col[sc][_key_norm(row.get(sc))] += 1
+                if pin_map is not None:
+                    raw_hash_by_key[
+                        "\x1f".join(
+                            _key_norm(trow.get(c)) for c in pin_key_cols
+                        )
+                    ] = hashlib.sha256(
+                        "\x1f".join(
+                            _key_norm(row.get(c)) for c in pin_hash_cols
+                        ).encode()
+                    ).hexdigest()[:16]
             for i, out in enumerate(outs):
                 orow = {
                     map_source_to_target(k, mappings): v
                     for k, v in out.items()
                 }
                 exp_fp[_fp(orow)] += 1
+                if pin_map is not None:
+                    _k = "\x1f".join(
+                        _key_norm(orow.get(c)) for c in pin_key_cols
+                    )
+                    exp_fp_by_key[_k] = _fph(orow)
+                    exp_decl_by_key[_k] = tuple(
+                        _key_norm(orow.get(t)) for _s, t in col_pairs
+                    )
                 if scope_keys is not None:
                     scope_keys.add(
                         tuple(_key_norm(orow.get(c)) for c in scope_pk)
@@ -500,6 +561,14 @@ def _transform_applied_proof(
                 for k, v in out.items()
             }
             exp_fp[_fp(orow)] += 1
+            if pin_map is not None:
+                _k = "\x1f".join(
+                    _key_norm(orow.get(c)) for c in pin_key_cols
+                )
+                exp_fp_by_key[_k] = _fph(orow)
+                exp_decl_by_key[_k] = tuple(
+                    _key_norm(orow.get(t)) for _s, t in col_pairs
+                )
             if scope_keys is not None:
                 scope_keys.add(
                     tuple(_key_norm(orow.get(c)) for c in scope_pk)
@@ -742,6 +811,13 @@ def _transform_applied_proof(
                         dest_fp[_fp(row)] += 1
                         for _sc, tc in col_pairs:
                             dest_col[tc][_key_norm(row.get(tc))] += 1
+                        if pin_map is not None:
+                            dest_fp_by_key[
+                                "\x1f".join(
+                                    _key_norm(row.get(c))
+                                    for c in pin_key_cols
+                                )
+                            ] = _fph(row)
                         yield row
 
             with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
@@ -795,13 +871,26 @@ def _transform_applied_proof(
         # written population toward the raw count — keep going so the
         # declared-column check can prove it. Anything else is drift.
         if not (pop_ops and actual_rows == raw_count):
+            reason = (
+                "source changed during run — re-read returned "
+                f"{exp_n} recipe-applied rows but "
+                f"{actual_label} holds {actual_rows}"
+            )
+            if pin_map is not None:
+                _drift_n = sum(
+                    1
+                    for k in exp_fp_by_key
+                    if pin_map.get(k) != raw_hash_by_key.get(k)
+                )
+                reason = (
+                    "source changed during run — "
+                    f"{_drift_n} of {len(exp_fp_by_key)} keys "
+                    f"changed in source during run; "
+                    f"{len(exp_fp_by_key) - _drift_n} proven"
+                )
             return {
                 "status": "unverifiable",
-                "reason": (
-                    "source changed during run — re-read returned "
-                    f"{exp_n} recipe-applied rows but "
-                    f"{actual_label} holds {actual_rows}"
-                ),
+                "reason": reason,
                 "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
                 "expected_rows": exp_n,
                 "actual_rows": actual_rows,
@@ -816,6 +905,7 @@ def _transform_applied_proof(
     # blame. (The wrong-value case is owned by the G-1d oracle above.)
     culprits: list[str] = []
     drift = False
+    drift_counts: tuple | None = None
     try:
         if dest_fp is None:
             dst_cfg = resolve_connector_config(endpoint)
@@ -868,31 +958,89 @@ def _transform_applied_proof(
                             dest_fp[_fp(row)] += 1
                             for _sc, tc in col_pairs:
                                 dest_col[tc][_key_norm(row.get(tc))] += 1
+                            if pin_map is not None:
+                                _dk = "\x1f".join(
+                                    _key_norm(row.get(c))
+                                    for c in pin_key_cols
+                                )
+                                _dh = _fph(row)
+                                dest_fp_by_key[_dk] = _dh
+                                if (
+                                    _dh != exp_fp_by_key.get(_dk)
+                                    and pin_map.get(_dk)
+                                    == raw_hash_by_key.get(_dk)
+                                    and pin_map.get(_dk) is not None
+                                ):
+                                    bad_dest[_dk] = row
 
-        extra = dest_fp - exp_fp
-        missing = exp_fp - dest_fp
-        culprit_n = 0
-        for fp, n in extra.items():
-            culprit_n += min(n, raw_fp.get(fp, 0))
-        ambiguous = sum(extra.values()) - culprit_n + sum(
-            missing.values()
-        )
-        if culprit_n:
-            culprit_cols: set[str] = set()
-            for scol, tcol in col_pairs:
-                if tcol not in exp_col:
-                    continue
-                extra_c = dest_col[tcol] - exp_col[tcol]
-                hit = sum(
-                    min(n, raw_col[scol].get(v, 0))
-                    for v, n in extra_c.items()
+        if pin_map is not None:
+            # Pinned-key judging: a key whose re-read raw hash equals the
+            # write-time hash is stable, so dest != expected on it is a
+            # provable defect (wrong value, partial application, dropped
+            # step) — it fails and names the step. Moved/new/missing keys
+            # are drift -> unverifiable, with counts in the message.
+            culprit_keys_p: list[str] = []
+            drift_n = 0
+            culprit_cols_p: set[str] = set()
+            for _k, _ef in exp_fp_by_key.items():
+                _pinned = (
+                    pin_map.get(_k) is not None
+                    and pin_map.get(_k) == raw_hash_by_key.get(_k)
                 )
-                if hit:
-                    culprit_cols.add(tcol)
-            culprits = sorted(culprit_cols or declared_tcols)
+                _df = dest_fp_by_key.get(_k)
+                if not _pinned:
+                    drift_n += 1
+                elif _df is None:
+                    # Pinned source key produced no destination row —
+                    # provable loss on a stable population.
+                    culprit_keys_p.append(_k)
+                    culprit_cols_p.update(declared_tcols)
+                elif _df != _ef:
+                    culprit_keys_p.append(_k)
+            drift_n += sum(
+                1 for _k in dest_fp_by_key if _k not in exp_fp_by_key
+            )
+            for _k in culprit_keys_p:
+                _drow = bad_dest.get(_k)
+                _evals = exp_decl_by_key.get(_k) or ()
+                if _drow is None:
+                    continue
+                for (_sc, _tc), _ev in zip(col_pairs, _evals):
+                    if _key_norm(_drow.get(_tc)) != _ev:
+                        culprit_cols_p.add(_tc)
+            culprits = (
+                sorted(culprit_cols_p or declared_tcols)
+                if culprit_keys_p
+                else []
+            )
+            drift = (drift_n > 0) and not culprits
+            drift_counts = (drift_n, len(exp_fp_by_key))
         else:
-            culprits = []
-        drift = bool(ambiguous) and not culprit_n
+            extra = dest_fp - exp_fp
+            missing = exp_fp - dest_fp
+            culprit_n = 0
+            for fp, n in extra.items():
+                culprit_n += min(n, raw_fp.get(fp, 0))
+            ambiguous = sum(extra.values()) - culprit_n + sum(
+                missing.values()
+            )
+            if culprit_n:
+                culprit_cols: set[str] = set()
+                for scol, tcol in col_pairs:
+                    if tcol not in exp_col:
+                        continue
+                    extra_c = dest_col[tcol] - exp_col[tcol]
+                    hit = sum(
+                        min(n, raw_col[scol].get(v, 0))
+                        for v, n in extra_c.items()
+                    )
+                    if hit:
+                        culprit_cols.add(tcol)
+                culprits = sorted(culprit_cols or declared_tcols)
+            else:
+                culprits = []
+            drift = bool(ambiguous) and not culprit_n
+            drift_counts = None
     except Exception:
         # Localization is best-effort; never upgrade an ambiguous
         # divergence into a blamed failure.
@@ -900,12 +1048,19 @@ def _transform_applied_proof(
         culprits = []
 
     if drift:
+        drift_reason = (
+            "source changed during run — the re-read population no "
+            "longer matches what was written"
+        )
+        if drift_counts and drift_counts[1]:
+            drift_reason = (
+                f"source changed during run — {drift_counts[0]} of "
+                f"{drift_counts[1]} keys changed in source during run; "
+                f"{drift_counts[1] - drift_counts[0]} proven"
+            )
         return {
             "status": "unverifiable",
-            "reason": (
-                "source changed during run — the re-read population no "
-                "longer matches what was written"
-            ),
+            "reason": drift_reason,
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
             "expected_rows": exp_n,
             "actual_rows": actual_rows,

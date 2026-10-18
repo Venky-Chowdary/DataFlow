@@ -1400,6 +1400,10 @@ def test_g1a_touched_col_drift_and_insert_unverifiable_pg(tmp_path, monkeypatch)
         approved_shape_recipe_hash=ShapeRecipe.parse(
             recipe, source_columns=COLS
         ).recipe_hash,
+        stream_contracts=[
+            {"selected": True, "primary_key": "id",
+             "sync_mode": "full_refresh_overwrite"}
+        ],
         skip_preflight=True, validation_mode="strict",
     )
 
@@ -1419,10 +1423,66 @@ def test_g1a_touched_col_drift_and_insert_unverifiable_pg(tmp_path, monkeypatch)
     assert res.success, res.error
     assert proof.get("status") == "unverifiable", proof
     assert not proof.get("culprit_steps"), proof
+    assert "changed in source during run" in str(proof.get("reason")), proof
     cur.execute("SELECT note FROM ovr_g1t_dst WHERE id='1'")
     assert cur.fetchone()[0] == "N1"  # correct data was never rolled back
     conn.close()
 
+
+
+def test_g1d_pinned_wrong_values_fail_pg(tmp_path, monkeypatch):
+    """G-1d pin ledger: on a stable, key-pinned source a step that wrote
+    WRONG values (neither raw nor expected) is a provable defect — it must
+    fail naming the step, not slip to unverifiable as the multiset did."""
+    import services.shape_apply as shape_apply_mod
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS * 2, table="ovr_g1w_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1w_dst CASCADE")
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = TransferRequest(
+        source=ep("ovr_g1w_src"), destination=ep("ovr_g1w_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        stream_contracts=[
+            {"selected": True, "primary_key": "id",
+             "sync_mode": "full_refresh_overwrite"}
+        ],
+        skip_preflight=True, validation_mode="strict",
+    )
+
+    _orig = shape_apply_mod.ShapeRunner.matrix
+
+    def _wrong(self, headers, rows):
+        h, out = _orig(self, headers, rows)
+        out[1][headers.index("note")] = "WRONG!"  # neither raw nor upper()
+        return h, out
+
+    monkeypatch.setattr(shape_apply_mod.ShapeRunner, "matrix", _wrong)
+    res = _exec(fake, req, prefix="ovrg1w")
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert not res.success
+    assert proof.get("status") == "failed", proof
+    assert "step 1" in " ".join(proof.get("culprit_steps") or []), proof
+    conn.close()
 
 def test_g1a_partial_chunk_application_fails_pg(tmp_path, monkeypatch):
     """G-1a hole 2: a step applied to only SOME rows (one chunk skipped)

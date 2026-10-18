@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
+import tempfile
 from services.brand_env import getenv_brand
 import sys
 import threading
@@ -1570,6 +1572,13 @@ def _stream_database_transfer_impl(
             workspace_id=workspace_id,
             source_types=dict(schema or {}),
         )
+    # G-1d: pin every keyed raw row the write consumed so the post-write
+    # proof can pin source stability per key instead of inferring drift.
+    pin_ledger = (
+        _StepRawLedger(list(pk_source_cols or []))
+        if shape_runner is not None and pk_source_cols
+        else None
+    )
 
     # ``columns`` stays the source's own column list: it is what every read
     # projects on. Under a recipe the writer sees different columns, so the
@@ -2654,6 +2663,8 @@ def _stream_database_transfer_impl(
                     ) from exc
         if shape_runner is not None and batch.rows is not None:
             headers = list(batch.headers or [])
+            if pin_ledger is not None:
+                pin_ledger.add_page(headers, batch.rows)
             unknown = [h for h in headers if h and h not in shape_inputs]
             if unknown:
                 # A column the recipe was never validated against cannot be
@@ -4598,10 +4609,95 @@ def _stream_database_transfer_impl(
             }
     except Exception as exc:
         logger.debug("source_snapshot stamp skipped: %s", exc)
+    if pin_ledger is not None:
+        try:
+            _pin_meta = pin_ledger.summary()
+            if _pin_meta:
+                dest_summary["shape_raw_ledger"] = _pin_meta
+        except Exception as exc:
+            logger.debug("raw-pin ledger stamp skipped: %s", exc)
     _carry_single_table_foreign_keys(
         source, destination, table, dest_table, mappings, dest_summary, ddl_log
     )
     return written, ddl_log, dest_summary, columns
+
+
+
+class _StepRawLedger:
+    """Write-time raw-pin ledger for the transform-applied proof.
+
+    While the write path reads the source, each keyed raw row is hashed
+    (all read columns) before ``shape_runner.matrix`` reshapes it. At
+    verify time a key whose re-read hash equals this hash is pinned and
+    judged strictly; a moved/new/missing key is drift. Past ``_SPILL_AT``
+    keys the dict flushes to a temp file and later pages stream there,
+    so memory stays bounded on million-key runs.
+    """
+
+    _SPILL_AT = 200_000
+
+    def __init__(self, key_columns: list[str]) -> None:
+        self.key_columns = list(key_columns or [])
+        self._d: dict[str, str] = {}
+        self._file: str | None = None
+        self._fh = None
+        self.keys = 0
+        self.hashed_columns: list[str] = []
+
+    @staticmethod
+    def _hash_row(row: Any) -> str:
+        return hashlib.sha256(
+            "\x1f".join("" if v is None else str(v) for v in row).encode()
+        ).hexdigest()[:16]
+
+    def add_page(self, headers: list[str], rows: Any) -> None:
+        if not rows or not self.key_columns:
+            return
+        self.hashed_columns = list(headers)
+        try:
+            kid = [headers.index(k) for k in self.key_columns]
+        except ValueError:
+            return
+        for row in rows:
+            try:
+                key = "\x1f".join(
+                    "" if row[i] is None else str(row[i]) for i in kid
+                )
+            except (IndexError, TypeError):
+                continue
+            self._put(key, self._hash_row(row))
+            self.keys += 1
+
+    def _put(self, key: str, h: str) -> None:
+        if self._fh is not None:
+            self._fh.write(f"{key}\x00{h}\n")
+            return
+        self._d[key] = h
+        if len(self._d) > self._SPILL_AT:
+            fd, self._file = tempfile.mkstemp(
+                prefix="df_pin_", suffix=".tsv"
+            )
+            self._fh = os.fdopen(fd, "w")
+            for k2, h2 in self._d.items():
+                self._fh.write(f"{k2}\x00{h2}\n")
+            self._d = {}
+
+    def summary(self) -> dict[str, Any] | None:
+        if self._fh is not None:
+            self._fh.close()
+            self._fh = None
+        if not self.keys:
+            return None
+        out: dict[str, Any] = {
+            "keys": self.keys,
+            "key_columns": list(self.key_columns),
+            "hashed_columns": list(self.hashed_columns),
+        }
+        if self._file:
+            out["file"] = self._file
+        else:
+            out["entries"] = self._d
+        return out
 
 
 class _NoOpCheckpointService:
