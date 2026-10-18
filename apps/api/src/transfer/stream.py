@@ -3314,6 +3314,10 @@ def _stream_database_transfer_impl(
                     routes_wire[_rname] = {
                         "table": _rtable,
                         "rows": int(_w or 0),
+                        # The route's rename map — downstream evidence probes
+                        # (identity watermark) translate source pk names to
+                        # the route table's actual columns through this.
+                        "map": dict(_rmap_decls.get(_rname) or {}),
                     }
             if routes_wire:
                 dest_summary["routes"] = routes_wire

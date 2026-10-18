@@ -2173,15 +2173,51 @@ def _run_reconciliation_impl(
                 keys=key_tuples,
             )
     try:
-        identity_state = _identity_watermark_evidence(
-            db_type=db_type,
-            cfg=cfg,
-            schema=str(schema or ""),
-            table=str(table_name or ""),
-            pk_cols=[str(c) for c in pk_cols if c],
-        )
-        if identity_state:
-            physical_state["identity_watermark"] = identity_state
+        _probe_pk_cols = [str(c) for c in pk_cols if c]
+        _route_probe = [
+            (str(_rn), str(_rinfo.get("table") or ""), dict(_rinfo.get("map") or {}))
+            for _rn, _rinfo in sorted(
+                (dest_summary.get("routes") or {}).items()
+            )
+            if isinstance(_rinfo, dict) and _rinfo.get("table")
+        ]
+        if _route_probe:
+            # A routed run never writes the base table — probe each route
+            # table, translating source pk names through that route's map
+            # (id -> cust_id). Probing the base name logs a false warning.
+            _route_states: dict[str, Any] = {}
+            for _rn2, _rtable2, _rmap2 in _route_probe:
+                _pk2 = [
+                    str(_rmap2.get(c) or c)
+                    for c in _probe_pk_cols
+                ]
+                _st2 = _identity_watermark_evidence(
+                    db_type=db_type,
+                    cfg=cfg,
+                    schema=str(schema or ""),
+                    table=_rtable2,
+                    pk_cols=_pk2,
+                )
+                if _st2:
+                    _route_states[_rn2] = _st2
+            if _route_states:
+                physical_state["identity_watermark"] = {
+                    "supported": True,
+                    "verified": all(
+                        bool(s.get("verified")) for s in _route_states.values()
+                    ),
+                    "routes": _route_states,
+                }
+        else:
+            identity_state = _identity_watermark_evidence(
+                db_type=db_type,
+                cfg=cfg,
+                schema=str(schema or ""),
+                table=str(table_name or ""),
+                pk_cols=_probe_pk_cols,
+            )
+            if identity_state:
+                physical_state["identity_watermark"] = identity_state
     except Exception as exc:
         logging.getLogger(__name__).warning(
             "identity watermark verification skipped: %s", exc, exc_info=exc
