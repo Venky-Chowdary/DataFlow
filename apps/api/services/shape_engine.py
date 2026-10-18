@@ -357,8 +357,9 @@ class ShapeEngine:
     def apply_records(self, record: Mapping[str, Any]) -> list[dict[str, Any]]:
         """Shape one source row into zero or more output rows.
 
-        ``unnest_json`` is the only step that may return more than one row.
-        Filter and divert return zero. Every other step returns exactly one.
+        ``unnest_json`` and ``join`` (fanout=allow) may return more than
+        one row. Filter and divert return zero. Every other step returns
+        exactly one.
         """
         self._row_index += 1
         self.effect.rows_in += 1
@@ -444,27 +445,103 @@ class ShapeEngine:
         out: list[dict[str, Any]] = []
         for index, step in enumerate(self.steps):
             buffer = self._buffers.pop(index, None)
-            if buffer is None:
+            if buffer is None and step.op != "union":
                 continue
             tally = self.effect.steps[index]
-            materialized = self._drain_step(step, index, buffer)
-            held = self._held.pop(index, 0)
-            emitted = len(materialized)
-            dropped = max(held - emitted, 0)
-            # The held rows either become output or dedupe/rank losers — the
-            # conservation ledger must name which.
-            tally.rows_buffered -= held
-            self.effect.rows_buffered -= held
+            if step.op == "union":
+                # Appended secondary input — real input population, counted
+                # in rows_in (not rows_expanded) because the write path's
+                # committed-offset accounting already counts them in the
+                # batch population; expansion would double-count.
+                materialized = self._union_rows(step, index)
+                emitted = len(materialized)
+                if emitted:
+                    tally.rows_in += emitted
+                    self.effect.rows_in += emitted
+            else:
+                materialized = self._drain_step(step, index, buffer)
+                held = self._held.pop(index, 0)
+                emitted = len(materialized)
+                dropped = max(held - emitted, 0)
+                # The held rows either become output or dedupe/rank losers — the
+                # conservation ledger must name which.
+                tally.rows_buffered -= held
+                self.effect.rows_buffered -= held
+                if dropped:
+                    tally.rows_removed += dropped
+                    self.effect.rows_shaped_out += dropped
             tally.rows_out += emitted
-            if dropped:
-                tally.rows_removed += dropped
-                self.effect.rows_shaped_out += dropped
             for row in materialized:
                 for final in self._run_tail(row, index + 1):
                     self._discover(final)
                     out.append(final)
         self.effect.rows_out += len(out)
         return out
+
+    def _secondary_rows(self, step: ShapeStep, index: int, tag: str) -> list[Any]:
+        """A step's rows-or-reference secondary input, loaded once per run."""
+        cache_key = f"{tag}:{index}"
+        cached = self._state.get(cache_key)
+        if cached is None:
+            reference = step.options.get("reference")
+            if reference is not None:
+                from services.lookup_reference import load_reference_rows
+
+                cached = load_reference_rows(
+                    reference, workspace_id=self.workspace_id
+                )
+            else:
+                cached = list(step.options.get("rows") or [])
+            self._state[cache_key] = cached
+        return cached
+
+    def _union_rows(self, step: ShapeStep, index: int) -> list[dict[str, Any]]:
+        """Align the union input to output columns by name (fail-closed).
+
+        ``map`` renames a reference column to an output column explicitly;
+        an unmapped column with no output counterpart refuses unless
+        ``extra=drop`` — an appended column cannot silently appear or vanish.
+        """
+        rows = self._secondary_rows(step, index, "union")
+        mapping = {str(k): str(v) for k, v in (step.options.get("map") or {}).items()}
+        extra = str(step.options.get("extra") or "refuse").casefold()
+        out: list[dict[str, Any]] = []
+        for pos, raw in enumerate(rows, start=1):
+            if not isinstance(raw, Mapping):
+                raise ValueError(
+                    f"union step {index + 1}: appended row {pos} is not an object"
+                )
+            aligned: dict[str, Any] = {}
+            for ref_col, value in raw.items():
+                name = str(ref_col)
+                if name in mapping:
+                    aligned[mapping[name]] = value
+                    continue
+                if name not in self._output_columns:
+                    if extra == "refuse":
+                        raise ValueError(
+                            f"union step {index + 1}: column '{name}' is not a "
+                            "stream column — map it explicitly or set extra=drop"
+                        )
+                    continue
+                aligned[name] = value
+            out.append(aligned)
+        return out
+
+    def _join_index(self, step: ShapeStep, index: int) -> dict[tuple, list[dict[str, Any]]]:
+        """The join input indexed by its 'on' key tuple, built once per run."""
+        cache_key = f"join:{index}"
+        built = self._state.get(cache_key)
+        if built is None:
+            built = {}
+            ref_cols = [str(c) for c in step.options["on"].values()]
+            for raw in self._secondary_rows(step, index, "join"):
+                if not isinstance(raw, Mapping):
+                    continue
+                key = tuple(_as_text(raw.get(c)) for c in ref_cols)
+                built.setdefault(key, []).append(dict(raw))
+            self._state[cache_key] = built
+        return built
 
     def _drain_step(
         self, step: ShapeStep, index: int, buffer: Any
@@ -605,7 +682,9 @@ class ShapeEngine:
         index: int,
         row: dict[str, Any],
         tally: StepEffect,
-    ) -> dict[str, Any]:
+    ) -> Any:
+        # dict → one row; list → fan-out (unnest_json, join fanout=allow);
+        # _HELD → buffered for drain; _Drop raises to skip.
         op = step.op
         options = step.options
 
@@ -732,6 +811,52 @@ class ShapeEngine:
                 value = match.get(source_col)
                 self._record_write(tally, before=row.get(target), after=value, existed=target in row)
                 row[target] = value
+            return row
+
+        if op == "join":
+            join_index = self._join_index(step, index)
+            on = {str(s): str(r) for s, r in (options.get("on") or {}).items()}
+            key = tuple(_as_text(row.get(c)) for c in on)
+            matches = join_index.get(key) or []
+            mapping = {str(k): str(v) for k, v in (options.get("map") or {}).items()}
+            if not matches:
+                if str(options.get("type") or "inner") == "left":
+                    # Left join keeps the row; every output column is null.
+                    for target in mapping.values():
+                        self._record_write(tally, before=row.get(target), after=None, existed=target in row)
+                        row[target] = None
+                    return row
+                if str(options.get("unmatched") or "drop") == "divert":
+                    raise _Drop(
+                        diverted=True,
+                        reason=str(options.get("reason") or f"no join match for key {key}"),
+                        step_index=index,
+                        op=op,
+                    )
+                raise _Drop(diverted=False, reason="no join match", step_index=index, op=op)
+            fanout = str(options.get("fanout") or "refuse").casefold()
+            if len(matches) > 1 and fanout == "refuse":
+                raise ValueError(
+                    f"join step {index + 1}: key {key} matches {len(matches)} "
+                    "reference rows and fanout=refuse — duplicate keys would "
+                    "multiply the row silently; pick fanout=first or allow"
+                )
+            picked = matches if fanout == "allow" else matches[:1]
+
+            def _merged(base: dict[str, Any], hit: dict[str, Any]) -> dict[str, Any]:
+                merged = dict(base)
+                for ref_col, target in mapping.items():
+                    value = hit.get(ref_col)
+                    self._record_write(tally, before=merged.get(target), after=value, existed=target in merged)
+                    merged[target] = value
+                return merged
+
+            merged_rows = [_merged(row, hit) for hit in picked]
+            return merged_rows[0] if len(merged_rows) == 1 else merged_rows
+
+        if op == "union":
+            # Pass the streamed row through untouched — the appended input
+            # emits at drain() once the output column set is complete.
             return row
 
         if op == "dedupe_rows":

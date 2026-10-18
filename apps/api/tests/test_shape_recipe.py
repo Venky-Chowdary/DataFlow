@@ -29,9 +29,11 @@ def recipe(*steps, columns=COLUMNS):
 
 
 def test_a_global_operation_is_refused_with_where_it_can_be_done():
-    """A join cannot be evaluated row-locally; saying so is the product teaching."""
-    with pytest.raises(ShapeError, match="post-load model on the Transforms page"):
-        recipe({"op": "join", "column": "id"})
+    """A pivot cannot be evaluated row-locally; saying so is the product teaching."""
+    with pytest.raises(ShapeError, match="post-load model step"):
+        recipe({"op": "pivot", "column": "id"})
+    # join graduated to a real op — it now refuses on missing options, not on
+    # the op itself, so its assertion lives in the join/union suite.
     # aggregate/sort/dedupe graduated to real streaming ops — the old names
     # still refuse, but the message now points at the op that does the work.
     with pytest.raises(ShapeError, match="sort_rows"):

@@ -195,8 +195,10 @@ def test_the_catalog_states_the_operations_the_engine_will_accept(client):
     body = client.get("/api/v1/shape/catalog").json()
     ops = {op["op"] for op in body["operations"]}
     assert {"trim", "round_number", "derive_column", "filter_rows", "unnest_json", "flatten_json"} <= ops
-    assert "join" not in ops
-    assert "join" in body["post_load_only"]["operations"]
+    # join/union/lookup and the buffered set ops graduated to real stream ops;
+    # only genuinely whole-population pivots stay post-load-only.
+    assert {"join", "union", "lookup"} <= ops
+    assert "join" not in body["post_load_only"]["operations"]
     assert body["set_operations"] == []
     assert body["set_engine"]["available"] is False
     assert body["set_engine"]["set_hash"] == ""

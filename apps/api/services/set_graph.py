@@ -36,16 +36,13 @@ __all__ = [
 # Published on GET /shape/catalog as post_load_only.operations. Aliases the
 # step parser refuses (group_by, order_by, distinct, …) stay parser-only so
 # this list does not grow a second vocabulary the wizard would have to render.
+# Ops that graduated to real in-flight steps (join/union/lookup/aggregate/
+# sort_rows/rank_rows/dedupe_rows) are removed — they are no longer
+# post-load-only.
 POST_LOAD_ONLY_OPERATIONS: tuple[str, ...] = (
-    "join",
-    "lookup",
-    "aggregate",
     "pivot",
     "unpivot",
-    "sort",
-    "rank",
     "window",
-    "dedupe",
 )
 
 POST_LOAD_ONLY_REASON = (

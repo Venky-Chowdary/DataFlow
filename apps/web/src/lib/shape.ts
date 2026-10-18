@@ -350,6 +350,10 @@ const FIELD_LABEL: Record<string, string> = {
   unmatched: "No-match policy",
   match: "Duplicate-key policy",
   defaults: "Defaults for unmatched",
+  type: "Join type",
+  on: "Join keys",
+  fanout: "Duplicate-key fan-out",
+  extra: "Extra columns policy",
 };
 
 const FIELD_HINT: Record<string, string> = {
@@ -376,6 +380,10 @@ const FIELD_HINT: Record<string, string> = {
   unmatched: "null writes nulls · drop removes the row · divert quarantines with the reason · default writes the defaults map.",
   match: "first keeps the earliest row for a duplicate key · refuse fails the run on a duplicate key.",
   defaults: 'JSON object: output column → value, used when no reference row matches, e.g. {"country_name":"UNKNOWN"}.',
+  type: "inner keeps only matching rows · left keeps every row, filling mapped columns with nulls.",
+  on: 'JSON object: source column → reference column, e.g. {"cc":"code"}. Composite keys list several pairs.',
+  fanout: "refuse fails the run when a key matches several reference rows (default — duplicate keys never multiply a row silently) · first keeps the earliest match · allow emits one row per match (fan-out).",
+  extra: "refuse fails the run when an appended column is not a stream column and has no map entry (default) · drop omits it.",
 };
 
 const FIELD_CHOICES: Record<string, string[]> = {
@@ -386,6 +394,15 @@ const FIELD_CHOICES: Record<string, string[]> = {
   depth: ["top", "deep"],
   unmatched: ["null", "drop", "divert", "default"],
   match: ["first", "refuse"],
+  type: ["inner", "left"],
+  fanout: ["first", "refuse", "allow"],
+  extra: ["refuse", "drop"],
+};
+
+/** Options whose allowed values differ per op — join's no-match policy has
+ *  no null/default (a left join keeps the row with nulls already). */
+const FIELD_CHOICES_BY_OP: Record<string, Record<string, string[]>> = {
+  join: { unmatched: ["drop", "divert"] },
 };
 
 const NUMBER_FIELDS = new Set(["places", "precision", "scale", "width", "limit", "min", "max"]);
@@ -394,15 +411,16 @@ const COLUMN_LIST_FIELDS = new Set(["columns"]);
 const LIST_FIELDS = new Set(["values", "into", "keys"]);
 /** Options whose value must be a JSON object/array — typed text is parsed and
  *  refused with a named error at draft time, never silently coerced. */
-const JSON_FIELDS = new Set(["rows", "reference", "map", "defaults"]);
+const JSON_FIELDS = new Set(["rows", "reference", "map", "defaults", "on"]);
 
 /** The fields to render for one operation, in the catalog's own order. */
 export function fieldsFor(operation: ShapeOperation): ShapeField[] {
   return operation.options.map((name) => {
     const required = operation.required.includes(name);
+    const choices = FIELD_CHOICES_BY_OP[operation.op]?.[name] ?? FIELD_CHOICES[name];
     const kind: ShapeFieldKind = name === operation.expression_option
       ? "expression"
-      : FIELD_CHOICES[name]
+      : choices
         ? "choice"
       : JSON_FIELDS.has(name)
         ? "json"
@@ -421,7 +439,7 @@ export function fieldsFor(operation: ShapeOperation): ShapeField[] {
       label: FIELD_LABEL[name] ?? name,
       hint: FIELD_HINT[name] ?? "",
       required,
-      choices: FIELD_CHOICES[name],
+      choices,
     };
   });
 }

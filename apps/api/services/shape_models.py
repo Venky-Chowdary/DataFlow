@@ -67,7 +67,6 @@ MAX_STEPS = 100
 # one exists — is the difference between a product that teaches and one that
 # says "invalid step type".
 _GLOBAL_OPS: dict[str, str] = {
-    "join": "joins another table — the 'lookup' op enriches each row from an inline reference list baked into the recipe; a second live input is a post-load model on the Transforms page",
     "group_by": "collapses many rows into one — the 'aggregate' op does this on-stream",
     "pivot": "turns rows into columns — that is a post-load model step",
     "unpivot": "turns columns into rows — that is a post-load model step",
@@ -331,6 +330,33 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         options=("to", "start", "step"),
         required=("to",),
     ),
+    _StepDef(
+        "join",
+        "Merge mapped columns from a secondary input (inline rows or a saved "
+        "connector's table, loaded once at run start) matched on 'on' keys — "
+        "inner drops or diverts non-matches, left keeps them with nulls",
+        family="advanced",
+        active=True,
+        expands=True,
+        needs_column=False,
+        options=(
+            "type", "on", "rows", "reference", "map", "fanout",
+            "unmatched", "reason",
+        ),
+        required=("on", "map"),
+    ),
+    _StepDef(
+        "union",
+        "Append a secondary input (inline rows or a saved connector's table, "
+        "loaded once at run start) after the stream, aligned to output "
+        "columns by name — an extra column refuses unless mapped or extra=drop",
+        family="advanced",
+        active=True,
+        expands=True,
+        needs_column=False,
+        options=("rows", "reference", "map", "extra"),
+        required=(),
+    ),
 )
 
 STEP_CATALOG: dict[str, _StepDef] = {d.op: d for d in _CATALOG_LIST}
@@ -408,7 +434,7 @@ class ShapeStep:
                 if isinstance(measure, Mapping) and measure.get("as"):
                     targets.append(str(measure["as"]))
             return tuple(name for name in targets if name)
-        if self.op == "lookup":
+        if self.op in ("lookup", "join", "union"):
             return tuple(
                 str(target) for target in (options.get("map") or {}).values() if target
             )
@@ -1018,43 +1044,7 @@ def _normalize_options(
         )
 
     if op == "lookup":
-        rows = out.get("rows")
-        reference = out.get("reference")
-        if rows is not None and reference is not None:
-            raise ShapeError(
-                f"{where}: lookup takes either rows or a reference, not both"
-            )
-        if reference is not None:
-            if not isinstance(reference, Mapping):
-                raise ShapeError(
-                    f"{where}: lookup reference must be an object "
-                    "{connector_id, table, columns?}"
-                )
-            connector_id = str(reference.get("connector_id") or "").strip()
-            if not connector_id:
-                raise ShapeError(f"{where}: lookup reference needs connector_id")
-            table = str(reference.get("table") or "").strip()
-            if not table:
-                raise ShapeError(f"{where}: lookup reference needs table")
-            ref_columns = _name_list(
-                reference.get("columns"), "reference.columns", where=where
-            )
-            out["reference"] = {
-                "connector_id": connector_id,
-                "table": table,
-                "columns": ref_columns,
-            }
-        else:
-            if not isinstance(rows, (list, tuple)) or not rows:
-                raise ShapeError(
-                    f"{where}: lookup needs either a reference "
-                    "{connector_id, table} or a non-empty rows list of "
-                    "reference objects"
-                )
-            for i, ref in enumerate(rows, start=1):
-                if not isinstance(ref, Mapping):
-                    raise ShapeError(f"{where}: lookup reference row {i} is not an object")
-            out["rows"] = [dict(r) for r in rows]
+        reference = _normalize_rows_or_reference(out, where=where, op=op)
         lookup_key = str(out.get("lookup_key") or "").strip()
         if not lookup_key:
             raise ShapeError(f"{where}: lookup needs lookup_key")
@@ -1106,6 +1096,83 @@ def _normalize_options(
                 )
             out["defaults"] = dict(defaults)
         out["unmatched"] = unmatched
+
+    if op == "join":
+        ref_block = _normalize_rows_or_reference(out, where=where, op=op)
+        join_type = str(out.get("type") or "inner").strip().casefold()
+        if join_type not in ("inner", "left"):
+            raise ShapeError(f"{where}: join type must be inner or left")
+        out["type"] = join_type
+        on = out.get("on")
+        if not isinstance(on, Mapping) or not on:
+            raise ShapeError(
+                f"{where}: join needs a non-empty on map of "
+                "source column → reference column"
+            )
+        out["on"] = {str(s).strip(): str(r).strip() for s, r in on.items()}
+        if any(not s or not r for s, r in out["on"].items()):
+            raise ShapeError(f"{where}: join on cannot name an empty column")
+        mapping = out.get("map")
+        if not isinstance(mapping, Mapping) or not mapping:
+            raise ShapeError(
+                f"{where}: join needs a non-empty map of "
+                "reference column → output column"
+            )
+        out["map"] = {
+            str(ref_col): _valid_name(str(dest_col), where=where)
+            for ref_col, dest_col in mapping.items()
+        }
+        fanout = str(out.get("fanout") or "refuse").strip().casefold()
+        if fanout not in ("first", "refuse", "allow"):
+            raise ShapeError(
+                f"{where}: join fanout must be first, refuse or allow"
+            )
+        out["fanout"] = fanout
+        unmatched = str(out.get("unmatched") or "drop").strip().casefold()
+        if unmatched not in ("drop", "divert"):
+            raise ShapeError(f"{where}: join unmatched must be drop or divert")
+        out["unmatched"] = unmatched
+        # The on/map reference columns must be inside a declared select list;
+        # the on source columns must exist in a scoped recipe.
+        if ref_block is not None and ref_block.get("columns"):
+            declared = ref_block["columns"]
+            unknown_on = [c for c in out["on"].values() if c not in declared]
+            if unknown_on:
+                raise ShapeError(
+                    f"{where}: join on reads '{unknown_on[0]}' which is not "
+                    "in reference.columns"
+                )
+            unknown_map = [c for c in out["map"] if c not in declared]
+            if unknown_map:
+                raise ShapeError(
+                    f"{where}: join map reads '{unknown_map[0]}' which is not "
+                    "in reference.columns"
+                )
+        if columns:
+            missing = [c for c in out["on"] if c not in columns]
+            if missing:
+                raise ShapeError(
+                    f"{where}: join on reads '{missing[0]}' which is not a "
+                    "source column"
+                )
+
+    if op == "union":
+        _normalize_rows_or_reference(out, where=where, op=op)
+        mapping = out.get("map")
+        if mapping is not None:
+            if not isinstance(mapping, Mapping):
+                raise ShapeError(
+                    f"{where}: union map must be an object of "
+                    "reference column → output column"
+                )
+            out["map"] = {
+                str(ref_col): _valid_name(str(dest_col), where=where)
+                for ref_col, dest_col in mapping.items()
+            }
+        extra = str(out.get("extra") or "refuse").strip().casefold()
+        if extra not in ("refuse", "drop"):
+            raise ShapeError(f"{where}: union extra must be refuse or drop")
+        out["extra"] = extra
 
     if op == "surrogate_key":
         out["start"] = _as_int(out.get("start", 1), "start", where=where)
@@ -1174,7 +1241,7 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
             if isinstance(measure, Mapping) and measure.get("as"):
                 columns.append(str(measure["as"]))
         return
-    if op == "lookup":
+    if op in ("lookup", "join", "union"):
         for target in (options.get("map") or {}).values():
             if target and str(target) not in columns:
                 columns.append(str(target))
@@ -1199,6 +1266,53 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
                 if name and name in columns:
                     columns.remove(name)
         return
+
+
+def _normalize_rows_or_reference(
+    out: dict[str, Any], *, where: str, op: str
+) -> dict[str, Any] | None:
+    """Validate the rows-or-reference secondary input shared by lookup/join/union.
+
+    Mutates ``out`` in place: ``reference`` normalizes to
+    ``{connector_id, table, columns}`` and ``rows`` to a list of dicts.
+    Returns the normalized reference dict, or None when inline rows are used.
+    """
+    rows = out.get("rows")
+    reference = out.get("reference")
+    if rows is not None and reference is not None:
+        raise ShapeError(f"{where}: {op} takes either rows or a reference, not both")
+    if reference is not None:
+        if not isinstance(reference, Mapping):
+            raise ShapeError(
+                f"{where}: {op} reference must be an object "
+                "{connector_id, table, columns?}"
+            )
+        connector_id = str(reference.get("connector_id") or "").strip()
+        if not connector_id:
+            raise ShapeError(f"{where}: {op} reference needs connector_id")
+        table = str(reference.get("table") or "").strip()
+        if not table:
+            raise ShapeError(f"{where}: {op} reference needs table")
+        ref_columns = _name_list(
+            reference.get("columns"), "reference.columns", where=where
+        )
+        out["reference"] = {
+            "connector_id": connector_id,
+            "table": table,
+            "columns": ref_columns,
+        }
+        return out["reference"]
+    if not isinstance(rows, (list, tuple)) or not rows:
+        raise ShapeError(
+            f"{where}: {op} needs either a reference "
+            "{connector_id, table} or a non-empty rows list of "
+            "reference objects"
+        )
+    for i, ref in enumerate(rows, start=1):
+        if not isinstance(ref, Mapping):
+            raise ShapeError(f"{where}: {op} reference row {i} is not an object")
+    out["rows"] = [dict(r) for r in rows]
+    return None
 
 
 def _option_cell_token(value: Any) -> str | None:
