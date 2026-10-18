@@ -284,6 +284,27 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["population_proof"] = False
         out["checksum_match"] = None
         return out
+    if str(out.get("checksum_scope") or "") == ROUTE_PARTITIONED:
+        # The router partitioned the population — no single dest digest can
+        # equal the source digest, so ``independent_match`` is meaningless
+        # here. The report's own checksum_match already carries the per-route
+        # digest result (each comparable route's read-back vs its write-pass
+        # fingerprint); population_proof is the conservation verdict.
+        route_matched = bool(out.get("passed")) and bool(
+            out.get("checksum_match")
+        )
+        out["phase"] = (
+            "post_write_verified" if out.get("passed") else "post_write_failed"
+        )
+        out["post_write_pending"] = False
+        out["preview"] = False
+        out["coverage"] = ROUTE_PARTITIONED
+        out["assurance_level"] = ROUTE_PARTITIONED
+        out["migration_proven"] = False
+        out["population_proof"] = bool(out.get("passed"))
+        out["checksum_match"] = route_matched
+        return out
+
     # Module 4: always stamp checksum honesty; never invent population RI proof.
     out["checksum_match"] = independent_match if (src and tgt) else False
     out["population_proof"] = False
@@ -832,6 +853,7 @@ def reconcile(
     target_rows_before: int | None = None,
     checksum_scope: str = "",
     keyed_expected_delta: int | None = None,
+    route_digest_match: bool | None = None,
 ) -> ReconciliationReport:
     """Compare source and destination evidence into one Gate-8 verdict.
 
@@ -986,8 +1008,13 @@ def reconcile(
             message=(
                 f"Routed output verified: {target_rows:,} row(s) across the "
                 f"route tables vs expected {expected_rows:,}. Each route "
-                "table's row count was read back independently; per-route "
-                "digests are in the route ledger."
+                "table's row count was read back independently"
+                + (
+                    " and every comparable route's value digest matched the "
+                    "write-pass fingerprint"
+                    if route_digest_match
+                    else "; per-route digests are in the route ledger"
+                )
                 if ok
                 else f"Row count mismatch across route tables: {target_rows:,} "
                 f"vs expected {expected_rows:,}."
@@ -996,7 +1023,7 @@ def reconcile(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
-            checksum_match=False,
+            checksum_match=bool(route_digest_match),
             population_proof=ok,
             assurance_level=ROUTE_PARTITIONED,
             checksum_scope=ROUTE_PARTITIONED,

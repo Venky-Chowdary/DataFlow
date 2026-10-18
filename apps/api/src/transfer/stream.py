@@ -2622,6 +2622,10 @@ def _stream_database_transfer_impl(
     # Shared destination connections for the life of this stream job (open once).
     sf_conn_state: dict[str, Any] = {"conn": None, "session_ready": False}
     pg_conn_state: dict[str, Any] = {"conn": None}
+    # Per-route write-pass fingerprint accumulators — the value-level digest
+    # each route table should show on read-back (Gate-8 compares it against
+    # verify_target's checksum per route, tag column never written).
+    route_fp_acc: dict[str, Any] = {}
     batches_completed = 0
     # Only the distinct set matters (the summary asks "did any batch COPY?"),
     # so dedupe instead of appending one entry per batch.
@@ -2911,6 +2915,49 @@ def _stream_database_transfer_impl(
                     _rcol_types = {
                         k: v for k, v in column_types.items() if k in _rtargets
                     }
+                    if True:
+                        # Value-level proof per route: fingerprint this route's
+                        # mapped rows exactly as the non-routed path does, so
+                        # Gate-8 can compare each route table's read-back
+                        # checksum against what this run wrote (RT accuracy).
+                        # Always fingerprint for routes — a whole-source
+                        # re-read cannot produce per-route digests.
+                        try:
+                            _r_mapped_fp, _ = map_rows_for_fingerprint(
+                                headers=_rheaders,
+                                data_rows=_rrows,
+                                mappings=_rmappings,
+                                target_cols=sorted(_rtargets),
+                                column_types=_rcol_types,
+                                error_policy=stream_error_policy,
+                                dest_types=fingerprint_dest_types,
+                                preserve_case=True,
+                                dest_kind=dest_bind_dialect,
+                                destination_pk_columns=list(pk_target_cols or []) or None,
+                                empty_cells_as_null=bool(
+                                    write_kwargs.get("empty_cells_as_null")
+                                ),
+                            )
+                            if _r_mapped_fp:
+                                from services.fingerprint_accumulator import (
+                                    FingerprintAccumulator,
+                                )
+
+                                acc = route_fp_acc.setdefault(
+                                    _rname, FingerprintAccumulator()
+                                )
+                                acc.add_many(
+                                    row_fingerprints(
+                                        _r_mapped_fp,
+                                        sorted(_rtargets),
+                                        dest_db_type=dest_bind_dialect,
+                                        dest_types=digest_dest_types,
+                                    )
+                                )
+                        except Exception as exc:
+                            logger.warning(
+                                "Route fingerprint skipped for %s: %s", _rname, exc
+                            )
                 else:
                     _rmappings = mappings
                     _rcol_types = column_types
@@ -3732,6 +3779,15 @@ def _stream_database_transfer_impl(
             PHASE_CHECKSUM, time.perf_counter() - checksum_started, rows=fp_accumulator.total
         )
         dest_summary["reread_pagination"] = reread_plan.get("mode")
+        if route_fp_acc:
+            # Per-route write-pass digests — the value-level expectation
+            # Gate-8 compares against each route table's independent
+            # read-back (route_verification). Keyed by route name.
+            dest_summary["route_expected"] = {
+                _rn: {"rows": _acc.total, "checksum": _acc.digest()}
+                for _rn, _acc in route_fp_acc.items()
+                if _acc.total > 0
+            }
         if fp_accumulator.total:
             if write_pass_fp.total:
                 alignment = align_source_populations(write_pass_fp, fp_accumulator)

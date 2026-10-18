@@ -2542,7 +2542,43 @@ def _run_reconciliation_impl(
                 target_rows += _r_rows
             else:
                 readback_ok = False
+        # Value-level per-route proof: the write pass fingerprinted each
+        # route's mapped rows (route_expected); compare the dest read-back
+        # digest against the expected per-route digest. The _df_route tag
+        # column is never a destination column, so no exclusion is needed.
+        route_expected = dest_summary.get("route_expected") or {}
+        route_precount = dest_summary.get("route_precount") or {}
+        _r_sync = str(dest_summary.get("sync_mode") or "")
+        _r_replacing = "overwrite" in _r_sync or "full_refresh" in _r_sync
+        route_digest_all = True
+        _route_digest_compared = 0
+        for _rname2, _rinfo in route_readback.items():
+            _exp = route_expected.get(_rname2)
+            # The run's write-pass digest is comparable only when the table
+            # holds exactly this run's rows: a replacing sync emptied it, or
+            # the per-route pre-count says it started empty. An append into a
+            # non-empty table makes the read-back a superset — compareable by
+            # count/delta, not by digest.
+            _comparable = _r_replacing or int(route_precount.get(_rname2) or 0) == 0
+            _rinfo["expected_checksum"] = str(_exp.get("checksum") or "") if _exp else ""
+            if not _comparable:
+                _rinfo["digest_match"] = None
+                _rinfo["digest_note"] = (
+                    "not comparable — table held rows before this run"
+                )
+                continue
+            _route_digest_compared += 1
+            _match = bool(
+                _exp
+                and _rinfo.get("checksum")
+                and _exp.get("checksum") == _rinfo.get("checksum")
+            )
+            _rinfo["digest_match"] = _match
+            if not _match:
+                route_digest_all = False
+        route_digest_all = route_digest_all and _route_digest_compared > 0
         dest_summary["route_verification"] = route_readback
+        dest_summary["route_digest_match"] = route_digest_all
         if not readback_ok:
             target_rows = -1
     else:
@@ -3200,6 +3236,7 @@ def _run_reconciliation_impl(
         checksum_scope=keyed_scope
         or (ROUTE_PARTITIONED if routed_tables else ""),
         keyed_expected_delta=keyed_delta,
+        route_digest_match=dest_summary.get("route_digest_match"),
     )
     return _finalize(report.to_dict())
 

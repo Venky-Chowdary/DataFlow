@@ -242,3 +242,54 @@ def test_rt5_failing_route_append_restores_all_route_tables(tmp_path, monkeypatc
     after = {t: _fetch(cur, t) for t in ("rt_high", "rt_mid", "rt_other")}
     assert after == before, f"route tables changed by failed run: {after}"
     conn.close()
+
+
+def test_route_verification_records_value_digests(tmp_path, monkeypatch):
+    """Each route's ledger entry carries the value-level digest match:
+    dest read-back checksum vs the write-pass fingerprint per route."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    res, job_id = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash))
+    assert res.success, res.error
+    doc = fake.jobs.get(job_id) or {}
+
+    def _find(obj, depth=0):
+        if isinstance(obj, dict):
+            if "route_verification" in obj:
+                return obj
+            for v in obj.values():
+                if depth < 5:
+                    hit = _find(v, depth + 1)
+                    if hit:
+                        return hit
+        elif isinstance(obj, list):
+            for v in obj:
+                if depth < 5:
+                    hit = _find(v, depth + 1)
+                    if hit:
+                        return hit
+        return None
+
+    holder = _find(doc)
+    assert holder, "route_verification not found on the job"
+    rv = holder["route_verification"]
+    assert set(rv) == {"high", "mid", "other"}
+    for name, info in rv.items():
+        assert info["checksum"], f"route {name}: no read-back digest"
+        assert info["digest_match"] is True, (
+            f"route {name}: dest digest {info['checksum']} != "
+            f"expected {info.get('expected_checksum')}"
+        )
+    assert holder.get("route_digest_match") is True
+    conn.close()
