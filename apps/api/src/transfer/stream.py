@@ -1566,6 +1566,38 @@ def _stream_database_transfer_impl(
     # delta stays unproven rather than being reported wrong.
     if not (written or offset):
         rows_before = pre_write_rows_before
+        _rstep0 = (
+            shape_runner.recipe.router_step
+            if shape_runner is not None and getattr(shape_runner, "recipe", None) is not None
+            else None
+        )
+        if _rstep0 is not None:
+            # A routed run never writes the base table — each route lands in
+            # its own table, so the "before" cardinality is the sum over every
+            # declared route table. Measuring the base name here leaves the
+            # post-write sum of all route tables compared against zero, and
+            # append-delta reconciliation then reads the whole dest as one
+            # run's growth (RT-4).
+            _rtargets0 = dict(_rstep0.options.get("targets") or {})
+            _rbase0 = resolve_dest_table(dest_type, destination, _source_name(source))
+            _rsum0 = 0
+            _rper0: dict[str, int] = {}
+            for _rroute in _rstep0.options.get("routes") or []:
+                _rname0 = str(_rroute.get("name") or "")
+                if not _rname0:
+                    continue
+                _rtable0 = str(_rtargets0.get(_rname0) or f"{_rbase0}__{_rname0}")
+                _rn0 = precount_table(dest_type, dest_cfg, _rtable0)
+                if _rn0 is None:
+                    # One unreadable route table keeps the sum honest: report
+                    # no "before" at all rather than a wrong one.
+                    _rsum0 = None
+                    break
+                _rsum0 += int(_rn0)
+                _rper0[_rname0] = int(_rn0)
+            rows_before = _rsum0
+            if _rper0:
+                dest_summary["route_precount"] = dict(_rper0)
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
             checkpoint.target_rows_before = int(rows_before)
@@ -2555,7 +2587,22 @@ def _stream_database_transfer_impl(
     pg_overwrite_one_txn = dest_type in ("postgresql", "redshift") and bool(
         (getattr(destination, "extra", None) or {}).get("pg_overwrite_in_transaction")
     )
-    if dest_type in ("sqlite", "snowflake", "iceberg") or pg_overwrite_one_txn:
+    # A routed run writes several tables — on PostgreSQL it must run on the
+    # single shared connection so one held transaction covers every route
+    # (commit all or roll back all, RT-5). With a worker pool each batch gets
+    # its own connection and each route commits independently, leaving
+    # half-written route sets on failure.
+    routed_pg = (
+        dest_type in ("postgresql", "redshift")
+        and shape_runner is not None
+        and getattr(shape_runner, "recipe", None) is not None
+        and shape_runner.recipe.router_step is not None
+    )
+    if (
+        dest_type in ("sqlite", "snowflake", "iceberg")
+        or pg_overwrite_one_txn
+        or routed_pg
+    ):
         max_workers = 1
     else:
         try:
@@ -2792,6 +2839,29 @@ def _stream_database_transfer_impl(
             if shape_runner is not None and shape_runner.recipe is not None
             else None
         )
+        if (
+            router_step is not None
+            and dest_type in ("postgresql", "redshift")
+            and write_kwargs.get("connection") is not None
+        ):
+            # A routed run writes several tables; a failure must not leave
+            # some routes committed and others not (RT-5). On the shared PG
+            # connection, arm a held transaction for ANY sync mode — every
+            # route's commits defer until finish_held_overwrite at stream end
+            # (commit all or roll back all). The overwrite path already binds
+            # one on truncate; begin() is idempotent.
+            from connectors.write_resilience import (
+                PgOverwriteTransaction,
+                bind_overwrite_transaction,
+                overwrite_transaction_for,
+            )
+
+            _rconn = write_kwargs["connection"]
+            _rheld = overwrite_transaction_for(_rconn)
+            if _rheld is None:
+                _rheld = PgOverwriteTransaction()
+                bind_overwrite_transaction(_rconn, _rheld)
+            _rheld.begin(job_id=job_id or "")
         write_calls: list[tuple[str | None, str, Any]] = []
         if row_apply_plan is not None:
             if router_step is not None:

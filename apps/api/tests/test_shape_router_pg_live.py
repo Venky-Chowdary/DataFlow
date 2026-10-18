@@ -182,3 +182,63 @@ def test_rt1_unmatched_divert_sends_rows_to_dlq(tmp_path, monkeypatch):
     dlq_rows = dlq.canonical_replay_details({"id": job_id})
     assert len(dlq_rows) == 2  # ids 3 (amt<50) and 6 — no route matched
     conn.close()
+
+
+def test_rt4_append_rerun_reconciles_clean(tmp_path, monkeypatch):
+    """Append re-run of a routed recipe: per-route pre-counts make the
+    dest COUNT growth equal this run's writes — no 'more rows than read'."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash, sync="append")
+    res1, _ = _run(fake, req, prefix="rta1")
+    assert res1.success, res1.error
+    res2, _ = _run(fake, req, prefix="rta2")
+    assert res2.success, res2.error
+    assert _fetch(cur, "rt_high") == [1, 1]
+    assert _fetch(cur, "rt_mid") == [2, 2, 5, 5]
+    assert _fetch(cur, "rt_other") == [3, 3, 6, 6]
+    conn.close()
+
+
+def test_rt5_failing_route_append_restores_all_route_tables(tmp_path, monkeypatch):
+    """A failed route write in append mode must leave EVERY route table
+    exactly as before the run — prior rows intact, no third copy anywhere."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash, sync="append")
+    for i in (1, 2):
+        res, _ = _run(fake, req, prefix=f"rtb{i}")
+        assert res.success, res.error
+    before = {t: _fetch(cur, t) for t in ("rt_high", "rt_mid", "rt_other")}
+    assert before == {"rt_high": [1, 1], "rt_mid": [2, 2, 5, 5], "rt_other": [3, 3, 6, 6]}
+    # Third run fails on the 'other' route table: a new source row routes
+    # there but its CHECK rejects it. Existing rows pass the constraint.
+    cur.execute("INSERT INTO rt (id, amt, region) VALUES (7, '5', 'NO')")
+    cur.execute('ALTER TABLE rt_other ADD CONSTRAINT rt_other_chk CHECK (id <> 7)')
+    res3, _ = _run(fake, req, prefix="rtb3")
+    assert not res3.success
+    after = {t: _fetch(cur, t) for t in ("rt_high", "rt_mid", "rt_other")}
+    assert after == before, f"route tables changed by failed run: {after}"
+    conn.close()
