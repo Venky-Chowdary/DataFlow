@@ -20,9 +20,16 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 
+def _pg_cfg() -> dict:
+    from conftest import pg_test_cfg
+
+    return pg_test_cfg()
+
+
 def _pg_reachable() -> bool:
+    cfg = _pg_cfg()
     try:
-        with socket.create_connection(("localhost", 5432), timeout=1.5):
+        with socket.create_connection((cfg["host"], cfg["port"]), timeout=1.5):
             return True
     except OSError:
         return False
@@ -69,14 +76,17 @@ def cast_route():
     from services.connector_store import create_connector, delete_connector
 
     sfx = uuid.uuid4().hex[:6]
+    cfg = _pg_cfg()
     conn = psycopg2.connect(
-        host="localhost", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+        host=cfg["host"], port=cfg["port"], dbname=cfg["database"],
+        user=cfg["username"], password=cfg["password"],
     )
     conn.autocommit = True
     name = f"MX314{sfx}"
     saved = create_connector({
-        "name": name, "type": "postgresql", "host": "localhost", "port": 5432,
-        "database": "dataflow", "username": "dataflow", "password": "dataflow",
+        "name": name, "type": "postgresql", "host": cfg["host"],
+        "port": cfg["port"], "database": cfg["database"],
+        "username": cfg["username"], "password": cfg["password"],
         "schema": "public",
     })
     made: list[str] = []

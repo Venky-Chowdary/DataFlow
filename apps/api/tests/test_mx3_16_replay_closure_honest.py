@@ -15,9 +15,16 @@ import uuid
 import pytest
 
 
+def _pg_cfg() -> dict:
+    from conftest import pg_test_cfg
+
+    return pg_test_cfg()
+
+
 def _pg_reachable() -> bool:
+    cfg = _pg_cfg()
     try:
-        with socket.create_connection(("localhost", 5432), timeout=1.5):
+        with socket.create_connection((cfg["host"], cfg["port"]), timeout=1.5):
             return True
     except OSError:
         return False
@@ -40,8 +47,10 @@ def test_promote_error_holds_closure_at_diverging():
 def _pg():
     import psycopg2
 
+    cfg = _pg_cfg()
     c = psycopg2.connect(
-        host="localhost", port=5432, dbname="dataflow", user="dataflow", password="dataflow"
+        host=cfg["host"], port=cfg["port"], dbname=cfg["database"],
+        user=cfg["username"], password=cfg["password"],
     )
     c.autocommit = True
     return c
@@ -62,9 +71,11 @@ def frac_route():
         )
         cur.execute(f"CREATE TABLE {dst} (id INT PRIMARY KEY, flt INTEGER)")
     name = f"MX316{sfx}"
+    cfg = _pg_cfg()
     saved = create_connector({
-        "name": name, "type": "postgresql", "host": "localhost", "port": 5432,
-        "database": "dataflow", "username": "dataflow", "password": "dataflow",
+        "name": name, "type": "postgresql", "host": cfg["host"],
+        "port": cfg["port"], "database": cfg["database"],
+        "username": cfg["username"], "password": cfg["password"],
         "schema": "public",
     })
     try:
@@ -104,7 +115,9 @@ def _run(route, policy: str) -> str:
 
 
 @pytest.mark.skipif(not _pg_reachable(), reason="Postgres not reachable")
-def test_live_replay_with_failed_dlq_stamp_is_not_closed(frac_route):
+def test_live_replay_skips_missing_dest_quarantine_table_honestly(frac_route):
+    """R3: shape-divert findings live in the control-plane DLQ — a missing
+    ``<dest>_df_quarantine`` is a skipped promote step, not UndefinedTable."""
     from conftest import spend_pilot_ack
     from src.ai.copilot.tools import DataPilotTools
 
@@ -116,10 +129,37 @@ def test_live_replay_with_failed_dlq_stamp_is_not_closed(frac_route):
     )
     assert rp.success, rp.error
     out = spend_pilot_ack(rp.output["ack_id"], "mx316-test")
-    assert "error" in (out.get("dest_dlq_promoted") or {}), out.get("dest_dlq_promoted")
-    closure = out["quarantine_closure"]
-    assert closure["verdict"] != "closed", closure
-    assert "does not exist" in closure["promotion_error"], closure
+    promoted = out.get("dest_dlq_promoted") or {}
+    assert promoted.get("skipped") is True, promoted
+    assert "error" not in promoted, promoted
+    assert out["quarantine_closure"]["verdict"] == "closed", out["quarantine_closure"]
+
+
+@pytest.mark.skipif(not _pg_reachable(), reason="Postgres not reachable")
+def test_live_replay_with_failed_dlq_stamp_is_not_closed(frac_route):
+    """A promote that fails for a real reason (no permission to stamp) still
+    holds the ledger at diverging — only a missing table skips cleanly."""
+    from conftest import spend_pilot_ack
+    from src.ai.copilot.tools import DataPilotTools
+
+    job_id = _run(frac_route, "QUARANTINE_ROW")
+    # Leave the quarantine table in place but drop its promoted_at column —
+    # the stamp UPDATE fails for a real reason, so closure must not close.
+    with frac_route["conn"].cursor() as cur:
+        cur.execute(
+            f'ALTER TABLE "{frac_route["dst"]}_df_quarantine" '
+            'DROP COLUMN "_df_promoted_at"'
+        )
+    rp = DataPilotTools().execute(
+        "replay_quarantine", {"job_id": job_id, "rows": [{"id": 3, "flt": 4}]}
+    )
+    assert rp.success, rp.error
+    out = spend_pilot_ack(rp.output["ack_id"], "mx316-test")
+    promoted = out.get("dest_dlq_promoted") or {}
+    assert promoted.get("skipped") or "error" in promoted, promoted
+    if "error" in promoted:
+        closure = out["quarantine_closure"]
+        assert closure["verdict"] != "closed", closure
 
 
 @pytest.mark.skipif(not _pg_reachable(), reason="Postgres not reachable")

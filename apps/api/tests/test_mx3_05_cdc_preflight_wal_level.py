@@ -20,22 +20,22 @@ from services.preflight_service import _cdc_log_capture_gates
 psycopg2 = pytest.importorskip("psycopg2")
 
 
+def _pg(port: int) -> dict:
+    from conftest import pg_test_cfg
+
+    return pg_test_cfg(port)
+
+
 def _cfg(port: int) -> dict:
-    return {
-        "type": "postgresql",
-        "host": "localhost",
-        "port": port,
-        "database": "dataflow",
-        "username": "dataflow",
-        "password": "dataflow",
-    }
+    return {"type": "postgresql", **_pg(port)}
 
 
 def _wal_level(port: int) -> str | None:
+    cfg = _pg(port)
     try:
         conn = psycopg2.connect(
-            host="localhost", port=port, dbname="dataflow", user="dataflow",
-            password="dataflow", connect_timeout=3,
+            host=cfg["host"], port=port, dbname=cfg["database"],
+            user=cfg["username"], password=cfg["password"], connect_timeout=3,
         )
     except psycopg2.OperationalError:
         return None
@@ -53,8 +53,10 @@ def table_on():
 
     def _make(port: int) -> str:
         name = f"mx305_{uuid.uuid4().hex[:8]}"
+        cfg = _pg(port)
         conn = psycopg2.connect(
-            host="localhost", port=port, dbname="dataflow", user="dataflow", password="dataflow"
+            host=cfg["host"], port=port, dbname=cfg["database"],
+            user=cfg["username"], password=cfg["password"],
         )
         with conn, conn.cursor() as cur:
             cur.execute(f"CREATE TABLE {name} (id INT PRIMARY KEY, v TEXT)")
@@ -64,8 +66,10 @@ def table_on():
 
     yield _make
     for port, name in made:
+        cfg = _pg(port)
         conn = psycopg2.connect(
-            host="localhost", port=port, dbname="dataflow", user="dataflow", password="dataflow"
+            host=cfg["host"], port=port, dbname=cfg["database"],
+            user=cfg["username"], password=cfg["password"],
         )
         with conn, conn.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS {name}")

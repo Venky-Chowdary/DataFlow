@@ -337,6 +337,30 @@ def _isolate_mcp_rate_limit_buckets():
         reset_mcp_rate_limits()
 
 
+def pg_test_cfg(port: int | None = None) -> dict:
+    """PG connection params for live tests, from DATAFLOW_PG_TEST_DSN.
+
+    Defaults to the local 127.0.0.1:5432 dataflow/dataflow instance —
+    ``localhost`` is refused by the egress guard even under a loopback
+    allowlist, so tests must never hardcode it. ``port`` overrides the
+    DSN port for tests that need a second server (e.g. wal_level matrix).
+    """
+    import os
+    from urllib.parse import urlparse
+
+    u = urlparse(
+        os.environ.get("DATAFLOW_PG_TEST_DSN")
+        or "postgresql://dataflow:dataflow@127.0.0.1:5432/dataflow"
+    )
+    return {
+        "host": u.hostname or "127.0.0.1",
+        "port": port if port is not None else (u.port or 5432),
+        "database": (u.path or "/dataflow").lstrip("/"),
+        "username": u.username or "dataflow",
+        "password": u.password or "",
+    }
+
+
 def _is_mongo_reachable() -> bool:
     try:
         socket.create_connection(("localhost", 27017), timeout=1.0).close()
