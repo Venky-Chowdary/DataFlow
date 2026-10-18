@@ -156,6 +156,32 @@ def test_unclassified_snowflake_auth_keeps_raw_driver_text():
     )
 
 
+def test_snowflake_generic_failure_keeps_driver_cause():
+    """D-01: warehouse/schema collapse must keep the driver's discriminator."""
+    raw = "Warehouse 'COMPUTE_WH' is suspended."
+    msg = humanize_connection_error("snowflake", raw)
+    assert "COMPUTE_WH" in msg
+    assert msg != "Snowflake connection failed. Check account, warehouse, database, schema, and role."
+
+
+def test_snowflake_dns_failure_names_account_host_not_credentials():
+    raw = "Failed to resolve hostname 'badacct.snowflakecomputing.com'"
+    msg = humanize_connection_error("snowflake", raw)
+    assert "account" in msg.lower() and "host" in msg.lower()
+    assert "dns" in msg.lower() or "resolve" in msg.lower()
+    assert "credentials failure" not in msg.lower() or "not a credentials" in msg.lower()
+
+
+def test_snowflake_egress_refusal_names_account_form_not_private_ip():
+    raw = (
+        "Refused connector host badacct: private or non-routable "
+        "addresses are not connection targets."
+    )
+    msg = humanize_connection_error("snowflake", raw)
+    assert "account" in msg.lower() and "host" in msg.lower()
+    assert "credentials" in msg.lower()  # names what NOT to check
+
+
 def test_password_policy_is_not_wrong_password():
     raw = "394504: PASSWORD authentication is not allowed by the authentication policy."
     msg = humanize_connection_error("snowflake", raw)

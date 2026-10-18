@@ -522,11 +522,18 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
         return _with_cause("Authentication failed. Check username, password, and permissions.", raw_s)
 
     # DNS / host unknown
-    if re.search(r"name or service not known|nodename|getaddrinfo|dns|unknown host|cannot resolve|not known", text):
+    if re.search(r"name or service not known|nodename|getaddrinfo|dns|unknown host|cannot resolve|not known|failed to resolve|resolve hostname", text):
         if "internal" in text:
             return (
                 "Host not found — this looks like a private/internal address. "
                 "Use the provider public proxy host and port (for Railway: *.proxy.rlwy.net)."
+            )
+        if driver == "snowflake":
+            return _with_cause(
+                "Snowflake account host did not resolve. Check the account locator/host "
+                "(e.g. xy12345.us-east-1.snowflakecomputing.com) — this is a DNS failure, "
+                "not a credentials failure.",
+                raw_s,
             )
         return "Host not found. Check the host/address and that it is reachable from the network."
 
@@ -571,9 +578,20 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     if re.search(r"no such file|is a directory|file not found|could not open|not a directory|path not found", text):
         return "File or path not found. Check the file path and that the volume is mounted."
 
-    # Snowflake-specific
+    # Snowflake account-host refusals name the account form, not a private-IP hint.
+    if driver == "snowflake" and re.search(r"refused connector host|did not resolve|non-routable|private", text):
+        return _with_cause(
+            "Snowflake account host was refused or did not resolve. Check the account "
+            "locator/host (e.g. xy12345.us-east-1.snowflakecomputing.com), not the credentials.",
+            raw_s,
+        )
+
+    # Snowflake-specific — keep the driver's reason; the discriminator is the fix.
     if driver == "snowflake" and re.search(r"warehouse|role|database|schema", text):
-        return "Snowflake connection failed. Check account, warehouse, database, schema, and role."
+        return _with_cause(
+            "Snowflake connection failed. Check account, warehouse, database, schema, and role.",
+            raw_s,
+        )
 
     # BigQuery-specific
     if driver == "bigquery" and re.search(r"project|dataset|grant|permission|invalid", text):

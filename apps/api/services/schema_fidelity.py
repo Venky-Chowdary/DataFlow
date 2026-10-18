@@ -346,19 +346,27 @@ _MYSQL_CLOCK_DEFAULT_RE = re.compile(
 _MYSQL_ZERO_DATE_RE = re.compile(r"0000-00-00")
 _NUMERIC_LOGICALS = frozenset({"integer", "decimal", "float", "number"})
 _TEMPORAL_LOGICALS = frozenset({"date", "datetime", "time", "timestamp"})
+#: MySQL error 1101 — BLOB/TEXT/GEOMETRY/JSON columns cannot take a literal
+#: DEFAULT at all (expression defaults ``DEFAULT (expr)`` are a separate 8.0.13+
+#: feature we do not emit). MariaDB has allowed literal defaults on these types
+#: since 10.2.1, so the check is dialect-scoped.
+_MYSQL_NO_LITERAL_DEFAULT_LOGICALS = frozenset({"text", "binary", "json", "geography"})
 
 
-def mysql_default_is_legal(default_sql: str, dest_type: str) -> bool:
-    """False when MySQL rejects this DEFAULT for the column type (error 1067).
+def mysql_default_is_legal(default_sql: str, dest_type: str, *, dialect: str = "mysql") -> bool:
+    """False when MySQL rejects this DEFAULT for the column type (errors 1067/1101).
 
     An integer key cannot take ``''`` or ``CURRENT_TIMESTAMP``. A temporal
     column cannot take a zero date under strict sql_mode. Clock functions stay
     on temporal types. Numeric literals and quoted strings on text stay.
+    BLOB/TEXT/GEOMETRY/JSON take no literal DEFAULT on MySQL; MariaDB permits it.
     """
     from services.type_system import normalize_logical_type
 
     expr = (default_sql or "").strip()
     logical = normalize_logical_type(dest_type or "")
+    if logical in _MYSQL_NO_LITERAL_DEFAULT_LOGICALS and dialect != "mariadb":
+        return False
     clock = bool(_MYSQL_CLOCK_DEFAULT_RE.match(expr))
     if logical in _NUMERIC_LOGICALS:
         if clock or expr in {"''", '""'}:
@@ -953,8 +961,9 @@ def plan_create_new_fidelity(
             )
             continue
         default_sql = _normalize_default_sql(expr, dest, _dest_type(dest_col))
-        if (dest or "").lower() in {"mysql", "mariadb"} and not mysql_default_is_legal(
-            default_sql, _dest_type(dest_col)
+        dest_dialect = (dest or "").lower()
+        if dest_dialect in {"mysql", "mariadb"} and not mysql_default_is_legal(
+            default_sql, _dest_type(dest_col), dialect=dest_dialect
         ):
             report.items.append(
                 SchemaFidelityItem(
@@ -963,7 +972,9 @@ def plan_create_new_fidelity(
                     status="unsupported",
                     reason=(
                         "MySQL rejects this DEFAULT for the destination column "
-                        "type (invalid default). The column is created without it."
+                        "type (invalid default, or BLOB/TEXT/GEOMETRY/JSON "
+                        "columns take no literal default). The column is "
+                        "created without it."
                     ),
                     source_detail=str(expr)[:200],
                 )
