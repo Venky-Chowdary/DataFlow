@@ -4142,6 +4142,7 @@ class UniversalTransferEngine:
                     limit=request.limit,
                     scd2_opts=_scd2_opts_stream,
                     key_columns=_scd2_keys_stream,
+                    shape_runner=shape_runner,
                 )
                 if isinstance(dest_summary, dict) and dest_summary.get("ok") is False:
                     block_msg = str(

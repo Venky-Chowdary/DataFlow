@@ -874,3 +874,28 @@ def test_scd2_proven_run_stamps_verified_verdict_pg(tmp_path, monkeypatch):
     msg = str(recon.get("message") or "")
     assert "not migration_proven" not in msg or "verified" in msg.lower()
     conn.close()
+
+
+def test_scd2_untracked_prestep_applies_pg(tmp_path, monkeypatch):
+    """B1-E6: a row-local step on an UNTRACKED column before the scd2
+    step must actually transform the written rows — never accepted and
+    silently skipped. case mode=upper on note lands N1, not n1."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="scd2_e6_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_e6_dst CASCADE")
+    recipe = {
+        "steps": [
+            {"op": "case", "column": "note", "options": {"mode": "upper"}},
+            *_scd2_recipe()["steps"],
+        ]
+    }
+    req = _engine_req("scd2_e6_src", "scd2_e6_dst", recipe, mode="strict")
+
+    res = _exec(fake, req, prefix="scde6")
+    assert res.success, res.error
+    cur.execute("SELECT id, note FROM scd2_e6_dst ORDER BY id")
+    notes = {r[0]: r[1] for r in cur.fetchall()}
+    assert notes == {1: "N1", 2: "N2", 3: "N3"}, notes
+    conn.close()

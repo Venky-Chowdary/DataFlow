@@ -102,6 +102,7 @@ def stream_scd2_mirror_transfer(
     limit: int = 0,
     scd2_opts: dict[str, Any] | None = None,
     key_columns: list[str] | None = None,
+    shape_runner: Any = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     """Stream a mirror or SCD2 database-to-database transfer through a staging table.
 
@@ -192,6 +193,7 @@ def stream_scd2_mirror_transfer(
             backfill_new_fields=backfill_new_fields,
             validation_mode=validation_mode,
             limit=limit,
+            shape_runner=shape_runner,
         )
 
         ddl_log = [
