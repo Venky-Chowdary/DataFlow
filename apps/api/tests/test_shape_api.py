@@ -489,3 +489,40 @@ def test_reading_the_vocabulary_is_a_read_and_designing_a_recipe_is_planning():
     assert _required_permission("DELETE", "/api/v1/shape/drafts") == Permission.JOB_PLAN
     assert _required_permission("POST", "/api/v1/shape/preview") == Permission.JOB_PLAN
     assert _required_permission("POST", "/api/v1/shape/validate") == Permission.JOB_PLAN
+
+
+def test_dedupe_preview_names_winners_and_losers(client):
+    """B2: the per-step preview shows the winner rule, which sampled rows
+    lose, and which survive — not only the shaped output."""
+    body = client.post(
+        "/api/v1/shape/preview",
+        json={
+            "sample_rows": [
+                {"id": "1", "v": "old", "ts": 1},
+                {"id": "2", "v": "b", "ts": 2},
+                {"id": "1", "v": "new", "ts": 3},
+            ],
+            "source_columns": ["id", "v", "ts"],
+            "recipe": {
+                "steps": [
+                    {
+                        "op": "dedupe_rows",
+                        "options": {
+                            "keys": ["id"],
+                            "keep": "last",
+                            "order_by": "ts",
+                        },
+                    }
+                ]
+            },
+        },
+    ).json()
+
+    assert body["effect"]["rows_diverted"] == 1
+    prev = body["dedupe_preview"]
+    assert prev["1"]["keys"] == ["id"]
+    assert "order_by=ts" in prev["1"]["rule"]
+    assert prev["1"]["loser_count"] == 1
+    loser = prev["1"]["losers"][0]
+    assert loser["row"] == 1 and loser["key"] == ["1"] and loser["winner_row"] == 3
+    assert prev["1"]["winner_count"] == 2

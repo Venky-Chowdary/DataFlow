@@ -34,9 +34,15 @@ def test_dedupe_refuses_unknown_keep():
         _parse([{"op": "dedupe_rows", "options": {"keys": ["id"], "keep": "bogus"}}])
 
 
-def test_dedupe_keep_last_requires_order_by():
-    with pytest.raises(ShapeError, match="order_by"):
-        _parse([{"op": "dedupe_rows", "options": {"keys": ["id"], "keep": "last"}}])
+def test_dedupe_keep_last_without_order_by_is_last_seen():
+    """keep=last with no ordering column is the declared last-seen rule —
+    the last-arriving member wins (B2)."""
+    recipe = _parse(
+        [{"op": "dedupe_rows", "options": {"keys": ["id"], "keep": "last"}}]
+    )
+    step = recipe.enabled_steps[0]
+    assert step.options["keep"] == "last"
+    assert "order_by" not in step.options
 
 
 def test_dedupe_refuses_a_missing_key_column():

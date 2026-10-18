@@ -2702,6 +2702,15 @@ def _stream_database_transfer_impl(
                 "shape_step": d.step,
                 "shape_op": d.op,
                 "source_row_index": d.row_index + 1,
+                **(
+                    {
+                        "dedupe_key": list(d.dedupe_key),
+                        "winner_row": d.winner_row_index + 1,
+                    }
+                    if getattr(d, "dedupe_key", None) is not None
+                    and getattr(d, "winner_row_index", None) is not None
+                    else {}
+                ),
             }
             for d in diverted
         ]

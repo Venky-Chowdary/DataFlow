@@ -1688,6 +1688,181 @@ def _apply_unique_rule_checks(
         payload["message"] = f"{payload.get('message') or ''} — {note}".strip()
 
 
+def _count_dest_key_duplicates(
+    dialect: str,
+    dest_cfg: dict[str, Any],
+    *,
+    endpoint: EndpointConfig,
+    table: str,
+    columns: list[str],
+) -> int:
+    """Number of keys appearing more than once on the destination, through
+    the canonical warehouse-SQL engine + table-ref helpers."""
+    import sqlalchemy as sa
+
+    from connectors.sql_identifiers import require_safe_identifier
+    from services.dest_precount import (
+        warehouse_sql_engine,
+        warehouse_sql_table_ref,
+    )
+
+    table_ref = warehouse_sql_table_ref(
+        dialect, dest_cfg, str(endpoint.schema or ""), table
+    )
+    with warehouse_sql_engine(dialect, dest_cfg) as engine:
+        quote = engine.dialect.identifier_preparer.quote
+        qcols = ", ".join(
+            quote(require_safe_identifier(c, preserve_case=True))
+            for c in columns
+        )
+        stmt = sa.text(
+            f"SELECT COUNT(*) FROM (SELECT {qcols} FROM {table_ref} "
+            f"GROUP BY {qcols} HAVING COUNT(*) > 1) df_dedupe_dups"
+        )
+        with engine.connect() as conn:
+            return int(conn.execute(stmt).scalar() or 0)
+
+
+def _run_dedupe_gate_checks(
+    report: dict[str, Any],
+    ctx: dict[str, Any],
+    dest_summary: dict[str, Any],
+    sync_mode: str,
+) -> list[dict[str, Any]]:
+    """B2 Gate-8 checks for recipes holding dedupe steps.
+
+    Ledger balance: a step's rows_in must equal winners out plus losers
+    ledgered (diverted + removed) — an unbalanced dedupe ledger means rows
+    moved without a named reason. Winner uniqueness: when this run wrote the
+    whole destination population and every key column lands on the
+    destination, the dest must contain no duplicated key.
+    """
+    from services.sync_cursor import is_overwrite_sync
+
+    checks: list[dict[str, Any]] = []
+    steps = dest_summary.get("shape_dedupe") or []
+    out_cols = set(str(c) for c in (dest_summary.get("shape_output_columns") or []))
+    db_type = str(ctx.get("engine") or "")
+    cfg = ctx.get("cfg") or {}
+    table_name = str(ctx.get("table_name") or "")
+    schema = str(ctx.get("schema") or "")
+    whole_table = is_overwrite_sync(sync_mode) or int(
+        dest_summary.get(PRECOUNT_KEY) or 0
+    ) == 0
+    dialect = _unique_check_dialect(db_type)
+    for entry in steps:
+        step_no = entry.get("step")
+        keys = [str(c) for c in entry.get("keys") or []]
+        rule = (
+            f"keep={entry.get('keep') or 'first'}"
+            + (f" order_by={entry.get('order_by')} {entry.get('order_dir') or 'desc'}"
+               if entry.get("order_by") else "")
+            + (" merge=non_null" if entry.get("merge") else "")
+        )
+        # 1. Ledger balance.
+        rows_in = int(entry.get("rows_in") or 0)
+        winners = int(entry.get("rows_out") or 0)
+        losers = int(entry.get("rows_diverted") or 0) + int(
+            entry.get("rows_removed") or 0
+        )
+        if rows_in == winners + losers:
+            checks.append(
+                {
+                    "step": step_no,
+                    "check": "ledger_balance",
+                    "status": "passed",
+                    "detail": f"{rows_in} in = {winners} winner(s) + {losers} loser(s)",
+                }
+            )
+        else:
+            checks.append(
+                {
+                    "step": step_no,
+                    "check": "ledger_balance",
+                    "status": "failed",
+                    "detail": (
+                        f"dedupe step {step_no}: {rows_in} row(s) in but "
+                        f"{winners} winner(s) + {losers} loser(s) ledgered"
+                    ),
+                }
+            )
+        # 2. Winner uniqueness on the destination.
+        base = {"step": step_no, "check": "winner_uniqueness", "keys": keys}
+        if not keys:
+            checks.append({**base, "status": "unverified", "reason": "no keys declared"})
+            continue
+        missing = [k for k in keys if k not in out_cols]
+        if missing:
+            checks.append(
+                {
+                    **base,
+                    "status": "unverified",
+                    "reason": (
+                        f"key column(s) {missing} do not reach the destination "
+                        "under their recipe names — cannot verify winner "
+                        "uniqueness"
+                    ),
+                }
+            )
+            continue
+        if not whole_table:
+            checks.append(
+                {
+                    **base,
+                    "status": "unverified",
+                    "reason": (
+                        "destination held prior rows this run did not write — "
+                        "dedupe keys are not a load contract, so winner "
+                        "uniqueness cannot be isolated to this run's rows"
+                    ),
+                }
+            )
+            continue
+        if dialect is None or not table_name:
+            checks.append(
+                {**base, "status": "unverified", "reason": "unsupported_destination"}
+            )
+            continue
+        try:
+            endpoint = EndpointConfig(
+                format=str(db_type or ""),
+                schema=schema,
+                table=table_name,
+            )
+            dups = _count_dest_key_duplicates(
+                dialect, cfg, endpoint=endpoint, table=table_name, columns=keys
+            )
+        except Exception as exc:
+            _logger.warning(
+                "dedupe winner-uniqueness check failed: error_type=%s",
+                type(exc).__name__,
+            )
+            checks.append(
+                {**base, "status": "unverified", "reason": "count_error"}
+            )
+            continue
+        if dups:
+            checks.append(
+                {
+                    **base,
+                    "status": "failed",
+                    "detail": (
+                        f"dedupe step {step_no} ({rule}): {dups} key(s) hold "
+                        "more than one winner on the destination"
+                    ),
+                }
+            )
+        else:
+            checks.append(
+                {
+                    **base,
+                    "status": "passed",
+                    "detail": f"{winners} unique winner key(s) under {rule}",
+                }
+            )
+    return checks
+
+
 def _run_reconciliation_impl(
     *,
     endpoint: EndpointConfig,
@@ -1714,6 +1889,7 @@ def _run_reconciliation_impl(
     vector_stamp_ctx: dict[str, Any] = {}
     keyset_stamp_ctx: dict[str, Any] = {}
     scd2_stamp_ctx: dict[str, Any] = {}
+    dedupe_stamp_ctx: dict[str, Any] = {}
     # G21/G22 — filled after source/dest engines resolve. Early file-export
     # returns still see mappings so a declared control total cannot skip silently.
     n5_ctx: dict[str, Any] = {
@@ -1858,6 +2034,52 @@ def _run_reconciliation_impl(
                 stamped["unproven"] = True
                 stamped["message"] = (
                     f"SCD2 history verification unproven: {exc}"
+                )
+        if dedupe_stamp_ctx:
+            # B2 Gate-8: every dedupe step must leave its winner set unique on
+            # the declared keys, and its ledger must balance — rows in equal
+            # winners out plus losers ledgered to quarantine. A violation is a
+            # failed verification in every mode; a check that cannot run is
+            # "unproven", never silently skipped.
+            try:
+                _ded = _run_dedupe_gate_checks(
+                    stamped,
+                    dedupe_stamp_ctx,
+                    dest_summary if isinstance(dest_summary, dict) else {},
+                    str(
+                        dest_summary.get("sync_mode")
+                        or dest_summary.get("effective_sync_mode")
+                        or ""
+                    ),
+                )
+                stamped["dedupe_checks"] = _ded
+                _ded_fail = [c for c in _ded if c.get("status") == "failed"]
+                _ded_unv = [c for c in _ded if c.get("status") == "unverified"]
+                if _ded_fail:
+                    stamped["passed"] = False
+                    stamped["verification_verdict"] = "failed"
+                    stamped["message"] = (
+                        "Dedupe verification failed: "
+                        + "; ".join(
+                            str(c.get("detail") or c.get("reason") or "")
+                            for c in _ded_fail
+                        )
+                    )
+                if _ded_unv:
+                    stamped["unproven"] = True
+                    stamped["message"] = (
+                        (stamped.get("message") or "")
+                        + " Dedupe checks unverified: "
+                        + "; ".join(
+                            str(c.get("reason") or "")
+                            for c in _ded_unv
+                        )
+                    ).strip()
+            except Exception as exc:  # noqa: BLE001
+                stamped["passed"] = False
+                stamped["unproven"] = True
+                stamped["message"] = (
+                    f"Dedupe verification unproven: {exc}"
                 )
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
@@ -2063,6 +2285,14 @@ def _run_reconciliation_impl(
         default="",
     ) == "scd2":
         scd2_stamp_ctx.update(
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            engine=db_type,
+        )
+
+    if isinstance(dest_summary, dict) and dest_summary.get("shape_dedupe"):
+        dedupe_stamp_ctx.update(
             cfg=cfg,
             schema=schema,
             table_name=table_name,

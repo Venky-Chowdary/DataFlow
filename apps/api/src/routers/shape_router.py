@@ -207,6 +207,7 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     if program_hash:
         identity["recipe_hash"] = program_hash
     scd2_preview = _scd2_step_preview(body, recipe, shaped or rows, out_columns)
+    dedupe_preview = _dedupe_step_preview(recipe, engine, shaped)
     return {
         "recipe": identity,
         "sampled_rows": len(rows),
@@ -222,6 +223,7 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         if body.include_profile
         else [],
         "scd2_preview": scd2_preview,
+        "dedupe_preview": dedupe_preview,
         "preview_note": preview_note,
     }
 
@@ -229,6 +231,55 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _dedupe_step_preview(recipe, engine, shaped) -> dict[int, dict[str, Any]]:
+    """Per dedupe step: the declared rule, which sampled rows lose, and
+    which survive — winner-vs-loser provenance, not just shaped output."""
+    out: dict[int, dict[str, Any]] = {}
+    steps = list(recipe.enabled_steps)
+    for i, step in enumerate(steps):
+        if step.op != "dedupe_rows":
+            continue
+        opts = step.options or {}
+        keys = [str(c) for c in opts.get("keys") or []]
+        rule_bits = [f"keep={opts.get('keep') or 'first'}"]
+        if opts.get("order_by"):
+            rule_bits.append(f"order_by={opts['order_by']} {opts.get('order_dir') or 'desc'}")
+        for entry in opts.get("then_by") or []:
+            if isinstance(entry, dict):
+                rule_bits.append(f"then_by={entry.get('column')} {entry.get('dir') or 'desc'}")
+            else:
+                rule_bits.append(f"then_by={entry}")
+        if opts.get("merge") == "non_null":
+            rule_bits.append("merge=non_null")
+        rule_bits.append(f"tie={opts.get('tie_break') or 'first_seen'}")
+        losers = [
+            {
+                "row": d.get("loser_row"),
+                "key": d.get("key"),
+                "winner_row": d.get("winner_row"),
+                "reason": d.get("reason"),
+            }
+            for d in engine.dedupe_decisions
+            if d.get("step") == i + 1
+        ]
+        # The surviving (winner) rows projected onto this step's key columns.
+        winners = [
+            {"key": [r.get(c) for c in keys], "row": r}
+            for r in (shaped or [])
+            if any(r.get(c) is not None for c in keys)
+        ]
+        out[i + 1] = {
+            "step": i + 1,
+            "rule": ", ".join(rule_bits),
+            "keys": keys,
+            "losers": losers,
+            "winners": winners,
+            "winner_count": len(winners),
+            "loser_count": len(losers),
+        }
+    return out
 
 
 def _scd2_step_preview(

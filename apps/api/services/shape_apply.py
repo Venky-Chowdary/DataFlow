@@ -347,7 +347,7 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
     if runner is None:
         return {}
     effect = runner.effect
-    return {
+    out = {
         "shape_recipe_hash": runner.recipe_hash,
         "rows_shaped_in": effect.rows_in,
         "rows_shaped_out": effect.rows_shaped_out,
@@ -357,3 +357,32 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
         "shape_cells_changed": effect.cells_changed,
         "shape_nulls_introduced": effect.nulls_introduced,
     }
+    # Per dedupe step: the declared winner rule, its keys, and the exact
+    # conservation tallies — Gate-8 balances rows_in against winners +
+    # ledgered losers and checks winner uniqueness on the destination.
+    dedupe_steps: list[dict[str, Any]] = []
+    for i, step in enumerate(runner.recipe.enabled_steps):
+        if step.op != "dedupe_rows":
+            continue
+        tally = effect.steps[i] if i < len(effect.steps) else None
+        opts = step.options or {}
+        dedupe_steps.append(
+            {
+                "step": i + 1,
+                "keys": [str(c) for c in opts.get("keys") or []],
+                "keep": str(opts.get("keep") or "first"),
+                "order_by": str(opts.get("order_by") or "") or None,
+                "order_dir": str(opts.get("order_dir") or "") or None,
+                "then_by": list(opts.get("then_by") or []),
+                "tie_break": str(opts.get("tie_break") or "first_seen"),
+                "merge": str(opts.get("merge") or "") or None,
+                "rows_in": int(getattr(tally, "rows_in", 0) or 0),
+                "rows_out": int(getattr(tally, "rows_out", 0) or 0),
+                "rows_diverted": int(getattr(tally, "rows_diverted", 0) or 0),
+                "rows_removed": int(getattr(tally, "rows_removed", 0) or 0),
+            }
+        )
+    if dedupe_steps:
+        out["shape_dedupe"] = dedupe_steps
+        out["shape_output_columns"] = list(runner.output_columns or ())
+    return out

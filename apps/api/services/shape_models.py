@@ -273,12 +273,16 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     # --- advanced set operations (Tier 5, may hold rows to end-of-stream) ----
     _StepDef(
         "dedupe_rows",
-        "Keep one row per key — the first seen, or the best by an ordering column",
+        "Keep one row per key — first/last seen, the best by ordering columns, "
+        "or a non-null merge — every loser ledgered to quarantine",
         family="advanced",
         active=True,
         needs_column=False,
         buffered=True,
-        options=("keys", "keep", "order_by", "order_dir", "max_keys"),
+        options=(
+            "keys", "keep", "order_by", "order_dir", "then_by",
+            "tie_break", "merge", "max_keys",
+        ),
         required=("keys",),
     ),
     _StepDef(
@@ -1062,11 +1066,6 @@ def _normalize_options(
             raise ShapeError(f"{where}: dedupe keep must be first or last")
         out["keep"] = keep
         order_by = str(out.get("order_by") or "").strip()
-        if keep == "last" and not order_by:
-            raise ShapeError(
-                f"{where}: dedupe keep=last needs order_by — 'last' is undefined "
-                "without an ordering column"
-            )
         _assert_columns_exist([order_by], columns, "order_by", where=where)
         # Default 'desc' matches the engine: keep=last means the largest
         # order_by value wins when no direction is stated.
@@ -1078,6 +1077,51 @@ def _normalize_options(
             out["order_by"] = order_by
         else:
             out.pop("order_by", None)
+            out.pop("order_dir", None)
+        # then_by: extra ordering columns consulted in order before the
+        # arrival tie-break — the declared tie-break order.
+        then_by = out.get("then_by")
+        if then_by in (None, "", []):
+            out.pop("then_by", None)
+        else:
+            if isinstance(then_by, str):
+                then_by = [part.strip() for part in then_by.split(",") if part.strip()]
+            if not isinstance(then_by, (list, tuple)):
+                raise ShapeError(f"{where}: dedupe then_by must be a list of columns")
+            normalized_tb: list[dict[str, str]] = []
+            for entry in then_by:
+                if isinstance(entry, Mapping):
+                    col = str(entry.get("column") or "").strip()
+                    direction = str(entry.get("dir") or entry.get("direction") or order_dir).strip().casefold()
+                else:
+                    col = str(entry).strip()
+                    direction = order_dir
+                if direction not in ("asc", "desc"):
+                    raise ShapeError(f"{where}: dedupe then_by dir must be asc or desc")
+                _assert_columns_exist([col], columns, "then_by", where=where)
+                normalized_tb.append({"column": col, "dir": direction})
+            if normalized_tb:
+                out["then_by"] = normalized_tb
+            else:
+                out.pop("then_by", None)
+        # tie_break: who wins when every ordering column compares equal —
+        # first_seen keeps the incumbent, last_seen replaces it.
+        tie_break = str(out.get("tie_break") or "first_seen").strip().casefold()
+        if tie_break not in ("first_seen", "last_seen"):
+            raise ShapeError(f"{where}: dedupe tie_break must be first_seen or last_seen")
+        out["tie_break"] = tie_break
+        # merge: 'non_null' fills the winner's null columns with the
+        # best-ranked non-null member value; 'none' emits the winner as-is.
+        merge = out.get("merge")
+        if merge in (None, "", "none", False):
+            out.pop("merge", None)
+        else:
+            if merge is True:
+                merge = "non_null"
+            merge = str(merge).strip().casefold()
+            if merge != "non_null":
+                raise ShapeError(f"{where}: dedupe merge must be non_null")
+            out["merge"] = "non_null"
         if out.get("max_keys") not in (None, ""):
             number = _as_int(out["max_keys"], "max_keys", where=where)
             if number <= 0:

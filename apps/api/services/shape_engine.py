@@ -117,15 +117,24 @@ class DivertedRow:
     step: int
     op: str
     record: dict[str, Any]
+    # Dedupe losers also name the key they lost on and the winner's row
+    # number, so the ledger (and the per-step preview) can pair them.
+    dedupe_key: tuple[Any, ...] | None = None
+    winner_row_index: int | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        out = {
             "row": self.row_index + 1,
             "reason": self.reason,
             "step": self.step + 1,
             "op": self.op,
             "record": dict(self.record),
         }
+        if self.dedupe_key is not None:
+            out["dedupe_key"] = list(self.dedupe_key)
+        if self.winner_row_index is not None:
+            out["winner_row"] = self.winner_row_index + 1
+        return out
 
 
 @dataclass
@@ -177,11 +186,14 @@ class ShapeEffect:
 class _Drop(Exception):
     """Internal: this row leaves the stream."""
 
-    def __init__(self, *, diverted: bool, reason: str, step_index: int, op: str):
+    def __init__(self, *, diverted: bool, reason: str, step_index: int, op: str,
+                 dedupe_key: tuple | None = None, winner_row_index: int | None = None):
         self.diverted = diverted
         self.reason = reason
         self.step_index = step_index
         self.op = op
+        self.dedupe_key = dedupe_key
+        self.winner_row_index = winner_row_index
 
 
 class _Held:
@@ -194,6 +206,103 @@ _HELD = _Held()
 # buffer. Unbounded buffers are how transform engines die, so every buffering
 # op has a declared cap that a recipe can raise — deliberately, never silently.
 _MAX_BUFFERED = 500_000
+
+
+def _dedupe_rank(
+    options: Mapping[str, Any], row: dict[str, Any], arrival: int
+) -> tuple[tuple[Any, ...], tuple[str, ...]]:
+    """The ordering positions a member is ranked on, with each direction.
+
+    Order: order_by first, then each then_by column, then — only as the
+    declared tie-break — arrival. keep=last with no ordering columns ranks on
+    arrival alone (last-seen); keep=first always ranks earliest arrival best.
+    """
+    keep = str(options.get("keep") or "first").casefold()
+    if keep == "first":
+        return (arrival,), ("asc",)
+    parts: list[Any] = []
+    dirs: list[str] = []
+    order_col = str(options.get("order_by") or "")
+    if order_col:
+        parts.append(_sort_val(row.get(order_col)))
+        dirs.append(str(options.get("order_dir") or "desc").casefold())
+    for entry in options.get("then_by") or []:
+        if isinstance(entry, Mapping):
+            parts.append(_sort_val(row.get(str(entry.get("column") or ""))))
+            dirs.append(str(entry.get("dir") or "desc").casefold())
+        else:
+            parts.append(_sort_val(row.get(str(entry))))
+            dirs.append(str(options.get("order_dir") or "desc").casefold())
+    if not parts:
+        # No ordering columns: arrival is the rank — last-seen wins.
+        parts.append(arrival)
+        dirs.append("desc")
+    return tuple(parts), tuple(dirs)
+
+
+def _dedupe_better(
+    new_parts: tuple[Any, ...],
+    cur_parts: tuple[Any, ...],
+    dirs: tuple[str, ...],
+    tie_last: bool,
+) -> bool:
+    """True when the challenger strictly outranks the incumbent.
+
+    Positions compare in order under their own direction; a full tie is
+    decided by the declared tie_break — first_seen keeps the incumbent,
+    last_seen replaces it.
+    """
+    for nv, cv, direction in zip(new_parts, cur_parts, dirs):
+        if nv == cv:
+            continue
+        return nv > cv if direction == "desc" else nv < cv
+    return tie_last
+
+
+def _dedupe_rule(options: Mapping[str, Any]) -> str:
+    keep = str(options.get("keep") or "first").casefold()
+    order_col = str(options.get("order_by") or "")
+    bits = [f"keep={keep}"]
+    if order_col:
+        bits.append(f"order_by={order_col} {options.get('order_dir') or 'desc'}")
+    for entry in options.get("then_by") or []:
+        if isinstance(entry, Mapping):
+            bits.append(f"then_by={entry.get('column')} {entry.get('dir') or 'desc'}")
+        else:
+            bits.append(f"then_by={entry}")
+    if str(options.get("merge") or "").casefold() == "non_null":
+        bits.append("merge=non_null")
+    bits.append(f"tie={options.get('tie_break') or 'first_seen'}")
+    return ", ".join(bits)
+
+
+_SQL_NULL_SENTINEL = "__DF_SQL_NULL__"
+
+
+def _dedupe_is_null(value: Any) -> bool:
+    """Null under either wire: Python None or the SQL NULL sentinel string
+    the transfer layer uses so NULL and '' stay distinct."""
+    return value is None or value == _SQL_NULL_SENTINEL
+
+
+def _dedupe_feed_fallback(
+    fallbacks: dict[str, tuple],
+    row: dict[str, Any],
+    parts: tuple[Any, ...],
+    arrival: int,
+) -> None:
+    """Offer a member's non-null values as merge fill candidates.
+
+    Per column the best-ranked member value wins the fill — tracked as
+    (rank, value) so a later, better-ranked member can still displace it.
+    """
+    rank = parts + (arrival,)
+    for col, value in row.items():
+        if _dedupe_is_null(value):
+            continue
+        current = fallbacks.get(col)
+        if current is None or rank > current[0]:
+            fallbacks[col] = (rank, value)
 
 
 def _max_buffer(options: Mapping[str, Any]) -> int:
@@ -339,6 +448,14 @@ class ShapeEngine:
         self._drained = False
         # Diverted rows awaiting the caller's persist (take_diverted per page).
         self._diverted_pending: list[DivertedRow] = []
+        # Dedupe decisions for the per-step preview: every loser, its key,
+        # and the winning row number. Capped like diverted_samples — the
+        # tallies in effect.steps stay exact regardless.
+        self.dedupe_decisions: list[dict[str, Any]] = []
+        self._dedupe_diverted: dict[int, int] = {}
+        # merge=non_null: per step, per key, the best-ranked non-null member
+        # value per column — the fill candidates for the winner's nulls.
+        self._dedupe_merge: dict[int, dict[tuple, dict[str, tuple]]] = {}
 
     @property
     def output_columns(self) -> tuple[str, ...]:
@@ -472,8 +589,20 @@ class ShapeEngine:
                 tally.rows_buffered -= held
                 self.effect.rows_buffered -= held
                 if dropped:
-                    tally.rows_removed += dropped
-                    self.effect.rows_shaped_out += dropped
+                    if step.op == "dedupe_rows":
+                        # Dedupe losers were diverted to quarantine at the
+                        # moment they lost — charge the remainder (a diverted
+                        # row must never count as a removal too).
+                        already = self._dedupe_diverted.pop(index, 0)
+                        remainder = dropped - already
+                        if remainder < 0:
+                            remainder = 0
+                        if remainder:
+                            tally.rows_removed += remainder
+                            self.effect.rows_shaped_out += remainder
+                    else:
+                        tally.rows_removed += dropped
+                        self.effect.rows_shaped_out += dropped
             tally.rows_out += emitted
             for row in materialized:
                 for final in self._run_tail(row, index + 1):
@@ -555,7 +684,20 @@ class ShapeEngine:
         options = step.options
 
         if op == "dedupe_rows":
-            return [entry[1] for entry in buffer.values()]
+            merge = str(options.get("merge") or "").casefold() == "non_null"
+            out = []
+            for key, entry in buffer.items():
+                parts, winner_row, winner_index = entry
+                if merge:
+                    fallbacks = (self._dedupe_merge.get(index) or {}).get(key) or {}
+                    merged = dict(winner_row)
+                    for col, fb in fallbacks.items():
+                        if _dedupe_is_null(merged.get(col)) and fb and not _dedupe_is_null(fb[1]):
+                            merged[col] = fb[1]
+                    out.append(merged)
+                else:
+                    out.append(winner_row)
+            return out
 
         if op == "aggregate":
             out = []
@@ -937,35 +1079,79 @@ class ShapeEngine:
             keys = [str(c) for c in options.get("keys", [])]
             key = tuple(_as_text(row.get(c)) for c in keys)
             keep = str(options.get("keep") or "first").casefold()
-            if keep == "first":
-                seen = self._state.setdefault(index, set())
-                if len(seen) >= _max_buffer(options):
+            merge = str(options.get("merge") or "").casefold() == "non_null"
+            rule = _dedupe_rule(options)
+            cap = _max_buffer(options)
+            if keep == "first" and not merge:
+                # Streaming first-seen: the winner emitted in place, later
+                # members quarantined with the winning row named.
+                seen = self._state.setdefault(index, {})
+                if len(seen) >= cap and key not in seen:
                     raise ValueError(
-                        f"dedupe_rows key space passed {_max_buffer(options)} keys — "
+                        f"dedupe_rows key space passed {cap} keys — "
                         "the buffer cap exists so one transfer cannot hold the "
                         "population in memory; raise 'max_keys' only deliberately"
                     )
-                if key in seen:
-                    raise _Drop(diverted=False, reason="duplicate key", step_index=index, op=op)
-                seen.add(key)
+                winner_index = seen.get(key)
+                if winner_index is not None:
+                    raise _Drop(
+                        diverted=True,
+                        reason=(
+                            f"dedupe loser — key {key} already kept row "
+                            f"#{winner_index + 1} under {rule}"
+                        ),
+                        step_index=index, op=op,
+                        dedupe_key=key,
+                        winner_row_index=winner_index,
+                    )
+                seen[key] = self._row_index
                 return row
+            # Buffered winner-election: keep=last (latest-by-column, then_by
+            # order, declared tie_break; no ordering = last-seen) or any
+            # merge — merge must see the whole group before emitting.
             winners = self._buffers.setdefault(index, {})
-            if len(winners) >= _max_buffer(options) and key not in winners:
+            if len(winners) >= cap and key not in winners:
                 raise ValueError(
-                    f"dedupe_rows key space passed {_max_buffer(options)} keys — "
+                    f"dedupe_rows key space passed {cap} keys — "
                     "raise 'max_keys' only deliberately"
                 )
-            order_col = str(options.get("order_by") or "")
-            order_val = _sort_val(row.get(order_col)) if order_col else (self._row_index,)
-            descending = str(options.get("order_dir") or "desc").casefold() != "asc"
+            parts, dirs = _dedupe_rank(options, row, self._row_index)
+            tie_last = str(options.get("tie_break") or "first_seen").casefold() == "last_seen"
             current = winners.get(key)
-            # Strict comparison both ways: on an equal order value the
-            # first-seen row keeps the win — replacing on a tie would make the
-            # result depend on arrival order in a way nobody asked for.
-            if current is None or (
-                (order_val > current[0]) if descending else (order_val < current[0])
-            ):
-                winners[key] = (order_val, dict(row))
+            fallbacks = self._dedupe_fallbacks(index, key) if merge else None
+            if current is None:
+                winners[key] = (parts, dict(row), self._row_index)
+                if merge:
+                    _dedupe_feed_fallback(fallbacks, row, parts, self._row_index)
+            elif _dedupe_better(parts, current[0], dirs, tie_last):
+                # Displaced winner — it is a loser now, quarantined with the
+                # new winner's row number named.
+                self._dedupe_lose(
+                    index, tally, key, current[1],
+                    loser_index=current[2],
+                    winner_index=self._row_index,
+                    reason=(
+                        f"dedupe loser — key {key} displaced by row "
+                        f"#{self._row_index + 1} under {rule}"
+                    ),
+                )
+                if merge:
+                    _dedupe_feed_fallback(fallbacks, current[1], current[0], current[2])
+                winners[key] = (parts, dict(row), self._row_index)
+                if merge:
+                    _dedupe_feed_fallback(fallbacks, row, parts, self._row_index)
+            else:
+                self._dedupe_lose(
+                    index, tally, key, row,
+                    loser_index=self._row_index,
+                    winner_index=current[2],
+                    reason=(
+                        f"dedupe loser — key {key} kept row "
+                        f"#{current[2] + 1} under {rule}"
+                    ),
+                )
+                if merge:
+                    _dedupe_feed_fallback(fallbacks, row, parts, self._row_index)
             return _HELD
 
         if op == "aggregate":
@@ -1263,7 +1449,26 @@ class ShapeEngine:
             step=drop.step_index,
             op=drop.op,
             record=dict(row) if self.keep_diverted_records else {},
+            dedupe_key=drop.dedupe_key,
+            winner_row_index=drop.winner_row_index,
         )
+        self._queue_diverted(record)
+        if drop.dedupe_key is not None and drop.winner_row_index is not None:
+            self._dedupe_diverted[drop.step_index] = (
+                self._dedupe_diverted.get(drop.step_index, 0) + 1
+            )
+            if len(self.dedupe_decisions) < _MAX_BUFFERED:
+                self.dedupe_decisions.append(
+                    {
+                        "step": drop.step_index + 1,
+                        "key": list(drop.dedupe_key),
+                        "loser_row": self._row_index + 1,
+                        "winner_row": drop.winner_row_index + 1,
+                        "reason": drop.reason,
+                    }
+                )
+
+    def _queue_diverted(self, record: DivertedRow) -> None:
         # Every diverted row is quarantine matter, not a sampled curiosity:
         # the transfer drains this per page and persists it to the DLQ.
         if len(self._diverted_pending) >= _MAX_BUFFERED:
@@ -1276,6 +1481,51 @@ class ShapeEngine:
         if len(self.effect.diverted_samples) >= self.sample_limit:
             return
         self.effect.diverted_samples.append(record)
+
+    def _dedupe_lose(
+        self,
+        index: int,
+        tally: "StepEffect",
+        key: tuple[Any, ...],
+        row: dict[str, Any],
+        *,
+        loser_index: int,
+        winner_index: int,
+        reason: str,
+    ) -> None:
+        """Ledger a dedupe loser: quarantined with the winner named.
+
+        Losers are diverted (quarantine matter — never silently dropped), and
+        the decision is logged so the per-step preview can pair every loser
+        with the row that beat it.
+        """
+        tally.rows_diverted += 1
+        self.effect.rows_diverted += 1
+        self._dedupe_diverted[index] = self._dedupe_diverted.get(index, 0) + 1
+        self._queue_diverted(
+            DivertedRow(
+                row_index=loser_index,
+                reason=reason,
+                step=index,
+                op="dedupe_rows",
+                record=dict(row) if self.keep_diverted_records else {},
+                dedupe_key=key,
+                winner_row_index=winner_index,
+            )
+        )
+        if len(self.dedupe_decisions) < _MAX_BUFFERED:
+            self.dedupe_decisions.append(
+                {
+                    "step": index + 1,
+                    "key": list(key),
+                    "loser_row": loser_index + 1,
+                    "winner_row": winner_index + 1,
+                    "reason": reason,
+                }
+            )
+
+    def _dedupe_fallbacks(self, index: int, key: tuple) -> dict[str, tuple]:
+        return self._dedupe_merge.setdefault(index, {}).setdefault(key, {})
 
     def take_diverted(self) -> list[DivertedRow]:
         """Diverted rows since the last call, then cleared.

@@ -370,3 +370,193 @@ def test_aggregate_column_contract() -> None:
     runner.records([{"dept": "A", "amt": 1, "v": 9}])
     runner.drain()
     assert tuple(runner.output_columns) == ("dept", "total")
+
+
+# ---------------------------------------------------------------------------
+# B2 winner rules: last-seen, tie-break order, non-null merge — and every
+# loser ledgered to quarantine with the winning row named.
+# ---------------------------------------------------------------------------
+
+def test_dedupe_last_seen_without_order_column() -> None:
+    """keep=last with no order_by is the declared last-seen rule."""
+    out, runner = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {"op": "dedupe_rows", "options": {"keys": ["id"], "keep": "last"}}
+            ],
+        },
+        [
+            {"id": "1", "v": "first"},
+            {"id": "1", "v": "second"},
+            {"id": "2", "v": "only"},
+        ],
+    )
+    assert sorted(r["id"] for r in out) == ["1", "2"]
+    assert next(r for r in out if r["id"] == "1")["v"] == "second"
+    diverted = runner.take_diverted()
+    assert len(diverted) == 1
+    assert diverted[0].record["v"] == "first"
+    assert diverted[0].dedupe_key == ("1",)
+    assert diverted[0].winner_row_index == 1
+    assert runner._engine.rows_accounted_for()
+
+
+def test_dedupe_tie_break_order_is_declared() -> None:
+    """Equal order values resolve by tie_break: first_seen (default) keeps the
+    incumbent, last_seen replaces it."""
+    for tie, expected in (("first_seen", "early"), ("last_seen", "late")):
+        out, _ = _run(
+            {
+                "input_columns": ["id", "v", "ts"],
+                "steps": [
+                    {
+                        "op": "dedupe_rows",
+                        "options": {
+                            "keys": ["id"],
+                            "keep": "last",
+                            "order_by": "ts",
+                            "tie_break": tie,
+                        },
+                    }
+                ],
+            },
+            [
+                {"id": "1", "v": "early", "ts": 5},
+                {"id": "1", "v": "late", "ts": 5},
+            ],
+        )
+        assert out[0]["v"] == expected
+
+
+def test_dedupe_then_by_breaks_ties_before_arrival() -> None:
+    """then_by orders the tie-break: the higher seq row wins even though it
+    arrived first — arrival only decides a full tie."""
+    out, runner = _run(
+        {
+            "input_columns": ["id", "v", "ts", "seq"],
+            "steps": [
+                {
+                    "op": "dedupe_rows",
+                    "options": {
+                        "keys": ["id"],
+                        "keep": "last",
+                        "order_by": "ts",
+                        "then_by": [{"column": "seq", "dir": "asc"}],
+                    },
+                }
+            ],
+        },
+        [
+            {"id": "1", "v": "seq2", "ts": 5, "seq": 2},
+            {"id": "1", "v": "seq1", "ts": 5, "seq": 1},
+        ],
+    )
+    assert out[0]["v"] == "seq1"
+    assert runner._engine.rows_accounted_for()
+
+
+def test_dedupe_non_null_merge_fills_winner_nulls() -> None:
+    """merge=non_null: the winner's null columns fill from the best-ranked
+    member holding a non-null value — the winner's own values never lose."""
+    out, runner = _run(
+        {
+            "input_columns": ["id", "v", "ts", "email", "phone"],
+            "steps": [
+                {
+                    "op": "dedupe_rows",
+                    "options": {
+                        "keys": ["id"],
+                        "keep": "last",
+                        "order_by": "ts",
+                        "merge": "non_null",
+                    },
+                }
+            ],
+        },
+        [
+            {"id": "1", "v": "old", "ts": 1, "email": "a@x.com", "phone": None},
+            {"id": "1", "v": "new", "ts": 3, "email": None, "phone": "111"},
+            {"id": "1", "v": "mid", "ts": 2, "email": "mid@x.com", "phone": "222"},
+        ],
+    )
+    assert len(out) == 1
+    row = out[0]
+    # Winner (ts=3) keeps its own values; email fills from ts=2 (best-ranked
+    # member with a non-null), phone keeps the winner's own non-null.
+    assert row["v"] == "new"
+    assert row["email"] == "mid@x.com"
+    assert row["phone"] == "111"
+    # Both members ledgered as losers.
+    assert runner.effect.steps[0].rows_diverted == 2
+    assert runner._engine.rows_accounted_for()
+
+
+def test_dedupe_keep_first_merge_fills_from_losers() -> None:
+    """keep=first + merge: the first-seen row wins; later members are losers
+    but still contribute non-null fills."""
+    out, runner = _run(
+        {
+            "input_columns": ["id", "v", "email"],
+            "steps": [
+                {
+                    "op": "dedupe_rows",
+                    "options": {
+                        "keys": ["id"], "keep": "first", "merge": "non_null"
+                    },
+                }
+            ],
+        },
+        [
+            {"id": "1", "v": "first", "email": None},
+            {"id": "1", "v": "dup", "email": "fill@x.com"},
+        ],
+    )
+    assert out == [{"id": "1", "v": "first", "email": "fill@x.com"}]
+    decisions = runner._engine.dedupe_decisions
+    assert len(decisions) == 1 and decisions[0]["winner_row"] == 1
+    assert runner._engine.rows_accounted_for()
+
+
+def test_dedupe_losers_are_quarantine_matter_not_silent_drops() -> None:
+    """Every loser — keep=first duplicates and displaced keep=last winners —
+    lands on the diverted ledger with key, winner and rule named."""
+    out, runner = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {"op": "dedupe_rows", "options": {"keys": ["id"], "keep": "first"}}
+            ],
+        },
+        [{"id": "1", "v": "a"}, {"id": "1", "v": "dup"}, {"id": "2", "v": "b"}],
+    )
+    assert [r["id"] for r in out] == ["1", "2"]
+    diverted = runner.take_diverted()
+    assert len(diverted) == 1
+    d = diverted[0]
+    assert d.op == "dedupe_rows"
+    assert d.dedupe_key == ("1",)
+    assert "kept row #1" in d.reason and "keep=first" in d.reason
+    # Diverted, not removed: quarantine is replayable, removal is silent.
+    assert runner.effect.rows_diverted == 1
+    assert runner.effect.rows_shaped_out == 0
+    assert runner._engine.rows_accounted_for()
+
+
+def test_dedupe_option_validation() -> None:
+    cols = ["id", "v"]
+    base = {"input_columns": cols, "steps": [{"op": "dedupe_rows", "options": {}}]}
+    import copy
+
+    bad_tie = copy.deepcopy(base)
+    bad_tie["steps"][0]["options"] = {"keys": ["id"], "tie_break": "random"}
+    with pytest.raises(ShapeError, match="tie_break"):
+        ShapeRecipe.parse(bad_tie, source_columns=cols)
+    bad_merge = copy.deepcopy(base)
+    bad_merge["steps"][0]["options"] = {"keys": ["id"], "merge": "concat"}
+    with pytest.raises(ShapeError, match="merge"):
+        ShapeRecipe.parse(bad_merge, source_columns=cols)
+    bad_then = copy.deepcopy(base)
+    bad_then["steps"][0]["options"] = {"keys": ["id"], "then_by": ["ghost"]}
+    with pytest.raises(ShapeError, match="then_by"):
+        ShapeRecipe.parse(bad_then, source_columns=cols)
