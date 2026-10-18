@@ -2,11 +2,12 @@ import { useState } from "react";
 import { StudioMultiPicker, StudioPicker } from "../ui/StudioPicker";
 import type { StudioPickerOption } from "../../lib/studioPicker";
 import {
-  composeFilterCondition,
+  composeFilterGroup,
   FILTER_OPERATORS,
   filterOperatorNeedsValue,
-  parseFilterCondition,
+  parseFilterGroup,
 } from "../../lib/filterCondition";
+import type { FilterCombinator, FilterConditionParts, FilterGroup } from "../../lib/filterCondition";
 import {
   fieldsFor,
   insertExpressionToken,
@@ -296,7 +297,7 @@ function ExpressionAssist({
   );
 }
 
-function FilterConditionBuilder({
+export function FilterConditionBuilder({
   id,
   field,
   value,
@@ -319,14 +320,16 @@ function FilterConditionBuilder({
   onExpressionChange: (text: string) => void;
   onCommit?: () => void;
 }) {
-  const parsed = parseFilterCondition(value);
+  const parsed = parseFilterGroup(value);
   const [advanced, setAdvanced] = useState(parsed == null);
-  const parts = parsed ?? { field: "", operator: "<>", value: "" };
-  const write = (next: { field: string; operator: string; value: string }) => {
-    const text = composeFilterCondition(next);
+  const group = parsed ?? { combinator: "and" as const, conditions: [{ field: "", operator: "<>", value: "" }] };
+  const write = (next: FilterGroup) => {
+    const text = composeFilterGroup(next);
     onChange(text);
     onExpressionChange(text);
   };
+  const writeCondition = (idx: number, part: FilterConditionParts) =>
+    write({ ...group, conditions: group.conditions.map((c, i) => (i === idx ? part : c)) });
   const compound = parsed == null && value.trim().length > 0;
   if (advanced) {
     return (
@@ -368,40 +371,85 @@ function FilterConditionBuilder({
   }
   return (
     <div className="df2-canvas-filter">
-      <StudioPicker
-        id={`${id}-field`}
-        label="Field"
-        required={field.required}
-        invalid={invalid && !parts.field}
-        value={parts.field}
-        options={columns}
-        placeholder="Pick a column…"
-        disabled={!canPlan}
-        onChange={(fieldName) => write({ ...parts, field: fieldName })}
-      />
-      <StudioPicker
-        id={`${id}-operator`}
-        label="Operator"
-        value={parts.operator}
-        options={FILTER_OPERATORS.map((operator) => ({ value: operator.id, label: operator.label }))}
-        disabled={!canPlan}
-        searchable={false}
-        onChange={(operator) => write({ ...parts, operator })}
-      />
-      {filterOperatorNeedsValue(parts.operator) && (
-        <div className="df2-field">
-          <label className="df2-label" htmlFor={`${id}-value`}>Value</label>
-          <input
-            id={`${id}-value`}
-            className="df2-input df2-studio-field"
-            value={parts.value}
+      {group.conditions.map((parts, ci) => (
+        <div key={ci} className="df2-canvas-filter-row" style={{ display: "grid", gap: 8 }}>
+          {ci > 0 && (
+            <div className="df2-canvas-filter-join">
+              <select
+                aria-label={`Join condition ${ci + 1}`}
+                className="df2-input df2-input-sm"
+                value={group.combinator}
+                disabled={!canPlan}
+                onChange={(event) =>
+                  write({ ...group, combinator: event.target.value as FilterCombinator })
+                }
+              >
+                <option value="and">AND</option>
+                <option value="or">OR</option>
+              </select>
+            </div>
+          )}
+          <StudioPicker
+            id={`${id}-field-${ci}`}
+            label="Field"
+            required={field.required && ci === 0}
+            invalid={invalid && !parts.field}
+            value={parts.field}
+            options={columns}
+            placeholder="Pick a column…"
             disabled={!canPlan}
-            placeholder="Empty matches a blank value"
-            onBlur={onCommit}
-            onChange={(event) => write({ ...parts, value: event.target.value })}
+            onChange={(fieldName) => writeCondition(ci, { ...parts, field: fieldName })}
           />
+          <StudioPicker
+            id={`${id}-operator-${ci}`}
+            label="Operator"
+            value={parts.operator}
+            options={FILTER_OPERATORS.map((operator) => ({ value: operator.id, label: operator.label }))}
+            disabled={!canPlan}
+            searchable={false}
+            onChange={(operator) => writeCondition(ci, { ...parts, operator })}
+          />
+          {filterOperatorNeedsValue(parts.operator) && (
+            <div className="df2-field">
+              <label className="df2-label" htmlFor={`${id}-value-${ci}`}>Value</label>
+              <input
+                id={`${id}-value-${ci}`}
+                className="df2-input df2-studio-field"
+                value={parts.value}
+                disabled={!canPlan}
+                placeholder="Empty matches a blank value"
+                onBlur={onCommit}
+                onChange={(event) => writeCondition(ci, { ...parts, value: event.target.value })}
+              />
+            </div>
+          )}
+          {group.conditions.length > 1 && (
+            <button
+              type="button"
+              className="df2-btn df2-btn-ghost df2-btn-sm"
+              disabled={!canPlan}
+              onClick={() =>
+                write({ ...group, conditions: group.conditions.filter((_, j) => j !== ci) })
+              }
+            >
+              Remove condition
+            </button>
+          )}
         </div>
-      )}
+      ))}
+      <button
+        type="button"
+        className="df2-btn df2-btn-ghost df2-btn-sm"
+        disabled={!canPlan}
+        onClick={() =>
+          write({
+            ...group,
+            conditions: [...group.conditions, { field: "", operator: "<>", value: "" }],
+          })
+        }
+      >
+        + Add condition ({group.combinator.toUpperCase()})
+      </button>
       {field.hint && <span className="df2-label-hint">{field.hint}</span>}
       {expressionError && <span className="df2-xform-required" role="alert">{expressionError}</span>}
       <button

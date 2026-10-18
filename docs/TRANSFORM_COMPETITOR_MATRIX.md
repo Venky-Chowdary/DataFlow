@@ -12,13 +12,13 @@ Missing = nothing in code yet.
 |1|Field selection|Have|Per-mapping source→target carry + column select|
 |2|Field rename|Have|Mapping `target` rename (src_to_tgt)|
 |3|Type cast/precision|Partial|`decimal/integer/boolean/date/datetime/time` ops + `target_type`; precision/scale params not exposed|
-|4|Row filter simple|Partial|`source_filter` counts `rows_source_filtered`; no AND/OR group builder|
+|4|Row filter condition builder|Implemented|guided AND/OR condition groups -> expression (any function in advanced mode) + `filter_rows`/`divert_rows`/`source_filter`|
 |5|Multi-way routing|Missing|—|
 |6|Aggregation GROUP BY|Implemented|`aggregate` op — group_by + sum/avg/count/min/max/first/last, end-of-stream drain, buffer cap|
 |7|Joins|Partial|transform_models relate refs in SQL; no in-flow Joiner step|
 |8|Lookup/reference|Implemented|`lookup` op — resolved reference table, key map, unmatched null/drop/divert|
-|9|Expression builder|Partial|`shape` /expression endpoint + rule_compiler NL; no validated function-language editor|
-|10|Function library|Partial|~20 real ops + `replace:`/`concat:`/`default:`/`assume_timezone:` prefixes + `_ENGINE_ALIASES`|
+|9|Expression builder|Implemented|`set_value`/`derive_column` expression steps + in-flow expression assist + function-insert picker in Library|
+|10|Function library|Implemented|expression language: text/numeric/date/null-safe fns + operators, validated design-time; /ops `functions` catalog feeds the pickers|
 |11|Cleanse trim/case/null/replace/regex|Have|`trim/upper/lower/normalize_unicode/strip_controls/replace:`|
 |12|Address verification|Missing|—|
 |13|Parse split typed fields|Missing|no split op|

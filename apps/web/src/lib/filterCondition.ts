@@ -59,3 +59,71 @@ export function composeFilterCondition(parts: FilterConditionParts): string {
   if (!COMPARISON.has(parts.operator)) return "";
   return `[${field}] ${parts.operator} ${quote(parts.value)}`;
 }
+
+// --- AND/OR groups ---------------------------------------------------------
+//
+// The guided builder speaks flat groups: every condition joined by one
+// combinator. Beats the one-comparison ceiling of ELT rivals while staying
+// honest — a mixed `a and b or c` or a nested `(a or b) and c` is genuinely
+// ambiguous without parens, so it stays in advanced mode.
+
+export type FilterCombinator = "and" | "or";
+
+export interface FilterGroup {
+  combinator: FilterCombinator;
+  conditions: FilterConditionParts[];
+}
+
+/** Empty text opens an empty group. A flat same-combinator chain round-trips.
+ *  Mixed/nested expressions stay advanced (return null). */
+export function parseFilterGroup(expression: string): FilterGroup | null {
+  const text = expression.trim();
+  if (!text) return { combinator: "and", conditions: [{ field: "", operator: "<>", value: "" }] };
+  // Split on top-level `and`/`or`. There are no parens or quotes containing
+  // the keywords to guard against deeper than "not inside '…'": scan and
+  // split only on keyword boundaries outside string literals.
+  const parts: string[] = [];
+  const combinators: FilterCombinator[] = [];
+  let depth = 0;
+  let inStr = false;
+  let start = 0;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inStr) {
+      if (ch === "'") {
+        if (text[i + 1] === "'") i++;
+        else inStr = false;
+      }
+      continue;
+    }
+    if (ch === "'") inStr = true;
+    else if (ch === "(" || ch === "[") depth++;
+    else if (ch === ")" || ch === "]") depth--;
+    else if (depth === 0) {
+      const rest = text.slice(i);
+      const m = rest.match(/^\s+(and|or)\s+/i);
+      if (m) {
+        parts.push(text.slice(start, i));
+        combinators.push(m[1].toLowerCase() as FilterCombinator);
+        i += m[0].length - 1;
+        start = i + 1;
+      }
+    }
+  }
+  parts.push(text.slice(start));
+  if (parts.some((p) => !p.trim())) return null;
+  const combinator = combinators[0] ?? "and";
+  if (combinators.some((c) => c !== combinator)) return null; // mixed — ambiguous
+  const conditions = parts.map((p) => parseFilterCondition(p));
+  if (conditions.some((c) => c == null)) return null;
+  return { combinator, conditions: conditions as FilterConditionParts[] };
+}
+
+export function composeFilterGroup(group: FilterGroup): string {
+  const clauses = group.conditions
+    .map(composeFilterCondition)
+    .filter((c) => c.trim().length > 0);
+  if (clauses.length === 0) return "";
+  if (clauses.length === 1) return clauses[0];
+  return clauses.join(` ${group.combinator} `);
+}

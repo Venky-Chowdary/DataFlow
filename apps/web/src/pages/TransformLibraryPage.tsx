@@ -9,6 +9,7 @@ import { PageToolbar } from "../components/ui/PageToolbar";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
 import { DtIcon } from "../components/DtIcon";
+import { FilterConditionBuilder } from "../components/transfer/ShapeStepFields";
 import {
   cloneTransformTemplate,
   createTransformRecipe,
@@ -233,6 +234,28 @@ export function TransformLibraryPage() {
 
   const opDetail = (op: string) => ops?.ops_detail?.find((d) => d.op === op);
 
+  // Columns the guided condition builder can offer: every column any step
+  // already names, plus keys from the preview sample rows.
+  const columnOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const s of steps) {
+      if (s.column) names.add(s.column);
+      if (s.output_column) names.add(s.output_column);
+      for (const v of Object.values(s.options || {})) {
+        if (typeof v === "string" && /^[A-Za-z_][\w.]*$/.test(v)) names.add(v);
+      }
+    }
+    try {
+      const rows = JSON.parse(previewRows || "[]");
+      if (Array.isArray(rows) && rows[0] && typeof rows[0] === "object") {
+        Object.keys(rows[0] as Record<string, unknown>).forEach((k) => names.add(k));
+      }
+    } catch {
+      /* preview JSON not parseable yet — column hints just stay sparse */
+    }
+    return [...names].sort().map((n) => ({ value: n, label: n }));
+  }, [steps, previewRows]);
+
   const stepOptions = useMemo(() => ops?.ops ?? [], [ops]);
 
   if (editing !== null || isNew) {
@@ -356,16 +379,69 @@ export function TransformLibraryPage() {
                   </div>
                   {(opDetail(step.op)?.options?.length ?? 0) > 0 ? (
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                      {opDetail(step.op)!.options!.map((key) => (
-                        <label key={key} className="df2-label-hint" style={{ display: "block" }}>
-                          {key}
-                          <input
-                            className="df2-input"
-                            value={typeof step.options?.[key] === "object" ? JSON.stringify(step.options[key]) : String(step.options?.[key] ?? "")}
-                            onChange={(e) => setStepOption(i, key, e.target.value)}
-                          />
-                        </label>
-                      ))}
+                      {opDetail(step.op)!.options!.map((key) => {
+                        const detail = opDetail(step.op)!;
+                        if (key === detail.expression_option && key === "condition") {
+                          return (
+                            <div key={key} style={{ flexBasis: "100%" }}>
+                              <FilterConditionBuilder
+                                id={`lib-step-${i}-condition`}
+                                field={{ name: "condition", kind: "expression", label: "Condition", hint: "", required: true }}
+                                value={String(step.options?.[key] ?? "")}
+                                columns={columnOptions}
+                                canPlan
+                                invalid={false}
+                                expressionError=""
+                                onChange={(v) => setStepOption(i, key, String(v ?? ""))}
+                                onExpressionChange={(t) => setStepOption(i, key, t)}
+                              />
+                            </div>
+                          );
+                        }
+                        if (key === detail.expression_option) {
+                          return (
+                            <div key={key} style={{ flexBasis: "100%" }}>
+                              <label className="df2-label-hint" style={{ display: "block" }}>
+                                {key}
+                                <textarea
+                                  className="df2-input df2-xform-code"
+                                  rows={2}
+                                  value={String(step.options?.[key] ?? "")}
+                                  onChange={(e) => setStepOption(i, key, e.target.value)}
+                                />
+                              </label>
+                              {(ops?.functions?.length ?? 0) > 0 && (
+                                <select
+                                  aria-label={`Insert function into step ${i + 1}`}
+                                  className="df2-input df2-input-sm"
+                                  value=""
+                                  onChange={(e) => {
+                                    if (!e.target.value) return;
+                                    setStepOption(i, key, `${step.options?.[key] ?? ""}${e.target.value}()`);
+                                  }}
+                                >
+                                  <option value="">Insert function…</option>
+                                  {ops!.functions!.map((f) => (
+                                    <option key={f.name} value={f.name}>
+                                      {f.name} — {f.summary}
+                                    </option>
+                                  ))}
+                                </select>
+                              )}
+                            </div>
+                          );
+                        }
+                        return (
+                          <label key={key} className="df2-label-hint" style={{ display: "block" }}>
+                            {key}
+                            <input
+                              className="df2-input"
+                              value={typeof step.options?.[key] === "object" ? JSON.stringify(step.options[key]) : String(step.options?.[key] ?? "")}
+                              onChange={(e) => setStepOption(i, key, e.target.value)}
+                            />
+                          </label>
+                        );
+                      })}
                     </div>
                   ) : null}
                   {opDetail(step.op)?.summary ? (
