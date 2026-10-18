@@ -7,6 +7,9 @@ import re
 from collections import Counter
 import os
 import hashlib
+import json
+import sqlite3
+import tempfile
 import time
 from typing import Any
 
@@ -296,6 +299,182 @@ _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS = frozenset(
 )
 
 
+class _PinStore:
+    """Disk-backed per-key state for the transform proof (G-1g).
+
+    The write-time ledger pins key -> raw-row hash; the proof then joins
+    re-read raw hashes, expected fingerprints and destination
+    fingerprints per key. Holding those maps in memory costs ~0.9 KB per
+    key — ~187 MB at 200k keys. A temp SQLite db keeps the proof O(1) in
+    memory instead: classification is SQL and only a small sample of
+    culprit keys is ever materialized for column naming.
+    """
+
+    def __init__(self) -> None:
+        fd, self.path = tempfile.mkstemp(prefix="df_pinmap_", suffix=".db")
+        os.close(fd)
+        self.db = sqlite3.connect(self.path)
+        self.db.execute("PRAGMA journal_mode=OFF")
+        self.db.execute("PRAGMA synchronous=OFF")
+        for ddl in (
+            "CREATE TABLE pin (k TEXT PRIMARY KEY, h TEXT)",
+            "CREATE TABLE rawh (k TEXT PRIMARY KEY, h TEXT)",
+            "CREATE TABLE exp (k TEXT PRIMARY KEY, fp TEXT, decl TEXT)",
+            "CREATE TABLE destk (k TEXT PRIMARY KEY, fp TEXT, vals TEXT)",
+        ):
+            self.db.execute(ddl)
+
+    def put(self, table: str, rows: list[tuple]) -> None:
+        if rows:
+            qs = ",".join("?" * len(rows[0]))
+            self.db.executemany(
+                f"INSERT OR REPLACE INTO {table} VALUES ({qs})",  # nosec B608
+                rows,
+            )
+
+    def flush(self) -> None:
+        self.db.commit()
+
+    def drift_stats(self) -> tuple[int, int, int]:
+        """(exp keys unpinned, exp key count, dest-only key count)."""
+        drift_n = int(
+            self.db.execute(
+                "SELECT count(*) FROM exp e "
+                "LEFT JOIN pin p ON e.k = p.k "
+                "LEFT JOIN rawh r ON e.k = r.k "
+                "WHERE p.h IS NULL OR p.h IS NOT r.h"
+            ).fetchone()[0]
+        )
+        n_keys = int(
+            self.db.execute("SELECT count(*) FROM exp").fetchone()[0]
+        )
+        dest_only = int(
+            self.db.execute(
+                "SELECT count(*) FROM destk d "
+                "LEFT JOIN exp e ON d.k = e.k WHERE e.k IS NULL"
+            ).fetchone()[0]
+        )
+        return drift_n, n_keys, dest_only
+
+    def culprit_keys(self, limit: int = 33) -> tuple[int, list[str]]:
+        """(culprit key count, up to ``limit`` sample keys).
+
+        A culprit is a pinned source key (write-time raw hash == re-read
+        hash) whose destination row is missing or fingerprint-differs
+        from the recipe-expected row — provable on a stable population.
+        """
+        where = (
+            "FROM exp e "
+            "JOIN pin p ON e.k = p.k "
+            "JOIN rawh r ON e.k = r.k AND p.h = r.h "
+            "LEFT JOIN destk d ON e.k = d.k "
+            "WHERE d.k IS NULL OR d.fp IS NOT e.fp"
+        )
+        n = int(
+            self.db.execute(f"SELECT count(*) {where}").fetchone()[0]  # nosec B608
+        )
+        keys = [
+            r[0]
+            for r in self.db.execute(
+                f"SELECT e.k {where} ORDER BY e.k LIMIT ?",  # nosec B608
+                (limit,),
+            )
+        ]
+        return n, keys
+
+    def samples(self, keys: list[str]) -> dict[str, tuple]:
+        """expected-decl and dest vals for a bounded set of keys."""
+        out: dict[str, tuple] = {}
+        for i in range(0, len(keys), 200):
+            chunk = keys[i : i + 200]
+            qs = ",".join("?" * len(chunk))
+            exp_rows = dict(
+                self.db.execute(
+                    f"SELECT k, decl FROM exp WHERE k IN ({qs})",  # nosec B608
+                    chunk,
+                )
+            )
+            dest_rows = dict(
+                self.db.execute(
+                    f"SELECT k, vals FROM destk WHERE k IN ({qs})",  # nosec B608
+                    chunk,
+                )
+            )
+            for k in chunk:
+                ed = exp_rows.get(k)
+                dv = dest_rows.get(k)
+                out[k] = (
+                    json.loads(ed) if ed else None,
+                    json.loads(dv) if dv else None,
+                )
+        return out
+
+    def close(self) -> None:
+        try:
+            self.db.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def __del__(self) -> None:  # noqa: D105
+        self.close()
+
+
+class _DiskKeySet:
+    """Disk-backed string set for run-scoped key filtering (G-1g).
+
+    Run-key scoping for SCD2/append proofs held every run key in a set —
+    O(keys) memory again at 1M rows. Temp SQLite keeps membership
+    lookups indexed and bounded.
+    """
+
+    def __init__(self) -> None:
+        fd, self.path = tempfile.mkstemp(prefix="df_scope_", suffix=".db")
+        os.close(fd)
+        self.db = sqlite3.connect(self.path)
+        self.db.execute("PRAGMA journal_mode=OFF")
+        self.db.execute("PRAGMA synchronous=OFF")
+        self.db.execute("CREATE TABLE scopek (k TEXT PRIMARY KEY)")
+        self._buf: list[str] = []
+
+    def add(self, k: str) -> None:
+        self._buf.append(k)
+        if len(self._buf) >= 5000:
+            self.flush()
+
+    def flush(self) -> None:
+        if self._buf:
+            self.db.executemany(
+                "INSERT OR IGNORE INTO scopek VALUES (?)",
+                [(k,) for k in self._buf],
+            )
+            self._buf.clear()
+
+    def __contains__(self, k: str) -> bool:
+        self.flush()
+        return bool(
+            self.db.execute(
+                "SELECT EXISTS(SELECT 1 FROM scopek WHERE k = ?)", (k,)
+            ).fetchone()[0]
+        )
+
+    def close(self) -> None:
+        try:
+            self.db.close()
+        except Exception:
+            pass
+        try:
+            os.unlink(self.path)
+        except OSError:
+            pass
+
+    def __del__(self) -> None:  # noqa: D105
+        self.close()
+
+
 def _transform_applied_proof(
     *,
     shape_recipe: dict[str, Any] | None,
@@ -455,7 +634,7 @@ def _transform_applied_proof(
     exp_out: dict[str, dict[str, str]] = {
         t: {} for t in set(declared_tcols)
     }
-    scope_keys: set[tuple[str, ...]] | None = set() if scope_pk else None
+    scope_keys: _DiskKeySet | None = _DiskKeySet() if scope_pk else None
 
     def _fp(row: dict[str, Any]) -> tuple:
         return tuple(_key_norm(row.get(c)) for c in digest_cols)
@@ -470,7 +649,7 @@ def _transform_applied_proof(
     # judged strictly (dest != expected fails naming the step); a moved,
     # new or missing key is drift -> unverifiable with counts.
     pin_meta = dest_summary.get("shape_raw_ledger")
-    pin_map: dict[str, str] | None = None
+    pin_store: _PinStore | None = None
     pin_key_cols: list[str] = []
     pin_hash_cols: list[str] = []
     if isinstance(pin_meta, dict) and pin_meta.get("keys"):
@@ -479,33 +658,43 @@ def _transform_applied_proof(
             for c in (pin_meta.get("key_columns") or [])
         ]
         pin_hash_cols = list(pin_meta.get("hashed_columns") or [])
+        _pin_path = str(pin_meta.get("file") or "")
         try:
-            if pin_meta.get("file"):
-                pin_map = {}
-                _pin_path = str(pin_meta["file"])
-                with open(_pin_path) as _fh:
-                    for line in _fh:
-                        k, _, h = line.rstrip("\n").partition("\x00")
-                        if k:
-                            pin_map[k] = h
-                try:
-                    os.unlink(_pin_path)
-                except OSError:
-                    pass
-            else:
-                pin_map = {
-                    str(k): str(v)
-                    for k, v in (pin_meta.get("entries") or {}).items()
-                }
-            if pin_map and not all(c in digest_cols for c in pin_key_cols):
-                pin_map = None
+            if all(c in digest_cols for c in pin_key_cols):
+                pin_store = _PinStore()
+                if _pin_path:
+                    _buf: list[tuple] = []
+                    with open(_pin_path) as _fh:
+                        for line in _fh:
+                            k, _, h = line.rstrip("\n").partition("\x00")
+                            if k:
+                                _buf.append((k, h))
+                            if len(_buf) >= 5000:
+                                pin_store.put("pin", _buf)
+                                _buf = []
+                    if _buf:
+                        pin_store.put("pin", _buf)
+                else:
+                    pin_store.put(
+                        "pin",
+                        [
+                            (str(k), str(v))
+                            for k, v in (pin_meta.get("entries") or {}).items()
+                        ],
+                    )
+                pin_store.flush()
         except Exception:
-            pin_map = None
-    exp_fp_by_key: dict[str, str] = {}
-    exp_decl_by_key: dict[str, tuple] = {}
-    raw_hash_by_key: dict[str, str] = {}
-    dest_fp_by_key: dict[str, str] = {}
-    bad_dest: dict[str, dict] = {}
+            if pin_store is not None:
+                pin_store.close()
+            pin_store = None
+        if _pin_path:
+            try:
+                os.unlink(_pin_path)
+            except OSError:
+                pass
+    _rawh_buf: list[tuple] = []
+    _exp_buf: list[tuple] = []
+    _destk_buf: list[tuple] = []
 
     def _expected_iter():
         nonlocal raw_count
@@ -525,33 +714,48 @@ def _transform_applied_proof(
                 raw_fp[_fp(trow)] += 1
                 for sc in raw_col:
                     raw_col[sc][_key_norm(row.get(sc))] += 1
-                if pin_map is not None:
-                    raw_hash_by_key[
-                        "\x1f".join(
-                            _key_norm(trow.get(c)) for c in pin_key_cols
+                if pin_store is not None:
+                    _rawh_buf.append(
+                        (
+                            "\x1f".join(
+                                _key_norm(trow.get(c))
+                                for c in pin_key_cols
+                            ),
+                            hashlib.sha256(
+                                "\x1f".join(
+                                    _key_norm(row.get(c))
+                                    for c in pin_hash_cols
+                                ).encode()
+                            ).hexdigest()[:16],
                         )
-                    ] = hashlib.sha256(
-                        "\x1f".join(
-                            _key_norm(row.get(c)) for c in pin_hash_cols
-                        ).encode()
-                    ).hexdigest()[:16]
+                    )
             for i, out in enumerate(outs):
                 orow = {
                     map_source_to_target(k, mappings): v
                     for k, v in out.items()
                 }
                 exp_fp[_fp(orow)] += 1
-                if pin_map is not None:
-                    _k = "\x1f".join(
-                        _key_norm(orow.get(c)) for c in pin_key_cols
-                    )
-                    exp_fp_by_key[_k] = _fph(orow)
-                    exp_decl_by_key[_k] = tuple(
-                        _key_norm(orow.get(t)) for _s, t in col_pairs
+                if pin_store is not None:
+                    _exp_buf.append(
+                        (
+                            "\x1f".join(
+                                _key_norm(orow.get(c))
+                                for c in pin_key_cols
+                            ),
+                            _fph(orow),
+                            json.dumps(
+                                [
+                                    _key_norm(orow.get(t))
+                                    for _s, t in col_pairs
+                                ]
+                            ),
+                        )
                     )
                 if scope_keys is not None:
                     scope_keys.add(
-                        tuple(_key_norm(orow.get(c)) for c in scope_pk)
+                        "\x1f".join(
+                            _key_norm(orow.get(c)) for c in scope_pk
+                        )
                     )
                 for sc, tc in col_pairs:
                     exp_col[tc][_key_norm(orow.get(tc))] += 1
@@ -561,27 +765,45 @@ def _transform_applied_proof(
                             _key_norm(orow.get(tc)),
                         )
                 yield orow
+            if pin_store is not None:
+                pin_store.put("rawh", _rawh_buf)
+                pin_store.put("exp", _exp_buf)
+                _rawh_buf.clear()
+                _exp_buf.clear()
         for out in runner.drain() or []:
             orow = {
                 map_source_to_target(k, mappings): v
                 for k, v in out.items()
             }
             exp_fp[_fp(orow)] += 1
-            if pin_map is not None:
-                _k = "\x1f".join(
-                    _key_norm(orow.get(c)) for c in pin_key_cols
-                )
-                exp_fp_by_key[_k] = _fph(orow)
-                exp_decl_by_key[_k] = tuple(
-                    _key_norm(orow.get(t)) for _s, t in col_pairs
+            if pin_store is not None:
+                _exp_buf.append(
+                    (
+                        "\x1f".join(
+                            _key_norm(orow.get(c)) for c in pin_key_cols
+                        ),
+                        _fph(orow),
+                        json.dumps(
+                            [
+                                _key_norm(orow.get(t))
+                                for _s, t in col_pairs
+                            ]
+                        ),
+                    )
                 )
             if scope_keys is not None:
                 scope_keys.add(
-                    tuple(_key_norm(orow.get(c)) for c in scope_pk)
+                    "\x1f".join(
+                        _key_norm(orow.get(c)) for c in scope_pk
+                    )
                 )
             for _sc, tc in col_pairs:
                 exp_col[tc][_key_norm(orow.get(tc))] += 1
             yield orow
+        if pin_store is not None:
+            pin_store.put("exp", _exp_buf)
+            _exp_buf.clear()
+            pin_store.flush()
 
     try:
         parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
@@ -668,12 +890,14 @@ def _transform_applied_proof(
             for st in steps
         )
     )
+    _covered_step_idx: set[int] = set()
     if oracle_ok:
-        for st in steps:
+        for _si, st in enumerate(steps):
             if not oracle_ok:
                 break
             op = str(st.get("op") or "")
             opts = st.get("options") or {}
+            _step_ok = True
             for scol in _step_cols(st):
                 expr = oracle_exprs.get(scol) or quote_sql_identifier(
                     scol, qs
@@ -681,8 +905,18 @@ def _transform_applied_proof(
                 expr = _step_sql(op, opts, expr, oracle_params)
                 if expr is None:
                     oracle_ok = False
+                    _step_ok = False
                     break
                 oracle_exprs[scol] = expr
+            if _step_ok:
+                _covered_step_idx.add(_si)
+    # Honest labeling (P3): name every step that got no independent SQL
+    # check so a re-apply verdict never reads as an independent proof.
+    oracle_uncovered: list[str] = [
+        f"step {i + 1} ({st.get('op') or 'unknown'})"
+        for i, st in enumerate(steps)
+        if i not in _covered_step_idx
+    ]
     oracle_bad: set[str] = set()
     if oracle_ok and oracle_exprs:
         # The oracle returns (raw -> oracle) pairs per declared column; a
@@ -807,7 +1041,7 @@ def _transform_applied_proof(
                 ):
                     for r in batch:
                         if (
-                            tuple(
+                            "\x1f".join(
                                 _key_norm(r.get(c)) for c in scope_pk
                             )
                             not in scope_keys
@@ -817,14 +1051,26 @@ def _transform_applied_proof(
                         dest_fp[_fp(row)] += 1
                         for _sc, tc in col_pairs:
                             dest_col[tc][_key_norm(row.get(tc))] += 1
-                        if pin_map is not None:
-                            dest_fp_by_key[
-                                "\x1f".join(
-                                    _key_norm(row.get(c))
-                                    for c in pin_key_cols
+                        if pin_store is not None:
+                            _destk_buf.append(
+                                (
+                                    "\x1f".join(
+                                        _key_norm(row.get(c))
+                                        for c in pin_key_cols
+                                    ),
+                                    _fph(row),
+                                    json.dumps(
+                                        {
+                                            c: _key_norm(row.get(c))
+                                            for c in digest_cols
+                                        }
+                                    ),
                                 )
-                            ] = _fph(row)
+                            )
                         yield row
+                    if pin_store is not None:
+                        pin_store.put("destk", _destk_buf)
+                        _destk_buf.clear()
 
             with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
                 with e0.connect() as c0:
@@ -866,6 +1112,7 @@ def _transform_applied_proof(
                 if oracle_ok and oracle_exprs
                 else "recipe re-applied"
             ),
+            "oracle_uncovered_steps": oracle_uncovered,
         }
 
     # G-1a: the re-read runs AFTER the write — a busy source may have
@@ -883,17 +1130,14 @@ def _transform_applied_proof(
                 f"{exp_n} recipe-applied rows but "
                 f"{actual_label} holds {actual_rows}"
             )
-            if pin_map is not None:
-                _drift_n = sum(
-                    1
-                    for k in exp_fp_by_key
-                    if pin_map.get(k) != raw_hash_by_key.get(k)
-                )
+            if pin_store is not None:
+                pin_store.flush()
+                _drift_n, _n_keys, _donly = pin_store.drift_stats()
                 reason = (
                     "source changed during run — "
-                    f"{_drift_n} of {len(exp_fp_by_key)} keys "
+                    f"{_drift_n + _donly} of {_n_keys + _donly} keys "
                     f"changed in source during run; "
-                    f"{len(exp_fp_by_key) - _drift_n} proven"
+                    f"{_n_keys - _drift_n} proven"
                 )
             return {
                 "status": "unverifiable",
@@ -955,7 +1199,7 @@ def _transform_applied_proof(
                     ):
                         for r in batch:
                             if scope_keys is not None and (
-                                tuple(
+                                "\x1f".join(
                                     _key_norm(r.get(c)) for c in scope_pk
                                 )
                                 not in scope_keys
@@ -965,63 +1209,60 @@ def _transform_applied_proof(
                             dest_fp[_fp(row)] += 1
                             for _sc, tc in col_pairs:
                                 dest_col[tc][_key_norm(row.get(tc))] += 1
-                            if pin_map is not None:
-                                _dk = "\x1f".join(
-                                    _key_norm(row.get(c))
-                                    for c in pin_key_cols
+                            if pin_store is not None:
+                                _destk_buf.append(
+                                    (
+                                        "\x1f".join(
+                                            _key_norm(row.get(c))
+                                            for c in pin_key_cols
+                                        ),
+                                        _fph(row),
+                                        json.dumps(
+                                            {
+                                                c: _key_norm(row.get(c))
+                                                for c in digest_cols
+                                            }
+                                        ),
+                                    )
                                 )
-                                _dh = _fph(row)
-                                dest_fp_by_key[_dk] = _dh
-                                if (
-                                    _dh != exp_fp_by_key.get(_dk)
-                                    and pin_map.get(_dk)
-                                    == raw_hash_by_key.get(_dk)
-                                    and pin_map.get(_dk) is not None
-                                ):
-                                    bad_dest[_dk] = row
+                        if pin_store is not None:
+                            pin_store.put("destk", _destk_buf)
+                            _destk_buf.clear()
 
-        if pin_map is not None:
-            # Pinned-key judging: a key whose re-read raw hash equals the
-            # write-time hash is stable, so dest != expected on it is a
-            # provable defect (wrong value, partial application, dropped
-            # step) — it fails and names the step. Moved/new/missing keys
-            # are drift -> unverifiable, with counts in the message.
-            culprit_keys_p: list[str] = []
-            drift_n = 0
+        if pin_store is not None:
+            # Pinned-key judging (disk-backed — G-1g): a key whose
+            # re-read raw hash equals the write-time hash is stable, so
+            # dest != expected on it is a provable defect (wrong value,
+            # partial application, dropped step) — it fails and names the
+            # step. Moved/new/missing keys are drift -> unverifiable,
+            # with counts in the message. Only a bounded sample of
+            # culprit keys is materialized for column naming.
+            pin_store.flush()
+            drift_n, n_keys, dest_only = pin_store.drift_stats()
+            drift_n += dest_only
+            culpr_n, culprit_keys_p = pin_store.culprit_keys()
             culprit_cols_p: set[str] = set()
-            for _k, _ef in exp_fp_by_key.items():
-                _pinned = (
-                    pin_map.get(_k) is not None
-                    and pin_map.get(_k) == raw_hash_by_key.get(_k)
-                )
-                _df = dest_fp_by_key.get(_k)
-                if not _pinned:
-                    drift_n += 1
-                elif _df is None:
-                    # Pinned source key produced no destination row —
-                    # provable loss on a stable population.
-                    culprit_keys_p.append(_k)
-                    culprit_cols_p.update(declared_tcols)
-                elif _df != _ef:
-                    culprit_keys_p.append(_k)
-            drift_n += sum(
-                1 for _k in dest_fp_by_key if _k not in exp_fp_by_key
-            )
-            for _k in culprit_keys_p:
-                _drow = bad_dest.get(_k)
-                _evals = exp_decl_by_key.get(_k) or ()
-                if _drow is None:
-                    continue
-                for (_sc, _tc), _ev in zip(col_pairs, _evals):
-                    if _key_norm(_drow.get(_tc)) != _ev:
-                        culprit_cols_p.add(_tc)
+            if culpr_n:
+                _samples = pin_store.samples(culprit_keys_p)
+                for _k in culprit_keys_p:
+                    _evals, _dvals = _samples.get(_k, (None, None))
+                    if _evals is None:
+                        continue
+                    if _dvals is None:
+                        # Pinned source key produced no destination row —
+                        # provable loss on a stable population.
+                        culprit_cols_p.update(declared_tcols)
+                        continue
+                    for (_sc, _tc), _ev in zip(col_pairs, _evals):
+                        if _key_norm(_dvals.get(_tc)) != _ev:
+                            culprit_cols_p.add(_tc)
             culprits = (
                 sorted(culprit_cols_p or declared_tcols)
-                if culprit_keys_p
+                if culpr_n
                 else []
             )
             drift = (drift_n > 0) and not culprits
-            drift_counts = (drift_n, len(exp_fp_by_key))
+            drift_counts = (drift_n, n_keys)
         else:
             extra = dest_fp - exp_fp
             missing = exp_fp - dest_fp

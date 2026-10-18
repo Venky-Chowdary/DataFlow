@@ -40,6 +40,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "schedule.approval.plan_changed": "A schedule approval plan changed.",
     "schedule.authorization.granted": "Standing schedule authorization was granted.",
     "schedule.authorization.revoked": "Standing schedule authorization was revoked.",
+    "schedule.recipe.upgrade": "A schedule's transform recipe binding was re-pinned to a newer version.",
     "audit.export.read": "Audit events were exported.",
     "audit.verify.read": "The audit chain was verified.",
     "audit.verify_pack.read": "An audit proof pack was verified.",
