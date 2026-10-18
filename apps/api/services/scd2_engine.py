@@ -631,6 +631,7 @@ def close_versions_missing_from_snapshot(
         )
     ).scalar()
     closed_n = int(closed or 0)
+    stamp = timestamp or _now_utc()
     if closed_n:
         conn.execute(
             sa.text(
@@ -638,9 +639,9 @@ def close_versions_missing_from_snapshot(
                 f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
                 f"WHERE {missing_pred}"
             ),
-            {"ts": timestamp or _now_utc()},
+            {"ts": stamp},
         )
-    return {"closed_missing_rows": closed_n}
+    return {"closed_missing_rows": closed_n, "run_stamp": stamp.isoformat()}
 
 
 def _active_checksum(
@@ -985,26 +986,39 @@ def _type1_update_rows(
     q = _qchar(dialect_name)
     current_quoted = quote_sql_identifier(cols["is_current"], q)
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
-    updated = 0
+    # One UPDATE per key at 20k untracked changes is 20k round-trips; group
+    # by the updated-column signature and send each group's parameter sets
+    # in a single executemany so the driver batches them server-side.
+    groups: dict[tuple[str, ...], list[tuple[str, dict[str, Any]]]] = {}
     for key, attrs in updates:
         if not attrs:
             continue
-        where_keys, params = _pk_or_clause(
-            pk_columns, [key], prefix="t1", dialect=dialect_name,
-            column_types=column_types,
-        )
+        groups.setdefault(tuple(sorted(attrs)), []).append((key, attrs))
+    updated = 0
+    for sig, members in groups.items():
+        cols_list = list(sig)
         set_clause = ", ".join(
             f"{quote_sql_identifier(c, q)} = :__v{i}"
-            for i, c in enumerate(attrs)
+            for i, c in enumerate(cols_list)
         )
-        for i, c in enumerate(attrs):
-            params[f"__v{i}"] = attrs[c]
-        sql = (
-            f"UPDATE {qualified} SET {set_clause} "  # nosec B608
-            f"WHERE {where_keys} AND {current_pred}"
-        )
-        result = conn.execute(sa.text(sql), params)
-        updated += result.rowcount or 0
+        sql = None
+        param_sets: list[dict[str, Any]] = []
+        for key, attrs in members:
+            where_keys, params = _pk_or_clause(
+                pk_columns, [key], prefix="t1", dialect=dialect_name,
+                column_types=column_types,
+            )
+            if sql is None:
+                sql = (
+                    f"UPDATE {qualified} SET {set_clause} "  # nosec B608
+                    f"WHERE {where_keys} AND {current_pred}"
+                )
+            for i, c in enumerate(cols_list):
+                params[f"__v{i}"] = attrs[c]
+            param_sets.append(params)
+        if sql is not None and param_sets:
+            result = conn.execute(sa.text(sql), param_sets)
+            updated += result.rowcount or 0
     return updated
 
 
@@ -1023,22 +1037,23 @@ def _fetch_max_versions(
     from connectors.writer_common import quote_sql_identifier
 
     q = _qchar(dialect_name)
-    pred, params = _pk_or_clause(
-        pk_columns, list(keys), prefix="mxv", dialect=dialect_name,
-        column_types=pk_types,
-    )
     ver_q = quote_sql_identifier(cols["version"], q)
     pk_sql = ", ".join(quote_sql_identifier(c, q) for c in pk_columns)
     out: dict[str, int] = {}
-    for row in conn.execute(
-        sa.text(
-            f"SELECT {pk_sql}, MAX({ver_q}) AS _mx FROM {qualified} "  # nosec B608
-            f"WHERE {pred} GROUP BY {pk_sql}"
-        ),
-        params,
-    ):
-        m = dict(row._mapping)
-        out[_compose_key(m, pk_columns)] = int(m.get("_mx") or 0)
+    for chunk in iter_pk_key_chunks(list(keys)):
+        pred, params = _pk_or_clause(
+            pk_columns, chunk, prefix="mxv", dialect=dialect_name,
+            column_types=pk_types,
+        )
+        for row in conn.execute(
+            sa.text(
+                f"SELECT {pk_sql}, MAX({ver_q}) AS _mx FROM {qualified} "  # nosec B608
+                f"WHERE {pred} GROUP BY {pk_sql}"
+            ),
+            params,
+        ):
+            m = dict(row._mapping)
+            out[_compose_key(m, pk_columns)] = int(m.get("_mx") or 0)
     return out
 
 
@@ -1366,6 +1381,11 @@ def apply_scd2(
         "rejected_rows": len(rejected_details),
         "transform_errors": list(transform_errors)[:20],
         "run_started_at": run_started_at.isoformat(),
+        # The exact stamp every row this call opened/closed carries. Gate-8
+        # recounts by exact-stamp membership so an overlapping writer inside
+        # the run window is never counted as this run's work.
+        "run_stamp": timestamp.isoformat(),
+        "run_stamps": [timestamp.isoformat()],
     }
 
 
@@ -1528,15 +1548,38 @@ def verify_scd2_history(
             # and a close inside the run window are the changed keys,
             # which must equal closed - closed_missing. The run's writes do
             # NOT share one timestamp: each merge batch and the close pass
-            # stamps its own instant, so the window is every stamp >= the
-            # recorded run start. Without a recorded run start (older
-            # summaries or direct callers) fall back to the max-instant
-            # heuristic, which is exact only for single-timestamp runs.
+            # stamps its own instant. The recount is by exact-stamp
+            # membership when the run recorded its stamps (an overlapping
+            # writer inside the window is then never counted), else by the
+            # recorded run start window, else the max-instant heuristic —
+            # exact only for single-timestamp runs.
+            stamp_set = {
+                d for d in (
+                    _as_dt(s) for s in (expected.get("run_stamps") or [])
+                ) if d is not None
+            }
             run_start = _as_dt(expected.get("run_started_at"))
             opened_now = 0
             closed_now = 0
             changed_now = 0
-            if run_start is not None:
+            if stamp_set:
+                for rows in versions.values():
+                    opened = sum(
+                        1 for m in rows
+                        if _as_dt(m.get(cols["valid_from"])) in stamp_set
+                    )
+                    closed = sum(
+                        1 for m in rows
+                        if _as_dt(m.get(cols["valid_to"])) in stamp_set
+                    )
+                    opened_now += opened
+                    closed_now += closed
+                    if opened and closed:
+                        changed_now += 1
+                run_ts = ",".join(
+                    sorted(str(s) for s in expected.get("run_stamps") or [])
+                )
+            elif run_start is not None:
                 for rows in versions.values():
                     opened = sum(
                         1 for m in rows

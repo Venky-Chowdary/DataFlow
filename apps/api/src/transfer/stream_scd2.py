@@ -226,6 +226,10 @@ def stream_scd2_mirror_transfer(
             # run writes — each batch and the close pass stamp their own
             # instant — is >= this. Recounted per run, not per timestamp.
             dest_summary["run_started_at"] = _dt_cls.now(_tz.utc).isoformat()
+            # The exact stamps this run writes — one per merge batch and the
+            # close pass. Gate-8 recounts by stamp membership so a second
+            # writer inside the window is never counted as this run's work.
+            run_stamps: set[str] = set()
             _scd2_cols = resolve_scd2_cols(scd2_opts)
             batch_size = 1_000
             if key_columns:
@@ -319,6 +323,8 @@ def stream_scd2_mirror_transfer(
                         active_rows = int(summary.get("active_rows", 0))
                         active_checksum = str(summary.get("active_checksum", ""))
                         break
+                    if summary.get("run_stamp"):
+                        run_stamps.add(str(summary["run_stamp"]))
                     written_total += int(summary.get("rows_written", 0))
                     updated_total += int(summary.get("updated_rows", 0))
                     type1_total += int(summary.get("type1_updated_rows") or 0)
@@ -358,6 +364,8 @@ def stream_scd2_mirror_transfer(
                             )
                             conn.commit()
                             dest_summary.update(closed)
+                            if closed.get("run_stamp"):
+                                run_stamps.add(str(closed["run_stamp"]))
                             updated_total += int(closed.get("closed_missing_rows") or 0)
                             if closed.get("closed_missing_rows"):
                                 active_rows, active_checksum = _scd2_active_checksum(
@@ -377,6 +385,7 @@ def stream_scd2_mirror_transfer(
                 dest_summary["type1_updated_rows"] = type1_total
                 dest_summary["scd2_rows_written"] = written_total
                 dest_summary["scd2_opts"] = _scd2_cols
+                dest_summary["run_stamps"] = sorted(run_stamps)
                 _stamp_merge_source_digest(dest_summary, stage_summary)
                 dest_summary["rejected_details"] = stage_rejects + rejected_all
                 dest_summary["rejected_rows"] = len(stage_rejects) + len(rejected_all)

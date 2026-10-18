@@ -355,14 +355,14 @@ def _exec(fake, req, prefix="scde"):
     return UniversalTransferEngine().execute_tracked(req, job_id)
 
 
-def _mk_src(cur, rows):
-    cur.execute("DROP TABLE IF EXISTS scd2_src CASCADE")
+def _mk_src(cur, rows, table="scd2_src"):
+    cur.execute(f"DROP TABLE IF EXISTS {table} CASCADE")
     cur.execute(
-        "CREATE TABLE scd2_src (id INT, name TEXT, price TEXT, note TEXT)"
+        f"CREATE TABLE {table} (id INT, name TEXT, price TEXT, note TEXT)"
     )
     for r in rows:
         cur.execute(
-            "INSERT INTO scd2_src (id, name, price, note) "
+            f"INSERT INTO {table} (id, name, price, note) "
             "VALUES (%s, %s, %s, %s)",
             (r["id"], r["name"], r["price"], r["note"]),
         )
@@ -382,27 +382,27 @@ def test_scd2_recipe_runs_through_engine_pg(tmp_path, monkeypatch):
     fake = _engine_env(monkeypatch)
     conn, parsed = _pg()
     cur = conn.cursor()
-    _mk_src(cur, ROWS)
-    cur.execute("DROP TABLE IF EXISTS scd2_dst CASCADE")
+    _mk_src(cur, ROWS, table="scd2_e1_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_e1_dst CASCADE")
     recipe = _scd2_recipe()
-    req = _engine_req("scd2_src", "scd2_dst", recipe, mode="strict")
+    req = _engine_req("scd2_e1_src", "scd2_e1_dst", recipe, mode="strict")
 
     res = _exec(fake, req)
     assert res.success, res.error
-    rows = _dst_rows(cur)
+    rows = _dst_rows(cur, table="scd2_e1_dst")
     assert len(rows) == 3
     assert all(r[4] == 1 and r[7] is True and r[6] is None for r in rows)
 
     # Unchanged rerun — no-op.
     res = _exec(fake, req)
     assert res.success, res.error
-    assert len(_dst_rows(cur)) == 3
+    assert len(_dst_rows(cur, table="scd2_e1_dst")) == 3
 
     # Tracked change id=1 price -> 15.00: v1 closes, v2 opens.
-    _mk_src(cur, [{**ROWS[0], "price": "15.00"}, ROWS[1], ROWS[2]])
+    _mk_src(cur, [{**ROWS[0], "price": "15.00"}, ROWS[1], ROWS[2]], table="scd2_e1_src")
     res = _exec(fake, req)
     assert res.success, res.error
-    rows = _dst_rows(cur)
+    rows = _dst_rows(cur, table="scd2_e1_dst")
     assert len(rows) == 4
     v2 = [r for r in rows if str(r[0]) == "1" and r[4] == 2]
     assert v2 and v2[0][7] is True and v2[0][2] == "15.00"
@@ -410,27 +410,27 @@ def test_scd2_recipe_runs_through_engine_pg(tmp_path, monkeypatch):
     # Untracked change id=2 note: Type-1 in place.
     changed = [{**ROWS[0], "price": "15.00"},
                {**ROWS[1], "note": "n2-new"}, ROWS[2]]
-    _mk_src(cur, changed)
+    _mk_src(cur, changed, table="scd2_e1_src")
     res = _exec(fake, req)
     assert res.success, res.error
-    rows = _dst_rows(cur)
+    rows = _dst_rows(cur, table="scd2_e1_dst")
     assert len(rows) == 4
     row2 = [r for r in rows if str(r[0]) == "2"][0]
     assert row2[3] == "n2-new" and row2[4] == 1
 
     # Key removal: id=3 absent -> soft-close; id=3 returns -> new version.
     reduced = [r for r in changed if r["id"] != "3"]
-    _mk_src(cur, reduced)
+    _mk_src(cur, reduced, table="scd2_e1_src")
     res = _exec(fake, req)
     assert res.success, res.error
-    rows = _dst_rows(cur)
+    rows = _dst_rows(cur, table="scd2_e1_dst")
     row3 = [r for r in rows if str(r[0]) == "3"][0]
     assert row3[7] is False and row3[6] is not None
 
-    _mk_src(cur, changed)
+    _mk_src(cur, changed, table="scd2_e1_src")
     res = _exec(fake, req)
     assert res.success, res.error
-    rows = _dst_rows(cur)
+    rows = _dst_rows(cur, table="scd2_e1_dst")
     v3 = [r for r in rows if str(r[0]) == "3"]
     assert sorted(r[4] for r in v3) == [1, 2]
     assert sum(1 for r in v3 if r[7] is True) == 1
@@ -444,35 +444,35 @@ def test_scd2_history_tamper_fails_gate8_pg(tmp_path, monkeypatch):
     fake = _engine_env(monkeypatch)
     conn, parsed = _pg()
     cur = conn.cursor()
-    _mk_src(cur, ROWS)
-    cur.execute("DROP TABLE IF EXISTS scd2_dst CASCADE")
+    _mk_src(cur, ROWS, table="scd2_e2_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_e2_dst CASCADE")
     recipe = _scd2_recipe()
-    req_strict = _engine_req("scd2_src", "scd2_dst", recipe, mode="strict")
+    req_strict = _engine_req("scd2_e2_src", "scd2_e2_dst", recipe, mode="strict")
     res = _exec(fake, req_strict)
     assert res.success, res.error
 
     # Tamper: insert a second is_current row for key 1 (duplicates its
     # current values under ver=99) then re-run unchanged under strict.
     cur.execute(
-        "INSERT INTO scd2_dst (id, name, price, note, ver, eff_from, "
+        "INSERT INTO scd2_e2_dst (id, name, price, note, ver, eff_from, "
         "eff_to, cur_flag, rh) "
         "SELECT id, name, price, note, 99, eff_from, NULL, true, rh "
-        "FROM scd2_dst WHERE id = '1'"
+        "FROM scd2_e2_dst WHERE id = '1'"
     )
     res = _exec(fake, req_strict)
     assert not res.success, "second is_current row must fail strict Gate-8"
-    cur.execute("DELETE FROM scd2_dst WHERE id = '1' AND ver = 99")
+    cur.execute("DELETE FROM scd2_e2_dst WHERE id = '1' AND ver = 99")
 
     # Same tamper under balanced: rows kept, verdict failed.
-    req_bal = _engine_req("scd2_src", "scd2_dst", recipe, mode="balanced")
+    req_bal = _engine_req("scd2_e2_src", "scd2_e2_dst", recipe, mode="balanced")
     cur.execute(
-        "INSERT INTO scd2_dst (id, name, price, note, ver, eff_from, "
+        "INSERT INTO scd2_e2_dst (id, name, price, note, ver, eff_from, "
         "eff_to, cur_flag, rh) "
         "SELECT id, name, price, note, 99, eff_from, NULL, true, rh "
-        "FROM scd2_dst WHERE id = '1'"
+        "FROM scd2_e2_dst WHERE id = '1'"
     )
     res = _exec(fake, req_bal)
-    cur.execute("DELETE FROM scd2_dst WHERE id = '1' AND ver = 99")
+    cur.execute("DELETE FROM scd2_e2_dst WHERE id = '1' AND ver = 99")
     recon = getattr(res, "reconciliation", None) or {}
     assert res.success is False or recon.get("passed") is False
     assert recon.get("verification_verdict") == "failed" or (
@@ -481,11 +481,11 @@ def test_scd2_history_tamper_fails_gate8_pg(tmp_path, monkeypatch):
     )
 
     # Overlapping interval: extend v1's valid_to past v2's valid_from.
-    _mk_src(cur, [{**ROWS[0], "price": "15.00"}, ROWS[1], ROWS[2]])
+    _mk_src(cur, [{**ROWS[0], "price": "15.00"}, ROWS[1], ROWS[2]], table="scd2_e2_src")
     res = _exec(fake, req_strict)
     assert res.success, res.error
     cur.execute(
-        "UPDATE scd2_dst SET eff_to = eff_to + interval '1 day' "
+        "UPDATE scd2_e2_dst SET eff_to = eff_to + interval '1 day' "
         "WHERE id = '1' AND ver = 1"
     )
     res = _exec(fake, req_strict)
@@ -614,6 +614,126 @@ def test_scd2_recount_catches_deleted_opened_row_pg(tmp_path, monkeypatch):
     res = _exec(fake, req)
     assert not res.success, (
         "deleting a row this run opened must fail the version recount"
+    )
+    recon = getattr(res, "reconciliation", None) or {}
+    hist = recon.get("scd2_history") or {}
+    assert "recount" in str(hist.get("violations") or res.error or "")
+    conn.close()
+
+
+def test_scd2_version_chunked_over_400_keys_pg(tmp_path, monkeypatch):
+    """B1-E4: a recipe scd2 WITH a version column must chunk the
+    max-version lookup — 401 and 1,200-key first loads plus a full
+    soft-close + reopen (every key misses current and hits the chunked
+    max-versions fetch) all run through execute_tracked."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_bulk(cur, _bulk_rows(1200), table="scd2_e4_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_e4_dst CASCADE")
+    recipe = _scd2_recipe()  # version column declared
+    req = _engine_req("scd2_e4_src", "scd2_e4_dst", recipe, mode="strict")
+
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute(
+        "SELECT COUNT(*), MIN(ver), MAX(ver) FROM scd2_e4_dst WHERE cur_flag"
+    )
+    n, lo, hi = cur.fetchone()
+    assert (n, lo, hi) == (1200, 1, 1)
+
+    # Soft-close 500 keys (keep ids 0-699 unchanged), then reopen them —
+    # each reopened key resolves max(version) over chunked predicates and
+    # must land ver=2. 500 missing keys exercises >1 chunk.
+    _mk_src_bulk(cur, _bulk_rows(700), table="scd2_e4_src")
+    res = _exec(fake, req)
+    assert res.success, res.error
+    _mk_src_bulk(cur, _bulk_rows(1200), table="scd2_e4_src")
+    res = _exec(fake, req)
+    assert res.success, res.error
+    cur.execute(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE ver = 2), "
+        "COUNT(*) FILTER (WHERE ver = 1) FROM scd2_e4_dst WHERE cur_flag"
+    )
+    n, v2, v1 = cur.fetchone()
+    assert (n, v2, v1) == (1200, 500, 700)
+    conn.close()
+
+
+def test_scd2_type1_batched_at_volume_pg(tmp_path, monkeypatch):
+    """B1-E4: 20k untracked-only changes take the Type-1 path — batched
+    executemany, in place, no new versions — measured through the engine."""
+    import time
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_bulk(cur, _bulk_rows(20000))
+    cur.execute("DROP TABLE IF EXISTS scd2_dst CASCADE")
+    recipe = _scd2_recipe(type1=True, tracked=["name"])
+    req = _engine_req("scd2_src", "scd2_dst", recipe, mode="strict")
+    res = _exec(fake, req)
+    assert res.success, res.error
+
+    changed = _bulk_rows(20000)
+    for r in changed:
+        r["note"] = f"u{r['id']}"  # untracked column only
+    _mk_src_bulk(cur, changed)
+    started = time.monotonic()
+    res = _exec(fake, req)
+    elapsed = time.monotonic() - started
+    assert res.success, res.error
+    # In place: still one version per key, note overwritten.
+    cur.execute(
+        "SELECT COUNT(*), COUNT(*) FILTER (WHERE ver = 1), "
+        "COUNT(*) FILTER (WHERE note LIKE 'u%') FROM scd2_dst"
+    )
+    n, v1, noted = cur.fetchone()
+    assert (n, v1, noted) == (20000, 20000, 20000)
+    print(f"\nType-1 20k untracked updates: {elapsed:.1f}s")
+    conn.close()
+
+
+def test_scd2_recount_ignores_overlapping_writer_pg(tmp_path, monkeypatch):
+    """P3: a second writer's stamps inside the run window must not count
+    as this run's work. Delete one row the run opened AND inject a
+    foreign open inside the window — a window recount nets zero and
+    masks the shortfall; the exact-stamp recount must still fail."""
+    import services.scd2_engine as scd2_mod
+    from datetime import datetime, timezone
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src_bulk(cur, _bulk_rows(1500), table="scd2_ol_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_ol_dst CASCADE")
+    req = _engine_req("scd2_ol_src", "scd2_ol_dst", None, mode="strict")
+
+    real = scd2_mod.verify_scd2_history
+
+    def _foreign_write_then_verify(*a, **kw):
+        ts = datetime.now(timezone.utc)
+        cur.execute(
+            "DELETE FROM scd2_ol_dst WHERE id = '7' AND is_current"
+        )
+        # A foreign writer opens a brand-new current key inside the
+        # window: window recount sees +1/-1 = expected, masking the
+        # deletion. Exact-stamp membership excludes it.
+        cur.execute(
+            "INSERT INTO scd2_ol_dst (id, name, price, note,"
+            " valid_from, valid_to, is_current, row_hash)"
+            " VALUES (77777,'x','1.00','n',%s,NULL,TRUE,'fk')",
+            (ts,),
+        )
+        return real(*a, **kw)
+
+    monkeypatch.setattr(
+        scd2_mod, "verify_scd2_history", _foreign_write_then_verify
+    )
+    res = _exec(fake, req)
+    assert not res.success, (
+        "a deleted run row masked by a foreign in-window open must "
+        "still fail the recount"
     )
     recon = getattr(res, "reconciliation", None) or {}
     hist = recon.get("scd2_history") or {}
