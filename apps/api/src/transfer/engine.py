@@ -2833,6 +2833,46 @@ class UniversalTransferEngine:
                         in ("full_refresh_mirror", "mirror"),
                     )
 
+                _scd2_opts = None
+                if effective_sync_lower == "scd2":
+                    # A recipe ``scd2`` step overrides the destination PK as
+                    # the natural key and declares stamp column names,
+                    # tracked columns, Type-1 untracked refresh, version
+                    # stamping, and the soft-close contract (B1). Keys and
+                    # tracked are declared in SOURCE column space; translate
+                    # to the mapped target names the merge writes.
+                    try:
+                        from services.shape_models import ShapeRecipe
+
+                        _rcp = ShapeRecipe.parse(
+                            getattr(request, "shape_recipe", None) or {},
+                            source_columns=columns,
+                        )
+                        _st = _rcp.scd2_step
+                        if _st is not None:
+                            _scd2_opts = _rcp.scd2_column_names() or {}
+                            _src2tgt = {
+                                str(m.get("source") or ""): str(
+                                    m.get("target") or ""
+                                )
+                                for m in (mappings or [])
+                                if isinstance(m, dict)
+                            }
+                            _rkeys = [
+                                str(_src2tgt.get(k) or k)
+                                for k in _scd2_opts.get("keys") or []
+                            ]
+                            if _rkeys:
+                                conflict_columns = _rkeys
+                            if _scd2_opts.get("tracked"):
+                                _scd2_opts["tracked"] = [
+                                    str(_src2tgt.get(t) or t)
+                                    for t in _scd2_opts["tracked"]
+                                ]
+                    except Exception as exc:  # noqa: BLE001
+                        logger.warning(
+                            "scd2 recipe step parse skipped: %s", exc
+                        )
                 if effective_sync_lower == "scd2" and conflict_columns:
                     from connectors.engine_record_spill import (
                         ENGINE_SPILL_SUMMARY_KEY,
@@ -2871,6 +2911,7 @@ class UniversalTransferEngine:
                                 # SCD2 never narrows its read (bind_batch_incremental),
                                 # so an unlimited read is the whole source population.
                                 complete_snapshot=not int(request.limit or 0),
+                                scd2_opts=_scd2_opts,
                             ),
                             budget=RetryBudget(
                                 max_attempts=3,
@@ -2887,6 +2928,7 @@ class UniversalTransferEngine:
                         "schema": _schema_for_endpoint(request.destination),
                         "checksum": scd2_summary.get("active_checksum", ""),
                         "scd2": scd2_summary,
+                        "scd2_opts": _scd2_opts,
                         "rejected_details": list(
                             scd2_summary.get("rejected_details") or []
                         ),

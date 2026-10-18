@@ -34,8 +34,44 @@ IS_CURRENT_COLUMN = "is_current"
 ROW_HASH_COLUMN = "row_hash"
 
 SCD2_COLUMNS = [VALID_FROM_COLUMN, VALID_TO_COLUMN, IS_CURRENT_COLUMN, ROW_HASH_COLUMN]
+_STAMP_SET = set(SCD2_COLUMNS)
+VERSION_COLUMN = "version"
 # Unit separator — safe delimiter for composite natural keys in-memory.
 _KEY_SEP = "\x1f"
+
+
+def resolve_scd2_cols(opts: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Recipe-declared SCD2 stamp/contract names with canonical defaults.
+
+    Returns keys: valid_from, valid_to, is_current, row_hash, version
+    (None unless declared), tracked ([] = all attributes tracked),
+    type1, close_missing. Recipe ``scd2`` steps pass their normalized
+    options through :meth:`ShapeRecipe.scd2_column_names`.
+    """
+    o = opts or {}
+    return {
+        "valid_from": str(o.get("valid_from") or VALID_FROM_COLUMN),
+        "valid_to": str(o.get("valid_to") or VALID_TO_COLUMN),
+        "is_current": str(o.get("is_current") or IS_CURRENT_COLUMN),
+        "row_hash": str(o.get("row_hash") or ROW_HASH_COLUMN),
+        "version": str(o.get("version") or "") or None,
+        "tracked": [str(t) for t in (o.get("tracked") or [])],
+        "type1": bool(o.get("type1")),
+        "close_missing": bool(o.get("close_missing", True)),
+    }
+
+
+def _stamp_set(cols: dict[str, Any] | None) -> set[str]:
+    """Stamp column names that must never hash or count as attributes."""
+    if not cols:
+        return _STAMP_SET
+    names = {
+        cols["valid_from"], cols["valid_to"], cols["is_current"],
+        cols["row_hash"],
+    }
+    if cols.get("version"):
+        names.add(cols["version"])
+    return names
 
 
 def stores_is_current_as_numeric(dialect: str) -> bool:
@@ -215,19 +251,30 @@ def _target_columns(records_columns: list[str], mappings: list[dict[str, Any]] |
     return records_columns
 
 
-def _row_hash(row: dict[str, Any], target_cols: list[str]) -> str:
+def _row_hash(
+    row: dict[str, Any],
+    target_cols: list[str],
+    *,
+    tracked: list[str] | None = None,
+    stamp_set: set[str] | None = None,
+) -> str:
     """Stable hash of the non-SCD target attribute values.
 
-    ``DF_MISSING`` must never participate — callers hydrate omit-from-SET cells
-    from the current SCD2 version before hashing so STOP_COLUMN cannot invent
-    false history by hashing as empty/NULL.
+    ``tracked`` narrows change detection to the recipe-declared columns;
+    an untracked change never opens a new version (Type-1 in place when
+    the recipe opts in). ``DF_MISSING`` must never participate — callers
+    hydrate omit-from-SET cells from the current SCD2 version before
+    hashing so STOP_COLUMN cannot invent false history by hashing as
+    empty/NULL.
     """
     from connectors.writer_common import conflict_key_wire
     from services.value_serializer import is_missing_sentinel
 
+    stamps = stamp_set or _STAMP_SET
+    hash_cols = list(tracked) if tracked else target_cols
     parts = []
-    for c in target_cols:
-        if c in SCD2_COLUMNS:
+    for c in hash_cols:
+        if c in stamps:
             continue
         val = row.get(c)
         if is_missing_sentinel(val):
@@ -240,13 +287,16 @@ def _hydrate_scd2_omit(
     row: dict[str, Any],
     current_attrs: dict[str, Any] | None,
     target_cols: list[str],
+    *,
+    stamp_set: set[str] | None = None,
 ) -> dict[str, Any]:
     """Overlay DF_MISSING from the current SCD2 version (never invent NULL history)."""
     from services.value_serializer import is_missing_sentinel
 
+    stamps = stamp_set or _STAMP_SET
     out = dict(row)
     for c in target_cols:
-        if c in SCD2_COLUMNS:
+        if c in stamps:
             continue
         if not is_missing_sentinel(out.get(c)):
             continue
@@ -258,10 +308,16 @@ def _hydrate_scd2_omit(
     return out
 
 
-def _ensure_scd_columns(engine: Any, table_obj: Any, dialect_name: str) -> None:
+def _ensure_scd_columns(
+    engine: Any,
+    table_obj: Any,
+    dialect_name: str,
+    cols: dict[str, Any] | None = None,
+) -> None:
     """Add SCD2 columns to an existing table if they are missing."""
     import sqlalchemy as sa
 
+    cols = cols or resolve_scd2_cols()
     inspector = sa.inspect(engine)
     schema = table_obj.schema
     table_name = table_obj.name
@@ -269,15 +325,19 @@ def _ensure_scd_columns(engine: Any, table_obj: Any, dialect_name: str) -> None:
     from connectors.generic_sql import _sa_type_for_logical
     from connectors.writer_common import quote_sql_identifier
 
-    additions = []
-    if VALID_FROM_COLUMN not in existing:
-        additions.append((VALID_FROM_COLUMN, _sa_type_for_logical("datetime", dialect_name)))
-    if VALID_TO_COLUMN not in existing:
-        additions.append((VALID_TO_COLUMN, _sa_type_for_logical("datetime", dialect_name)))
-    if IS_CURRENT_COLUMN not in existing:
-        additions.append((IS_CURRENT_COLUMN, _sa_type_for_logical("boolean", dialect_name)))
-    if ROW_HASH_COLUMN not in existing:
-        additions.append((ROW_HASH_COLUMN, _sa_type_for_logical("string", dialect_name)))
+    wanted = [
+        (cols["valid_from"], "datetime"),
+        (cols["valid_to"], "datetime"),
+        (cols["is_current"], "boolean"),
+        (cols["row_hash"], "string"),
+    ]
+    if cols.get("version"):
+        wanted.append((cols["version"], "integer"))
+    additions = [
+        (name, _sa_type_for_logical(logical, dialect_name))
+        for name, logical in wanted
+        if name not in existing
+    ]
 
     qualified = _qualified_name(table_name, schema, dialect_name)
     for col_name, sa_type in additions:
@@ -298,19 +358,24 @@ def _build_scd_table(
     target_cols: list[str],
     column_types: dict[str, str],
     db_type: str,
+    cols: dict[str, Any] | None = None,
 ) -> Any:
     """Build or reflect the destination table with SCD2 audit columns."""
     import sqlalchemy as sa
     from connectors.generic_sql import _build_table_for_write
 
-    all_cols = list(dict.fromkeys(list(target_cols) + SCD2_COLUMNS))
+    cols = resolve_scd2_cols(cols)
+    all_cols = list(dict.fromkeys(list(target_cols) + list(_stamp_set(cols))))
     all_types = {**column_types}
-    for scd_col, logical in {
-        VALID_FROM_COLUMN: "datetime",
-        VALID_TO_COLUMN: "datetime",
-        IS_CURRENT_COLUMN: "boolean",
-        ROW_HASH_COLUMN: "string",
-    }.items():
+    wanted_types = {
+        cols["valid_from"]: "datetime",
+        cols["valid_to"]: "datetime",
+        cols["is_current"]: "boolean",
+        cols["row_hash"]: "string",
+    }
+    if cols.get("version"):
+        wanted_types[cols["version"]] = "integer"
+    for scd_col, logical in wanted_types.items():
         if scd_col not in all_types:
             all_types[scd_col] = logical
 
@@ -328,7 +393,7 @@ def _build_scd_table(
     inspector = sa.inspect(engine)
     table_exists = inspector.has_table(table_name, schema=schema_name)
     if table_exists:
-        _ensure_scd_columns(engine, table_obj, dialect_name)
+        _ensure_scd_columns(engine, table_obj, dialect_name, cols)
     else:
         table_obj.create(engine, checkfirst=True)
     return table_obj
@@ -342,18 +407,24 @@ def _fetch_current_snapshots(
     keys: set[str],
     dialect_name: str,
     column_types: dict[str, Any] | None = None,
+    cols: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
-    """Return {composite_key: {hash, attrs}} for current rows in ``keys``."""
+    """Return {composite_key: {hash, attrs, version}} for current rows in ``keys``."""
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
 
+    cols = cols or resolve_scd2_cols()
+    stamps = _stamp_set(cols)
     if not keys or not pk_columns:
         return {}
-    attr_cols = [c for c in target_cols if c not in SCD2_COLUMNS]
-    select_cols = list(dict.fromkeys(list(pk_columns) + [ROW_HASH_COLUMN] + attr_cols))
+    attr_cols = [c for c in target_cols if c not in stamps]
+    extra_selects = [cols["version"]] if cols.get("version") else []
+    select_cols = list(
+        dict.fromkeys(list(pk_columns) + [cols["row_hash"]] + extra_selects + attr_cols)
+    )
     q = _qchar(dialect_name)
     cols_quoted = ", ".join(quote_sql_identifier(c, q) for c in select_cols)
-    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
+    current_quoted = quote_sql_identifier(cols["is_current"], q)
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     out: dict[str, dict[str, Any]] = {}
     for chunk in iter_pk_key_chunks(keys):
@@ -369,9 +440,14 @@ def _fetch_current_snapshots(
             mapping = dict(row._mapping)
             key = _compose_key(mapping, pk_columns)
             attrs = {c: mapping.get(c) for c in attr_cols}
+            version_val = (
+                int(mapping.get(cols["version"]) or 0)
+                if cols.get("version") else None
+            )
             out[key] = {
-                "hash": str(mapping.get(ROW_HASH_COLUMN) or ""),
+                "hash": str(mapping.get(cols["row_hash"]) or ""),
                 "attrs": attrs,
+                "version": version_val,
             }
     return out
 
@@ -408,16 +484,18 @@ def _expire_rows(
     timestamp: datetime,
     dialect_name: str,
     column_types: dict[str, Any] | None = None,
+    cols: dict[str, Any] | None = None,
 ) -> int:
     """Mark the current versions of ``keys`` as historical."""
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
 
+    cols = cols or resolve_scd2_cols()
     if not keys or not pk_columns:
         return 0
     q = _qchar(dialect_name)
-    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
-    valid_to_quoted = quote_sql_identifier(VALID_TO_COLUMN, q)
+    current_quoted = quote_sql_identifier(cols["is_current"], q)
+    valid_to_quoted = quote_sql_identifier(cols["valid_to"], q)
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     false_lit = scd2_is_current_false_sql(dialect_name)
     expired = 0
@@ -443,15 +521,17 @@ def _iter_current_keys(
     pk_columns: list[str],
     dialect_name: str,
     batch_size: int,
+    cols: dict[str, Any] | None = None,
 ):
     """Stream the composite keys of every current version. Never OFFSET."""
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
     from services.reconciliation_api import iter_select_row_dicts
 
+    cols = cols or resolve_scd2_cols()
     q = _qchar(dialect_name)
     current_pred = scd2_is_current_predicate(
-        dialect_name, quote_sql_identifier(IS_CURRENT_COLUMN, q)
+        dialect_name, quote_sql_identifier(cols["is_current"], q)
     )
     cols_quoted = ", ".join(quote_sql_identifier(c, q) for c in pk_columns)
     sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {current_pred}"  # nosec B608
@@ -471,6 +551,7 @@ def close_versions_missing_from_keys(
     dialect_name: str,
     batch_size: int = 1_000,
     column_types: dict[str, Any] | None = None,
+    cols: dict[str, Any] | None = None,
 ) -> int:
     """Expire current versions whose key is not in a complete source key set.
 
@@ -484,7 +565,9 @@ def close_versions_missing_from_keys(
         return 0
     missing = [
         k
-        for k in _iter_current_keys(conn, qualified, pk_columns, dialect_name, batch_size)
+        for k in _iter_current_keys(
+            conn, qualified, pk_columns, dialect_name, batch_size, cols
+        )
         if k and k not in source_keys
     ]
     expired = 0
@@ -497,6 +580,7 @@ def close_versions_missing_from_keys(
             timestamp,
             dialect_name,
             column_types=column_types,
+            cols=cols,
         )
     return expired
 
@@ -509,6 +593,7 @@ def close_versions_missing_from_snapshot(
     *,
     timestamp: datetime | None = None,
     dialect: str = "",
+    cols: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Expire current versions whose key is absent from a complete source snapshot.
 
@@ -523,11 +608,12 @@ def close_versions_missing_from_snapshot(
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
 
+    cols = cols or resolve_scd2_cols()
     if not pk_columns:
         return {"closed_missing_rows": 0}
     q = _qchar(dialect)
-    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
-    valid_to_quoted = quote_sql_identifier(VALID_TO_COLUMN, q)
+    current_quoted = quote_sql_identifier(cols["is_current"], q)
+    valid_to_quoted = quote_sql_identifier(cols["valid_to"], q)
     current_pred = scd2_is_current_predicate(dialect, current_quoted)
     false_lit = scd2_is_current_false_sql(dialect)
     join_pred = " AND ".join(
@@ -564,6 +650,7 @@ def _active_checksum(
     batch_size: int,
     dialect_name: str,
     dest_types: dict[str, str] | None = None,
+    cols: dict[str, Any] | None = None,
 ) -> tuple[int, str]:
     """Current-version digest: one streamed SELECT. Never OFFSET.
 
@@ -575,10 +662,12 @@ def _active_checksum(
     from connectors.writer_common import quote_sql_identifier
     from services.reconciliation_api import stream_select_checksum
 
+    cols = cols or resolve_scd2_cols()
+    stamps = _stamp_set(cols)
     q = _qchar(dialect_name)
-    current_quoted = quote_sql_identifier(IS_CURRENT_COLUMN, q)
+    current_quoted = quote_sql_identifier(cols["is_current"], q)
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
-    attr_cols = [c for c in target_cols if c not in SCD2_COLUMNS]
+    attr_cols = [c for c in target_cols if c not in stamps]
     cols_quoted = ",".join(quote_sql_identifier(c, q) for c in attr_cols)
     sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {current_pred}"  # nosec B608
     return stream_select_checksum(
@@ -872,6 +961,53 @@ def prepare_scd2_mapped_rows(
     }
 
 
+def _type1_update_rows(
+    conn: Any,
+    qualified: str,
+    pk_columns: list[str],
+    updates: list[tuple[str, dict[str, Any]]],
+    dialect_name: str,
+    cols: dict[str, Any],
+    column_types: dict[str, Any] | None = None,
+) -> int:
+    """Type-1 overwrite of untracked attributes on the current version.
+
+    The key's tracked hash matched, so no new version opens — the recipe
+    declares untracked columns refresh in place (Kimball Type-1), valid_from
+    and the version number stay untouched.
+    """
+    import sqlalchemy as sa
+    from connectors.writer_common import conflict_key_wire as _ckw  # noqa: F401
+    from connectors.writer_common import quote_sql_identifier
+
+    if not updates:
+        return 0
+    q = _qchar(dialect_name)
+    current_quoted = quote_sql_identifier(cols["is_current"], q)
+    current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
+    updated = 0
+    for key, attrs in updates:
+        if not attrs:
+            continue
+        where_keys, params = _pk_or_clause(
+            pk_columns, [key], prefix="t1", dialect=dialect_name,
+            column_types=column_types,
+        )
+        set_clause = ", ".join(
+            f"{quote_sql_identifier(c, q)} = :__v{i}"
+            for i, c in enumerate(attrs)
+        )
+        for i, c in enumerate(attrs):
+            params[f"__v{i}"] = attrs[c]
+        sql = (
+            f"UPDATE {qualified} SET {set_clause} "  # nosec B608
+            f"WHERE {where_keys} AND {current_pred}"
+        )
+        result = conn.execute(sa.text(sql), params)
+        updated += result.rowcount or 0
+    return updated
+
+
 def _merge_scd2_bundle(
     conn: Any,
     table_obj: Any,
@@ -881,8 +1017,15 @@ def _merge_scd2_bundle(
     target_cols: list[str],
     dialect_name: str,
     timestamp: datetime,
-) -> tuple[int, int]:
+    cols: dict[str, Any] | None = None,
+) -> tuple[int, int, int]:
     """Expire + insert one PK-ok bundle. Intra-bundle last hash wins after insert."""
+    from connectors.writer_common import conflict_key_wire
+
+    cols = cols or resolve_scd2_cols()
+    stamps = _stamp_set(cols)
+    tracked = list(cols.get("tracked") or [])
+    tracked_set = set(tracked) if tracked else None
     keys: set[str] = set()
     for row in batch:
         key = _compose_key(row, pk_columns)
@@ -890,12 +1033,25 @@ def _merge_scd2_bundle(
             keys.add(key)
     pk_types = key_column_types(table_obj, pk_columns)
     current_snaps = _fetch_current_snapshots(
-        conn, qualified, pk_columns, target_cols, keys, dialect_name, pk_types
+        conn, qualified, pk_columns, target_cols, keys, dialect_name,
+        pk_types, cols,
     )
     current_hashes = {k: str(v.get("hash") or "") for k, v in current_snaps.items()}
 
+    # Untracked attributes (not the key, not stamps, not the tracked set)
+    # refresh in place when the recipe opts into Type-1.
+    attr_cols = [
+        c for c in target_cols if c not in stamps and c not in pk_columns
+    ]
+    untracked_cols = (
+        [c for c in attr_cols if c not in tracked_set]
+        if tracked_set is not None
+        else []
+    )
+
     to_insert: list[dict[str, Any]] = []
     to_expire: set[str] = set()
+    to_type1: list[tuple[str, dict[str, Any]]] = []
 
     for row in batch:
         key = _compose_key(row, pk_columns)
@@ -906,35 +1062,60 @@ def _merge_scd2_bundle(
             row,
             (snap or {}).get("attrs") if snap else None,
             target_cols,
+            stamp_set=stamps,
         )
-        new_hash = _row_hash(hydrated, target_cols)
-        hydrated[ROW_HASH_COLUMN] = new_hash
+        new_hash = _row_hash(
+            hydrated, target_cols, tracked=tracked or None, stamp_set=stamps
+        )
+        hydrated[cols["row_hash"]] = new_hash
         if key in current_hashes and current_hashes[key] == new_hash:
+            # Tracked attributes unchanged — Type-1 refresh of untracked
+            # columns on the current row, only where they actually differ.
+            if cols.get("type1") and snap is not None and untracked_cols:
+                snap_attrs = snap.get("attrs") or {}
+                changed = {
+                    c: hydrated.get(c)
+                    for c in untracked_cols
+                    if conflict_key_wire(hydrated.get(c))
+                    != conflict_key_wire(snap_attrs.get(c))
+                }
+                if changed:
+                    to_type1.append((key, changed))
+                    snap_attrs.update(changed)
             continue
         if key in current_hashes:
             to_expire.add(key)
-        hydrated[VALID_FROM_COLUMN] = timestamp
-        hydrated[VALID_TO_COLUMN] = None
-        hydrated[IS_CURRENT_COLUMN] = True
+        hydrated[cols["valid_from"]] = timestamp
+        hydrated[cols["valid_to"]] = None
+        hydrated[cols["is_current"]] = True
+        if cols.get("version"):
+            hydrated[cols["version"]] = int(
+                ((snap or {}).get("version") or 0)
+            ) + 1
         to_insert.append(hydrated)
 
     expired = 0
     if to_expire:
         expired = _expire_rows(
             conn, qualified, pk_columns, to_expire, timestamp, dialect_name,
-            column_types=pk_types,
+            column_types=pk_types, cols=cols,
         )
+    type1_updated = _type1_update_rows(
+        conn, qualified, pk_columns, to_type1, dialect_name, cols,
+        column_types=pk_types,
+    )
     inserted = _insert_rows(conn, table_obj, to_insert)
     # Same-connection later bundles must see this bundle's current hash
     # (the original in-memory update after insert).
     for row in to_insert:
         key = _compose_key(row, pk_columns)
-        current_hashes[key] = row[ROW_HASH_COLUMN]
+        current_hashes[key] = row[cols["row_hash"]]
         current_snaps[key] = {
-            "hash": row[ROW_HASH_COLUMN],
-            "attrs": {c: row.get(c) for c in target_cols if c not in SCD2_COLUMNS},
+            "hash": row[cols["row_hash"]],
+            "version": row.get(cols["version"]) if cols.get("version") else None,
+            "attrs": {c: row.get(c) for c in target_cols if c not in stamps},
         }
-    return inserted, expired
+    return inserted, expired, type1_updated
 
 
 def apply_scd2(
@@ -950,6 +1131,7 @@ def apply_scd2(
     source_spool: Any = None,
     clear_records: bool = False,
     complete_snapshot: bool = False,
+    scd2_opts: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Apply an SCD2 merge against the SQL destination.
 
@@ -973,6 +1155,7 @@ def apply_scd2(
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
 
+    cols = resolve_scd2_cols(scd2_opts)
     ctx = _scd2_map_context(
         endpoint,
         columns,
@@ -1048,11 +1231,13 @@ def apply_scd2(
 
         try:
             table_obj = _build_scd_table(
-                engine, table, schema_name, target_cols, column_types, db_type
+                engine, table, schema_name, target_cols, column_types,
+                db_type, cols,
             )
             timestamp = _now_utc()
             inserted_total = 0
             expired_total = 0
+            type1_total = 0
             closed_missing = 0
             source_keys: set[str] = set()
             qualified = _qualified_name(table, schema_name, dialect_name)
@@ -1069,21 +1254,25 @@ def apply_scd2(
                             source_keys.update(
                                 _compose_key(row, pk_columns) for row in pk_ok
                             )
-                        inserted, expired = _merge_scd2_bundle(
-                            conn,
-                            table_obj,
-                            qualified,
-                            pk_ok,
-                            pk_columns,
-                            target_cols,
-                            dialect_name,
-                            timestamp,
+                        inserted, expired, type1_updated = (
+                            _merge_scd2_bundle(
+                                conn,
+                                table_obj,
+                                qualified,
+                                pk_ok,
+                                pk_columns,
+                                target_cols,
+                                dialect_name,
+                                timestamp,
+                                cols=cols,
+                            )
                         )
                         inserted_total += inserted
                         expired_total += expired
+                        type1_total += type1_updated
                     del pk_ok
 
-                if complete_snapshot:
+                if complete_snapshot and cols.get("close_missing", True):
                     closed_missing = close_versions_missing_from_keys(
                         conn,
                         qualified,
@@ -1093,6 +1282,7 @@ def apply_scd2(
                         dialect_name,
                         batch_size=batch_size,
                         column_types=key_column_types(table_obj, pk_columns),
+                        cols=cols,
                     )
                     expired_total += closed_missing
 
@@ -1103,6 +1293,7 @@ def apply_scd2(
                     batch_size,
                     dialect_name,
                     dest_types=ctx["dest_types"],
+                    cols=cols,
                 )
         finally:
             release_engine(engine)
@@ -1115,6 +1306,7 @@ def apply_scd2(
         "rows_written": inserted_total,
         "updated_rows": expired_total,
         "closed_missing_rows": closed_missing,
+        "type1_updated_rows": type1_total,
         "active_rows": active_rows,
         "active_checksum": active_checksum,
         "mode": "scd2",
@@ -1124,3 +1316,329 @@ def apply_scd2(
         "rejected_rows": len(rejected_details),
         "transform_errors": list(transform_errors)[:20],
     }
+
+
+def _instant(value: Any) -> Any:
+    """Canonical instant for valid_from/valid_to comparison — a tz-aware
+    and a naive rendering of the same write timestamp compare equal."""
+    if isinstance(value, datetime):
+        v = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return v.astimezone(timezone.utc)
+    s = str(value or "")
+    for suffix in ("+00:00", "Z", " UTC"):
+        if s.endswith(suffix):
+            s = s[: -len(suffix)]
+    return s
+
+
+def verify_scd2_history(
+    cfg: dict[str, Any],
+    schema: str,
+    table_name: str,
+    pk_columns: list[str],
+    cols: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Gate-8 read-back of the SCD2 history invariants, row by row.
+
+    Asserts per natural key: exactly one is_current row; intervals do not
+    overlap and do not gap (each version's valid_from equals the prior
+    version's valid_to, the current version's valid_to is open); when the
+    recipe declares a version column, versions form 1..n per key.
+    Returns {"ok": bool, "violations": [...], "keys": int,
+    "current_rows": int, "history_rows": int} — ok=None-safe: a read
+    error returns ok False with the error in violations (fail closed for
+    a history contract).
+    """
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from connectors.writer_common import quote_sql_identifier
+
+    cols = resolve_scd2_cols(cols)
+    engine = None
+    try:
+        engine = get_sqlalchemy_engine(cfg)
+        dialect_name = engine.dialect.name if engine.dialect else ""
+        q = _qchar(dialect_name)
+        qualified = _qualified_name(table_name, schema or None, dialect_name)
+        select_cols = list(
+            dict.fromkeys(
+                list(pk_columns)
+                + [
+                    cols["valid_from"],
+                    cols["valid_to"],
+                    cols["is_current"],
+                ]
+                + ([cols["version"]] if cols.get("version") else [])
+            )
+        )
+        col_sql = ", ".join(quote_sql_identifier(c, q) for c in select_cols)
+        order_sql = ", ".join(quote_sql_identifier(c, q) for c in pk_columns) + (
+            ", " + quote_sql_identifier(cols["valid_from"], q)
+        )
+        versions: dict[str, list[dict[str, Any]]] = {}
+        with engine.connect() as conn:
+            for row in conn.execute(
+                sa.text(
+                    f"SELECT {col_sql} FROM {qualified} "  # nosec B608
+                    f"ORDER BY {order_sql}"
+                )
+            ):
+                m = dict(row._mapping)
+                key = _compose_key(m, pk_columns)
+                versions.setdefault(key, []).append(m)
+
+        violations: list[str] = []
+        current_rows = 0
+        history_rows = 0
+        for key, rows in versions.items():
+            currents = []
+            for m in rows:
+                ic = m.get(cols["is_current"])
+                is_cur = ic is True or str(ic).lower() in (
+                    "1", "true", "t", "yes",
+                )
+                if is_cur:
+                    currents.append(m)
+                    current_rows += 1
+                else:
+                    history_rows += 1
+            label = key.replace(_KEY_SEP, "|")[:80]
+            # At most one current row per key — a soft-closed key (removed
+            # from a full snapshot) keeps history with zero current rows.
+            if len(currents) > 1:
+                violations.append(
+                    f"key {label}: {len(currents)} is_current rows "
+                    "(expected at most 1)"
+                )
+            ordered = sorted(
+                rows,
+                key=lambda m: (
+                    m.get(cols["valid_from"]) is None,
+                    str(m.get(cols["valid_from"]) or ""),
+                ),
+            )
+            for prev, nxt in zip(ordered, ordered[1:]):
+                vt_p = prev.get(cols["valid_to"])
+                vf_n = nxt.get(cols["valid_from"])
+                if vt_p is None:
+                    violations.append(
+                        f"key {label}: a non-final version has open valid_to"
+                    )
+                elif _instant(vt_p) != _instant(vf_n):
+                    violations.append(
+                        f"key {label}: gap/overlap — valid_to {vt_p} "
+                        f"!= next valid_from {vf_n}"
+                    )
+            if cols.get("version"):
+                seq = [m.get(cols["version"]) for m in ordered]
+                if seq != list(range(1, len(seq) + 1)):
+                    violations.append(
+                        f"key {label}: versions {seq} are not 1..{len(seq)}"
+                    )
+        return {
+            "ok": not violations,
+            "violations": violations[:20],
+            "keys": len(versions),
+            "current_rows": current_rows,
+            "history_rows": history_rows,
+            "scd2": True,
+        }
+    except Exception as exc:  # noqa: BLE001 — history proof fails closed
+        return {
+            "ok": False,
+            "violations": [f"scd2 history read-back failed: {exc}"],
+            "keys": -1,
+            "current_rows": -1,
+            "history_rows": -1,
+            "scd2": True,
+        }
+    finally:
+        if engine is not None:
+            release_engine(engine)
+
+
+def preview_scd2_merge(
+    endpoint,
+    records: list[dict[str, Any]],
+    columns: list[str],
+    schema: dict[str, str],
+    mappings: list[dict[str, Any]] | None,
+    conflict_columns: list[str],
+    *,
+    validation_mode: str = "balanced",
+    complete_snapshot: bool = False,
+    scd2_opts: dict[str, Any] | None = None,
+    batch_size: int = 1_000,
+    sample: int = 50,
+) -> dict[str, Any]:
+    """Per-step SCD2 preview: which rows would open or close a version.
+
+    Read-only — runs the same key/tracked-hash diff as ``apply_scd2``
+    against the destination's current snapshots without writing anything.
+    Returns per-key actions plus totals: ``open`` (new key or changed
+    tracked columns), ``close`` (version closed by a change or by a key
+    missing from a full snapshot), ``unchanged`` (no-op), ``type1`` (rows
+    that would get an in-place Type-1 update of untracked columns).
+    """
+    from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
+    from connectors.sql_write_materialize import ensure_sql_source_spool
+    from src.transfer.adapters import resolve_connector_config
+
+    cols = resolve_scd2_cols(scd2_opts)
+    preview: dict[str, Any] = {
+        "opens": [],
+        "closes": [],
+        "unchanged": 0,
+        "type1_updates": 0,
+        "counts": {},
+        "ok": True,
+        "mode": "scd2_preview",
+    }
+    engine = None
+    try:
+        ctx = _scd2_map_context(
+            endpoint,
+            columns,
+            schema,
+            mappings,
+            conflict_columns,
+            validation_mode=validation_mode,
+        )
+        pk_columns = list(ctx["pk_columns"])
+        target_cols = list(ctx["target_cols"])
+        spool, close_spool = ensure_sql_source_spool(
+            headers=columns,
+            records=records,
+            mappings=ctx["effective_mappings"],
+            extra=ctx.get("extra") or {},
+        )
+        cfg = resolve_connector_config(endpoint)
+        schema_name = get_sql_schema(cfg)
+        table = endpoint.table or endpoint.collection or "dt_import"
+        engine = get_sqlalchemy_engine(cfg)
+        dialect_name = engine.dialect.name if engine.dialect else ""
+        qualified = _qualified_name(table, schema_name, dialect_name)
+
+        tracked = list(cols.get("tracked") or [])
+        tracked_set = set(tracked) if tracked else None
+        stamps = _stamp_set(cols)
+        attr_cols = [
+            c for c in target_cols if c not in stamps and c not in pk_columns
+        ]
+        untracked_cols = (
+            [c for c in attr_cols if c not in tracked_set]
+            if tracked_set is not None
+            else []
+        )
+        from connectors.writer_common import conflict_key_wire as _ckw
+
+        opens: list[str] = []
+        closes: list[str] = []
+        seen_keys: set[str] = set()
+        try:
+            with engine.connect() as conn:
+                for pk_ok, _details, _errors in iter_scd2_prepared_bundles(
+                    columns=columns,
+                    ctx=ctx,
+                    source_spool=spool,
+                    batch_size=batch_size,
+                ):
+                    if not pk_ok:
+                        continue
+                    keys = {
+                        _compose_key(row, pk_columns)
+                        for row in pk_ok
+                    }
+                    keys.discard("")
+                    seen_keys.update(keys)
+                    snaps = _fetch_current_snapshots(
+                        conn,
+                        qualified,
+                        pk_columns,
+                        target_cols,
+                        keys,
+                        dialect_name,
+                        cols=cols,
+                    )
+                    for row in pk_ok:
+                        key = _compose_key(row, pk_columns)
+                        if not key or all(
+                            p == "" for p in key.split(_KEY_SEP)
+                        ):
+                            continue
+                        label = key.replace(_KEY_SEP, "|")[:80]
+                        snap = snaps.get(key)
+                        hydrated = _hydrate_scd2_omit(
+                            row,
+                            (snap or {}).get("attrs") if snap else None,
+                            target_cols,
+                            stamp_set=stamps,
+                        )
+                        new_hash = _row_hash(
+                            hydrated,
+                            target_cols,
+                            tracked=tracked or None,
+                            stamp_set=stamps,
+                        )
+                        if snap is None:
+                            opens.append(label)
+                            snaps[key] = {
+                                "hash": new_hash,
+                                "attrs": dict(hydrated),
+                            }
+                            continue
+                        if str(snap.get("hash") or "") != new_hash:
+                            closes.append(label)
+                            opens.append(label)
+                            snaps[key] = {
+                                "hash": new_hash,
+                                "attrs": dict(hydrated),
+                            }
+                        elif untracked_cols:
+                            to_diff = {
+                                c: hydrated.get(c)
+                                for c in untracked_cols
+                                if _ckw((snap.get("attrs") or {}).get(c))
+                                != _ckw(hydrated.get(c))
+                            }
+                            if to_diff:
+                                preview["type1_updates"] += 1
+                            else:
+                                preview["unchanged"] += 1
+                        else:
+                            preview["unchanged"] += 1
+                    del pk_ok
+        finally:
+            if callable(close_spool):
+                close_spool()
+        if complete_snapshot and cols.get("close_missing", True):
+            with engine.connect() as conn:
+                all_keys = set(
+                    _iter_current_keys(
+                        conn,
+                        qualified,
+                        pk_columns,
+                        dialect_name,
+                        batch_size,
+                        cols=cols,
+                    )
+                )
+            for key in sorted(all_keys - seen_keys):
+                closes.append(key.replace(_KEY_SEP, "|")[:80])
+        preview["opens"] = opens[:sample]
+        preview["closes"] = closes[:sample]
+        preview["counts"] = {
+            "open": len(opens),
+            "close": len(closes),
+            "unchanged": preview["unchanged"],
+            "type1": preview["type1_updates"],
+        }
+        return preview
+    except Exception as exc:  # noqa: BLE001 — preview is advisory, fail honest
+        preview["ok"] = False
+        preview["error"] = str(exc)
+        return preview
+    finally:
+        if engine is not None:
+            release_engine(engine)

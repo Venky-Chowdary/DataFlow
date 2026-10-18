@@ -369,6 +369,29 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         options=("routes", "unmatched", "targets"),
         required=("routes",),
     ),
+    _StepDef(
+        "scd2",
+        "Type-2 history contract — declares the business key and the stamp "
+        "column names the destination merge writes (validity window + "
+        "current flag + change hash); on re-run the merge closes the prior "
+        "version of every changed key and inserts a new current row, and an "
+        "unchanged key never duplicates",
+        family="advanced",
+        active=True,
+        needs_column=False,
+        options=(
+            "keys",
+            "tracked",
+            "type1",
+            "close_missing",
+            "version",
+            "effective_from",
+            "end_date",
+            "is_current",
+            "row_hash",
+        ),
+        required=("keys",),
+    ),
 )
 
 # Column every routed row is tagged with — the write path strips it and
@@ -535,6 +558,29 @@ class ShapeRecipe:
         return any(s.active for s in self.enabled_steps)
 
     @property
+    def scd2_step(self) -> ShapeStep | None:
+        """The enabled scd2 contract step, when the recipe declares one."""
+        return next((s for s in self.enabled_steps if s.op == "scd2"), None)
+
+    def scd2_column_names(self) -> dict[str, str] | None:
+        """Recipe-declared SCD2 stamp column names, canonical keys."""
+        step = self.scd2_step
+        if step is None:
+            return None
+        opts = step.options
+        return {
+            "keys": [str(k) for k in (opts.get("keys") or [])],
+            "tracked": [str(t) for t in (opts.get("tracked") or [])],
+            "type1": bool(opts.get("type1")),
+            "close_missing": bool(opts.get("close_missing", True)),
+            "version": str(opts.get("version") or ""),
+            "valid_from": str(opts.get("effective_from") or "valid_from"),
+            "valid_to": str(opts.get("end_date") or "valid_to"),
+            "is_current": str(opts.get("is_current") or "is_current"),
+            "row_hash": str(opts.get("row_hash") or "row_hash"),
+        }
+
+    @property
     def router_step(self) -> ShapeStep | None:
         """The enabled router step, when this recipe routes rows to per-route
         destination tables. At most one router step is honoured; a recipe
@@ -679,6 +725,12 @@ class ShapeRecipe:
             if columns is not None and step.enabled:
                 _apply_column_effect(step, columns)
 
+        scd2_count = sum(1 for s in steps if s.op == "scd2" and s.enabled)
+        if scd2_count > 1:
+            raise ShapeError(
+                "a recipe may hold one scd2 step — one history contract "
+                "per destination"
+            )
         router_count = sum(1 for s in steps if s.op == "router" and s.enabled)
         if router_count > 1:
             raise ShapeError(
@@ -1355,6 +1407,55 @@ def _normalize_options(
                 for name, table in targets.items()
             }
         out["routes"] = norm_routes
+
+    if op == "scd2":
+        keys = out.get("keys")
+        if not isinstance(keys, (list, tuple)) or not keys:
+            raise ShapeError(f"{where}: scd2 needs a non-empty keys list")
+        out["keys"] = [str(k) for k in keys]
+        _assert_columns_exist(out["keys"], columns, "keys", where=where)
+        version = out.get("version")
+        if version is not None and str(version).strip():
+            out["version"] = _valid_name(str(version), where=where)
+        else:
+            out.pop("version", None)
+        tracked = out.get("tracked")
+        if isinstance(tracked, (list, tuple)) and tracked:
+            out["tracked"] = [str(t) for t in tracked]
+            _assert_columns_exist(out["tracked"], columns, "tracked", where=where)
+        else:
+            out.pop("tracked", None)
+        for flag, default in (("type1", False), ("close_missing", True)):
+            raw = out.get(flag, default)
+            out[flag] = (
+                raw if isinstance(raw, bool)
+                else str(raw).strip().lower() in ("1", "true", "yes", "on")
+            )
+        for field, default in (
+            ("effective_from", "valid_from"),
+            ("end_date", "valid_to"),
+            ("is_current", "is_current"),
+            ("row_hash", "row_hash"),
+        ):
+            value = out.get(field)
+            out[field] = (
+                _valid_name(str(value), where=where)
+                if value is not None and str(value).strip()
+                else default
+            )
+        stamp_names = [
+            out["effective_from"],
+            out["end_date"],
+            out["is_current"],
+            out["row_hash"],
+        ]
+        if out.get("version"):
+            stamp_names.append(out["version"])
+        if len(set(stamp_names)) != len(stamp_names):
+            raise ShapeError(
+                f"{where}: scd2 stamp column names must be distinct — "
+                f"got {stamp_names}"
+            )
 
     if op == "surrogate_key":
         out["start"] = _as_int(out.get("start", 1), "start", where=where)

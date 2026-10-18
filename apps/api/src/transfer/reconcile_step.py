@@ -1788,6 +1788,37 @@ def _run_reconciliation_impl(
                 table_name=str(scd2_stamp_ctx.get("table_name") or ""),
                 dest_engine=str(scd2_stamp_ctx.get("engine") or ""),
             )
+            # B1 Gate-8: read the destination history back row by row —
+            # exactly one is_current per key, contiguous non-overlapping
+            # intervals per key, and 1..n versions when declared. A broken
+            # history is a failed verification, never a verified run.
+            try:
+                from services.scd2_engine import verify_scd2_history
+
+                _scd2_sum = (
+                    (dest_summary or {}).get("scd2") or {}
+                    if isinstance(dest_summary, dict)
+                    else {}
+                )
+                _pk_cols = list(_scd2_sum.get("primary_key_columns") or [])
+                if _pk_cols:
+                    _hist = verify_scd2_history(
+                        scd2_stamp_ctx.get("cfg"),
+                        str(scd2_stamp_ctx.get("schema") or ""),
+                        str(scd2_stamp_ctx.get("table_name") or ""),
+                        _pk_cols,
+                        (dest_summary or {}).get("scd2_opts"),
+                    )
+                    stamped["scd2_history"] = _hist
+                    if _hist.get("ok") is False:
+                        stamped["passed"] = False
+                        stamped["verification_verdict"] = "failed"
+                        stamped["message"] = (
+                            "SCD2 history verification failed: "
+                            + "; ".join(_hist.get("violations") or [])
+                        )
+            except Exception as exc:  # noqa: BLE001
+                _logger.warning("scd2 history verify skipped: %s", exc)
         # Property 5 — attach L1–L5 ladder when both populations are available.
         try:
             stamped = _maybe_attach_verification_ladder(
