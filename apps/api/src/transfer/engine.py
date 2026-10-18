@@ -3243,6 +3243,7 @@ class UniversalTransferEngine:
                         validation_mode=request.validation_mode,
                         source_endpoint=request.source,
                         source_spool=getattr(spill_holder, "spool", None),
+                        shape_recipe=getattr(request, "shape_recipe", None),
                     )
                 finally:
                     if spill_holder is not None:
@@ -4272,6 +4273,7 @@ class UniversalTransferEngine:
                     source_schema=schema,
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
+                    shape_recipe=getattr(request, "shape_recipe", None),
                 )
             canonical_rejected_details = _snapshot_rejected_details(dest_summary)
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)
@@ -5168,6 +5170,7 @@ class UniversalTransferEngine:
                     source_schema=schema,
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
+                    shape_recipe=getattr(request, "shape_recipe", None),
                 )
             canonical_rejected_details = _snapshot_rejected_details(dest_summary)
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)

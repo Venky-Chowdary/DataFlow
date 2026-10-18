@@ -985,3 +985,102 @@ def test_scd2_small_change_run_dq_gate_pg(tmp_path, monkeypatch):
     assert not res4.success
     assert "null-rate" in str(res4.error or "")
     conn.close()
+
+
+def test_g1_dropped_shape_step_fails_gate8_pg(tmp_path, monkeypatch):
+    """G-1: a recipe step the write path never applied can no longer pass
+    Gate-8. The transform-applied proof re-derives the expected output
+    digest from an independent source re-read — the 1584edc6 silent-skip
+    behaviour now reports passed=false + verdict failed naming the step.
+    Covers the scd2 streaming route AND a plain overwrite shaped route."""
+    import services.shape_apply as shape_apply_mod
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+
+    # The write path's runner no-ops its matrix pages — rows land unshaped
+    # while the ledger still counts them (the silent skip).
+    monkeypatch.setattr(
+        shape_apply_mod.ShapeRunner,
+        "matrix",
+        lambda self, headers, rows: (list(headers), [list(r) for r in rows]),
+    )
+
+    # Route 1: scd2 streaming with a row-local pre-step.
+    recipe = {
+        "steps": [
+            {"op": "case", "column": "note", "options": {"mode": "upper"}},
+            *_scd2_recipe()["steps"],
+        ]
+    }
+    _mk_src(cur, ROWS, table="scd2_g1_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_g1_dst CASCADE")
+    req = _engine_req("scd2_g1_src", "scd2_g1_dst", recipe, mode="strict")
+    res = _exec(fake, req, prefix="scg1")
+    assert not res.success, res.error
+    recon = res.reconciliation or {}
+    assert recon.get("passed") is False
+    assert recon.get("verification_verdict") == "failed"
+    proof = recon.get("transform_applied") or {}
+    assert proof.get("status") == "failed", proof
+    assert any("case" in s for s in proof.get("culprit_steps") or []), proof
+    # The destination really holds unshaped data — the verdict is accurate.
+    cur.execute("SELECT note FROM scd2_g1_dst LIMIT 1")
+    assert cur.fetchone()[0] == "n1"
+
+    # Route 2: plain overwrite + row-local recipe.
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    _mk_src(cur, ROWS, table="ovr_g1_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1_dst CASCADE")
+    recipe2 = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req2 = TransferRequest(
+        source=ep("ovr_g1_src"), destination=ep("ovr_g1_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe2,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe2, source_columns=COLS
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+    res2 = _exec(fake, req2, prefix="ovg1")
+    assert not res2.success, res2.error
+    recon2 = res2.reconciliation or {}
+    assert recon2.get("passed") is False
+    proof2 = recon2.get("transform_applied") or {}
+    assert proof2.get("status") == "failed", proof2
+    conn.close()
+
+
+def test_g1_correct_shape_run_verifies_pg(tmp_path, monkeypatch):
+    """G-1 counterpart: a shaped run where the recipe really ran reports
+    the transform-applied proof as verified (not silently absent)."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    recipe = {
+        "steps": [
+            {"op": "case", "column": "note", "options": {"mode": "upper"}},
+            *_scd2_recipe()["steps"],
+        ]
+    }
+    _mk_src(cur, ROWS, table="scd2_g1b_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_g1b_dst CASCADE")
+    req = _engine_req("scd2_g1b_src", "scd2_g1b_dst", recipe, mode="strict")
+    res = _exec(fake, req, prefix="scg1b")
+    assert res.success, res.error
+    recon = res.reconciliation or {}
+    assert recon.get("passed") is True
+    proof = recon.get("transform_applied") or {}
+    assert proof.get("status") == "verified", proof
+    conn.close()
