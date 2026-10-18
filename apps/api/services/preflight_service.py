@@ -368,7 +368,10 @@ def run_transfer_policy_gates(
         "block_all",
     }
     if schema not in allowed_schema:
-        schema_issues.append(f"Unknown schema policy '{schema}'")
+        schema_issues.append(
+            f"Unknown schema policy '{schema}' — expected one of: "
+            + ", ".join(sorted(allowed_schema))
+        )
 
     # Stuck Studio toggle: backfill=true while policy is still manual_review (operator
     # switched policy back but the checkbox state was never cleared). That must not

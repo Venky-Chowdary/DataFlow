@@ -79,7 +79,9 @@ def land_export_bytes(
         )
         if not export_path.startswith(root):
             raise ValueError(
-                "File export path must be inside the application workspace"
+                "File export path must be inside the application workspace "
+                f"({root}) — pass a path under that directory or a relative "
+                "export name."
             )
         os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
         appending = is_append_sync(

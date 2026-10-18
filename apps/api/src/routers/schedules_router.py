@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.acknowledgment_contract import MIN_ACTOR_LEN
 from services.audit_coverage import record_security_event
@@ -72,7 +72,7 @@ class ScheduleCreate(BaseModel):
     source_table: str
     dest_connector_id: str
     dest_table: str
-    interval: IntervalPreset = "daily"
+    interval: str = "daily"
     cron: str = ""
     timezone: str = "UTC"
     sync_mode: SyncMode = "full_refresh_overwrite"
@@ -117,6 +117,21 @@ class ScheduleCreate(BaseModel):
     in_file_dedupe: str = "block"
     #: Inbox → Studio footer: persist mappings onto this draft instead of a new row.
     replay_schedule_id: str = ""
+
+    @field_validator("interval")
+    @classmethod
+    def _interval_names_the_accepted_forms(cls, value: str) -> str:
+        """D-11: the old Literal 422 hid that `cron` is a first-class cadence."""
+        from services.schedule_store import INTERVALS, rolling_minutes
+
+        v = (value or "").strip().lower()
+        if v in INTERVALS or v == "cron" or rolling_minutes(v) is not None:
+            return v
+        raise ValueError(
+            f"Invalid interval {value!r}. Accepted: hourly, daily, weekly; "
+            "pass interval='cron' with a 5-field cron expression in `cron` for "
+            "custom cadences; or a rolling form like 'every_15m'."
+        )
 
 
 class ScheduleUpdate(BaseModel):

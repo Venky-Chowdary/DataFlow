@@ -284,7 +284,12 @@ def classify_host(
 def _refusal_text(host: str, phrase: str) -> str:
     if phrase.startswith("DNS"):
         return f"Refused connector host {host}: {phrase}."
-    return f"Refused connector host {host}: {phrase} addresses are not connection targets."
+    return (
+        f"Refused connector host {host}: {phrase} addresses are not connection "
+        "targets. To reach an on-prem or loopback target, allowlist its range "
+        "(for example 127.0.0.0/8) via DATAFLOW_EGRESS_ALLOWLIST or the "
+        "workspace egress allowlist."
+    )
 
 
 def host_is_blocked(host: str) -> bool:
