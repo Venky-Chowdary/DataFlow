@@ -1909,6 +1909,35 @@ def stream_file_to_database(
     # recipe's own arithmetic disappear from conservation.
     shape_raw_rows_read = 0
 
+    def _persist_file_shape_diverts() -> None:
+        """Shape-diverted rows are quarantine — persist them to the job's DLQ."""
+        diverted = shape_runner.take_diverted() if shape_runner is not None else []
+        if not diverted or not job_id:
+            return
+        from services.quarantine_dlq import persist_rejected_rows
+
+        persist_rejected_rows(
+            job_id=str(job_id),
+            rejected_details=[
+                {
+                    "row": d.record,
+                    "reason": f"transform divert — step {d.step} '{d.op}': {d.reason}",
+                    "failure_reason": d.reason,
+                    "transform_attempted": f"shape step {d.step} '{d.op}'",
+                    "shape_step": d.step,
+                    "shape_op": d.op,
+                    "source_row_index": d.row_index + 1,
+                }
+                for d in diverted
+            ],
+            source="shape_divert",
+            connector=str(
+                getattr(destination, "format", None)
+                or getattr(destination, "kind", None)
+                or ""
+            ),
+        )
+
     if shape_runner is not None:
         # One runner for the whole file, applied on the read: every batch is
         # shaped before it is mapped, fingerprinted, counted or written, so a
@@ -1923,10 +1952,13 @@ def stream_file_to_database(
         shaped_iter = shape_runner.batches(_count_rows_read(batch_iter))
 
         def _with_shape_drain():
-            yield from shaped_iter
+            for batch in shaped_iter:
+                _persist_file_shape_diverts()
+                yield batch
             # Buffering steps emit at end-of-stream — the file's last batch.
             tail = shape_runner.drain()
             if tail:
+                _persist_file_shape_diverts()
                 yield tail
 
         batch_iter = _with_shape_drain()

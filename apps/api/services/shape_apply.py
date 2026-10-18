@@ -103,6 +103,15 @@ class ShapeRunner:
         """Rows buffering steps held until end-of-stream (see ShapeEngine.drain)."""
         return self._engine.drain()
 
+    def take_diverted(self):
+        """Rows shape steps diverted since the last call — quarantine matter.
+
+        The transfer persists these to the job's DLQ after every page so a
+        diverted row is replayable quarantine with step/op/reason, not only a
+        ledger counter.
+        """
+        return self._engine.take_diverted()
+
     def drain_matrix(self) -> tuple[list[str], list[list[Any]]]:
         """Rows buffering steps held until end-of-stream, as a matrix page.
 

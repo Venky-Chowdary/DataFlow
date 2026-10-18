@@ -152,3 +152,59 @@ def test_sort_rows_drains_ordered_tail(tmp_path: Path, isolated):
     finally:
         conn.close()
     assert [r[0] for r in rows] == [30, 15, 10]
+
+
+def test_cast_divert_quarantines_the_row_not_silently(tmp_path: Path, isolated, monkeypatch):
+    """Audit P0-3: a shape-diverted row is excluded from the destination AND
+    persisted to the job's quarantine DLQ with step/op/reason."""
+    import json
+
+    import services.quarantine_dlq as dlq_mod
+
+    dlq_path = tmp_path / "quarantine_dlq.jsonl"
+    monkeypatch.setattr(dlq_mod, "DLQ_PATH", dlq_path)
+
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _exec(src, "CREATE TABLE t (id TEXT, v TEXT)")
+    _exec(
+        src,
+        "INSERT INTO t (id, v) VALUES (?, ?)",
+        [("1", "10"), ("2", "NOT_A_NUMBER"), ("3", "30")],
+    )
+    result = _run(
+        isolated,
+        src,
+        dst,
+        [
+            {
+                "op": "cast_column",
+                "column": "v",
+                "options": {"to_type": "integer"},
+                "on_error": "divert",
+            }
+        ],
+    )
+    assert result.success, result.error
+    conn = sqlite3.connect(str(dst))
+    try:
+        rows = conn.execute("SELECT id, v FROM t ORDER BY id").fetchall()
+    finally:
+        conn.close()
+    # The bad-cast row did not land.
+    assert [r[0] for r in rows] == ["1", "3"]
+
+    # …and it is durable quarantine, with the step/op/reason named.
+    assert dlq_path.exists(), "no DLQ file written for the diverted row"
+    events = [
+        json.loads(line)
+        for line in dlq_path.read_text().splitlines()
+        if line.strip()
+    ]
+    details = []
+    for ev in events:
+        det = ev.get("details") or {}
+        details.extend(det.get("rejected_details") or [])
+    diverts = [d for d in details if d.get("shape_op") == "cast_column"]
+    assert diverts, f"no shape_divert quarantine row in {events!r}"
+    assert diverts[0]["row"]["id"] == "2"
+    assert "step" in diverts[0]["reason"].lower() or diverts[0].get("shape_step")

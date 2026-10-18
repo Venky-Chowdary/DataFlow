@@ -2373,7 +2373,48 @@ def _stream_database_transfer_impl(
                     "against the source as it is now"
                 )
             batch.headers, batch.rows = shape_runner.matrix(headers, batch.rows)
+            _persist_shape_diverts()
         return batch
+
+    def _persist_shape_diverts() -> None:
+        """Persist this page's shape-diverted rows to the quarantine DLQ.
+
+        A row a recipe step diverted (on_error=divert, divert_rows, lookup
+        unmatched=divert) is excluded from the destination — quarantine is what
+        makes it recoverable. Persisting per page keeps the pending list
+        bounded and keeps quarantine durable across a mid-stream abort.
+        """
+        if shape_runner is None:
+            return
+        diverted = shape_runner.take_diverted()
+        if not diverted or not job_id:
+            return
+        from services.quarantine_dlq import persist_rejected_rows
+
+        details = [
+            {
+                "row": d.record,
+                "reason": (
+                    f"transform divert — step {d.step} '{d.op}': {d.reason}"
+                ),
+                "failure_reason": d.reason,
+                "transform_attempted": f"shape step {d.step} '{d.op}'",
+                "shape_step": d.step,
+                "shape_op": d.op,
+                "source_row_index": d.row_index + 1,
+            }
+            for d in diverted
+        ]
+        persist_rejected_rows(
+            job_id=str(job_id),
+            rejected_details=details,
+            source="shape_divert",
+            connector=str(
+                getattr(destination, "format", None)
+                or getattr(destination, "kind", None)
+                or ""
+            ),
+        )
 
     def _page_cursor_max(batch) -> str:
         """The page's highest cursor value, as the source handed it over.
@@ -3152,6 +3193,8 @@ def _stream_database_transfer_impl(
                 )
                 tail_idx = first_idx + 1 + 10_000_000
                 _apply_result(tail_idx, _process_db_chunk(tail_idx, tail_batch))
+            # Winners can still hit a divert step downstream of the buffer.
+            _persist_shape_diverts()
         row_path_ok = True
     finally:
         if run_after:

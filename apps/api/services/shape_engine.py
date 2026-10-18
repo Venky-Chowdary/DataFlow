@@ -331,6 +331,8 @@ class ShapeEngine:
         self._buffers: dict[int, Any] = {}
         self._held: dict[int, int] = {}
         self._drained = False
+        # Diverted rows awaiting the caller's persist (take_diverted per page).
+        self._diverted_pending: list[DivertedRow] = []
 
     @property
     def output_columns(self) -> tuple[str, ...]:
@@ -1010,17 +1012,36 @@ class ShapeEngine:
             return None
 
     def _sample_diverted(self, drop: _Drop, row: dict[str, Any]) -> None:
+        record = DivertedRow(
+            row_index=self._row_index,
+            reason=drop.reason,
+            step=drop.step_index,
+            op=drop.op,
+            record=dict(row) if self.keep_diverted_records else {},
+        )
+        # Every diverted row is quarantine matter, not a sampled curiosity:
+        # the transfer drains this per page and persists it to the DLQ.
+        if len(self._diverted_pending) >= _MAX_BUFFERED:
+            raise ValueError(
+                f"shape divert queue passed {_MAX_BUFFERED} rows without being "
+                "drained — the stream persists diverted rows per page; "
+                "reaching the cap means the caller never collected them"
+            )
+        self._diverted_pending.append(record)
         if len(self.effect.diverted_samples) >= self.sample_limit:
             return
-        self.effect.diverted_samples.append(
-            DivertedRow(
-                row_index=self._row_index,
-                reason=drop.reason,
-                step=drop.step_index,
-                op=drop.op,
-                record=dict(row) if self.keep_diverted_records else {},
-            )
-        )
+        self.effect.diverted_samples.append(record)
+
+    def take_diverted(self) -> list[DivertedRow]:
+        """Diverted rows since the last call, then cleared.
+
+        The transfer pulls this after every page and persists the rows to the
+        job's quarantine store — a shape-diverted row is replayable quarantine,
+        not a counter in a ledger.
+        """
+        rows = self._diverted_pending
+        self._diverted_pending = []
+        return rows
 
 
 # ---------------------------------------------------------------------------
