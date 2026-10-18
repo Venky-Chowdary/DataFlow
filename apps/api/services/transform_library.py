@@ -49,6 +49,44 @@ def _is_newer(candidate: TransformRecipe, incumbent: TransformRecipe) -> bool:
     return (candidate.updated_at or "") > (incumbent.updated_at or "")
 
 
+def recipe_step_diff(
+    from_steps: list[dict[str, Any]],
+    to_steps: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Per-position step diff between two recipe versions.
+
+    Ordered, positional: a recipe is a pipeline, so step N of version A is
+    compared to step N of version B — a rename or re-order shows honestly
+    as removed+added/modified entries rather than a silent set diff.
+    """
+    out: list[dict[str, Any]] = []
+    for i in range(max(len(from_steps), len(to_steps))):
+        before = from_steps[i] if i < len(from_steps) else None
+        after = to_steps[i] if i < len(to_steps) else None
+        if before == after:
+            continue
+        if before is None:
+            out.append({"index": i, "change": "added", "after": after})
+        elif after is None:
+            out.append({"index": i, "change": "removed", "before": before})
+        else:
+            changed_keys = sorted(
+                k
+                for k in set(before) | set(after)
+                if before.get(k) != after.get(k)
+            )
+            out.append(
+                {
+                    "index": i,
+                    "change": "modified",
+                    "changed_keys": changed_keys,
+                    "before": before,
+                    "after": after,
+                }
+            )
+    return out
+
+
 class TransformLibraryStore(ABC):
     @abstractmethod
     def list(self, workspace_id: str = "") -> list[TransformRecipe]: ...

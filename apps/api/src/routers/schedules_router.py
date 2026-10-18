@@ -917,6 +917,104 @@ async def accept_source_schema(
     }
 
 
+class ScheduleRecipeUpgrade(BaseModel):
+    """Explicit recipe-version upgrade for a bound schedule (B3)."""
+
+    target_version: int = Field(ge=1)
+
+
+@router.post("/{schedule_id}/transform-recipe/upgrade")
+def upgrade_schedule_recipe(
+    schedule_id: str,
+    body: ScheduleRecipeUpgrade,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Re-pin a schedule's transform recipe to a newer version — explicit.
+
+    The companion GET preview is ``POST /transform-library/{id}/
+    upgrade-preview``: this call applies the re-pin the operator already
+    reviewed, re-resolving the compiled shape_recipe at the target version
+    so the bound steps always match the binding they claim. Pin mode is
+    forced — a follow-latest schedule upgrades by editing its mode, not
+    this endpoint.
+    """
+    resolve_write_workspace(request, workspace_id)
+    existing = get_schedule(schedule_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "")
+    recipe_id = str(getattr(existing, "transform_recipe_id", "") or "").strip()
+    if not recipe_id:
+        raise HTTPException(
+            status_code=409,
+            detail="Schedule has no transform recipe binding to upgrade",
+        )
+    from_version = int(getattr(existing, "transform_recipe_version", 0) or 0)
+
+    from services.transform_library import (
+        get_transform_library,
+        recipe_step_diff,
+    )
+
+    store = get_transform_library()
+    ws = getattr(existing, "workspace_id", "") or ""
+    old = store.get(recipe_id, workspace_id=ws or None, version=from_version)
+    new = store.get(
+        recipe_id, workspace_id=ws or None, version=body.target_version
+    )
+    if new is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"Transform recipe {recipe_id} version "
+                f"{body.target_version} not found"
+            ),
+        )
+    try:
+        updated = update_schedule(
+            schedule_id,
+            {
+                "transform_recipe_id": recipe_id,
+                "transform_recipe_version": int(body.target_version),
+                "transform_recipe_version_mode": "pin",
+            },
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not updated:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    record_security_event(
+        "schedule.recipe.upgrade",
+        outcome="succeeded",
+        request=request,
+        resource=f"schedule:{updated.id}",
+        status=200,
+        details={
+            "recipe_id": recipe_id,
+            "from_version": from_version,
+            "to_version": int(body.target_version),
+        },
+    )
+    return {
+        "schedule_id": schedule_id,
+        "recipe_id": recipe_id,
+        "from_version": from_version,
+        "to_version": int(body.target_version),
+        "bound_version": int(
+            getattr(updated, "transform_recipe_version", 0) or 0
+        ),
+        "step_diff": (
+            recipe_step_diff(
+                [st.to_dict() for st in old.steps],
+                [st.to_dict() for st in new.steps],
+            )
+            if old is not None
+            else []
+        ),
+    }
+
+
 @router.post("/{schedule_id}/sync")
 async def sync_pipeline(
     schedule_id: str,

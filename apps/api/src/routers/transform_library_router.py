@@ -73,12 +73,25 @@ class RecipeUpdate(BaseModel):
 
 class PreviewRequest(BaseModel):
     rows: list[dict[str, Any]] = Field(default_factory=list, max_length=PREVIEW_ROW_LIMIT)
-    """When set, preview this step list instead of the stored recipe's."""
     steps: Optional[list[StepPayload]] = None
-    """Parameter values overriding the recipe's declared defaults."""
+    """When set, preview this step list instead of the stored recipe's."""
     params: Optional[dict[str, Any]] = None
-    """When true, each row also carries the value after every step."""
+    """Parameter values overriding the recipe's declared defaults."""
     per_step: bool = False
+    """When true, each row also carries the value after every step."""
+
+
+class UpgradePreviewPayload(BaseModel):
+    """Version-upgrade preview request: which bound version moves to which.
+
+    ``bound_version`` defaults to the consuming schedule's pinned version
+    when ``schedule_id`` is given, else the recipe's previous version;
+    ``target_version`` defaults to the recipe's latest.
+    """
+
+    target_version: Optional[int] = Field(default=None, ge=1)
+    bound_version: Optional[int] = Field(default=None, ge=1)
+    schedule_id: Optional[str] = None
 
 
 def _to_steps(payloads: list[StepPayload]) -> list[RecipeStep]:
@@ -399,6 +412,73 @@ def compile_for_transfer(
         "parameters": recipe.parameters,
         "input_columns": list(recipe.input_columns),
         "output_columns": list(shape.output_columns),
+    }
+
+
+@router.post("/{recipe_id}/upgrade-preview")
+def upgrade_preview(
+    recipe_id: str,
+    body: UpgradePreviewPayload,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
+    """Per-step diff a version upgrade would apply — B3 upgrade path.
+
+    Editing a shared recipe creates a new version; consumers pinned to an
+    older one must opt in explicitly. This endpoint is the opt-in surface:
+    it returns the exact per-step changes between the bound version and
+    the target BEFORE anything re-pins, plus the schedules that bind the
+    recipe. Nothing mutates — the client re-pins the schedule only after
+    reviewing this diff.
+    """
+    ws = resolve_read_workspace(request, workspace_id)
+    store = get_transform_library()
+    recipe = store.get(recipe_id, workspace_id=ws)
+    if not recipe:
+        raise HTTPException(status_code=404, detail="Transform recipe not found")
+    assert_resource_workspace(request, recipe.workspace_id or "")
+
+    from services.schedule_store import get_schedule
+
+    bound_version = body.bound_version
+    if bound_version is None and body.schedule_id:
+        sched = get_schedule(body.schedule_id)
+        if not sched:
+            raise HTTPException(status_code=404, detail="Schedule not found")
+        bound_version = int(
+            getattr(sched, "transform_recipe_version", 0) or 0
+        ) or None
+    if bound_version is None:
+        bound_version = max(1, int(recipe.version or 1) - 1)
+    target_version = body.target_version or int(recipe.version or 1)
+
+    old = store.get(recipe_id, workspace_id=ws, version=bound_version)
+    if old is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Transform recipe version {bound_version} not found",
+        )
+    new = store.get(recipe_id, workspace_id=ws, version=target_version)
+    if new is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"Transform recipe version {target_version} not found",
+        )
+
+    from services.transform_library import recipe_step_diff
+
+    return {
+        "recipe_id": recipe_id,
+        "recipe_name": recipe.name,
+        "from_version": bound_version,
+        "to_version": target_version,
+        "step_diff": recipe_step_diff(
+            [st.to_dict() for st in old.steps],
+            [st.to_dict() for st in new.steps],
+        ),
+        "enabled_changed": bool(old.enabled) != bool(new.enabled),
+        "used_by": _schedule_users(recipe_id, int(recipe.version or 1)),
+        "mutates_nothing": True,
     }
 
 
