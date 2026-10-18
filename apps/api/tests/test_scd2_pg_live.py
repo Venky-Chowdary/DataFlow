@@ -852,3 +852,25 @@ def test_scd2_overlap_foreign_stamp_excluded_pg(tmp_path, monkeypatch):
     assert db_.get("opened") == 2, hist_b
     assert db_.get("changed") == 0
     conn.close()
+
+
+def test_scd2_proven_run_stamps_verified_verdict_pg(tmp_path, monkeypatch):
+    """V-1: a fully proven run carries verification_verdict="verified"
+    and its message leads with the structured verdict, never a bare
+    'not migration_proven' contradiction under passed=true."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="scd2_v1_src")
+    cur.execute("DROP TABLE IF EXISTS scd2_v1_dst CASCADE")
+    recipe = _scd2_recipe()
+    req = _engine_req("scd2_v1_src", "scd2_v1_dst", recipe, mode="strict")
+
+    res = _exec(fake, req, prefix="scdv1")
+    assert res.success, res.error
+    recon = res.reconciliation or {}
+    assert recon.get("passed") is True
+    assert recon.get("verification_verdict") == "verified", recon
+    msg = str(recon.get("message") or "")
+    assert "not migration_proven" not in msg or "verified" in msg.lower()
+    conn.close()

@@ -444,9 +444,9 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
             out["population_proof"] = False
             if str(out.get("message") or "").lower().startswith("row fidelity verified"):
                 out["message"] = (
-                    f"Destination read-back matches the write-pass fingerprint "
-                    f"({rows} rows). Source warehouse was not independently "
-                    "re-read — not migration_proven."
+                    f"Gate-8 verified — destination read-back matches the "
+                    f"write-pass fingerprint ({rows} rows); source warehouse "
+                    "was not independently re-read (migration_proven=false)."
                 )
             return out
         out["phase"] = "post_write_verified"

@@ -20,7 +20,9 @@ from __future__ import annotations
 import hashlib
 import os
 import socket
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
+
+UTC = timezone.utc
 from decimal import Decimal
 from typing import Any, Iterable, Sequence
 

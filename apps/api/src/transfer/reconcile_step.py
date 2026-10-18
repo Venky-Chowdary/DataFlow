@@ -2440,6 +2440,14 @@ def _run_reconciliation_impl(
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
         stamped = qualify_multi_stream_reconciliation(stamped, dest_summary)
         stamped = _attach_match_summary(stamped, dest_summary)
+        if (
+            stamped.get("passed")
+            and not stamped.get("unproven")
+            and not stamped.get("verification_verdict")
+        ):
+            # V-1: a fully proven run carries an explicit structured verdict —
+            # only failed / partial / unproven runs may differ.
+            stamped["verification_verdict"] = "verified"
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)

@@ -15,7 +15,7 @@ from connectors.writer_common import (  # noqa: E402
     quarantine_unfit_specialty_types,
     quarantine_unfit_temporals,
 )
-from services.schema_introspect import (  # noqa: E402
+from services.unique_key_introspect import (  # noqa: E402
     _oracle_fetch_unique_keys,
     _sqlserver_fetch_unique_keys,
 )

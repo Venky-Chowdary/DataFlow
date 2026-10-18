@@ -12,6 +12,8 @@ if str(_API_ROOT) not in sys.path:
 
 from services.schema_introspect import (  # noqa: E402
     _fetch_foreign_keys,
+)
+from services.unique_key_introspect import (  # noqa: E402
     _mysql_fetch_unique_keys,
     _oracle_fetch_unique_keys,
     _pg_fetch_unique_keys,

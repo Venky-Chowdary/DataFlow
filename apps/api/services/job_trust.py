@@ -179,9 +179,11 @@ def _reconcile_factor(recon: dict[str, Any]) -> dict[str, Any]:
     elif writer_ack:
         r_note = "Writer acknowledgment only — independent read-back not captured."
     elif assurance == "write_pass_dest_readback" or "write_pass" in phase:
+        _vv = str(recon.get("verification_verdict") or "").lower() or "unproven"
         r_note = (
-            "Dest read-back matches the write-pass fingerprint — source warehouse "
-            "was not independently re-read. Not migration_proven."
+            f"verification_verdict={_vv} — dest read-back matches the "
+            "write-pass fingerprint; source warehouse was not independently "
+            "re-read (migration_proven=false)."
         )
     elif sample:
         r_note = "Sample-verified Gate-8 — not full independent checksum."
