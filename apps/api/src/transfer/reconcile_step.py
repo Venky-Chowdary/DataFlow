@@ -2520,24 +2520,46 @@ def _run_reconciliation_impl(
         route_readback: dict[str, Any] = {}
         readback_ok = True
         for _rname, _rtable in routed_tables:
-            _r_rows, _r_checksum = verify_target(
-                db_type,
-                cfg,
-                schema=schema,
-                table_name=_rtable,
-                fallback_rows=-1,
-                fallback_checksum="",
-                target_columns=None,
-                limit=checksum_limit,
-                dest_types=None,
-                written_ids=None,
-                pk_column=None,
-            )
+            if db_type == "postgresql":
+                # One scan yields both the canonical digest and the additive
+                # multiset digest — the additive form proves an append into an
+                # occupied route table (post − pre == this run's rows, RT-6).
+                from services.reconciliation import verify_postgres_route_table
+
+                _r_rows, _r_checksum, _r_additive = verify_postgres_route_table(
+                    host=str(cfg.get("host") or ""),
+                    port=int(cfg.get("port") or 5432),
+                    database=str(cfg.get("database") or ""),
+                    username=str(cfg.get("username") or cfg.get("user") or ""),
+                    password=str(cfg.get("password") or ""),
+                    schema=schema,
+                    connection_string=str(cfg.get("connection_string") or ""),
+                    ssl=bool(cfg.get("ssl") or cfg.get("sslmode")),
+                    table_name=_rtable,
+                    dest_types=None,
+                )
+            else:
+                _r_additive = ""
+                _r_rows, _r_checksum = verify_target(
+                    db_type,
+                    cfg,
+                    schema=schema,
+                    table_name=_rtable,
+                    fallback_rows=-1,
+                    fallback_checksum="",
+                    target_columns=None,
+                    limit=checksum_limit,
+                    dest_types=None,
+                    written_ids=None,
+                    pk_column=None,
+                )
             route_readback[_rname] = {
                 "table": _rtable,
                 "verified_rows": _r_rows,
                 "checksum": _r_checksum,
             }
+            if _r_additive:
+                route_readback[_rname]["additive_checksum"] = _r_additive
             if isinstance(_r_rows, int) and _r_rows >= 0:
                 target_rows += _r_rows
             else:
@@ -2548,23 +2570,61 @@ def _run_reconciliation_impl(
         # column is never a destination column, so no exclusion is needed.
         route_expected = dest_summary.get("route_expected") or {}
         route_precount = dest_summary.get("route_precount") or {}
-        _r_sync = str(dest_summary.get("sync_mode") or "")
-        _r_replacing = "overwrite" in _r_sync or "full_refresh" in _r_sync
+        route_predigest = dest_summary.get("route_predigest") or {}
+        from services.sync_cursor import is_overwrite_sync, normalize_sync_mode
+
+        _r_sync = normalize_sync_mode(
+            str(dest_summary.get("sync_mode") or ""), default=""
+        )
+        # "full_refresh" substring matching treated full_refresh_append as a
+        # replacing sync and compared this run's digest against a table that
+        # still held prior rows — a guaranteed false mismatch (RT-6).
+        _r_replacing = is_overwrite_sync(_r_sync)
+        # Upsert-class modes land exactly this run's expected set: the final
+        # table state IS the run's rows, so the canonical digest compares
+        # directly regardless of pre-count (RT-7).
+        _r_idempotent = _r_sync in {"incremental_deduped", "upsert", "mirror"}
         route_digest_all = True
         _route_digest_compared = 0
         for _rname2, _rinfo in route_readback.items():
             _exp = route_expected.get(_rname2)
             # The run's write-pass digest is comparable only when the table
-            # holds exactly this run's rows: a replacing sync emptied it, or
-            # the per-route pre-count says it started empty. An append into a
-            # non-empty table makes the read-back a superset — compareable by
-            # count/delta, not by digest.
-            _comparable = _r_replacing or int(route_precount.get(_rname2) or 0) == 0
+            # holds exactly this run's rows: a replacing sync emptied it, an
+            # upsert made the table equal the expected set, or the per-route
+            # pre-count says it started empty.
+            _pre_rows = int(route_precount.get(_rname2) or 0)
+            _comparable = _r_replacing or _r_idempotent or _pre_rows == 0
             _rinfo["expected_checksum"] = str(_exp.get("checksum") or "") if _exp else ""
             if not _comparable:
+                # Append into an occupied table: prove the delta, not the
+                # whole table. post-digest − pre-digest must equal this run's
+                # additive digest, and post-count − pre-count the run's rows.
+                _pre_add = str((route_predigest.get(_rname2) or {}).get("additive") or "")
+                _post_add = str(_rinfo.get("additive_checksum") or "")
+                _run_add = str((_exp or {}).get("additive") or "")
+                _run_rows = int((_exp or {}).get("rows") or 0)
+                if _pre_add and _post_add and _run_add:
+                    _route_digest_compared += 1
+                    _delta_ok = (
+                        (int(_post_add, 16) - int(_pre_add, 16)) % (1 << 256)
+                        == int(_run_add, 16)
+                    )
+                    _count_ok = int(_rinfo.get("verified_rows") or -1) - _pre_rows == _run_rows
+                    _match = _delta_ok and _count_ok
+                    _rinfo["digest_match"] = _match
+                    _rinfo["digest_note"] = (
+                        "additive digest: post-write minus pre-write equals "
+                        "this run's rows" if _match else
+                        "additive digest mismatch — the table's post-minus-pre "
+                        "delta does not equal this run's rows"
+                    )
+                    if not _match:
+                        route_digest_all = False
+                    continue
                 _rinfo["digest_match"] = None
                 _rinfo["digest_note"] = (
-                    "not comparable — table held rows before this run"
+                    "not comparable — table held rows before this run and no "
+                    "additive digest was measured"
                 )
                 continue
             _route_digest_compared += 1
@@ -2576,7 +2636,8 @@ def _run_reconciliation_impl(
             _rinfo["digest_match"] = _match
             if not _match:
                 route_digest_all = False
-        route_digest_all = route_digest_all and _route_digest_compared > 0
+        if _route_digest_compared == 0:
+            route_digest_all = None  # unproven — not a false alarm
         dest_summary["route_verification"] = route_readback
         dest_summary["route_digest_match"] = route_digest_all
         if not readback_ok:
@@ -3237,6 +3298,7 @@ def _run_reconciliation_impl(
         or (ROUTE_PARTITIONED if routed_tables else ""),
         keyed_expected_delta=keyed_delta,
         route_digest_match=dest_summary.get("route_digest_match"),
+        rows_written=int(rows_written) if rows_written is not None else None,
     )
     return _finalize(report.to_dict())
 

@@ -200,6 +200,10 @@ class ReconciliationReport:
     checksum_scope: str = ""
     # Pre-write dest COUNT(*) — append identity is dest_after − dest_before.
     target_rows_before: int | None = None
+    # Rows this run physically landed/upserted (writer-acknowledged). For
+    # routed upsert re-runs the net growth is 0 while rows_written is the
+    # upserted count — the ledger measures it instead of "unmeasured" (RT-7).
+    rows_written: int | None = None
 
     def to_dict(self) -> dict:
         return stamp_post_write_phase(asdict(self))
@@ -290,9 +294,8 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         # here. The report's own checksum_match already carries the per-route
         # digest result (each comparable route's read-back vs its write-pass
         # fingerprint); population_proof is the conservation verdict.
-        route_matched = bool(out.get("passed")) and bool(
-            out.get("checksum_match")
-        )
+        _route_cm = out.get("checksum_match")
+        route_matched = bool(out.get("passed")) and bool(_route_cm)
         out["phase"] = (
             "post_write_verified" if out.get("passed") else "post_write_failed"
         )
@@ -302,7 +305,10 @@ def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
         out["assurance_level"] = ROUTE_PARTITIONED
         out["migration_proven"] = False
         out["population_proof"] = bool(out.get("passed"))
-        out["checksum_match"] = route_matched
+        # Tri-state preserved: None = digest unproven (append into occupied
+        # tables with no additive evidence) — a successful run must not report
+        # checksum_match=false it never measured.
+        out["checksum_match"] = None if _route_cm is None else route_matched
         return out
 
     # Module 4: always stamp checksum honesty; never invent population RI proof.
@@ -804,6 +810,37 @@ def _saas_readback_truncated(driver: str, limit: int, rows: int) -> bool:
 EMPTY_POPULATION_DIGEST: Final[str] = hashlib.sha256().hexdigest()
 
 
+def additive_checksum_from_iter(
+    rows: Iterable[Any],
+    columns: list[str] | None = None,
+    *,
+    sort_key: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str]:
+    """(count, additive digest) — sum of per-row fingerprint hashes mod 2^256.
+
+    Same fingerprints as ``canonical_checksum``, so the two digests describe
+    the same row content; the additive form stays comparable when a table
+    holds prior rows plus this run's append: post − pre must equal the run.
+    """
+    total = 0
+    n = 0
+    for _rk, fp in _iter_fingerprints(
+        rows,
+        columns,
+        sort_key=sort_key,
+        dest_db_type=dest_db_type,
+        dest_types=dest_types,
+    ):
+        total = (
+            total
+            + int.from_bytes(hashlib.sha256(fp.encode("utf-8")).digest(), "big")
+        ) % (1 << 256)
+        n += 1
+    return n, format(total, "064x")
+
+
 def checksum_rows(
     rows: list[Any],
     columns: list[str] | None = None,
@@ -854,6 +891,7 @@ def reconcile(
     checksum_scope: str = "",
     keyed_expected_delta: int | None = None,
     route_digest_match: bool | None = None,
+    rows_written: int | None = None,
 ) -> ReconciliationReport:
     """Compare source and destination evidence into one Gate-8 verdict.
 
@@ -1023,11 +1061,15 @@ def reconcile(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             sample_compare=sample_compare,
-            checksum_match=bool(route_digest_match),
+            # Tri-state: True (comparable routes matched), False (a compared
+            # route diverged), None (nothing was comparable — unproven, never
+            # a false alarm on a successful run).
+            checksum_match=route_digest_match,
             population_proof=ok,
             assurance_level=ROUTE_PARTITIONED,
             checksum_scope=ROUTE_PARTITIONED,
             target_rows_before=target_rows_before,
+            rows_written=rows_written,
         )
     keyed_identity = (
         keyed_expected_delta is not None
@@ -1627,6 +1669,66 @@ def verify_postgres_table(
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
         return -1, ""
+
+
+def verify_postgres_route_table(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    connection_string: str,
+    ssl: bool,
+    table_name: str,
+    dest_types: dict[str, str] | None = None,
+) -> tuple[int, str, str]:
+    """(count, canonical checksum, additive checksum) for one route table.
+
+    One read-back scan produces both digests — the additive form proves an
+    append into an occupied route table (post − pre == this run), which the
+    canonical whole-table digest cannot (RT-6).
+    """
+    try:
+        from connectors.postgresql_conn import get_connection
+
+        conn = get_connection(
+            host=host,
+            port=port,
+            database=database,
+            username=username,
+            password=password,
+            connection_string=connection_string,
+            ssl=ssl,
+        )
+        from connectors.sql_identifiers import quote_table_ref
+
+        table_ref = quote_table_ref(
+            table_name, schema or "public", dialect="postgresql"
+        )
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
+            count = int(cur.fetchone()[0])
+        with streaming_readback_cursor(conn, engine="postgresql") as cur:
+            cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+            names, rows = dbapi_streaming_rows(cur)
+            columns, projected = project_readback(names, None, rows)
+            acc = FingerprintAccumulator()
+            for rk, fp in _iter_fingerprints(
+                projected,
+                columns,
+                dest_db_type="postgresql",
+                dest_types=dest_types,
+            ):
+                acc.add(rk, fp)
+            canonical = acc.digest()
+            additive = acc.additive_digest()
+        conn.close()
+        return count, canonical, additive
+    except Exception as exc:
+        logger.warning("Route read-back failed: %s", exc, exc_info=exc)
+        return -1, "", ""
 
 
 def verify_pgvector_table(

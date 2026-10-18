@@ -383,7 +383,16 @@ def test_gate8_failure_restores_route_tables_to_pre_run_content(
         rows, checksum = real_verify(*a, **k)
         return rows + 1, checksum
 
+    real_route_verify = recon_mod.verify_postgres_route_table
+
+    def _wrong_route_count(*a, **k):
+        rows, checksum, additive = real_route_verify(*a, **k)
+        return rows + 1, checksum, additive
+
     monkeypatch.setattr(reconcile_step_mod, "verify_target", _wrong_count)
+    monkeypatch.setattr(
+        recon_mod, "verify_postgres_route_table", _wrong_route_count
+    )
     res2, job2 = _run(fake, req, prefix="rtgrd")
     assert not res2.success
     after = {t: _fetch(cur, t) for t in ("rt_high", "rt_mid", "rt_other")}
@@ -440,4 +449,120 @@ def test_gate8_success_discards_route_backups(tmp_path, monkeypatch):
     assert all(
         v["backup"].startswith(f"{v['table']}__dfbak_") for v in backups.values()
     ), backups
+    conn.close()
+
+
+def _find_key(obj, key, depth=0):
+    if isinstance(obj, dict):
+        if key in obj:
+            return obj
+        for v in obj.values():
+            if depth < 5:
+                hit = _find_key(v, key, depth + 1)
+                if hit:
+                    return hit
+    elif isinstance(obj, list):
+        for v in obj:
+            if depth < 5:
+                hit = _find_key(v, key, depth + 1)
+                if hit:
+                    return hit
+    return None
+
+
+def test_rt6_append_rerun_additive_digest_proves_rows(tmp_path, monkeypatch):
+    """RT-6: an append into occupied route tables is value-verified by the
+    additive multiset digest — post minus pre equals this run's rows. A
+    successful run must never report checksum_match=false on a table it
+    provably wrote."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    req = _req(parsed, recipe, parsed_recipe.recipe_hash, sync="full_refresh_append")
+    res1, _ = _run(fake, req, prefix="rta1")
+    assert res1.success, res1.error
+    res2, job_id2 = _run(fake, req, prefix="rta2")
+    assert res2.success, res2.error
+    recon = res2.reconciliation or {}
+    doc = fake.jobs.get(job_id2) or {}
+    holder = _find_key(doc, "route_verification") or {}
+    rv = holder.get("route_verification") or {}
+    assert set(rv) == {"high", "mid", "other"}
+    for name, info in rv.items():
+        assert info["digest_match"] is True, (
+            f"route {name}: append delta not proven — {info}"
+        )
+        assert "additive" in str(info.get("digest_note") or "").lower()
+    assert holder.get("route_digest_match") is True
+    # A successful, proven run must not report checksum_match=false.
+    assert recon.get("checksum_match") is not False, recon.get("message")
+    assert _fetch(cur, "rt_high") == [1, 1]
+    assert _fetch(cur, "rt_mid") == [2, 2, 5, 5]
+    assert _fetch(cur, "rt_other") == [3, 3, 6, 6]
+    conn.close()
+
+
+def test_rt7_deduped_rerun_reports_match_and_measured_rows_written(
+    tmp_path, monkeypatch
+):
+    """RT-7: an incremental_deduped routed re-run lands exactly the expected
+    set — per-route digests match, checksum_match is true, and rows_written
+    is measured (rows upserted) rather than reported unmeasured."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    for t in ("rt", "rt_out", "rt_high", "rt_mid", "rt_other"):
+        cur.execute(f"DROP TABLE IF EXISTS {t}")
+    cur.execute("CREATE TABLE rt (id INT PRIMARY KEY, amt TEXT, region TEXT)")
+    for r in ROWS:
+        cur.execute("INSERT INTO rt (id, amt, region) VALUES (%s, %s, %s)", r)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {"name": "high", "condition": "to_number([amt]) >= 100"},
+            {"name": "mid", "condition": "to_number([amt]) >= 50"},
+            {"name": "other", "default": True},
+        ],
+        targets={"high": "rt_high", "mid": "rt_mid", "other": "rt_other"},
+    )
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl,
+        extra={"primary_key_columns": ["id"]})
+    req = TransferRequest(
+        source=ep("rt"), destination=ep("rt_out"),
+        sync_mode="incremental_deduped",
+        shape_recipe=recipe, approved_shape_recipe_hash=parsed_recipe.recipe_hash,
+        skip_preflight=True, validation_mode="strict")
+    res1, _ = _run(fake, req, prefix="rtd1")
+    assert res1.success, res1.error
+    res2, job_id2 = _run(fake, req, prefix="rtd2")
+    assert res2.success, res2.error
+    recon = res2.reconciliation or {}
+    doc = fake.jobs.get(job_id2) or {}
+    holder = _find_key(doc, "route_verification") or {}
+    rv = holder.get("route_verification") or {}
+    assert set(rv) == {"high", "mid", "other"}
+    for name, info in rv.items():
+        assert info["digest_match"] is True, (
+            f"route {name}: deduped rerun must compare — {info}"
+        )
+    assert holder.get("route_digest_match") is True
+    assert recon.get("checksum_match") is True, recon.get("message")
+    # rows_written measured: the run upserted its 5 routed rows (net growth 0).
+    assert recon.get("rows_written") == 5, recon.get("message")
+    assert _fetch(cur, "rt_high") == [1]
+    assert _fetch(cur, "rt_mid") == [2, 5]
+    assert _fetch(cur, "rt_other") == [3, 6]
     conn.close()

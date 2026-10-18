@@ -52,6 +52,7 @@ class FingerprintAccumulator:
         self.chunk_files: list[str] = []
         self.total = 0
         self._progress_noted = 0
+        self._additive_sum = 0
         self._tempdir: tempfile.TemporaryDirectory | None = None
 
     def _flush_progress(self) -> None:
@@ -64,6 +65,14 @@ class FingerprintAccumulator:
     def add(self, key: str, fingerprint: str) -> None:
         self.buffer.append((key, fingerprint))
         self.total += 1
+        # Order-independent additive digest: sum of per-row fingerprint
+        # hashes mod 2^256. An append into an occupied table is then
+        # value-verifiable — post-write sum minus pre-write sum must equal
+        # this run's sum (RT-6).
+        self._additive_sum = (
+            self._additive_sum
+            + int.from_bytes(hashlib.sha256(fingerprint.encode("utf-8")).digest(), "big")
+        ) % (1 << 256)
         if self.total - self._progress_noted >= _PROGRESS_EVERY:
             self._flush_progress()
         if len(self.buffer) >= self.threshold:
@@ -161,6 +170,14 @@ class FingerprintAccumulator:
             h.update(fp.encode("utf-8"))
         self.close()
         return h.hexdigest()
+
+    def additive_digest(self) -> str:
+        """Additive multiset digest: sum of per-row hashes mod 2^256, as hex.
+
+        Order-independent AND insert-only-safe: for an append the post-write
+        table sum minus the pre-write table sum must equal this run's sum.
+        """
+        return format(self._additive_sum % (1 << 256), "064x")
 
     def close(self) -> None:
         if self._tempdir is not None:

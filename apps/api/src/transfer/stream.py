@@ -1627,6 +1627,54 @@ def _stream_database_transfer_impl(
             if _rper0:
                 dest_summary["route_precount"] = dict(_rper0)
                 route_backup_state["precount"] = dict(_rper0)
+                # RT-6: an append into an occupied route table cannot be
+                # proven by the canonical whole-table digest, but it can by
+                # the additive multiset digest: post − pre must equal this
+                # run's digest. Measure the pre-write additive sum for each
+                # occupied route table now (postgres only — other engines
+                # stay honestly "not comparable").
+                if dest_type == "postgresql" and not is_overwrite_sync(
+                    str(effective_sync or "")
+                ):
+                    from services.reconciliation import (
+                        verify_postgres_route_table,
+                    )
+
+                    _rpred: dict[str, Any] = {}
+                    _rmap0 = {
+                        str(_rr.get("name")): str(
+                            _rtargets0.get(_rr.get("name"))
+                            or f"{_rbase0}__{_rr.get('name')}"
+                        )
+                        for _rr in (_rstep0.options.get("routes") or [])
+                        if _rr.get("name")
+                    }
+                    for _rname1, _rn1 in _rper0.items():
+                        if int(_rn1 or 0) <= 0:
+                            continue
+                        _ptable = _rmap0.get(_rname1) or f"{_rbase0}__{_rname1}"
+                        _pc, _pchk, _padd = verify_postgres_route_table(
+                            host=str(dest_cfg.get("host") or ""),
+                            port=int(dest_cfg.get("port") or 5432),
+                            database=str(dest_cfg.get("database") or ""),
+                            username=str(
+                                dest_cfg.get("username") or dest_cfg.get("user") or ""
+                            ),
+                            password=str(dest_cfg.get("password") or ""),
+                            schema=str(dest_cfg.get("schema") or "public"),
+                            connection_string=str(
+                                dest_cfg.get("connection_string") or ""
+                            ),
+                            ssl=bool(dest_cfg.get("ssl") or dest_cfg.get("sslmode")),
+                            table_name=_ptable,
+                        )
+                        if _padd:
+                            _rpred[_rname1] = {
+                                "rows": int(_rn1),
+                                "additive": _padd,
+                            }
+                    if _rpred:
+                        dest_summary["route_predigest"] = _rpred
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
             checkpoint.target_rows_before = int(rows_before)
@@ -3928,7 +3976,14 @@ def _stream_database_transfer_impl(
             # Gate-8 compares against each route table's independent
             # read-back (route_verification). Keyed by route name.
             dest_summary["route_expected"] = {
-                _rn: {"rows": _acc.total, "checksum": _acc.digest()}
+                _rn: {
+                    "rows": _acc.total,
+                    "checksum": _acc.digest(),
+                    # Additive multiset digest — proves an append into an
+                    # occupied route table: post-read-back sum minus the
+                    # pre-write sum must equal this value (RT-6).
+                    "additive": _acc.additive_digest(),
+                }
                 for _rn, _acc in route_fp_acc.items()
                 if _acc.total > 0
             }
@@ -4130,6 +4185,10 @@ def _stream_database_transfer_impl(
     stamp_source_row_count(
         dest_summary, reader_count=counted_population, rows_written=int(written or 0)
     )
+    # RT-7: routed upsert re-runs grow the destination by 0 but still landed
+    # their rows — the ledger must read the measured writer tally, not
+    # "unmeasured".
+    dest_summary["rows_written"] = int(written or 0)
     if cursor_bounded_total:
         dest_summary["rows_cursor_bounded"] = int(cursor_bounded_total)
         ddl_log.append(
