@@ -203,6 +203,28 @@ from src.transfer.reconcile_heartbeat import (  # noqa: E402
 )
 
 
+
+def _shape_recipe_removes_rows(request: "TransferRequest") -> bool:
+    """True when the approved recipe declares a step that legitimately removes
+    rows from the destination population: divert_rows / drop / filter, or a
+    router whose unmatched policy is divert. Routed tables split the rows, but
+    only a divert actually shrinks the surviving population — the load-history
+    count/volume-drop signals must not fire on an accounted removal (RT-3)."""
+    recipe = getattr(request, "shape_recipe", None)
+    if not isinstance(recipe, dict):
+        return False
+    for step in recipe.get("steps") or []:
+        if not isinstance(step, dict) or step.get("enabled") is False:
+            continue
+        op = str(step.get("op") or "")
+        options = step.get("options") or {}
+        if op in {"divert_rows", "drop", "filter"}:
+            return True
+        if op == "router" and str(options.get("unmatched") or "") == "divert":
+            return True
+    return False
+
+
 def _compare_and_publish_load_history(
     mongo: Any,
     job_id: str,
@@ -231,6 +253,23 @@ def _compare_and_publish_load_history(
             current_row_count=row_count_hint,
         )
         quality_anomalies = list(load_history_report.get("anomalies") or [])
+        if quality_anomalies and _shape_recipe_removes_rows(request):
+            # Divert/drop/filter/router-divert recipes legitimately shrink the
+            # destination population — the ledger already accounts those rows.
+            # Downgrade count/volume-drop signals to notes; every other signal
+            # (null-rate shift, mean drift, novel quarantine) still blocks.
+            kept = [
+                a
+                for a in quality_anomalies
+                if "row count dropped" not in a
+                and "is below 50% of prior median" not in a
+            ]
+            if len(kept) != len(quality_anomalies):
+                load_history_report["population_shift_notes"] = [
+                    a for a in quality_anomalies if a not in kept
+                ]
+                load_history_report["anomalies"] = kept
+                quality_anomalies = kept
         if quality_anomalies:
             mongo.update_job_status(
                 job_id,

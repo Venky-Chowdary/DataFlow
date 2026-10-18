@@ -270,12 +270,34 @@ def _split_routed_batch(
             groups[name] = []
             order.append(name)
         groups[name].append(i)
+    route_decls = {
+        str(r.get("name") or ""): (r.get("map") or {})
+        for r in (router_step.options.get("routes") or [])
+    }
     splits: list[tuple[str, str, list[str], list[list[Any]]]] = []
     for name in order:
-        wanted = [c for c in recipe.route_output_columns(name) if c in batch.headers]
-        ix = [batch.headers.index(c) for c in wanted]
-        headers = [batch.headers[i] for i in ix]
-        rows = [[r[i] for i in ix] for r in (batch.rows[i] for i in groups[name])]
+        route_map = route_decls.get(name) or {}
+        if route_map:
+            # A mapped route renames its columns at write time: extract the
+            # map's SOURCE names from the shared batch headers, emit the
+            # TARGET names. The row dict is never rewritten at shape time —
+            # every routed row keeps the shared shape (RT-3).
+            wanted = [str(s) for s in route_map.keys() if str(s) in batch.headers]
+            emit = [str(route_map[s]) for s in wanted]
+            ix = [batch.headers.index(c) for c in wanted]
+            headers = emit
+            rows = [
+                [r[i] for i in ix] for r in (batch.rows[i] for i in groups[name])
+            ]
+        else:
+            wanted = [
+                c for c in recipe.route_output_columns(name) if c in batch.headers
+            ]
+            ix = [batch.headers.index(c) for c in wanted]
+            headers = [batch.headers[i] for i in ix]
+            rows = [
+                [r[i] for i in ix] for r in (batch.rows[i] for i in groups[name])
+            ]
         table = str(targets.get(name) or f"{dest_table}__{name}")
         splits.append((name, table, headers, rows))
     return splits
@@ -2534,6 +2556,8 @@ def _stream_database_transfer_impl(
     batch = _filter_batch(first_page)
     batch_quality_enabled = validation_mode in ("strict", "maximum")
     drift_detector = BatchDriftDetector()
+    # Per-route drift detectors — routed runs audit each split separately.
+    route_drift_detectors: dict[str, Any] = {}
     # Identity key for duplicate audit — NEVER reuse the CDC cursor column.
     # Cursor fields (updated_at, id) are not the uniqueness contract; Mongo→Redis
     # must audit `_id`, not a business `id` that legitimately repeats.
@@ -2760,7 +2784,16 @@ def _stream_database_transfer_impl(
             dict(zip(batch.headers, row)) for row in batch.rows[:_RECONCILE_SAMPLE_CAP]
         ]
         # Per-batch data-quality / anomaly gate for database streams.
-        if batch_quality_enabled:
+        # Routed batches are audited PER ROUTE inside the split loop — each
+        # route table is a separate destination; auditing the mixed batch
+        # reads one route's mapped/diverted population as another's NULLs
+        # and shrinkage (RT-3).
+        _batch_routed = (
+            shape_runner is not None
+            and getattr(shape_runner, "recipe", None) is not None
+            and shape_runner.recipe.router_step is not None
+        )
+        if batch_quality_enabled and not _batch_routed:
             # Audit uniqueness must match the *write* posture, not only the sync
             # label. Resume upgrades insert→upsert while effective_sync stays
             # append — inventing a soft uniqueness check would last-row-wins.
@@ -2961,6 +2994,66 @@ def _stream_database_transfer_impl(
                 else:
                     _rmappings = mappings
                     _rcol_types = column_types
+                if _rname is not None and batch_quality_enabled:
+                    # Each route table is its own destination — audit the
+                    # route's rows against its own columns, never the mixed
+                    # batch (RT-3).
+                    try:
+                        audit = run_integrity_audit(
+                            headers=_rheaders,
+                            rows=_rrows,
+                            column_types=_rcol_types,
+                            mappings=_rmappings,
+                            required_targets=pk_target_cols or [],
+                            primary_key=pk_source_col
+                            if pk_source_col in _rheaders
+                            else None,
+                            primary_key_columns=[
+                                c for c in (pk_audit_cols or []) if c in _rheaders
+                            ],
+                            validation_mode=validation_mode,
+                            dest_kind=dest_type,
+                            sync_mode=(
+                                "upsert"
+                                if write_mode == "upsert"
+                                else effective_sync
+                            ),
+                        )
+                        if audit.issues:
+                            local_warnings.extend(
+                                f"route {_rname}: {i}" for i in audit.issues[:10]
+                            )
+                        if audit.warnings:
+                            local_warnings.extend(
+                                f"route {_rname}: {w}" for w in audit.warnings[:10]
+                            )
+                        if not audit.passed:
+                            raise ValueError(
+                                f"Batch {idx} route {_rname} failed "
+                                f"data-quality audit: "
+                                f"{'; '.join(audit.issues[:5])}"
+                            )
+                        _rdet = route_drift_detectors.setdefault(
+                            _rname, BatchDriftDetector()
+                        )
+                        drift_warnings = _rdet.check(audit.stats or {})
+                        if drift_warnings:
+                            if validation_mode == "maximum":
+                                raise ValueError(
+                                    f"Batch {idx} route {_rname} drift "
+                                    f"detected: "
+                                    f"{'; '.join(drift_warnings[:3])}"
+                                )
+                            local_warnings.extend(
+                                f"route {_rname}: {w}"
+                                for w in drift_warnings[:3]
+                            )
+                    except ValueError:
+                        raise
+                    except Exception as exc:
+                        logger.warning(
+                            "Route %s integrity audit skipped: %s", _rname, exc
+                        )
                 write_calls.append(
                     (
                         _rname,

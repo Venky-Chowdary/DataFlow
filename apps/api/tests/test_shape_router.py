@@ -143,11 +143,17 @@ def test_router_per_route_map_and_output_columns():
     r = ShapeRunner(recipe)
     headers, rows = r.matrix(["id", "amt"], [["1", "150"], ["2", "10"]])
     tag_ix = headers.index(ROUTE_COLUMN)
-    assert "big_amt" in headers
-    assert rows[0][tag_ix] == "high"
+    # The map applies at WRITE time, not in the shared batch — rewriting the
+    # row here would mix row shapes and read the mapped population as NULLs
+    # in the data-quality audit (RT-3).
+    # The output schema may still declare the map target column, but the
+    # rows keep the source values — the write emits the rename.
     big_ix = headers.index("big_amt")
-    assert rows[0][big_ix] == "150"
-    assert rows[1][tag_ix] == "other" and rows[1][big_ix] is None
+    assert rows[0][tag_ix] == "high"
+    amt_ix = headers.index("amt")
+    assert rows[0][amt_ix] == "150"
+    assert rows[0][big_ix] is None
+    assert rows[1][tag_ix] == "other" and rows[1][amt_ix] == "10"
 
 
 def test_router_preview_matrix_shows_tag_column():

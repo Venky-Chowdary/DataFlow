@@ -818,12 +818,11 @@ class ShapeEngine:
                     row_index=self._row_index,
                     column="",
                 )
-            route_map = route.get("map")
-            if route_map:
-                row = {
-                    str(dst): row.get(str(src))
-                    for src, dst in route_map.items()
-                }
+            # The route map is applied at write time in _split_routed_batch —
+            # rewriting the row here mixes row shapes inside one batch: the
+            # mapped row loses the shared columns, list-alignment then drops
+            # its values, and the data-quality audit reads them as NULLs
+            # (RT-3).
             row[ROUTE_COLUMN] = route["name"]
             self.effect.routes[route["name"]] = (
                 self.effect.routes.get(route["name"], 0) + 1

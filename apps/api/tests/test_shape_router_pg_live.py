@@ -293,3 +293,39 @@ def test_route_verification_records_value_digests(tmp_path, monkeypatch):
         )
     assert holder.get("route_digest_match") is True
     conn.close()
+
+
+def test_rt3_per_route_map_renames_columns_on_write(tmp_path, monkeypatch):
+    """RT-3: a per-route map renames the route table's columns at write time —
+    the shared batch keeps the source shape, so the data-quality audit never
+    reads the mapped population as NULLs. Fails on 38f990b9: the map was
+    applied to the row dict at shape time, the 'us' table was never created,
+    and the run died on 'Required column id has 2 null/empty values'."""
+    fake = _pg_env(monkeypatch)
+    parsed = _parse_dsn()
+    conn = psycopg2.connect(host=parsed["host"], port=parsed["port"], dbname=parsed["database"], user=parsed["user"], password=parsed["password"]); conn.autocommit = True
+    cur = conn.cursor()
+    _setup_source(cur, ROWS)
+    recipe, parsed_recipe = _recipe(
+        routes=[
+            {
+                "name": "us",
+                "condition": "[region] = 'US'",
+                "map": {"id": "cust_id", "amt": "amount"},
+            },
+        ],
+        targets={"us": "rt_us"},
+        unmatched="divert",
+    )
+    for t in ("rt_us",):
+        cur.execute(f"DROP TABLE IF EXISTS {t}")
+    res, _ = _run(fake, _req(parsed, recipe, parsed_recipe.recipe_hash))
+    assert res.success, res.error
+    cur.execute("SELECT cust_id, amount FROM rt_us ORDER BY cust_id")
+    assert [tuple(r) for r in cur.fetchall()] == [("1", "150"), ("3", "10")]
+    # Diverted rows still reach the DLQ — the 'us' table does not get them.
+    cur.execute(
+        "SELECT COUNT(*) FROM rt_us"
+    )
+    assert cur.fetchone()[0] == 2
+    conn.close()
