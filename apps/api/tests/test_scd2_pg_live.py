@@ -1207,3 +1207,75 @@ def test_g1a_value_drift_same_count_unverifiable_pg(tmp_path, monkeypatch):
     assert proof.get("status") == "unverifiable", proof
     assert (res.reconciliation or {}).get("passed") is True
     conn.close()
+
+
+def test_g1b_dropped_filter_step_fails_gate8_pg(tmp_path, monkeypatch):
+    """G-1b: row-removing recipes are covered too — a no-op'd
+    filter_rows writes the excluded rows and must fail, naming the
+    step; a correctly applied filter verifies."""
+    import services.shape_apply as shape_apply_mod
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+
+    recipe = {
+        "steps": [
+            {"op": "filter_rows",
+             "options": {"condition": "[id] <> '3'"}},
+            {"op": "case", "column": "note", "options": {"mode": "upper"}},
+        ]
+    }
+
+    def _req(src, dst):
+        return TransferRequest(
+            source=ep(src), destination=ep(dst),
+            sync_mode="full_refresh_overwrite",
+            mappings=[
+                {"source": c, "target": c, "confidence": 1.0,
+                 "user_override": True, "transform": "none"}
+                for c in COLS
+            ],
+            shape_recipe=recipe,
+            approved_shape_recipe_hash=ShapeRecipe.parse(
+                recipe, source_columns=COLS
+            ).recipe_hash,
+            skip_preflight=True, validation_mode="strict",
+        )
+
+    # Correct run first: rows 1-2 land uppercased, row 3 filtered out.
+    _mk_src(cur, ROWS, table="flt_g1b_src")
+    cur.execute("DROP TABLE IF EXISTS flt_g1b_dst CASCADE")
+    res = _exec(fake, _req("flt_g1b_src", "flt_g1b_dst"), prefix="g1bc")
+    assert res.success, res.error
+    proof = (res.reconciliation or {}).get("transform_applied") or {}
+    assert proof.get("status") == "verified", proof
+    cur.execute("SELECT id, note FROM flt_g1b_dst ORDER BY id")
+    assert {str(r[0]): r[1] for r in cur.fetchall()} == {"1": "N1", "2": "N2"}
+
+    # Now the dropped-step run: matrix no-op writes all three rows raw.
+    monkeypatch.setattr(
+        shape_apply_mod.ShapeRunner,
+        "matrix",
+        lambda self, headers, rows: (list(headers), [list(r) for r in rows]),
+    )
+    _mk_src(cur, ROWS, table="flt_g1b_src2")
+    cur.execute("DROP TABLE IF EXISTS flt_g1b_dst2 CASCADE")
+    res2 = _exec(fake, _req("flt_g1b_src2", "flt_g1b_dst2"), prefix="g1bd")
+    assert not res2.success, res2.error
+    recon2 = res2.reconciliation or {}
+    assert recon2.get("passed") is False
+    assert recon2.get("verification_verdict") == "failed"
+    proof2 = recon2.get("transform_applied") or {}
+    assert proof2.get("status") == "failed", proof2
+    assert any(
+        "filter" in s for s in proof2.get("culprit_steps") or []
+    ), proof2
+    conn.close()

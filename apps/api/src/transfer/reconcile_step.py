@@ -283,6 +283,15 @@ _TRANSFORM_PROOF_POPULATION_OPS = frozenset(
     }
 )
 
+# G-1b: population-changing ops whose expected output is deterministic
+# given a stable source re-read (row-removing predicates only — no arrival-
+# order dependence, no cross-destination routing, no grouping). Dedupe is
+# proven by the winner checks; router fans out to several destinations;
+# aggregate/group_by need grouped digest semantics — all stay skipped.
+_TRANSFORM_PROOF_PROVABLE_POPULATION_OPS = frozenset(
+    {"filter", "filter_rows", "divert_rows", "drop", "drop_rows"}
+)
+
 
 def _transform_applied_proof(
     *,
@@ -318,9 +327,12 @@ def _transform_applied_proof(
         for s in (shape_recipe.get("steps") or [])
         if isinstance(s, dict) and s.get("enabled") is not False
     ]
-    if any(
-        str(s.get("op") or "") in _TRANSFORM_PROOF_POPULATION_OPS for s in steps
-    ):
+    pop_ops = {
+        str(s.get("op") or "")
+        for s in steps
+        if str(s.get("op") or "") in _TRANSFORM_PROOF_POPULATION_OPS
+    }
+    if pop_ops - _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS:
         return {
             "status": "skipped",
             "reason": (
@@ -352,8 +364,7 @@ def _transform_applied_proof(
 
     from .connector_capabilities import resolve_driver_type
 
-    declared_src: list[str] = []
-    for s in steps:
+    def _step_cols(s: dict[str, Any]) -> list[str]:
         opts = s.get("options") or {}
         col = (
             s.get("column")
@@ -362,7 +373,23 @@ def _transform_applied_proof(
             or opts.get("target")
         )
         if col:
-            declared_src.append(str(col))
+            return [str(col)]
+        # Predicate steps name their columns inside a [col] expression.
+        expr = str(
+            opts.get("condition")
+            or s.get("condition")
+            or opts.get("expression")
+            or ""
+        )
+        return re.findall(r"\[([^\]]+)\]", expr)
+
+    declared_src: list[str] = []
+    declared_map: dict[int, list[str]] = {}
+    for i, s in enumerate(steps):
+        cols = _step_cols(s)
+        if cols:
+            declared_map[i] = cols
+            declared_src.extend(cols)
 
     raw_declared: dict[str, list[Any]] = {c: [] for c in set(declared_src)}
 
@@ -373,12 +400,14 @@ def _transform_applied_proof(
         src_cfg = resolve_connector_config(source_endpoint)
         read_cols = list(runner.recipe.input_columns or columns)
         expected_rows: list[dict[str, Any]] = []
+        raw_count = 0
         for batch in _proof_source_batches(
             source_endpoint=source_endpoint,
             src_type=src_type,
             src_cfg=src_cfg,
             read_cols=read_cols,
         ):
+            raw_count += len(batch)
             for c in raw_declared:
                 raw_declared[c].extend(row.get(c) for row in batch)
             expected_rows.extend(runner.records(batch))
@@ -466,17 +495,21 @@ def _transform_applied_proof(
     # untransformed values on the step's column. Anything ambiguous is
     # unverifiable — never a false failure that rolls back correct data.
     if actual_rows != len(mapped_expected):
-        return {
-            "status": "unverifiable",
-            "reason": (
-                "source changed during run — re-read returned "
-                f"{len(mapped_expected)} recipe-applied rows but "
-                f"{actual_label} holds {actual_rows}"
-            ),
-            "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
-            "expected_rows": len(mapped_expected),
-            "actual_rows": actual_rows,
-        }
+        # G-1b: for row-removing recipes a dropped step inflates the
+        # written population toward the raw count — keep going so the
+        # declared-column check can prove it. Anything else is drift.
+        if not (pop_ops and actual_rows == raw_count):
+            return {
+                "status": "unverifiable",
+                "reason": (
+                    "source changed during run — re-read returned "
+                    f"{len(mapped_expected)} recipe-applied rows but "
+                    f"{actual_label} holds {actual_rows}"
+                ),
+                "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
+                "expected_rows": len(mapped_expected),
+                "actual_rows": actual_rows,
+            }
 
     declared_tcols = [map_source_to_target(c, mappings) for c in declared_src]
     untouched_cols = [c for c in digest_cols if c not in declared_tcols]
@@ -532,43 +565,58 @@ def _transform_applied_proof(
             )
             return cs
 
+        def _classify_declared() -> None:
+            for scol in declared_src:
+                col = map_source_to_target(scol, mappings)
+                if col not in digest_cols:
+                    continue
+                col_expected = _exp_digest([col])
+                col_actual = _dest_digest([col])
+                if col_actual == col_expected:
+                    continue
+                # Destination holds the raw value the source held — the
+                # step never ran on it. Anything else (a third value
+                # entirely) means the source changed.
+                col_raw = canonical_checksum_from_iter(
+                    ({col: v} for v in raw_declared.get(scol, [])),
+                    [col],
+                    dest_db_type=dest_db_type,
+                    dest_types=dest_types,
+                )
+                if col_actual == col_raw:
+                    culprits.append(col)
+                else:
+                    drift_cols.append(True)
+
+        drift_cols: list[bool] = []
         with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
             with deng.connect() as dconn:
-                # Key-set drift: the written population's keys must be the
-                # re-read population's keys.
-                if pk_cols and _dest_digest(pk_cols) != _exp_digest(pk_cols):
-                    drift = True
+                if pop_ops:
+                    # G-1b: a dropped row-removing step inflates every
+                    # column digest, so blame can only come from a
+                    # declared column holding the raw population.
+                    _classify_declared()
+                    if not culprits:
+                        if pk_cols and _dest_digest(pk_cols) != _exp_digest(
+                            pk_cols
+                        ):
+                            drift_cols.append(True)
+                        elif untouched_cols and _dest_digest(
+                            untouched_cols
+                        ) != _exp_digest(untouched_cols):
+                            drift_cols.append(True)
+                elif pk_cols and _dest_digest(pk_cols) != _exp_digest(pk_cols):
+                    drift_cols.append(True)
                 # Untouched columns are written raw — if the destination's
                 # raw-held columns no longer match the re-read, the source
                 # moved underneath the run.
                 elif untouched_cols and _dest_digest(untouched_cols) != _exp_digest(
                     untouched_cols
                 ):
-                    drift = True
+                    drift_cols.append(True)
                 else:
-                    for i, col in enumerate(declared_tcols):
-                        if col not in digest_cols:
-                            continue
-                        col_expected = _exp_digest([col])
-                        col_actual = _dest_digest([col])
-                        if col_actual == col_expected:
-                            continue
-                        # Destination holds the raw value the source held —
-                        # the step never ran on it. Anything else (a third
-                        # value entirely) means the source changed.
-                        col_raw = canonical_checksum_from_iter(
-                            (
-                                {col: v}
-                                for v in raw_declared.get(declared_src[i], [])
-                            ),
-                            [col],
-                            dest_db_type=dest_db_type,
-                            dest_types=dest_types,
-                        )
-                        if col_actual == col_raw:
-                            culprits.append(col)
-                        else:
-                            drift = True
+                    _classify_declared()
+        drift = bool(drift_cols)
     except Exception:
         # Localization is best-effort; never upgrade an ambiguous
         # divergence into a blamed failure.
@@ -600,15 +648,9 @@ def _transform_applied_proof(
 
     culprit_steps = []
     for i, s in enumerate(steps):
-        opts = s.get("options") or {}
-        col = (
-            s.get("column")
-            or opts.get("column")
-            or s.get("target")
-            or opts.get("target")
-        )
-        if col and map_source_to_target(str(col), mappings) in culprits:
-            culprit_steps.append(f"step {i + 1} ({s.get('op')} on '{col}')")
+        cols = declared_map.get(i) or []
+        if any(map_source_to_target(c, mappings) in culprits for c in cols):
+            culprit_steps.append(f"step {i + 1} ({s.get('op')} on '{cols[0]}')")
     if not culprit_steps:
         culprit_steps = [
             f"step {i + 1} ({s.get('op')})"
