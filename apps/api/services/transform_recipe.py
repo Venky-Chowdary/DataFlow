@@ -198,7 +198,35 @@ class TransformRecipe:
                 issues.append(
                     f"step {i}: on_error must be one of {sorted(ON_ERROR_MODES)}"
                 )
+        if not issues:
+            compile_issue = self._compile_probe()
+            if compile_issue:
+                issues.append(compile_issue)
         return issues
+
+    def _compile_probe(self) -> str:
+        """Compile the recipe the same way a bind does, with declared defaults.
+
+        Parameters without a declared default stand in with ``"1"`` — a probe
+        value that passes numeric and column-name checks — so a parameterized
+        recipe still gets the deep check instead of skipping it. A step whose
+        options the shape engine refuses (a bad character class, an unknown
+        aggregate function, a malformed lookup) is reported here instead of
+        surprising the first transfer that binds the recipe.
+        """
+        supplied = {
+            name: spec["default"] if isinstance(spec, dict) and "default" in spec else "1"
+            for name, spec in self.parameters.items()
+        }
+        try:
+            bound = self.bind_parameters(supplied)
+            payload = {"steps": [_step_to_shape_wire(s) for s in bound.steps]}
+            from services.shape_models import ShapeRecipe
+
+            ShapeRecipe.parse(payload)
+        except Exception as exc:
+            return f"compile check: {exc}"
+        return ""
 
     def refresh_status(self) -> "TransformRecipe":
         """Recompute ``issues`` + ``status`` from ``check`` — called on save."""
@@ -360,10 +388,12 @@ def _step_to_shape_wire(step: RecipeStep) -> dict[str, Any]:
             else:  # default:
                 op = "default_if_null"
                 options = {"value": arg}
-        elif step.op in _ENGINE_OP_TO_SHAPE:
-            op, defaults = _ENGINE_OP_TO_SHAPE[step.op]
+        elif (canonical := normalize_engine_transform(step.op)) in _ENGINE_OP_TO_SHAPE:
+            # Aliases (``to_decimal`` → ``decimal``) map through their canonical
+            # engine id — the faithful shape op is the same one.
+            op, defaults = _ENGINE_OP_TO_SHAPE[canonical]
             options = {**defaults, **options}
-        elif normalize_engine_transform(step.op) is not None:
+        elif canonical is not None:
             raise ValueError(
                 f"recipe step on '{step.column}' uses engine transform "
                 f"{step.op!r}, which has no faithful shape-step equivalent — "

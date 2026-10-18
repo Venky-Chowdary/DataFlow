@@ -56,10 +56,20 @@ def test_nest_keeps_sources_without_drop():
     assert shaped[0]["p"] == '{"a":1}'
 
 
-def test_nest_refuses_a_missing_source_column():
+def test_nest_refuses_a_field_naming_no_declared_column_at_parse():
+    from services.shape_models import ShapeError
+
+    with pytest.raises(ShapeError, match="not available"):
+        ShapeRecipe.parse(
+            {"steps": [{"op": "nest_json", "options": {"fields": ["zz"], "to": "p"}}]},
+            source_columns=["a"],
+        )
+
+
+def test_nest_refuses_a_field_absent_from_the_row():
     plan = ShapeRecipe.parse(
         {"steps": [{"op": "nest_json", "options": {"fields": ["zz"], "to": "p"}}]},
-        source_columns=["a"],
+        source_columns=["a", "zz"],
     )
     with pytest.raises(ShapeRowError, match="not a column"):
         shape_records(plan, [{"a": 1}])

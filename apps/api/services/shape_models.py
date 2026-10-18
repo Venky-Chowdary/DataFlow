@@ -794,7 +794,7 @@ def _normalize_options(
         kind = str(out.get("characters") or "").strip().casefold()
         allowed = (
             "punctuation", "digits", "letters",
-            "non_numeric", "non_printable", "whitespace",
+            "non_numeric", "non_printable", "controls", "whitespace",
         )
         if kind not in allowed:
             raise ShapeError(
@@ -894,6 +894,161 @@ def _normalize_options(
             if not isinstance(keys, (list, tuple)):
                 raise ShapeError(f"{where}: flatten_json keys must be a list of names")
             out["keys"] = [_valid_name(str(name), where=where) for name in keys]
+
+    # --- buffered set-ops: strict config, because a wrong option emitting
+    # None/last silently is silent wrong data, not a style choice. ---------
+    if op == "dedupe_rows":
+        out["keys"] = _required_column_list(out, "keys", columns, where=where)
+        keep = str(out.get("keep") or "first").strip().casefold()
+        if keep not in ("first", "last"):
+            raise ShapeError(f"{where}: dedupe keep must be first or last")
+        out["keep"] = keep
+        order_by = str(out.get("order_by") or "").strip()
+        if keep == "last" and not order_by:
+            raise ShapeError(
+                f"{where}: dedupe keep=last needs order_by — 'last' is undefined "
+                "without an ordering column"
+            )
+        _assert_columns_exist([order_by], columns, "order_by", where=where)
+        # Default 'desc' matches the engine: keep=last means the largest
+        # order_by value wins when no direction is stated.
+        order_dir = str(out.get("order_dir") or "desc").strip().casefold()
+        if order_dir not in ("asc", "desc"):
+            raise ShapeError(f"{where}: dedupe order_dir must be asc or desc")
+        out["order_dir"] = order_dir
+        if order_by:
+            out["order_by"] = order_by
+        else:
+            out.pop("order_by", None)
+        if out.get("max_keys") not in (None, ""):
+            number = _as_int(out["max_keys"], "max_keys", where=where)
+            if number <= 0:
+                raise ShapeError(f"{where}: max_keys must be greater than zero")
+            out["max_keys"] = number
+        else:
+            out.pop("max_keys", None)
+
+    if op == "aggregate":
+        out["group_by"] = _optional_column_list(out, "group_by", columns, where=where)
+        measures = out.get("measures")
+        if not isinstance(measures, (list, tuple)) or not measures:
+            raise ShapeError(f"{where}: aggregate needs a non-empty measures list")
+        allowed_fns = ("sum", "avg", "count", "min", "max", "first", "last")
+        normalized_measures = []
+        for i, measure in enumerate(measures, start=1):
+            if not isinstance(measure, Mapping):
+                raise ShapeError(f"{where}: measure {i} must be an object")
+            function = str(measure.get("function") or "").strip().casefold()
+            if function not in allowed_fns:
+                raise ShapeError(
+                    f"{where}: measure {i} function '{function}' is not one of "
+                    f"{', '.join(allowed_fns)}"
+                )
+            measure_col = str(measure.get("column") or "").strip()
+            if function != "count" and not measure_col:
+                raise ShapeError(f"{where}: measure {i} ({function}) needs a column")
+            if measure_col:
+                _assert_columns_exist([measure_col], columns, f"measure {i} column", where=where)
+            alias = str(measure.get("as") or "").strip()
+            if not alias:
+                raise ShapeError(f"{where}: measure {i} needs an 'as' output name")
+            entry = {"function": function, "as": _valid_name(alias, where=where)}
+            if measure_col:
+                entry["column"] = measure_col
+            normalized_measures.append(entry)
+        out["measures"] = normalized_measures
+
+    if op == "sort_rows":
+        order = out.get("order")
+        if order in (None, ""):
+            order = [
+                {
+                    "column": str(out.get("order_by") or "").strip(),
+                    "direction": str(out.get("direction") or "asc").strip().casefold(),
+                }
+            ]
+        if not isinstance(order, (list, tuple)) or not order:
+            raise ShapeError(f"{where}: sort_rows needs an order list")
+        normalized_order = []
+        for i, spec in enumerate(order, start=1):
+            if isinstance(spec, str):
+                spec = {"column": spec, "direction": "asc"}
+            if not isinstance(spec, Mapping):
+                raise ShapeError(f"{where}: sort order {i} must name a column")
+            col = str(spec.get("column") or "").strip()
+            _assert_columns_exist([col], columns, f"sort order {i}", where=where)
+            direction = str(spec.get("direction") or "asc").strip().casefold()
+            if direction not in ("asc", "desc"):
+                raise ShapeError(f"{where}: sort order {i} direction must be asc or desc")
+            normalized_order.append({"column": col, "direction": direction})
+        out["order"] = normalized_order
+
+    if op == "rank_rows":
+        order_by = str(out.get("order_by") or "").strip()
+        if not order_by:
+            raise ShapeError(f"{where}: rank_rows needs order_by")
+        _assert_columns_exist([order_by], columns, "order_by", where=where)
+        out["order_by"] = order_by
+        direction = str(out.get("direction") or "top").strip().casefold()
+        if direction not in ("top", "bottom"):
+            raise ShapeError(f"{where}: rank_rows direction must be top or bottom")
+        out["direction"] = direction
+        if out.get("limit") in (None, ""):
+            out["limit"] = 0  # no cap
+        else:
+            limit = _as_int(out["limit"], "limit", where=where)
+            if limit < 0:
+                raise ShapeError(f"{where}: limit must be zero (no cap) or positive")
+            out["limit"] = limit
+        out["partition_by"] = _optional_column_list(
+            out, "partition_by", columns, where=where
+        )
+
+    if op == "lookup":
+        rows = out.get("rows")
+        if not isinstance(rows, (list, tuple)):
+            raise ShapeError(
+                f"{where}: lookup rows must be a list of reference objects"
+            )
+        for i, ref in enumerate(rows, start=1):
+            if not isinstance(ref, Mapping):
+                raise ShapeError(f"{where}: lookup reference row {i} is not an object")
+        lookup_key = str(out.get("lookup_key") or "").strip()
+        if not lookup_key:
+            raise ShapeError(f"{where}: lookup needs lookup_key")
+        out["lookup_key"] = lookup_key
+        mapping = out.get("map")
+        if not isinstance(mapping, Mapping) or not mapping:
+            raise ShapeError(
+                f"{where}: lookup needs a non-empty map of reference column → output column"
+            )
+        out["map"] = {
+            str(ref_col): _valid_name(str(dest_col), where=where)
+            for ref_col, dest_col in mapping.items()
+        }
+        unmatched = str(out.get("unmatched") or "null").strip().casefold()
+        if unmatched not in ("null", "drop", "divert"):
+            raise ShapeError(f"{where}: lookup unmatched must be null, drop or divert")
+        out["unmatched"] = unmatched
+
+    if op == "surrogate_key":
+        out["start"] = _as_int(out.get("start", 1), "start", where=where)
+        out["step"] = _as_int(out.get("step", 1), "step", where=where)
+
+    if op == "nest_json":
+        fields = out.get("fields")
+        if not isinstance(fields, (list, tuple)) or not fields:
+            raise ShapeError(f"{where}: nest_json needs a non-empty fields list")
+        sources = []
+        for item in fields:
+            if isinstance(item, Mapping):
+                source = str(item.get("from") or item.get("column") or item.get("to") or "")
+            else:
+                source = str(item)
+            if not source:
+                raise ShapeError(f"{where}: a nest_json field needs a source column")
+            sources.append(source)
+        _assert_columns_exist(sources, columns, "fields", where=where)
 
     return out
 
@@ -1054,3 +1209,43 @@ def _as_positive_int(value: Any, field_name: str, *, where: str) -> int:
     if number > 10_000:
         raise ShapeError(f"{where}: {field_name} must be at most 10000")
     return number
+
+
+def _assert_columns_exist(
+    names: list[str], columns: list[str] | None, field: str, *, where: str
+) -> None:
+    """Refuse when a named column is not available at this point in the recipe."""
+    if columns is None:
+        return
+    missing = [n for n in names if n and n not in columns]
+    if missing:
+        raise ShapeError(
+            f"{where}: {field} column '{missing[0]}' is not available at this "
+            f"point in the recipe. Available: {', '.join(columns[:20])}"
+        )
+
+
+def _name_list(value: Any, field: str, *, where: str) -> list[str] | None:
+    if isinstance(value, str):
+        value = [part.strip() for part in value.split(",") if part.strip()]
+    if not isinstance(value, (list, tuple)):
+        return None
+    return [str(n).strip() for n in value if str(n).strip()]
+
+
+def _required_column_list(
+    options: dict[str, Any], field: str, columns: list[str] | None, *, where: str
+) -> list[str]:
+    names = _name_list(options.get(field), field, where=where)
+    if not names:
+        raise ShapeError(f"{where}: '{field}' needs at least one column name")
+    _assert_columns_exist(names, columns, field, where=where)
+    return names
+
+
+def _optional_column_list(
+    options: dict[str, Any], field: str, columns: list[str] | None, *, where: str
+) -> list[str]:
+    names = _name_list(options.get(field), field, where=where) or []
+    _assert_columns_exist(names, columns, field, where=where)
+    return names

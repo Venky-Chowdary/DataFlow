@@ -762,11 +762,19 @@ def _fn_strip_characters(value: Any, kind: Any) -> Any:
         return re.sub(r"[^0-9.\-]", "", text)
     if name == "non_printable":
         return "".join(c for c in text if c.isprintable() or c in "\t\n")
+    if name == "controls":
+        # C0/C1 control characters; tab/newline/carriage-return are kept
+        # because they are meaningful field whitespace, not noise.
+        import unicodedata
+
+        return "".join(
+            c for c in text if unicodedata.category(c) != "Cc" or c in "\t\n\r"
+        )
     if name == "whitespace":
         return re.sub(r"\s+", "", text)
     raise EvalError(
         f"'{name}' is not a character class; use punctuation, digits, letters, "
-        "non_numeric, non_printable or whitespace"
+        "non_numeric, non_printable, controls or whitespace"
     )
 
 
