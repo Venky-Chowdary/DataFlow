@@ -793,6 +793,23 @@ def revoke_standing_authorization(
     return {"schedule": updated, "authorization": revoked.to_dict()}
 
 
+def _derive_parked_corrective(request: dict[str, Any]) -> str:
+    """The corrective a parked finding implies, for records stored without one."""
+    from services.schedule_mapping_contract import (
+        EMPTY_MAPPING_CORRECTIVE,
+        is_empty_mapping_finding,
+    )
+
+    code = str(request.get("code") or "")
+    finding = str(request.get("finding") or "")
+    if is_empty_mapping_finding(code, finding):
+        return EMPTY_MAPPING_CORRECTIVE
+    return (
+        "Open Validate for this schedule's route and resolve the blocking "
+        "check, then run the schedule again."
+    )
+
+
 def open_approvals(workspace_id: str = "") -> list[dict[str, Any]]:
     """The inbox: every schedule currently parked on a decision."""
     from services.schedule_mapping_contract import (
@@ -816,6 +833,11 @@ def open_approvals(workspace_id: str = "") -> list[dict[str, Any]]:
             str(request.get("finding") or ""),
         ):
             continue
+        # Records parked before a corrective existed, or by a path that never
+        # wrote one, read back as an empty action. Re-derive it from the stored
+        # finding so the inbox always names the fix.
+        if not str(request.get("corrective_action") or "").strip():
+            request["corrective_action"] = _derive_parked_corrective(request)
         out.append({
             "schedule_id": sched.id,
             "schedule_name": sched.name,

@@ -1249,9 +1249,12 @@ def _park_on_decision(
 
 def _collapse_repeated_finding(message: str) -> str:
     """One drift sentence, even when Execute and the proof bundle both said it."""
-    from services.blocker_titles import collapse_operator_message
+    from services.blocker_titles import (
+        collapse_operator_message,
+        sanitize_operator_finding,
+    )
 
-    return collapse_operator_message(message)
+    return collapse_operator_message(sanitize_operator_finding(message))
 
 
 def _open_finding(

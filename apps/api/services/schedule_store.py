@@ -167,6 +167,11 @@ class PipelineSchedule:
     dest_table: str
     interval: str  # hourly | daily | weekly (preset cadence)
     enabled: bool = True
+    #: Why the schedule sits disabled when the caller asked for enabled — e.g.
+    #: a create with ``enabled:true`` but no persisted mappings is stored
+    #: disabled rather than silently downgraded. Empty means no downgrade
+    #: happened; cleared when the missing piece arrives.
+    enabled_note: str = ""
     # Cadence — cron (5-field) takes precedence over ``interval`` when set.
     cron: str = ""
     timezone: str = "UTC"  # IANA timezone for cron/preset evaluation
@@ -317,6 +322,7 @@ class PipelineSchedule:
             dest_table=data["dest_table"],
             interval=data.get("interval", "daily"),
             enabled=bool(data.get("enabled", True)),
+            enabled_note=str(data.get("enabled_note") or ""),
             cron=(data.get("cron") or "").strip(),
             timezone=(data.get("timezone") or "UTC").strip() or "UTC",
             sync_mode=data.get("sync_mode") or "full_refresh_overwrite",
@@ -1334,9 +1340,18 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
             if updated:
                 return updated
     enabled = bool(payload.get("enabled", True))
+    enabled_note = str(payload.get("enabled_note") or "")
     if enabled and not rows:
         # Draft is allowed. Enabling an empty-mapping schedule invents _auto_map.
         enabled = False
+        from services.schedule_mapping_contract import EMPTY_MAPPING_CORRECTIVE
+
+        enabled_note = (
+            "Created disabled: enabling now would need column mappings that "
+            "are not on this schedule. " + EMPTY_MAPPING_CORRECTIVE
+        )
+    elif rows:
+        enabled_note = ""
     with _NAME_LOCK:
         _assert_unique_schedule_name_locked(str(payload.get("name") or ""))
         schedules = _load_all()
@@ -1350,6 +1365,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
             "contract_id": contract_id,
             "require_signed_contract": require_signed,
             "enabled": enabled,
+            "enabled_note": enabled_note,
         })
         _guard_schedule_destination(sched.dest_connector_id, sched.dest_table)
         sched.next_run_at = next_run_for(sched)

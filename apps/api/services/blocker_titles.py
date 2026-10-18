@@ -68,6 +68,33 @@ def is_schema_drift_echo(message: object) -> bool:
     )
 
 
+_STACK_LINE = re.compile(
+    r"^\s*(?:traceback\b|file \"|during handling|the above exception|\^+\s*$|"
+    r"at [\w.]+\()",
+    re.IGNORECASE,
+)
+
+
+def sanitize_operator_finding(message: object) -> str:
+    """Drop driver traceback lines and noise from a parked finding.
+
+    A pymssql/DB-API exception arrives as a raw multi-line stack — unusable as
+    an operator finding and a leak of internal internals. Keep the first
+    substantive line(s), which carry the driver's actual reason.
+    """
+    text = str(message or "").strip()
+    if not text:
+        return text
+    kept = [
+        line.strip()
+        for line in text.splitlines()
+        if line.strip() and not _STACK_LINE.match(line.strip())
+    ]
+    if not kept:
+        return text.splitlines()[0].strip()[:500]
+    return " ".join(kept[:2])[:500]
+
+
 def blocker_title(gate_id: str, message: str = "", *, catalog_title: str = "") -> str:
     """Human title for a blocker, never the internal id.
 
