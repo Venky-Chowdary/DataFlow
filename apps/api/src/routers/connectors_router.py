@@ -1839,6 +1839,23 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     if dest.kind == "file_export":
         raise HTTPException(status_code=400, detail="Quarantine replay is not supported for file_export destinations")
 
+    # Replay must never carry the parent's overwrite semantics. A parent that
+    # ran full_refresh_overwrite stamps overwrite-class flags on the request
+    # destination extra (e.g. pg_overwrite_in_transaction); replayed through
+    # the writer those flags truncate the table even though the write below is
+    # a keyed upsert — deleting every previously landed row (P0-R1).
+    _overwrite_extras = {
+        "pg_overwrite_in_transaction",
+        "overwrite_backup",
+        "overwrite_backup_engine",
+    }
+    dest_extra = dict(getattr(dest, "extra", None) or {})
+    if _overwrite_extras & dest_extra.keys():
+        import copy as _copy
+
+        dest = _copy.copy(dest)
+        dest.extra = {k: v for k, v in dest_extra.items() if k not in _overwrite_extras}
+
     # Prefer stream-contract / identity PK — never hardcode only id/_id
     # (Mongo→SQL users use `_id`→`id`, but many routes use user_id / code).
     conflict_columns: list[str] = []

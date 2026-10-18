@@ -365,3 +365,256 @@ def test_shape_divert_null_cell_replay_writes_sql_null(tmp_path, isolated, monke
     finally:
         conn.close()
     assert got == [(None,)], f"sentinel text must never land in a destination: {got}"
+
+
+def test_replay_strips_overwrite_flags_from_destination(tmp_path, isolated, monkeypatch):
+    """P0-R1: a parent run with sync_mode=full_refresh_overwrite stamps
+    overwrite-class flags (pg_overwrite_in_transaction, overwrite_backup*)
+    on the request destination extra. Replay is a keyed upsert — forwarding
+    those flags to the writer truncates the table and deletes landed rows."""
+    import asyncio
+    import sqlite3
+    import uuid
+
+    import importlib
+
+    router = importlib.import_module("src.routers.connectors_router")
+    import src.transfer.adapters as adapters_mod
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import transfer_request_to_dict
+    from tests.test_shape_buffered_ops_stream_e2e import _exec, _request
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    monkeypatch.setattr(router, "get_mongodb_service", lambda: isolated)
+
+    captured = {}
+    real_write = adapters_mod.write_destination_database
+
+    def _spy(endpoint, records, columns, schema, mappings, **options):
+        captured["extra"] = dict(getattr(endpoint, "extra", None) or {})
+        return real_write(endpoint, records, columns, schema, mappings, **options)
+
+    monkeypatch.setattr(adapters_mod, "write_destination_database", _spy)
+
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _exec(src, "CREATE TABLE t (id TEXT, v TEXT, note TEXT)")
+    _exec(
+        src,
+        "INSERT INTO t (id, v, note) VALUES (?, ?, ?)",
+        [("1", "10", "a"), ("2", "BAD", None), ("3", "30", "c")],
+    )
+
+    req = _request(
+        src,
+        dst,
+        [{"op": "cast_column", "column": "v", "options": {"to_type": "integer"}, "on_error": "divert"}],
+    )
+    # The parent's PG overwrite drop stamps this flag on the request
+    # destination extra; it is serialized into the stored transfer_request.
+    req.destination.extra = dict(req.destination.extra or {})
+    req.destination.extra["pg_overwrite_in_transaction"] = True
+    req.destination.extra["overwrite_backup"] = "t_backup_x"
+
+    job_id = "p0r1flag" + uuid.uuid4().hex[:12]
+    isolated.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(req, job_id)
+    assert result.success, result.error
+    isolated.update_job_fields(
+        job_id,
+        {"id": job_id, "job_id": job_id, "transfer_request": transfer_request_to_dict(req)},
+    )
+
+    resp = asyncio.run(
+        replay_job_quarantine(
+            job_id,
+            QuarantineReplayRequest(rows=[{"id": "2", "v": 42, "note": None}]),
+            _replay_request(),
+        )
+    )
+    assert resp.get("rows_written", 0) >= 1, resp
+
+    extra = captured.get("extra") or {}
+    assert "pg_overwrite_in_transaction" not in extra, extra
+    assert "overwrite_backup" not in extra, extra
+
+    conn = sqlite3.connect(str(dst))
+    try:
+        got = [(r[0], str(r[1]), r[2]) for r in conn.execute("SELECT id, v, note FROM t ORDER BY id")]
+    finally:
+        conn.close()
+    assert got == [("1", "10", "a"), ("2", "42", None), ("3", "30", "c")], got
+
+
+def test_pg_upsert_write_never_forwards_overwrite_flag(monkeypatch):
+    """Adapter layer: pg_overwrite_in_transaction only applies to insert-mode
+    loads — a keyed upsert call carrying it would truncate the table."""
+    import connectors.postgresql_writer as pgw
+    from connectors.writer_common import WriteResult
+    from src.transfer.adapters import write_destination_database
+    from src.transfer.models import EndpointConfig
+
+    captured: dict = {}
+
+    def _fake_writer(**kwargs):
+        captured.update(kwargs)
+        return WriteResult(
+            ok=True,
+            rows_written=1,
+            table_name="t",
+            target_schema="public",
+            checksum="",
+            chunks_completed=1,
+        )
+
+    monkeypatch.setattr(pgw, "write_mapped_rows", _fake_writer)
+    import services.dest_precount as dest_precount
+
+    monkeypatch.setattr(dest_precount, "precount_destination", lambda endpoint, cfg: 2)
+    import services.row_conservation as row_conservation
+
+    monkeypatch.setattr(
+        row_conservation,
+        "prepare_keyed_upsert",
+        lambda records, **kw: (records, None),
+    )
+
+    endpoint = EndpointConfig(
+        kind="database",
+        format="postgresql",
+        host="pg.internal",
+        port=5432,
+        database="d",
+        table="t",
+        extra={"pg_overwrite_in_transaction": True},
+    )
+    write_destination_database(
+        endpoint,
+        [{"id": "2", "v": "42"}],
+        ["id", "v"],
+        {"id": "string", "v": "string"},
+        [{"source": "id", "target": "id"}, {"source": "v", "target": "v"}],
+        write_mode="upsert",
+        conflict_columns=["id"],
+        sync_mode="incremental_deduped",
+        protect_landed_object=True,
+    )
+    assert "pg_overwrite_in_transaction" not in captured, sorted(captured)
+
+
+def test_overwrite_parent_replay_preserves_landed_rows(tmp_path, isolated, monkeypatch):
+    """P0-R1 contract: replay into an overwrite-loaded destination keeps every
+    previously landed row and lands the remediated one."""
+    import asyncio
+    import sqlite3
+    import uuid
+
+    import importlib
+
+    router = importlib.import_module("src.routers.connectors_router")
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import transfer_request_to_dict
+    from tests.test_shape_buffered_ops_stream_e2e import _exec, _request
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    monkeypatch.setattr(router, "get_mongodb_service", lambda: isolated)
+
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _exec(src, "CREATE TABLE t (id TEXT, v TEXT, note TEXT)")
+    _exec(
+        src,
+        "INSERT INTO t (id, v, note) VALUES (?, ?, ?)",
+        [("1", "10", "a"), ("2", "BAD", None), ("3", "30", "c")],
+    )
+
+    req = _request(
+        src,
+        dst,
+        [{"op": "cast_column", "column": "v", "options": {"to_type": "integer"}, "on_error": "divert"}],
+    )
+    assert req.sync_mode == "full_refresh_overwrite"
+    job_id = "p0r1keep" + uuid.uuid4().hex[:12]
+    isolated.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(req, job_id)
+    assert result.success, result.error
+    isolated.update_job_fields(
+        job_id,
+        {"id": job_id, "job_id": job_id, "transfer_request": transfer_request_to_dict(req)},
+    )
+
+    resp = asyncio.run(
+        replay_job_quarantine(
+            job_id,
+            QuarantineReplayRequest(rows=[{"id": "2", "v": 42, "note": None}]),
+            _replay_request(),
+        )
+    )
+    assert resp.get("rows_written", 0) >= 1, resp
+
+    conn = sqlite3.connect(str(dst))
+    try:
+        got = [(r[0], str(r[1]), r[2]) for r in conn.execute("SELECT id, v, note FROM t ORDER BY id")]
+    finally:
+        conn.close()
+    assert got == [("1", "10", "a"), ("2", "42", None), ("3", "30", "c")], (
+        "replay must never remove a landed row"
+    )
+
+
+def test_replay_landed_rows_survive_diverging_closure(tmp_path, isolated, monkeypatch):
+    """Gate-8 failure path: even when the post-write closure verdict diverges
+    (no _df_quarantine store on this engine), the landed rows are left
+    untouched — a failed proof must not remove data."""
+    import asyncio
+    import sqlite3
+    import uuid
+
+    import importlib
+
+    router = importlib.import_module("src.routers.connectors_router")
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import transfer_request_to_dict
+    from tests.test_shape_buffered_ops_stream_e2e import _exec, _request
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    monkeypatch.setattr(router, "get_mongodb_service", lambda: isolated)
+
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _exec(src, "CREATE TABLE t (id TEXT, v TEXT, note TEXT)")
+    _exec(
+        src,
+        "INSERT INTO t (id, v, note) VALUES (?, ?, ?)",
+        [("1", "10", "a"), ("2", "BAD", None), ("3", "30", "c")],
+    )
+
+    req = _request(
+        src,
+        dst,
+        [{"op": "cast_column", "column": "v", "options": {"to_type": "integer"}, "on_error": "divert"}],
+    )
+    job_id = "p0r1gate" + uuid.uuid4().hex[:12]
+    isolated.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(req, job_id)
+    assert result.success, result.error
+    isolated.update_job_fields(
+        job_id,
+        {"id": job_id, "job_id": job_id, "transfer_request": transfer_request_to_dict(req)},
+    )
+
+    asyncio.run(
+        replay_job_quarantine(
+            job_id,
+            QuarantineReplayRequest(rows=[{"id": "2", "v": 42, "note": None}]),
+            _replay_request(),
+        )
+    )
+    # Closure verdict may diverge on engines without a *_df_quarantine table;
+    # landed rows must still be intact.
+    conn = sqlite3.connect(str(dst))
+    try:
+        got = [(r[0], str(r[1])) for r in conn.execute("SELECT id, v FROM t ORDER BY id")]
+    finally:
+        conn.close()
+    assert got == [("1", "10"), ("2", "42"), ("3", "30")], got

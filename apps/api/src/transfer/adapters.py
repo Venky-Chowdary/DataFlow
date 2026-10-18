@@ -1673,8 +1673,14 @@ def _write_destination_database(
         if db_type in {"redshift", "amazon_redshift", "redshift_serverless"}:
             common["port"] = cfg["port"] or 5439
             common["dest_extra"] = dict(cfg.get("extra") or {})
-        if db_type == "postgresql" and (getattr(endpoint, "extra", None) or {}).get(
-            "pg_overwrite_in_transaction"
+        if (
+            db_type == "postgresql"
+            # Overwrite-in-transaction only makes sense for an insert-mode
+            # load. A keyed upsert must never truncate (P0-R1).
+            and write_mode == "insert"
+            and (getattr(endpoint, "extra", None) or {}).get(
+                "pg_overwrite_in_transaction"
+            )
         ):
             common["pg_overwrite_in_transaction"] = True
         for col in columns:

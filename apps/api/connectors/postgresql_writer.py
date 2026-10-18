@@ -2243,8 +2243,14 @@ def write_mapped_rows(
             # first 20k-row chunk, then the next batch tried to store the
             # overwrite flag on the psycopg2 connection and left that prefix
             # behind (R5-002).
+            # pg_overwrite_in_transaction only makes sense for an insert-mode
+            # load. If it leaks into an upsert call (e.g. a quarantine replay
+            # inheriting the parent's destination extra), honoring it would
+            # truncate the table and delete landed rows (P0-R1).
             overwrite_requested = (
-                bool(_kwargs.get("pg_overwrite_in_transaction")) and port != 5439
+                bool(_kwargs.get("pg_overwrite_in_transaction"))
+                and port != 5439
+                and write_mode == "insert"
             )
             if overwrite_requested:
                 from connectors.write_resilience import (
