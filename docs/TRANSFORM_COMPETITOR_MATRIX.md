@@ -16,7 +16,7 @@ Missing = nothing in code yet.
 |5|Multi-way routing|Missing|—|
 |6|Aggregation GROUP BY|Implemented|`aggregate` op — group_by + sum/avg/count/min/max/first/last, end-of-stream drain, buffer cap|
 |7|Joins|Missing|in-flow `join` is refused by name (shape_models _GLOBAL_OPS) with a pointer to post-load; `lookup` covers inline-list enrichment only|
-|8|Lookup/reference|Implemented|`lookup` op enriches from inline rows or a live saved-connector table (`reference {connector_id,table,columns}` read once at run start, ≤500k rows, multi return columns via `map`, unmatched null/drop/divert/default, duplicate-key `match` first/refuse); non-paging source families (DynamoDB/ES/Redis/Kafka/Qdrant) refuse by name|
+|8|Lookup/reference|Partial|`lookup` op enriches from inline rows or a live saved-connector table (`reference {connector_id,table,columns}` read once at run start, ≤500k rows, multi return columns via `map`, unmatched null/drop/divert/default, duplicate-key `match` first/refuse); non-paging source families (DynamoDB/ES/Redis/Kafka/Qdrant) refuse by name. Gap: design-time preview resolves references in global scope only — workspace-scoped connectors fail closed, so preview can't exercise a workspace-bound reference yet|
 |9|Expression builder|Implemented|`set_value`/`derive_column` expression steps + in-flow expression assist + function-insert picker in Library|
 |10|Function library|Implemented|expression language: text/numeric/date/null-safe fns + operators, validated design-time; /ops `functions` catalog feeds the pickers|
 |11|Cleanse trim/case/null/replace/regex|Have|`trim/upper/lower/normalize_unicode/strip_controls/replace:`|

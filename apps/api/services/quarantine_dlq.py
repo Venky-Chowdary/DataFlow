@@ -418,6 +418,7 @@ def quarantine_details_from_dlq(
         for d in chunk:
             if not isinstance(d, dict):
                 continue
+            d = _unwire_quarantine_detail(d)
             row = d.get("row")
             # The row is a record (dict/list), not a scalar — dedupe on its
             # canonical serialization; an unhashable member made every read
@@ -434,6 +435,36 @@ def quarantine_details_from_dlq(
             if len(out) >= max_rows:
                 return out
     return out
+
+
+def _unwire_quarantine_detail(detail: dict[str, Any]) -> dict[str, Any]:
+    """Restore real NULLs in a DLQ detail.
+
+    The write path stores cells with ``quarantine_cell_wire``, which encodes
+    SQL NULL as the ``__DF_SQL_NULL__`` sentinel string. Read-back must not
+    hand that text to operators or replay — replaying it verbatim wrote the
+    literal sentinel into destinations (QA live job row ``{cc: \"__DF_SQL_NULL__\"}``).
+    Re-encoding a real None reproduces the sentinel downstream, so writers
+    still land NULL.
+    """
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    def _u(value: Any) -> Any:
+        return None if isinstance(value, str) and value.strip() == SQL_NULL_SENTINEL else value
+
+    changed = dict(detail)
+    row = changed.get("row")
+    if isinstance(row, dict):
+        changed["row"] = {k: _u(v) for k, v in row.items()}
+    elif isinstance(row, list):
+        changed["row"] = [_u(v) for v in row]
+    for field in ("values", "source_values"):
+        cells = changed.get(field)
+        if isinstance(cells, dict):
+            changed[field] = {k: _u(v) for k, v in cells.items()}
+    if "value" in changed:
+        changed["value"] = _u(changed["value"])
+    return changed
 
 
 def _dlq_query(*, job_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:

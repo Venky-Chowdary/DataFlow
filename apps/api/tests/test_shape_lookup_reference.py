@@ -114,7 +114,7 @@ def test_unknown_connector_refuses_named(monkeypatch):
     import services.connector_store as cs
     monkeypatch.setattr(cs, "get_connector", lambda cid, workspace_id=None: None)
     recipe = _recipe(
-        reference={"connector_id": "missing", "table": "t", "columns": ["name", "risk"]},
+        reference={"connector_id": "missing", "table": "t", "columns": ["code", "name", "risk"]},
     )
     runner = ShapeRunner(recipe)
     with pytest.raises(lr.LookupReferenceError, match="missing"):
@@ -128,7 +128,7 @@ def test_unknown_connector_refuses_named(monkeypatch):
     ({"rows": [], "map": {"a": "b"}, "lookup_key": "k"}, "either"),
     ({"rows": [{"k": 1}], "map": {"a": "b"}, "lookup_key": "k", "match": "best"}, "first or refuse"),
     ({"rows": [{"k": 1}], "map": {"a": "b"}, "lookup_key": "k", "unmatched": "default"}, "defaults"),
-    ({"reference": {"connector_id": "c", "table": "t", "columns": ["a"]}, "map": {"zzz": "b"}, "lookup_key": "k"}, "not in reference.columns"),
+    ({"reference": {"connector_id": "c", "table": "t", "columns": ["k", "a"]}, "map": {"zzz": "b"}, "lookup_key": "k"}, "not in reference.columns"),
 ])
 def test_lookup_option_validation_refuses(bad, msg):
     with pytest.raises(ShapeError, match=msg):
@@ -216,3 +216,23 @@ def test_lookup_reference_rerun_sees_changed_reference_data(ref_db, monkeypatch)
 
     headers, rows = ShapeRunner(recipe).matrix(["cc"], [["US"]])
     assert dict(zip(headers, rows[0]))["country_name"] == "USA"
+
+
+def test_parse_refuses_lookup_key_outside_reference_columns():
+    """A1-D1: lookup_key 'code' with columns [name, risk] used to parse and
+    silently NULL every row."""
+    with pytest.raises(ShapeError, match="lookup_key 'code' is not in reference.columns"):
+        _recipe(
+            reference={
+                "connector_id": "ref-conn-1",
+                "table": "countries",
+                "columns": ["name", "risk"],
+            }
+        )
+
+
+def test_parse_allows_lookup_key_when_columns_list_is_omitted():
+    recipe = _recipe(
+        reference={"connector_id": "ref-conn-1", "table": "countries"}
+    )
+    assert recipe.steps[0].options["reference"]["columns"] is None

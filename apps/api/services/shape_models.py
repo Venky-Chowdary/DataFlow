@@ -1070,8 +1070,17 @@ def _normalize_options(
         }
         # A declared return-column list bounds what the reference read selects;
         # a map key outside it is a typo that would silently produce nulls.
+        # lookup_key outside it is worse: every row resolves to "no match" and
+        # the run silently emits nulls/diverts — refuse at parse (A1-D1).
         if reference is not None and out["reference"]["columns"]:
-            unknown = [c for c in out["map"] if c not in out["reference"]["columns"]]
+            declared = out["reference"]["columns"]
+            if lookup_key not in declared:
+                raise ShapeError(
+                    f"{where}: lookup_key '{lookup_key}' is not in "
+                    "reference.columns — add it or drop the column list so the "
+                    "reference read can key rows"
+                )
+            unknown = [c for c in out["map"] if c not in declared]
             if unknown:
                 raise ShapeError(
                     f"{where}: lookup map reads '{unknown[0]}' which is not in "

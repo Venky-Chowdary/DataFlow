@@ -288,3 +288,80 @@ def test_shape_divert_unedited_replay_behaves_sensibly(tmp_path, isolated, monke
         assert landed == ["2"] or still_open, (
             f"row neither written (landed={landed}) nor still quarantined ({still_open})"
         )
+
+
+def test_dlq_readback_restores_real_null_not_sentinel(tmp_path, monkeypatch):
+    """A1-D2: a NULL persisted as __DF_SQL_NULL__ reads back as None, never
+    the literal sentinel text."""
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    dlq.append_dlq_event(
+        job_id="job-null",
+        action="quarantine_chunk",
+        details={
+            "rejected_details": [
+                {
+                    "row": {"id": "2", "cc": "__DF_SQL_NULL__"},
+                    "reason": "transform divert — step 0 'divert_rows': test",
+                    "shape_step": 0,
+                    "shape_op": "divert_rows",
+                    "source_row_index": 2,
+                    "value": "__DF_SQL_NULL__",
+                }
+            ]
+        },
+        path=tmp_path / "dlq.jsonl",
+    )
+    rows = dlq.quarantine_details_from_dlq("job-null")
+    assert rows[0]["row"] == {"id": "2", "cc": None}
+    assert rows[0]["value"] is None
+
+
+def test_shape_divert_null_cell_replay_writes_sql_null(tmp_path, isolated, monkeypatch):
+    """A1-D2: divert a row carrying a NULL column -> unedited replay -> the
+    destination holds SQL NULL, not the sentinel text."""
+    import asyncio
+    import sqlite3
+    import uuid
+
+    import importlib
+
+    router = importlib.import_module("src.routers.connectors_router")
+    from src.routers.connectors_router import QuarantineReplayRequest, replay_job_quarantine
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import transfer_request_to_dict
+    from tests.test_shape_buffered_ops_stream_e2e import _exec, _request
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
+    monkeypatch.setattr(router, "get_mongodb_service", lambda: isolated)
+
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _exec(src, "CREATE TABLE t (id TEXT, v TEXT)")
+    _exec(src, "INSERT INTO t (id, v) VALUES (?, ?)", [("1", "10"), ("2", None)])
+
+    req = _request(
+        src,
+        dst,
+        [{"op": "divert_rows", "options": {"condition": "id == '2'", "reason": "test divert"}}],
+    )
+    job_id = "dlqnull" + uuid.uuid4().hex[:12]
+    isolated.update_job_status(job_id, "pending", transfer_request={})
+    result = UniversalTransferEngine().execute_tracked(req, job_id)
+    assert result.success, result.error
+    isolated.update_job_fields(
+        job_id,
+        {"id": job_id, "job_id": job_id, "transfer_request": transfer_request_to_dict(req)},
+    )
+
+    # Read-back exposes a real NULL, not the sentinel.
+    detail = dlq.canonical_replay_details({"id": job_id})[0]
+    assert detail["row"] == {"id": "2", "v": None}, detail["row"]
+
+    resp = asyncio.run(replay_job_quarantine(job_id, QuarantineReplayRequest(), _replay_request()))
+    assert resp.get("rows_written", 0) >= 1, resp
+
+    conn = sqlite3.connect(str(dst))
+    try:
+        got = conn.execute("SELECT v FROM t WHERE id = '2'").fetchall()
+    finally:
+        conn.close()
+    assert got == [(None,)], f"sentinel text must never land in a destination: {got}"
