@@ -28,6 +28,7 @@ from services.reconcile_coverage import (
     CDC_SOURCE_IMAGE_COUNT,
     CDC_SOURCE_IMAGE_VALUES,
     NO_OP_DEST_UNCHANGED,
+    ROUTE_PARTITIONED,
     SOURCE_DIGEST_ENGINE_POPULATION,
     SOURCE_DIGEST_REMAPPED_ROWS,
     SOURCE_DIGEST_SOURCE_REREAD,
@@ -2470,6 +2471,11 @@ def _run_reconciliation_impl(
     # the same population coverage at a fraction of the cost, since neither side
     # has to bring rows into Python to hash them.
     engine_digests = None
+    routed_tables = [
+        (str(name), str(info.get("table") or ""))
+        for name, info in sorted((dest_summary.get("routes") or {}).items())
+        if isinstance(info, dict) and info.get("table")
+    ]
     # A server-to-server COPY never brought rows into Python, so it computed both
     # digests itself — the source one inside the same snapshot it copied. Those
     # are the only two comparable values for such a run: recomputing either side
@@ -2496,12 +2502,49 @@ def _run_reconciliation_impl(
             dest_types=dest_types,
         )
 
+    if routed_tables:
+        # The router partitioned the run into per-route tables; the base table
+        # name was never written to. Verify each route table independently —
+        # per-route rows+checksums land on the route ledger — and let the
+        # ROUTE_PARTITIONED scope grade conservation at the final reconcile.
+        engine_digests = None
     if engine_digests is not None:
         source_checksum, target_checksum, target_rows = engine_digests
         # Both sides re-read independently, in full — the strongest source a
         # digest can have here, and in particular not the writer's own account.
         source_checksum_provenance = SOURCE_DIGEST_ENGINE_POPULATION
         digest_provenance["source"] = source_checksum_provenance
+    elif routed_tables:
+        target_rows = 0
+        target_checksum = ""
+        route_readback: dict[str, Any] = {}
+        readback_ok = True
+        for _rname, _rtable in routed_tables:
+            _r_rows, _r_checksum = verify_target(
+                db_type,
+                cfg,
+                schema=schema,
+                table_name=_rtable,
+                fallback_rows=-1,
+                fallback_checksum="",
+                target_columns=None,
+                limit=checksum_limit,
+                dest_types=None,
+                written_ids=None,
+                pk_column=None,
+            )
+            route_readback[_rname] = {
+                "table": _rtable,
+                "verified_rows": _r_rows,
+                "checksum": _r_checksum,
+            }
+            if isinstance(_r_rows, int) and _r_rows >= 0:
+                target_rows += _r_rows
+            else:
+                readback_ok = False
+        dest_summary["route_verification"] = route_readback
+        if not readback_ok:
+            target_rows = -1
     else:
         # Always full-table first for SQL. Keyed batch proof is a fallback when the
         # sink legitimately has extras (upsert/append into non-empty) — never for a
@@ -2980,6 +3023,7 @@ def _run_reconciliation_impl(
         and not sample_compare
         and not sample_records
         and engine_digests is None
+        and not routed_tables
         and db_type
         not in {"pinecone", "qdrant", "weaviate", "milvus", "pgvector", "email"}
     ):
@@ -3148,7 +3192,8 @@ def _run_reconciliation_impl(
         rows_source_filtered=rows_source_filtered,
         rows_expanded=rows_expanded,
         target_rows_before=rows_before,
-        checksum_scope=keyed_scope,
+        checksum_scope=keyed_scope
+        or (ROUTE_PARTITIONED if routed_tables else ""),
         keyed_expected_delta=keyed_delta,
     )
     return _finalize(report.to_dict())

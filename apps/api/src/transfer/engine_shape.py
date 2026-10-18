@@ -171,6 +171,12 @@ def _shape_materialized_read(
     schema: dict[str, str],
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
     """Apply the recipe to a fully-read source and re-declare what it produced."""
+    if runner.recipe.router_step is not None:
+        raise ValueError(
+            "the transform recipe routes rows to per-route destination "
+            "tables — that path is only supported on streaming database "
+            "sources in this version; a fully-read source cannot be routed"
+        )
     shaped = runner.records(records)
     # Buffering steps (dedupe keep-last, aggregate, sort, rank) emit only at
     # end-of-stream — a fully-read source is that stream.

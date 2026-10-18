@@ -30,6 +30,7 @@ from services.reconcile_coverage import (
     CDC_SOURCE_IMAGE_COUNT,
     CDC_SOURCE_IMAGE_VALUES,
     NO_OP_DEST_UNCHANGED,
+    ROUTE_PARTITIONED,
     SOURCE_DIGEST_WRITE_PASS,
     SOURCE_DIGEST_WRITER_ACK,
     WRITTEN_BATCH_KEYS,
@@ -964,6 +965,41 @@ def reconcile(
             population_proof=checksum_match and not dest_short,
             assurance_level=CDC_SOURCE_IMAGE_VALUES,
             checksum_scope=CDC_SOURCE_IMAGE_VALUES,
+            target_rows_before=target_rows_before,
+        )
+    if checksum_scope == ROUTE_PARTITIONED:
+        # The router split the population into per-route tables. Each route
+        # table was read back independently (rows + digest recorded in the
+        # run's route_verification ledger); the comparable proof is
+        # conservation — every source row landed in exactly one route or was
+        # diverted — because a single source digest cannot equal the digest
+        # of a partitioned destination.
+        ok = target_rows == expected_rows or (
+            allow_extra_rows and target_rows >= expected_rows
+        )
+        return ReconciliationReport(
+            passed=ok,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum=source_checksum,
+            target_checksum=target_checksum,
+            message=(
+                f"Routed output verified: {target_rows:,} row(s) across the "
+                f"route tables vs expected {expected_rows:,}. Each route "
+                "table was read back independently; per-route digests are in "
+                "the route ledger."
+                if ok
+                else f"Row count mismatch across route tables: {target_rows:,} "
+                f"vs expected {expected_rows:,}."
+            ),
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            sample_compare=sample_compare,
+            checksum_match=False,
+            population_proof=ok,
+            assurance_level=ROUTE_PARTITIONED,
+            checksum_scope=ROUTE_PARTITIONED,
             target_rows_before=target_rows_before,
         )
     keyed_identity = (

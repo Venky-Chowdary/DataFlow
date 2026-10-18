@@ -246,6 +246,64 @@ from .stream_catalog import (  # noqa: E402
 )
 
 
+def _split_routed_batch(
+    batch: Any, recipe: Any, dest_table: str
+) -> list[tuple[str, str, list[str], list[list[Any]]]]:
+    """Split a shaped batch into per-route (name, table, headers, rows) writes.
+
+    Every routed row carries the ROUTE_COLUMN tag; each route writes its own
+    table (explicit ``targets`` override, else ``{dest_table}__{route}``) with
+    exactly the columns that route declares — a mapped route emits only its
+    map targets, a pass-through route emits the shared output columns minus
+    the tag and other routes' map targets.
+    """
+    from services.shape_models import ROUTE_COLUMN
+
+    router_step = recipe.router_step
+    targets = dict(router_step.options.get("targets") or {}) if router_step else {}
+    tag_index = batch.headers.index(ROUTE_COLUMN)
+    groups: dict[str, list[int]] = {}
+    order: list[str] = []
+    for i, row in enumerate(batch.rows):
+        name = str(row[tag_index])
+        if name not in groups:
+            groups[name] = []
+            order.append(name)
+        groups[name].append(i)
+    splits: list[tuple[str, str, list[str], list[list[Any]]]] = []
+    for name in order:
+        wanted = [c for c in recipe.route_output_columns(name) if c in batch.headers]
+        ix = [batch.headers.index(c) for c in wanted]
+        headers = [batch.headers[i] for i in ix]
+        rows = [[r[i] for i in ix] for r in (batch.rows[i] for i in groups[name])]
+        table = str(targets.get(name) or f"{dest_table}__{name}")
+        splits.append((name, table, headers, rows))
+    return splits
+
+
+def _merge_chunk_write_summaries(
+    merged: dict[str, Any], incoming: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge per-route write summaries into one batch ledger.
+
+    Row counts sum; rejected-details and warnings concatenate (each detail
+    already names its route's table); anything else takes the latest write's
+    value.
+    """
+    incoming = dict(incoming or {})
+    if not merged:
+        return incoming
+    for key in ("rejected_rows", "coerced_null_rows", "orphan_fk_rows"):
+        merged[key] = int(merged.get(key) or 0) + int(incoming.get(key) or 0)
+    for key in ("rejected_details", "warnings"):
+        merged[key] = list(merged.get(key) or []) + list(incoming.get(key) or [])
+    for key, value in incoming.items():
+        if key in ("rejected_rows", "coerced_null_rows", "orphan_fk_rows", "rejected_details", "warnings"):
+            continue
+        merged[key] = value
+    return merged
+
+
 def _fk_orphans_fail_closed(validation_mode: str) -> bool:
     return str(validation_mode or "").strip().lower() in {"strict", "maximum"}
 
@@ -2729,40 +2787,98 @@ def _stream_database_transfer_impl(
             write_kwargs["close_connection"] = False
             write_kwargs["connection_holder"] = pg_conn_state
 
+        router_step = (
+            shape_runner.recipe.router_step
+            if shape_runner is not None and shape_runner.recipe is not None
+            else None
+        )
+        write_calls: list[tuple[str | None, str, Any]] = []
         if row_apply_plan is not None:
+            if router_step is not None:
+                raise ValueError(
+                    "router transform cannot write through a destination "
+                    "stored-procedure plan — route outputs are separate tables"
+                )
             from .stream_dest_procedure import write_procedure_chunk
 
             records = [dict(zip(batch.headers, row)) for row in batch.rows]
-            write_op = partial(write_procedure_chunk, destination, records, row_apply_plan)
+            write_calls.append(
+                (
+                    None,
+                    dest_table,
+                    partial(write_procedure_chunk, destination, records, row_apply_plan),
+                )
+            )
         else:
             from .stream_write import _write_batch
 
-            write_op = partial(
-                _write_batch,
-                dest_type,
-                destination,
-                dest_cfg,
-                dest_table,
-                batch.headers,
-                batch.rows,
-                mappings,
-                column_types,
-                create_table=not ddl_state["created"],
-                on_checkpoint=None,
-                chunk_idx=idx,
-                total_chunks=chunks,
-                rows_so_far=0,
-                write_mode=write_mode,
-                conflict_columns=pk_target_cols or None,
-                sync_mode=effective_sync,
-                backfill_new_fields=backfill_new_fields,
-                error_policy=stream_error_policy,
-                job_id=job_id,
-                skip_preflight=skip_preflight,
-                source_schema_catalog=source_schema_catalog,
-                **write_kwargs,
+            splits = (
+                _split_routed_batch(batch, shape_runner.recipe, dest_table)
+                if router_step is not None
+                else [(None, dest_table, batch.headers, batch.rows)]
             )
-        if keyed_census_acc is not None:
+            created_tables = ddl_state.setdefault("created_tables", set())
+            for _rname, _rtable, _rheaders, _rrows in splits:
+                create_this = (
+                    _rtable not in created_tables
+                    if _rname is not None
+                    else not ddl_state["created"]
+                )
+                if _rname is not None:
+                    # The route table declares only its own columns — the
+                    # ROUTE_COLUMN tag and other routes' map targets must not
+                    # reach the writer (a "mapped source not in headers" risk
+                    # contract would refuse the batch as a NULL-invent).
+                    _rheader_set = set(_rheaders)
+                    _rmappings = [
+                        m for m in mappings
+                        if str(m.get("source") or "") in _rheader_set
+                    ]
+                    _rtargets = {
+                        str(m.get("target") or m.get("source") or "")
+                        for m in _rmappings
+                    }
+                    _rcol_types = {
+                        k: v for k, v in column_types.items() if k in _rtargets
+                    }
+                else:
+                    _rmappings = mappings
+                    _rcol_types = column_types
+                write_calls.append(
+                    (
+                        _rname,
+                        _rtable,
+                        partial(
+                            _write_batch,
+                            dest_type,
+                            destination,
+                            dest_cfg,
+                            _rtable,
+                            _rheaders,
+                            _rrows,
+                            _rmappings,
+                            _rcol_types,
+                            create_table=create_this,
+                            on_checkpoint=None,
+                            chunk_idx=idx,
+                            total_chunks=chunks,
+                            rows_so_far=0,
+                            write_mode=write_mode,
+                            conflict_columns=pk_target_cols or None,
+                            sync_mode=effective_sync,
+                            backfill_new_fields=backfill_new_fields,
+                            error_policy=stream_error_policy,
+                            job_id=job_id,
+                            skip_preflight=skip_preflight,
+                            source_schema_catalog=source_schema_catalog,
+                            **write_kwargs,
+                        ),
+                    )
+                )
+        # Keyed census and the inline write-pass fingerprint are single-table
+        # mechanisms — routed rows land in per-route tables, verified per
+        # route at Gate-8 instead.
+        if keyed_census_acc is not None and router_step is None:
             observe_keyed_batch(
                 keyed_census_acc,
                 headers=batch.headers,
@@ -2779,7 +2895,7 @@ def _stream_database_transfer_impl(
         # Tombstones are already stripped: hashing deleted keys as writes would
         # fail Gate-8 after a correct hard DELETE.
         inline_fps: list[Any] = []
-        if inline_fingerprints_used:
+        if inline_fingerprints_used and router_step is None:
             try:
                 mapped_fp, _ = map_rows_for_fingerprint(
                     headers=batch.headers,
@@ -2834,17 +2950,34 @@ def _stream_database_transfer_impl(
             except Exception as exc:  # noqa: BLE001 - a failed read must not hide the write
                 logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
         try:
-            batch_written, last_checksum, dest_summary = with_retry(
-                write_op,
-                budget=RetryBudget(
-                    max_attempts=retry.max_attempts,
-                    base_delay_seconds=retry.base_delay_seconds,
-                    max_delay_seconds=retry.max_delay_seconds,
-                    exponential_base=retry.exponential_base,
-                    jitter=retry.jitter,
-                ),
-                replay_safety=replay_safety,
-            )
+            batch_written = 0
+            last_checksum = ""
+            dest_summary: dict[str, Any] = {}
+            routes_wire: dict[str, dict[str, Any]] = {}
+            for _rname, _rtable, _wop in write_calls:
+                _w, _cs, _ds = with_retry(
+                    _wop,
+                    budget=RetryBudget(
+                        max_attempts=retry.max_attempts,
+                        base_delay_seconds=retry.base_delay_seconds,
+                        max_delay_seconds=retry.max_delay_seconds,
+                        exponential_base=retry.exponential_base,
+                        jitter=retry.jitter,
+                    ),
+                    replay_safety=replay_safety,
+                )
+                batch_written += int(_w or 0)
+                if _cs:
+                    last_checksum = _cs
+                dest_summary = _merge_chunk_write_summaries(dest_summary, _ds)
+                if _rname is not None:
+                    ddl_state["created_tables"].add(_rtable)
+                    routes_wire[_rname] = {
+                        "table": _rtable,
+                        "rows": int(_w or 0),
+                    }
+            if routes_wire:
+                dest_summary["routes"] = routes_wire
             # Fold orphan-FK holdouts into the batch's own rejected ledger so
             # they persist to the quarantine DLQ and balance Gate-8
             # conservation (read = written + rejected + filtered).

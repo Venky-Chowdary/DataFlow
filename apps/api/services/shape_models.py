@@ -357,7 +357,24 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         options=("rows", "reference", "map", "extra"),
         required=(),
     ),
+    _StepDef(
+        "router",
+        "Route each row to one named output — first matching condition wins; "
+        "a route may declare default: true for unmatched rows, otherwise "
+        "unmatched must be divert — each route writes its own destination "
+        "table and may carry its own map",
+        family="advanced",
+        active=True,
+        needs_column=False,
+        options=("routes", "unmatched", "targets"),
+        required=("routes",),
+    ),
 )
+
+# Column every routed row is tagged with — the write path strips it and
+# splits the batch by its value, so a routed row lands in exactly one
+# route's destination table.
+ROUTE_COLUMN = "_df_route"
 
 STEP_CATALOG: dict[str, _StepDef] = {d.op: d for d in _CATALOG_LIST}
 
@@ -438,6 +455,13 @@ class ShapeStep:
             return tuple(
                 str(target) for target in (options.get("map") or {}).values() if target
             )
+        if self.op == "router":
+            targets = [ROUTE_COLUMN]
+            for route in options.get("routes") or []:
+                targets.extend(
+                    str(t) for t in (route.get("map") or {}).values() if t
+                )
+            return tuple(dict.fromkeys(targets))
         if self.op == "surrogate_key":
             target = str(options.get("to") or "")
             return (target,) if target else ()
@@ -509,6 +533,42 @@ class ShapeRecipe:
     def has_active_step(self) -> bool:
         """Whether any enabled step can change the row count — i.e. the ledger will move."""
         return any(s.active for s in self.enabled_steps)
+
+    @property
+    def router_step(self) -> ShapeStep | None:
+        """The enabled router step, when this recipe routes rows to per-route
+        destination tables. At most one router step is honoured; a recipe
+        with more refuses at parse (single routing decision per stream)."""
+        return next((s for s in self.enabled_steps if s.op == "router"), None)
+
+    def route_output_columns(self, route_name: str) -> list[str]:
+        """The columns one route's destination table gets.
+
+        A route with a declared ``map`` emits exactly its map targets; a
+        pass-through route emits every output column except the route tag
+        and other routes' map targets (they belong to those routes' tables).
+        """
+        step = self.router_step
+        if step is None:
+            return []
+        route = next(
+            (r for r in (step.options.get("routes") or []) if r.get("name") == route_name),
+            None,
+        )
+        if route is None:
+            return []
+        route_map = route.get("map")
+        if route_map:
+            return [str(t) for t in route_map.values()]
+        mapped = {
+            str(t)
+            for r in (step.options.get("routes") or [])
+            for t in (r.get("map") or {}).values()
+        }
+        return [
+            c for c in (self.output_columns or self.input_columns or ())
+            if c != ROUTE_COLUMN and c not in mapped
+        ]
 
     @property
     def identity_columns(self) -> tuple[str, ...]:
@@ -618,6 +678,13 @@ class ShapeRecipe:
             steps.append(step)
             if columns is not None and step.enabled:
                 _apply_column_effect(step, columns)
+
+        router_count = sum(1 for s in steps if s.op == "router" and s.enabled)
+        if router_count > 1:
+            raise ShapeError(
+                "a recipe may hold one router step — one routing decision "
+                "per stream; model further outputs in a second transfer"
+            )
 
         return cls(
             steps=tuple(steps),
@@ -1174,6 +1241,101 @@ def _normalize_options(
             raise ShapeError(f"{where}: union extra must be refuse or drop")
         out["extra"] = extra
 
+    if op == "router":
+        routes = out.get("routes")
+        if not isinstance(routes, (list, tuple)) or not routes:
+            raise ShapeError(f"{where}: router needs a non-empty routes list")
+        seen_names: set[str] = set()
+        default_count = 0
+        norm_routes: list[dict[str, Any]] = []
+        for i, raw_route in enumerate(routes):
+            if not isinstance(raw_route, Mapping):
+                raise ShapeError(f"{where}: route {i} must be an object")
+            name = str(raw_route.get("name") or "").strip()
+            if not name:
+                raise ShapeError(f"{where}: route {i} needs a name")
+            if name in seen_names:
+                raise ShapeError(f"{where}: route '{name}' is declared twice")
+            seen_names.add(name)
+            is_default = bool(raw_route.get("default"))
+            condition = str(raw_route.get("condition") or "").strip()
+            if is_default:
+                default_count += 1
+                if condition:
+                    raise ShapeError(
+                        f"{where}: route '{name}' is the default — it takes no condition"
+                    )
+            elif not condition:
+                raise ShapeError(
+                    f"{where}: route '{name}' needs a condition or default: true"
+                )
+            if condition:
+                try:
+                    compile_expression(
+                        condition,
+                        known_columns=columns,
+                        label=f"{where} route '{name}' condition",
+                    )
+                except ExpressionError as exc:
+                    raise ShapeError(str(exc)) from exc
+            route_map = raw_route.get("map")
+            norm_route: dict[str, Any] = {
+                "name": name,
+                "condition": condition,
+                "default": is_default,
+            }
+            if route_map is not None:
+                if not isinstance(route_map, Mapping) or not route_map:
+                    raise ShapeError(
+                        f"{where}: route '{name}' map must be a non-empty object "
+                        "of column → output column"
+                    )
+                norm_route["map"] = {
+                    str(src_col): _valid_name(str(dst_col), where=where)
+                    for src_col, dst_col in route_map.items()
+                }
+                _assert_columns_exist(
+                    [str(src_col) for src_col in route_map], columns, "map", where=where
+                )
+            norm_routes.append(norm_route)
+        if default_count > 1:
+            raise ShapeError(f"{where}: only one route may be default: true")
+        unmatched = str(out.get("unmatched") or "").strip().casefold()
+        if unmatched:
+            if unmatched not in ("divert", "fail"):
+                raise ShapeError(
+                    f"{where}: router unmatched must be divert or fail"
+                )
+            if default_count:
+                raise ShapeError(
+                    f"{where}: unmatched has no effect when a default route exists"
+                )
+            out["unmatched"] = unmatched
+        elif not default_count:
+            raise ShapeError(
+                f"{where}: declare a default route or set unmatched — "
+                "an unmatched row must go somewhere explicit"
+            )
+        else:
+            out.pop("unmatched", None)
+        targets = out.get("targets")
+        if targets is not None:
+            if not isinstance(targets, Mapping):
+                raise ShapeError(f"{where}: router targets must be an object")
+            unknown_targets = [
+                str(name) for name in targets if str(name) not in seen_names
+            ]
+            if unknown_targets:
+                raise ShapeError(
+                    f"{where}: router targets name unknown route(s) "
+                    f"{', '.join(sorted(unknown_targets))}"
+                )
+            out["targets"] = {
+                str(name): _valid_name(str(table), where=where)
+                for name, table in targets.items()
+            }
+        out["routes"] = norm_routes
+
     if op == "surrogate_key":
         out["start"] = _as_int(out.get("start", 1), "start", where=where)
         out["step"] = _as_int(out.get("step", 1), "step", where=where)
@@ -1245,6 +1407,16 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
         for target in (options.get("map") or {}).values():
             if target and str(target) not in columns:
                 columns.append(str(target))
+        return
+    if op == "router":
+        # A mapped route emits only its map targets; the shared column set
+        # is the union plus the route tag so preview shows where each row went.
+        for route in options.get("routes") or []:
+            for target in (route.get("map") or {}).values():
+                if target and str(target) not in columns:
+                    columns.append(str(target))
+        if ROUTE_COLUMN not in columns:
+            columns.append(ROUTE_COLUMN)
         return
     if op == "surrogate_key":
         target = str(options.get("to") or "")

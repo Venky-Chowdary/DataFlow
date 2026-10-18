@@ -31,9 +31,10 @@ from services.shape_expr import (
     EvalError,
     _as_number,
     _as_text,
+    compile_expression,
     is_blank,
 )
-from services.shape_models import ShapeRecipe, ShapeStep
+from services.shape_models import ROUTE_COLUMN, ShapeRecipe, ShapeStep
 
 __all__ = [
     "ShapeRowError",
@@ -141,6 +142,8 @@ class ShapeEffect:
     nulls_introduced: int = 0
     steps: list[StepEffect] = field(default_factory=list)
     diverted_samples: list[DivertedRow] = field(default_factory=list)
+    # Rows per named router output — the per-route conservation ledger.
+    routes: dict[str, int] = field(default_factory=dict)
 
     @property
     def balanced(self) -> bool:
@@ -167,6 +170,7 @@ class ShapeEffect:
             "balanced": self.balanced,
             "steps": [s.to_dict() for s in self.steps],
             "diverted_samples": [d.to_dict() for d in self.diverted_samples],
+            "routes": dict(self.routes),
         }
 
 
@@ -636,6 +640,46 @@ class ShapeEngine:
             current = next_rows
         return current
 
+    def _match_route(
+        self,
+        step: ShapeStep,
+        index: int,
+        row: dict[str, Any],
+        tally: StepEffect,
+    ) -> dict[str, Any] | None:
+        """First route whose condition matches this row, else the default.
+
+        Conditions were compiled once at parse (a bad one refused the
+        recipe); the cache here only avoids re-compiling per row — an
+        ExpressionError at this point would still surface through
+        ``_guarded`` as a step error.
+        """
+        routes = self._state.get(f"router:{index}")
+        if routes is None:
+            routes = []
+            for raw_route in step.options.get("routes") or []:
+                expr = None
+                if not raw_route.get("default"):
+                    expr = compile_expression(
+                        str(raw_route["condition"]),
+                        known_columns=None,
+                        label=f"router route '{raw_route['name']}'",
+                    )
+                routes.append((raw_route, expr))
+            self._state[f"router:{index}"] = routes
+        default_route = None
+        for raw_route, expr in routes:
+            if raw_route.get("default"):
+                default_route = raw_route
+                continue
+            assert expr is not None
+            matched = self._guarded(
+                step, index, tally, row, lambda e=expr: e.matches(row)
+            )
+            if matched:
+                return raw_route
+        return default_route
+
     def _lookup_table(self, step: ShapeStep, index: int) -> dict[str, dict[str, Any]]:
         """The reference rows as a key-indexed dict, built once per run.
 
@@ -753,6 +797,37 @@ class ShapeEngine:
             matched = self._guarded(step, index, tally, row, lambda: step.expression.matches(row))
             if bool(matched) != keep:
                 raise _Drop(diverted=False, reason="filtered out", step_index=index, op=op)
+            return row
+
+        if op == "router":
+            route = self._match_route(step, index, row, tally)
+            if route is None:
+                if str(options.get("unmatched") or "") == "divert":
+                    raise _Drop(
+                        diverted=True,
+                        reason="no route matched",
+                        step_index=index,
+                        op=op,
+                    )
+                raise ShapeRowError(
+                    f"transform step {index + 1} (router), source row "
+                    f"{self._row_index + 1}: no route matched and unmatched "
+                    "is not divert — refusing to lose the row",
+                    step=step,
+                    step_index=index,
+                    row_index=self._row_index,
+                    column="",
+                )
+            route_map = route.get("map")
+            if route_map:
+                row = {
+                    str(dst): row.get(str(src))
+                    for src, dst in route_map.items()
+                }
+            row[ROUTE_COLUMN] = route["name"]
+            self.effect.routes[route["name"]] = (
+                self.effect.routes.get(route["name"], 0) + 1
+            )
             return row
 
         if op == "divert_rows":

@@ -354,6 +354,8 @@ const FIELD_LABEL: Record<string, string> = {
   on: "Join keys",
   fanout: "Duplicate-key fan-out",
   extra: "Extra columns policy",
+  routes: "Routes",
+  targets: "Route destination tables",
 };
 
 const FIELD_HINT: Record<string, string> = {
@@ -384,6 +386,8 @@ const FIELD_HINT: Record<string, string> = {
   on: 'JSON object: source column → reference column, e.g. {"cc":"code"}. Composite keys list several pairs.',
   fanout: "refuse fails the run when a key matches several reference rows (default — duplicate keys never multiply a row silently) · first keeps the earliest match · allow emits one row per match (fan-out).",
   extra: "refuse fails the run when an appended column is not a stream column and has no map entry (default) · drop omits it.",
+  routes: 'JSON array: [{"name":"high","condition":"[risk] = \'high\'","map":{"name":"customer_name"}},{"name":"other","default":true}] — first matching condition wins; one route may declare default: true for unmatched rows (then unmatched stays blank); every other route needs a condition. Each route may carry its own map. Without a default route, unmatched is required: divert quarantines, fail stops the run.',
+  targets: 'JSON object: route name → destination table, e.g. {"high":"customers_high"}. Routes without an entry write to <base>__<route>.',
 };
 
 const FIELD_CHOICES: Record<string, string[]> = {
@@ -403,6 +407,7 @@ const FIELD_CHOICES: Record<string, string[]> = {
  *  no null/default (a left join keeps the row with nulls already). */
 const FIELD_CHOICES_BY_OP: Record<string, Record<string, string[]>> = {
   join: { unmatched: ["drop", "divert"] },
+  router: { unmatched: ["divert", "fail"] },
 };
 
 const NUMBER_FIELDS = new Set(["places", "precision", "scale", "width", "limit", "min", "max"]);
@@ -411,7 +416,7 @@ const COLUMN_LIST_FIELDS = new Set(["columns"]);
 const LIST_FIELDS = new Set(["values", "into", "keys"]);
 /** Options whose value must be a JSON object/array — typed text is parsed and
  *  refused with a named error at draft time, never silently coerced. */
-const JSON_FIELDS = new Set(["rows", "reference", "map", "defaults", "on"]);
+const JSON_FIELDS = new Set(["rows", "reference", "map", "defaults", "on", "routes", "targets"]);
 
 /** The fields to render for one operation, in the catalog's own order. */
 export function fieldsFor(operation: ShapeOperation): ShapeField[] {

@@ -13,7 +13,7 @@ Missing = nothing in code yet.
 |2|Field rename|Have|Mapping `target` rename (src_to_tgt)|
 |3|Type cast/precision|Partial|`decimal/integer/boolean/date/datetime/time` ops + `target_type`; precision/scale params not exposed|
 |4|Row filter condition builder|Implemented|guided AND/OR condition groups -> expression (any function in advanced mode) + `filter_rows`/`divert_rows`/`source_filter`|
-|5|Multi-way routing|Missing|— (router is next on the roadmap; union `union` op appends a secondary input but routing by condition is not built)|
+|5|Multi-way routing|Partial|`router` op — one input to named outputs by condition (first match wins), per-route `map`, `unmatched` divert/fail or a `default: true` route, per-route `targets` destination tables; stream DB→DB writes each route to its own table (`targets` name or `<base>__<route>`), Gate-8 verifies each route table independently and grades conservation (route_partitioned scope). Gap: materialized (fully-read/file) sources refuse the router by name — routes write DB destinations on the streaming path only|
 |6|Aggregation GROUP BY|Implemented|`aggregate` op — group_by + sum/avg/count/min/max/first/last, end-of-stream drain, buffer cap|
 |7|Joins|Implemented|`join` op — inner/left, `on {src:ref}` composite keys, inline rows or saved-connector reference, map of return columns, duplicate-key `fanout` refuse/first/allow (refuse = fail loud, never silent multiply), inner no-match drop/divert, left preserves nulls|
 |8|Lookup/reference|Partial|`lookup` op enriches from inline rows or a live saved-connector table (`reference {connector_id,table,columns}` read once at run start, ≤500k rows, multi return columns via `map`, unmatched null/drop/divert/default, duplicate-key `match` first/refuse); non-paging source families (DynamoDB/ES/Redis/Kafka/Qdrant) refuse by name. Gap: design-time preview resolves references in global scope only — workspace-scoped connectors fail closed, so preview can't exercise a workspace-bound reference yet|
@@ -41,7 +41,7 @@ Missing = nothing in code yet.
 |30|SCD2/history|Partial|`scd2-history` library template only prepares incoming rows (surrogate + effective_from + is_current literal) — it does not close prior versions or detect change|
 |31|Soft delete|Missing|—|
 |32|Sort/Rank top-N|Implemented|`sort_rows` multi-key mixed direction + `rank_rows` top/bottom-N per partition|
-|33|Union|Missing|—|
+|33|Union|Implemented|`union` op — appends a secondary input at drain; column alignment by name, `map` renames explicitly, unmapped extras `extra` refuse (default) or drop; appended rows count as input population so in = out + diverted reconciles|
 |34|DQ authored reusable rules|Implemented|transform Library = named/versioned reusable rule assets + templates; rule_compiler executable status|
 |35|Design validation blocks run|Implemented|recipe.check() blocks runnability (Draft-invalid never binds) + g9 gate + validation_mode|
 |36|Preview before/after per step|Implemented|/preview?per_step=1 before/after per step incl. held/diverted/drained honesty|

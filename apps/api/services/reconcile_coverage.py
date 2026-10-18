@@ -25,6 +25,11 @@ CDC_SOURCE_IMAGE_COUNT = "cdc_source_image_count"
 # Dest extras do not fail (changelog is not S). This is not full_checksum
 # and not platform exactly-once.
 CDC_SOURCE_IMAGE_VALUES = "cdc_source_image_values"
+# A router recipe partitioned the population into per-route tables, each read
+# back independently. Population conservation is the proof level — one
+# source-vs-destination digest cannot compare a partitioned population, so
+# per-route read-back digests are reported, not compared as one checksum.
+ROUTE_PARTITIONED = "route_partitioned"
 # A quiet incremental poll: the reader found nothing past the watermark, so no
 # batch exists to compare and the proof is that the destination count did not
 # move. Population evidence must not be turned on such a report — comparing a
