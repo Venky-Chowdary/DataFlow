@@ -224,6 +224,50 @@ def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
 # digest only compares against the destination when every declared step is
 # row-local (or an engine-level no-op like scd2): population-changing recipes
 # are proven by the row ledger and the dedupe winner checks instead.
+def _proof_source_batches(
+    *,
+    source_endpoint: EndpointConfig,
+    src_type: str,
+    src_cfg: dict[str, Any],
+    read_cols: list[str],
+):
+    """Yield raw source batches for the transform-applied proof.
+
+    Its own seam so tests (and future snapshot/spool sources) can inject
+    the same population the write consumed without disturbing the engine's
+    own source readers.
+    """
+    import sqlalchemy as sa
+
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.dest_precount import (
+        warehouse_sql_engine,
+        warehouse_sql_table_ref,
+    )
+    from services.reconciliation import iter_select_row_dicts
+
+    table_ref = warehouse_sql_table_ref(
+        src_type,
+        src_cfg,
+        str(getattr(source_endpoint, "schema", "") or src_cfg.get("schema") or ""),
+        str(source_endpoint.table or ""),
+    )
+    q = '"'
+    if src_type in {"mysql", "mariadb", "clickhouse"}:
+        q = "`"
+    elif src_type in {"sqlserver", "mssql", "azure_sql"}:
+        q = "["
+    qcols = ", ".join(quote_sql_identifier(c, q) for c in read_cols)
+    with warehouse_sql_engine(src_type, src_cfg) as eng:
+        with eng.connect() as conn:
+            for batch in iter_select_row_dicts(
+                conn,
+                sa.text(f"SELECT {qcols} FROM {table_ref}"),  # nosec B608
+                read_cols,
+            ):
+                yield batch
+
+
 _TRANSFORM_PROOF_POPULATION_OPS = frozenset(
     {
         "dedupe",
@@ -299,7 +343,6 @@ def _transform_applied_proof(
     )
     from services.reconciliation import (
         canonical_checksum_from_iter,
-        iter_select_row_dicts,
         stream_select_checksum,
     )
     from services.scd2_engine import _active_checksum, _stamp_set
@@ -309,33 +352,36 @@ def _transform_applied_proof(
 
     from .connector_capabilities import resolve_driver_type
 
+    declared_src: list[str] = []
+    for s in steps:
+        opts = s.get("options") or {}
+        col = (
+            s.get("column")
+            or opts.get("column")
+            or s.get("target")
+            or opts.get("target")
+        )
+        if col:
+            declared_src.append(str(col))
+
+    raw_declared: dict[str, list[Any]] = {c: [] for c in set(declared_src)}
+
     try:
         parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
         runner = ShapeRunner(parsed)
         src_type = resolve_driver_type(source_endpoint.format or "")
         src_cfg = resolve_connector_config(source_endpoint)
         read_cols = list(runner.recipe.input_columns or columns)
-        table_ref = warehouse_sql_table_ref(
-            src_type,
-            src_cfg,
-            str(getattr(source_endpoint, "schema", "") or src_cfg.get("schema") or ""),
-            str(source_endpoint.table or ""),
-        )
-        q = '"'
-        if src_type in {"mysql", "mariadb", "clickhouse"}:
-            q = "`"
-        elif src_type in {"sqlserver", "mssql", "azure_sql"}:
-            q = "["
-        qcols = ", ".join(quote_sql_identifier(c, q) for c in read_cols)
         expected_rows: list[dict[str, Any]] = []
-        with warehouse_sql_engine(src_type, src_cfg) as eng:
-            with eng.connect() as conn:
-                for batch in iter_select_row_dicts(
-                    conn,
-                    sa.text(f"SELECT {qcols} FROM {table_ref}"),  # nosec B608
-                    read_cols,
-                ):
-                    expected_rows.extend(runner.records(batch))
+        for batch in _proof_source_batches(
+            source_endpoint=source_endpoint,
+            src_type=src_type,
+            src_cfg=src_cfg,
+            read_cols=read_cols,
+        ):
+            for c in raw_declared:
+                raw_declared[c].extend(row.get(c) for row in batch)
+            expected_rows.extend(runner.records(batch))
         expected_rows.extend(runner.drain() or [])
     except Exception as exc:  # the proof must not crash the verifier
         return {
@@ -412,64 +458,145 @@ def _transform_applied_proof(
             "rows": len(mapped_expected),
         }
 
-    # Localize: which declared step's column diverged? One small per-column
-    # digest each — names the step the operator must look at.
-    declared_cols: list[str] = []
-    for s in steps:
-        opts = s.get("options") or {}
-        col = (
-            s.get("column")
-            or opts.get("column")
-            or s.get("target")
-            or opts.get("target")
+    # G-1a: the re-read runs AFTER the write — a busy source may have
+    # drifted in between. Row-local steps never change the written row
+    # count, so a count divergence is always drift (or a population issue
+    # the ledger itself reports); and a step is only blamed when the
+    # population is provably stable AND the destination provably holds
+    # untransformed values on the step's column. Anything ambiguous is
+    # unverifiable — never a false failure that rolls back correct data.
+    if actual_rows != len(mapped_expected):
+        return {
+            "status": "unverifiable",
+            "reason": (
+                "source changed during run — re-read returned "
+                f"{len(mapped_expected)} recipe-applied rows but "
+                f"{actual_label} holds {actual_rows}"
+            ),
+            "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
+            "expected_rows": len(mapped_expected),
+            "actual_rows": actual_rows,
+        }
+
+    declared_tcols = [map_source_to_target(c, mappings) for c in declared_src]
+    untouched_cols = [c for c in digest_cols if c not in declared_tcols]
+    pk_cols = [
+        c
+        for c in (
+            dest_summary.get("primary_key_columns")
+            or dest_summary.get("conflict_columns")
+            or []
         )
-        if col:
-            declared_cols.append(map_source_to_target(str(col), mappings))
+        if c in digest_cols
+    ]
+
+    def _exp_digest(cols: list[str]) -> str:
+        return canonical_checksum_from_iter(
+            ({c: r.get(c) for c in cols} for r in mapped_expected),
+            cols,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
+
     culprits: list[str] = []
-    if declared_cols:
-        try:
-            dst_cfg = resolve_connector_config(endpoint)
-            dest_ref = warehouse_sql_table_ref(
-                dest_db_type,
-                dst_cfg,
-                str(getattr(endpoint, "schema", "") or dst_cfg.get("schema") or ""),
-                str(endpoint.table or ""),
+    drift = False
+    try:
+        dst_cfg = resolve_connector_config(endpoint)
+        dest_ref = warehouse_sql_table_ref(
+            dest_db_type,
+            dst_cfg,
+            str(getattr(endpoint, "schema", "") or dst_cfg.get("schema") or ""),
+            str(endpoint.table or ""),
+        )
+        dq = "`" if dest_db_type in {"mysql", "mariadb", "clickhouse"} else '"'
+
+        def _dest_digest(cols: list[str]) -> str:
+            if scd2_opts:
+                _n, cs = _active_checksum(
+                    dconn,
+                    dest_ref,
+                    cols,
+                    5000,
+                    dest_db_type,
+                    dest_types=dest_types,
+                    cols=scd2_opts,
+                )
+                return cs
+            qc = ", ".join(quote_sql_identifier(c, dq) for c in cols)
+            _n, cs = stream_select_checksum(
+                dconn,
+                sa.text(f"SELECT {qc} FROM {dest_ref}"),  # nosec B608
+                cols,
+                dest_db_type=dest_db_type,
+                dest_types=dest_types,
             )
-            dq = "`" if dest_db_type in {"mysql", "mariadb", "clickhouse"} else '"'
-            with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
-                with deng.connect() as dconn:
-                    for col in declared_cols:
+            return cs
+
+        with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
+            with deng.connect() as dconn:
+                # Key-set drift: the written population's keys must be the
+                # re-read population's keys.
+                if pk_cols and _dest_digest(pk_cols) != _exp_digest(pk_cols):
+                    drift = True
+                # Untouched columns are written raw — if the destination's
+                # raw-held columns no longer match the re-read, the source
+                # moved underneath the run.
+                elif untouched_cols and _dest_digest(untouched_cols) != _exp_digest(
+                    untouched_cols
+                ):
+                    drift = True
+                else:
+                    for i, col in enumerate(declared_tcols):
                         if col not in digest_cols:
                             continue
-                        col_expected = canonical_checksum_from_iter(
-                            [{col: r.get(col)} for r in mapped_expected],
+                        col_expected = _exp_digest([col])
+                        col_actual = _dest_digest([col])
+                        if col_actual == col_expected:
+                            continue
+                        # Destination holds the raw value the source held —
+                        # the step never ran on it. Anything else (a third
+                        # value entirely) means the source changed.
+                        col_raw = canonical_checksum_from_iter(
+                            (
+                                {col: v}
+                                for v in raw_declared.get(declared_src[i], [])
+                            ),
                             [col],
                             dest_db_type=dest_db_type,
                             dest_types=dest_types,
                         )
-                        if scd2_opts:
-                            _n, col_actual = _active_checksum(
-                                dconn,
-                                dest_ref,
-                                [col],
-                                5000,
-                                dest_db_type,
-                                dest_types=dest_types,
-                                cols=scd2_opts,
-                            )
-                        else:
-                            qc = quote_sql_identifier(col, dq)
-                            _n, col_actual = stream_select_checksum(
-                                dconn,
-                                sa.text(f"SELECT {qc} FROM {dest_ref}"),  # nosec B608
-                                [col],
-                                dest_db_type=dest_db_type,
-                                dest_types=dest_types,
-                            )
-                        if col_actual != col_expected:
+                        if col_actual == col_raw:
                             culprits.append(col)
-        except Exception:
-            culprits = []
+                        else:
+                            drift = True
+    except Exception:
+        # Localization is best-effort; never upgrade an ambiguous
+        # divergence into a blamed failure.
+        drift = True
+        culprits = []
+
+    if drift:
+        return {
+            "status": "unverifiable",
+            "reason": (
+                "source changed during run — the re-read population no "
+                "longer matches what was written"
+            ),
+            "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
+            "expected_rows": len(mapped_expected),
+            "actual_rows": actual_rows,
+        }
+    if not culprits:
+        return {
+            "status": "unverifiable",
+            "reason": (
+                "expected/actual digest mismatch could not be attributed "
+                "to a declared step or to source drift"
+            ),
+            "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
+            "expected_rows": len(mapped_expected),
+            "actual_rows": actual_rows,
+        }
 
     culprit_steps = []
     for i, s in enumerate(steps):
@@ -4468,6 +4595,14 @@ def run_reconciliation(
                 note = (
                     f"transform output verified against an independent "
                     f"source re-read ({proof.get('rows')} rows)"
+                )
+                if recon.get("message"):
+                    recon["message"] = f"{recon['message']} ({note})"
+            elif proof.get("status") == "unverifiable":
+                if recon.get("verification_verdict") in (None, "verified"):
+                    recon["verification_verdict"] = "partial"
+                note = (
+                    f"transform proof unverifiable — {proof.get('reason')}"
                 )
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"

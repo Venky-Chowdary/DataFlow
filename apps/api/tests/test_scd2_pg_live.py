@@ -1084,3 +1084,126 @@ def test_g1_correct_shape_run_verifies_pg(tmp_path, monkeypatch):
     proof = recon.get("transform_applied") or {}
     assert proof.get("status") == "verified", proof
     conn.close()
+
+
+def _patch_proof_source(monkeypatch, rs, drifted):
+    """Inject a post-write source mutation at the deepest available seam:
+    the proof's dedicated re-read seam when present, else the shared
+    raw-batch reader the old proof used."""
+    if getattr(rs, "_proof_source_batches", None) is not None:
+        monkeypatch.setattr(rs, "_proof_source_batches", drifted)
+    else:
+        import services.reconciliation as rec_mod
+        monkeypatch.setattr(
+            rec_mod, "iter_select_row_dicts", lambda *a, **kw: drifted()
+        )
+
+
+def test_g1a_source_drift_never_false_fails_pg(tmp_path, monkeypatch):
+    """G-1a: a source that changes between the write and the proof's
+    re-read must never blame a step or roll back correct data — the proof
+    reports unverifiable('source changed during run')."""
+    import src.transfer.reconcile_step as rs
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="ovr_g1a_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1a_dst CASCADE")
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = TransferRequest(
+        source=ep("ovr_g1a_src"), destination=ep("ovr_g1a_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+
+    # The proof's re-read sees a source that drifted post-write: one row
+    # updated (untouched column), one row inserted.
+    def _drifted(**kw):
+        yield [
+            {"id": "1", "name": "drifted", "price": "10.00", "note": "n1"},
+            {"id": "2", "name": "B", "price": "20.00", "note": "n2"},
+            {"id": "3", "name": "C", "price": "30.00", "note": "n3"},
+            {"id": "4", "name": "D", "price": "40.00", "note": "n4"},
+        ]
+
+    _patch_proof_source(monkeypatch, rs, _drifted)
+    res = _exec(fake, req, prefix="g1a")
+    assert res.success, res.error
+    recon = res.reconciliation or {}
+    assert recon.get("passed") is True
+    proof = recon.get("transform_applied") or {}
+    assert proof.get("status") == "unverifiable", proof
+    assert "changed during run" in str(proof.get("reason", ""))
+    assert recon.get("verification_verdict") == "partial"
+    # The run's data was correct and stays — no rollback.
+    cur.execute("SELECT COUNT(*), MIN(note) FROM ovr_g1a_dst")
+    n, mn = cur.fetchone()
+    assert n == 3 and mn == "N1", (n, mn)
+    conn.close()
+
+
+def test_g1a_value_drift_same_count_unverifiable_pg(tmp_path, monkeypatch):
+    """G-1a same-count drift: an in-place source update post-write must
+    also resolve to unverifiable, not a blamed step failure."""
+    import src.transfer.reconcile_step as rs
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="ovr_g1b_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1b_dst CASCADE")
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = TransferRequest(
+        source=ep("ovr_g1b_src"), destination=ep("ovr_g1b_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+
+    # Same row count; one untouched value changed post-write.
+    def _drifted(**kw):
+        yield [
+            {"id": "1", "name": "drifted", "price": "10.00", "note": "n1"},
+            {"id": "2", "name": "B", "price": "20.00", "note": "n2"},
+            {"id": "3", "name": "C", "price": "30.00", "note": "n3"},
+        ]
+
+    _patch_proof_source(monkeypatch, rs, _drifted)
+    res = _exec(fake, req, prefix="g1b")
+    assert res.success, res.error
+    proof = (res.reconciliation or {}).get("transform_applied") or {}
+    assert proof.get("status") == "unverifiable", proof
+    assert (res.reconciliation or {}).get("passed") is True
+    conn.close()
