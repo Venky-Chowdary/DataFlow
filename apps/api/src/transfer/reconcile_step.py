@@ -335,6 +335,7 @@ def _transform_applied_proof(
     if pop_ops - _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS:
         return {
             "status": "skipped",
+            "covered_by": "row ledger + dedupe winner checks",
             "reason": (
                 "recipe changes the written population — removals are proven "
                 "by the row ledger and dedupe winner checks"
@@ -355,14 +356,17 @@ def _transform_applied_proof(
     )
     from services.reconciliation import (
         canonical_checksum_from_iter,
-        stream_select_checksum,
+        iter_select_row_dicts,
     )
-    from services.scd2_engine import _active_checksum, _stamp_set
+    from services.scd2_engine import _stamp_set
     from services.shape_apply import ShapeRunner
     from services.shape_models import ShapeRecipe
     from services.sync_cursor import is_overwrite_sync, map_source_to_target
 
     from .connector_capabilities import resolve_driver_type
+
+    def _key_norm(v: Any) -> str:
+        return "" if v is None else str(v)
 
     def _step_cols(s: dict[str, Any]) -> list[str]:
         opts = s.get("options") or {}
@@ -391,8 +395,6 @@ def _transform_applied_proof(
             declared_map[i] = cols
             declared_src.extend(cols)
 
-    raw_declared: dict[str, list[Any]] = {c: [] for c in set(declared_src)}
-
     try:
         parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
         runner = ShapeRunner(parsed)
@@ -400,6 +402,7 @@ def _transform_applied_proof(
         src_cfg = resolve_connector_config(source_endpoint)
         read_cols = list(runner.recipe.input_columns or columns)
         expected_rows: list[dict[str, Any]] = []
+        raw_rows_mapped: list[dict[str, Any]] = []
         raw_count = 0
         for batch in _proof_source_batches(
             source_endpoint=source_endpoint,
@@ -408,8 +411,13 @@ def _transform_applied_proof(
             read_cols=read_cols,
         ):
             raw_count += len(batch)
-            for c in raw_declared:
-                raw_declared[c].extend(row.get(c) for row in batch)
+            raw_rows_mapped.extend(
+                {
+                    map_source_to_target(k, mappings or []): v
+                    for k, v in row.items()
+                }
+                for row in batch
+            )
             expected_rows.extend(runner.records(batch))
         expected_rows.extend(runner.drain() or [])
     except Exception as exc:  # the proof must not crash the verifier
@@ -428,6 +436,8 @@ def _transform_applied_proof(
     ]
 
     scd2_opts = dest_summary.get("scd2_opts")
+    scope_keys: set[tuple[str, ...]] | None = None
+    scope_pk: list[str] = []
     sync_mode = str(
         dest_summary.get("sync_mode")
         or dest_summary.get("effective_sync_mode")
@@ -451,22 +461,93 @@ def _transform_applied_proof(
         actual_label = "destination current rows"
         comparable = bool(actual_checksum)
     else:
-        rows_before = dest_summary.get(PRECOUNT_KEY)
-        if not (is_overwrite_sync(sync_mode) or not rows_before):
-            # An append/upsert into a populated target holds rows outside
-            # this run's population — the whole-table digest cannot compare.
-            return {
-                "status": "skipped",
-                "reason": (
-                    "destination holds rows outside this run's population "
-                    "(append/upsert into a non-empty table)"
-                ),
-            }
         digest_cols = _mapped_targets(mappings, columns)
-        actual_checksum = str(recon.get("target_checksum") or "")
-        actual_rows = int(recon.get("target_rows") or 0)
-        actual_label = "destination read-back"
-        comparable = bool(actual_checksum)
+        if not is_overwrite_sync(sync_mode):
+            # G-1c: an append/upsert can hold rows outside this run's
+            # population — scope the read-back to this run's keys so the
+            # proof still compares honestly.
+            scope_pk = [
+                c
+                for c in (
+                    dest_summary.get("primary_key_columns")
+                    or dest_summary.get("conflict_columns")
+                    or []
+                )
+                if c in digest_cols
+            ]
+            if not scope_pk:
+                return {
+                    "status": "skipped",
+                    "reason": (
+                        "non-overwrite run with no key columns — the "
+                        "destination read-back cannot be scoped to this "
+                        "run's population"
+                    ),
+                }
+            scope_keys = {
+                tuple(_key_norm(r.get(c)) for c in scope_pk)
+                for r in mapped_expected
+            }
+        if scope_keys is None:
+            actual_checksum = str(recon.get("target_checksum") or "")
+            actual_rows = int(recon.get("target_rows") or 0)
+            actual_label = "destination read-back"
+            comparable = bool(actual_checksum)
+        else:
+            actual_label = "destination rows for this run's keys"
+            comparable = True
+            try:
+                dst_cfg0 = resolve_connector_config(endpoint)
+                dest_ref0 = warehouse_sql_table_ref(
+                    dest_db_type,
+                    dst_cfg0,
+                    str(
+                        getattr(endpoint, "schema", "")
+                        or dst_cfg0.get("schema")
+                        or ""
+                    ),
+                    str(endpoint.table or ""),
+                )
+                dq0 = (
+                    "`"
+                    if dest_db_type in {"mysql", "mariadb", "clickhouse"}
+                    else '"'
+                )
+                sel_cols0 = list(
+                    dict.fromkeys(list(digest_cols) + list(scope_pk))
+                )
+                qc0 = ", ".join(
+                    quote_sql_identifier(c, dq0) for c in sel_cols0
+                )
+                scoped_rows: list[dict[str, Any]] = []
+                with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
+                    with e0.connect() as c0:
+                        for batch in iter_select_row_dicts(
+                            c0,
+                            sa.text(f"SELECT {qc0} FROM {dest_ref0}"),  # nosec B608
+                            sel_cols0,
+                        ):
+                            scoped_rows.extend(
+                                {c: r.get(c) for c in digest_cols}
+                                for r in batch
+                                if tuple(
+                                    _key_norm(r.get(c)) for c in scope_pk
+                                )
+                                in scope_keys
+                            )
+                actual_rows = len(scoped_rows)
+                actual_checksum = canonical_checksum_from_iter(
+                    scoped_rows,
+                    digest_cols,
+                    dest_db_type=dest_db_type,
+                    dest_types=dest_types,
+                )
+            except Exception as exc:
+                return {
+                    "status": "unverifiable",
+                    "reason": f"key-scoped destination read failed: {exc!s}"[:300],
+                    "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
+                }
 
     if not comparable:
         return {
@@ -512,7 +593,6 @@ def _transform_applied_proof(
             }
 
     declared_tcols = [map_source_to_target(c, mappings) for c in declared_src]
-    untouched_cols = [c for c in digest_cols if c not in declared_tcols]
     pk_cols = [
         c
         for c in (
@@ -522,14 +602,20 @@ def _transform_applied_proof(
         )
         if c in digest_cols
     ]
+    # Population key for row-level classification: the declared key columns
+    # when present, whole-row identity otherwise (no key needed).
+    key_cols = pk_cols or list(digest_cols)
 
-    def _exp_digest(cols: list[str]) -> str:
-        return canonical_checksum_from_iter(
-            ({c: r.get(c) for c in cols} for r in mapped_expected),
-            cols,
-            dest_db_type=dest_db_type,
-            dest_types=dest_types,
+    def _rk(r: dict[str, Any]) -> tuple:
+        return tuple(_key_norm(r.get(c)) for c in key_cols)
+
+    def _row_eq(a: dict[str, Any], b: dict[str, Any]) -> bool:
+        return all(
+            _key_norm(a.get(c)) == _key_norm(b.get(c)) for c in digest_cols
         )
+
+    exp_by_key = {_rk(r): r for r in mapped_expected}
+    raw_by_key = {_rk(r): r for r in raw_rows_mapped}
 
     culprits: list[str] = []
     drift = False
@@ -542,81 +628,75 @@ def _transform_applied_proof(
             str(endpoint.table or ""),
         )
         dq = "`" if dest_db_type in {"mysql", "mariadb", "clickhouse"} else '"'
+        sel_cols = list(dict.fromkeys(list(digest_cols) + list(scope_pk)))
+        qc = ", ".join(quote_sql_identifier(c, dq) for c in sel_cols)
+        stmt = sa.text(f"SELECT {qc} FROM {dest_ref}")  # nosec B608
+        if scd2_opts:
+            from services.scd2_engine import scd2_is_current_predicate
 
-        def _dest_digest(cols: list[str]) -> str:
-            if scd2_opts:
-                _n, cs = _active_checksum(
-                    dconn,
-                    dest_ref,
-                    cols,
-                    5000,
-                    dest_db_type,
-                    dest_types=dest_types,
-                    cols=scd2_opts,
-                )
-                return cs
-            qc = ", ".join(quote_sql_identifier(c, dq) for c in cols)
-            _n, cs = stream_select_checksum(
-                dconn,
-                sa.text(f"SELECT {qc} FROM {dest_ref}"),  # nosec B608
-                cols,
-                dest_db_type=dest_db_type,
-                dest_types=dest_types,
+            cur_pred = scd2_is_current_predicate(
+                dest_db_type,
+                quote_sql_identifier(str(scd2_opts["is_current"]), dq),
             )
-            return cs
-
-        def _classify_declared() -> None:
-            for scol in declared_src:
-                col = map_source_to_target(scol, mappings)
-                if col not in digest_cols:
-                    continue
-                col_expected = _exp_digest([col])
-                col_actual = _dest_digest([col])
-                if col_actual == col_expected:
-                    continue
-                # Destination holds the raw value the source held — the
-                # step never ran on it. Anything else (a third value
-                # entirely) means the source changed.
-                col_raw = canonical_checksum_from_iter(
-                    ({col: v} for v in raw_declared.get(scol, [])),
-                    [col],
-                    dest_db_type=dest_db_type,
-                    dest_types=dest_types,
-                )
-                if col_actual == col_raw:
-                    culprits.append(col)
-                else:
-                    drift_cols.append(True)
-
-        drift_cols: list[bool] = []
+            stmt = sa.text(  # nosec B608
+                f"SELECT {qc} FROM {dest_ref} WHERE {cur_pred}"
+            )
+        # Stream the destination once, index by the population key. A row
+        # proven equal to the raw re-read is untransformed by construction —
+        # a post-write source change cannot write raw values to the
+        # destination. Everything else is ambiguous (drift or wrong values)
+        # and goes to unverifiable, never blame.
+        dest_by_key: dict[tuple, dict[str, Any]] = {}
         with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
             with deng.connect() as dconn:
-                if pop_ops:
-                    # G-1b: a dropped row-removing step inflates every
-                    # column digest, so blame can only come from a
-                    # declared column holding the raw population.
-                    _classify_declared()
-                    if not culprits:
-                        if pk_cols and _dest_digest(pk_cols) != _exp_digest(
-                            pk_cols
+                for batch in iter_select_row_dicts(dconn, stmt, sel_cols):
+                    for r in batch:
+                        if scope_keys is not None and (
+                            tuple(_key_norm(r.get(c)) for c in scope_pk)
+                            not in scope_keys
                         ):
-                            drift_cols.append(True)
-                        elif untouched_cols and _dest_digest(
-                            untouched_cols
-                        ) != _exp_digest(untouched_cols):
-                            drift_cols.append(True)
-                elif pk_cols and _dest_digest(pk_cols) != _exp_digest(pk_cols):
-                    drift_cols.append(True)
-                # Untouched columns are written raw — if the destination's
-                # raw-held columns no longer match the re-read, the source
-                # moved underneath the run.
-                elif untouched_cols and _dest_digest(untouched_cols) != _exp_digest(
-                    untouched_cols
-                ):
-                    drift_cols.append(True)
-                else:
-                    _classify_declared()
-        drift = bool(drift_cols)
+                            continue
+                        row = {c: r.get(c) for c in digest_cols}
+                        dest_by_key[_rk(row)] = row
+
+        culprit_keys: list[tuple] = []
+        ambiguous = 0
+        for k, erow in exp_by_key.items():
+            drow = dest_by_key.get(k)
+            if drow is None:
+                ambiguous += 1
+            elif _row_eq(drow, erow):
+                continue
+            elif _row_eq(drow, raw_by_key.get(k, {})):
+                culprit_keys.append(k)
+            else:
+                ambiguous += 1
+        for k, drow in dest_by_key.items():
+            if k in exp_by_key:
+                continue
+            if _row_eq(drow, raw_by_key.get(k, {})):
+                culprit_keys.append(k)
+            else:
+                ambiguous += 1
+
+        if culprit_keys:
+            culprit_cols: set[str] = set()
+            for k in culprit_keys:
+                drow = dest_by_key[k]
+                erow = exp_by_key.get(k) or {}
+                for tcol in declared_tcols:
+                    if tcol not in digest_cols:
+                        continue
+                    if _key_norm(drow.get(tcol)) != _key_norm(erow.get(tcol)):
+                        culprit_cols.add(tcol)
+            culprits = sorted(culprit_cols or declared_tcols)
+        else:
+            culprits = []
+        # Drift means "unattributable": a touched-column-only source update
+        # and a wrong-valued op are observationally identical here, and both
+        # must be unverifiable (the wrong-value case is owned by the G-1d
+        # independent oracle, not this heuristic).
+        drift = bool(ambiguous) and not culprit_keys
     except Exception:
         # Localization is best-effort; never upgrade an ambiguous
         # divergence into a blamed failure.
@@ -4640,12 +4720,13 @@ def run_reconciliation(
                 )
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"
-            elif proof.get("status") == "unverifiable":
+            elif proof.get("status") == "unverifiable" or (
+                proof.get("status") == "skipped" and not proof.get("covered_by")
+            ):
                 if recon.get("verification_verdict") in (None, "verified"):
                     recon["verification_verdict"] = "partial"
-                note = (
-                    f"transform proof unverifiable — {proof.get('reason')}"
-                )
+                label = "unverifiable" if proof.get("status") == "unverifiable" else "not applicable"
+                note = f"transform proof {label} — {proof.get('reason')}"
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"
     _emit_gate8_verdict(

@@ -1082,6 +1082,7 @@ def test_g1_correct_shape_run_verifies_pg(tmp_path, monkeypatch):
     recon = res.reconciliation or {}
     assert recon.get("passed") is True
     proof = recon.get("transform_applied") or {}
+    print("PROOF:", proof, "| verdict:", recon.get("verification_verdict"), "| msg:", recon.get("message"))
     assert proof.get("status") == "verified", proof
     conn.close()
 
@@ -1278,4 +1279,201 @@ def test_g1b_dropped_filter_step_fails_gate8_pg(tmp_path, monkeypatch):
     assert any(
         "filter" in s for s in proof2.get("culprit_steps") or []
     ), proof2
+    conn.close()
+
+
+def test_g1c_append_into_populated_target_pg(tmp_path, monkeypatch):
+    """G-1c: a shaped append into a populated destination must scope the
+    proof to this run's keys — a dropped step still fails; and an
+    unscoped/unprovable case may never report verdict verified."""
+    import importlib
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+
+    def _req(src, dst):
+        return TransferRequest(
+            source=ep(src), destination=ep(dst),
+            sync_mode="append",
+            stream_contracts=[
+                {"selected": True, "primary_key": "id", "sync_mode": "append"}
+            ],
+            mappings=[
+                {"source": c, "target": c, "confidence": 1.0,
+                 "user_override": True, "transform": "none"}
+                for c in COLS
+            ],
+            shape_recipe=recipe,
+            approved_shape_recipe_hash=ShapeRecipe.parse(
+                recipe, source_columns=COLS
+            ).recipe_hash,
+            skip_preflight=True, validation_mode="strict",
+        )
+
+    # Seed the destination with pre-existing rows (outside the run's keys).
+    cur.execute("DROP TABLE IF EXISTS app_g1c_dst CASCADE")
+    cur.execute(
+        "CREATE TABLE app_g1c_dst (id text, name text, price text, note text)"
+    )
+    cur.execute("INSERT INTO app_g1c_dst VALUES ('10','X','1.00','seed1'),"
+                "('11','Y','2.00','seed2')")
+    conn.commit()
+
+    # Correct shaped append → verifies via the key-scoped read-back.
+    _mk_src(cur, ROWS, table="app_g1c_src")
+    res = _exec(fake, _req("app_g1c_src", "app_g1c_dst"), prefix="g1cc")
+    assert res.success, res.error
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    print("PROOF:", proof, "| verdict:", recon.get("verification_verdict"), "| msg:", recon.get("message"))
+    assert proof.get("status") == "verified", proof
+    assert proof.get("rows") == 3, proof
+
+    # Dropped step on an append → still fails, naming the step.
+    cur.execute("DROP TABLE IF EXISTS app_g1c_dst2 CASCADE")
+    cur.execute(
+        "CREATE TABLE app_g1c_dst2 (id text, name text, price text, note text)"
+    )
+    cur.execute("INSERT INTO app_g1c_dst2 VALUES ('10','X','1.00','seed1')")
+    conn.commit()
+    import src.transfer.engine as eng_mod
+    monkeypatch.setattr(
+        eng_mod,
+        "_shape_materialized_read",
+        lambda runner, records, columns, schema: (records, columns, schema),
+    )
+    _noop = lambda self, headers, rows: (list(headers), [list(r) for r in rows])  # noqa: E731
+    for _mod_name in ("services.shape_apply", "src.services.shape_apply"):
+        try:
+            _mod = importlib.import_module(_mod_name)
+            monkeypatch.setattr(_mod.ShapeRunner, "matrix", _noop)
+        except Exception:
+            pass
+    _mk_src(cur, ROWS, table="app_g1c_src2")
+    res2 = _exec(fake, _req("app_g1c_src2", "app_g1c_dst2"), prefix="g1cd")
+    print("PROOF2:", (res2.reconciliation or {}).get("transform_applied"), "| verdict:", (res2.reconciliation or {}).get("verification_verdict"))
+    assert not res2.success, res2.error
+    recon2 = res2.reconciliation or {}
+    proof2 = recon2.get("transform_applied") or {}
+    assert recon2.get("verification_verdict") != "verified"
+    assert proof2.get("status") == "failed", proof2
+    conn.close()
+
+
+def test_g1a_touched_col_drift_and_insert_unverifiable_pg(tmp_path, monkeypatch):
+    """G-1a hole 1: a post-write source update ON the transformed column
+    plus an inserted row must resolve to unverifiable — never a blamed
+    step failure, never a rollback of correct data."""
+    import src.transfer.reconcile_step as rs
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="ovr_g1t_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1t_dst CASCADE")
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = TransferRequest(
+        source=ep("ovr_g1t_src"), destination=ep("ovr_g1t_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+
+    # Touch ONLY the transformed column of an existing row + add a row.
+    def _drifted(**kw):
+        yield [
+            {"id": "1", "name": "A", "price": "10.00", "note": "changed"},
+            {"id": "2", "name": "B", "price": "20.00", "note": "n2"},
+            {"id": "3", "name": "C", "price": "30.00", "note": "n3"},
+            {"id": "4", "name": "D", "price": "40.00", "note": "n4"},
+        ]
+
+    _patch_proof_source(monkeypatch, rs, _drifted)
+    res = _exec(fake, req, prefix="ovrg1t")
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert res.success, res.error
+    assert proof.get("status") == "unverifiable", proof
+    assert not proof.get("culprit_steps"), proof
+    cur.execute("SELECT note FROM ovr_g1t_dst WHERE id='1'")
+    assert cur.fetchone()[0] == "N1"  # correct data was never rolled back
+    conn.close()
+
+
+def test_g1a_partial_chunk_application_fails_pg(tmp_path, monkeypatch):
+    """G-1a hole 2: a step applied to only SOME rows (one chunk skipped)
+    leaves raw rows on the destination — proven untransformed — and must
+    fail naming the step, not slip into unverifiable."""
+    import services.shape_apply as shape_apply_mod
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS * 2, table="ovr_g1p_src")  # 6 rows, dup ids collapse fine
+    cur.execute("DROP TABLE IF EXISTS ovr_g1p_dst CASCADE")
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = TransferRequest(
+        source=ep("ovr_g1p_src"), destination=ep("ovr_g1p_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+
+    # Partial application: the step is skipped for one row in the batch.
+    _orig = shape_apply_mod.ShapeRunner.matrix
+
+    def _flaky(self, headers, rows):
+        h, out = _orig(self, headers, rows)
+        for i, r in enumerate(out):
+            if i % 3 == 1:
+                r[headers.index("note")] = rows[i][headers.index("note")]
+        return h, out
+
+    monkeypatch.setattr(shape_apply_mod.ShapeRunner, "matrix", _flaky)
+    res = _exec(fake, req, prefix="ovrg1p")
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert not res.success, res.error
+    assert recon.get("passed") is False
+    assert proof.get("status") == "failed", proof
+    assert any("case" in s for s in proof.get("culprit_steps") or []), proof
     conn.close()
