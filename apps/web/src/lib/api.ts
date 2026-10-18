@@ -691,6 +691,130 @@ export async function compileTransformRecipe(
   return res.json();
 }
 
+export interface TransformLibraryOps {
+  ops: string[];
+  ops_detail: Record<string, {
+    summary?: string;
+    family?: string;
+    needs_column?: boolean;
+    produces_column?: boolean;
+    expression?: boolean;
+    options?: Record<string, unknown>;
+  }>;
+  engine_aliases: string[];
+  on_error_modes: string[];
+}
+
+export interface TransformRecipeStepWire {
+  column: string;
+  op: string;
+  on_error: "fail" | "keep_original";
+  enabled: boolean;
+  options?: Record<string, unknown>;
+  output_column?: string;
+}
+
+export async function fetchTransformLibraryOps(): Promise<TransformLibraryOps> {
+  const res = await apiFetch(`${API_BASE}/transform-library/ops`);
+  if (!res.ok) throw await apiErrorFrom(res, "Transform ops unavailable");
+  return res.json();
+}
+
+export interface TransformTemplate {
+  key: string;
+  name: string;
+  description: string;
+}
+
+export async function listTransformTemplates(): Promise<TransformTemplate[]> {
+  const res = await apiFetch(`${API_BASE}/transform-library/templates`);
+  if (!res.ok) throw await apiErrorFrom(res, "Transform templates unavailable");
+  return res.json();
+}
+
+export async function cloneTransformTemplate(key: string): Promise<TransformLibraryRecipe> {
+  const res = await apiFetch(
+    `${API_BASE}/transform-library/templates/${encodeURIComponent(key)}/clone`,
+    { method: "POST" },
+  );
+  if (!res.ok) throw await apiErrorFrom(res, "Template could not be added");
+  return res.json();
+}
+
+export async function getTransformRecipe(id: string): Promise<TransformLibraryRecipe> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}`);
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe not found");
+  return res.json();
+}
+
+export interface TransformRecipeDraft {
+  name?: string;
+  description?: string;
+  enabled?: boolean;
+  steps?: TransformRecipeStepWire[];
+  parameters?: Record<string, { default?: unknown; description?: string }>;
+  input_columns?: string[];
+  output_columns?: string[];
+  expected_version?: number;
+}
+
+export async function createTransformRecipe(body: TransformRecipeDraft): Promise<TransformLibraryRecipe> {
+  const res = await apiFetch(`${API_BASE}/transform-library/`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe could not be saved");
+  return res.json();
+}
+
+export async function updateTransformRecipe(id: string, body: TransformRecipeDraft): Promise<TransformLibraryRecipe> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}`, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe could not be saved");
+  return res.json();
+}
+
+export async function deleteTransformRecipe(id: string): Promise<void> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Recipe could not be deleted");
+}
+
+export interface TransformPreviewResult {
+  compiled: boolean;
+  rows_removed?: number;
+  rows: Record<string, unknown>[];
+  steps?: { step: string; after?: Record<string, unknown> }[];
+  error?: string;
+}
+
+export async function previewTransformRecipe(
+  id: string,
+  body: { rows: Record<string, unknown>[]; steps?: TransformRecipeStepWire[]; params?: Record<string, unknown>; per_step?: boolean },
+): Promise<TransformPreviewResult> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  if (!res.ok) throw await apiErrorFrom(res, "Preview failed");
+  return res.json();
+}
+
+export async function transformRecipeWhereUsed(id: string): Promise<{
+  recipe_id: string;
+  used_by: { schedule_id: string; schedule_name: string; bound_version: number; version_mode: string; latest_version: number }[];
+}> {
+  const res = await apiFetch(`${API_BASE}/transform-library/${encodeURIComponent(id)}/where-used`);
+  if (!res.ok) throw await apiErrorFrom(res, "Where-used unavailable");
+  return res.json();
+}
+
 export async function syncJobNow(
   jobId: string,
   mode: "delta" | "full" = "delta",

@@ -82,6 +82,13 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
     keywords: "dbt alternative, post-load SQL, data transformation, warehouse models, data tests",
     robots: "noindex",
   },
+  "transform-library": {
+    title: "Transform Library",
+    description:
+      "Named, versioned pre-load transforms — built once, bound from the Transform step of any transfer with pinned or latest versions and parameter overrides.",
+    keywords: "transform library, reusable transforms, data cleansing, PII masking, versioned recipes",
+    robots: "noindex",
+  },
   jobs: {
     title: "Job Theater",
     description:

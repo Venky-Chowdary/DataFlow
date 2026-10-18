@@ -51,6 +51,7 @@ const TransferPage = lazyNamed(() => import("./pages/TransferPage"), "TransferPa
 const ConnectorsPage = lazyNamed(() => import("./pages/ConnectorsPage"), "ConnectorsPage");
 const SchedulesPage = lazyNamed(() => import("./pages/SchedulesPage"), "SchedulesPage");
 const TransformsPage = lazyNamed(() => import("./pages/TransformsPage"), "TransformsPage");
+const TransformLibraryPage = lazyNamed(() => import("./pages/TransformLibraryPage"), "TransformLibraryPage");
 const JobsPage = lazyNamed(() => import("./pages/JobsPage"), "JobsPage");
 const ContractsPage = lazyNamed(() => import("./pages/ContractsPage"), "ContractsPage");
 const McpPage = lazyNamed(() => import("./pages/McpPage"), "McpPage");
@@ -81,6 +82,7 @@ const NAV: { id: Screen; label: string; icon: string; desc: string; group: "plat
   { id: "jobs", label: "Jobs", icon: "jobs", desc: "Live progress and history", group: "ops" },
   { id: "schedules", label: "Schedules", icon: "activity", desc: "Recurring syncs", group: "ops" },
   { id: "transforms", label: "Transforms", icon: "layers", desc: "Post-load SQL models", group: "ops" },
+  { id: "transform-library", label: "Library", icon: "book", desc: "Reusable pre-load transforms", group: "ops" },
   { id: "query", label: "Query", icon: "search", desc: "Ad-hoc SQL and export", group: "ops" },
   { id: "pilot", label: "Pilot", icon: "sparkle", desc: "Natural-language assistant", group: "ops" },
   { id: "settings", label: "Settings", icon: "settings", desc: "Security, team, SSO", group: "system" },
@@ -893,6 +895,13 @@ function AppShell({
                 <div className={`df2-screen-keep ${showScreen("transforms")}`} hidden={screen !== "transforms"} aria-hidden={screen !== "transforms"}>
                 <PageErrorBoundary label="Transformations">
                   <TransformsPage connectors={connectors} onNavigate={setScreen} />
+                </PageErrorBoundary>
+                </div>
+              )}
+              {mountedScreens.has("transform-library") && (
+                <div className={`df2-screen-keep ${showScreen("transform-library")}`} hidden={screen !== "transform-library"} aria-hidden={screen !== "transform-library"}>
+                <PageErrorBoundary label="Transform Library">
+                  <TransformLibraryPage />
                 </PageErrorBoundary>
                 </div>
               )}
