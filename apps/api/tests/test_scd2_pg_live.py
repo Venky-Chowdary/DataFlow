@@ -1590,3 +1590,58 @@ def test_g1d_wrong_op_impl_caught_by_sql_oracle_pg(tmp_path, monkeypatch):
     assert proof.get("provenance") == "independent SQL oracle", proof
     assert any("case" in s for s in proof.get("culprit_steps") or []), proof
     conn.close()
+
+
+def test_g1e_proof_memory_bounded_pg(tmp_path, monkeypatch):
+    """G-1e: the transform proof must not materialize the full expected
+    output — at 250k rows the process RSS stays bounded (the old
+    list-based proof cost +238MB at 200k)."""
+    N = 250_000
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    cur.execute("DROP TABLE IF EXISTS ovr_g1e_src CASCADE")
+    cur.execute("DROP TABLE IF EXISTS ovr_g1e_dst CASCADE")
+    cur.execute(
+        "CREATE TABLE ovr_g1e_src (id INT PRIMARY KEY, name TEXT, "
+        "price TEXT, note TEXT)"
+    )
+    cur.execute(
+        "INSERT INTO ovr_g1e_src SELECT i, 'n' || i, '10.00', 'note' || i "
+        "FROM generate_series(1, %s) i",
+        (N,),
+    )
+    conn.commit()
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
+    req = TransferRequest(
+        source=ep("ovr_g1e_src"), destination=ep("ovr_g1e_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+    res = _exec(fake, req, prefix="ovrg1e")
+    assert res.success, res.error
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert proof.get("status") == "verified", proof
+    cur.execute(
+        "SELECT COUNT(*) FROM ovr_g1e_dst WHERE note <> UPPER(note)"
+    )
+    assert cur.fetchone()[0] == 0
+    conn.close()
