@@ -32,10 +32,14 @@ def test_a_global_operation_is_refused_with_where_it_can_be_done():
     """A join cannot be evaluated row-locally; saying so is the product teaching."""
     with pytest.raises(ShapeError, match="post-load model on the Transforms page"):
         recipe({"op": "join", "column": "id"})
-    with pytest.raises(ShapeError, match="post-load model"):
-        recipe({"op": "aggregate", "column": "amount"})
-    with pytest.raises(ShapeError, match="post-load model"):
+    # aggregate/sort/dedupe graduated to real streaming ops — the old names
+    # still refuse, but the message now points at the op that does the work.
+    with pytest.raises(ShapeError, match="sort_rows"):
         recipe({"op": "sort", "column": "amount"})
+    with pytest.raises(ShapeError, match="dedupe_rows"):
+        recipe({"op": "dedupe", "column": "id"})
+    with pytest.raises(ShapeError, match="aggregate"):
+        recipe({"op": "group_by", "column": "amount"})
 
 
 def test_an_unknown_operation_lists_the_ones_that_exist():

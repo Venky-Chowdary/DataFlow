@@ -10,6 +10,7 @@ import threading
 import time
 from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 _stream = sys.modules[__name__]
@@ -3137,6 +3138,20 @@ def _stream_database_transfer_impl(
             apply_result=_apply_result,
             start_idx=first_idx + 1,
         )
+        # A buffering recipe step (dedupe keep-last, aggregate, sort, rank)
+        # holds rows until the population is fully read — this is that moment.
+        # Drained rows run the same write path and DDL gate as every other page.
+        if shape_runner is not None:
+            tail_headers, tail_rows = shape_runner.drain_matrix()
+            if tail_rows:
+                tail_batch = SimpleNamespace(
+                    headers=tail_headers,
+                    rows=tail_rows,
+                    meta={},
+                    fk_orphan_details=[],
+                )
+                tail_idx = first_idx + 1 + 10_000_000
+                _apply_result(tail_idx, _process_db_chunk(tail_idx, tail_batch))
         row_path_ok = True
     finally:
         if run_after:

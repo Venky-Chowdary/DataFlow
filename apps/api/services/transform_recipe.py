@@ -256,6 +256,9 @@ class TransformRecipe:
             if step.output_column:
                 resolved = _substitute_params(step.output_column, bound)
                 step.output_column = str(resolved)
+            if step.column and str(step.column).startswith(":"):
+                resolved = _substitute_params(str(step.column), bound)
+                step.column = str(resolved)
         return recipe
 
     def to_dict(self) -> dict[str, Any]:
@@ -304,7 +307,16 @@ def _substitute_params(value: Any, bound: dict[str, Any]) -> Any:
     if isinstance(value, dict):
         return {k: _substitute_params(v, bound) for k, v in value.items()}
     if isinstance(value, list):
-        return [_substitute_params(v, bound) for v in value]
+        out: list[Any] = []
+        for v in value:
+            resolved = _substitute_params(v, bound)
+            # A :param bound to a list splices into a list option — otherwise
+            # 'keys': [':pk_columns'] would nest one list inside another.
+            if isinstance(resolved, list):
+                out.extend(resolved)
+            else:
+                out.append(resolved)
+        return out
     if not isinstance(value, str):
         return value
     exact = _PARAM_TOKEN.match(value)

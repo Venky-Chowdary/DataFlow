@@ -691,18 +691,25 @@ export async function compileTransformRecipe(
   return res.json();
 }
 
+export interface TransformOpDetail {
+  op: string;
+  summary?: string;
+  family?: string;
+  active?: boolean;
+  expands?: boolean;
+  needs_column?: boolean;
+  produces_column?: boolean;
+  expression_option?: string | null;
+  options?: string[];
+  required?: string[];
+}
+
 export interface TransformLibraryOps {
   ops: string[];
-  ops_detail: Record<string, {
-    summary?: string;
-    family?: string;
-    needs_column?: boolean;
-    produces_column?: boolean;
-    expression?: boolean;
-    options?: Record<string, unknown>;
-  }>;
+  ops_detail: TransformOpDetail[];
   engine_aliases: string[];
   on_error_modes: string[];
+  functions?: { name: string; min_args: number; max_args: number | null; summary?: string }[];
 }
 
 export interface TransformRecipeStepWire {

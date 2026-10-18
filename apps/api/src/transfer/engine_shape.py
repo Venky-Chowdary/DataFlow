@@ -169,5 +169,8 @@ def _shape_materialized_read(
 ) -> tuple[list[dict[str, Any]], list[str], dict[str, str]]:
     """Apply the recipe to a fully-read source and re-declare what it produced."""
     shaped = runner.records(records)
+    # Buffering steps (dedupe keep-last, aggregate, sort, rank) emit only at
+    # end-of-stream — a fully-read source is that stream.
+    shaped.extend(runner.drain())
     out_columns = list(runner.output_columns or columns)
     return shaped, out_columns, shaped_schema(runner, shaped, schema)

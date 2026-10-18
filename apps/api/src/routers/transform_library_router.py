@@ -113,6 +113,7 @@ def list_recipes(
 @router.get("/ops")
 def list_ops() -> dict[str, Any]:
     """The ops a recipe step may use, so the selector UI enumerates them."""
+    from services.shape_expr import describe_functions
     from services.shape_models import STEP_CATALOG, describe_catalog
 
     return {
@@ -120,6 +121,7 @@ def list_ops() -> dict[str, Any]:
         "ops_detail": describe_catalog(),
         "engine_aliases": sorted(KNOWN_TRANSFORMS),
         "on_error_modes": sorted(ON_ERROR_MODES),
+        "functions": describe_functions(),
     }
 
 

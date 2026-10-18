@@ -69,6 +69,81 @@ TEMPLATES: dict[str, dict[str, Any]] = {
         "input_columns": ["amount"],
         "output_columns": ["amount"],
     },
+    "dedupe-keep-latest": {
+        "name": "Dedupe Keep Latest",
+        "description": (
+            "One row per primary key, the winner decided by an ordering column "
+            "(updated_at by default) — the survivorship rule an incremental "
+            "dedupe load writes. Clone, then set the key and ordering columns."
+        ),
+        "steps": [
+            {
+                "op": "dedupe_rows",
+                "options": {
+                    "keys": [":pk_columns"],
+                    "keep": "last",
+                    "order_by": ":order_column",
+                    "order_dir": "desc",
+                },
+            }
+        ],
+        "parameters": {
+            "pk_columns": {
+                "default": ["id"],
+                "description": "Primary-key column list — one row survives per key",
+            },
+            "order_column": {
+                "default": "updated_at",
+                "description": "Column that decides which duplicate wins",
+            },
+        },
+        "input_columns": ["id", "updated_at"],
+        "output_columns": ["id", "updated_at"],
+    },
+    "scd2-history": {
+        "name": "SCD-2 History (surrogate + effective dates)",
+        "description": (
+            "Type-2 slowly-changing-dimension shape: a surrogate key, the "
+            "effective-from stamp filled from a version column, and a current "
+            "flag on the incoming rows. Closing the previous version's range is "
+            "destination-side history logic — this recipe prepares the row set "
+            "the merge applies. Clone, then name the columns."
+        ),
+        "steps": [
+            {"op": "surrogate_key", "options": {"to": ":sk_column", "start": 1}},
+            {
+                "op": "derive_column",
+                "options": {
+                    "to": ":effective_from_column",
+                    "expression": ":version_column",
+                },
+            },
+            {
+                "op": "derive_column",
+                "options": {"to": ":is_current_column", "expression": "'true'"},
+            },
+        ],
+        "parameters": {
+            "sk_column": {
+                "default": "sk",
+                "description": "Surrogate-key column the merge addresses",
+            },
+            "effective_from_column": {
+                "default": "effective_from",
+                "description": "Column holding the version's effective-from stamp",
+            },
+            "version_column": {
+                "default": "updated_at",
+                "description": "Source column supplying the version timestamp",
+            },
+            "is_current_column": {
+                "default": "is_current",
+                "description": "Current-version flag column",
+            },
+        },
+        "input_columns": ["id", "updated_at"],
+        "output_columns": ["id", "updated_at", "sk", "effective_from", "is_current"],
+    },
 }
 
 

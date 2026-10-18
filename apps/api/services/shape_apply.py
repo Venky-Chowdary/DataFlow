@@ -99,6 +99,21 @@ class ShapeRunner:
         out_headers = list(self.output_columns or headers)
         return out_headers, shaped_rows
 
+    def drain(self) -> list[dict[str, Any]]:
+        """Rows buffering steps held until end-of-stream (see ShapeEngine.drain)."""
+        return self._engine.drain()
+
+    def drain_matrix(self) -> tuple[list[str], list[list[Any]]]:
+        """Rows buffering steps held until end-of-stream, as a matrix page.
+
+        dedupe keep-last, aggregate, sort and rank emit only once the whole
+        population was read; the transfer calls this after the last batch so
+        their winners still reach the writer. Empty when nothing was held.
+        """
+        rows = self._engine.drain()
+        headers = list(self.output_columns)
+        return headers, [[r.get(h) for h in headers] for r in rows]
+
     def report(self) -> dict[str, Any]:
         """Proof-pack fragment: what the recipe is, and what it did."""
         effect = self._engine.effect

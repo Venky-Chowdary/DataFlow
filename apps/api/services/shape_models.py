@@ -59,24 +59,23 @@ class ShapeError(ValueError):
 # pass over every row. Refuse rather than quietly making a 1M-row run crawl.
 MAX_STEPS = 100
 
-# Ops a user reasonably reaches for that cannot be evaluated row-locally on a
-# stream. Naming each one, with where it *can* be done, is the difference
-# between a product that teaches and one that says "invalid step type".
+# Ops a user reasonably reaches for under another name, or that still cannot
+# be evaluated on this engine. Naming each one — with the op that does it when
+# one exists — is the difference between a product that teaches and one that
+# says "invalid step type".
 _GLOBAL_OPS: dict[str, str] = {
-    "join": "joins another table",
-    "lookup": "reads a second dataset",
-    "aggregate": "collapses many rows into one",
-    "group_by": "collapses many rows into one",
-    "pivot": "turns rows into columns",
-    "unpivot": "turns columns into rows",
-    "sort": "orders the whole population",
-    "order_by": "orders the whole population",
-    "rank": "compares a row against the whole population",
-    "window": "compares a row against neighbouring rows",
-    "dedupe": "must remember every key it has seen",
-    "distinct": "must remember every row it has seen",
-    "running_total": "carries state between rows",
-    "fill_down": "carries state between rows",
+    "join": "joins another table — the 'lookup' op enriches each row from a reference table; a second live input is a post-load model on the Transforms page",
+    "group_by": "collapses many rows into one — the 'aggregate' op does this on-stream",
+    "pivot": "turns rows into columns — that is a post-load model step",
+    "unpivot": "turns columns into rows — that is a post-load model step",
+    "sort": "orders the whole population — the 'sort_rows' op does this on-stream",
+    "order_by": "orders the whole population — the 'sort_rows' op does this on-stream",
+    "rank": "compares a row against the whole population — the 'rank_rows' op does this on-stream",
+    "window": "compares a row against neighbouring rows — that is a post-load model step",
+    "dedupe": "must remember every key it has seen — the 'dedupe_rows' op does this on-stream",
+    "distinct": "must remember every row it has seen — the 'dedupe_rows' op does this on-stream",
+    "running_total": "carries state between rows — that is a post-load model step",
+    "fill_down": "carries state between rows — that is a post-load model step",
 }
 
 _CASE_MODES = ("upper", "lower", "title")
@@ -258,6 +257,58 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         options=("condition", "reason"),
         required=("condition",),
     ),
+    # --- advanced set operations (Tier 5, may hold rows to end-of-stream) ----
+    _StepDef(
+        "dedupe_rows",
+        "Keep one row per key — the first seen, or the best by an ordering column",
+        family="advanced",
+        active=True,
+        needs_column=False,
+        options=("keys", "keep", "order_by", "order_dir", "max_keys"),
+        required=("keys",),
+    ),
+    _StepDef(
+        "aggregate",
+        "Group rows and emit one row per group with computed measures",
+        family="advanced",
+        active=True,
+        needs_column=False,
+        options=("group_by", "measures"),
+        required=("group_by", "measures"),
+    ),
+    _StepDef(
+        "sort_rows",
+        "Order the whole stream by one or more columns",
+        family="advanced",
+        needs_column=False,
+        options=("order", "order_by", "direction"),
+        required=(),
+    ),
+    _StepDef(
+        "rank_rows",
+        "Keep the top or bottom N rows per partition by an ordering column",
+        family="advanced",
+        active=True,
+        needs_column=False,
+        options=("order_by", "direction", "limit", "partition_by"),
+        required=("order_by", "limit"),
+    ),
+    _StepDef(
+        "lookup",
+        "Enrich a row from a reference table keyed on this column",
+        family="advanced",
+        options=("lookup_key", "rows", "map", "unmatched", "reason"),
+        required=("lookup_key", "rows", "map"),
+    ),
+    _StepDef(
+        "surrogate_key",
+        "Assign a running integer key to every row",
+        family="advanced",
+        needs_column=False,
+        produces_column=True,
+        options=("to", "start", "step"),
+        required=("to",),
+    ),
 )
 
 STEP_CATALOG: dict[str, _StepDef] = {d.op: d for d in _CATALOG_LIST}
@@ -326,6 +377,21 @@ class ShapeStep:
         options = self.options
         if self.op in ("drop_column", "keep_columns", "filter_rows", "divert_rows"):
             return ()
+        if self.op in ("dedupe_rows", "sort_rows", "rank_rows"):
+            return ()
+        if self.op == "aggregate":
+            targets = [str(c) for c in options.get("group_by", [])]
+            for measure in options.get("measures", []):
+                if isinstance(measure, Mapping) and measure.get("as"):
+                    targets.append(str(measure["as"]))
+            return tuple(name for name in targets if name)
+        if self.op == "lookup":
+            return tuple(
+                str(target) for target in (options.get("map") or {}).values() if target
+            )
+        if self.op == "surrogate_key":
+            target = str(options.get("to") or "")
+            return (target,) if target else ()
         if self.op == "rename_column":
             target = str(options.get("to") or "")
             return (target,) if target else ()
@@ -557,11 +623,7 @@ def _parse_step(
     if not op:
         raise ShapeError(f"{where} has no op")
     if op in _GLOBAL_OPS:
-        raise ShapeError(
-            f"{where}: '{op}' {_GLOBAL_OPS[op]}, which cannot be done row by row "
-            "on a stream — do it as a post-load model on the Transforms page, "
-            "where the whole population is addressable"
-        )
+        raise ShapeError(f"{where}: '{op}' {_GLOBAL_OPS[op]}")
     definition = STEP_CATALOG.get(op)
     if definition is None:
         raise ShapeError(
@@ -864,6 +926,22 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
         for name in options.get("keys", []):
             if name and str(name) not in columns:
                 columns.append(str(name))
+        return
+    if op == "aggregate":
+        columns[:] = [str(c) for c in options.get("group_by", [])]
+        for measure in options.get("measures", []):
+            if isinstance(measure, Mapping) and measure.get("as"):
+                columns.append(str(measure["as"]))
+        return
+    if op == "lookup":
+        for target in (options.get("map") or {}).values():
+            if target and str(target) not in columns:
+                columns.append(str(target))
+        return
+    if op == "surrogate_key":
+        target = str(options.get("to") or "")
+        if target and target not in columns:
+            columns.append(target)
         return
 
 

@@ -213,12 +213,25 @@ export function TransformLibraryPage() {
   };
 
   const setStepOption = (index: number, key: string, value: string) => {
+    // Structured options (measures, rows, map, keys, order…) are JSON — parse
+    // the raw text when it reads as JSON so list/dict options survive intact.
+    const trimmed = value.trim();
+    let parsed: unknown = value;
+    if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
+      try {
+        parsed = JSON.parse(trimmed);
+      } catch {
+        parsed = value;
+      }
+    }
     setSteps((prev) =>
       prev.map((s, i) =>
-        i === index ? { ...s, options: { ...(s.options || {}), [key]: value } } : s,
+        i === index ? { ...s, options: { ...(s.options || {}), [key]: parsed } } : s,
       ),
     );
   };
+
+  const opDetail = (op: string) => ops?.ops_detail?.find((d) => d.op === op);
 
   const stepOptions = useMemo(() => ops?.ops ?? [], [ops]);
 
@@ -298,7 +311,7 @@ export function TransformLibraryPage() {
                     >
                       {stepOptions.map((op) => (
                         <option key={op} value={op}>
-                          {ops?.ops_detail?.[op]?.summary || op}
+                          {opDetail(op)?.summary || op}
                         </option>
                       ))}
                     </select>
@@ -341,23 +354,23 @@ export function TransformLibraryPage() {
                       Remove
                     </button>
                   </div>
-                  {Object.keys(ops?.ops_detail?.[step.op]?.options || {}).length ? (
+                  {(opDetail(step.op)?.options?.length ?? 0) > 0 ? (
                     <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginTop: 8 }}>
-                      {Object.keys(ops!.ops_detail[step.op].options!).map((key) => (
+                      {opDetail(step.op)!.options!.map((key) => (
                         <label key={key} className="df2-label-hint" style={{ display: "block" }}>
                           {key}
                           <input
                             className="df2-input"
-                            value={String(step.options?.[key] ?? "")}
+                            value={typeof step.options?.[key] === "object" ? JSON.stringify(step.options[key]) : String(step.options?.[key] ?? "")}
                             onChange={(e) => setStepOption(i, key, e.target.value)}
                           />
                         </label>
                       ))}
                     </div>
                   ) : null}
-                  {ops?.ops_detail?.[step.op]?.summary ? (
+                  {opDetail(step.op)?.summary ? (
                     <p className="df2-label-hint" style={{ marginTop: 6 }}>
-                      {ops.ops_detail[step.op].summary}
+                      {opDetail(step.op)!.summary}
                     </p>
                   ) : null}
                 </div>

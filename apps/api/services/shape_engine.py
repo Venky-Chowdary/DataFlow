@@ -29,6 +29,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from services.shape_expr import (
     FUNCTIONS,
     EvalError,
+    _as_number,
     _as_text,
     is_blank,
 )
@@ -81,6 +82,7 @@ class StepEffect:
     rows_removed: int = 0
     rows_expanded: int = 0
     rows_diverted: int = 0
+    rows_buffered: int = 0
     cells_changed: int = 0
     nulls_introduced: int = 0
     errors: int = 0
@@ -97,6 +99,7 @@ class StepEffect:
             "rows_removed": self.rows_removed,
             "rows_expanded": self.rows_expanded,
             "rows_diverted": self.rows_diverted,
+            "rows_buffered": self.rows_buffered,
             "cells_changed": self.cells_changed,
             "nulls_introduced": self.nulls_introduced,
             "errors": self.errors,
@@ -133,6 +136,7 @@ class ShapeEffect:
     rows_shaped_out: int = 0
     rows_expanded: int = 0
     rows_diverted: int = 0
+    rows_buffered: int = 0
     cells_changed: int = 0
     nulls_introduced: int = 0
     steps: list[StepEffect] = field(default_factory=list)
@@ -140,10 +144,14 @@ class ShapeEffect:
 
     @property
     def balanced(self) -> bool:
-        """Every row read, plus every row a step added, is kept, filtered, or diverted."""
+        """Every row read, plus every row a step added, is kept, filtered,
+        diverted, or held in an end-of-stream buffer (aggregate/dedupe/sort)."""
         return (
             self.rows_in + self.rows_expanded
-            == self.rows_out + self.rows_shaped_out + self.rows_diverted
+            == self.rows_out
+            + self.rows_shaped_out
+            + self.rows_diverted
+            + self.rows_buffered
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -153,6 +161,7 @@ class ShapeEffect:
             "rows_shaped_out": self.rows_shaped_out,
             "rows_expanded": self.rows_expanded,
             "rows_diverted": self.rows_diverted,
+            "rows_buffered": self.rows_buffered,
             "cells_changed": self.cells_changed,
             "nulls_introduced": self.nulls_introduced,
             "balanced": self.balanced,
@@ -169,6 +178,121 @@ class _Drop(Exception):
         self.reason = reason
         self.step_index = step_index
         self.op = op
+
+
+class _Held:
+    """Internal: a buffering step keeps the row until end-of-stream."""
+
+
+_HELD = _Held()
+
+# A step that must see the whole population before it can emit holds rows in a
+# buffer. Unbounded buffers are how transform engines die, so every buffering
+# op has a declared cap that a recipe can raise — deliberately, never silently.
+_MAX_BUFFERED = 500_000
+
+
+def _max_buffer(options: Mapping[str, Any]) -> int:
+    try:
+        return max(1, int(options.get("max_keys") or _MAX_BUFFERED))
+    except (TypeError, ValueError):
+        return _MAX_BUFFERED
+
+
+def _sort_val(value: Any) -> tuple[int, Any]:
+    """A stable, mixed-type sort key: numbers compare as numbers, everything
+    else as text, nulls last — never a TypeError on a real column."""
+    if value is None:
+        return (2, "")
+    if isinstance(value, bool):
+        return (0, float(value))
+    if isinstance(value, (int, float)):
+        return (0, float(value))
+    try:
+        from decimal import Decimal
+
+        if isinstance(value, Decimal):
+            return (0, float(value))
+    except ImportError:  # pragma: no cover - decimal is stdlib
+        pass
+    return (1, _as_text(value) or "")
+
+
+def _sort_order(options: Mapping[str, Any]) -> list[tuple[str, bool]]:
+    """Normalise the sort spec into (column, descending) pairs.
+
+    Accepts ``order``: [{"column": ..., "direction": "asc"|"desc"}] or the
+    simpler ``order_by`` + ``direction`` pair.
+    """
+    out: list[tuple[str, bool]] = []
+    for entry in options.get("order", []) or []:
+        if isinstance(entry, Mapping) and entry.get("column"):
+            out.append(
+                (
+                    str(entry["column"]),
+                    str(entry.get("direction") or "asc").casefold() == "desc",
+                )
+            )
+        elif isinstance(entry, str) and entry:
+            out.append((entry, False))
+    if not out:
+        col = str(options.get("order_by") or "")
+        if col:
+            out.append((col, str(options.get("direction") or "asc").casefold() == "desc"))
+    return out
+
+
+def _agg_init() -> dict[str, Any]:
+    return {"n": 0, "sum": None, "min": None, "max": None, "first": None, "last": None}
+
+
+def _agg_add(state: dict[str, Any], fn: str, value: Any) -> None:
+    if fn == "count":
+        state["n"] += 1
+        return
+    if value is None:
+        return
+    if fn in ("sum", "avg"):
+        try:
+            num = _as_number(value)
+        except (ValueError, TypeError, ArithmeticError):
+            return
+        if num is None:
+            return
+        state["sum"] = (state["sum"] or 0) + num
+        state["n"] += 1
+    elif fn == "min":
+        state["min"] = value if state["min"] is None or _sort_val(value) < _sort_val(state["min"]) else state["min"]
+    elif fn == "max":
+        state["max"] = value if state["max"] is None or _sort_val(value) > _sort_val(state["max"]) else state["max"]
+    elif fn == "first":
+        if state["first"] is None:
+            state["first"] = value
+    elif fn == "last":
+        state["last"] = value
+
+
+def _agg_finish(state: dict[str, Any], fn: str) -> Any:
+    if fn == "count":
+        return state["n"]
+    if fn == "sum":
+        return state["sum"]
+    if fn == "avg":
+        if not state["n"]:
+            return None
+        try:
+            return state["sum"] / state["n"]
+        except (ArithmeticError, TypeError):
+            return None
+    if fn == "min":
+        return state["min"]
+    if fn == "max":
+        return state["max"]
+    if fn == "first":
+        return state["first"]
+    if fn == "last":
+        return state["last"]
+    return None
 
 
 class ShapeEngine:
@@ -198,6 +322,15 @@ class ShapeEngine:
         )
         self._row_index = -1
         self._output_columns: list[str] = list(recipe.output_columns or recipe.input_columns)
+        # Streaming state, per step index: dedupe seen-sets, surrogate counters,
+        # lookup tables built once.
+        self._state: dict[int, Any] = {}
+        # Rows a buffering step (dedupe keep-last, aggregate, sort, rank) holds
+        # until the stream ends; drained in step order so a later step still
+        # sees them through the rest of the recipe.
+        self._buffers: dict[int, Any] = {}
+        self._held: dict[int, int] = {}
+        self._drained = False
 
     @property
     def output_columns(self) -> tuple[str, ...]:
@@ -247,6 +380,12 @@ class ShapeEngine:
                         tally.rows_removed += 1
                         self.effect.rows_shaped_out += 1
                     continue
+                if result is _HELD:
+                    # The step holds the row until end-of-stream; drain() emits.
+                    tally.rows_buffered += 1
+                    self.effect.rows_buffered += 1
+                    self._held[index] = self._held.get(index, 0) + 1
+                    continue
                 produced = result if isinstance(result, list) else [result]
                 extra = max(len(produced) - 1, 0)
                 if extra:
@@ -283,6 +422,150 @@ class ShapeEngine:
 
     def rows_accounted_for(self) -> bool:
         return self.effect.balanced
+
+    # -- end-of-stream drain -------------------------------------------------
+
+    def drain(self) -> list[dict[str, Any]]:
+        """Emit the rows buffering steps held, run through the rest of the recipe.
+
+        dedupe keep-last, aggregate, sort and rank cannot judge a row until they
+        have seen the population, so they hold; the end of the read is when they
+        must answer. Each emitted row then continues through the steps after it,
+        so a cleanse downstream of an aggregate still applies — and a second
+        buffering step still holds until its own drain, reached in step order.
+        """
+        if self._drained:
+            return []
+        self._drained = True
+        out: list[dict[str, Any]] = []
+        for index, step in enumerate(self.steps):
+            buffer = self._buffers.pop(index, None)
+            if buffer is None:
+                continue
+            tally = self.effect.steps[index]
+            materialized = self._drain_step(step, index, buffer)
+            held = self._held.pop(index, 0)
+            emitted = len(materialized)
+            dropped = max(held - emitted, 0)
+            # The held rows either become output or dedupe/rank losers — the
+            # conservation ledger must name which.
+            tally.rows_buffered -= held
+            self.effect.rows_buffered -= held
+            tally.rows_out += emitted
+            if dropped:
+                tally.rows_removed += dropped
+                self.effect.rows_shaped_out += dropped
+            for row in materialized:
+                for final in self._run_tail(row, index + 1):
+                    self._discover(final)
+                    out.append(final)
+        self.effect.rows_out += len(out)
+        return out
+
+    def _drain_step(
+        self, step: ShapeStep, index: int, buffer: Any
+    ) -> list[dict[str, Any]]:
+        """Materialize one step's held rows into emittable dicts."""
+        op = step.op
+        options = step.options
+
+        if op == "dedupe_rows":
+            return [entry[1] for entry in buffer.values()]
+
+        if op == "aggregate":
+            out = []
+            measures = [
+                (
+                    str(m.get("as") or ""),
+                    str(m.get("function") or "").casefold(),
+                )
+                for m in options.get("measures", [])
+            ]
+            for acc in buffer.values():
+                row = dict(acc["group"])
+                for name, fn in measures:
+                    if not name:
+                        continue
+                    row[name] = _agg_finish(acc["measures"].get(name) or _agg_init(), fn)
+                out.append(row)
+            return out
+
+        if op == "sort_rows":
+            order = _sort_order(options)
+            rows = list(buffer)
+            # Stable-sort one key at a time, last key first, so mixed
+            # asc/desc per column works with a single comparator.
+            for col, descending in reversed(order):
+                rows.sort(key=lambda r, c=col: _sort_val(r.get(c)), reverse=descending)
+            return rows
+
+        if op == "rank_rows":
+            order_col = str(options.get("order_by") or "")
+            descending = str(options.get("direction") or "top").casefold() != "bottom"
+            limit = max(0, int(options.get("limit") or 0))
+            partitions = [str(c) for c in options.get("partition_by", [])]
+            groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+            for row in buffer:
+                pkey = (
+                    tuple(_as_text(row.get(c)) for c in partitions)
+                    if partitions
+                    else ("",)
+                )
+                groups.setdefault(pkey, []).append(row)
+            out = []
+            for rows in groups.values():
+                rows.sort(key=lambda r: _sort_val(r.get(order_col)), reverse=descending)
+                out.extend(rows[:limit] if limit else rows)
+            return out
+
+        return list(buffer.values()) if isinstance(buffer, dict) else list(buffer)
+
+    def _run_tail(self, row: dict[str, Any], start: int) -> list[dict[str, Any]]:
+        """Run one drained row through the steps after the step that held it."""
+        current = [row]
+        for index in range(start, len(self.steps)):
+            step = self.steps[index]
+            tally = self.effect.steps[index]
+            next_rows: list[dict[str, Any]] = []
+            for r in current:
+                tally.rows_in += 1
+                try:
+                    result = self._apply_step(step, index, r, tally)
+                except _Drop as drop:
+                    if drop.diverted:
+                        tally.rows_diverted += 1
+                        self.effect.rows_diverted += 1
+                        self._sample_diverted(drop, r)
+                    else:
+                        tally.rows_removed += 1
+                        self.effect.rows_shaped_out += 1
+                    continue
+                if result is _HELD:
+                    tally.rows_buffered += 1
+                    self.effect.rows_buffered += 1
+                    self._held[index] = self._held.get(index, 0) + 1
+                    continue
+                produced = result if isinstance(result, list) else [result]
+                extra = max(len(produced) - 1, 0)
+                if extra:
+                    tally.rows_expanded += extra
+                    self.effect.rows_expanded += extra
+                tally.rows_out += len(produced)
+                next_rows.extend(produced)
+            current = next_rows
+        return current
+
+    def _lookup_table(self, step: ShapeStep, index: int) -> dict[str, dict[str, Any]]:
+        """The reference rows as a key-indexed dict, built once per run."""
+        table = self._state.get(index)
+        if table is None:
+            table = {}
+            key_col = str(step.options.get("lookup_key") or "")
+            for raw in step.options.get("rows", []):
+                if isinstance(raw, Mapping):
+                    table[_as_text(raw.get(key_col)) or ""] = dict(raw)
+            self._state[index] = table
+        return table
 
     # -- step dispatch -----------------------------------------------------
 
@@ -374,6 +657,116 @@ class ShapeEngine:
                     op=op,
                 )
             return row
+
+        if op == "surrogate_key":
+            target = str(options.get("to") or "")
+            start = int(options.get("start") or 1)
+            step_by = int(options.get("step") or 1)
+            counter = self._state.get(index)
+            if counter is None:
+                counter = start
+            value = counter
+            self._state[index] = counter + step_by
+            self._record_write(tally, before=row.get(target), after=value, existed=target in row)
+            row[target] = value
+            return row
+
+        if op == "lookup":
+            table = self._lookup_table(step, index)
+            key = _as_text(row.get(step.column))
+            match = table.get(key) if key is not None else None
+            targets = {str(k): str(v) for k, v in (options.get("map") or {}).items()}
+            if match is None:
+                unmatched = str(options.get("unmatched") or "null").casefold()
+                if unmatched == "drop":
+                    raise _Drop(diverted=False, reason="no lookup match", step_index=index, op=op)
+                if unmatched == "divert":
+                    raise _Drop(
+                        diverted=True,
+                        reason=str(options.get("reason") or f"no lookup match for '{key}'"),
+                        step_index=index,
+                        op=op,
+                    )
+                for target in targets.values():
+                    self._record_write(tally, before=row.get(target), after=None, existed=target in row)
+                    row[target] = None
+                return row
+            for source_col, target in targets.items():
+                value = match.get(source_col)
+                self._record_write(tally, before=row.get(target), after=value, existed=target in row)
+                row[target] = value
+            return row
+
+        if op == "dedupe_rows":
+            keys = [str(c) for c in options.get("keys", [])]
+            key = tuple(_as_text(row.get(c)) for c in keys)
+            keep = str(options.get("keep") or "first").casefold()
+            if keep == "first":
+                seen = self._state.setdefault(index, set())
+                if len(seen) >= _max_buffer(options):
+                    raise ValueError(
+                        f"dedupe_rows key space passed {_max_buffer(options)} keys — "
+                        "the buffer cap exists so one transfer cannot hold the "
+                        "population in memory; raise 'max_keys' only deliberately"
+                    )
+                if key in seen:
+                    raise _Drop(diverted=False, reason="duplicate key", step_index=index, op=op)
+                seen.add(key)
+                return row
+            winners = self._buffers.setdefault(index, {})
+            if len(winners) >= _max_buffer(options) and key not in winners:
+                raise ValueError(
+                    f"dedupe_rows key space passed {_max_buffer(options)} keys — "
+                    "raise 'max_keys' only deliberately"
+                )
+            order_col = str(options.get("order_by") or "")
+            order_val = _sort_val(row.get(order_col)) if order_col else (self._row_index,)
+            descending = str(options.get("order_dir") or "desc").casefold() != "asc"
+            current = winners.get(key)
+            if current is None or (order_val > current[0]) == descending:
+                winners[key] = (order_val, dict(row))
+            return _HELD
+
+        if op == "aggregate":
+            groups = self._buffers.setdefault(index, {})
+            if len(groups) >= _max_buffer(options):
+                raise ValueError(
+                    f"aggregate passed {_max_buffer(options)} groups — "
+                    "raise 'max_keys' only deliberately"
+                )
+            group_cols = [str(c) for c in options.get("group_by", [])]
+            gkey = tuple(_as_text(row.get(c)) for c in group_cols)
+            acc = groups.get(gkey)
+            if acc is None:
+                acc = {"group": {c: row.get(c) for c in group_cols}, "measures": {}}
+                groups[gkey] = acc
+            for measure in options.get("measures", []):
+                name = str(measure.get("as") or "")
+                fn = str(measure.get("function") or "").casefold()
+                mcol = str(measure.get("column") or "")
+                state = acc["measures"].setdefault(name, _agg_init())
+                _agg_add(state, fn, row.get(mcol))
+            return _HELD
+
+        if op == "sort_rows":
+            buf = self._buffers.setdefault(index, [])
+            if len(buf) >= _max_buffer(options):
+                raise ValueError(
+                    f"sort_rows passed {_max_buffer(options)} rows — "
+                    "raise 'max_keys' only deliberately"
+                )
+            buf.append(dict(row))
+            return _HELD
+
+        if op == "rank_rows":
+            buf = self._buffers.setdefault(index, [])
+            if len(buf) >= _max_buffer(options):
+                raise ValueError(
+                    f"rank_rows passed {_max_buffer(options)} rows — "
+                    "raise 'max_keys' only deliberately"
+                )
+            buf.append(dict(row))
+            return _HELD
 
         if op == "unnest_json":
             produced = self._guarded(
