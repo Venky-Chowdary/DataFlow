@@ -699,6 +699,7 @@ export interface TransformOpDetail {
   expands?: boolean;
   needs_column?: boolean;
   produces_column?: boolean;
+  buffered?: boolean;
   expression_option?: string | null;
   options?: string[];
   required?: string[];

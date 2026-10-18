@@ -8,11 +8,14 @@ Three rules are enforced here rather than left to the engine, because a step
 that cannot be run honestly must be refused while the operator is still looking
 at the screen:
 
-1. **Row-local and deterministic only.** A join, aggregate, pivot, sort, window
-   or unbounded dedupe cannot be evaluated on a stream without buffering the
-   population; each is refused by name with a pointer to the post-load
-   Transforms page, the way Informatica refuses transformations that its
-   SQL-ELT pushdown mode cannot express.
+1. **Row-local steps + declared buffering ops only.** Row-local steps evaluate
+   a row without its neighbours. The buffered set-ops — ``dedupe_rows``,
+   ``aggregate``, ``sort_rows``, ``rank_rows`` — declare that they hold the
+   population (bounded by ``_MAX_BUFFERED``) and emit on drain at
+   end-of-stream; a truly unbounded/multi-input op (join, union, pivot,
+   window) is still refused by name with a pointer to the post-load Transforms
+   page, the way Informatica refuses transformations its SQL-ELT pushdown
+   cannot express.
 2. **Active steps are declared.** A step that changes the row count moves the
    conservation ledger. Removals close
    ``rows_read = rows_shaped_out + dest_count + held_out + skipped``.
@@ -64,7 +67,7 @@ MAX_STEPS = 100
 # one exists — is the difference between a product that teaches and one that
 # says "invalid step type".
 _GLOBAL_OPS: dict[str, str] = {
-    "join": "joins another table — the 'lookup' op enriches each row from a reference table; a second live input is a post-load model on the Transforms page",
+    "join": "joins another table — the 'lookup' op enriches each row from an inline reference list baked into the recipe; a second live input is a post-load model on the Transforms page",
     "group_by": "collapses many rows into one — the 'aggregate' op does this on-stream",
     "pivot": "turns rows into columns — that is a post-load model step",
     "unpivot": "turns columns into rows — that is a post-load model step",
@@ -95,6 +98,7 @@ class _StepDef:
     needs_column: bool = True     # operates on an existing named column
     produces_column: bool = False # writes a new column name
     expression: str = ""          # name of the option carrying an expression
+    buffered: bool = False        # holds the population in memory until drain
     options: tuple[str, ...] = ()
     required: tuple[str, ...] = ()
 
@@ -274,6 +278,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         family="advanced",
         active=True,
         needs_column=False,
+        buffered=True,
         options=("keys", "keep", "order_by", "order_dir", "max_keys"),
         required=("keys",),
     ),
@@ -283,6 +288,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         family="advanced",
         active=True,
         needs_column=False,
+        buffered=True,
         options=("group_by", "measures"),
         required=("group_by", "measures"),
     ),
@@ -291,6 +297,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         "Order the whole stream by one or more columns",
         family="advanced",
         needs_column=False,
+        buffered=True,
         options=("order", "order_by", "direction"),
         required=(),
     ),
@@ -300,12 +307,14 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         family="advanced",
         active=True,
         needs_column=False,
+        buffered=True,
         options=("order_by", "direction", "limit", "partition_by"),
         required=("order_by", "limit"),
     ),
     _StepDef(
         "lookup",
-        "Enrich a row from a reference table keyed on this column",
+        "Enrich a row from an inline reference list (rows baked into the "
+        "recipe, keyed on this column — not a live table lookup)",
         family="advanced",
         options=("lookup_key", "rows", "map", "unmatched", "reason"),
         required=("lookup_key", "rows", "map"),
@@ -341,6 +350,7 @@ def describe_catalog() -> list[dict[str, Any]]:
             "expands": d.expands,
             "family": d.family,
             "needs_column": d.needs_column,
+            "buffered": d.buffered,
             "options": list(d.options),
             "required": list(d.required),
             "expression_option": d.expression or None,

@@ -137,15 +137,33 @@ class FileTransformLibraryStore(TransformLibraryStore):
         with self._lock:
             raw = self._read()
             existing = raw.get(recipe.id) or {}
-            history = list(existing.get(_HISTORY_KEY) or [])
+            # A version is a runnable identity, not a save counter: a
+            # metadata-only edit (name/description) keeps the version so a
+            # pinned binding cannot be invalidated by a comment change.
+            runnable_changed = True
             if existing:
+                runnable = (
+                    existing.get("steps") != [s.to_dict() for s in recipe.steps]
+                    or existing.get("parameters")
+                    != {k: dict(v or {}) for k, v in recipe.parameters.items()}
+                    or existing.get("input_columns") != list(recipe.input_columns)
+                    or existing.get("output_columns") != list(recipe.output_columns)
+                    or bool(existing.get("enabled", True)) != bool(recipe.enabled)
+                )
+                runnable_changed = runnable
+            history = list(existing.get(_HISTORY_KEY) or [])
+            if existing and runnable_changed:
                 prior = {
                     k: v for k, v in existing.items() if k != _HISTORY_KEY
                 }
                 history.append(prior)
                 history = history[-_HISTORY_CAP:]
             recipe.created_at = str(existing.get("created_at") or recipe.created_at)
-            recipe.version = int(existing.get("version") or 0) + 1
+            recipe.version = (
+                int(existing.get("version") or 0) + 1
+                if (not existing or runnable_changed)
+                else int(existing.get("version") or 1)
+            )
             recipe.updated_at = _now()
             stored = recipe.to_dict()
             stored[_HISTORY_KEY] = history

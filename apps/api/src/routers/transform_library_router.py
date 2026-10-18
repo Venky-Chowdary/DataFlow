@@ -187,6 +187,33 @@ def list_versions(
     return {"recipe_id": recipe_id, "versions": sorted(set(versions))}
 
 
+def _schedule_users(recipe_id: str, latest_version: int) -> list[dict[str, Any]]:
+    """Schedules that bind this recipe — the where-used scan.
+
+    Scope is schedules only: a schedule re-resolves a follow-latest recipe at
+    run time, so deleting the recipe would break the next fire. One-off
+    transfers snapshot compiled steps at apply, so nothing else needs
+    scanning — the scope is named on the response so a client never reads it
+    as "everything".
+    """
+    from services.schedule_store import list_schedules
+
+    users: list[dict[str, Any]] = []
+    for sched in list_schedules():
+        if getattr(sched, "transform_recipe_id", "") != recipe_id:
+            continue
+        users.append(
+            {
+                "schedule_id": sched.id,
+                "schedule_name": getattr(sched, "name", "") or sched.id,
+                "bound_version": int(getattr(sched, "transform_recipe_version", 0) or 0),
+                "version_mode": getattr(sched, "transform_recipe_version_mode", "pin"),
+                "latest_version": latest_version,
+            }
+        )
+    return users
+
+
 @router.get("/{recipe_id}/where-used")
 def where_used(
     recipe_id: str,
@@ -204,22 +231,11 @@ def where_used(
     if not recipe:
         raise HTTPException(status_code=404, detail="Transform recipe not found")
     assert_resource_workspace(request, recipe.workspace_id or "")
-    from services.schedule_store import list_schedules
-
-    users: list[dict[str, Any]] = []
-    for sched in list_schedules():
-        if getattr(sched, "transform_recipe_id", "") != recipe_id:
-            continue
-        users.append(
-            {
-                "schedule_id": sched.id,
-                "schedule_name": getattr(sched, "name", "") or sched.id,
-                "bound_version": int(getattr(sched, "transform_recipe_version", 0) or 0),
-                "version_mode": getattr(sched, "transform_recipe_version_mode", "pin"),
-                "latest_version": recipe.version,
-            }
-        )
-    return {"recipe_id": recipe_id, "used_by": users}
+    return {
+        "recipe_id": recipe_id,
+        "used_by": _schedule_users(recipe_id, recipe.version),
+        "scope": "schedules",
+    }
 
 
 @router.post("/", status_code=201)
@@ -302,6 +318,23 @@ def delete_recipe(
     if not recipe:
         raise HTTPException(status_code=404, detail="Transform recipe not found")
     assert_resource_workspace(request, recipe.workspace_id or "")
+    bound = _schedule_users(recipe_id, recipe.version)
+    if bound:
+        names = ", ".join(u["schedule_name"] for u in bound[:10])
+        raise HTTPException(
+            status_code=409,
+            detail={
+                "error": "recipe_in_use",
+                "message": (
+                    f"Recipe is bound to {len(bound)} schedule(s) — unbind them "
+                    "before deleting. One-off transfers already snapshot the "
+                    "compiled steps, so only schedules are listed."
+                ),
+                "scope": "schedules",
+                "used_by": bound,
+                "names": names,
+            },
+        )
     if not store.delete(recipe_id):
         raise HTTPException(status_code=404, detail="Transform recipe not found")
     return Response(status_code=204)

@@ -99,7 +99,13 @@ def test_file_store_roundtrip_and_versioning(tmp_path, monkeypatch):
 
     again.name = "clean customers v2"
     saved2 = store.save(again)
-    assert saved2.version == 2
+    # Metadata-only edits keep the runnable version (a pinned binding is not
+    # invalidated by a rename); a steps change is what bumps it.
+    assert saved2.version == 1
+    saved2.steps = [saved2.steps[0], *saved2.steps[1:]]
+    saved2.steps[0].options = {"x": 1}
+    saved3 = store.save(saved2)
+    assert saved3.version == 2
 
     listed = store.list()
     assert [r.id for r in listed] == [saved.id]
@@ -239,8 +245,6 @@ def test_binding_resolution_pin_follow_and_draft(tmp_path, monkeypatch):
     )
 
     store = FileTransformLibraryStore()
-    import services.transform_binding as tb
-
     monkeypatch.setattr(
         "services.transform_library._store", None, raising=False
     )

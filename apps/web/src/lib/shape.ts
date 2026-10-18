@@ -35,6 +35,7 @@ export interface ShapeOperation {
   expands?: boolean;
   family?: string;
   needs_column: boolean;
+  buffered?: boolean;
   options: string[];
   required: string[];
   expression_option: string | null;

@@ -725,7 +725,12 @@ class ShapeEngine:
             order_val = _sort_val(row.get(order_col)) if order_col else (self._row_index,)
             descending = str(options.get("order_dir") or "desc").casefold() != "asc"
             current = winners.get(key)
-            if current is None or (order_val > current[0]) == descending:
+            # Strict comparison both ways: on an equal order value the
+            # first-seen row keeps the win — replacing on a tie would make the
+            # result depend on arrival order in a way nobody asked for.
+            if current is None or (
+                (order_val > current[0]) if descending else (order_val < current[0])
+            ):
                 winners[key] = (order_val, dict(row))
             return _HELD
 

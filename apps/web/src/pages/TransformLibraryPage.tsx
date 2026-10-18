@@ -449,6 +449,12 @@ export function TransformLibraryPage() {
                       {opDetail(step.op)!.summary}
                     </p>
                   ) : null}
+                  {opDetail(step.op)?.buffered ? (
+                    <p className="df2-label-hint" style={{ marginTop: 6 }}>
+                      Holds the population in memory (up to 500,000 rows) and
+                      emits at end-of-stream — the run fails loud past the cap.
+                    </p>
+                  ) : null}
                 </div>
               ))}
             </div>

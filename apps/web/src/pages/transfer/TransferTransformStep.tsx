@@ -842,6 +842,14 @@ export function TransferTransformStep({
                       {step.on_error && step.on_error !== "refuse" && (
                         <span className="df2-badge">on error: {step.on_error}</span>
                       )}
+                      {operationsByName.get(step.op)?.buffered ? (
+                        <span
+                          className="df2-badge df2-badge-warn"
+                          title="Holds the population in memory (up to 500,000 rows) and emits at end-of-stream; the run fails loud past the cap"
+                        >
+                          buffered · 500k row cap
+                        </span>
+                      ) : null}
                       {operationsByName.get(step.op)?.expands ? (
                         <span
                           className="df2-badge df2-badge-warn"

@@ -15,8 +15,8 @@ Missing = nothing in code yet.
 |4|Row filter condition builder|Implemented|guided AND/OR condition groups -> expression (any function in advanced mode) + `filter_rows`/`divert_rows`/`source_filter`|
 |5|Multi-way routing|Missing|—|
 |6|Aggregation GROUP BY|Implemented|`aggregate` op — group_by + sum/avg/count/min/max/first/last, end-of-stream drain, buffer cap|
-|7|Joins|Partial|transform_models relate refs in SQL; no in-flow Joiner step|
-|8|Lookup/reference|Implemented|`lookup` op — resolved reference table, key map, unmatched null/drop/divert|
+|7|Joins|Missing|in-flow `join` is refused by name (shape_models _GLOBAL_OPS) with a pointer to post-load; `lookup` covers inline-list enrichment only|
+|8|Lookup/reference|Partial|`lookup` op enriches from an inline reference list baked into the recipe (key map, unmatched null/drop/divert); a live connection/table lookup is not implemented|
 |9|Expression builder|Implemented|`set_value`/`derive_column` expression steps + in-flow expression assist + function-insert picker in Library|
 |10|Function library|Implemented|expression language: text/numeric/date/null-safe fns + operators, validated design-time; /ops `functions` catalog feeds the pickers|
 |11|Cleanse trim/case/null/replace/regex|Have|`trim/upper/lower/normalize_unicode/strip_controls/replace:`|
@@ -28,7 +28,7 @@ Missing = nothing in code yet.
 |17|PII blocking|Have|`omit` + field deselection|
 |18|PII hashing|Have|`hash_pii`|
 |19|PII encryption|Missing|—|
-|20|Masking patterns/substitution|Implemented|`mask_pii` pattern=last4|first4|email; unknown pattern refuses|
+|20|Masking patterns/substitution|Implemented|`mask_pii` pattern=last4|first4|email; unknown pattern refuses. Limits: no seeded/deterministic substitution (same input → same mask across runs) and no format-preserving masking depth|
 |21|Policy masking by role|Missing|—|
 |22|Flatten JSON/array|Implemented|`flatten_json` (depth/keys) + `unnest_json` array explode w/ caps|
 |23|Nest relational→JSON|Implemented|`nest_json` groups columns into a JSON object; missing source refuses, drop option|
@@ -37,8 +37,8 @@ Missing = nothing in code yet.
 |26|Schema change policy|Implemented|`schema_policy` gate + drift ack + recipe input_columns contract fails closed at compile|
 |27|Incremental cursor/CDC|Have|`incremental_append`/`incremental_deduped`/CDC engine + cursor-semantics verdicts|
 |28|Authored merge/upsert|Partial|Sync-mode-driven merge; no authored update-column override|
-|29|Surrogate keys|Implemented|`surrogate_key` op — stateful sequence across pages|
-|30|SCD2/history|Implemented|`scd2-history` library template — surrogate + effective_from + is_current over `scd2`/`mirror` modes|
+|29|Surrogate keys|Implemented|`surrogate_key` op — stateful sequence across pages. Limit: the sequence is run-local (starts at `start` each run), not a persisted warehouse key pool|
+|30|SCD2/history|Partial|`scd2-history` library template only prepares incoming rows (surrogate + effective_from + is_current literal) — it does not close prior versions or detect change|
 |31|Soft delete|Missing|—|
 |32|Sort/Rank top-N|Implemented|`sort_rows` multi-key mixed direction + `rank_rows` top/bottom-N per partition|
 |33|Union|Missing|—|
@@ -83,6 +83,12 @@ transform contract · surrogate keys + SCD2 template.
 
 **P2:** fuzzy dedupe, address verification, DQ rule assets, flatten/nest,
 Union, Router, custom SQL/Python step, ML/API enrichment.
+
+**Buffered-op scale limit (P1-5 honesty):** `dedupe_rows` (keep-last),
+`aggregate`, `sort_rows`, `rank_rows` hold the population in memory up to
+`_MAX_BUFFERED` = 500,000 rows; a run fails loud past the cap — there is no
+disk spill yet. The Library/in-flow UI surfaces this cap when a buffered op
+is added.
 
 **Anti-patterns avoided (§5.3):** impact diff before apply; explicit
 processing location; tiered palette (Essential→Advanced), not 40 steps at once.

@@ -65,7 +65,8 @@ _PUNCT = (
     "(", ")", ",", "+", "-", "*", "/", "%", "<", ">", "=",
 )
 
-_KEYWORDS = {"and", "or", "not", "null", "true", "false"}
+_KEYWORDS = {"and", "or", "not", "null", "true", "false",
+             "case", "when", "then", "else", "end"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -275,6 +276,40 @@ class _Call(_Node):
 
     def canonical(self) -> Any:
         return ["call", self.name, [a.canonical() for a in self.args]]
+
+
+@dataclass(frozen=True, slots=True)
+class _Case(_Node):
+    """CASE WHEN cond THEN value [WHEN ... THEN ...]* [ELSE value] END.
+
+    Lazy like ``if`` — an untaken branch never evaluates, so
+    ``CASE WHEN is_null(x) THEN 0 ELSE 1/x END`` cannot divide by the value
+    it already guarded.
+    """
+
+    whens: tuple[tuple[_Node, _Node], ...]
+    fallback: _Node | None
+
+    def evaluate(self, row: Mapping[str, Any]) -> Any:
+        for condition, result in self.whens:
+            if _as_bool(condition.evaluate(row)):
+                return result.evaluate(row)
+        return self.fallback.evaluate(row) if self.fallback is not None else None
+
+    def columns(self) -> set[str]:
+        found: set[str] = set()
+        for condition, result in self.whens:
+            found |= condition.columns() | result.columns()
+        if self.fallback is not None:
+            found |= self.fallback.columns()
+        return found
+
+    def canonical(self) -> Any:
+        return [
+            "case",
+            [[c.canonical(), r.canonical()] for c, r in self.whens],
+            self.fallback.canonical() if self.fallback is not None else None,
+        ]
 
 
 # ---------------------------------------------------------------------------
@@ -920,6 +955,7 @@ _FUNCTION_LIST: tuple[_Function, ...] = (
     _Function("is_null", 1, 1, lambda v: is_blank(v), "Whether the value is blank"),
     _Function("is_not_null", 1, 1, lambda v: not is_blank(v), "Whether a value is present"),
     _Function("if", 2, 3, _fn_if, "Conditional value", True),
+    _Function("iif", 2, 3, _fn_if, "Conditional value — Informatica spelling", True),
 )
 
 FUNCTIONS: dict[str, _Function] = {f.name: f for f in _FUNCTION_LIST}
@@ -976,6 +1012,15 @@ class _Parser:
             )
         self.advance()
 
+    def _expect_keyword(self, word: str) -> None:
+        token = self.current
+        if token.kind != "keyword" or token.text.casefold() != word:
+            raise ExpressionError(
+                f"expected {word.upper()} at position {token.pos + 1}, got "
+                f"{token.text or 'end of expression'!r}"
+            )
+        self.advance()
+
     def parse(self) -> _Node:
         node = self.parse_expression(0)
         if self.current.kind != "end":
@@ -1012,6 +1057,35 @@ class _Parser:
                 return _Literal(False)
             if word == "not":
                 return _Unary("not", self.parse_expression(_PRECEDENCE["and"] + 1))
+            if word == "case":
+                whens: list[tuple[_Node, _Node]] = []
+                fallback: _Node | None = None
+                while True:
+                    token = self.advance()
+                    if token.kind != "keyword":
+                        raise ExpressionError(
+                            f"expected WHEN, ELSE or END inside CASE "
+                            f"(position {token.pos + 1})"
+                        )
+                    inner = token.text.casefold()
+                    if inner == "when":
+                        condition = self.parse_expression(0)
+                        self._expect_keyword("then")
+                        whens.append((condition, self.parse_expression(0)))
+                    elif inner == "else":
+                        fallback = self.parse_expression(0)
+                        self._expect_keyword("end")
+                        break
+                    elif inner == "end":
+                        break
+                    else:
+                        raise ExpressionError(
+                            f"'{token.text}' is not allowed inside CASE "
+                            f"(position {token.pos + 1})"
+                        )
+                if not whens:
+                    raise ExpressionError("CASE needs at least one WHEN ... THEN")
+                return _Case(tuple(whens), fallback)
             raise ExpressionError(
                 f"'{token.text}' cannot start an expression (position {token.pos + 1})"
             )

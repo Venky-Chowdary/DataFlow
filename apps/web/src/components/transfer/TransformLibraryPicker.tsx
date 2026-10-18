@@ -159,7 +159,7 @@ export function TransformLibraryPicker({
               onChange={(e) => setMode(e.target.value as "pin" | "follow")}
             >
               <option value="pin">Pin version</option>
-              <option value="follow">Follow latest</option>
+              <option value="follow">Follow latest (re-resolves each scheduled run)</option>
             </select>
             {mode === "pin" && selected ? (
               <select
@@ -179,6 +179,13 @@ export function TransformLibraryPicker({
           </div>
           {selected?.description ? (
             <p className="df2-xform-note">{selected.description}</p>
+          ) : null}
+          {mode === "follow" ? (
+            <p className="df2-xform-note">
+              Apply compiles the latest active version now. A one-off run uses
+              those steps as applied; a schedule re-resolves the latest version
+              at each run time.
+            </p>
           ) : null}
           {paramNames.map((name) => (
             <label key={name} className="df2-label-hint" style={{ display: "block" }}>
