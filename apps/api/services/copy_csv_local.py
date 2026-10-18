@@ -1577,7 +1577,7 @@ def _pairs_and_ddls(
     mappings: list[dict],
     schema: dict[str, str],
     dest_type: str,
-) -> tuple[list[tuple[str, str]], list[str], list[str]]:
+) -> tuple[list[tuple[str, str]], list[str], list[str], list[str]]:
     from connectors.mysql_writer import mysql_type
     from connectors.postgresql_writer import pg_type
     from connectors.sqlite_writer import sqlite_type
@@ -1589,10 +1589,16 @@ def _pairs_and_ddls(
     pairs: list[tuple[str, str]] = []
     ddls: list[str] = []
     declared_types: list[str] = []
+    # Columns with no declared carrier anywhere (mapping type, target_type,
+    # source_type, introspected schema) land as TEXT accepting any value.
+    # Surface them — the silent accept was D-07.
+    untyped_targets: list[str] = []
     for item in mappings:
         source_col = str(item.get("source") or "").strip()
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
+        if not declared:
+            untyped_targets.append(target_col or source_col)
         if dest in {"postgresql", "postgres"}:
             physical = pg_type(declared) if declared else "TEXT"
             if not pg_type_is_load_safe(physical):
@@ -1616,7 +1622,7 @@ def _pairs_and_ddls(
             ddls.append(physical)
         pairs.append((source_col, target_col))
         declared_types.append(census_logical_type(item, declared))
-    return pairs, ddls, declared_types
+    return pairs, ddls, declared_types, untyped_targets
 
 
 def _format_csv_copy(
@@ -1628,6 +1634,7 @@ def _format_csv_copy(
     sync_mode: str,
     replace_destination: bool,
     file_type: str = "csv",
+    untyped_columns: list[str] | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]]:
     snapshot = dict(result.source_snapshot or {})
     inc_mode = (sync_mode or "").strip().lower()
@@ -1675,6 +1682,14 @@ def _format_csv_copy(
         # digest the read-back is compared against, not the loader's own ack.
         dest_summary["checksum_mode"] = "inline_write_pass"
         dest_summary["source_independently_reread"] = False
+    untyped = [str(c).strip() for c in (untyped_columns or []) if str(c).strip()]
+    if untyped:
+        shown = ", ".join(untyped[:5])
+        dest_summary["warnings"] = [
+            f"{len(untyped)} mapped column(s) have no declared type and accept "
+            f"arbitrary values as TEXT ({shown}) — declare a target type in Map "
+            "to enforce the intended carrier"
+        ]
     inc_wm = str(snapshot.get("incremental_watermark") or "")
     if incremental:
         dest_summary["incremental_watermark"] = inc_wm
@@ -1771,7 +1786,9 @@ def try_copy_local_csv(
         return None
 
     try:
-        pairs, ddls, declared_types = _pairs_and_ddls(mappings, schema, dest_type)
+        pairs, ddls, declared_types, untyped_targets = _pairs_and_ddls(
+            mappings, schema, dest_type
+        )
     except FastPathUnavailable as exc:
         logger.info("CSV COPY declined: %s", exc)
         return None
@@ -1892,6 +1909,7 @@ def try_copy_local_csv(
         raise
 
     rows, ddl_log, dest_summary, _cols = _format_csv_copy(
+        untyped_columns=untyped_targets,
         result=result,
         dest_type=dest_type,
         dest_table=dest_table,

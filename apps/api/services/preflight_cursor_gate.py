@@ -449,11 +449,21 @@ def build_sync_contract_gate(
                 "so CDC cannot land there. Use full refresh or incremental append."
             )
     if missing_cursor:
-        issues.append(f"Missing cursor field for {', '.join(missing_cursor[:5])}")
+        issues.append(
+            f"Missing cursor field for {', '.join(missing_cursor[:5])} — declare "
+            "stream_contracts[].cursor_field (and cursor_semantics) for that stream"
+        )
     if requires_primary_key and not contracts and not catalog_identity:
-        issues.append("Missing primary key — no stream contract carries one")
+        issues.append(
+            f"Missing primary key — no stream contract carries one; {sync} requires "
+            "stream_contracts entries naming primary_key (plus cursor_field and "
+            "cursor_semantics for the incremental read)"
+        )
     if missing_primary_key:
-        issues.append(f"Missing primary key for {', '.join(missing_primary_key[:5])}")
+        issues.append(
+            f"Missing primary key for {', '.join(missing_primary_key[:5])} — declare "
+            "stream_contracts[].primary_key for that stream"
+        )
     if unknown_cursor:
         issues.append(
             f"Cursor field not in source schema: {', '.join(unknown_cursor[:5])}"
