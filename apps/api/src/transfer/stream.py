@@ -1460,19 +1460,6 @@ def _stream_database_transfer_impl(
     if not columns:
         raise ValueError(f"Source table `{table}` has no columns or is empty")
 
-    if shape_steps and shape_runner is None:
-        from .stream_dest_procedure import runner_for_stream_steps
-
-        shape_runner = runner_for_stream_steps(
-            shape_steps,
-            columns=list(columns),
-            table=table,
-            effective_sync=effective_sync,
-            cursor_field=cursor_source_col or "",
-            key_columns=pk_source_cols,
-            workspace_id=workspace_id,
-        )
-
     # Schemaless sources — absorb sparse attrs discovered mid-transfer so they
     # are never silently dropped from destination writes (Dynamo/Mongo/ES/Redis).
     #
@@ -1567,6 +1554,22 @@ def _stream_database_transfer_impl(
                 schema = _introspect_table_schema(src_read_type, src_cfg, table, columns)
                 if not schema:
                     schema = {c: "string" for c in columns}
+
+    # Built after schema resolution so ordering steps compare under the
+    # source column's declared type, never wire text (DD-1).
+    if shape_steps and shape_runner is None:
+        from .stream_dest_procedure import runner_for_stream_steps
+
+        shape_runner = runner_for_stream_steps(
+            shape_steps,
+            columns=list(columns),
+            table=table,
+            effective_sync=effective_sync,
+            cursor_field=cursor_source_col or "",
+            key_columns=pk_source_cols,
+            workspace_id=workspace_id,
+            source_types=dict(schema or {}),
+        )
 
     # ``columns`` stays the source's own column list: it is what every read
     # projects on. Under a recipe the writer sees different columns, so the
@@ -1856,6 +1859,10 @@ def _stream_database_transfer_impl(
     cursor_bounded_total = (
         int(getattr(checkpoint, "rows_cursor_bounded", 0) or 0) if resumed_pass else 0
     )
+    # Cumulative held-buffered rows at the last committed page — the page's
+    # held contribution is the delta so buffered rows aren't counted as
+    # recipe removals (DD-3).
+    shape_held_seen = [0]
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     # Threaded to every writer so the streaming path matches the buffered path.
     stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
@@ -2659,10 +2666,13 @@ def _stream_database_transfer_impl(
                     "against the source as it is now"
                 )
             batch.headers, batch.rows = shape_runner.matrix(headers, batch.rows)
-            _persist_shape_diverts()
+            batch.raw_page_diverted = _persist_shape_diverts()
+            # Rows still held by a buffering step are not removals — the
+            # ledger subtracts them via this marker (DD-3).
+            batch.raw_page_held = int(shape_runner.effect.rows_buffered or 0)
         return batch
 
-    def _persist_shape_diverts() -> None:
+    def _persist_shape_diverts() -> int:
         """Persist this page's shape-diverted rows to the quarantine DLQ.
 
         A row a recipe step diverted (on_error=divert, divert_rows, lookup
@@ -2671,7 +2681,7 @@ def _stream_database_transfer_impl(
         bounded and keeps quarantine durable across a mid-stream abort.
         """
         if shape_runner is None:
-            return
+            return 0
         diverted = shape_runner.take_diverted()
         shape_diverted_total[0] += len(diverted or [])
         # Keyed routed runs purge diverted keys from every route table —
@@ -2688,7 +2698,7 @@ def _stream_database_transfer_impl(
             if _key is not None and all(v is not None for v in _key):
                 shape_divert_key_tuples.append(_key)
         if not diverted or not job_id:
-            return
+            return len(diverted or [])
         from services.quarantine_dlq import persist_rejected_rows
 
         details = [
@@ -2724,6 +2734,7 @@ def _stream_database_transfer_impl(
                 or ""
             ),
         )
+        return len(diverted)
 
     def _page_cursor_max(batch) -> str:
         """The page's highest cursor value, as the source handed it over.
@@ -2966,6 +2977,12 @@ def _stream_database_transfer_impl(
                     - _raw_page_filtered(batch)
                     - _raw_page_cursor_bounded(batch)
                     - len(orphans),
+                ),
+                "shape_page_diverted": int(
+                    getattr(batch, "raw_page_diverted", 0) or 0
+                ),
+                "shape_page_held": int(
+                    getattr(batch, "raw_page_held", 0) or 0
                 ),
                 "reconcile_sample_rows": [],
                 "fingerprints": [],
@@ -3590,6 +3607,14 @@ def _stream_database_transfer_impl(
                 # recipe removals — counting both made a correct run look lossy.
                 - len(_fk_held_out(batch)),
             ),
+            # Quarantine-diverted and still-buffered rows left the page for
+            # named reasons — neither is a recipe removal (DD-3).
+            "shape_page_diverted": int(
+                getattr(batch, "raw_page_diverted", 0) or 0
+            ),
+            "shape_page_held": int(
+                getattr(batch, "raw_page_held", 0) or 0
+            ),
             "reconcile_sample_rows": sample_rows,
             "fingerprints": inline_fps,
             "overwrite_keys": (
@@ -3615,8 +3640,19 @@ def _stream_database_transfer_impl(
         filter_removed = int(result.get("filter_page_removed") or 0)
         filtered_on_read_total += filter_removed
         cursor_bounded_total += int(result.get("cursor_bounded_page") or 0)
-        removed_on_read_total += filter_removed + int(
-            result.get("shape_page_removed") or 0
+        # Held-buffered rows and quarantine diverts left the page for named
+        # reasons — subtracting them keeps removed_on_read_total at the true
+        # recipe-removal count. rows_buffered is cumulative, so the page's
+        # held contribution is the delta since the last committed page
+        # (drained rows re-emit with raw_page_rows=0 and never recount).
+        _held_now = int(result.get("shape_page_held") or 0)
+        _held_delta = max(0, _held_now - shape_held_seen[0])
+        shape_held_seen[0] = _held_now
+        removed_on_read_total += filter_removed + max(
+            0,
+            int(result.get("shape_page_removed") or 0)
+            - int(result.get("shape_page_diverted") or 0)
+            - _held_delta,
         )
         last_checksum = result["last_checksum"] or last_checksum
         fps = result.get("fingerprints") or []
@@ -3870,6 +3906,10 @@ def _stream_database_transfer_impl(
                     rows=tail_rows,
                     meta={},
                     fk_orphan_details=[],
+                    # Every drained row was already counted in the page that
+                    # held it — the tail is a re-emit, not new source rows
+                    # (DD-3). raw_page_rows=0 keeps committed_offset honest.
+                    raw_page_rows=0,
                 )
                 tail_idx = first_idx + 1 + 10_000_000
                 _apply_result(tail_idx, _process_db_chunk(tail_idx, tail_batch))
@@ -4490,16 +4530,19 @@ def _stream_database_transfer_impl(
             f"{cursor_bounded_total:,} row(s) at or before the watermark were "
             f"not in this run's read scope ({src_type} cannot push the bound down)"
         )
-    if removed_on_read_total:
+    _diverted_total = int(shape_diverted_total[0] or 0)
+    if removed_on_read_total or _diverted_total:
         # committed_offset counts the rows the source handed over, so the rows a
         # declared filter or an approved recipe removed are inside that population
         # and have to be named for Gate-8 — otherwise a filtered or shaped run
-        # reads as short delivery against the table's own count.
-        dest_summary["rows_removed_on_read"] = int(removed_on_read_total)
+        # reads as short delivery against the table's own count. A run whose only
+        # movement was diverts still has to charge them (DD-3).
+        if removed_on_read_total:
+            dest_summary["rows_removed_on_read"] = int(removed_on_read_total)
         # Named apart: the operator's declared scope removed these before the
         # recipe was offered them, so they are not the recipe's effect.
         dest_summary["rows_source_filtered"] = int(filtered_on_read_total)
-        diverted = int(shape_diverted_total[0] or 0)
+        diverted = _diverted_total
         shaped_removed = max(
             0, removed_on_read_total - filtered_on_read_total - diverted
         )

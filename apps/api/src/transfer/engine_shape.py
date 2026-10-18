@@ -33,6 +33,7 @@ from .models import TransferRequest
 def _open_shape_runner(
     request: TransferRequest,
     columns: list[str] | None,
+    schema: dict[str, str] | None = None,
 ) -> "ShapeRunner | None":
     """The declared shaping recipe, refused unless it is the approved one.
 
@@ -44,6 +45,7 @@ def _open_shape_runner(
     return build_shape_runner(
         getattr(request, "shape_recipe", None),
         source_columns=list(columns or []),
+        source_types=dict(schema or getattr(request, "column_types", None) or {}),
         approved_hash=str(getattr(request, "approved_shape_recipe_hash", "") or ""),
         approved_set_hash=str(getattr(request, "approved_set_hash", "") or ""),
         workspace_id=str(getattr(request, "workspace_id", "") or ""),

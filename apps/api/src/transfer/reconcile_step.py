@@ -1852,15 +1852,282 @@ def _run_dedupe_gate_checks(
                     ),
                 }
             )
-        else:
-            checks.append(
-                {
-                    **base,
-                    "status": "passed",
-                    "detail": f"{winners} unique winner key(s) under {rule}",
-                }
+            continue
+        checks.append(
+            {
+                **base,
+                "status": "passed",
+                "detail": f"{winners} unique winner key(s) under {rule}",
+            }
+        )
+        # 3. Winner ordering: re-derive the extremal ordering tuple per key
+        # from an independent source re-read and compare it against the row
+        # the destination kept. Uniqueness alone passed DD-1's class — a run
+        # could keep '9' over '10' and still verify.
+        checks.append(
+            _dedupe_winner_ordering_check(
+                entry,
+                step_no,
+                keys,
+                rule,
+                dialect=dialect,
+                dest_cfg=cfg,
+                dest_schema=schema,
+                dest_table=table_name,
+                ctx=ctx,
             )
+        )
     return checks
+
+
+def _dedupe_winner_ordering_check(
+    entry: dict[str, Any],
+    step_no: Any,
+    keys: list[str],
+    rule: str,
+    *,
+    dialect: str | None,
+    dest_cfg: dict[str, Any],
+    dest_schema: str,
+    dest_table: str,
+    ctx: dict[str, Any],
+) -> dict[str, Any]:
+    """Prove the kept winner per key from an independent source re-read.
+
+    Applies to ordering-based rules (order_by/then_by) on whole-table runs:
+    the source is queried for each key's extremal ordering tuple under the
+    declared directions and the destination's winner must carry that tuple.
+    Arrival-based rules (keep=first, bare keep=last) and merge steps (fill
+    can legitimately change an ordering column's value on the winner) are
+    honestly unverified — SQL cannot express them.
+    """
+    base = {"step": step_no, "check": "winner_ordering", "keys": keys}
+    order_cols: list[tuple[str, str]] = []
+    order_by = str(entry.get("order_by") or "")
+    if order_by:
+        order_cols.append((order_by, str(entry.get("order_dir") or "desc").casefold()))
+    for t in entry.get("then_by") or []:
+        if isinstance(t, dict):
+            order_cols.append(
+                (str(t.get("column") or ""), str(t.get("dir") or "desc").casefold())
+            )
+        else:
+            order_cols.append(
+                (str(t), str(entry.get("order_dir") or "desc").casefold())
+            )
+    order_cols = [(c, d) for c, d in order_cols if c]
+    if not order_cols:
+        return {
+            **base,
+            "status": "unverified",
+            "reason": (
+                "arrival-based rule (keep=first / last-seen) has no SQL-"
+                "expressible winner ordering — uniqueness proven, ordering "
+                "identity is not"
+            ),
+        }
+    if entry.get("merge"):
+        return {
+            **base,
+            "status": "unverified",
+            "reason": (
+                "merge=non_null may fill an ordering column on the winner — "
+                "the destination tuple is legitimately not the source extremal"
+            ),
+        }
+    src_db = str(ctx.get("source_db_type") or "")
+    src_cfg = ctx.get("source_cfg") or {}
+    src_schema = str(ctx.get("source_schema") or "")
+    src_table = str(ctx.get("source_table") or "")
+    src_dialect = _unique_check_dialect(src_db)
+    if (
+        not src_table
+        or src_dialect is None
+        or src_dialect == "clickhouse"
+        or dialect is None
+        or not dest_table
+    ):
+        return {**base, "status": "unverified", "reason": "unsupported_source_or_dest"}
+    order_types = entry.get("order_types") or {}
+    key_types = entry.get("key_types") or {}
+    if not order_types:
+        return {
+            **base,
+            "status": "unverified",
+            "reason": "declared source types for ordering columns unavailable",
+        }
+    # Destination column names for the source-space key/ordering columns.
+    mappings = ctx.get("mappings") or []
+    target_of = {
+        str(m.get("source") or ""): str(m.get("target") or "")
+        for m in mappings
+        if isinstance(m, dict) and m.get("source") and m.get("target")
+    }
+    dest_keys = [target_of.get(k, k) for k in keys]
+    dest_ords = [target_of.get(c, c) for c, _ in order_cols]
+    try:
+        expected = _dedupe_source_extrema(
+            src_dialect,
+            src_cfg,
+            schema=src_schema,
+            table=src_table,
+            keys=keys,
+            order_cols=order_cols,
+        )
+        dest_rows = _dedupe_dest_winner_tuples(
+            dialect,
+            dest_cfg,
+            schema=dest_schema,
+            table=dest_table,
+            keys=dest_keys,
+            order_cols=dest_ords,
+        )
+    except Exception as exc:
+        _logger.warning(
+            "dedupe winner-ordering check failed: error_type=%s", type(exc).__name__
+        )
+        return {**base, "status": "unverified", "reason": "check_error"}
+
+    def _canon(vals: tuple, cols: list[str], types_map: dict) -> tuple:
+        from services.shape_engine import _dedupe_sort_val
+
+        return tuple(
+            _dedupe_sort_val(v, types_map.get(c)) for v, c in zip(vals, cols)
+        )
+
+    def _key_canon(vals: tuple) -> tuple:
+        # Keys canonicalize under their declared types when known — an int
+        # key and its text form must join; else text.
+        from services.shape_engine import _dedupe_sort_val
+
+        return tuple(
+            _dedupe_sort_val(v, key_types.get(c)) for v, c in zip(vals, keys)
+        )
+
+    expected_map = {
+        _key_canon(tuple(erow[: len(keys)])): _canon(
+            tuple(erow[len(keys):]),
+            [c for c, _ in order_cols],
+            order_types,
+        )
+        for erow in expected
+    }
+    seen: set[tuple] = set()
+    mismatches = 0
+    missing = 0
+    for drow in dest_rows:
+        k = _key_canon(drow[: len(keys)])
+        seen.add(k)
+        exp = expected_map.get(k)
+        if exp is None:
+            missing += 1
+            continue
+        got = _canon(drow[len(keys):], [c for c, _ in order_cols], order_types)
+        if got != exp:
+            mismatches += 1
+    extra = len(expected_map) - len(expected_map.keys() & seen)
+    if mismatches or missing or extra:
+        return {
+            **base,
+            "status": "failed",
+            "detail": (
+                f"dedupe step {step_no} ({rule}): winner ordering does not "
+                f"match an independent source re-read — {mismatches} key(s) "
+                f"keep a non-extremal ordering tuple, {missing} dest key(s) "
+                f"have no source key, {extra} source key(s) have no winner"
+            ),
+        }
+    return {
+        **base,
+        "status": "passed",
+        "detail": (
+            f"{len(seen)} winner(s) match the source's extremal ordering "
+            f"tuple per key under {rule} (independent re-read)"
+        ),
+    }
+
+
+def _dedupe_source_extrema(
+    dialect: str,
+    src_cfg: dict[str, Any],
+    *,
+    schema: str,
+    table: str,
+    keys: list[str],
+    order_cols: list[tuple[str, str]],
+) -> list[tuple]:
+    """Each key's extremal ordering tuple on the source, via ROW_NUMBER.
+
+    NULL ordering mirrors the shape engine's rank buckets: under desc the
+    null bucket sorts highest (SQL NULLS FIRST), under asc lowest (NULLS
+    LAST) — expressed dialect-agnostically as ``(col IS NULL)`` so MySQL
+    and MSSQL, which lack NULLS FIRST/LAST, order identically.
+    """
+    import sqlalchemy as sa
+
+    from connectors.sql_identifiers import require_safe_identifier
+    from services.dest_precount import (
+        warehouse_sql_engine,
+        warehouse_sql_table_ref,
+    )
+
+    table_ref = warehouse_sql_table_ref(dialect, src_cfg, schema, table)
+    with warehouse_sql_engine(dialect, src_cfg) as engine:
+        quote = engine.dialect.identifier_preparer.quote
+        qk = ", ".join(
+            quote(require_safe_identifier(c, preserve_case=True)) for c in keys
+        )
+        order_terms = []
+        qo_parts = []
+        for col, direction in order_cols:
+            qc = quote(require_safe_identifier(col, preserve_case=True))
+            qo_parts.append(qc)
+            dir_sql = "DESC" if direction == "desc" else "ASC"
+            null_sql = "DESC" if direction == "desc" else "ASC"
+            order_terms.append(f"({qc} IS NULL) {null_sql}")
+            order_terms.append(f"{qc} {dir_sql}")
+        qo = ", ".join(qo_parts)
+        stmt = sa.text(
+            f"SELECT {qk}, {qo} FROM ("
+            f"SELECT {qk}, {qo}, ROW_NUMBER() OVER ("
+            f"PARTITION BY {qk} ORDER BY {', '.join(order_terms)}"
+            f") df_rn FROM {table_ref}"
+            f") df_dedupe_ext WHERE df_rn = 1"
+        )
+        with engine.connect() as conn:
+            return [tuple(r) for r in conn.execute(stmt).fetchall()]
+
+
+def _dedupe_dest_winner_tuples(
+    dialect: str,
+    dest_cfg: dict[str, Any],
+    *,
+    schema: str,
+    table: str,
+    keys: list[str],
+    order_cols: list[str],
+) -> list[tuple]:
+    """The destination's (key, ordering) tuples as they landed."""
+    import sqlalchemy as sa
+
+    from connectors.sql_identifiers import require_safe_identifier
+    from services.dest_precount import (
+        warehouse_sql_engine,
+        warehouse_sql_table_ref,
+    )
+
+    table_ref = warehouse_sql_table_ref(dialect, dest_cfg, schema, table)
+    with warehouse_sql_engine(dialect, dest_cfg) as engine:
+        quote = engine.dialect.identifier_preparer.quote
+        qcols = ", ".join(
+            quote(require_safe_identifier(c, preserve_case=True))
+            for c in list(keys) + list(order_cols)
+        )
+        with engine.connect() as conn:
+            return [
+                tuple(r)
+                for r in conn.execute(sa.text(f"SELECT {qcols} FROM {table_ref}"))
+            ]
 
 
 def _run_reconciliation_impl(
@@ -2332,6 +2599,15 @@ def _run_reconciliation_impl(
         )
         n5_ctx["source_table"] = str(
             source_endpoint.table or src_cfg.get("table") or ""
+        )
+        # The dedupe winner-ordering proof re-reads the source independently —
+        # it needs the same coordinates plus the mapping names.
+        dedupe_stamp_ctx.update(
+            source_cfg=dict(src_cfg),
+            source_db_type=src_type,
+            source_schema=n5_ctx["source_schema"],
+            source_table=n5_ctx["source_table"],
+            mappings=n5_ctx["mappings"],
         )
     # Prefer physical types stamped by the writer when present.
     physical = dest_summary.get("column_types") or dest_summary.get("target_types")

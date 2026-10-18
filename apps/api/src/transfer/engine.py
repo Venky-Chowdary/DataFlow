@@ -2211,7 +2211,7 @@ class UniversalTransferEngine:
                     request, job_id, incremental_bound.scope.watermark
                 )
             _settle_locales(request, records, columns)
-            shape_runner = _open_shape_runner(request, columns)
+            shape_runner = _open_shape_runner(request, columns, schema)
             if shape_runner is not None:
                 records, columns, schema = _shape_materialized_read(
                     shape_runner, records, columns, schema
@@ -3613,7 +3613,9 @@ class UniversalTransferEngine:
             # builds one runner per stream from shape_by_stream.
             from services.execute_shape_route import open_execute_shape
 
-            shape_plan = open_execute_shape(request, columns, job_id=job_id)
+            shape_plan = open_execute_shape(
+                request, columns, job_id=job_id, schema=schema
+            )
             if shape_plan.failure is not None:
                 return shape_plan.failure
             design_runner = shape_plan.design_runner
@@ -4698,7 +4700,7 @@ class UniversalTransferEngine:
             # the sample's effects are design-time and must not be added to the
             # population accounting the ledger publishes.
             _settle_locales(request, sample_rows, columns)
-            shape_runner = _open_shape_runner(request, columns)
+            shape_runner = _open_shape_runner(request, columns, schema)
             if shape_runner is not None:
                 sample_probe = ShapeRunner(shape_runner.recipe)
                 sample_rows = sample_probe.records(sample_rows)

@@ -149,6 +149,7 @@ def build_shape_runner(
     payload: Any,
     *,
     source_columns: Sequence[str] | None = None,
+    source_types: Mapping[str, str] | None = None,
     approved_hash: str = "",
     approved_set_hash: str = "",
     sample_limit: int = 25,
@@ -165,7 +166,9 @@ def build_shape_runner(
     no graph. A graph that cannot run raises before the pass-through return, so
     a recipe with no row steps and a join is not treated as "do nothing".
     """
-    recipe = ShapeRecipe.parse(payload, source_columns=source_columns)
+    recipe = ShapeRecipe.parse(
+        payload, source_columns=source_columns, source_types=source_types
+    )
     blocked = block_message(recipe.set_graph)
     if blocked:
         raise ShapeError(blocked)
@@ -366,6 +369,13 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
             continue
         tally = effect.steps[i] if i < len(effect.steps) else None
         opts = step.options or {}
+        # Declared source types for the columns the check compares — Gate-8
+        # canonicalizes both sides under them, never wire text (DD-1).
+        _types = dict(getattr(runner.recipe, "source_types", None) or {})
+        _order_cols = [str(opts.get("order_by") or "")] + [
+            str(t.get("column") if isinstance(t, Mapping) else t)
+            for t in (opts.get("then_by") or [])
+        ]
         dedupe_steps.append(
             {
                 "step": i + 1,
@@ -376,6 +386,12 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
                 "then_by": list(opts.get("then_by") or []),
                 "tie_break": str(opts.get("tie_break") or "first_seen"),
                 "merge": str(opts.get("merge") or "") or None,
+                "key_types": {
+                    c: _types[c] for c in (opts.get("keys") or []) if c in _types
+                },
+                "order_types": {
+                    c: _types[c] for c in _order_cols if c in _types
+                },
                 "rows_in": int(getattr(tally, "rows_in", 0) or 0),
                 "rows_out": int(getattr(tally, "rows_out", 0) or 0),
                 "rows_diverted": int(getattr(tally, "rows_diverted", 0) or 0),

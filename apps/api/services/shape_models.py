@@ -548,6 +548,9 @@ class ShapeRecipe:
     input_columns: tuple[str, ...] = ()
     output_columns: tuple[str, ...] = ()
     set_graph: SetGraph | None = None
+    # Source column -> declared logical type, carried alongside the recipe so
+    # ordering steps compare under the real type, never wire text (DD-1).
+    source_types: Mapping[str, str] | None = None
 
     def __bool__(self) -> bool:
         return bool(self.enabled_steps)
@@ -706,13 +709,16 @@ class ShapeRecipe:
         payload: Any,
         *,
         source_columns: Sequence[str] | None = None,
+        source_types: Mapping[str, str] | None = None,
     ) -> "ShapeRecipe":
         """Build a recipe from an API payload, refusing anything unrunnable.
 
         ``source_columns`` is what the source actually has. When given, every
         step is checked against the column set *as it stands at that point in
         the recipe*, so a step that reads a column an earlier step dropped is
-        refused at design time rather than per row.
+        refused at design time rather than per row. ``source_types`` is the
+        same column set's declared logical types — ordering steps compare
+        under them because the wire carries every value as text.
         """
         raw_steps = _payload_steps(payload)
         if len(raw_steps) > MAX_STEPS:
@@ -747,6 +753,7 @@ class ShapeRecipe:
             input_columns=original,
             output_columns=tuple(columns) if columns is not None else (),
             set_graph=attach_set_graph(payload),
+            source_types=dict(source_types or {}),
         )
 
 

@@ -80,7 +80,13 @@ def peek_declared_source(
     return columns, schema, total_rows, sample_rows
 
 
-def open_execute_shape(request: Any, columns: list[str], *, job_id: str) -> ExecuteShapePlan:
+def open_execute_shape(
+    request: Any,
+    columns: list[str],
+    *,
+    job_id: str,
+    schema: dict | None = None,
+) -> ExecuteShapePlan:
     """Partition a multi-table recipe. A refusal is a failed transfer, not a write."""
     from services.multi_stream_plan import (
         approved_recipe_refusal,
@@ -155,6 +161,7 @@ def open_execute_shape(request: Any, columns: list[str], *, job_id: str) -> Exec
                     plan.design_runner = build_shape_runner(
                         {"steps": primary_steps},
                         source_columns=list(columns),
+                        source_types=dict(schema or {}),
                     )
                 except ShapeError as exc:
                     shape_refusal = f"{primary_name}: {exc}"
@@ -169,7 +176,7 @@ def open_execute_shape(request: Any, columns: list[str], *, job_id: str) -> Exec
                 )
     elif not shape_refusal:
         try:
-            plan.shape_runner = _open_shape_runner(request, columns)
+            plan.shape_runner = _open_shape_runner(request, columns, schema)
         except ShapeError as exc:
             message = str(exc)
             if not _set_graph_refusal(message):

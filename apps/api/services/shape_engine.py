@@ -207,37 +207,160 @@ _HELD = _Held()
 # op has a declared cap that a recipe can raise — deliberately, never silently.
 _MAX_BUFFERED = 500_000
 
+# Source-declared logical types that change how a dedupe ordering column
+# compares. The wire carries every value as text, so a bare string compare
+# keeps '9' over '10' and '9.50' over '10.00' (DD-1): when the column is
+# declared numeric/date/timestamp/bool, compare by value, not by bytes.
+_DEDUPE_INT_TYPES = {
+    "int", "integer", "bigint", "smallint", "tinyint", "mediumint",
+    "serial", "bigserial", "long", "int2", "int4", "int8",
+}
+_DEDUPE_NUMERIC_TYPES = {
+    "decimal", "numeric", "number", "money", "float", "double", "real",
+    "bignumeric", "bigdecimal", "fixed", "float4", "float8", "double precision",
+}
+_DEDUPE_DATE_TYPES = {"date"}
+_DEDUPE_TS_TYPES = {
+    "timestamp", "timestamptz", "datetime", "datetime2", "smalldatetime",
+    "timestamp_tz", "timestamp_ntz", "timestamp_ltz", "datetimeoffset",
+    "timestamp with time zone", "timestamp without time zone",
+}
+_DEDUPE_BOOL_TYPES = {"bool", "boolean", "bit"}
+
+
+def _dedupe_instant(text: Any, *, date_only: bool = False) -> float | None:
+    """A date/timestamp wire value as an epoch instant, or ``None``.
+
+    Timestamps compare as instants, not strings — '2024-01-02T00:00:00+05:00'
+    and '2024-01-01T20:00:00Z' are the same instant. Naive values are taken
+    as UTC so an offset-less timestamp never outranks a later instant just
+    because its string sorts first.
+    """
+    s = str(text or "").strip()
+    if not s:
+        return None
+    try:
+        from datetime import date, datetime, timezone
+
+        if date_only:
+            d = date.fromisoformat(s[:10])
+            return datetime(d.year, d.month, d.day, tzinfo=timezone.utc).timestamp()
+        v = s[:-1] + "+00:00" if s.endswith("Z") else s
+        dt = datetime.fromisoformat(v)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+def _dedupe_sort_val(value: Any, decl: str | None = None) -> tuple[int, Any]:
+    """One ordering position, honouring the column's declared source type.
+
+    Buckets: 0 = parsed under the declared type, 1 = untyped text, 2 = a
+    declared-typed value that failed to parse (deterministic tail), 3 =
+    null. Column values are homogeneous, so same-column comparisons never
+    mix bucket types.
+    """
+    if _dedupe_is_null(value):
+        return (3, "")
+    kind = str(decl or "").strip().casefold()
+    # "numeric(10,2)" → "numeric"; "int unsigned" → "int".
+    kind = kind.split("(", 1)[0].strip()
+    if kind.endswith(" unsigned"):
+        kind = kind[: -len(" unsigned")]
+    text = _as_text(value)
+    if kind in _DEDUPE_INT_TYPES or kind in _DEDUPE_NUMERIC_TYPES:
+        try:
+            from decimal import Decimal
+
+            return (0, Decimal(str(text).strip()))
+        except Exception:
+            return (2, text or "")
+    if kind in _DEDUPE_BOOL_TYPES:
+        v = str(text or "").strip().casefold()
+        return (0, 1 if v in {"1", "true", "t", "yes", "y", "on"} else 0)
+    if kind in _DEDUPE_DATE_TYPES:
+        instant = _dedupe_instant(text, date_only=True)
+        return (0, instant) if instant is not None else (2, text or "")
+    if kind in _DEDUPE_TS_TYPES:
+        instant = _dedupe_instant(text)
+        return (0, instant) if instant is not None else (2, text or "")
+    # Undeclared columns keep the legacy mixed-type ordering: real Python
+    # numbers as numbers, everything else as text.
+    return _sort_val(value)
+
 
 def _dedupe_rank(
-    options: Mapping[str, Any], row: dict[str, Any], arrival: int
+    options: Mapping[str, Any],
+    row: dict[str, Any],
+    arrival: int,
+    types: Mapping[str, str] | None = None,
 ) -> tuple[tuple[Any, ...], tuple[str, ...]]:
     """The ordering positions a member is ranked on, with each direction.
 
     Order: order_by first, then each then_by column, then — only as the
     declared tie-break — arrival. keep=last with no ordering columns ranks on
     arrival alone (last-seen); keep=first always ranks earliest arrival best.
+    ``types`` is the source column -> declared logical type map; ordering
+    columns compare under their declared type so PG-carried text values like
+    '9' and '10' order numerically.
     """
     keep = str(options.get("keep") or "first").casefold()
     if keep == "first":
         return (arrival,), ("asc",)
+    decls = types or {}
     parts: list[Any] = []
     dirs: list[str] = []
     order_col = str(options.get("order_by") or "")
     if order_col:
-        parts.append(_sort_val(row.get(order_col)))
+        parts.append(_dedupe_sort_val(row.get(order_col), decls.get(order_col)))
         dirs.append(str(options.get("order_dir") or "desc").casefold())
     for entry in options.get("then_by") or []:
         if isinstance(entry, Mapping):
-            parts.append(_sort_val(row.get(str(entry.get("column") or ""))))
+            tcol = str(entry.get("column") or "")
+            parts.append(_dedupe_sort_val(row.get(tcol), decls.get(tcol)))
             dirs.append(str(entry.get("dir") or "desc").casefold())
         else:
-            parts.append(_sort_val(row.get(str(entry))))
+            tcol = str(entry)
+            parts.append(_dedupe_sort_val(row.get(tcol), decls.get(tcol)))
             dirs.append(str(options.get("order_dir") or "desc").casefold())
     if not parts:
         # No ordering columns: arrival is the rank — last-seen wins.
         parts.append(arrival)
         dirs.append("desc")
     return tuple(parts), tuple(dirs)
+
+
+def _dedupe_rank_cmp(
+    new_parts: tuple[Any, ...], cur_parts: tuple[Any, ...], dirs: tuple[str, ...]
+) -> int:
+    """Signed compare of two rank tuples under their directions."""
+    for nv, cv, direction in zip(new_parts, cur_parts, dirs):
+        if nv == cv:
+            continue
+        return 1 if (nv > cv if direction == "desc" else nv < cv) else -1
+    return 0
+
+
+def _dedupe_member_better(
+    new_parts: tuple[Any, ...],
+    new_arrival: int,
+    cur_parts: tuple[Any, ...],
+    cur_arrival: int,
+    dirs: tuple[str, ...],
+    tie_last: bool,
+) -> bool:
+    """True when the challenger outranks the incumbent — including ties.
+
+    Unlike _dedupe_better this takes the arrival positions so a full ordering
+    tie resolves under the declared tie_break instead of assuming the
+    challenger arrived later and won.
+    """
+    cmp_ = _dedupe_rank_cmp(new_parts, cur_parts, dirs)
+    if cmp_:
+        return cmp_ > 0
+    return new_arrival > cur_arrival if tie_last else new_arrival < cur_arrival
 
 
 def _dedupe_better(
@@ -290,19 +413,24 @@ def _dedupe_feed_fallback(
     row: dict[str, Any],
     parts: tuple[Any, ...],
     arrival: int,
+    dirs: tuple[str, ...] = (),
+    tie_last: bool = False,
 ) -> None:
     """Offer a member's non-null values as merge fill candidates.
 
-    Per column the best-ranked member value wins the fill — tracked as
-    (rank, value) so a later, better-ranked member can still displace it.
+    Per column the BEST-ranked member value wins the fill, under the same
+    directions and tie_break the winner election uses — ascending rules
+    (order_dir=asc, keep=first) fill from the smallest-ranked member, not
+    the largest (DD-2).
     """
-    rank = parts + (arrival,)
     for col, value in row.items():
         if _dedupe_is_null(value):
             continue
         current = fallbacks.get(col)
-        if current is None or rank > current[0]:
-            fallbacks[col] = (rank, value)
+        if current is None or _dedupe_member_better(
+            parts, arrival, current[0], current[1], dirs, tie_last
+        ):
+            fallbacks[col] = (parts, arrival, value)
 
 
 def _max_buffer(options: Mapping[str, Any]) -> int:
@@ -456,6 +584,11 @@ class ShapeEngine:
         # merge=non_null: per step, per key, the best-ranked non-null member
         # value per column — the fill candidates for the winner's nulls.
         self._dedupe_merge: dict[int, dict[tuple, dict[str, tuple]]] = {}
+        # Source column -> declared logical type, when the recipe was parsed
+        # with the run's schema: ordering columns compare under it (DD-1).
+        self._column_types: dict[str, str] = dict(
+            getattr(recipe, "source_types", None) or {}
+        )
 
     @property
     def output_columns(self) -> tuple[str, ...]:
@@ -692,8 +825,8 @@ class ShapeEngine:
                     fallbacks = (self._dedupe_merge.get(index) or {}).get(key) or {}
                     merged = dict(winner_row)
                     for col, fb in fallbacks.items():
-                        if _dedupe_is_null(merged.get(col)) and fb and not _dedupe_is_null(fb[1]):
-                            merged[col] = fb[1]
+                        if _dedupe_is_null(merged.get(col)) and fb and not _dedupe_is_null(fb[2]):
+                            merged[col] = fb[2]
                     out.append(merged)
                 else:
                     out.append(winner_row)
@@ -1115,14 +1248,18 @@ class ShapeEngine:
                     f"dedupe_rows key space passed {cap} keys — "
                     "raise 'max_keys' only deliberately"
                 )
-            parts, dirs = _dedupe_rank(options, row, self._row_index)
+            parts, dirs = _dedupe_rank(
+                options, row, self._row_index, self._column_types
+            )
             tie_last = str(options.get("tie_break") or "first_seen").casefold() == "last_seen"
             current = winners.get(key)
             fallbacks = self._dedupe_fallbacks(index, key) if merge else None
             if current is None:
                 winners[key] = (parts, dict(row), self._row_index)
                 if merge:
-                    _dedupe_feed_fallback(fallbacks, row, parts, self._row_index)
+                    _dedupe_feed_fallback(
+                        fallbacks, row, parts, self._row_index, dirs, tie_last
+                    )
             elif _dedupe_better(parts, current[0], dirs, tie_last):
                 # Displaced winner — it is a loser now, quarantined with the
                 # new winner's row number named.
@@ -1136,10 +1273,14 @@ class ShapeEngine:
                     ),
                 )
                 if merge:
-                    _dedupe_feed_fallback(fallbacks, current[1], current[0], current[2])
+                    _dedupe_feed_fallback(
+                        fallbacks, current[1], current[0], current[2], dirs, tie_last
+                    )
                 winners[key] = (parts, dict(row), self._row_index)
                 if merge:
-                    _dedupe_feed_fallback(fallbacks, row, parts, self._row_index)
+                    _dedupe_feed_fallback(
+                        fallbacks, row, parts, self._row_index, dirs, tie_last
+                    )
             else:
                 self._dedupe_lose(
                     index, tally, key, row,
@@ -1151,7 +1292,9 @@ class ShapeEngine:
                     ),
                 )
                 if merge:
-                    _dedupe_feed_fallback(fallbacks, row, parts, self._row_index)
+                    _dedupe_feed_fallback(
+                        fallbacks, row, parts, self._row_index, dirs, tie_last
+                    )
             return _HELD
 
         if op == "aggregate":
