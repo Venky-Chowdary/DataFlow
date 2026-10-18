@@ -236,6 +236,15 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         family="nested",
         options=("depth", "keys"),
     ),
+    _StepDef(
+        "nest_json",
+        "Group listed columns into a JSON object in a new column — relational → nested",
+        family="nested",
+        needs_column=False,
+        produces_column=True,
+        options=("fields", "to", "drop"),
+        required=("fields", "to"),
+    ),
     # --- row shape (Tier 4, active) -----------------------------------------
     _StepDef(
         "filter_rows",
@@ -942,6 +951,21 @@ def _apply_column_effect(step: ShapeStep, columns: list[str]) -> None:
         target = str(options.get("to") or "")
         if target and target not in columns:
             columns.append(target)
+        return
+    if op == "nest_json":
+        target = str(options.get("to") or "")
+        if target and target not in columns:
+            columns.append(target)
+        if options.get("drop"):
+            fields = options.get("fields") or []
+            names = [
+                str(f.get("from") or f.get("column") or f.get("to") or "")
+                if isinstance(f, Mapping) else str(f)
+                for f in fields
+            ]
+            for name in names:
+                if name and name in columns:
+                    columns.remove(name)
         return
 
 

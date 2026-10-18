@@ -788,6 +788,12 @@ class ShapeEngine:
             )
             return [row if flattened is None else flattened]
 
+        if op == "nest_json":
+            nested = self._guarded(
+                step, index, tally, row, lambda: self._nest_fields(step, row, tally)
+            )
+            return [row if nested is None else nested]
+
         # Everything else is a single-cell value transform.
         before = row.get(step.column)
         after = self._guarded(
@@ -891,6 +897,50 @@ class ShapeEngine:
                     tally, before=row.get(key), after=after, existed=key in row
                 )
                 clone[key] = after
+        return clone
+
+    def _nest_fields(
+        self, step: ShapeStep, row: dict[str, Any], tally: StepEffect
+    ) -> dict[str, Any]:
+        """Group listed columns into one JSON-object column.
+
+        ``fields`` entries are a column name (kept under its own key) or
+        ``{from|column: source, to: key}`` to rename inside the object. A field
+        naming a column the row does not carry is refused, not nulled — an
+        object missing keys silently is a data-integrity event. ``drop`` folds
+        the sources away so the destination keeps only the nested column.
+        """
+        from services.json_intelligence import json_cell_text
+
+        options = step.options
+        target = str(options.get("to") or "")
+        if not target:
+            raise ValueError("nest_json requires 'to'")
+        entries: list[tuple[str, str]] = []
+        for item in options.get("fields") or []:
+            if isinstance(item, Mapping):
+                source = str(item.get("from") or item.get("column") or item.get("to") or "")
+                key = str(item.get("to") or item.get("from") or item.get("column") or "")
+            else:
+                source = key = str(item)
+            if not source or not key:
+                raise ValueError("nest_json field needs both a source column and a key")
+            if source not in row:
+                raise ValueError(
+                    f"'{source}' is not a column on this row — nest_json will not invent a key"
+                )
+            entries.append((source, key))
+        clone = dict(row)
+        obj = {key: row[source] for source, key in entries}
+        after = json_cell_text(obj)
+        self._record_write(
+            tally, before=row.get(target), after=after, existed=target in row
+        )
+        clone[target] = after
+        if options.get("drop"):
+            for source, _ in entries:
+                if source != target and source in clone:
+                    clone.pop(source)
         return clone
 
     # -- bookkeeping -------------------------------------------------------

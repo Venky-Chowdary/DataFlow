@@ -21,17 +21,17 @@ Missing = nothing in code yet.
 |10|Function library|Implemented|expression language: text/numeric/date/null-safe fns + operators, validated design-time; /ops `functions` catalog feeds the pickers|
 |11|Cleanse trim/case/null/replace/regex|Have|`trim/upper/lower/normalize_unicode/strip_controls/replace:`|
 |12|Address verification|Missing|—|
-|13|Parse split typed fields|Missing|no split op|
+|13|Parse split typed fields|Implemented|`split_column` into typed fields + `cast_column`/`case` + expression parse|
 |14|Dedupe PK latest|Implemented|`dedupe_rows` keep first/last by order column (composite keys) + `incremental_deduped` merge|
 |15|Fuzzy dedupe + consolidation|Missing|—|
-|16|Split/merge columns|Partial|`concat:` only|
+|16|Split/merge columns|Implemented|`split_column` (into=[...]) + `concat_columns` merge|
 |17|PII blocking|Have|`omit` + field deselection|
 |18|PII hashing|Have|`hash_pii`|
 |19|PII encryption|Missing|—|
 |20|Masking patterns/substitution|Partial|`mask_pii`/`redact`; no pattern/substitution dictionary|
 |21|Policy masking by role|Missing|—|
-|22|Flatten JSON/array|Partial|`json` op parses payload; no path flatten step|
-|23|Nest relational→JSON|Missing|—|
+|22|Flatten JSON/array|Implemented|`flatten_json` (depth/keys) + `unnest_json` array explode w/ caps|
+|23|Nest relational→JSON|Implemented|`nest_json` groups columns into a JSON object; missing source refuses, drop option|
 |24|Repeating-field unpivot|Missing|—|
 |25|Unstructured→structured|Missing|—|
 |26|Schema change policy|Implemented|`schema_policy` gate + drift ack + recipe input_columns contract fails closed at compile|
