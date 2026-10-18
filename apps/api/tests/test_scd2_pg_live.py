@@ -773,3 +773,82 @@ def test_scd2_close_missing_false_retained_keys_pg(tmp_path, monkeypatch):
     if ra:
         assert ra.get("balanced") is True, ra.get("note")
     conn.close()
+
+
+def test_scd2_overlap_foreign_stamp_excluded_pg(tmp_path, monkeypatch):
+    """B1-E7a: an overlapping writer's stamps inside this run's window
+    are never counted — recount is by exact-stamp membership. A second
+    execute_tracked run on different keys into the same destination
+    recounts only its own work."""
+    from datetime import timedelta
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    _mk_src(cur, ROWS, table="scd2_ov_src")
+    rows_b = [
+        {"id": 11, "name": "P", "price": "11.00", "note": "np"},
+        {"id": 12, "name": "Q", "price": "12.00", "note": "nq"},
+    ]
+    _mk_src(cur, rows_b, table="scd2_ov_src2")
+    cur.execute("DROP TABLE IF EXISTS scd2_ov_dst CASCADE")
+    recipe = _scd2_recipe()
+    req = _engine_req("scd2_ov_src", "scd2_ov_dst", recipe, mode="strict")
+
+    res_a = _exec(fake, req, prefix="scdoa")
+    assert res_a.success, res_a.error
+    ds_a = res_a.destination_summary or {}
+    stamps_a = sorted(ds_a.get("run_stamps") or [])
+    assert stamps_a
+    cfg = _cfg(_endpoint("scd2_ov_dst"))
+
+    # Simulate an overlapping writer: a foreign row whose valid_from sits
+    # INSIDE run A's stamp window but is not one of run A's stamps — an
+    # interleaved writer run B could stamp exactly this.
+    from services.scd2_engine import _as_dt, verify_scd2_history
+
+    hi = max(_as_dt(s) for s in stamps_a)
+    foreign_stamp = (hi + timedelta(microseconds=1)).isoformat()
+    # A row for a key run A never touched, stamped inside its window.
+    cur.execute(
+        "INSERT INTO scd2_ov_dst (id, name, price, note, ver, cur_flag,"
+        " eff_from, eff_to, rh) VALUES (99, 'X', '9', 'nx', 1, true,"
+        f" '{foreign_stamp}', NULL, 'fx')"
+    )
+    _o = recipe["steps"][0]["options"]
+    cols = {
+        "valid_from": _o["effective_from"],
+        "valid_to": _o["end_date"],
+        "is_current": _o["is_current"],
+        "row_hash": _o["row_hash"],
+        "version": _o["version"],
+        "type1": _o.get("type1"),
+        "close_missing": _o.get("close_missing", True),
+    }
+    hist = verify_scd2_history(
+        cfg, "public", "scd2_ov_dst", ["id"], cols,
+        expected={
+            "inserted": 3,
+            "closed": 0,
+            "closed_missing": 0,
+            "run_started_at": ds_a.get("run_started_at"),
+            "run_stamps": stamps_a,
+        },
+    )
+    # Membership recount counts only run A's stamps: 3 opened, not 4 —
+    # and zero structural violations.
+    assert hist["ok"], hist.get("violations")
+    d = hist["deltas"]
+    assert d["opened"] == 3 and d["run_stamp_count"] == len(stamps_a)
+    assert d["run_ts_min"] and d["run_ts_max"]
+
+    # A second run on different keys into the same destination recounts
+    # only its own work — the overlapping row and run A's are ignored.
+    req2 = _engine_req("scd2_ov_src2", "scd2_ov_dst", recipe, mode="strict")
+    res_b = _exec(fake, req2, prefix="scdob")
+    assert res_b.success, res_b.error
+    hist_b = (res_b.reconciliation or {}).get("scd2_history") or {}
+    db_ = hist_b.get("deltas") or {}
+    assert db_.get("opened") == 2, hist_b
+    assert db_.get("changed") == 0
+    conn.close()

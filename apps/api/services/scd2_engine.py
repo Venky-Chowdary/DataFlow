@@ -1665,8 +1665,8 @@ def verify_scd2_history(
                     closed_now += closed
                     if opened and closed:
                         changed_now += 1
-                run_ts = ",".join(
-                    sorted(str(s) for s in expected.get("run_stamps") or [])
+                stamp_strs = sorted(
+                    str(s) for s in expected.get("run_stamps") or []
                 )
             elif run_start is not None:
                 for rows in versions.values():
@@ -1711,8 +1711,18 @@ def verify_scd2_history(
             exp_changed = int(expected.get("closed") or 0) - int(
                 expected.get("closed_missing") or 0
             )
+            # B1-E7a — never surface a comma-joined stamp list (grows
+            # linearly with volume). Membership stays internal; report
+            # min/max + count so API consumers get a bounded shape.
+            _stamp_strs = (
+                stamp_strs
+                if stamp_set
+                else ([str(run_ts)] if run_ts is not None else [])
+            )
             deltas = {
-                "run_ts": str(run_ts),
+                "run_ts_min": _stamp_strs[0] if _stamp_strs else None,
+                "run_ts_max": _stamp_strs[-1] if _stamp_strs else None,
+                "run_stamp_count": len(_stamp_strs),
                 "opened": opened_now,
                 "closed": closed_now,
                 "changed": changed_now,
