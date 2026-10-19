@@ -1640,6 +1640,7 @@ def copy_between_postgres(
             for p in partitions
         ]
         snapshot["copy_split"] = copy_split
+        snapshot["engine_digest_target_columns"] = list(target_cols)
         snapshot["shard_mode"] = shard_mode if partitions else "serial"
         snapshot["copy_workers"] = 1
         snapshot["copy_partitions"] = len(partitions) or 1

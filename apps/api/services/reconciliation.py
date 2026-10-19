@@ -82,6 +82,12 @@ _NUMERIC_WIRE_MARKS = ("$", "€", "£", "¥")
 _NUMERIC_WIRE_CODES = ("USD", "EUR", "GBP")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
 # RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
+_TEXT_FAMILY_DDL_RE = re.compile(
+    r"^(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?|BPCHAR|(?:N)?(?:VAR)?CHAR2|TEXT|TINYTEXT|"
+    r"MEDIUMTEXT|LONGTEXT|NTEXT|CLOB|NCLOB|CHARACTER|STRING|ENUM|SET\b",
+    re.I,
+)
+
 _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
@@ -241,7 +247,43 @@ def attach_dest_readback(report: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
+_COMPARE_MODE_BY_COVERAGE = {
+    "full_checksum": "independent source vs destination digests over all rows",
+    "write_pass_dest_readback": "write-pass fingerprint vs destination read-back over all rows",
+    "sample": "keyed destination sample only",
+    "writer_ack": "writer acknowledgment only (no read-back)",
+    "quarantine_excluded": "independent digests over non-quarantined rows",
+    "none": "no compare ran",
+}
+
+
 def stamp_post_write_phase(report: dict[str, Any]) -> dict[str, Any]:
+    out = _stamp_post_write_phase_impl(report)
+    # Plain statement of which compare ran, so a large-run "verified" can
+    # never read as a stronger claim than it is (pairwise vs digest).
+    out["compare_mode"] = _COMPARE_MODE_BY_COVERAGE.get(
+        str(out.get("coverage") or "none"), "no compare ran"
+    )
+    if out["compare_mode"] == "no compare ran" and out.get("checksum_match") is False:
+        src = str(out.get("source_checksum") or "").strip()
+        tgt = str(out.get("target_checksum") or "").strip()
+        if src and tgt:
+            if _COUNT_TOKEN_RE.match(src):
+                out["compare_mode"] = (
+                    "keyed row-count join proof only (values not compared)"
+                )
+            else:
+                out["compare_mode"] = (
+                    "independent source vs destination digests over all rows "
+                    "(mismatch)"
+                )
+    return out
+
+
+_COUNT_TOKEN_RE = re.compile(r"^(?:dest_count|pk_join_count):\d+$")
+
+
+def _stamp_post_write_phase_impl(report: dict[str, Any]) -> dict[str, Any]:
     """Stamp explicit post-write phase so UIs never confuse writer-ack with Verified.
 
     Also stamps ``coverage``, ``checksum_match``, ``population_proof``,
@@ -491,9 +533,11 @@ def overlay_physical_dest_types(
 
     A pre-existing column can contradict the plan (declared DATETIME(6),
     physical datetime), so the writer's stamped physical type wins — except a
-    TEXT carrier holding a numeric logical type (SQLite has no DECIMAL
-    affinity). Steered as TEXT that column hashes its spelling, and
-    ``Decimal('1.000')`` on the write pass never equals ``'1.000'`` read back.
+    text carrier over an empty or non-text declaration (SQLite has no DECIMAL
+    affinity and degrades columns to TEXT). Steered as TEXT that column hashes
+    its literal spelling, and ``'1000'`` on the write pass never equals
+    ``'1000.00'`` read back — repr coercion by the declared type would
+    false-fail.
     """
     out = dict(logical)
     if not isinstance(physical, dict):
@@ -503,7 +547,13 @@ def overlay_physical_dest_types(
             continue
         key = str(k)
         prior = out.get(key, "")
-        if str(v).strip().upper() == "TEXT" and prior and _is_numeric_logical(prior):
+        if _TEXT_FAMILY_DDL_RE.match(str(v).strip()) and (
+            not _TEXT_FAMILY_DDL_RE.match((prior or "").strip())
+        ):
+            # Physical text carrier over an empty or non-text declaration —
+            # the writer rendered per declared semantics (or inference), so
+            # a literal text compare would false-fail repr coercion like
+            # '1000' -> '1000.00' (SQLite TEXT degrade class).
             continue
         out[key] = str(v)
     return out
@@ -2393,6 +2443,7 @@ def verify_s3_object(
     ssl: bool,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of S3 GET streams. Never JSON-fallback empty.
 
@@ -2419,6 +2470,8 @@ def verify_s3_object(
             table_name=key,
             columns=target_columns,
             limit=limit,
+            dest_db_type="s3",
+            dest_types=dest_types,
         )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -2434,6 +2487,7 @@ def verify_gcs_blob(
     connection_string: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of GCS GET streams. Never JSON-fallback empty."""
     try:
@@ -2447,6 +2501,8 @@ def verify_gcs_blob(
                 "connection_string": connection_string,
                 "database": bucket,
             },
+            dest_db_type="gcs",
+            dest_types=dest_types,
             table_name=key,
             columns=target_columns,
             limit=limit,
@@ -3286,6 +3342,7 @@ def verify_iceberg_table(
     database: str = "",
     host: str = "",
     extra: dict[str, Any] | None = None,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile Iceberg from current-snapshot data files, not ``scan().to_arrow()``.
 
@@ -3330,7 +3387,11 @@ def verify_iceberg_table(
         )
         if rows is None:
             return int(count), ""
-        checksum = fingerprint_checksum(_iter_fingerprints(rows, cols))
+        checksum = fingerprint_checksum(
+            _iter_fingerprints(
+                rows, cols, dest_db_type="iceberg", dest_types=dest_types or {}
+            )
+        )
         return int(count), checksum
     except Exception as exc:
         logger.warning("Iceberg reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -3672,6 +3733,7 @@ def verify_target(
             database=dest.get("database", ""),
             host=dest.get("host", "") or "",
             extra=extra,
+            dest_types=dest_types,
         )
     elif db_type == "mongodb":
         count, chk = verify_mongodb_collection(
@@ -3723,6 +3785,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
             written_ids=ids,
             pk_column=pk,
         )
@@ -3750,6 +3813,7 @@ def verify_target(
                 table_name=table_name,
                 target_columns=target_columns,
                 limit=limit,
+                dest_types=dest_types,
                 written_ids=ids,
                 pk_column=pk,
             )
@@ -3976,6 +4040,7 @@ def verify_target(
             ssl=bool(dest.get("ssl", False)),
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "gcs":
         count, chk = verify_gcs_blob(
@@ -3986,6 +4051,7 @@ def verify_target(
             connection_string=dest.get("connection_string", ""),
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type in {
         "adls",
@@ -4357,6 +4423,14 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         return _NULL_SENTINEL
     if isinstance(value, bool):
         return "1" if value else "0"
+    _text_declared = bool(ddl_type) and bool(
+        _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip())
+    )
+    if _text_declared and isinstance(value, (int, float, Decimal)):
+        # Declared TEXT carrier: compare the bound repr, not a canonicalized
+        # number — '1000.00' the writer rendered equals read-back '1000.00',
+        # while '01' vs '1' stays a real change.
+        return str(value)
     if isinstance(value, _datetime):
         if value.tzinfo is not None:
             value = value.astimezone(timezone.utc).replace(tzinfo=None)
@@ -4437,6 +4511,44 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             text = raw_text.strip()
     else:
         text = raw_text.strip()
+    # Type-driven honesty: on a declared TEXT-family column the cell IS text —
+    # '01' vs '1', 'A' vs 'A ', and '30.99' vs '30.990' are real value changes
+    # and must not collapse under the numeric/bool folds below. Format-variant
+    # domains a writer legitimately re-renders (a datetime instant stored as
+    # '2024-06-01 00:00:00' vs '2024-06-01T00:00:00', or a re-serialized JSON
+    # document) still fold — they carry the same value in a different repr.
+    if ddl_type and _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip()):
+        if text.startswith(("{", "[")):
+            try:
+                parsed = json_loads_exact(text)
+                if isinstance(parsed, (dict, list)):
+                    return json.dumps(parsed, sort_keys=True, default=json_default)
+            except (json.JSONDecodeError, TypeError):
+                pass
+        if (
+            text
+            and text[0].isdigit()
+            and len(text) >= 8
+            and _DATE_LIKE_CHARS.intersection(text)
+            and _DATE_LIKE_RE.search(text)
+        ):
+            dtm = _parse_datetime(text)
+            if dtm:
+                return _checksum_datetime_utc_wall(
+                    dtm if isinstance(dtm, str) else str(dtm), original=text
+                )
+            dt = _parse_date(text)
+            if dt:
+                return f"{dt}T00:00:00"
+        # Strict bool tokens still fold on a declared text column — a writer
+        # that bound a boolean into TEXT renders 'true', which is the same
+        # value as source 1/true. Status enums ('active'…) stay literal.
+        _tl = text.lower()
+        if _tl in _STRICT_BOOL_TRUE:
+            return "1"
+        if _tl in _STRICT_BOOL_FALSE:
+            return "0"
+        return text
     # Boolean and empty fast paths.
     if not text:
         return ""
@@ -4982,11 +5094,29 @@ def sample_compare_rows(
             or dest_types.get(tgt_col.lower())
             or ""
         )
-        if not ddl:
-            for m in mappings:
-                if str(m.get("target") or "") == tgt_col:
-                    ddl = str(m.get("target_type") or m.get("inferredType") or "")
-                    break
+        declared = ""
+        for m in mappings:
+            if str(m.get("target") or "") == tgt_col:
+                declared = str(
+                    m.get("target_type")
+                    or m.get("inferredType")
+                    or m.get("type")
+                    or ""
+                )
+                break
+        if (
+            declared
+            and ddl
+            and _TEXT_FAMILY_DDL_RE.match(ddl.strip())
+            and not _TEXT_FAMILY_DDL_RE.match(declared.strip())
+        ):
+            # The physical carrier degraded to TEXT (e.g. SQLite has no
+            # DECIMAL affinity) while the write rendered per the declared
+            # type — compare under declared semantics. The degrade itself
+            # is reported separately (X-4).
+            ddl = declared
+        elif not ddl:
+            ddl = declared
         if ddl and typed_cast_incompatible_with_text_sink(
             transform or "", normalize_logical_type(ddl)
         ):
@@ -5327,6 +5457,7 @@ def sample_compare_rows(
                 mismatches.append(
                     {
                         "row": str(idx),
+                        "key": str(key) if keyed else "",
                         "source": src_col,
                         "target": tgt_col,
                         "source_value": operator_cell_text(src_val)[:120],

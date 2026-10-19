@@ -104,7 +104,11 @@ from services.excel_parser import (
     require_xlsx,
 )
 from services.read_options import ReadOptions
-from services.reconciliation import FingerprintAccumulator
+from services.reconciliation import (
+    _TEXT_FAMILY_DDL_RE,
+    FingerprintAccumulator,
+    overlay_physical_dest_types,
+)
 from services.tabular_window import header_and_rows, row_to_record
 
 try:
@@ -1060,10 +1064,10 @@ def fingerprint_parsed_file(
         from services.shape_apply import ShapeRunner
 
         shape_runner = ShapeRunner(shape_recipe, workspace_id=workspace_id)
-        full_iter = shape_runner.batches(full_iter)
+        shaped_iter = shape_runner.batches(full_iter)
 
         def _with_shape_drain():
-            yield from full_iter
+            yield from shaped_iter
             # Buffering steps (dedupe keep-last, aggregate, sort, rank) emit
             # only once the population is read — the file's last batch is it.
             tail = shape_runner.drain()
@@ -1385,6 +1389,34 @@ def stream_file_to_database(
     fingerprint_dest_types = {
         target_cols[i]: logical_types[i] for i in range(len(target_cols))
     }
+    # Digest-basis alignment: the logical target type falls back to the TEXT
+    # carrier for untyped file columns, but the write pass and the source
+    # digest hash on the declared schema type (CSV-inferred DECIMAL etc.).
+    # A non-text schema declaration must override the text carrier here or
+    # the two sides of Gate-8 hash the same value on different bases.
+    _schema_decl_types: dict[str, str] = {}
+    for _m in mappings or []:
+        if not isinstance(_m, dict):
+            continue
+        _t = str(_m.get("target") or _m.get("source") or "")
+        _s = str(_m.get("source") or _t)
+        if _t and schema.get(_s):
+            _schema_decl_types[_t] = str(schema[_s])
+    for _tc in target_cols:
+        if _tc not in _schema_decl_types and schema.get(_tc):
+            _schema_decl_types[_tc] = str(schema[_tc])
+    # Inferred schema types fill ONLY a text carrier — an approved mapping
+    # type (DECIMAL(38,10)) always wins over a sample-inferred declaration
+    # (DECIMAL(17,2)); letting inference override would reject real values as
+    # scale violations during fingerprinting.
+    for _tc, _st in _schema_decl_types.items():
+        _prior = str(fingerprint_dest_types.get(_tc) or "")
+        if (
+            _st
+            and not _TEXT_FAMILY_DDL_RE.match(str(_st).strip())
+            and (not _prior or _TEXT_FAMILY_DDL_RE.match(_prior.strip()))
+        ):
+            fingerprint_dest_types[_tc] = str(_st)
 
     try:
         from services.sync_cursor import (
@@ -1850,6 +1882,9 @@ def stream_file_to_database(
                 cursor_pk_source=cursor_pk_source,
                 pk_target_cols=[pk_for_copy] if pk_for_copy else [],
             )
+        # Same digest-basis stamp as the write loop — the copy path's write
+        # pass fingerprinted on this basis and Gate-8 must read back on it.
+        dest_summary.setdefault("gate8_digest_types", dict(fingerprint_dest_types))
         return rows_copied, copy_ddl, dest_summary, columns
 
     if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():
@@ -3066,4 +3101,7 @@ def stream_file_to_database(
             cleanup_write_ledger(dest_type=dest_type, cfg=dest_cfg, job_id=job_id)
 
     dest_summary["rows_written"] = int(written or 0)
+    # The exact type basis this stream fingerprinted on — Gate-8's dest
+    # read-back must hash against it (SQLite TEXT degrade; see stream.py).
+    dest_summary.setdefault("gate8_digest_types", dict(fingerprint_dest_types))
     return written, ddl_log, dest_summary, columns

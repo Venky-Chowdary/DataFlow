@@ -217,11 +217,14 @@ def _destination_enforces_single_key(
 def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
     return {
         str(m.get("target") or ""): str(
-            m.get("target_type") or m.get("inferredType") or ""
+            m.get("target_type")
+            or m.get("inferredType")
+            or m.get("type")
+            or ""
         )
         for m in mappings
         if m.get("target")
-        and (m.get("target_type") or m.get("inferredType"))
+        and (m.get("target_type") or m.get("inferredType") or m.get("type"))
     }
 
 
@@ -395,6 +398,52 @@ class _PinStore:
                 "WHERE e.ovh IS NOT o.ovh"
             )
         ]
+
+    def culprit_keys_by_kind(self, limit: int = 32) -> dict[str, list[str]]:
+        """Culprit keys split by kind, for tamper drill-down.
+
+        ``changed``/``missing_in_dest`` only name keys proven stable in
+        source during the run (write-time pin hash == re-read hash), so a
+        drifted key is never blamed as a culprit. ``extra_in_dest`` names
+        keys present only on the destination."""
+        lim = limit + 1
+        stable = (
+            "FROM exp e "
+            "JOIN pin p ON e.k = p.k "
+            "JOIN rawh r ON e.k = r.k AND p.h = r.h "
+            "LEFT JOIN destk d ON e.k = d.k "
+        )
+        changed = [
+            r[0]
+            for r in self.db.execute(
+                f"SELECT e.k {stable} WHERE d.k IS NOT NULL "  # nosec B608
+                "AND d.fp IS NOT e.fp ORDER BY e.k LIMIT ?",
+                (lim,),
+            )
+        ]
+        missing = [
+            r[0]
+            for r in self.db.execute(
+                f"SELECT e.k {stable} WHERE d.k IS NULL ORDER BY e.k LIMIT ?",  # nosec B608
+                (lim,),
+            )
+        ]
+        extra = [
+            r[0]
+            for r in self.db.execute(
+                "SELECT d.k FROM destk d LEFT JOIN pin p ON p.k = d.k "
+                "WHERE p.k IS NULL ORDER BY d.k LIMIT ?",
+                (lim,),
+            )
+        ]
+        out: dict[str, list[str]] = {}
+        if changed:
+            out["changed"] = changed[:limit]
+        if missing:
+            out["missing_in_dest"] = missing[:limit]
+        if extra:
+            out["extra_in_dest"] = extra[:limit]
+        return out
 
     def drift_stats(self) -> tuple[int, int, int]:
         """(exp keys unpinned, exp key count, dest-only key count)."""
@@ -600,6 +649,7 @@ def _transform_applied_proof(
     from services.reconciliation import (
         canonical_checksum_from_iter,
         iter_select_row_dicts,
+        normalize_cell,
     )
     from services.scd2_engine import _stamp_set
     from services.shape_apply import ShapeRunner
@@ -608,8 +658,83 @@ def _transform_applied_proof(
 
     from .connector_capabilities import resolve_driver_type
 
+    _NULL_SENTINEL = "\x00NULL\x00"
+
+    _TEXT_FAMILY_DDL_RE = re.compile(
+        r"^(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?|BPCHAR|(?:N)?(?:VAR)?CHAR2|"
+        r"TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT|NTEXT|CLOB|NCLOB|CHARACTER|"
+        r"STRING|ENUM|SET\b",
+        re.I,
+    )
+
+    _NUMERIC_DDL = re.compile(
+        r"NUMERIC|DECIMAL|INT|FLOAT|DOUBLE|REAL|MONEY", re.I
+    )
+
     def _key_norm(v: Any) -> str:
-        return "" if v is None else str(v)
+        # Join keys + source-side row hashes. Strings stay literal — a text
+        # key '01' never collapses into '1' or 'A ' into 'A'. Non-str driver
+        # values take the canonical path so write-time and re-read reprs of
+        # the same value agree (datetime vs ISO text, Decimal scale).
+        # SQL NULL stays distinct from ''.
+        if v is None:
+            return _NULL_SENTINEL
+        if isinstance(v, str):
+            return v
+        try:
+            return normalize_cell(v)
+        except Exception:
+            return str(v)
+
+    def _val_norm(v: Any, ddl: str = "") -> str:
+        # Type-driven canonicalization for VALUE compares (recipe output vs
+        # destination read-back). Strings stay literal unless the column is
+        # numeric-family — 'A ' vs 'A' and '01' vs '1' on a TEXT column are
+        # real changes and must be detected. Non-str driver values take the
+        # Gate-8 canonical path (Decimal scale, datetimes, bytes) so
+        # Decimal('30.990') read-back equals recipe output '30.99' on a
+        # DECIMAL column.
+        if v is None:
+            return _NULL_SENTINEL
+        try:
+            # Oracle VARCHAR2 stores '' AS NULL natively — '' vs NULL
+            # can never be told apart on read-back there, so they are
+            # the same value on an Oracle destination only.
+            if v == "" and "oracle" in str(dest_db_type or "").lower():
+                return _NULL_SENTINEL
+            if (
+                isinstance(v, str)
+                and ddl
+                and _TEXT_FAMILY_DDL_RE.match(str(ddl).strip())
+            ):
+                # Declared text column: 'A ' vs 'A' and '01' vs '1' are
+                # real changes and must be detected.
+                return v
+            return normalize_cell(v, ddl_type=ddl, engine=dest_db_type)
+        except Exception:
+            return str(v)
+
+    def _val_ddl(col: str) -> str:
+        return str(dest_types.get(col) or dest_types.get(col.lower()) or "")
+
+    def _src_norm(v: Any, ddl: str = "") -> str:
+        # Source-side hash normalization — must match stream._pin_norm on
+        # the write ledger: declared text compares literally, numeric/date
+        # columns canonicalize so COPY-text and driver reprs hash alike.
+        if v is None:
+            return _NULL_SENTINEL
+        try:
+            if isinstance(v, str) and ddl and _TEXT_FAMILY_DDL_RE.match(
+                str(ddl).strip()
+            ):
+                return v
+            return normalize_cell(v, ddl_type=str(ddl or ""), engine=src_type)
+        except Exception:
+            return str(v)
+
+    def _src_ddl(col: str) -> str:
+        ss = source_schema or {}
+        return str(ss.get(col) or ss.get(col.lower()) or "")
 
     def _step_cols(s: dict[str, Any]) -> list[str]:
         opts = s.get("options") or {}
@@ -700,7 +825,9 @@ def _transform_applied_proof(
 
     def _fph(row: dict[str, Any]) -> str:
         return hashlib.sha256(
-            "\x1f".join(_key_norm(row.get(c)) for c in digest_cols).encode()
+            "\x1f".join(
+                _val_norm(row.get(c), _val_ddl(c)) for c in digest_cols
+            ).encode()
         ).hexdigest()[:16]
 
     def _vh(v: Any) -> str:
@@ -811,7 +938,7 @@ def _transform_applied_proof(
                             ),
                             hashlib.sha256(
                                 "\x1f".join(
-                                    _key_norm(row.get(c))
+                                    _src_norm(row.get(c), _src_ddl(c))
                                     for c in pin_hash_cols
                                 ).encode()
                             ).hexdigest()[:16],
@@ -833,7 +960,7 @@ def _transform_applied_proof(
                             _fph(orow),
                             json.dumps(
                                 [
-                                    _key_norm(orow.get(t))
+                                    _val_norm(orow.get(t), _val_ddl(t))
                                     for _s, t in col_pairs
                                 ]
                             ),
@@ -847,14 +974,14 @@ def _transform_applied_proof(
                     )
                 for sc, tc in col_pairs:
                     _cv_buf.append(
-                        (tc, "e", _vh(_key_norm(orow.get(tc))))
+                        (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
                     )
                     if i < len(batch):
                         _eo_buf.append(
                             (
                                 tc,
                                 _vh(_key_norm(batch[i].get(sc))),
-                                _vh(_key_norm(orow.get(tc))),
+                                _vh(_val_norm(orow.get(tc), _val_ddl(tc))),
                             )
                         )
                 yield orow
@@ -874,7 +1001,7 @@ def _transform_applied_proof(
                         _fph(orow),
                         json.dumps(
                             [
-                                _key_norm(orow.get(t))
+                                _val_norm(orow.get(t), _val_ddl(t))
                                 for _s, t in col_pairs
                             ]
                         ),
@@ -888,15 +1015,15 @@ def _transform_applied_proof(
                 )
             for _sc, tc in col_pairs:
                 _cv_buf.append(
-                    (tc, "e", _vh(_key_norm(orow.get(tc))))
+                    (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
                 )
             yield orow
         _flush_ms()
 
     try:
         parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
-        runner = ShapeRunner(parsed)
         src_type = resolve_driver_type(source_endpoint.format or "")
+        runner = ShapeRunner(parsed)
         src_cfg = resolve_connector_config(source_endpoint)
         read_cols = list(runner.recipe.input_columns or columns)
         expected_checksum = canonical_checksum_from_iter(
@@ -1039,7 +1166,7 @@ def _transform_applied_proof(
                                             _key_norm(r.get(f"__raw_{c}"))
                                         ),
                                         _vh(
-                                            _key_norm(r.get(f"__o_{c}"))
+                                            _val_norm(r.get(f"__o_{c}"), _val_ddl(c))
                                         ),
                                     )
                                 )
@@ -1072,6 +1199,9 @@ def _transform_applied_proof(
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
             "culprit_steps": bad_steps,
             "culprit_columns": sorted(oracle_bad),
+            "culprit_keys": (
+                pin_store.culprit_keys_by_kind() if keyed else {}
+            ),
             "provenance": "independent SQL oracle",
         }
 
@@ -1090,15 +1220,16 @@ def _transform_applied_proof(
         comparable = bool(actual_checksum)
         dest_scanned = False
     elif scope_keys is None:
-        actual_checksum = str(recon.get("target_checksum") or "")
-        actual_rows = int(recon.get("target_rows") or 0)
         actual_label = "destination read-back"
-        comparable = bool(actual_checksum)
-        dest_scanned = False
     else:
         actual_label = "destination rows for this run's keys"
+    if not scd2_opts:
+        # G-1i: never trust the recon/writer-acknowledged checksum for the
+        # transform proof — the proof must read the destination itself.
+        # Filtered to this run's keys only for non-overwrite sync modes.
         comparable = True
         dest_scanned = True
+        actual_rows = 0
         try:
             dst_cfg0 = resolve_connector_config(endpoint)
             dest_ref0 = warehouse_sql_table_ref(
@@ -1123,27 +1254,23 @@ def _transform_applied_proof(
                 quote_sql_identifier(c, dq0) for c in sel_cols0
             )
 
-            def _scoped_gen(conn):
-                for batch in iter_select_row_dicts(
-                    conn,
-                    sa.text(
-                        f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
-                    ),
-                    sel_cols0,
-                ):
+            def _scoped_gen(batches):
+                nonlocal actual_rows
+                for batch in batches:
                     for r in batch:
-                        if (
+                        if scope_keys is not None and (
                             "\x1f".join(
                                 _key_norm(r.get(c)) for c in scope_pk
                             )
                             not in scope_keys
                         ):
                             continue
+                        actual_rows += 1
                         row = {c: r.get(c) for c in digest_cols}
                         _fpm_buf.append(("d", _fph(row)))
                         for _sc, tc in col_pairs:
                             _cv_buf.append(
-                                (tc, "d", _vh(_key_norm(row.get(tc))))
+                                (tc, "d", _vh(_val_norm(row.get(tc), _val_ddl(tc))))
                             )
                         if keyed:
                             _destk_buf.append(
@@ -1155,7 +1282,7 @@ def _transform_applied_proof(
                                     _fph(row),
                                     json.dumps(
                                         {
-                                            c: _key_norm(row.get(c))
+                                            c: _val_norm(row.get(c), _val_ddl(c))
                                             for c in digest_cols
                                         }
                                     ),
@@ -1164,15 +1291,68 @@ def _transform_applied_proof(
                         yield row
                     _flush_ms()
 
-            with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
-                with e0.connect() as c0:
+            if dest_db_type == "postgresql":
+                # G-1i: a pooled connection can carry an older REPEATABLE
+                # READ snapshot that predates the committed write — the
+                # tamper test proved a pooled conn counted 5000 of 5001.
+                # A dedicated connection always sees committed state.
+                from connectors.postgresql_conn import get_connection
+
+                _pc = get_connection(
+                    host=dst_cfg0.get("host", ""),
+                    port=int(dst_cfg0.get("port") or 5432),
+                    database=dst_cfg0.get("database", ""),
+                    username=dst_cfg0.get("username", ""),
+                    password=dst_cfg0.get("password", ""),
+                    connection_string=dst_cfg0.get("connection_string", ""),
+                    ssl=bool(dst_cfg0.get("ssl", False)),
+                )
+                try:
+                    _cur = _pc.cursor(name="df_readback")  # server-side stream
+                    _cur.execute(  # nosec B608
+                        f"SELECT {qc0} FROM {dest_ref0}"
+                    )
+                    _cnames = list(sel_cols0)
+
+                    def _pg_batches():
+                        while True:
+                            _rows = _cur.fetchmany(5000)
+                            if not _rows:
+                                break
+                            yield [dict(zip(_cnames, r)) for r in _rows]
+
                     actual_checksum = canonical_checksum_from_iter(
-                        _scoped_gen(c0),
+                        _scoped_gen(_pg_batches()),
                         digest_cols,
                         dest_db_type=dest_db_type,
                         dest_types=dest_types,
                     )
-            actual_rows = pin_store.side_count("d")
+                finally:
+                    try:
+                        _pc.close()
+                    except Exception:
+                        pass
+            else:
+                with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
+                    with e0.connect() as c0:
+                        c0.rollback()
+                        c0 = c0.execution_options(
+                            isolation_level="READ COMMITTED"
+                        )
+                        actual_checksum = canonical_checksum_from_iter(
+                            _scoped_gen(
+                                iter_select_row_dicts(
+                                    c0,
+                                    sa.text(
+                                        f"SELECT {qc0} FROM {dest_ref0}"  # nosec B608
+                                    ),
+                                    sel_cols0,
+                                )
+                            ),
+                            digest_cols,
+                            dest_db_type=dest_db_type,
+                            dest_types=dest_types,
+                        )
         except Exception as exc:
             return {
                 "status": "unverifiable",
@@ -1191,6 +1371,38 @@ def _transform_applied_proof(
                 "destination read-back unavailable for the transform "
                 "proof"
             ),
+        }
+
+    _leftover_n = int(dest_summary.get("leftover_deleted") or 0)
+    if _leftover_n > 0 and dest_summary.get("overwrite_clear_recorded"):
+        # This run recorded a successful destination clear before its
+        # first write ("emptied" an existing table or "absent"/create-new)
+        # — no pre-run row can reach the heal, so a leftover can only have
+        # been written between the write and the reconcile: a mid-gap
+        # tamper. When no clear ran for this run (skipped, non-overwrite,
+        # resume arming a bare txn) heal-removal of stale rows is the
+        # overwrite's normal job and stays "removed by overwrite" on the
+        # report rather than a failed proof.
+        _removed = [
+            str(k)
+            for k in (dest_summary.get("leftover_deleted_keys") or [])
+        ]
+        return {
+            "status": "failed",
+            "reason": (
+                f"destination held {_leftover_n} extra row(s) not in "
+                "the recipe output — healed by overwrite merge"
+            )[:300],
+            "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
+            "culprit_keys": (
+                {"extra_in_dest": _removed} if _removed else None
+            ),
+            "key_note": (
+                " Culprit key(s) — extra_in_dest: " + ", ".join(_removed) + "."
+                if _removed
+                else None
+            ),
+            "provenance": "destination key census (overwrite leftover merge)",
         }
 
     if expected_checksum == actual_checksum and actual_rows == exp_n:
@@ -1212,10 +1424,13 @@ def _transform_applied_proof(
     # count, so a count divergence is always drift (or a population issue
     # the ledger itself reports); anything ambiguous is unverifiable —
     # never a false failure that rolls back correct data.
-    if actual_rows != exp_n:
+    if actual_rows != exp_n and not keyed:
         # G-1b: for row-removing recipes a dropped step inflates the
         # written population toward the raw count — keep going so the
         # declared-column check can prove it. Anything else is drift.
+        # Keyed runs fall through: the pinned-key classifier below judges
+        # a missing/differing destination row on a stable key as a
+        # provable defect (naming the key), not source drift.
         if not (pop_ops and actual_rows == raw_count):
             reason = (
                 "source changed during run — re-read returned "
@@ -1303,7 +1518,7 @@ def _transform_applied_proof(
                                     (
                                         tc,
                                         "d",
-                                        _vh(_key_norm(row.get(tc))),
+                                        _vh(_val_norm(row.get(tc), _val_ddl(tc))),
                                     )
                                 )
                             if keyed:
@@ -1316,7 +1531,7 @@ def _transform_applied_proof(
                                         _fph(row),
                                         json.dumps(
                                             {
-                                                c: _key_norm(row.get(c))
+                                                c: _val_norm(row.get(c), _val_ddl(c))
                                                 for c in digest_cols
                                             }
                                         ),
@@ -1334,8 +1549,19 @@ def _transform_applied_proof(
             # culprit keys is materialized for column naming.
             pin_store.flush()
             drift_n, n_keys, dest_only = pin_store.drift_stats()
-            drift_n += dest_only
+            # A destination key that was never in the written population
+            # is a foreign row (inserted/duplicated), not source drift —
+            # a source row deleted mid-run stays in pin and counts as
+            # drift, but a key absent from pin entirely is a defect.
+            foreign_n = int(
+                pin_store.db.execute(
+                    "SELECT count(*) FROM destk d "
+                    "LEFT JOIN pin p ON p.k = d.k WHERE p.k IS NULL"
+                ).fetchone()[0]
+            )
+            drift_n += dest_only - foreign_n
             culpr_n, culprit_keys_p = pin_store.culprit_keys()
+            culpr_n += foreign_n
             culprit_cols_p: set[str] = set()
             if culpr_n:
                 _samples = pin_store.samples(culprit_keys_p)
@@ -1349,7 +1575,7 @@ def _transform_applied_proof(
                         culprit_cols_p.update(declared_tcols)
                         continue
                     for (_sc, _tc), _ev in zip(col_pairs, _evals):
-                        if _key_norm(_dvals.get(_tc)) != _ev:
+                        if _val_norm(_dvals.get(_tc), _val_ddl(_tc)) != _ev:
                             culprit_cols_p.add(_tc)
             culprits = (
                 sorted(culprit_cols_p or declared_tcols)
@@ -1411,6 +1637,9 @@ def _transform_applied_proof(
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
             "expected_rows": exp_n,
             "actual_rows": actual_rows,
+            "culprit_keys": (
+                pin_store.culprit_keys_by_kind() if keyed else {}
+            ),
         }
     if not culprits:
         return {
@@ -1422,6 +1651,9 @@ def _transform_applied_proof(
             "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
             "expected_rows": exp_n,
             "actual_rows": actual_rows,
+            "culprit_keys": (
+                pin_store.culprit_keys_by_kind() if keyed else {}
+            ),
         }
 
     culprit_steps = []
@@ -1436,6 +1668,17 @@ def _transform_applied_proof(
             if str(s.get("op") or "") != "scd2"
         ] or [f"recipe {dest_summary.get('shape_recipe_hash')}"]
 
+    key_culprits = pin_store.culprit_keys_by_kind() if keyed else {}
+    key_note = ""
+    if key_culprits:
+        _kc_parts = []
+        for _lbl in ("changed", "missing_in_dest", "extra_in_dest"):
+            if key_culprits.get(_lbl):
+                _kc_parts.append(
+                    f"{_lbl}: {', '.join(key_culprits[_lbl][:8])}"
+                )
+        key_note = " Culprit key(s) — " + "; ".join(_kc_parts) + "."
+
     return {
         "status": "failed",
         "recipe_hash": str(dest_summary.get("shape_recipe_hash") or ""),
@@ -1445,6 +1688,8 @@ def _transform_applied_proof(
         "actual_rows": actual_rows,
         "culprit_columns": culprits,
         "culprit_steps": culprit_steps,
+        "culprit_keys": key_culprits,
+        "key_note": key_note,
         "actual_label": actual_label,
     }
 
@@ -2535,6 +2780,169 @@ def _localize_checksum_mismatch(
     return report
 
 
+_CULPRIT_KEYS_LIMIT = 32
+
+
+def _name_gate8_culprits(
+    report: dict[str, Any],
+    *,
+    source_endpoint: Any,
+    endpoint: Any,
+    dest_summary: dict[str, Any] | None,
+) -> None:
+    """Name culprit keys on a failed keyed PG→PG run.
+
+    Gate-8 fails on a digest difference over the whole population; without a
+    named culprit the operator only has two hex strings. On keyed Postgres
+    routes we can do better in bounded memory: stream ``(pk, row hash)`` from
+    each side into a temp sqlite table, then join to name up to
+    ``_CULPRIT_KEYS_LIMIT`` keys that changed value, went missing, or exist
+    only on the destination. Runs only on the failure path, never on verify.
+    """
+    summary = dest_summary or {}
+    if str(getattr(endpoint, "format", "") or "") != "postgresql":
+        return
+    if source_endpoint is None or str(getattr(source_endpoint, "format", "") or "") != "postgresql":
+        return
+    pk_cols = [
+        str(c)
+        for c in (summary.get("primary_key_columns") or [])
+        if str(c or "").strip()
+    ]
+    if len(pk_cols) != 1:
+        return
+    pk = pk_cols[0]
+    src_tbl = str(getattr(source_endpoint, "table", "") or "").strip()
+    dst_tbl = str(getattr(endpoint, "table", "") or "").strip()
+    if not src_tbl or not dst_tbl:
+        return
+    try:
+        from services.dest_precount import warehouse_sql_table_ref
+        from connectors.sql_identifiers import quote_sql_identifier as _qi
+        from .connector_capabilities import resolve_driver_type
+        from connectors.postgresql_conn import get_connection
+
+        dest_type = resolve_driver_type(endpoint.format or "") or "postgresql"
+        src_type = resolve_driver_type(source_endpoint.format or "") or "postgresql"
+        src_cfg = resolve_connector_config(source_endpoint)
+        dst_cfg = resolve_connector_config(endpoint)
+        qpk = _qi(pk, '"')
+        qpk_d = _qi(pk, '"')
+        src_ref = warehouse_sql_table_ref(
+            src_type, src_cfg, str(src_cfg.get("schema") or ""), src_tbl
+        )
+        dst_ref = warehouse_sql_table_ref(
+            dest_type, dst_cfg, str(dst_cfg.get("schema") or ""), dst_tbl
+        )
+        stmt_src = (
+            f"SELECT {qpk} AS pk, md5(row_to_json(t)::text) AS h "  # nosec B608
+            f"FROM {src_ref} t"
+        )
+        stmt_dst = (
+            f"SELECT {qpk_d} AS pk, md5(row_to_json(t)::text) AS h "  # nosec B608
+            f"FROM {dst_ref} t"
+        )
+
+        fd, path = tempfile.mkstemp(prefix="df_culprits_", suffix=".sqlite3")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.execute(
+                "CREATE TABLE k(side INTEGER NOT NULL, pk TEXT, h TEXT)"
+            )
+            db.execute("CREATE INDEX ki ON k(side, pk)")
+
+            def _load(cfg, stmt, side):
+                # Dedicated connection + server-side cursor: a pooled conn
+                # can carry a stale REPEATABLE READ snapshot, and the
+                # egress-guarded sqlalchemy pool refuses targets the
+                # engine's own psycopg2 path just wrote to.
+                pc = get_connection(
+                    host=cfg.get("host", ""),
+                    port=int(cfg.get("port") or 5432),
+                    database=cfg.get("database", ""),
+                    username=cfg.get("username", ""),
+                    password=cfg.get("password", ""),
+                    connection_string=cfg.get("connection_string", ""),
+                    ssl=bool(cfg.get("ssl", False)),
+                )
+                try:
+                    cur = pc.cursor(name="df_culprits")
+                    cur.execute(stmt)
+                    while True:
+                        chunk = cur.fetchmany(5000)
+                        if not chunk:
+                            break
+                        db.executemany(
+                            "INSERT INTO k(side, pk, h) VALUES (?,?,?)",
+                            ((side, str(r[0]), r[1]) for r in chunk),
+                        )
+                    db.commit()
+                finally:
+                    pc.close()
+
+            _load(src_cfg, stmt_src, 0)
+            _load(dst_cfg, stmt_dst, 1)
+
+            lim = _CULPRIT_KEYS_LIMIT + 1
+            changed = [
+                r[0]
+                for r in db.execute(
+                    "SELECT s.pk FROM k s JOIN k d ON s.pk = d.pk AND d.side = 1 "
+                    "WHERE s.side = 0 AND s.h <> d.h LIMIT ?",
+                    (lim,),
+                )
+            ]
+            missing = [
+                r[0]
+                for r in db.execute(
+                    "SELECT s.pk FROM k s LEFT JOIN k d "
+                    "ON s.pk = d.pk AND d.side = 1 "
+                    "WHERE s.side = 0 AND d.pk IS NULL LIMIT ?",
+                    (lim,),
+                )
+            ]
+            extra = [
+                r[0]
+                for r in db.execute(
+                    "SELECT d.pk FROM k d LEFT JOIN k s "
+                    "ON d.pk = s.pk AND s.side = 0 "
+                    "WHERE d.side = 1 AND s.pk IS NULL LIMIT ?",
+                    (lim,),
+                )
+            ]
+            db.close()
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    except Exception as exc:
+        _logger.warning(
+            "Gate-8 culprit-key naming skipped: %s", exc, exc_info=exc
+        )
+        return
+    culprits: dict[str, Any] = {}
+    parts: list[str] = []
+    for label, keys, desc in (
+        ("changed", changed, "value changed"),
+        ("missing_in_dest", missing, "missing from destination"),
+        ("extra_in_dest", extra, "present only on destination"),
+    ):
+        if keys:
+            culprits[label] = keys[:_CULPRIT_KEYS_LIMIT]
+            suffix = "…" if len(keys) > _CULPRIT_KEYS_LIMIT else ""
+            parts.append(
+                f"{desc}: {', '.join(culprits[label][:8])}{suffix} "
+                f"({len(culprits[label])}{'+' if len(keys) > _CULPRIT_KEYS_LIMIT else ''} key(s))"
+            )
+    if not culprits:
+        return
+    report["culprit_keys"] = culprits
+    msg = str(report.get("message") or "")
+    report["message"] = f"{msg} Culprit key(s) — {'; '.join(parts)}."
+
+
 def _attach_match_summary(
     report: dict[str, Any],
     dest_summary: dict[str, Any] | None,
@@ -2761,6 +3169,79 @@ def _engine_population_digests(
     if source_digest is None or dest_digest is None:
         return None
     return source_digest.checksum, dest_digest.checksum, dest_digest.row_count
+
+
+def _reread_dest_engine_digest(
+    paired: tuple[str, str, int],
+    *,
+    db_type: str,
+    dest_summary: dict[str, Any] | None,
+    cfg: dict[str, Any],
+    schema: str,
+    table_name: str,
+    mappings: list[dict],
+) -> tuple[str, str, int] | None:
+    """Re-read the destination's engine digest at *verify* time (G-1i).
+
+    The writer's ``engine_target_checksum`` is honest but stale: it was
+    computed inside the copy transaction before commit, so post-write
+    tampering is invisible to it. For a PostgreSQL destination we can ask the
+    engine for the same additive digest over the same mapped columns, read
+    now — the source side stays the write-time snapshot digest (that is the
+    population that was copied). Returns the same ``(source, target, rows)``
+    triple with ``target`` replaced by the verify-time read, or ``None`` when
+    the destination cannot be re-read.
+    """
+    summary = dest_summary or {}
+    if db_type != "postgresql":
+        return None
+    if is_count_proof_token(paired[0]) or is_count_proof_token(paired[1]):
+        return None
+    target_cols = [
+        str(c)
+        for c in (
+            (summary.get("source_snapshot") or {}).get(
+                "engine_digest_target_columns"
+            )
+            or []
+        )
+        if str(c or "").strip()
+    ]
+    if not target_cols:
+        target_cols = [
+            str(m.get("target") or "")
+            for m in mappings
+            if isinstance(m, dict) and str(m.get("target") or "").strip()
+        ]
+    if not target_cols or not table_name:
+        return None
+    try:
+        from connectors.postgresql_conn import get_connection
+        from connectors.sql_identifiers import quote_table_ref
+        from services.engine_checksum import postgresql_engine_checksum
+
+        dest_ref = quote_table_ref(
+            table_name, schema or "public", dialect="postgresql"
+        )
+        conn = get_connection(
+            host=cfg.get("host", ""),
+            port=int(cfg.get("port") or 5432),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+        try:
+            with conn.cursor() as cur:
+                digest = postgresql_engine_checksum(cur, dest_ref, target_cols)
+        finally:
+            conn.close()
+    except Exception:
+        return None
+    if digest is None:
+        return None
+    return paired[0], digest.checksum, int(digest.row_count)
 
 
 def _unique_check_dialect(db_type: str) -> str | None:
@@ -3415,6 +3896,11 @@ def _run_reconciliation_impl(
                 **payload,
                 "source_checksum_scope": digest_provenance["source_scope"],
             }
+        if digest_provenance.get("dest_read"):
+            payload = {
+                **payload,
+                "dest_digest_timing": digest_provenance["dest_read"],
+            }
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
         stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
@@ -3891,6 +4377,16 @@ def _run_reconciliation_impl(
             source_table=n5_ctx["source_table"],
             mappings=n5_ctx["mappings"],
         )
+    # The write pass already picked the type basis it fingerprinted on
+    # (mapping/logical types overlaid with the physical carrier) and stamps it
+    # as gate8_digest_types — the read-back must hash against the same basis
+    # or a correct load mismatches in both directions (TEXT carrier degrades
+    # and source-declared overrides alike).
+    stamped_digest_types = dest_summary.get("gate8_digest_types")
+    if isinstance(stamped_digest_types, dict) and stamped_digest_types:
+        dest_types = {
+            str(k): str(v) for k, v in stamped_digest_types.items() if v
+        }
     # Prefer physical types stamped by the writer when present.
     physical = dest_summary.get("column_types") or dest_summary.get("target_types")
     dest_types = overlay_physical_dest_types(dest_types, physical)
@@ -4011,6 +4507,7 @@ def _run_reconciliation_impl(
             try:
                 from services.row_conservation import apply_inferred_leftover_deletes
 
+                _removed_keys: list[tuple] = []
                 deleted = apply_inferred_leftover_deletes(
                     db_type=db_type,
                     cfg=cfg,
@@ -4024,9 +4521,15 @@ def _run_reconciliation_impl(
                         or dest_summary.get("effective_sync_mode")
                         or "full_refresh_overwrite"
                     ),
+                    leftover_out=_removed_keys,
                 )
                 if deleted:
                     dest_summary["leftover_deleted"] = int(deleted)
+                    if _removed_keys:
+                        dest_summary["leftover_deleted_keys"] = [
+                            "\x1f".join(str(p) for p in t)
+                            for t in _removed_keys[:32]
+                        ]
             except Exception as exc:
                 logging.getLogger(__name__).warning(
                     "Overwrite leftover MERGE skipped: %s", exc, exc_info=exc
@@ -4452,14 +4955,53 @@ def _run_reconciliation_impl(
     # here would compare two different algorithms and always disagree.
     paired = _writer_supplied_engine_digests(dest_summary)
     if paired is not None and not source_checksum_scope_note:
-        engine_digests = _with_reread_dest_count(
+        # G-1i: the writer's dest digest was computed inside the copy
+        # transaction — post-write tampering is invisible to it. Re-digest
+        # the destination at verify time (same engine digest, same column
+        # order). When a PostgreSQL destination cannot be re-read, the
+        # verdict must degrade to count-only — never verified on a stale
+        # write-time digest.
+        reread = _reread_dest_engine_digest(
             paired,
             db_type=db_type,
+            dest_summary=dest_summary,
             cfg=cfg,
             schema=schema,
             table_name=table_name,
-            rows_before=rows_before,
+            mappings=mapping_dicts,
         )
+        if reread is not None:
+            paired = reread
+            engine_digests = _with_reread_dest_count(
+                paired,
+                db_type=db_type,
+                cfg=cfg,
+                schema=schema,
+                table_name=table_name,
+                rows_before=rows_before,
+            )
+            if engine_digests is not None:
+                digest_provenance["dest_read"] = "verify_time_engine_digest"
+        elif db_type == "postgresql":
+            source_checksum_scope_label = "count only"
+            source_checksum_scope_note = (
+                "The destination value digest could not be re-read at verify "
+                "time — a write-time digest cannot see post-write changes, so "
+                "this verdict is row-count only, never value-verified."
+            )
+        else:
+            engine_digests = _with_reread_dest_count(
+                paired,
+                db_type=db_type,
+                cfg=cfg,
+                schema=schema,
+                table_name=table_name,
+                rows_before=rows_before,
+            )
+            if engine_digests is not None:
+                digest_provenance["dest_read"] = (
+                    "write_time_engine_digest_no_verify_reread"
+                )
     elif (_engine_digest_enabled() or _cdc_source_image_gate(dest_summary)) and not source_checksum_scope_note:
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
@@ -5400,16 +5942,27 @@ def run_reconciliation(
                 "reason": f"transform-applied proof errored: {exc!s}"[:300],
             }
         if proof:
+            # Plain statement of which compare ran — exact per-row multiset
+            # joins at any size, not a sampled or digest shortcut.
+            proof.setdefault(
+                "compare_mode",
+                "exact per-row multiset joins (disk-backed, all rows)",
+            )
             recon["transform_applied"] = proof
             if proof.get("status") == "failed":
                 steps_txt = ", ".join(proof.get("culprit_steps") or [])
                 recon["passed"] = False
                 recon["verification_verdict"] = "failed"
+                why_txt = (
+                    f"{steps_txt} did not apply as declared"
+                    if steps_txt
+                    else str(proof.get("reason") or "the recipe output differs")
+                )
                 recon["message"] = (
                     f"Transform-applied proof failed: the destination does not "
-                    f"hold the approved recipe's output — {steps_txt} did not "
-                    f"apply as declared (recipe "
+                    f"hold the approved recipe's output — {why_txt} (recipe "
                     f"{proof.get('recipe_hash')})."
+                    f"{proof.get('key_note') or ''}"
                 )
             elif proof.get("status") == "verified":
                 prov = proof.get("provenance") or "recipe re-applied"
@@ -5449,6 +6002,57 @@ def run_reconciliation(
                 note = f"transform proof {label} — {proof.get('reason')}"
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"
+    # Unshaped digest failures only: for shaped runs the transform_applied
+    # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
+    # src vs shaped dest here would flag every transformed row.
+    if (
+        recon.get("checksum_match") is False
+        and not recon.get("culprit_keys")
+        and not recon.get("transform_applied")
+    ):
+        _loc_rows = (
+            (recon.get("verification_ladder") or {}).get("localization") or {}
+        ).get("rows") or []
+        _by_kind: dict[str, list[str]] = {}
+        for _r in _loc_rows:
+            _pk = _r.get("pk")
+            if _pk is None:
+                continue
+            if _r.get("reason") == "missing_side":
+                _kind = (
+                    "missing_in_dest"
+                    if _r.get("source_present")
+                    else "extra_in_dest"
+                )
+            else:
+                _kind = "changed"
+            if sum(len(v) for v in _by_kind.values()) >= 32:
+                break
+            _by_kind.setdefault(_kind, []).append(str(_pk))
+        if _by_kind:
+            recon["culprit_keys"] = _by_kind
+        else:
+            _name_gate8_culprits(
+                recon,
+                source_endpoint=source_endpoint,
+                endpoint=endpoint,
+                dest_summary=dest_summary,
+            )
+            if not recon.get("culprit_keys"):
+                # Never leave a detected mismatch with empty culprits and no
+                # explanation: name why keys could not be produced (the
+                # census needs a single-column PK on a postgres route and
+                # both sides readable), so the verdict degrades honestly.
+                recon["culprit_keys_unavailable_reason"] = (
+                    "culprit keys could not be named — destination key "
+                    "census requires a single-column primary key on a "
+                    "postgres-to-postgres route with both sides readable"
+                )
+                if recon.get("message"):
+                    recon["message"] = (
+                        f"{recon['message']} "
+                        f"({recon['culprit_keys_unavailable_reason']})"
+                    )
     _emit_gate8_verdict(
         recon, endpoint=endpoint, validation_mode=validation_mode,
         rows_written=rows_written, duration_ms=(time.monotonic() - started) * 1000.0,

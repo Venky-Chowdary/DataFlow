@@ -685,9 +685,23 @@ def _write_mapped_csv(
     if digest is not None:
         from services.reconciliation import _iter_fingerprints
 
-        dest_types = {
-            dest: ddl for dest, ddl in zip(dest_cols, physicals, strict=True) if ddl
-        }
+        # Same type basis as Gate-8 and the independent re-read: declared
+        # types win over physical carriers (SQLite TEXT degrade class), so
+        # write-pass and re-read fingerprints canonicalize identically.
+        from services.reconciliation import overlay_physical_dest_types
+
+        dest_types = overlay_physical_dest_types(
+            {
+                dest: ddl
+                for dest, ddl in zip(dest_cols, carriers, strict=True)
+                if ddl
+            },
+            {
+                dest: ddl
+                for dest, ddl in zip(dest_cols, physicals, strict=True)
+                if ddl
+            },
+        )
 
         def fingerprints(rows: list[dict[str, str | None]]) -> None:
             digest.add_many(
@@ -1677,6 +1691,9 @@ def _format_csv_copy(
         "csv_read": snapshot.get("csv_read"),
         "copy_fast_path": "used",
     }
+    _gate8_basis = snapshot.get("gate8_digest_types")
+    if isinstance(_gate8_basis, dict) and _gate8_basis:
+        dest_summary["gate8_digest_types"] = dict(_gate8_basis)
     if write_pass_digest:
         # Mapped rows fingerprinted during the CSV write pass: the Gate-8 source
         # digest the read-back is compared against, not the loader's own ack.
@@ -1900,6 +1917,27 @@ def try_copy_local_csv(
             snap = dict(result.source_snapshot or {})
             snap["write_pass_identity_digest"] = identity_digest
             snap["write_pass_fingerprint_rows"] = fingerprint_rows
+            # The exact basis the write pass fingerprinted on — Gate-8's dest
+            # read-back must hash against the same types or a correct load
+            # mismatches (declared-over-physical overlay, same rule as here).
+            from services.reconciliation import overlay_physical_dest_types
+
+            snap["gate8_digest_types"] = overlay_physical_dest_types(
+                {
+                    dest: ddl
+                    for dest, ddl in zip(
+                        [p[1] for p in pairs], declared_types or [], strict=False
+                    )
+                    if ddl
+                },
+                {
+                    dest: ddl
+                    for dest, ddl in zip(
+                        [p[1] for p in pairs], ddls or [], strict=False
+                    )
+                    if ddl
+                },
+            )
             result = result._replace(source_snapshot=snap)
     except FastPathUnavailable as exc:
         logger.info("CSV COPY declined: %s", exc)

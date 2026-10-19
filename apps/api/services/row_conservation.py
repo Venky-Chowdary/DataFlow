@@ -581,6 +581,7 @@ def apply_inferred_leftover_deletes(
     keys: Sequence[tuple[Any, ...]] | Sequence[Sequence[Any]],
     complete_snapshot: bool,
     sync_mode: str = "",
+    leftover_out: list[tuple[Any, ...]] | None = None,
 ) -> int | None:
     """Hard-DELETE dest keys not in complete source set ``S``. Overwrite only.
 
@@ -651,6 +652,8 @@ def apply_inferred_leftover_deletes(
     ]
     if not leftover:
         return 0
+    if leftover_out is not None:
+        leftover_out.extend(leftover)
     return apply_hard_deletes(
         db_type=engine,
         cfg=cfg,

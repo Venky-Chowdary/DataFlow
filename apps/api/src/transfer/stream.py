@@ -6,6 +6,7 @@ import hashlib
 import logging
 import os
 import tempfile
+import weakref
 from services.brand_env import getenv_brand
 import sys
 import threading
@@ -1595,7 +1596,10 @@ def _stream_database_transfer_impl(
             or []
         )
     pin_ledger = (
-        _StepRawLedger(ledger_key_cols)
+        _StepRawLedger(
+            ledger_key_cols,
+            col_ddl={c: str(schema.get(c, "")) for c in columns},
+        )
         if shape_runner is not None and ledger_key_cols
         else None
     )
@@ -1675,8 +1679,23 @@ def _stream_database_transfer_impl(
     # not a row to reject.
     digest_dest_types = dict(fingerprint_dest_types)
     try:
-        from services.dest_physical_types import apply_physical_temporal_precision
+        from services.dest_physical_types import (
+            apply_physical_temporal_precision,
+            physical_column_types,
+        )
+        from services.reconciliation import overlay_physical_dest_types
 
+        # Same type basis as the dest read-back: the carrier the rows land in
+        # steers the digest — a pre-existing non-text column (DECLARED DECIMAL
+        # over a Mongo string carrier) and a degraded TEXT carrier both follow
+        # overlay_physical_dest_types, or write-pass and read-back hash
+        # identical rows differently.
+        digest_dest_types = overlay_physical_dest_types(
+            digest_dest_types,
+            physical_column_types(
+                dest_type, dest_cfg, table=str(dest_table), columns=list(target_cols)
+            ),
+        )
         digest_dest_types = apply_physical_temporal_precision(
             digest_dest_types, dest_type, dest_cfg, table=str(dest_table)
         )
@@ -3971,7 +3990,21 @@ def _stream_database_transfer_impl(
                     )
 
                     _rtx = overwrite_transaction_for(conn)
+                    # G-1i: record whether this run's write transaction
+                    # cleared the destination ("emptied" an existing table
+                    # or "absent"/create-new via note_truncated) BEFORE
+                    # finish() resets the flags. The transform proof fails
+                    # a leftover-delete only when the run recorded this
+                    # clear — anything reaching the heal afterwards can
+                    # only have been written mid-gap. When no clear ran
+                    # (clear skipped, non-overwrite, resume arming a bare
+                    # txn) heal-removal stays "removed by overwrite".
+                    _run_cleared = bool(
+                        _rtx is not None and _rtx.was_truncated()
+                    )
                     finish_held_overwrite(conn, success=row_path_ok)
+                    if _run_cleared:
+                        dest_summary["overwrite_clear_recorded"] = True
                     _rtables = sorted(
                         {
                             str(v.get("table") or "")
@@ -4639,8 +4672,63 @@ def _stream_database_transfer_impl(
     _carry_single_table_foreign_keys(
         source, destination, table, dest_table, mappings, dest_summary, ddl_log
     )
+    # The exact type basis the write-pass/re-read fingerprinted on — the dest
+    # read-back must hash against it or a correct load mismatches (SQLite TEXT
+    # degrade: write pass hashes DECIMAL-declared, naive read-back hashes the
+    # TEXT carrier literally).
+    dest_summary.setdefault("gate8_digest_types", dict(digest_dest_types))
     return written, ddl_log, dest_summary, columns
 
+
+
+_TEXT_DDL_RE = __import__("re").compile(
+    r"^(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?|BPCHAR|(?:N)?(?:VAR)?CHAR2|TEXT|"
+    r"TINYTEXT|MEDIUMTEXT|LONGTEXT|NTEXT|CLOB|NCLOB|CHARACTER|STRING|ENUM|SET\b",
+    __import__("re").I,
+)
+
+
+def _pin_norm(v: Any, ddl: str = "") -> str:
+    # Identical to the proof-side key/raw-hash normalization
+    # (reconcile_step._src_norm): SOURCE-type-driven — declared text columns
+    # compare literally ('01' never folds into '1', 'A ' keeps its pad),
+    # numeric/date/uuid columns canonicalize so write-side COPY-text and
+    # re-read driver reprs of the same value agree. NULL stays distinct
+    # from ''.
+    if v is None:
+        return "\x00NULL\x00"
+    try:
+        if isinstance(v, str) and ddl and _TEXT_DDL_RE.match(str(ddl).strip()):
+            return v
+        from services.reconciliation import normalize_cell
+
+        return normalize_cell(v, ddl_type=str(ddl or ""), engine="")
+    except Exception:
+        return str(v)
+
+
+_ACTIVE_PIN_LEDGERS: "weakref.WeakSet[_StepRawLedger]" = weakref.WeakSet()
+
+
+def _discard_unconsumed_pin_ledgers() -> None:
+    """Remove spill files of ledgers that never reached the proof.
+
+    Called from the transfer engine's exit path (success, refusal,
+    exception, cancel): a ledger whose exception unwound _stream before
+    summary() is still registered here, and its df_pin_*.tsv must not
+    outlive the run. Ledgers already consumed by the proof unregistered
+    themselves and are untouched.
+    """
+    tid = threading.get_ident()
+    for ledger in list(_ACTIVE_PIN_LEDGERS):
+        # Same-thread only: a concurrent run on another thread owns its
+        # own ledger and must not have its in-flight spill file removed.
+        if ledger._tid != tid:
+            continue
+        try:
+            ledger.discard()
+        except Exception:
+            pass
 
 
 class _StepRawLedger:
@@ -4652,22 +4740,40 @@ class _StepRawLedger:
     judged strictly; a moved/new/missing key is drift. Past ``_SPILL_AT``
     keys the dict flushes to a temp file and later pages stream there,
     so memory stays bounded on million-key runs.
+
+    Every instance registers itself in ``_ACTIVE_PIN_LEDGERS`` until
+    ``summary()`` (handed to the proof) or ``discard()`` marks it
+    consumed; the transfer engine's exit path calls
+    ``_discard_unconsumed_pin_ledgers`` so no exit path — success,
+    refusal, exception, cancel — can leave a ``df_pin_*.tsv`` behind.
     """
 
     _SPILL_AT = 50_000
 
-    def __init__(self, key_columns: list[str]) -> None:
+    def __init__(
+        self,
+        key_columns: list[str],
+        col_ddl: dict[str, str] | None = None,
+    ) -> None:
         self.key_columns = list(key_columns or [])
+        # Source-declared type per column — drives honest normalization so
+        # COPY-text reprs and driver reprs of the same cell hash alike.
+        self._col_ddl = dict(col_ddl or {})
         self._d: dict[str, str] = {}
         self._file: str | None = None
         self._fh = None
+        self._consumed = False
         self.keys = 0
         self.hashed_columns: list[str] = []
+        self._tid = threading.get_ident()
+        _ACTIVE_PIN_LEDGERS.add(self)
 
-    @staticmethod
-    def _hash_row(row: Any) -> str:
+    def _hash_row(self, row: Any) -> str:
         return hashlib.sha256(
-            "\x1f".join("" if v is None else str(v) for v in row).encode()
+            "\x1f".join(
+                _pin_norm(v, self._col_ddl.get(h, ""))
+                for h, v in zip(self.hashed_columns, row)
+            ).encode()
         ).hexdigest()[:16]
 
     def add_page(self, headers: list[str], rows: Any) -> None:
@@ -4681,7 +4787,8 @@ class _StepRawLedger:
         for row in rows:
             try:
                 key = "\x1f".join(
-                    "" if row[i] is None else str(row[i]) for i in kid
+                    _pin_norm(row[i], self._col_ddl.get(headers[i], ""))
+                    for i in kid
                 )
             except (IndexError, TypeError):
                 continue
@@ -4702,12 +4809,48 @@ class _StepRawLedger:
                 self._fh.write(f"{k2}\x00{h2}\n")
             self._d = {}
 
+    def __del__(self) -> None:
+        # If _stream dies before summary() hands the spill file to the
+        # transform proof, nobody else will remove it.
+        try:
+            if not self._consumed:
+                if self._fh is not None:
+                    self._fh.close()
+                    self._fh = None
+                if self._file:
+                    try:
+                        os.unlink(self._file)
+                    except OSError:
+                        pass
+        except Exception:
+            pass
+
+    def discard(self) -> None:
+        """Remove the spill file when the run dies before the proof can
+        consume it; called for every still-active ledger from the
+        engine's exit path."""
+        self._consumed = True
+        _ACTIVE_PIN_LEDGERS.discard(self)
+        try:
+            if self._fh is not None:
+                self._fh.close()
+                self._fh = None
+            if self._file:
+                os.unlink(self._file)
+                self._file = None
+        except Exception:
+            pass
+
     def summary(self) -> dict[str, Any] | None:
+        # Handed to the transform proof via dest_summary — the proof/engine
+        # finally owns the spill file from here, so unregister now.
+        _ACTIVE_PIN_LEDGERS.discard(self)
         if self._fh is not None:
             self._fh.close()
             self._fh = None
         if not self.keys:
             return None
+        self._consumed = True
         out: dict[str, Any] = {
             "keys": self.keys,
             "key_columns": list(self.key_columns),
