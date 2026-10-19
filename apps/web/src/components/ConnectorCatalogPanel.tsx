@@ -298,7 +298,7 @@ export function ConnectorCatalogPanel({
                   }
                 >
                   <div className="df2-connector-tile-icon">
-                    <ConnectorIcon id={catalogType(item.id)} size={28} />
+                    <ConnectorIcon id={item.id} size={28} />
                   </div>
                   <span className="df2-connector-tile-name">{highlightMatch(item.name, debouncedQ)}</span>
                   {item.description && (
