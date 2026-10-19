@@ -153,6 +153,13 @@ class TransferPlan:
     sync_mode: str = ""
     # Operator identity from stream_contracts (source column name). Empty = infer.
     contract_primary_key: str = ""
+    # Live source-catalog PK columns for keyed sync modes whose contract
+    # declared none (a CDC schedule created via the bare API carries
+    # ``primary_key: ""``). The same fallback Validate/Execute policy gates
+    # apply via ``_catalog_pk_for_policy`` — empty means the source had no
+    # catalog key or could not be read, and G9 still blocks and names the
+    # missing declaration. A contract-declared key is never replaced.
+    source_primary_key_columns: list[str] = field(default_factory=list)
     # Introspected destination PK column names (when table exists).
     destination_pk_columns: list[str] = field(default_factory=list)
     destination_table: str = ""

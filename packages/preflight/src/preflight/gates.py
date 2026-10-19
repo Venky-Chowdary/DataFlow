@@ -3702,6 +3702,14 @@ def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
             for part in str(getattr(ctx.plan, "contract_primary_key", "") or "").split(",")
             if part.strip()
         ]
+        # The contract-declared key leads; the live source catalog fills it in
+        # when the contract named none (API-created CDC/SCD2 schedules). Empty
+        # falls through to the gate's own missing-key refusal — never invented.
+        catalog_pk = contract_pk or [
+            str(col).strip()
+            for col in (getattr(ctx.plan, "source_primary_key_columns", None) or [])
+            if str(col or "").strip()
+        ]
         payload = build_sync_contract_gate(
             contracts,
             sync=sync,
@@ -3713,7 +3721,7 @@ def gate_g9_sync_contract(ctx: PreflightContext) -> GateResult:
             pass_status="pass",
             block_status="block",
             source_read_mode=mode,
-            catalog_primary_key_columns=contract_pk or None,
+            catalog_primary_key_columns=catalog_pk or None,
             mappings=_plan_mapping_dicts(ctx),
             source_table=str(getattr(ctx.plan, "stream_name", "") or ""),
         )
