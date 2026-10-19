@@ -528,3 +528,26 @@ def test_x9_db_source_refusal_empty_dest_leaves_nothing(tmp_path, monkeypatch):
     assert not result.success
     snap = _dest_snapshot(dst_db, dst_table)
     assert snap is None, f"table this run created must be dropped, got {snap}"
+
+
+def test_x9_failed_run_reports_undo_and_readback_matches(tmp_path, monkeypatch):
+    """Committed==read-back: a failed run that rolled its partial batch back
+    must (a) say so on the job's error message — an operator must not read a
+    silent failure and believe rows are committed — and (b) leave the
+    destination read-back byte-equal to the pre-run state."""
+    _engine_env(monkeypatch)
+    table = f"x9rb_{uuid.uuid4().hex[:8]}"
+    dbfile = str(tmp_path / "dest.sqlite")
+    result = UniversalTransferEngine().execute(_request(tmp_path, table))
+    assert not result.success
+    error_text = str(getattr(result, "error", "") or "")
+    assert (
+        "partial batch" in error_text
+        or "byte-identical" in error_text
+        or "dropped" in error_text
+    ), f"failure message must surface the batch undo, got: {error_text!r}"
+    snap = _dest_snapshot(dbfile, table)
+    readback_rows = 0 if snap is None else len(snap["rows"])
+    assert readback_rows == 0, (
+        f"read-back shows {readback_rows} row(s) the failure report did not account for"
+    )
