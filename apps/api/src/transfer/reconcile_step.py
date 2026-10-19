@@ -585,6 +585,128 @@ class _DiskKeySet:
         self.close()
 
 
+_RECIPE_ORACLE_DIALECTS = {
+    "postgresql",
+    "postgres",
+    "mysql",
+    "mariadb",
+    # X-19/X-20: SQL Server was silently left out — every sqlserver route
+    # reported "recipe re-applied" with no independent oracle.
+    "sqlserver",
+    "mssql",
+    "azure_sql",
+}
+_TSQL_DIALECTS = {"sqlserver", "mssql", "azure_sql"}
+
+
+def _recipe_step_sql(
+    op: str,
+    opts: dict[str, Any],
+    col_expr: str,
+    params: dict[str, Any],
+    *,
+    src_type: str,
+) -> str | None:
+    """Faithful SQL equivalent of one recipe step, or None when the dialect
+    has none. The G-1d independent oracle recomputes declared columns in the
+    source database and compares multisets — an op without a faithful
+    mapping stays "recipe re-applied" (honest), never fake SQL."""
+    tsql = src_type in _TSQL_DIALECTS
+
+    def _lit(v: Any) -> str:
+        key = f"ov{len(params)}"
+        params[key] = v
+        return f":{key}"
+
+    def _text_cast(expr: str) -> str:
+        if tsql:
+            return f"CAST({expr} AS nvarchar(max))"
+        if src_type in {"mysql", "mariadb"}:
+            return f"CAST({expr} AS CHAR)"
+        return f"{expr}::text"
+
+    def _btrim(expr: str) -> str:
+        if tsql:
+            return f"LTRIM(RTRIM({expr}))"
+        return f"BTRIM({expr})"
+
+    if op == "case":
+        mode = str(opts.get("mode") or "").casefold()
+        if mode == "upper":
+            return f"UPPER({col_expr})"
+        if mode == "lower":
+            return f"LOWER({col_expr})"
+        return None
+    if op == "trim":
+        if tsql:
+            return f"LTRIM(RTRIM({col_expr}))"
+        return f"TRIM({col_expr})"
+    if op == "collapse_whitespace":
+        # _fn_collapse_whitespace = re.sub(r"\s+", " ", t).strip()
+        if tsql:
+            # T-SQL has no regex engine — honestly uncovered here.
+            return None
+        if src_type in {"postgresql", "postgres"}:
+            ws = _lit(r"\s+")
+            return (
+                "BTRIM(regexp_replace("
+                f"{col_expr}, {ws}, {_lit(' ')}, 'g'))"
+            )
+        ws = _lit("\\s+")
+        return (
+            "TRIM(REGEXP_REPLACE("
+            f"{col_expr}, {ws}, {_lit(' ')}))"
+        )
+    if op == "replace":
+        if opts.get("regex"):
+            pat = str(opts.get("search") or "")
+            # Only patterns that cannot match an empty string and use no
+            # look-around/inline-flag syntax are exact under the source's
+            # regex engine — anything else stays uncovered.
+            if re.search(r"\*|\?|\(\?", pat):
+                return None
+            if tsql:
+                return None  # no T-SQL regex — honestly uncovered
+            if src_type in {"postgresql", "postgres"}:
+                return (
+                    f"regexp_replace({col_expr}, {_lit(pat)}, "
+                    f"{_lit(opts.get('replacement', ''))}, 'g')"
+                )
+            return (
+                f"REGEXP_REPLACE({col_expr}, {_lit(pat)}, "
+                f"{_lit(opts.get('replacement', ''))})"
+            )
+        return (
+            f"REPLACE({col_expr}, {_lit(opts.get('search'))}, "
+            f"{_lit(opts.get('replacement', ''))})"
+        )
+    if op == "default_if_null":
+        # is_blank: NULL, empty/whitespace text, wire sentinels, NaN.
+        txt = _text_cast(col_expr)
+        return (
+            f"CASE WHEN {col_expr} IS NULL "
+            f"OR {_btrim(txt)} = '' "
+            f"OR {txt} = 'NaN' "
+            f"OR {txt} IN ({_lit('__df_sql_null__')}, "
+            f"{_lit('__df_missing__')}, {_lit('__df_ddb_null__')}) "
+            f"THEN {_lit(opts.get('value'))} "
+            f"ELSE {txt} END"
+        )
+    if op == "null_if":
+        expr = col_expr
+        for v in opts.get("values") or []:
+            expr = f"NULLIF({expr}, {_lit(v)})"
+        return expr
+    if op == "cast_column" and str(
+        opts.get("to_type") or ""
+    ).casefold() == "text":
+        if tsql:
+            return f"CAST({col_expr} AS nvarchar(max))"
+        cast = "TEXT" if src_type in {"postgresql", "postgres"} else "CHAR"
+        return f"CAST({col_expr} AS {cast})"
+    return None
+
+
 def _transform_applied_proof(
     *,
     shape_recipe: dict[str, Any] | None,
@@ -1050,83 +1172,24 @@ def _transform_applied_proof(
     # an op-implementation defect, not drift, so it fails and names the
     # step. Coverage is honestly partial: ops/dialects without a faithful
     # SQL mapping are reported as "recipe re-applied" only.
-    _ORACLE_DIALECTS = {"postgresql", "postgres", "mysql", "mariadb"}
+    _ORACLE_DIALECTS = {
+        "postgresql",
+        "postgres",
+        "mysql",
+        "mariadb",
+        # X-19/X-20: SQL Server was silently left out — every sqlserver
+        # route reported "recipe re-applied" with no independent oracle.
+        "sqlserver",
+        "mssql",
+        "azure_sql",
+    }
 
-    def _step_sql(
-        op: str, opts: dict[str, Any], col_expr: str, params: dict[str, Any]
-    ) -> str | None:
-        def _lit(v: Any) -> str:
-            key = f"ov{len(params)}"
-            params[key] = v
-            return f":{key}"
-
-        if op == "case":
-            mode = str(opts.get("mode") or "").casefold()
-            if mode == "upper":
-                return f"UPPER({col_expr})"
-            if mode == "lower":
-                return f"LOWER({col_expr})"
-            return None
-        if op == "trim":
-            return f"TRIM({col_expr})"
-        if op == "collapse_whitespace":
-            # _fn_collapse_whitespace = re.sub(r"\s+", " ", t).strip()
-            if src_type in {"postgresql", "postgres"}:
-                ws = _lit(r"\s+")
-                return (
-                    "BTRIM(regexp_replace("
-                    f"{col_expr}, {ws}, {_lit(' ')}, 'g'))"
-                )
-            ws = _lit("\\s+")
-            return (
-                "TRIM(REGEXP_REPLACE("
-                f"{col_expr}, {ws}, {_lit(' ')}))"
-            )
-        if op == "replace":
-            if opts.get("regex"):
-                pat = str(opts.get("search") or "")
-                # Only patterns that cannot match an empty string and use
-                # no look-around/inline-flag syntax are exact under the
-                # source's regex engine — anything else stays uncovered.
-                if re.search(r"\*|\?|\(\?", pat):
-                    return None
-                if src_type in {"postgresql", "postgres"}:
-                    return (
-                        f"regexp_replace({col_expr}, {_lit(pat)}, "
-                        f"{_lit(opts.get('replacement', ''))}, 'g')"
-                    )
-                return (
-                    f"REGEXP_REPLACE({col_expr}, {_lit(pat)}, "
-                    f"{_lit(opts.get('replacement', ''))})"
-                )
-            return (
-                f"REPLACE({col_expr}, {_lit(opts.get('search'))}, "
-                f"{_lit(opts.get('replacement', ''))})"
-            )
-        if op == "default_if_null":
-            # is_blank: NULL, empty/whitespace text, wire sentinels, NaN.
-            return (
-                f"CASE WHEN {col_expr} IS NULL "
-                f"OR BTRIM({col_expr}::text) = '' "
-                f"OR {col_expr}::text = 'NaN' "
-                f"OR {col_expr}::text IN ({_lit('__df_sql_null__')}, "
-                f"{_lit('__df_missing__')}, {_lit('__df_ddb_null__')}) "
-                f"THEN {_lit(opts.get('value'))} "
-                f"ELSE {col_expr}::text END"
-            )
-        if op == "null_if":
-            expr = col_expr
-            for v in opts.get("values") or []:
-                expr = f"NULLIF({expr}, {_lit(v)})"
-            return expr
-        if op == "cast_column" and str(
-            opts.get("to_type") or ""
-        ).casefold() == "text":
-            cast = "TEXT" if src_type in {"postgresql", "postgres"} else "CHAR"
-            return f"CAST({col_expr} AS {cast})"
-        return None
-
-    qs = '`' if src_type in {"mysql", "mariadb", "clickhouse"} else '"'
+    if src_type in {"mysql", "mariadb", "clickhouse"}:
+        qs = '`'
+    elif src_type in {"sqlserver", "mssql", "azure_sql"}:
+        qs = "["
+    else:
+        qs = '"'
     src_ref_sql = warehouse_sql_table_ref(
         src_type,
         src_cfg,
@@ -1159,7 +1222,7 @@ def _transform_applied_proof(
                 expr = oracle_exprs.get(scol) or quote_sql_identifier(
                     scol, qs
                 )
-                expr = _step_sql(op, opts, expr, oracle_params)
+                expr = _recipe_step_sql(op, opts, expr, oracle_params, src_type=src_type)
                 if expr is None:
                     oracle_ok = False
                     _step_ok = False
@@ -1464,11 +1527,15 @@ def _transform_applied_proof(
         scd2_opts, dict
     ):
         try:
-            _q = (
-                "`"
-                if dest_db_type in {"mysql", "mariadb", "clickhouse"}
-                else '"'
-            )
+            if dest_db_type in {"mysql", "mariadb", "clickhouse"}:
+                _q = "`"
+            elif dest_db_type in {"sqlserver", "mssql", "azure_sql"}:
+                _q = "["
+            else:
+                _q = '"'
+            _tsql_dest = dest_db_type in {"sqlserver", "mssql", "azure_sql"}
+            _limit1 = "LIMIT 1" if not _tsql_dest else ""
+            _top1 = "TOP 1 " if _tsql_dest else ""
             _keys = [str(k) for k in scd2_opts.get("keys") or []]
             _cur = str(scd2_opts.get("is_current") or "is_current")
             _vf = str(scd2_opts.get("valid_from") or "valid_from")
@@ -1504,9 +1571,9 @@ def _transform_applied_proof(
                     with _ieng.connect() as _iconn:
                         _n = _iconn.execute(
                             sa.text(
-                                f"SELECT 1 FROM {_dest_ref_i} "  # nosec B608
+                                f"SELECT {_top1}1 FROM {_dest_ref_i} "  # nosec B608
                                 f"WHERE {_cur_pred} GROUP BY {_kcols} "
-                                "HAVING COUNT(*) <> 1 LIMIT 1"
+                                f"HAVING COUNT(*) <> 1 {_limit1}".rstrip()
                             )
                         ).first()
                         if _n:
@@ -1518,15 +1585,26 @@ def _transform_applied_proof(
                         _qvf = quote_sql_identifier(_vf, _q)
                         _qvt = quote_sql_identifier(_vt, _q)
                         _order = f"{_qver}, {_qvf}" if _qver else _qvf
+                        if _tsql_dest:
+                            _gap_pred = (
+                                "o.nxt IS NOT NULL AND ("
+                                "o.vt IS NULL AND o.nxt IS NOT NULL "
+                                "OR o.vt IS NOT NULL AND o.nxt IS NULL "
+                                "OR o.vt <> o.nxt)"
+                            )
+                        else:
+                            _gap_pred = (
+                                "o.nxt IS NOT NULL "
+                                "AND o.vt IS DISTINCT FROM o.nxt"
+                            )
                         _adj = _iconn.execute(
                             sa.text(
-                                "SELECT 1 FROM (SELECT "
+                                f"SELECT {_top1}1 FROM (SELECT "
                                 f"{_kcols}, {_qvt} AS vt, {_qvf} AS vf, "
                                 f"LEAD({_qvf}) OVER (PARTITION BY {_kcols} "
                                 f"ORDER BY {_order}) AS nxt "
                                 f"FROM {_dest_ref_i}) o "  # nosec B608
-                                "WHERE o.nxt IS NOT NULL "
-                                "AND o.vt IS DISTINCT FROM o.nxt LIMIT 1"
+                                f"WHERE {_gap_pred} {_limit1}".rstrip()
                             )
                         ).first()
                         if _adj:
@@ -1536,9 +1614,9 @@ def _transform_applied_proof(
                             )
                         _flag = _iconn.execute(
                             sa.text(
-                                f"SELECT 1 FROM {_dest_ref_i} "  # nosec B608
+                                f"SELECT {_top1}1 FROM {_dest_ref_i} "  # nosec B608
                                 f"WHERE {_cur_pred} AND {_qvt} IS NOT NULL "
-                                "LIMIT 1"
+                                f"{_limit1}".rstrip()
                             )
                         ).first()
                         if _flag:
@@ -1570,18 +1648,34 @@ def _transform_applied_proof(
                                 f" = d.{quote_sql_identifier(k, _q)}"
                                 for k in _keys
                             )
+                            def _distinct_frag(t: str) -> str:
+                                dq = f"d.{quote_sql_identifier(t, _q)}"
+                                sq = (
+                                    f"s.{quote_sql_identifier(str(_inv_map.get(t) or t), qs)}"
+                                )
+                                if _tsql_dest:
+                                    # IS DISTINCT FROM is SQL Server 2022+;
+                                    # emit the portable null-safe form.
+                                    dt = f"CAST({dq} AS nvarchar(max))"
+                                    st = f"CAST({sq} AS nvarchar(max))"
+                                    return (
+                                        f"({dt} <> {st} "
+                                        f"OR ({dq} IS NULL AND {sq} IS NOT NULL) "
+                                        f"OR ({dq} IS NOT NULL AND {sq} IS NULL))"
+                                    )
+                                return (
+                                    f"{dq}::text IS DISTINCT FROM {sq}::text"
+                                )
+
                             _diffs = " OR ".join(
-                                f"d.{quote_sql_identifier(t, _q)}::text IS "
-                                "DISTINCT FROM "
-                                f"s.{quote_sql_identifier(str(_inv_map.get(t) or t), qs)}::text"
-                                for t in _tracked
+                                _distinct_frag(t) for t in _tracked
                             )
                             _eq = _iconn.execute(
                                 sa.text(
-                                    f"SELECT 1 FROM {_dest_ref_i} d "  # nosec B608
+                                    f"SELECT {_top1}1 FROM {_dest_ref_i} d "  # nosec B608
                                     f"JOIN {_src_ref_i} s ON {_join} "
                                     f"WHERE {_cur_pred.replace(quote_sql_identifier(_cur, _q), 'd.' + quote_sql_identifier(_cur, _q))} "
-                                    f"AND ({_diffs}) LIMIT 1"
+                                    f"AND ({_diffs}) {_limit1}".rstrip()
                                 )
                             ).first()
                             if _eq:
