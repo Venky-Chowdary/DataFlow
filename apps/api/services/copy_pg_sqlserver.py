@@ -259,6 +259,81 @@ def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
     return row
 
 
+def _sqlserver_decimal_cast_placeholder(ddl: str) -> str | None:
+    """``CAST(%s AS DECIMAL(p,s))`` for wide-decimal dest columns.
+
+    pyodbc fast_executemany describes the parameter from the column type and
+    sizes the wchar buffer from the precision — DECIMAL(38) yields a 76-byte
+    buffer that truncates the 39-char fixed-point text a >28-digit bind sends
+    ('String data, right truncation: length 78 buffer 76'). Wrapping the
+    placeholder in an explicit CAST declares the parameter a varchar-sizeable
+    input, so the canonical text reaches the server and converts. Only
+    ``DECIMAL(p>28)`` can receive a text-bound wide decimal, so narrower
+    columns keep the plain ``%s``.
+    """
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    if normalize_logical_type(ddl or "") != LOGICAL_DECIMAL:
+        return None
+    p, s = parse_numeric_precision_scale(ddl or "")
+    if p is None or int(p) <= 28:
+        return None
+    return f"CAST(%s AS DECIMAL({int(p)},{0 if s is None else int(s)}))"
+
+
+def sqlserver_insert_placeholders(sqlserver_ddls: list[str]) -> str:
+    """``%s`` placeholder list; wide-decimal dest columns wrapped in CAST."""
+    return ", ".join(
+        _sqlserver_decimal_cast_placeholder(ddl) or "%s" for ddl in sqlserver_ddls
+    )
+
+
+def set_wide_decimal_inputsizes(cur: Any, sqlserver_ddls: list[str]) -> None:
+    """Declare wide-decimal params ``SQL_VARCHAR`` so pyodbc does not truncate.
+
+    ``setinputsizes((SQL_DECIMAL, …))`` keeps the same precision-sized buffer;
+    declaring varchar with room for sign + digits + point lets the fixed-point
+    text bind whole, and the CAST in the insert converts it (pyodbc#845).
+    pymssql has no setinputsizes — its RPC packing already sends the varchar
+    payload at real length.
+    """
+    if not _cursor_is_pyodbc(cur):
+        return
+    try:
+        import pyodbc
+    except ImportError:
+        return
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    inner = getattr(cur, "_cur", cur)
+    setter = getattr(inner, "setinputsizes", None)
+    if setter is None:
+        return
+    sizes: list[Any] = []
+    any_wide = False
+    for ddl in sqlserver_ddls:
+        p, _s = (
+            parse_numeric_precision_scale(ddl or "")
+            if normalize_logical_type(ddl or "") == LOGICAL_DECIMAL
+            else (None, None)
+        )
+        if p is not None and int(p) > 28:
+            sizes.append((pyodbc.SQL_VARCHAR, int(p) + 3))
+            any_wide = True
+        else:
+            sizes.append(None)
+    if any_wide:
+        setter(*sizes)
+
+
 class _CopyExecutemanySink:
     """File-like COPY TO STDOUT consumer that binds decoded batches."""
 
@@ -393,7 +468,7 @@ def copy_postgres_to_sqlserver(
     dst_schema = _ss_schema_of(dest_cfg, dest_schema)
     dest_ref = _ss_table_ref(dst_schema, dest_table)
     col_sql = ", ".join(_ss_ident(c) for c in target_cols)
-    placeholders = ", ".join(["%s"] * len(target_cols))
+    placeholders = sqlserver_insert_placeholders(sqlserver_ddls)
     insert_sql = (
         f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
         f"VALUES ({placeholders})"
@@ -412,6 +487,7 @@ def copy_postgres_to_sqlserver(
         src_cur = source_conn.cursor()
         dst_cur = dest_conn.cursor()
         fast = _enable_fast_executemany(dst_cur)
+        set_wide_decimal_inputsizes(dst_cur, sqlserver_ddls)
         try:
             src_cur.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
@@ -670,8 +746,10 @@ def copy_postgres_to_sqlserver(
             except Exception:
                 logger.debug("SQL Server dest cursor close skipped", exc_info=True)
     except Exception:
-        if preserve_dest_on_failure:
-            raise
+        # A table this run created (or an existing dest that was empty before)
+        # must end byte-identical to before the failure — never a partial
+        # commit. PK-shard resume preserves committed rows only for a
+        # pre-existing occupied dest.
         if created_here:
             try:
                 with dest_conn.cursor() as cur:
@@ -686,6 +764,8 @@ def copy_postgres_to_sqlserver(
                 dest_conn.commit()
             except Exception:
                 logger.debug("dest truncate after copy failure skipped", exc_info=True)
+        elif preserve_dest_on_failure:
+            raise
         raise
     finally:
         try:
