@@ -344,12 +344,57 @@ def _delete_all_rows(
             conn.close()
         return True
 
+    if db_type in {"mongodb", "mongo"}:
+        from pymongo import MongoClient
+
+        from src.transfer.adapters import mongodb_connection_string
+
+        database = str(cfg.get("database") or "")
+        if not database:
+            return False
+        client: MongoClient = MongoClient(
+            mongodb_connection_string(cfg), serverSelectionTimeoutMS=5000
+        )
+        try:
+            client[database][table_name].delete_many({})
+        finally:
+            client.close()
+        return True
+
+    if db_type == "bigquery":
+        from connectors.bigquery_conn import get_client
+        from services.copy_bigquery_common import bigquery_table_ref
+        from services.dest_precount import _bigquery_run_job
+
+        project = str(cfg.get("database") or cfg.get("project_id") or "")
+        dataset = str(schema or cfg.get("schema") or cfg.get("dataset") or "")
+        if not project or not dataset:
+            return False
+        client = get_client(
+            project_id=project,
+            credentials_path=str(cfg.get("connection_string") or ""),
+            service_account=str(cfg.get("service_account") or ""),
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 0),
+        )
+        ref = bigquery_table_ref(project, dataset, table_name)
+        _bigquery_run_job(client, f"DELETE FROM {ref} WHERE TRUE")  # nosec B608
+        return True
+
     from services.dialect_profiles import warehouse_sql_quote_dialect
     from services.dest_precount import warehouse_sql_engine, warehouse_sql_table_ref
 
     dialect = warehouse_sql_quote_dialect(db_type)
     if dialect not in {"sqlserver", "oracle"}:
-        return False
+        # SQLAlchemy-writer dialects (DuckDB, Trino, RisingWave, Databricks…)
+        # fell through to "left in place" with no cleanup attempted — a
+        # failed batch on them silently stayed landed (G-1i-R1 / X-18).
+        from src.transfer.connector_capabilities import resolve_driver_type
+
+        raw_type = str(cfg.get("type") or db_type)
+        if resolve_driver_type(raw_type) != "generic_sql":
+            return False
+        dialect = db_type
     import sqlalchemy as sa
 
     ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
