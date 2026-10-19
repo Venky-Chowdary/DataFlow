@@ -916,8 +916,27 @@ def mark_sqlalchemy_chunk_committed(
 
 
 def _is_duplicate_key_error(exc: BaseException) -> bool:
-    """Whether an exception is a primary-key / unique violation."""
+    """Whether an exception is a primary-key / unique violation.
+
+    CHECK, FOREIGN KEY and NOT NULL violations also surface as IntegrityError
+    (SQL Server error 547, 515, ...) — they must NOT be treated as duplicates:
+    silently skipping them mislabels a contract violation as a repeat row.
+    """
     text = str(exc).lower()
+    non_duplicate_signals = (
+        "check constraint",
+        "conflicted with the check",
+        "foreign key constraint",
+        "conflicted with the foreign key",
+        "cannot insert null",
+        "cannot insert the value null",
+        "not null constraint",
+        "does not allow nulls",
+        "violates not-null constraint",
+        "violates check constraint",
+    )
+    if any(s in text for s in non_duplicate_signals):
+        return False
     signals = (
         "duplicate key",
         "unique constraint",

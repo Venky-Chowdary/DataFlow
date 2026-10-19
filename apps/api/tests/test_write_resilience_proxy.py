@@ -167,3 +167,52 @@ def test_postgres_writer_reconnects_and_skips_ledged_chunk(monkeypatch):
     # One physical write; retry skipped via ledger.
     assert write_calls["n"] == 1
     assert ("job-ledger-1", "t1:1", 0) in ledger
+
+
+def test_check_fk_notnull_violations_are_not_masked_as_duplicate_key():
+    """X-13: SQL Server CHECK / FK / NOT NULL violations raise IntegrityError
+    too — classifying them as duplicates silently skips a contract violation
+    and mislabels the failure as 'duplicate key on id'."""
+    from connectors.write_resilience import _is_duplicate_key_error
+
+    class _IntegrityError(Exception):
+        __name__ = "IntegrityError"
+
+    _IntegrityError.__name__ = "IntegrityError"
+
+    mssql_check = (
+        "(pyodbc.IntegrityError) ('23000', '[23000] [Microsoft][ODBC Driver 18 "
+        "for SQL Server][SQL Server]The INSERT statement conflicted with the "
+        "CHECK constraint \"ck_t_positive\". The conflict occurred in database "
+        "\"qa\", table \"dbo.t\", column \'amount\'. (547) (SQLExecDirectW)')"
+    )
+    mssql_fk = (
+        "(pyodbc.IntegrityError) ('23000', '[23000] The INSERT statement "
+        "conflicted with the FOREIGN KEY constraint \"fk_t_parent\" (547)')"
+    )
+    mssql_notnull = (
+        "(pyodbc.IntegrityError) ('23000', '[23000] Cannot insert the value "
+        "NULL into column \'name\', table \'dbo.t\'; column does not allow "
+        "nulls. INSERT fails. (515)')"
+    )
+    pg_check = 'new row for relation "t" violates check constraint "ck_t"'
+    pg_notnull = 'null value in column "name" violates not-null constraint'
+
+    for msg in (mssql_check, mssql_fk, mssql_notnull, pg_check, pg_notnull):
+        assert not _is_duplicate_key_error(Exception(msg)), msg
+
+    # Same driver class (IntegrityError) carrying a CHECK violation: still not
+    # a duplicate even though the type-name fallback exists.
+    class FakeIntegrityError(Exception):
+        pass
+
+    FakeIntegrityError.__name__ = "IntegrityError"
+    assert not _is_duplicate_key_error(FakeIntegrityError(mssql_check))
+
+    # Genuine duplicates still classify.
+    assert _is_duplicate_key_error(
+        Exception("Violation of PRIMARY KEY constraint 'pk_t' (2627)")
+    )
+    assert _is_duplicate_key_error(
+        FakeIntegrityError("(pyodbc.IntegrityError) Duplicate entry '7' (1062)")
+    )
