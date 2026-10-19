@@ -218,6 +218,10 @@ TOOL_DEFINITIONS: list[dict] = [
                         "differs, so a truncated credential is never stored."
                     ),
                 },
+                "secret_field": {
+                    "type": "string",
+                    "description": "When the call carries several secret fields, name the field secret_length/secret_sha256 cover.",
+                },
                 "secret_length": {
                     "type": "integer",
                     "description": (
@@ -1813,6 +1817,7 @@ class DataPilotTools:
         private_key_passphrase: str = "",
         secret_sha256: str = "",
         secret_length: int = 0,
+        secret_field: str = "",
         message: str = "",
         test_first: bool = True,
         host_key: str = "",
@@ -1859,6 +1864,7 @@ class DataPilotTools:
         integrity = secret_integrity_error(
             secret_sha256=secret_sha256,
             secret_length=secret_length,
+            secret_field=secret_field,
             password=password or private_key_passphrase,
             private_key=private_key,
             connection_string=connection_string,
@@ -3565,6 +3571,7 @@ class DataPilotTools:
         private_key_passphrase: str = "",
         secret_sha256: str = "",
         secret_length: int = 0,
+        secret_field: str = "",
     ) -> ToolResult:
         from .lifecycle_tools import update_connector
 
@@ -3575,6 +3582,7 @@ class DataPilotTools:
             warehouse=warehouse, auth_role=auth_role, auth_mode=auth_mode,
             private_key=private_key, private_key_passphrase=private_key_passphrase,
             secret_sha256=secret_sha256, secret_length=secret_length,
+            secret_field=secret_field,
         )
 
     def _set_schedule_enabled(
