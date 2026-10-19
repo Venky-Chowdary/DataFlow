@@ -664,6 +664,23 @@ def _job_tool(
     return _tool_result(tool, success=False, output=None, error=f"Unknown job tool {tool}")
 
 
+def _resolved_connector_id(conn: dict[str, Any]) -> str:
+    """Public connector id, whichever field stores it.
+
+    Canonical docs carry ``id``; docs written through paths that generated
+    their own ``_id`` keep the public id in ``_id`` only (the same two-field
+    resolution ``connector_store._connector_id_query`` uses for lookups).
+    Resolving only ``id``/``connector_id`` produced briefs with
+    ``connector_id: ""`` — probe/mark_tested/update/delete then acted on an
+    empty id (X-23).
+    """
+    for field in ("id", "connector_id", "_id"):
+        value = str(conn.get(field) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
     ctype = str(conn.get("type") or conn.get("format") or "")
     # Role is the driver's declared topology, not a stale stored string —
@@ -691,7 +708,7 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             pass
     brief = {
-        "connector_id": str(conn.get("id") or conn.get("connector_id") or ""),
+        "connector_id": _resolved_connector_id(conn),
         "name": str(conn.get("name") or ""),
         "type": ctype,
         "host": host,
@@ -706,6 +723,31 @@ def _connector_brief(conn: dict[str, Any]) -> dict[str, Any]:
             "connection string — the stored host field is not what is dialed."
         )
     return brief
+
+
+def _unresolved_id_error(tool: str, conn: dict[str, Any]) -> ToolResult:
+    """Refuse to probe or stage a write against a doc with no resolvable id.
+
+    A connector doc that carries neither ``id`` nor ``_id`` cannot be
+    addressed: probing or staging with ``connector_id=""`` would no-op or,
+    worse, silently hit a different record. Fail closed instead (X-23).
+    """
+    name = str(conn.get("name") or "")
+    _logger.warning(
+        "%s refused: connector %r carries no resolvable id field",
+        tool,
+        name,
+    )
+    return _tool_result(
+        tool,
+        success=False,
+        output={"name": name},
+        error=(
+            f"Connector “{name or '?'}” has no resolvable id — it cannot be "
+            "tested, updated, or deleted through the assistant. Re-save it "
+            "from the Connectors UI so it gets a canonical id."
+        ),
+    )
 
 
 # Delete, in-place edit, and CDC prepare write or destroy an instance.
@@ -825,6 +867,8 @@ def prepare_cdc_source(
         return err
     assert conn is not None
     brief = _connector_brief(conn)
+    if not brief["connector_id"]:
+        return _unresolved_id_error("prepare_cdc_source", conn)
     engine = str(brief.get("type") or conn.get("type") or "")
     described = describe_cdc_prepare(engine)
     if not described.get("stage"):
@@ -860,12 +904,15 @@ def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
         return err
     assert conn is not None
     brief = _connector_brief(conn)
+    if not brief["connector_id"]:
+        return _unresolved_id_error("test_connector", conn)
     from services.connector_probe import probe_saved_connector
     from services.connector_store import mark_tested
 
     ok, message, _cfg = probe_saved_connector(brief["connector_id"], workspace_id=conn.get("workspace_id") or None)
     mark_tested(brief["connector_id"], ok)
-    return _tool_result("test_connector",
+    return _tool_result(
+        "test_connector",
         success=True,
         output={**brief, "ok": bool(ok), "message": str(message or ""), "risk": "safe"},
     )
@@ -877,6 +924,8 @@ def delete_connector(connector_id: str = "", name: str = "") -> ToolResult:
         return err
     assert conn is not None
     brief = _connector_brief(conn)
+    if not brief["connector_id"]:
+        return _unresolved_id_error("delete_connector", conn)
     dependents = _schedules_bound_to(brief["connector_id"])
     preview = {**brief, "bound_schedules": dependents}
     return _stage(
@@ -932,6 +981,8 @@ def update_connector(  # nosec B107
         return err
     assert conn is not None
     brief = _connector_brief(conn)
+    if not brief["connector_id"]:
+        return _unresolved_id_error("update_connector", conn)
     requested: dict[str, Any] = {
         "host": (host or "").strip(),
         "port": int(port or 0),
