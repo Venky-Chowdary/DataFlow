@@ -81,6 +81,13 @@ def probe_saved_connector(
         # not make an addressable doc "not found" (X-24). The scope narrows a
         # lookup; it cannot be the reason an id that resolved stops resolving.
         conn = get_connector(connector_id, workspace_id=None)
+        if conn is not None:
+            # Tenancy: the retry only heals a same-scope miss. A doc stored
+            # under a *different* workspace than the caller's claim is not the
+            # caller's to probe — fail closed (X-24 P2 hardening).
+            doc_ws = (getattr(conn, "workspace_id", None) or "").strip() or None
+            if doc_ws and doc_ws != workspace_id:
+                conn = None
     raw_doc: dict[str, Any] | None = None
     if conn is None:
         # Some deployments list connectors through mongodb_service while the
@@ -91,6 +98,12 @@ def probe_saved_connector(
             from services.mongodb_service import get_mongodb_service
 
             raw = get_mongodb_service().get_connector(connector_id)
+            if isinstance(raw, dict):
+                # Same tenancy gate as the scoped retry: a raw doc under a
+                # workspace the caller did not claim is not visible here.
+                doc_ws = (raw.get("workspace_id") or "").strip() or None
+                if workspace_id and doc_ws and doc_ws != workspace_id:
+                    raw = None
             if isinstance(raw, dict):
                 try:
                     conn = _doc_to_connector(raw)

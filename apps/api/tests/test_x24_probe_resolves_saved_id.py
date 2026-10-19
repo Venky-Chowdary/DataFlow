@@ -60,19 +60,45 @@ def _patch_driver(monkeypatch) -> list[str]:
     return probed
 
 
-def test_probe_scoped_miss_falls_back_to_unscoped(fake_mongo_store, monkeypatch):
-    """Doc stored under workspace 'ws-prod'; probe arrives scoped 'ws-other'.
-    The id already addressed the doc — a scope mismatch must not hide it."""
+def test_probe_scoped_miss_heals_same_scope_doc(fake_mongo_store, monkeypatch):
+    """Doc stored unscoped (''); caller claims ws-prod scope. The unscoped
+    retry heals the store miss — the doc's scope does not contradict the
+    caller's claim."""
     public_id = str(uuid.uuid4())
-    fake_mongo_store.insert_one(_trial_doc(public_id, workspace_id="ws-prod"))
+    fake_mongo_store.insert_one(_trial_doc(public_id, workspace_id=""))
     probed = _patch_driver(monkeypatch)
 
     ok, message, cfg = probe_mod.probe_saved_connector(
-        public_id, workspace_id="ws-other"
+        public_id, workspace_id="ws-prod"
     )
     assert ok is True, message
     assert probed == ["postgresql"], "driver was never reached — conn stayed None"
     assert cfg
+
+
+def test_probe_refuses_cross_workspace_doc(fake_mongo_store, monkeypatch):
+    """Tenancy (X-24 P2): doc stored under ws-prod; caller claims ws-other.
+    The unscoped retry AND the raw-doc service fallback must not hand a
+    cross-workspace doc to the driver — callers pass the resolved doc's
+    own workspace_id, never drop scope."""
+    doc = _trial_doc(str(uuid.uuid4()), workspace_id="ws-prod")
+    public_id = doc["_id"]
+    fake_mongo_store.insert_one(doc)
+
+    class _FakeSvc:
+        def get_connector(self, cid):
+            return doc if cid == public_id else None
+
+    monkeypatch.setattr(
+        "services.mongodb_service.get_mongodb_service", lambda: _FakeSvc()
+    )
+    probed = _patch_driver(monkeypatch)
+
+    ok, message, _ = probe_mod.probe_saved_connector(
+        public_id, workspace_id="ws-other"
+    )
+    assert ok is False
+    assert probed == [], "cross-workspace doc reached the driver — tenancy leak"
 
 
 def test_probe_same_workspace_still_resolves(fake_mongo_store, monkeypatch):
