@@ -191,9 +191,11 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         "name": "update_connector",
         "description": (
             "Stage a change to one saved connector's connection fields (host, port, "
-            "database, username, password, connection_string, schema, ssl) or its "
-            "name. Pending action until Confirm; the connector id, and every "
-            "pipeline bound to it, stay the same. Secrets are never echoed."
+            "database, username, password, connection_string, schema, ssl, "
+            "warehouse, auth_role, auth_mode, SFTP host-key trust, SQL Server "
+            "trust_server_certificate) or its name. Pending action until Confirm; "
+            "the connector id, and every pipeline bound to it, stay the same. "
+            "Secrets are never echoed."
         ),
         "input_schema": {
             "type": "object",
@@ -209,6 +211,22 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                 "schema": {"type": "string"},
                 "ssl": {"type": "boolean"},
                 "new_name": {"type": "string"},
+                "host_key": {
+                    "type": "string",
+                    "description": "SFTP only: operator-approved server key fingerprint (SHA256:...) shown by a failed test; pins this connector.",
+                },
+                "known_hosts": {
+                    "type": "string",
+                    "description": "SFTP only: known_hosts entry or file contents to trust for this connector.",
+                },
+                "host_key_policy": {
+                    "type": "string",
+                    "description": "SFTP only: host-key policy (e.g. strict/pin/auto) recorded with the connector.",
+                },
+                "trust_server_certificate": {
+                    "type": "boolean",
+                    "description": "SQL Server only: operator-declared skip of TLS chain verification for self-signed / private-CA servers.",
+                },
                 "warehouse": {
                     "type": "string",
                     "description": "Engine warehouse (Snowflake warehouse, e.g. DATAFLOW_WH).",
@@ -1070,6 +1088,9 @@ def update_connector(  # nosec B107
     ssl: bool | None = None,
     new_name: str = "",
     host_key: str = "",
+    known_hosts: str = "",
+    host_key_policy: str = "",
+    trust_server_certificate: bool | None = None,
     warehouse: str = "",
     auth_role: str = "",
     auth_mode: str = "",
@@ -1083,23 +1104,19 @@ def update_connector(  # nosec B107
 
     Empty values mean "unchanged". The payload keeps the new secrets on the
     server-side ack ledger; the preview only says that a secret changed.
-    An SFTP host-key pin is not editable here: the PUT body
-    (``ConnectorSaveDTO``) has no trust fields, so a staged pin would be
-    dropped on Confirm while the preview claimed it changed.
+    SFTP host-key trust (``host_key``/``known_hosts``/``host_key_policy``) and
+    SQL Server ``trust_server_certificate`` ride the same allow-listed
+    ``ConnectorSaveDTO`` fields the UI writes — Confirm persists them under
+    ``extra`` via the store's lift.
     """
     if (host_key or "").strip():
-        _logger.warning("update_connector refused an SFTP host-key change for %r", connector_id or name)
-        return _tool_result(
-            "update_connector",
-            success=False,
-            output=None,
-            error=(
-                "update_connector cannot change an SFTP host key pin — the saved-connector "
-                "update has no host-key field, so the new pin would not be stored. After "
-                "verifying the new fingerprint with the server admin, save it with "
-                "create_connector(host_key=SHA256:...) as a new connector."
-            ),
-        )
+        from connectors.sftp_common import normalize_host_key_pin
+
+        try:
+            host_key = normalize_host_key_pin(host_key)
+        except ValueError as exc:
+            _logger.warning("update_connector refused a malformed SFTP host_key pin for %r", connector_id or name)
+            return _tool_result("update_connector", success=False, output=None, error=str(exc))
     conn, err = _connector("update_connector", connector_id, name)
     if err:
         return err
@@ -1117,6 +1134,7 @@ def update_connector(  # nosec B107
     )
     if integrity:
         return _tool_result("update_connector", success=False, output=None, error=integrity)
+    stored_extra = conn.get("extra") if isinstance(conn.get("extra"), dict) else {}
     requested: dict[str, Any] = {
         "host": (host or "").strip(),
         "port": int(port or 0),
@@ -1133,14 +1151,29 @@ def update_connector(  # nosec B107
         "private_key": private_key or "",
         "name": (new_name or "").strip(),
     }
+    # Trust extras live under ``extra`` on the stored record — compare against
+    # that, not the record root.
+    trust_requested = {
+        "host_key": (host_key or "").strip(),
+        "known_hosts": (known_hosts or "").strip(),
+        "host_key_policy": (host_key_policy or "").strip(),
+    }
+    trust_changes = {
+        k: v for k, v in trust_requested.items() if v and v != stored_extra.get(k)
+    }
     # Snowflake key-pair records carry the key passphrase in the ``password``
     # field (the driver passes ``private_key_passphrase=password``) — the
     # save DTO has no separate passphrase column.
     if (private_key_passphrase or "").strip():
         requested["password"] = private_key_passphrase
     changes = {k: v for k, v in requested.items() if v and v != conn.get(k)}
+    changes.update(trust_changes)
     if ssl is not None and bool(ssl) != bool(conn.get("ssl")):
         changes["ssl"] = bool(ssl)
+    if trust_server_certificate is not None and bool(trust_server_certificate) != bool(
+        stored_extra.get("trust_server_certificate")
+    ):
+        changes["trust_server_certificate"] = bool(trust_server_certificate)
     if not changes:
         return _tool_result(
             "update_connector",
@@ -1149,7 +1182,8 @@ def update_connector(  # nosec B107
             error=(
                 f"What should change on “{brief['name']}”? Give a host, port, database, "
                 "username, password, connection string, schema, warehouse, "
-                "account role (auth_role), auth mode, private key, ssl or a new name."
+                "account role (auth_role), auth mode, private key, ssl, SFTP "
+                "host-key trust, SQL Server trust_server_certificate, or a new name."
             ),
         )
     if "name" in changes:

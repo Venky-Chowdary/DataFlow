@@ -235,6 +235,18 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": "SFTP only: operator-approved server key fingerprint "
                     "(SHA256:...) shown by a failed test; pins this connector.",
                 },
+                "known_hosts": {
+                    "type": "string",
+                    "description": "SFTP only: known_hosts entry or file contents to trust for this connector.",
+                },
+                "host_key_policy": {
+                    "type": "string",
+                    "description": "SFTP only: host-key policy (e.g. strict/pin/auto) recorded with the connector.",
+                },
+                "trust_server_certificate": {
+                    "type": "boolean",
+                    "description": "SQL Server only: operator-declared skip of TLS chain verification for self-signed / private-CA servers.",
+                },
                 "message": {
                     "type": "string",
                     "description": "Original user message (for credential extraction)",
@@ -1821,6 +1833,9 @@ class DataPilotTools:
         message: str = "",
         test_first: bool = True,
         host_key: str = "",
+        known_hosts: str = "",
+        host_key_policy: str = "",
+        trust_server_certificate: bool | None = None,
     ) -> ToolResult:
         from .connector_create import build_connector_draft, draft_is_complete
 
@@ -1848,6 +1863,9 @@ class DataPilotTools:
                 "service_account": service_account,
                 "ssl": ssl,
                 "host_key": host_key,
+                "known_hosts": known_hosts,
+                "host_key_policy": host_key_policy,
+                "trust_server_certificate": bool(trust_server_certificate),
                 "schema": schema,
                 "warehouse": warehouse,
                 "role": role,
@@ -1962,6 +1980,7 @@ class DataPilotTools:
                         "account": draft.get("account") or "",
                         "service_account": draft.get("service_account") or "",
                         "host_key": draft.get("host_key") or "",
+                        "trust_server_certificate": draft.get("trust_server_certificate") or "",
                         "workspace_id": str(draft.get("workspace_id") or ""),
                     },
                 )
@@ -3564,6 +3583,9 @@ class DataPilotTools:
         ssl: bool | None = None,
         new_name: str = "",
         host_key: str = "",
+        known_hosts: str = "",
+        host_key_policy: str = "",
+        trust_server_certificate: bool | None = None,
         warehouse: str = "",
         auth_role: str = "",
         auth_mode: str = "",
@@ -3579,6 +3601,8 @@ class DataPilotTools:
             connector_id, name, host=host, port=port, database=database,
             username=username, password=password, connection_string=connection_string,
             schema=schema, ssl=ssl, new_name=new_name, host_key=host_key,
+            known_hosts=known_hosts, host_key_policy=host_key_policy,
+            trust_server_certificate=trust_server_certificate,
             warehouse=warehouse, auth_role=auth_role, auth_mode=auth_mode,
             private_key=private_key, private_key_passphrase=private_key_passphrase,
             secret_sha256=secret_sha256, secret_length=secret_length,
