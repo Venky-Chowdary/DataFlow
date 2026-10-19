@@ -385,6 +385,15 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
                 "Re-save the connector with a valid PAT (DataFlow stores it in "
                 "the Password/PAT field), or switch the record to Key-pair."
             )
+        if auth_mode == "user_pass":
+            # A token-shaped refusal on a password attempt means the password
+            # was rejected (or a JWT-looking value was stored in the password
+            # field) — no private key was used, so name the password.
+            return (
+                "Snowflake refused the stored password. Check the password, or "
+                "switch to Programmatic access token / Key-pair if this user "
+                "requires token or key auth."
+            )
         return (
             "Snowflake key-pair authentication failed. Check the username, account "
             "host, and that the public key is assigned (ALTER USER … SET RSA_PUBLIC_KEY)."
