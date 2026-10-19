@@ -266,6 +266,62 @@ def test_x9_writer_reject_preserves_prior_rows(tmp_path, monkeypatch):
     )
 
 
+def _clean_csv(n: int = 3000) -> bytes:
+    # amt = i/100 keeps every row under the dest CHECK (amt < 100).
+    lines = [f"{i},{i/100:.2f}" for i in range(1, n)]
+    return ("id,amt\n" + "\n".join(lines) + "\n").encode()
+
+
+def _clean_request(tmp_path: Path, table: str) -> TransferRequest:
+    recipe = {"steps": [{"op": "cast_column", "column": "amt", "options": {"to_type": "decimal"}}]}
+    return TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=EndpointConfig(
+            kind="database",
+            format="sqlite",
+            host="",
+            port=0,
+            database=str(tmp_path / "dest.sqlite"),
+            username="",
+            password="",
+            table=table,
+        ),
+        source_filename="amt.csv",
+        source_content=_clean_csv(),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+        skip_preflight=True,
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=["id", "amt"]
+        ).recipe_hash,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 1.0, "target_type": "integer"},
+            {"source": "amt", "target": "amt", "confidence": 1.0, "target_type": "DECIMAL(10,2)"},
+        ],
+    )
+
+
+def test_x12_successful_overwrite_preserves_ddl(tmp_path, monkeypatch):
+    """X-12: a successful overwrite on a customer's existing table must keep
+    its declared DDL byte-identical — PK, CHECK, NOT NULL, types. A
+    stage+publish that renames a fresh table over the live one silently
+    drops the customer's constraints."""
+    _engine_env(monkeypatch)
+    table = f"x12_{uuid.uuid4().hex[:8]}"
+    dbfile = str(tmp_path / "dest.sqlite")
+    _make_prior(dbfile, table)
+    before = _dest_snapshot(dbfile, table)
+    result = UniversalTransferEngine().execute(_clean_request(tmp_path, table))
+    assert result.success
+    after = _dest_snapshot(dbfile, table)
+    assert after is not None
+    assert len(after["rows"]) == 2999
+    assert after["ddl"] == before["ddl"], (
+        f"customer DDL changed by a successful overwrite:\nbefore={before['ddl']}\nafter ={after['ddl']}"
+    )
+
+
 def test_x9_db_source_refusal_empty_dest_leaves_nothing(tmp_path, monkeypatch):
     """DB->DB create-new drop: the run-created table must be absent, not just
     empty — byte-identical means the destination had no such table before."""
