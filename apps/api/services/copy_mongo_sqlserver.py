@@ -37,7 +37,11 @@ from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session
 from services.copy_mongo_sink import bson_to_python
 from services.copy_pg_mongo import mongo_collection
 from services.copy_pg_mysql import mapping_is_plain_carry
-from services.copy_pg_sqlserver import _enable_fast_executemany, pg_sqlserver_copy_batch
+from services.copy_pg_sqlserver import (
+    _enable_fast_executemany,
+    bind_row_for_sqlserver,
+    pg_sqlserver_copy_batch,
+)
 from services.copy_sqlserver_pg import _close_ss
 from services.copy_sqlserver_sqlserver import (
     _count as _ss_count,
@@ -166,11 +170,11 @@ def copy_mongo_to_sqlserver(
                         )
                     )
                     if len(batch) >= batch_size:
-                        dst_cur.executemany(insert_sql, batch)
+                        dst_cur.executemany(insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
                         copied += len(batch)
                         batch.clear()
             if batch:
-                dst_cur.executemany(insert_sql, batch)
+                dst_cur.executemany(insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
                 copied += len(batch)
             dest_conn.commit()
         finally:

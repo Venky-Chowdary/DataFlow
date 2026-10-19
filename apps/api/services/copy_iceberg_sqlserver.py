@@ -37,7 +37,11 @@ from services.copy_iceberg_pg import (
 )
 from services.copy_pg_iceberg import iceberg_copy_endpoint
 from services.copy_pg_mysql import mapping_is_plain_carry
-from services.copy_pg_sqlserver import _enable_fast_executemany, pg_sqlserver_copy_batch
+from services.copy_pg_sqlserver import (
+    _enable_fast_executemany,
+    bind_row_for_sqlserver,
+    pg_sqlserver_copy_batch,
+)
 from services.copy_sqlserver_pg import _close_ss
 from services.copy_sqlserver_sqlserver import (
     _count as _ss_count,
@@ -74,11 +78,11 @@ def _arrow_into_sqlserver(
         for row in zip(*cols):
             batch.append(tuple(row))
             if len(batch) >= batch_size:
-                dst_cur.executemany(insert_sql, batch)
+                dst_cur.executemany(insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
                 copied += len(batch)
                 batch.clear()
     if batch:
-        dst_cur.executemany(insert_sql, batch)
+        dst_cur.executemany(insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
         copied += len(batch)
     return copied
 

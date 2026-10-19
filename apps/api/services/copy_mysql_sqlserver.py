@@ -42,7 +42,11 @@ from services.copy_pg_mysql import (
     pg_mysql_copy_partitions,
     pg_mysql_copy_workers,
 )
-from services.copy_pg_sqlserver import _enable_fast_executemany, pg_sqlserver_copy_batch
+from services.copy_pg_sqlserver import (
+    _enable_fast_executemany,
+    bind_row_for_sqlserver,
+    pg_sqlserver_copy_batch,
+)
 from services.copy_sqlserver_pg import _close_ss
 from services.copy_sqlserver_sqlserver import (
     _count as _ss_count,
@@ -86,7 +90,7 @@ def _select_into_sqlserver(
             if not rows:
                 break
             for row in rows:
-                batch.append(tuple(row))
+                batch.append(bind_row_for_sqlserver(dst_cur, tuple(row)))
                 if len(batch) >= batch_size:
                     dst_cur.executemany(insert_sql, batch)
                     copied += len(batch)

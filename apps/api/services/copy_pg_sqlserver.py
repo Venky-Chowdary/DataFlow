@@ -215,6 +215,31 @@ def _enable_fast_executemany(cur: Any) -> bool:
     return False
 
 
+def _cursor_is_pymssql(cur: Any) -> bool:
+    """True when the dest cursor is backed by pymssql (FreeTDS), which cannot
+    RPC-pack a Python ``Decimal`` at wide precision — a DECIMAL(38,10) value
+    aborts the batch with TDS error 8023. Canonical text binds instead;
+    SQL Server converts varchar→decimal implicitly (X-25)."""
+    return type(cur).__module__.startswith("pymssql")
+
+
+def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Bind one row for the SQL Server driver this cursor uses.
+
+    pymssql only: ``Decimal`` values are sent as canonical decimal text
+    (``format(d, 'f')`` — never scientific notation), which the server
+    converts into the decimal column. pyodbc binds ``Decimal`` natively
+    and is untouched.
+    """
+    if not _cursor_is_pymssql(cur):
+        return row
+    from decimal import Decimal
+
+    return tuple(
+        format(v, "f") if isinstance(v, Decimal) else v for v in row
+    )
+
+
 class _CopyExecutemanySink:
     """File-like COPY TO STDOUT consumer that binds decoded batches."""
 
@@ -288,7 +313,10 @@ class _CopyExecutemanySink:
     def _flush_batch(self) -> None:
         if not self._batch:
             return
-        self._cur.executemany(self._insert_sql, self._batch)
+        self._cur.executemany(
+            self._insert_sql,
+            [bind_row_for_sqlserver(self._cur, r) for r in self._batch],
+        )
         self.rows += len(self._batch)
         self._batch.clear()
 
