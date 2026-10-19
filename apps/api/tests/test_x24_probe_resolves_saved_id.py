@@ -113,6 +113,37 @@ def test_probe_falls_back_to_mongodb_service_doc(fake_mongo_store, monkeypatch):
     assert cfg
 
 
+def test_probe_malformed_doc_reports_unreadable_not_missing(
+    fake_mongo_store, monkeypatch
+):
+    """Prod shape: the raw doc resolves for the list path, but its record
+    cannot be materialized (e.g. a credential field that fails decryption in
+    from_dict). The probe must say 'exists but unreadable' — never 'not
+    found' for a doc the workspace can see."""
+    public_id = str(uuid.uuid4())
+    raw_doc = {"_id": public_id}  # no 'type'/'name' — from_dict cannot parse
+
+    class _StoreMiss:
+        def find_one(self, query):
+            return None
+
+    class _FakeSvc:
+        def get_connector(self, cid):
+            return raw_doc if cid == public_id else None
+
+    monkeypatch.setattr(store, "_mongo_collection", lambda: _StoreMiss())
+    monkeypatch.setattr(
+        "services.mongodb_service.get_mongodb_service", lambda: _FakeSvc()
+    )
+    probed = _patch_driver(monkeypatch)
+
+    ok, message, _ = probe_mod.probe_saved_connector(public_id, workspace_id=None)
+    assert ok is False
+    assert "not found" not in message
+    assert "could not be read" in message
+    assert probed == []
+
+
 def test_probe_unknown_id_still_reports_not_found(fake_mongo_store, monkeypatch):
     """Fail-closed: a genuinely unknown id must never reach the driver."""
     probed = _patch_driver(monkeypatch)

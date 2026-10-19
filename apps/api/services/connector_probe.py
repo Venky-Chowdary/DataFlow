@@ -81,6 +81,7 @@ def probe_saved_connector(
         # not make an addressable doc "not found" (X-24). The scope narrows a
         # lookup; it cannot be the reason an id that resolved stops resolving.
         conn = get_connector(connector_id, workspace_id=None)
+    raw_doc: dict[str, Any] | None = None
     if conn is None:
         # Some deployments list connectors through mongodb_service while the
         # store layer misses the same doc (file fallback, collection shape).
@@ -91,7 +92,18 @@ def probe_saved_connector(
 
             raw = get_mongodb_service().get_connector(connector_id)
             if isinstance(raw, dict):
-                conn = _doc_to_connector(raw)
+                try:
+                    conn = _doc_to_connector(raw)
+                except Exception as exc:
+                    # The doc exists — it resolved for the list path — but its
+                    # record cannot be materialized (e.g. an undecryptable
+                    # stored credential). "Not found" lies about that (X-24).
+                    raw_doc = raw
+                    _LOG.warning(
+                        "connector probe: doc %s could not be materialized: %s",
+                        connector_id,
+                        exc,
+                    )
         except Exception:
             conn = None
     with connector_operation(
@@ -101,6 +113,16 @@ def probe_saved_connector(
         connector_id=connector_id,
     ) as op:
         if not conn:
+            if raw_doc is not None:
+                op.failed(category="record_unreadable")
+                return (
+                    False,
+                    f"Connector '{connector_id}' exists but its saved record "
+                    "could not be read (a stored field is malformed — usually "
+                    "an undecryptable credential). Re-save it from the "
+                    "Connectors UI, then Test again.",
+                    {},
+                )
             op.failed(category="not_found")
             return False, f"Connector '{connector_id}' not found", {}
 
