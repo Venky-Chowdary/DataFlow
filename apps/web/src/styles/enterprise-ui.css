@@ -6701,14 +6701,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .dt-toast-host {
   /* Docked bottom-right (dataflow-ui.css): the top-right stack this rule
      used to force landed on the page header and covered the Policy card on
-     the Connectors empty state — toasts must never cover content (D-BP-4). */
-  top: auto !important;
-  /* No !important on bottom: the studio step-specific rules raise the
-     clearance through ``body:has()`` specificity and must be able to win. */
+     the Connectors empty state — toasts must never cover content (D-BP-4).
+     No !important anywhere: the studio step rules raise bottom clearance and
+     cap the stack height through ``body:has()`` specificity, and !important
+     here made those caps dead code (the D-BP-17 stack cap never engaged). */
+  top: auto;
   bottom: calc(60px + env(safe-area-inset-bottom, 0px));
-  right: 16px !important;
-  max-height: calc(100dvh - var(--df-header-height, 56px) - 88px) !important;
-  z-index: var(--df-z-toast, 1100) !important;
+  right: 16px;
+  max-height: calc(100dvh - var(--df-header-height, 56px) - 88px);
+  z-index: var(--df-z-toast, 1100);
 }
 
 .df-app-boot-overlay {
