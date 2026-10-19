@@ -102,6 +102,9 @@ pytestmark = pytest.mark.skipif(
 def isolated(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    # Loopback resolves to both families — without ::1 the guard refuses the
+    # saved localhost connector on boxes where localhost -> ::1 (loop run).
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
     import services.schedule_store as schedule_store
 
     monkeypatch.setattr(schedule_store, "_mongo_backend", lambda: None)
