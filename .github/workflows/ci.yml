@@ -519,6 +519,12 @@ jobs:
         working-directory: apps/web
         run: node scripts/check_important_budget.mjs
 
+      - name: a11y + raw-hex ratchet (audit P1-5/P2-6)
+        id: a11y_hex
+        if: ${{ !cancelled() && (success() || failure()) }}
+        working-directory: apps/web
+        run: node scripts/check_a11y_hex.mjs
+
       # Surface which gate failed when earlier steps failed but proofs still ran.
       - name: Fail job if api tests or proof gates failed
         if: ${{ always() && !cancelled() }}
@@ -533,9 +539,10 @@ jobs:
           # but its outcome was never read, so an oversized bundle merged green.
           chunks="${{ steps.chunk_budgets.outcome }}"
           imp="${{ steps.important_budget.outcome }}"
-          echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks important_budget=$imp"
+          a11y="${{ steps.a11y_hex.outcome }}"
+          echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks important_budget=$imp a11y_hex=$a11y"
           fail=0
-          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp"; do
+          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y"; do
             name="${name_out%%:*}"
             out="${name_out##*:}"
             # skipped only acceptable when job cancelled mid-flight; otherwise require success
@@ -552,6 +559,7 @@ jobs:
           echo "- web_build: \`$web\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- chunk_budgets: \`$chunks\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- important_budget: \`$imp\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- a11y_hex: \`$a11y\`" >> "$GITHUB_STEP_SUMMARY"
           if [ "$fail" -ne 0 ]; then
             echo "Red CI blocks merge — fix failing gates before claiming production readiness." >> "$GITHUB_STEP_SUMMARY"
             exit 1
