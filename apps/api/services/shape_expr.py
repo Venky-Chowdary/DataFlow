@@ -29,7 +29,11 @@ from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP, localcontext
 from typing import Any, Callable, Mapping, Sequence
 
-from services.value_serializer import cell_to_string, is_null_evidence
+from services.value_serializer import (
+    NULL_WIRE_SENTINELS,
+    cell_to_string,
+    is_null_evidence,
+)
 
 __all__ = [
     "ExpressionError",
@@ -316,15 +320,37 @@ class _Case(_Node):
 # Value coercion — one definition, shared by every operator and function
 # ---------------------------------------------------------------------------
 
+import contextvars
+
+# Database-sourced rows carry real '' / whitespace values that must NOT
+# collapse into NULL the way spreadsheet-empty cells do (X-1). The runner
+# sets this to False when the source is a typed database; file/spreadsheet
+# readers keep the legacy collapse.
+_BLANK_AS_NULL: "contextvars.ContextVar[bool]" = contextvars.ContextVar(
+    "df_shape_blank_as_null", default=True
+)
+
+
+def blank_as_null() -> bool:
+    """Whether ''/whitespace-only text counts as null in this run."""
+    return _BLANK_AS_NULL.get()
+
 
 def is_blank(value: Any) -> bool:
-    """Null-ish for shaping purposes: SQL NULL, empty/whitespace, Missing, NaN.
+    """Null-ish for shaping purposes: SQL NULL, Missing, NaN — plus
+    empty/whitespace text only for loose (file) sources.
 
     A spreadsheet's empty cell arrives as ``""`` from one reader and ``None``
     from another; treating them differently would make the same recipe behave
-    differently per source. Reader-wired ``SQL_NULL_SENTINEL`` used to look
-    like a present string, so ``is_null`` / ``coalesce`` invented a token.
+    differently per source. Database sources are typed: ``''`` is a stored
+    value distinct from SQL NULL, so collapsing it is silent data change.
+    Reader-wired ``SQL_NULL_SENTINEL`` used to look like a present string, so
+    ``is_null`` / ``coalesce`` invented a token.
     """
+    if not _BLANK_AS_NULL.get() and isinstance(value, str):
+        # Typed source: '' and '   ' are real values; NULL wire sentinels
+        # still mean NULL.
+        return value.strip() in NULL_WIRE_SENTINELS
     if is_null_evidence(value):
         return True
     if isinstance(value, float) and value != value:
@@ -334,7 +360,7 @@ def is_blank(value: Any) -> bool:
 
 def _as_text(value: Any) -> str | None:
     """Present text. Reader-wired SQL NULL is not a customer token."""
-    if is_null_evidence(value):
+    if is_blank(value):
         return None
     if isinstance(value, str):
         return value

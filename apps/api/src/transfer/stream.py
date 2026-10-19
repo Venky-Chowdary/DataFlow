@@ -1573,6 +1573,7 @@ def _stream_database_transfer_impl(
             key_columns=pk_source_cols,
             workspace_id=workspace_id,
             source_types=dict(schema or {}),
+            typed_values=_typed_value_source(src_read_type),
         )
     # G-1d: pin every keyed raw row the write consumed so the post-write
     # proof can pin source stability per key instead of inferring drift.
@@ -4281,7 +4282,7 @@ def _stream_database_transfer_impl(
         # replays the same approved recipe. Its own runner: the run's shaping
         # effects were counted on the write pass and must not be counted twice.
         reread_shaper = (
-            ShapeRunner(shape_runner.recipe) if shape_runner is not None else None
+            ShapeRunner(shape_runner.recipe, typed_values=shape_runner.typed_values) if shape_runner is not None else None
         )
         reread_holdouts: list[dict[str, Any]] = []
         reread_tombstones_excluded = 0
@@ -4723,6 +4724,15 @@ def _stream_database_transfer_impl(
     dest_summary.setdefault("gate8_digest_types", dict(digest_dest_types))
     return written, ddl_log, dest_summary, columns
 
+
+
+def _typed_value_source(fmt: str) -> bool:
+    try:
+        from services.shape_apply import is_typed_value_source
+
+        return is_typed_value_source(fmt)
+    except Exception:
+        return False
 
 
 _TEXT_DDL_RE = __import__("re").compile(

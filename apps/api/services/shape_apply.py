@@ -40,11 +40,30 @@ class ShapeRunner:
     the counts cover the whole population, not one chunk.
     """
 
-    def __init__(self, recipe: ShapeRecipe, *, sample_limit: int = 25, workspace_id: str = "") -> None:
+    def __init__(
+        self,
+        recipe: ShapeRecipe,
+        *,
+        sample_limit: int = 25,
+        workspace_id: str = "",
+        typed_values: bool = False,
+    ) -> None:
         self.recipe = recipe
+        # typed_values: source is a database — '' and whitespace-only text
+        # are stored values, not spreadsheet-empty cells (X-1).
+        self.typed_values = typed_values
         self._engine = ShapeEngine(
             recipe, sample_limit=sample_limit, workspace_id=workspace_id
         )
+
+    def _apply(self, fn):
+        from services.shape_expr import _BLANK_AS_NULL
+
+        token = _BLANK_AS_NULL.set(not self.typed_values)
+        try:
+            return fn()
+        finally:
+            _BLANK_AS_NULL.reset(token)
 
     @property
     def recipe_hash(self) -> str:
@@ -72,7 +91,7 @@ class ShapeRunner:
 
     def records(self, batch: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
         """Shape one batch of record dicts, dropping filtered/diverted rows."""
-        return self._engine.apply_batch(batch)
+        return self._apply(lambda: self._engine.apply_batch(batch))
 
     def batches(
         self,
@@ -85,7 +104,7 @@ class ShapeRunner:
         in it was shaped out.
         """
         for batch in batches:
-            yield self._engine.apply_batch(batch)
+            yield self._apply(lambda: self._engine.apply_batch(batch))
 
     def matrix(
         self,
@@ -100,7 +119,7 @@ class ShapeRunner:
         shaped_rows: list[list[Any]] = []
         for row in rows:
             record = {h: (row[i] if i < len(row) else None) for i, h in enumerate(headers)}
-            for shaped in self._engine.apply_records(record):
+            for shaped in self._apply(lambda: list(self._engine.apply_records(record))):
                 out_headers = list(self.output_columns or headers)
                 shaped_rows.append([shaped.get(h) for h in out_headers])
         out_headers = list(self.output_columns or headers)
@@ -145,6 +164,21 @@ class ShapeRunner:
         }
 
 
+TYPED_VALUE_SOURCES = frozenset({
+    "postgresql", "postgres", "mysql", "mariadb", "sqlite", "sqlserver",
+    "mssql", "oracle", "mongodb", "bigquery", "snowflake", "databricks",
+    "clickhouse", "redshift", "db2", "informix", "duckdb", "cassandra",
+    "cockroachdb", "greenplum", "teradata", "sybase", "hana", "vertica",
+    "db2i", "firebird", "timescaledb", "yugabytedb", "singlestore",
+})
+
+
+def is_typed_value_source(fmt: str) -> bool:
+    """True when the source is a typed database whose '' and whitespace-only
+    text cells are stored values — not spreadsheet-empty cells (X-1)."""
+    return str(fmt or "").strip().lower() in TYPED_VALUE_SOURCES
+
+
 def build_shape_runner(
     payload: Any,
     *,
@@ -154,6 +188,7 @@ def build_shape_runner(
     approved_set_hash: str = "",
     sample_limit: int = 25,
     workspace_id: str = "",
+    typed_values: bool = False,
 ) -> ShapeRunner | None:
     """Parse a recipe payload into a runner, or ``None`` when there is nothing to do.
 
@@ -169,6 +204,7 @@ def build_shape_runner(
     recipe = ShapeRecipe.parse(
         payload, source_columns=source_columns, source_types=source_types
     )
+    _runner_typed = typed_values
     blocked = block_message(recipe.set_graph)
     if blocked:
         raise ShapeError(blocked)
@@ -188,7 +224,7 @@ def build_shape_runner(
             f"transform recipe {recipe.recipe_hash} is not the one approved at Validate "
             f"({approved_hash}) — re-validate the changed recipe before running"
         )
-    return ShapeRunner(recipe, sample_limit=sample_limit, workspace_id=workspace_id)
+    return ShapeRunner(recipe, sample_limit=sample_limit, workspace_id=workspace_id, typed_values=_runner_typed)
 
 
 def _scale_ceilings(recipe: ShapeRecipe) -> dict[str, int]:
