@@ -2560,8 +2560,11 @@ def _maybe_attach_verification_ladder(
     except Exception as exc:
         logging.getLogger(__name__).debug("ladder dest load failed: %s", exc)
         # X-22: a covered destination whose population could not be read has no
-        # value proof — a count-only green must not stamp "verified".
-        report["unproven"] = True
+        # value proof — a count-only green must not stamp "verified". A report
+        # already carrying real digests is proven either way: a measured
+        # mismatch is a failure, not an unproven verdict.
+        if not _report_has_value_digest(report):
+            report["unproven"] = True
         return _return(report, "dest_population_read_failed")
 
     # A shaping recipe rewrote source-side values on the read, so the rows still
@@ -2645,7 +2648,11 @@ def _maybe_attach_verification_ladder(
         # X-22: a covered source whose re-read attempted but came back empty
         # (driver threw, or zero rows) while the destination holds rows has no
         # value proof — do not let the count-only green stamp "verified".
-        if source_reread and target_rows:
+        if (
+            source_reread
+            and target_rows
+            and not _report_has_value_digest(report)
+        ):
             report["unproven"] = True
         return _return(report, "source_or_dest_population_empty")
 
@@ -3039,6 +3046,19 @@ def _report_is_count_proof_only(report: dict[str, Any] | None) -> bool:
         return True
     scope = str(r.get("checksum_scope") or "")
     return bool(scope) and any(known in scope for known in _COUNT_PROOF_SCOPES)
+
+
+def _report_has_value_digest(report: dict[str, Any] | None) -> bool:
+    """True when the report already carries a real (non-count-token) value
+    digest — a measured checksum mismatch is a proven failure and a matching
+    digest is proven equality, so the ladder may never downgrade either to
+    'unproven' (regression vs test_gate8_verdict_real_shapes)."""
+    r = report or {}
+    return bool(
+        (r.get("checksum") or r.get("target_checksum"))
+        and not is_count_proof_token(r.get("checksum"))
+        and not is_count_proof_token(r.get("target_checksum"))
+    )
 
 
 _SOURCE_DIGEST_MODES = ("inline_write_pass", "source_reread")
