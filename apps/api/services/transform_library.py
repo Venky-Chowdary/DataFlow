@@ -7,6 +7,7 @@ Mongo outage degrades to the file rather than losing a recipe.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -85,6 +86,33 @@ def recipe_step_diff(
                 }
             )
     return out
+
+
+def recipe_diff_hash(
+    recipe_id: str,
+    from_version: int,
+    to_version: int,
+    step_diff: list[dict[str, Any]],
+) -> str:
+    """Content hash binding an upgrade preview to a later re-pin.
+
+    ``upgrade-preview`` returns this so ``transform-recipe/upgrade`` can
+    require the exact diff the operator reviewed — a recipe edited again
+    after previewing produces a different hash and the upgrade refuses
+    with 409 instead of silently applying an unreviewed change.
+    """
+    canon = json.dumps(
+        {
+            "recipe_id": recipe_id,
+            "from_version": int(from_version),
+            "to_version": int(to_version),
+            "step_diff": step_diff,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+    return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
 class TransformLibraryStore(ABC):
