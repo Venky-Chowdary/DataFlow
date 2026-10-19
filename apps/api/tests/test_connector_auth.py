@@ -446,3 +446,57 @@ def test_snowflake_session_kwargs_threads_key_pair_and_drops_topology():
     )
     assert nested["private_key"].startswith("-----BEGIN PRIVATE KEY-----")
     assert snowflake_session_kwargs({"role": "both"})["role"] == ""
+
+
+def test_infer_auth_mode_masked_key_does_not_outrank_password():
+    # The live d878f487 failure shape: masked stored key + PAT/password,
+    # no declared auth_mode — must route to password auth, never key-pair.
+    assert (
+        infer_auth_mode(driver="snowflake", private_key="********", password="pat-token")
+        == "user_pass"
+    )
+    assert (
+        infer_auth_mode(
+            driver="snowflake",
+            private_key="truncated-key-material-no-pem",
+            password="pat-token",
+        )
+        == "user_pass"
+    )
+    # No password: the stored key is the only credential — key_pair still
+    # inferred so probe surfaces the honest key-pair failure.
+    assert (
+        infer_auth_mode(driver="snowflake", private_key="********", password="")
+        == "key_pair"
+    )
+    # Real PEM material still selects key-pair even with a password present.
+    assert (
+        infer_auth_mode(
+            driver="snowflake",
+            private_key="-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----",
+            password="unused",
+        )
+        == "key_pair"
+    )
+    # Declared modes always win over any stray key.
+    assert (
+        infer_auth_mode(
+            driver="snowflake",
+            auth_mode="pat",
+            private_key="-----BEGIN PRIVATE KEY-----\nMIIB\n-----END PRIVATE KEY-----",
+        )
+        == "pat"
+    )
+
+
+def test_snowflake_session_kwargs_masked_key_with_password_routes_password():
+    from services.connector_auth import snowflake_session_kwargs
+
+    out = snowflake_session_kwargs(
+        {"private_key": "********", "password": "pat-token"}
+    )
+    assert out["private_key"] == ""
+
+    # Non-PEM key alone stays so the driver reports the honest key failure.
+    kept = snowflake_session_kwargs({"private_key": "********"})
+    assert kept["private_key"] == "********"

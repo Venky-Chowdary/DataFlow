@@ -245,6 +245,10 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                         "differs, so a truncated credential is never stored."
                     ),
                 },
+                "secret_field": {
+                    "type": "string",
+                    "description": "When the call carries several secret fields, name the field secret_length/secret_sha256 cover (e.g. password, private_key).",
+                },
                 "secret_length": {
                     "type": "integer",
                     "description": (
@@ -995,6 +999,7 @@ def secret_integrity_error(
     *,
     secret_sha256: str = "",
     secret_length: int = 0,
+    secret_field: str = "",
     **secrets: str,
 ) -> str | None:
     """Server-side integrity check for a staged credential.
@@ -1003,7 +1008,9 @@ def secret_integrity_error(
     intended to send. When the check parameters are present and no secret
     field was supplied, or the received secret's length/hash disagrees, the
     stage fails loudly — a truncated credential is never stored. The secret
-    itself is never logged.
+    itself is never logged. When several secret fields arrive in one call,
+    ``secret_field`` must name the field the declared length/hash covers —
+    an ambiguous check is refused rather than guessed at.
     """
     want_len = int(secret_length or 0)
     want_hash = (secret_sha256 or "").strip().lower()
@@ -1015,7 +1022,22 @@ def secret_integrity_error(
             "A secret integrity check was declared (length/hash) but no secret "
             "field was supplied in this call. Nothing was staged."
         )
-    field, value = next(iter(provided.items()))
+    named = (secret_field or "").strip()
+    if len(provided) > 1 and not named:
+        return (
+            "A secret integrity check was declared but several secret fields "
+            f"arrived ({', '.join(sorted(provided))}). Pass secret_field naming "
+            "which field the length/hash covers. Nothing was staged."
+        )
+    if named:
+        if named not in provided:
+            return (
+                f"secret_field {named!r} names no secret in this call "
+                f"(supplied: {', '.join(sorted(provided))}). Nothing was staged."
+            )
+        field, value = named, provided[named]
+    else:
+        field, value = next(iter(provided.items()))
     import hashlib
 
     raw = value.encode("utf-8")
@@ -1055,6 +1077,7 @@ def update_connector(  # nosec B107
     private_key_passphrase: str = "",
     secret_sha256: str = "",
     secret_length: int = 0,
+    secret_field: str = "",
 ) -> ToolResult:
     """Stage an in-place connector edit; Confirm applies it via ``PUT /saved-connectors``.
 
@@ -1087,6 +1110,7 @@ def update_connector(  # nosec B107
     integrity = secret_integrity_error(
         secret_sha256=secret_sha256,
         secret_length=secret_length,
+        secret_field=secret_field,
         password=password,
         private_key=private_key,
         connection_string=connection_string,

@@ -253,3 +253,52 @@ def test_update_schema_accepts_snowflake_fields():
         "private_key", "secret_sha256", "secret_length",
     ):
         assert want in props, want
+
+
+def test_multi_secret_call_requires_secret_field(staged):
+    """Two secret fields + a declared hash without secret_field = refused."""
+    tr = lt.update_connector(
+        connector_id="sf-1",
+        password="tok",
+        private_key="pem",
+        secret_sha256="0" * 64,
+    )
+    assert tr.success is False
+    assert "secret_field" in tr.error
+    assert staged == []
+
+
+def test_secret_field_selects_the_checked_secret(staged):
+    import hashlib as h
+
+    tok = "tok-bytes"
+    tr = lt.update_connector(
+        connector_id="sf-1",
+        password=tok,
+        private_key="pem",
+        secret_field="password",
+        secret_sha256=h.sha256(tok.encode()).hexdigest(),
+    )
+    assert tr.success, tr.error
+
+
+def test_empty_mode_non_pem_key_routes_to_password():
+    """A masked/garbage private_key must not silently route to key-pair when a
+    password is present and no auth_mode is declared (route by secret type)."""
+    from connectors.snowflake_conn import snowflake_connect_kwargs
+
+    kw = snowflake_connect_kwargs(
+        account="acct", username="u", password="pat-or-pw",
+        private_key="****", auth_mode="",
+    )
+    assert kw["password"] == "pat-or-pw"
+    assert "private_key" not in kw
+
+
+def test_empty_mode_non_pem_key_no_password_still_reports_key_error():
+    from connectors.snowflake_conn import snowflake_connect_kwargs
+
+    with pytest.raises((ValueError, RuntimeError)):
+        snowflake_connect_kwargs(
+            account="acct", username="u", private_key="not-a-pem", auth_mode=""
+        )
