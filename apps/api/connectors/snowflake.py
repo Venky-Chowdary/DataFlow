@@ -33,14 +33,21 @@ def test_snowflake(
     auth_mode: str = "",
     list_tables: bool = True,
 ) -> ConnectResult:
-    del port, ssl, auth_mode
+    del port, ssl
     parsed = parse_snowflake_url(connection_string) if (connection_string or "").strip() else {}
     account = parsed.get("account") or normalize_account(host)
     user = parsed.get("user") or username
     secret = parsed.get("password") or password
     database = parsed.get("database") or database
     schema = parsed.get("schema") or schema
-    pem = (private_key or "").strip()
+    # PAT/password records must not silently fall back to a stray stored
+    # private_key — honor the declared auth mode (X-PAT).
+    mode = (auth_mode or "").strip().lower()
+    pem = (
+        ""
+        if mode in ("user_pass", "connection_string", "pat")
+        else (private_key or "").strip()
+    )
     if not account or not user:
         return ConnectResult(
             ok=False,
@@ -82,6 +89,7 @@ def test_snowflake(
             role=engine_login_role(parsed.get("role"), auth_role, role),
             private_key=pem,
             private_key_passphrase=secret if pem else "",
+            auth_mode=mode,
         )
         with conn.cursor() as cur:
             if wh:

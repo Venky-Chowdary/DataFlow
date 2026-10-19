@@ -245,11 +245,21 @@ def snowflake_session_kwargs(
     src: dict[str, Any] = dict(cfg or {})
     src.update({k: v for k, v in overrides.items() if v is not None})
     extra_nested = src.get("extra") if isinstance(src.get("extra"), dict) else {}
-    pk = str(src.get("private_key") or extra_nested.get("private_key") or "").strip()
+    mode = str(
+        src.get("auth_mode") or extra_nested.get("auth_mode") or ""
+    ).strip().lower()
+    # A declared password/PAT mode must not be silently overridden by a stray
+    # stored private_key — the driver would then route to key-pair auth and
+    # Snowflake answers with a JWT error ops read as a bad key.
+    pk = (
+        str(src.get("private_key") or extra_nested.get("private_key") or "").strip()
+        if mode not in ("user_pass", "connection_string", "pat")
+        else ""
+    )
     role = engine_login_role(
         src.get("auth_role"),
         src.get("role"),
         extra_nested.get("auth_role") if extra_nested else None,
         extra_nested.get("role") if extra_nested else None,
     )
-    return {"private_key": pk, "role": role}
+    return {"private_key": pk, "role": role, "auth_mode": mode}

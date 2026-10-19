@@ -239,6 +239,7 @@ def snowflake_connect_kwargs(
     role: str = "",
     private_key: str = "",
     private_key_passphrase: str = "",
+    auth_mode: str = "",
 ) -> dict[str, Any]:
     """Keyword args for ``snowflake.connector.connect`` — never a positional URL.
 
@@ -255,7 +256,16 @@ def snowflake_connect_kwargs(
     merged_schema = parsed.get("schema") or schema
     merged_warehouse = parsed.get("warehouse") or warehouse
     login_role = engine_login_role(parsed.get("role"), role)
-    pem = (private_key or "").strip()
+    # Driver selection honors the declared auth_mode: a PAT/password record
+    # must never be routed to key-pair because a stray private_key field is
+    # populated (Snowflake then returns a JWT/invalid-token error that ops
+    # read as a key-pair failure). Empty mode keeps the legacy inference.
+    mode = (auth_mode or "").strip().lower()
+    pem = (
+        ""
+        if mode in ("user_pass", "connection_string", "pat")
+        else (private_key or "").strip()
+    )
 
     if not normalize_account(merged_account):
         raise ValueError(SNOWFLAKE_MISSING_ACCOUNT_MSG)
@@ -275,7 +285,13 @@ def snowflake_connect_kwargs(
         "user": merged_user,
         "login_timeout": 10,
     }
-    if pem:
+    if mode == "pat":
+        # Programmatic Access Token: authenticator=PROGRAMMATIC_ACCESS_TOKEN +
+        # the token value (carried in the password field — never a login
+        # password and never a private key).
+        kwargs["authenticator"] = "PROGRAMMATIC_ACCESS_TOKEN"
+        kwargs["token"] = merged_password
+    elif pem:
         kwargs["private_key"] = load_snowflake_private_key(pem, private_key_passphrase)
     elif merged_password:
         kwargs["password"] = merged_password
@@ -696,6 +712,7 @@ def get_connection(
     role: str = "",
     private_key: str = "",
     private_key_passphrase: str = "",
+    auth_mode: str = "",
 ) -> Any:
     kwargs = snowflake_connect_kwargs(
         account=account,
@@ -708,6 +725,7 @@ def get_connection(
         role=role,
         private_key=private_key,
         private_key_passphrase=private_key_passphrase,
+        auth_mode=auth_mode,
     )
 
     snowflake_connector = _snowflake_connector_module()

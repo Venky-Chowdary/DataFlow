@@ -85,6 +85,7 @@ def count_table_rows(
     table: str,
     role: str = "",
     private_key: str = "",
+    auth_mode: str = "",
 ) -> int:
     del port
     account = normalize_account(host)
@@ -100,6 +101,7 @@ def count_table_rows(
         role=role,
         private_key=private_key,
         private_key_passphrase=password if private_key else "",
+        auth_mode=auth_mode,
     )
     try:
         with conn.cursor() as cur:
@@ -128,6 +130,7 @@ def read_table_batch(
     known_total_rows: int | None = None,
     role: str = "",
     private_key: str = "",
+    auth_mode: str = "",
     cursor_primary_key: str | None = None,
     skip_population_count: bool = False,
 ) -> ReadBatch:
@@ -144,6 +147,7 @@ def read_table_batch(
         role=role,
         private_key=private_key,
         private_key_passphrase=password if private_key else "",
+        auth_mode=auth_mode,
     )
     try:
         with conn.cursor() as cur:
@@ -248,6 +252,7 @@ def read_table_scan_batch(
     known_total_rows: int | None = None,
     role: str = "",
     private_key: str = "",
+    auth_mode: str = "",
     cursor_primary_key: str | None = None,
     skip_population_count: bool = False,
     scan_state: dict[str, Any],
@@ -268,6 +273,7 @@ def read_table_scan_batch(
             role=role,
             private_key=private_key,
             private_key_passphrase=password if private_key else "",
+            auth_mode=auth_mode,
         )
         cur = conn.cursor()
         try:
@@ -357,6 +363,7 @@ def read_table_cursor_batch(
     limit: int = 500,
     role: str = "",
     private_key: str = "",
+    auth_mode: str = "",
     cursor_primary_key: str | None = None,
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — incremental sync.
@@ -380,6 +387,7 @@ def read_table_cursor_batch(
         role=role,
         private_key=private_key,
         private_key_passphrase=password if private_key else "",
+        auth_mode=auth_mode,
     )
     try:
         with conn.cursor() as cur:

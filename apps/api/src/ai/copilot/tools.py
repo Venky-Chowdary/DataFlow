@@ -186,6 +186,46 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": "Topology role: source, destination, or both.",
                     "enum": ["source", "destination", "both"],
                 },
+                "auth_role": {
+                    "type": "string",
+                    "description": (
+                        "Engine login role (Snowflake account role, e.g. ACCOUNTADMIN) — "
+                        "distinct from the topology role (source/destination/both)."
+                    ),
+                },
+                "auth_mode": {
+                    "type": "string",
+                    "description": (
+                        "Declared authentication mode: user_pass, pat (Snowflake "
+                        "programmatic access token), key_pair, connection_string, "
+                        "service_account, api_key. Determines which credential the "
+                        "driver uses — a PAT/password record never routes to key-pair."
+                    ),
+                },
+                "private_key": {
+                    "type": "string",
+                    "description": "PKCS#8 private key for key_pair auth (never echoed).",
+                },
+                "private_key_passphrase": {
+                    "type": "string",
+                    "description": "Passphrase for the private key (never echoed).",
+                },
+                "secret_sha256": {
+                    "type": "string",
+                    "description": (
+                        "Optional SHA-256 hex of the secret being staged — the "
+                        "server fails loudly when the received secret's hash "
+                        "differs, so a truncated credential is never stored."
+                    ),
+                },
+                "secret_length": {
+                    "type": "integer",
+                    "description": (
+                        "Optional byte length of the secret being staged — the "
+                        "server fails loudly when the received secret's length "
+                        "differs, so a truncated credential is never stored."
+                    ),
+                },
                 "host_key": {
                     "type": "string",
                     "description": "SFTP only: operator-approved server key fingerprint "
@@ -1767,6 +1807,12 @@ class DataPilotTools:
         schema: str = "",
         warehouse: str = "",
         role: str = "",
+        auth_role: str = "",
+        auth_mode: str = "",
+        private_key: str = "",
+        private_key_passphrase: str = "",
+        secret_sha256: str = "",
+        secret_length: int = 0,
         message: str = "",
         test_first: bool = True,
         host_key: str = "",
@@ -1800,8 +1846,28 @@ class DataPilotTools:
                 "schema": schema,
                 "warehouse": warehouse,
                 "role": role,
+                "auth_role": auth_role,
+                "auth_mode": auth_mode,
+                "private_key": private_key,
+                # Snowflake key-pair carries the passphrase in ``password``
+                # (``private_key_passphrase=password`` at connect time).
+                "password": password or private_key_passphrase,
             },
         )
+        from .lifecycle_tools import secret_integrity_error
+
+        integrity = secret_integrity_error(
+            secret_sha256=secret_sha256,
+            secret_length=secret_length,
+            password=password or private_key_passphrase,
+            private_key=private_key,
+            connection_string=connection_string,
+            service_account=service_account,
+        )
+        if integrity:
+            return ToolResult(
+                name="create_connector", success=False, output=None, error=integrity
+            )
         ok, missing = draft_is_complete(draft)
         if not ok:
             from .ack_ledger import redact_payload
@@ -3492,6 +3558,13 @@ class DataPilotTools:
         ssl: bool | None = None,
         new_name: str = "",
         host_key: str = "",
+        warehouse: str = "",
+        auth_role: str = "",
+        auth_mode: str = "",
+        private_key: str = "",
+        private_key_passphrase: str = "",
+        secret_sha256: str = "",
+        secret_length: int = 0,
     ) -> ToolResult:
         from .lifecycle_tools import update_connector
 
@@ -3499,6 +3572,9 @@ class DataPilotTools:
             connector_id, name, host=host, port=port, database=database,
             username=username, password=password, connection_string=connection_string,
             schema=schema, ssl=ssl, new_name=new_name, host_key=host_key,
+            warehouse=warehouse, auth_role=auth_role, auth_mode=auth_mode,
+            private_key=private_key, private_key_passphrase=private_key_passphrase,
+            secret_sha256=secret_sha256, secret_length=secret_length,
         )
 
     def _set_schedule_enabled(

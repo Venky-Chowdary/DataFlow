@@ -209,6 +209,50 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                 "schema": {"type": "string"},
                 "ssl": {"type": "boolean"},
                 "new_name": {"type": "string"},
+                "warehouse": {
+                    "type": "string",
+                    "description": "Engine warehouse (Snowflake warehouse, e.g. DATAFLOW_WH).",
+                },
+                "auth_role": {
+                    "type": "string",
+                    "description": (
+                        "Engine login role (Snowflake account role, e.g. ACCOUNTADMIN) — "
+                        "distinct from the topology role (source/destination/both)."
+                    ),
+                },
+                "auth_mode": {
+                    "type": "string",
+                    "description": (
+                        "Declared authentication mode: user_pass, pat (Snowflake "
+                        "programmatic access token), key_pair, connection_string, "
+                        "service_account, api_key. Determines which credential the "
+                        "driver uses — a PAT/password record never routes to key-pair."
+                    ),
+                },
+                "private_key": {
+                    "type": "string",
+                    "description": "PKCS#8 private key for key_pair auth (never echoed).",
+                },
+                "private_key_passphrase": {
+                    "type": "string",
+                    "description": "Passphrase for the private key (never echoed).",
+                },
+                "secret_sha256": {
+                    "type": "string",
+                    "description": (
+                        "Optional SHA-256 hex of the secret being staged — the "
+                        "server fails loudly when the received secret's hash "
+                        "differs, so a truncated credential is never stored."
+                    ),
+                },
+                "secret_length": {
+                    "type": "integer",
+                    "description": (
+                        "Optional byte length of the secret being staged — the "
+                        "server fails loudly when the received secret's length "
+                        "differs, so a truncated credential is never stored."
+                    ),
+                },
             },
             "required": [],
         },
@@ -937,7 +981,57 @@ def delete_connector(connector_id: str = "", name: str = "") -> ToolResult:
     )
 
 
-_CONNECTOR_SECRET_FIELDS = frozenset({"password", "connection_string"})
+_CONNECTOR_SECRET_FIELDS = frozenset({
+    "password",
+    "connection_string",
+    "private_key",
+    "private_key_passphrase",
+    "service_account",
+    "api_key",
+})
+
+
+def secret_integrity_error(
+    *,
+    secret_sha256: str = "",
+    secret_length: int = 0,
+    **secrets: str,
+) -> str | None:
+    """Server-side integrity check for a staged credential.
+
+    The caller declares the byte length and/or SHA-256 of the secret it
+    intended to send. When the check parameters are present and no secret
+    field was supplied, or the received secret's length/hash disagrees, the
+    stage fails loudly — a truncated credential is never stored. The secret
+    itself is never logged.
+    """
+    want_len = int(secret_length or 0)
+    want_hash = (secret_sha256 or "").strip().lower()
+    if not want_len and not want_hash:
+        return None
+    provided = {k: v for k, v in secrets.items() if (v or "").strip()}
+    if not provided:
+        return (
+            "A secret integrity check was declared (length/hash) but no secret "
+            "field was supplied in this call. Nothing was staged."
+        )
+    field, value = next(iter(provided.items()))
+    import hashlib
+
+    raw = value.encode("utf-8")
+    if want_len and len(raw) != want_len:
+        return (
+            f"Secret integrity check failed for {field}: expected {want_len} "
+            f"bytes but {len(raw)} arrived — the credential was truncated in "
+            "transit. Nothing was stored."
+        )
+    if want_hash and hashlib.sha256(raw).hexdigest() != want_hash:
+        return (
+            f"Secret integrity check failed for {field}: SHA-256 of the "
+            "received secret does not match the declared hash — the credential "
+            "was mangled in transit. Nothing was stored."
+        )
+    return None
 
 
 def update_connector(  # nosec B107
@@ -954,6 +1048,13 @@ def update_connector(  # nosec B107
     ssl: bool | None = None,
     new_name: str = "",
     host_key: str = "",
+    warehouse: str = "",
+    auth_role: str = "",
+    auth_mode: str = "",
+    private_key: str = "",
+    private_key_passphrase: str = "",
+    secret_sha256: str = "",
+    secret_length: int = 0,
 ) -> ToolResult:
     """Stage an in-place connector edit; Confirm applies it via ``PUT /saved-connectors``.
 
@@ -983,6 +1084,15 @@ def update_connector(  # nosec B107
     brief = _connector_brief(conn)
     if not brief["connector_id"]:
         return _unresolved_id_error("update_connector", conn)
+    integrity = secret_integrity_error(
+        secret_sha256=secret_sha256,
+        secret_length=secret_length,
+        password=password,
+        private_key=private_key,
+        connection_string=connection_string,
+    )
+    if integrity:
+        return _tool_result("update_connector", success=False, output=None, error=integrity)
     requested: dict[str, Any] = {
         "host": (host or "").strip(),
         "port": int(port or 0),
@@ -991,8 +1101,19 @@ def update_connector(  # nosec B107
         "password": password or "",
         "connection_string": (connection_string or "").strip(),
         "schema": (schema or "").strip(),
+        "warehouse": (warehouse or "").strip(),
+        # ``auth_role`` is the engine login role (Snowflake ACCOUNTADMIN & co.)
+        # — distinct from the topology ``role`` (source/destination/both).
+        "auth_role": (auth_role or "").strip(),
+        "auth_mode": (auth_mode or "").strip().lower(),
+        "private_key": private_key or "",
         "name": (new_name or "").strip(),
     }
+    # Snowflake key-pair records carry the key passphrase in the ``password``
+    # field (the driver passes ``private_key_passphrase=password``) — the
+    # save DTO has no separate passphrase column.
+    if (private_key_passphrase or "").strip():
+        requested["password"] = private_key_passphrase
     changes = {k: v for k, v in requested.items() if v and v != conn.get(k)}
     if ssl is not None and bool(ssl) != bool(conn.get("ssl")):
         changes["ssl"] = bool(ssl)
@@ -1003,7 +1124,8 @@ def update_connector(  # nosec B107
             output=None,
             error=(
                 f"What should change on “{brief['name']}”? Give a host, port, database, "
-                "username, password, connection string, schema, ssl or a new name."
+                "username, password, connection string, schema, warehouse, "
+                "account role (auth_role), auth mode, private key, ssl or a new name."
             ),
         )
     if "name" in changes:
