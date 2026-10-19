@@ -77,6 +77,13 @@ def _decide(
         )
     before = dest_summary.get(PRECOUNT_KEY)
     if not isinstance(before, int):
+        # Worker-path failures reach this undo through the engine's job
+        # summary, which need not carry the stream layer's precount — the
+        # same measurement rides destination.extra.
+        _eb = (getattr(destination, "extra", None) or {}).get("dest_rows_before")
+        if isinstance(_eb, int):
+            before = _eb
+    if not isinstance(before, int):
         return (
             "retained",
             "Pre-write destination count was not measured, so the failed batch "
@@ -126,7 +133,16 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
     # Byte-identical undo distinguishes two "empty before" shapes: the run
     # created the table (drop it — the destination had no table) or the table
     # existed empty (delete rows — its DDL must stay).
-    drop_created = dest_summary.get("dest_table_existed_before") is False
+    drop_created = (
+        dest_summary.get("dest_table_existed_before") is False
+        # The stamp also rides destination.extra: worker-path failures reach
+        # this undo through the engine's job summary, which does not carry
+        # every stream-layer key.
+        or (getattr(destination, "extra", None) or {}).get(
+            "dest_table_existed_before"
+        )
+        is False
+    )
     removed_any = False
     remaining_after: list[int] = []
     dropped_all = drop_created

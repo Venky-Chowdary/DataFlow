@@ -1848,7 +1848,9 @@ def _stream_database_transfer_impl(
             # X-9: same existence stamp as the file path — a precount of 0
             # cannot tell "created this run" from "emptied existing", so the
             # undo needs it to DROP (create-new) vs DELETE. None is not
-            # stamped: unknown must never justify a drop.
+            # stamped: unknown must never justify a drop. Worker-path
+            # failures reach the undo through the engine's job summary, so
+            # both stamps ride destination.extra as well.
             try:
                 from services.dest_precount import destination_table_exists
 
@@ -1860,6 +1862,13 @@ def _stream_database_transfer_impl(
                 )
                 if _existed is not None:
                     dest_summary["dest_table_existed_before"] = bool(_existed)
+                    _dextra = getattr(destination, "extra", None)
+                    if isinstance(_dextra, dict):
+                        _dextra["dest_table_existed_before"] = bool(_existed)
+                if rows_before is not None:
+                    _dextra = getattr(destination, "extra", None)
+                    if isinstance(_dextra, dict):
+                        _dextra["dest_rows_before"] = int(rows_before)
             except Exception:  # noqa: BLE001 - probe failure must not abort the run
                 pass
     elif checkpoint.target_rows_before is not None:

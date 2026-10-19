@@ -1582,6 +1582,11 @@ def stream_file_to_database(
         rows_before = None
     if rows_before is not None:
         dest_summary[PRECOUNT_KEY] = int(rows_before)
+        # Worker-path failures reach the failed-batch undo through the
+        # engine's job summary, not this dict — ride destination.extra too.
+        dest_extra = getattr(destination, "extra", None)
+        if isinstance(dest_extra, dict):
+            dest_extra["dest_rows_before"] = int(rows_before)
     if not resumed:
         # X-9: a failed run must restore byte-identical state. A precount of 0
         # cannot tell "created this run" from "emptied existing" — the undo
@@ -1597,6 +1602,9 @@ def stream_file_to_database(
         )
         if _existed is not None:
             dest_summary["dest_table_existed_before"] = bool(_existed)
+            dest_extra = getattr(destination, "extra", None)
+            if isinstance(dest_extra, dict):
+                dest_extra["dest_table_existed_before"] = bool(_existed)
     if isinstance(pinned_before, int) or not resumed:
         from services.file_load_ledger import (
             file_already_loaded,

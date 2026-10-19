@@ -322,6 +322,161 @@ def test_x12_successful_overwrite_preserves_ddl(tmp_path, monkeypatch):
     )
 
 
+_MYSQL = dict(
+    host="127.0.0.1", port=3306, database="dataflow",
+    username="dataflow", password="dataflow",
+)
+
+
+def _mysql_conn():
+    import pymysql
+
+    return pymysql.connect(
+        host=_MYSQL["host"], port=_MYSQL["port"], user=_MYSQL["username"],
+        password=_MYSQL["password"], database=_MYSQL["database"],
+        connect_timeout=5, autocommit=True,
+    )
+
+
+def _mysql_available() -> bool:
+    try:
+        conn = _mysql_conn()
+        conn.close()
+        return True
+    except Exception:
+        return False
+
+
+def _mysql_drop(table: str) -> None:
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+    finally:
+        conn.close()
+
+
+def _mysql_make_prior(table: str) -> None:
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"CREATE TABLE `{table}` ("
+                " id INT PRIMARY KEY,"
+                " amt DECIMAL(10,2) NOT NULL CHECK (amt < 100))"
+            )
+            cur.executemany(
+                f"INSERT INTO `{table}` (id, amt) VALUES (%s, %s)",
+                [(1, "9.00"), (2, "8.00"), (3, "7.00")],
+            )
+    finally:
+        conn.close()
+
+
+def _mysql_snapshot(table: str):
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
+            if not cur.fetchone()[0]:
+                return None
+            cur.execute(f"SELECT * FROM `{table}` ORDER BY 1")
+            rows = [tuple(r) for r in cur.fetchall()]
+            cur.execute(
+                "SELECT column_name, data_type, is_nullable, column_key "
+                "FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = %s "
+                "ORDER BY ordinal_position",
+                (table,),
+            )
+            cols = cur.fetchall()
+            cur.execute(
+                "SELECT con.constraint_name, con.constraint_type "
+                "FROM information_schema.table_constraints con "
+                "WHERE con.table_schema = DATABASE() AND con.table_name = %s "
+                "ORDER BY con.constraint_name",
+                (table,),
+            )
+            constraints = cur.fetchall()
+            return {"rows": rows, "cols": cols, "constraints": constraints}
+    finally:
+        conn.close()
+
+
+def _mysql_request(tmp_path: Path, table: str, content: bytes) -> TransferRequest:
+    recipe = _recipe()
+    return TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=EndpointConfig(
+            kind="database", format="mysql", host=_MYSQL["host"], port=_MYSQL["port"],
+            database=_MYSQL["database"], username=_MYSQL["username"],
+            password=_MYSQL["password"], table=table,
+        ),
+        source_filename="amt.csv",
+        source_content=content,
+        sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+        skip_preflight=True,
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=["id", "amt"]
+        ).recipe_hash,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 1.0, "target_type": "integer"},
+            {"source": "amt", "target": "amt", "confidence": 1.0, "target_type": "DECIMAL(10,2)"},
+        ],
+    )
+
+
+def test_x9_mysql_refusal_preserves_prior_rows(tmp_path, monkeypatch):
+    """Live MySQL cell: PK + CHECK + prior rows byte-identical after a
+    mid-run transform refusal."""
+    if not _mysql_available():
+        import pytest
+
+        pytest.skip("mysql not reachable")
+    _engine_env(monkeypatch)
+    table = f"x9my_{uuid.uuid4().hex[:8]}"
+    _mysql_drop(table)
+    _mysql_make_prior(table)
+    before = _mysql_snapshot(table)
+    try:
+        result = UniversalTransferEngine().execute(
+            _mysql_request(tmp_path, table, _csv())
+        )
+        assert not result.success
+        after = _mysql_snapshot(table)
+        assert after == before, (
+            f"mysql destination changed by a failed run: before={len(before['rows'])} "
+            f"after={after and len(after['rows'])}"
+        )
+    finally:
+        _mysql_drop(table)
+
+
+def test_x9_mysql_refusal_empty_dest_leaves_nothing(tmp_path, monkeypatch):
+    if not _mysql_available():
+        import pytest
+
+        pytest.skip("mysql not reachable")
+    _engine_env(monkeypatch)
+    table = f"x9my_{uuid.uuid4().hex[:8]}"
+    _mysql_drop(table)
+    try:
+        result = UniversalTransferEngine().execute(
+            _mysql_request(tmp_path, table, _csv())
+        )
+        assert not result.success
+        snap = _mysql_snapshot(table)
+        assert snap is None, f"table this run created must be dropped, got {snap}"
+    finally:
+        _mysql_drop(table)
+
+
 def test_x9_db_source_refusal_empty_dest_leaves_nothing(tmp_path, monkeypatch):
     """DB->DB create-new drop: the run-created table must be absent, not just
     empty — byte-identical means the destination had no such table before."""
