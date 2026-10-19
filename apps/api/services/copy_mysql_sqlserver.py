@@ -46,6 +46,8 @@ from services.copy_pg_sqlserver import (
     _enable_fast_executemany,
     bind_row_for_sqlserver,
     pg_sqlserver_copy_batch,
+    set_wide_decimal_inputsizes,
+    sqlserver_insert_placeholders,
 )
 from services.copy_sqlserver_pg import _close_ss
 from services.copy_sqlserver_sqlserver import (
@@ -136,7 +138,7 @@ def copy_mysql_to_sqlserver(
     dst_schema = _ss_schema_of(dest_cfg, dest_schema)
     dest_ref = _ss_table_ref(dst_schema, dest_table)
     col_sql = ", ".join(_ss_ident(c) for c in target_cols)
-    placeholders = ", ".join(["%s"] * len(target_cols))
+    placeholders = sqlserver_insert_placeholders(sqlserver_ddls)
     insert_sql = (
         f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
         f"VALUES ({placeholders})"
@@ -146,10 +148,13 @@ def copy_mysql_to_sqlserver(
     source_conn = _mysql_connect(source_cfg)
     dest_conn = _ss_connect(dest_cfg)
     created_here = False
+    existed_before = False
+    reset_empty_dest_on_failure = False
     pk_map: tuple[str, str] | None = None
     preserve_dest_on_failure = False
     dst_cur = dest_conn.cursor()
     _enable_fast_executemany(dst_cur)
+    set_wide_decimal_inputsizes(dst_cur, sqlserver_ddls)
     try:
         with source_conn.cursor() as src_cur:
             src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -165,6 +170,7 @@ def copy_mysql_to_sqlserver(
             pk_map = mapped_single_pk(pk_cols, pairs)
 
             exists = _ss_table_exists(dst_cur, dst_schema, dest_table)
+            existed_before = bool(exists)
             dest_occupied = False
             if replace_destination and exists:
                 dst_cur.execute(_ss_drop_sql(dest_ref))
@@ -172,6 +178,7 @@ def copy_mysql_to_sqlserver(
                 exists = False
             if exists:
                 dest_occupied = _ss_count(dst_cur, dest_ref) > 0
+                reset_empty_dest_on_failure = not dest_occupied
                 if dest_occupied and pk_map is None:
                     raise FastPathUnavailable(
                         "append into non-empty SQL Server dest stays on the row path"
@@ -333,14 +340,26 @@ def copy_mysql_to_sqlserver(
             ),
         )
     except Exception:
-        if preserve_dest_on_failure:
-            raise
+        # A table this run created (or an existing dest that was empty before)
+        # must end byte-identical to before the failure — never a partial
+        # commit. PK-shard resume preserves committed rows only for a
+        # pre-existing occupied dest.
         if created_here:
             try:
                 dst_cur.execute(_ss_drop_sql(dest_ref))
                 dest_conn.commit()
             except Exception:
                 logger.debug("dest drop after copy failure skipped", exc_info=True)
+        elif existed_before and reset_empty_dest_on_failure:
+            try:
+                dst_cur.execute(f"TRUNCATE TABLE {dest_ref}")  # nosec B608
+                dest_conn.commit()
+            except Exception:
+                logger.debug(
+                    "dest truncate after copy failure skipped", exc_info=True
+                )
+        elif preserve_dest_on_failure:
+            raise
         raise
     finally:
         try:
