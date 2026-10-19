@@ -6,14 +6,14 @@
 }
 
 .df2-studio-next .df2-btn-primary {
-  /* premium-theme paints .df2-btn-primary from --df-accent. The variable
+  /* premium-theme paints .df2-btn-primary from --df-action-bg. The variable
      keeps the tile on these surfaces; the shared fill rule does the work. */
-  --df-accent: var(--df-brand-tile);
+  --df-action-bg: var(--df-brand-tile);
   color: var(--df-on-tile);
 }
 
 .df2-studio-next .df2-btn-primary:hover:not(:disabled) {
-  --df-accent: var(--df-brand-text);
+  --df-action-bg: var(--df-brand-text);
 }
 
 .df2-transfer-schema {

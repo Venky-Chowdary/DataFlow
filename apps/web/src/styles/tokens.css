@@ -35,6 +35,12 @@
   --df-info-text: #0369a1;
   --df-brand-strong: #115e59;
   --df-brand-deep: #0f766e;
+  /* Fill/ink for controls that carry white or tinted text. #0f766e keeps the
+     brand hue but clears AA (5.47:1 vs white, 5.25 vs the #f0fdfa nav tint);
+     --df-brand (#0d9488) is for non-text accents only. Same fill in dark:
+     the workspace keeps light action fills and tints there too. */
+  --df-action-bg: #0f766e;
+  --df-action-bg-hover: #115e59;
   --df-brand-bright: #14b8a6;
   --df-brand-muted: #f0fdfa;
   --df-brand-soft: #ccfbf1;
@@ -94,7 +100,9 @@
 
   --df-text-primary: #0f172a;
   --df-text-secondary: #475569;
-  --df-text-tertiary: #94a3b8;
+  /* #64748b = 4.76:1 on white — tertiary text carries real labels (OCR hint,
+     wizard captions), so it must meet AA, not act as a decorative ink. */
+  --df-text-tertiary: #64748b;
   --df-text-muted: #64748b;
   /* Alias used by leftover sheets (`var(--df-text, #0f172a)`). Must track primary so dark remaps. */
   --df-text: var(--df-text-primary);
@@ -630,9 +638,12 @@ html.df2-theme-dark:has(.df2-app),
   --df-border-strong: #3a4658;
   --df-text-primary: #e8eef5;
   --df-text-secondary: #9aa8b8;
-  --df-text-tertiary: #6b7a8c;
+  /* #8a99ab = 5.77:1 on the dark surface — same AA rule as light tertiary. */
+  --df-text-tertiary: #8a99ab;
   --df-text-muted: #8a97a8;
   --df-brand-strong: #5eead4;
+  --df-action-bg: #0f766e;
+  --df-action-bg-hover: #115e59;
   --df-brand-hover: #2dd4bf;
   --df-brand-text: var(--df-brand-strong);
   --df-success-text: #6ee7b7;

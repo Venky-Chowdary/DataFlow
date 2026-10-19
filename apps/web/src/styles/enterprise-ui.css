@@ -3045,7 +3045,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-source-aside-steps li.done .df2-source-aside-step-marker { background: var(--df-success); color: var(--df-surface); }
-.df2-source-aside-steps li.active .df2-source-aside-step-marker { background: var(--df-brand); color: var(--df-surface); }
+.df2-source-aside-steps li.active .df2-source-aside-step-marker { background: var(--df-action-bg); color: var(--df-surface); }
 
 .df2-source-aside-steps li strong { display: block; font-size: 13px; color: var(--df-text-primary); }
 .df2-source-aside-steps li span { font-size: 12px; color: var(--df-text-muted); }

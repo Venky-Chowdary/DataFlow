@@ -2579,6 +2579,15 @@
             "sensitive": false,
             "hint": "Paste the private key text. If provided, password is optional.",
             "placeholder": "-----BEGIN OPENSSH PRIVATE KEY----- ..."
+          },
+          {
+            "key": "hostKey",
+            "label": "SSH host key pin (optional)",
+            "type": "textarea",
+            "optional": true,
+            "sensitive": false,
+            "hint": "Pin the server's host key. A failed Test prints the fingerprint — paste it here after verifying it with the server admin.",
+            "placeholder": "SHA256:… or an ssh-keyscan line"
           }
         ]
       },
@@ -3098,6 +3107,14 @@
             "optional": false,
             "sensitive": false,
             "hint": "Encrypt the connection to the server."
+          },
+          {
+            "key": "trustServerCertificate",
+            "label": "Trust server certificate",
+            "type": "checkbox",
+            "optional": true,
+            "sensitive": false,
+            "hint": "For self-signed or private-CA servers only — skips TLS chain verification."
           }
         ]
       },

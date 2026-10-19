@@ -72,7 +72,7 @@
 
   .df2-app.df2-sidebar-nav-compact .df2-nav-item.active .dt-nav-icon,
   .df2-app.df2-sidebar-nav-compact .df2-nav-item.active .dt-nav-icon svg {
-    color: #0f766e !important;
+    color: var(--df-action-bg) !important;
     stroke: currentColor !important;
   }
 
@@ -861,12 +861,12 @@ select.df2-select {
 }
 
 .df2-nav-item.active {
-  color: var(--df-brand, #0f766e) !important;
+  color: var(--df-action-bg) !important;
 }
 
 .df2-nav-item.active .dt-nav-icon,
 .df2-nav-item.active .dt-nav-icon svg {
-  color: var(--df-brand, #0f766e) !important;
+  color: var(--df-action-bg) !important;
 }
 
 .df2-system-pill {
@@ -1459,7 +1459,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-app .df2-nav-item.active .dt-nav-icon,
 .df2-app .df2-nav-item.active .dt-nav-icon svg {
-  color: #0f766e !important;
+  color: var(--df-action-bg) !important;
   stroke: currentColor !important;
 }
 

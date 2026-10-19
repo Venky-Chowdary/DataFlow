@@ -284,15 +284,15 @@ body {
 /* ─── Buttons — enterprise primary ─── */
 
 .df2-btn-primary {
-  background: #0f766e !important;
-  border-color: #0f766e !important;
+  background: var(--df-action-bg) !important;
+  border-color: var(--df-action-bg) !important;
   color: #ffffff !important;
   font-weight: 600;
 }
 
 .df2-btn-primary:hover:not(:disabled) {
-  background: #115e59 !important;
-  border-color: #115e59 !important;
+  background: var(--df-action-bg-hover) !important;
+  border-color: var(--df-action-bg-hover) !important;
   color: #ffffff !important;
 }
 
@@ -786,9 +786,9 @@ body {
 }
 
 .df2-segment .df2-btn-primary {
-  background: #0f766e !important;
+  background: var(--df-action-bg) !important;
   color: #ffffff !important;
-  border-color: #0f766e !important;
+  border-color: var(--df-action-bg) !important;
 }
 
 /* ─── Login — full viewport enterprise gate ─── */
@@ -1492,16 +1492,16 @@ body {
 
 .df2-nav-item.active {
   background: var(--df-brand-subtle);
-  color: var(--df-brand);
+  color: var(--df-action-bg);
   font-weight: 600;
 }
 
 .df2-sidebar-cta {
-  background: var(--df-brand);
+  background: var(--df-action-bg);
 }
 
 .df2-sidebar-cta:hover {
-  background: var(--df-brand-hover);
+  background: var(--df-action-bg-hover);
 }
 
 /* ─── Badges ─── */
@@ -1678,7 +1678,7 @@ body {
 }
 
 .df2-nav-item.active {
-  color: #0f766e !important;
+  color: var(--df-action-bg) !important;
   background: #f0fdfa !important;
 }
 

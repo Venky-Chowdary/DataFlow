@@ -232,7 +232,8 @@ body {
 
 .df2-nav-item.active {
   background: #f0fdfa;
-  color: #0f766e;
+  /* --df-action-bg: the old teal-on-tint measured 3.59:1 (below AA). */
+  color: var(--df-action-bg);
   font-weight: 600;
 }
 
@@ -265,7 +266,7 @@ body {
   margin-bottom: 12px;
   border: none;
   border-radius: 8px;
-  background: #0f766e;
+  background: var(--df-action-bg);
   color: #fff;
   font-size: 13px;
   font-weight: 600;
@@ -273,7 +274,7 @@ body {
   transition: background 0.12s;
 }
 
-.df2-sidebar-cta:hover { background: #115e59; }
+.df2-sidebar-cta:hover { background: var(--df-action-bg-hover); }
 
 .df2-main {
   flex: 1;
@@ -516,14 +517,14 @@ body {
 }
 
 .df2-btn-primary {
-  background: #0f766e;
-  border-color: #0f766e;
+  background: var(--df-action-bg);
+  border-color: var(--df-action-bg);
   color: #fff;
 }
 
 .df2-btn-primary:hover {
-  background: #115e59;
-  border-color: #115e59;
+  background: var(--df-action-bg-hover);
+  border-color: var(--df-action-bg-hover);
 }
 
 .df2-btn-ghost {
@@ -1411,7 +1412,9 @@ body {
 }
 
 .df2-wizard-step.active .df2-wizard-num {
-  background: var(--df-brand);
+  /* White numeral on --df-brand measured 3.74:1 — fills carrying
+     text use the action token (AA in both themes). */
+  background: var(--df-action-bg);
   color: #fff;
 }
 
@@ -3221,7 +3224,9 @@ body {
   align-items: center;
   gap: 10px;
   min-height: 44px;
-  color: #0f172a;
+  /* --df-text-primary so the dark theme remaps the ink (was pinned #0f172a
+     = 1.06:1 on the dark surface). */
+  color: var(--df-text-primary, #0f172a);
   cursor: pointer;
 }
 
@@ -3243,7 +3248,7 @@ body {
 .df2-policy-toggle small {
   margin-top: 2px;
   font-size: 12px;
-  color: #64748b;
+  color: var(--df-text-secondary, #64748b);
 }
 
 .df2-stream-contract {
@@ -4065,12 +4070,12 @@ body {
 .df2-nav-item.active {
   background: var(--df-brand-muted);
   border-color: transparent;
-  color: var(--df-brand-deep);
+  color: var(--df-action-bg);
   box-shadow: none;
 }
 
 .df2-nav-item.active .dt-nav-icon {
-  color: var(--df-brand);
+  color: var(--df-action-bg);
 }
 
 .df2-nav-badge {
@@ -4084,7 +4089,7 @@ body {
 
 .df2-sidebar-cta {
   height: 40px;
-  background: var(--df-brand);
+  background: var(--df-action-bg);
   box-shadow: none;
 }
 
@@ -4926,15 +4931,15 @@ body {
 }
 
 .df2-btn-primary {
-  border-color: #0f766e;
-  background: #0f766e;
+  border-color: var(--df-action-bg);
+  background: var(--df-action-bg);
   color: #fff;
   box-shadow: 0 10px 22px rgba(15, 118, 110, 0.22);
 }
 
 .df2-btn-primary:hover {
-  background: #115e59;
-  border-color: #115e59;
+  background: var(--df-action-bg-hover);
+  border-color: var(--df-action-bg-hover);
 }
 
 .df2-stats,

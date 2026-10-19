@@ -163,9 +163,10 @@
   color: var(--df-text, #0f172a) !important;
 }
 
-/* Prefer solid primary over premium gradient when both fight */
+/* Prefer solid primary over premium gradient when both fight. Fill is the
+   action token — --df-accent (#0d9488) carries white text at 3.74:1. */
 .df2-btn-primary {
-  background: var(--df-accent, #0d9488) !important;
+  background: var(--df-action-bg) !important;
   border: 1px solid transparent !important;
   box-shadow: none;
 }
