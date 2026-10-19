@@ -3966,6 +3966,23 @@ def _stream_database_transfer_impl(
             # Winners can still hit a divert step downstream of the buffer.
             _persist_shape_diverts()
         row_path_ok = True
+    except BaseException as _row_exc:
+        # X-9: same undo as the file path — a transform refusal / writer
+        # reject / cancel mid-run must not leave committed batches. The
+        # note rides the exception into the engine's failure message.
+        try:
+            from services.batch_undo import undo_failed_batch_if_dest_was_empty
+
+            _undo_note = undo_failed_batch_if_dest_was_empty(
+                destination=destination,
+                dest_summary=dest_summary,
+                sync_mode=effective_sync,
+            )
+            if _undo_note:
+                setattr(_row_exc, "failed_batch_undo_note", _undo_note)
+        except Exception:  # noqa: BLE001 - undo must not hide the write failure
+            pass
+        raise
     finally:
         if run_after:
             run_session_after(
