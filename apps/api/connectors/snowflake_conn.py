@@ -332,7 +332,7 @@ def load_snowflake_private_key(pem: str, passphrase: str = "") -> bytes:
     )
 
 
-def classify_snowflake_connect_error(raw: str) -> str | None:
+def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | None:
     """Honest operator copy — do not call an invalid role a bad password."""
     stripped = (raw or "").strip()
     text = stripped.lower()
@@ -375,6 +375,16 @@ def classify_snowflake_connect_error(raw: str) -> str | None:
             "is refused. Use Programmatic access token or Key-pair on Connectors."
         )
     if re.search(r"jwt|private.?key|390144|invalid token", text):
+        # A PAT is itself a JWT — an invalid-token refusal under auth_mode=pat
+        # means Snowflake rejected the stored token, not a key. Name the
+        # credential actually used so operators are not sent to ALTER USER.
+        if auth_mode == "pat":
+            return (
+                "Snowflake refused the programmatic access token (PAT) — it is "
+                "expired, revoked, or was not issued for this user/account. "
+                "Re-save the connector with a valid PAT (DataFlow stores it in "
+                "the Password/PAT field), or switch the record to Key-pair."
+            )
         return (
             "Snowflake key-pair authentication failed. Check the username, account "
             "host, and that the public key is assigned (ALTER USER … SET RSA_PUBLIC_KEY)."

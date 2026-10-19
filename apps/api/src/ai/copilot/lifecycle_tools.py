@@ -1192,12 +1192,14 @@ def update_connector(  # nosec B107
     # otherwise preserve the stored secret (X-PAT stray-key repair).
     from services.connector_store import SECRET_CLEAR_SENTINEL
 
+    already_empty = [f for f in clears if not conn.get(f)]
     for field, _ in clears.items():
-        if conn.get(field):
-            changes[field] = SECRET_CLEAR_SENTINEL
+        changes[field] = SECRET_CLEAR_SENTINEL
     shown = {
         k: (
-            "(cleared)"
+            "(already empty)"
+            if v == SECRET_CLEAR_SENTINEL and k in already_empty
+            else "(cleared)"
             if v == SECRET_CLEAR_SENTINEL
             else "(changed — hidden)"
             if k in _CONNECTOR_SECRET_FIELDS

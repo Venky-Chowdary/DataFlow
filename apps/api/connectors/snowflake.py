@@ -124,7 +124,7 @@ def test_snowflake(
             driver="snowflake-connector-python",
         )
     except Exception as exc:
-        classified = classify_snowflake_connect_error(str(exc))
+        classified = classify_snowflake_connect_error(str(exc), auth_mode=mode)
         return ConnectResult(
             ok=False,
             tables=[],

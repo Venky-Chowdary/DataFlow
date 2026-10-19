@@ -1166,7 +1166,10 @@ def _run_snowflake_query(connector, body):
             private_key_passphrase=connector.password or "",
         )
     except Exception as exc:
-        classified = classify_snowflake_connect_error(redact_log_text(str(exc)))
+        classified = classify_snowflake_connect_error(
+            redact_log_text(str(exc)),
+            auth_mode=str(getattr(connector, "auth_mode", "") or "").strip().lower(),
+        )
         connection_detail = humanize_connection_error("snowflake", classified or exc)
         raise HTTPException(
             status_code=400,
