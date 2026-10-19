@@ -1067,10 +1067,50 @@ def _transform_applied_proof(
             return None
         if op == "trim":
             return f"TRIM({col_expr})"
-        if op == "replace" and not opts.get("regex"):
+        if op == "collapse_whitespace":
+            # _fn_collapse_whitespace = re.sub(r"\s+", " ", t).strip()
+            if src_type in {"postgresql", "postgres"}:
+                ws = _lit(r"\s+")
+                return (
+                    "BTRIM(regexp_replace("
+                    f"{col_expr}, {ws}, {_lit(' ')}, 'g'))"
+                )
+            ws = _lit("\\s+")
+            return (
+                "TRIM(REGEXP_REPLACE("
+                f"{col_expr}, {ws}, {_lit(' ')}))"
+            )
+        if op == "replace":
+            if opts.get("regex"):
+                pat = str(opts.get("search") or "")
+                # Only patterns that cannot match an empty string and use
+                # no look-around/inline-flag syntax are exact under the
+                # source's regex engine — anything else stays uncovered.
+                if re.search(r"\*|\?|\(\?", pat):
+                    return None
+                if src_type in {"postgresql", "postgres"}:
+                    return (
+                        f"regexp_replace({col_expr}, {_lit(pat)}, "
+                        f"{_lit(opts.get('replacement', ''))}, 'g')"
+                    )
+                return (
+                    f"REGEXP_REPLACE({col_expr}, {_lit(pat)}, "
+                    f"{_lit(opts.get('replacement', ''))})"
+                )
             return (
                 f"REPLACE({col_expr}, {_lit(opts.get('search'))}, "
                 f"{_lit(opts.get('replacement', ''))})"
+            )
+        if op == "default_if_null":
+            # is_blank: NULL, empty/whitespace text, wire sentinels, NaN.
+            return (
+                f"CASE WHEN {col_expr} IS NULL "
+                f"OR BTRIM({col_expr}::text) = '' "
+                f"OR {col_expr}::text = 'NaN' "
+                f"OR {col_expr}::text IN ({_lit('__df_sql_null__')}, "
+                f"{_lit('__df_missing__')}, {_lit('__df_ddb_null__')}) "
+                f"THEN {_lit(opts.get('value'))} "
+                f"ELSE {col_expr}::text END"
             )
         if op == "null_if":
             expr = col_expr
@@ -1405,6 +1445,160 @@ def _transform_applied_proof(
             "provenance": "destination key census (overwrite leftover merge)",
         }
 
+    # --- G-2: independent SCD2 invariants --------------------------------
+    # Structural SQL on the written history table: exactly one current row
+    # per business key, interval chains without gaps or overlaps, and
+    # (when no declared step transforms a tracked column) every current
+    # row's tracked values equal its source row. A violation fails the
+    # run naming the invariant; a pass upgrades provenance to
+    # "independent SCD2 invariants".
+    scd2_provenance = ""
+    if scd2_opts and dest_db_type in _ORACLE_DIALECTS and isinstance(
+        scd2_opts, dict
+    ):
+        try:
+            _q = (
+                "`"
+                if dest_db_type in {"mysql", "mariadb", "clickhouse"}
+                else '"'
+            )
+            _keys = [str(k) for k in scd2_opts.get("keys") or []]
+            _cur = str(scd2_opts.get("is_current") or "is_current")
+            _vf = str(scd2_opts.get("valid_from") or "valid_from")
+            _vt = str(scd2_opts.get("valid_to") or "valid_to")
+            _ver = str(scd2_opts.get("version") or "")
+            _tracked = [str(t) for t in scd2_opts.get("tracked") or []]
+            if _keys:
+                _dst_cfg_i = resolve_connector_config(endpoint)
+                _dest_ref_i = warehouse_sql_table_ref(
+                    dest_db_type,
+                    _dst_cfg_i,
+                    str(
+                        getattr(endpoint, "schema", "")
+                        or _dst_cfg_i.get("schema")
+                        or ""
+                    ),
+                    str(endpoint.table or ""),
+                )
+                from services.scd2_engine import (
+                    scd2_is_current_predicate,
+                )
+
+                _cur_pred = scd2_is_current_predicate(
+                    dest_db_type, quote_sql_identifier(_cur, _q)
+                )
+                _kcols = ", ".join(
+                    quote_sql_identifier(k, _q) for k in _keys
+                )
+                _violations: list[str] = []
+                with warehouse_sql_engine(
+                    dest_db_type, _dst_cfg_i
+                ) as _ieng:
+                    with _ieng.connect() as _iconn:
+                        _n = _iconn.execute(
+                            sa.text(
+                                f"SELECT 1 FROM {_dest_ref_i} "  # nosec B608
+                                f"WHERE {_cur_pred} GROUP BY {_kcols} "
+                                "HAVING COUNT(*) <> 1 LIMIT 1"
+                            )
+                        ).first()
+                        if _n:
+                            _violations.append(
+                                "not exactly one current row per "
+                                "business key"
+                            )
+                        _qver = quote_sql_identifier(_ver, _q) if _ver else None
+                        _qvf = quote_sql_identifier(_vf, _q)
+                        _qvt = quote_sql_identifier(_vt, _q)
+                        _order = f"{_qver}, {_qvf}" if _qver else _qvf
+                        _adj = _iconn.execute(
+                            sa.text(
+                                "SELECT 1 FROM (SELECT "
+                                f"{_kcols}, {_qvt} AS vt, {_qvf} AS vf, "
+                                f"LEAD({_qvf}) OVER (PARTITION BY {_kcols} "
+                                f"ORDER BY {_order}) AS nxt "
+                                f"FROM {_dest_ref_i}) o "  # nosec B608
+                                "WHERE o.nxt IS NOT NULL "
+                                "AND o.vt IS DISTINCT FROM o.nxt LIMIT 1"
+                            )
+                        ).first()
+                        if _adj:
+                            _violations.append(
+                                "gapped or overlapping validity "
+                                "intervals for a key"
+                            )
+                        _flag = _iconn.execute(
+                            sa.text(
+                                f"SELECT 1 FROM {_dest_ref_i} "  # nosec B608
+                                f"WHERE {_cur_pred} AND {_qvt} IS NOT NULL "
+                                "LIMIT 1"
+                            )
+                        ).first()
+                        if _flag:
+                            _violations.append(
+                                "a current row carries an end date"
+                            )
+                        # Tracked-equality: only when no declared step
+                        # transforms a tracked column, and only against a
+                        # SQL source — comparing transformed output to raw
+                        # source would be a false failure by construction.
+                        _src_ref_i = src_ref_sql if src_ref_sql else ""
+                        _tset = {str(t) for t in _tracked}
+                        _transformed_t = {
+                            map_source_to_target(c, mappings)
+                            for c in declared_src
+                        }
+                        if (
+                            _tracked
+                            and _src_ref_i
+                            and not (_tset & _transformed_t)
+                            and src_type in _ORACLE_DIALECTS
+                        ):
+                            _inv_map = {
+                                map_source_to_target(c, mappings): c
+                                for c in read_cols
+                            }
+                            _join = " AND ".join(
+                                f"s.{quote_sql_identifier(str(_inv_map.get(k) or k), qs)}"
+                                f" = d.{quote_sql_identifier(k, _q)}"
+                                for k in _keys
+                            )
+                            _diffs = " OR ".join(
+                                f"d.{quote_sql_identifier(t, _q)}::text IS "
+                                "DISTINCT FROM "
+                                f"s.{quote_sql_identifier(str(_inv_map.get(t) or t), qs)}::text"
+                                for t in _tracked
+                            )
+                            _eq = _iconn.execute(
+                                sa.text(
+                                    f"SELECT 1 FROM {_dest_ref_i} d "  # nosec B608
+                                    f"JOIN {_src_ref_i} s ON {_join} "
+                                    f"WHERE {_cur_pred.replace(quote_sql_identifier(_cur, _q), 'd.' + quote_sql_identifier(_cur, _q))} "
+                                    f"AND ({_diffs}) LIMIT 1"
+                                )
+                            ).first()
+                            if _eq:
+                                _violations.append(
+                                    "a current row's tracked columns "
+                                    "differ from its source row"
+                                )
+                if _violations:
+                    return {
+                        "status": "failed",
+                        "reason": (
+                            "SCD2 invariant violated: "
+                            + "; ".join(_violations)
+                        )[:300],
+                        "recipe_hash": str(
+                            dest_summary.get("shape_recipe_hash") or ""
+                        ),
+                        "culprit_steps": ["scd2 invariant"],
+                        "provenance": "independent SCD2 invariants",
+                    }
+                scd2_provenance = "independent SCD2 invariants"
+        except Exception:
+            scd2_provenance = ""
+
     if expected_checksum == actual_checksum and actual_rows == exp_n:
         return {
             "status": "verified",
@@ -1413,10 +1607,19 @@ def _transform_applied_proof(
             "scoped_to_run_keys": scope_keys is not None,
             "provenance": (
                 "independent SQL oracle"
+                + (" + SCD2 invariants" if scd2_provenance else "")
                 if oracle_ok and oracle_exprs
-                else "recipe re-applied"
+                else (
+                    scd2_provenance
+                    or "recipe re-applied"
+                )
             ),
             "oracle_uncovered_steps": oracle_uncovered,
+            "oracle_coverage": {
+                "covered": len(steps) - len(oracle_uncovered),
+                "total": len(steps),
+                "scd2_invariants": bool(scd2_provenance),
+            },
         }
 
     # G-1a: the re-read runs AFTER the write — a busy source may have

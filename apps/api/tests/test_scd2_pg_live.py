@@ -1875,6 +1875,69 @@ def test_g1f_catalog_pk_drift_counts_pg(tmp_path, monkeypatch):
     conn.close()
 
 
+def test_g2_oracle_differential_value_ops_pg(tmp_path, monkeypatch):
+    """G-2: differential proof for the newly covered value ops — recipe
+    engine output must equal the SQL oracle on adversarial inputs
+    (nulls, empty/whitespace-only, unicode, multi-space, regex metachars).
+    Any divergence fails the run, so a correct run verifying proves the
+    oracle matches on every cell."""
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    rows = [
+        {"id": i, "name": n, "price": 1.5, "note": n}
+        for i, n in enumerate(
+            ["  a  b   c ", "", "   ", "ünïcodé  üf", "a\tb", "x.y.z",
+             "ABC Def", "123-45", None, "multi  \n line", "q"],
+            start=1,
+        )
+    ]
+    _mk_src(cur, rows, table="ovr_g2_src")
+    cur.execute("DROP TABLE IF EXISTS ovr_g2_dst CASCADE")
+
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    ep = lambda tbl: EndpointConfig(  # noqa: E731
+        kind="database", format="postgresql",
+        host=parsed["host"], port=parsed["port"], database=parsed["database"],
+        username=parsed["username"], password=parsed["password"], table=tbl)
+    recipe = {"steps": [
+        {"op": "collapse_whitespace", "column": "note"},
+        {"op": "replace", "column": "note",
+         "options": {"regex": True, "search": r"\d+", "replacement": "#"}},
+        {"op": "replace", "column": "name",
+         "options": {"search": ".", "replacement": "_"}},
+        {"op": "default_if_null", "column": "name",
+         "options": {"value": "FILL"}},
+        {"op": "null_if", "column": "price", "options": {"values": [1.5]}},
+    ]}
+    req = TransferRequest(
+        source=ep("ovr_g2_src"), destination=ep("ovr_g2_dst"),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {"source": c, "target": c, "confidence": 1.0,
+             "user_override": True, "transform": "none"}
+            for c in COLS
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=COLS
+        ).recipe_hash,
+        skip_preflight=True, validation_mode="strict",
+    )
+    res = _exec(fake, req, prefix="ovrg2")
+    assert res.success, res.error
+    recon = res.reconciliation or {}
+    proof = recon.get("transform_applied") or {}
+    assert proof.get("status") == "verified", proof
+    cov = proof.get("oracle_coverage") or {}
+    assert cov.get("total") == 5, proof
+    assert cov.get("covered") == 5, proof
+    assert not proof.get("oracle_uncovered_steps"), proof
+    conn.close()
+
+
 def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
     """G-1h: the shaped write+proof path must stay memory-bounded — the
     multiset/pin/oracle state lives on disk, not in Counters/dicts.
