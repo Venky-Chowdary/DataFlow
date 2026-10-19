@@ -13,6 +13,7 @@ import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
+import { MAPPING_TIMEOUT_MS, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
@@ -418,6 +419,10 @@ export function TransferPage({
   const [analyzing, setAnalyzing] = useState(false);
   const [mappingProgress, setMappingProgress] = useState(0);
   const [mappingPhase, setMappingPhase] = useState("Preparing schema context…");
+  const [mappingError, setMappingError] = useState<string | null>(null);
+  const analyzingRef = useRef(false);
+  analyzingRef.current = analyzing;
+  const mappingRunRef = useRef(0);
   const [sourceIntrospecting, setSourceIntrospecting] = useState(false);
   const [sourceIntrospectError, setSourceIntrospectError] = useState<string | null>(null);
   const [sourceObjectNames, setSourceObjectNames] = useState<string[]>([]);
@@ -3520,10 +3525,27 @@ export function TransferPage({
     });
   };
 
+  const hintEgress = (msg: string): string =>
+    withEgressHint(
+      msg,
+      destKindMode === "database" ? selectedDestConnector?.host : undefined,
+      sourceConnector?.host,
+    );
+
   const goToMapping = async () => {
     if (explainDestinationGap()) return;
     setStep(STEP_MAP);
+    setMappingError(null);
     setAnalyzing(true);
+    const startedAt = Date.now();
+    mappingRunRef.current = startedAt;
+    window.setTimeout(() => {
+      if (analyzingRef.current && mappingRunRef.current === startedAt) {
+        setAnalyzing(false);
+        setMappingProgress(0);
+        setMappingError(mappingTimeoutCopy);
+      }
+    }, MAPPING_TIMEOUT_MS);
     const bump = (pct: number, phase: string) => {
       setMappingProgress(pct);
       setMappingPhase(phase);
@@ -3544,6 +3566,7 @@ export function TransferPage({
       let freshDestSchema = destSchemaMap;
       let loadedTableExists: boolean | null = destTableExists;
       let loadedConnected: boolean | null = null;
+      let loadedSchemaMessage = "";
       if (destKindMode === "database") {
         mark("Loading destination schema…");
         let loaded = await loadDestinationSchema({ force: true });
@@ -3562,6 +3585,7 @@ export function TransferPage({
         freshDestSchema = loaded.schema;
         loadedTableExists = loaded.tableExists;
         loadedConnected = loaded.connected;
+        loadedSchemaMessage = loaded.message || destConnectionError || "";
       }
       mark("Building transfer plan…");
       await loadTransferPlan();
@@ -3706,15 +3730,21 @@ export function TransferPage({
       bump(100, "Mapping ready");
       await new Promise((r) => window.setTimeout(r, 220));
       if (!mapped.length) {
+        const detail = hintEgress(
+          loadedSchemaMessage || "Retry mapping, or go back and confirm the destination table schema is reachable."
+        );
+        setMappingError(detail);
         toast({
           title: "Mappings did not load",
-          message: "Retry mapping, or go back and confirm the destination table schema is reachable.",
+          message: detail,
           tone: "warning",
         });
       }
     } catch (e) {
       const message = e instanceof Error ? e.message : "Could not prepare column mappings.";
-      toast({ title: "Mapping setup failed", message, tone: "error" });
+      const detail = hintEgress(message);
+      setMappingError(detail);
+      toast({ title: "Mapping setup failed", message: detail, tone: "error" });
       console.error(e);
     } finally {
       setAnalyzing(false);
@@ -6594,7 +6624,9 @@ export function TransferPage({
           <EmptyState
             icon="sparkle"
             title="Preparing column mappings"
-            description={analysis?.columns.length
+            description={mappingError
+              ? mappingError
+              : analysis?.columns.length
               ? "Analysis finished but mappings did not load — retry to map source columns to your destination."
               : "Configure your destination first, then we will fetch the existing schema and map source columns intelligently."}
             action={
