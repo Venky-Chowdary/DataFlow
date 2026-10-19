@@ -144,6 +144,42 @@ def test_x9_transform_refusal_preserves_prior_rows(tmp_path, monkeypatch):
     )
 
 
+class _CancelAfterFirstChunk:
+    """Job store that answers "cancel requested" once the first batch has
+    reported written rows — a mid-run operator cancel, not a pre-run one."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def get_job(self, job_id):
+        job = dict(self._inner.get_job(job_id) or {})
+        if job.get("records_processed"):
+            job["cancel_requested"] = True
+        return job
+
+
+def test_x9_cancel_mid_run_leaves_nothing(tmp_path, monkeypatch):
+    """Cancel landing after committed batches must still leave the destination
+    byte-identical (absent for a create-new run)."""
+    import src.transfer.engine as engine_mod
+
+    fake = _engine_env(monkeypatch)
+    monkeypatch.setattr(
+        engine_mod, "get_mongodb_service", lambda: _CancelAfterFirstChunk(fake)
+    )
+    table = f"x9c_{uuid.uuid4().hex[:8]}"
+    dbfile = str(tmp_path / "dest.sqlite")
+    result = UniversalTransferEngine().execute(_request(tmp_path, table))
+    assert not result.success
+    snap = _dest_snapshot(dbfile, table)
+    assert snap is None or snap["rows"] == [], (
+        f"cancelled run left {len(snap['rows']) if snap else 'table'} committed"
+    )
+
+
 def _make_db_source(dbfile: str, table: str, n: int = N_ROWS) -> None:
     conn = sqlite3.connect(dbfile)
     try:
