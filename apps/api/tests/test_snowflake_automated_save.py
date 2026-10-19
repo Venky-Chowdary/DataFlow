@@ -253,3 +253,30 @@ def test_update_schema_accepts_snowflake_fields():
         "private_key", "secret_sha256", "secret_length",
     ):
         assert want in props, want
+
+
+def test_multi_secret_call_requires_secret_field(staged):
+    """Two secret fields + a declared hash without secret_field = refused."""
+    tr = lt.update_connector(
+        connector_id="sf-1",
+        password="tok",
+        private_key="pem",
+        secret_sha256="0" * 64,
+    )
+    assert tr.success is False
+    assert "secret_field" in tr.error
+    assert staged == []
+
+
+def test_secret_field_selects_the_checked_secret(staged):
+    import hashlib as h
+
+    tok = "tok-bytes"
+    tr = lt.update_connector(
+        connector_id="sf-1",
+        password=tok,
+        private_key="pem",
+        secret_field="password",
+        secret_sha256=h.sha256(tok.encode()).hexdigest(),
+    )
+    assert tr.success, tr.error
