@@ -40,10 +40,27 @@ def test_pymssql_never_emits_scientific_notation():
     assert out == ("0.0000000150",)
 
 
-def test_pyodbc_row_untouched():
+def test_pyodbc_wide_decimal_binds_as_text():
+    # pyodbc fast_executemany packs Decimal into a SQL_NUMERIC_STRUCT that
+    # cannot hold >28 significant digits — same TDS 8023 RPC error (X-25).
     row = (1, WIDE)
     out = bind_row_for_sqlserver(_PyodbcCursor(), row)
-    assert out[1] is WIDE  # native Decimal bind — no conversion
+    assert out[1] == "9999999999999999999999999999.9999999999"
+
+
+def test_pyodbc_narrow_decimal_binds_natively():
+    narrow = Decimal("123456789012345.12345")
+    out = bind_row_for_sqlserver(_PyodbcCursor(), (1, narrow))
+    assert out[1] is narrow  # 28-digit bound — native bind untouched
+
+
+def test_pyodbc_inner_wrapped_cursor_detected():
+    class _Wrap:
+        def __init__(self, cur):
+            self._cur = cur
+
+    out = bind_row_for_sqlserver(_Wrap(_PyodbcCursor()), (WIDE,))
+    assert out == ("9999999999999999999999999999.9999999999",)
 
 
 def test_int_float_str_pass_through_on_pymssql():

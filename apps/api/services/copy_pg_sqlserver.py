@@ -223,21 +223,40 @@ def _cursor_is_pymssql(cur: Any) -> bool:
     return type(cur).__module__.startswith("pymssql")
 
 
+def _cursor_is_pyodbc(cur: Any) -> bool:
+    """True when the dest cursor is backed by pyodbc. fast_executemany packs
+    ``Decimal`` into a SQL_NUMERIC_STRUCT, which cannot hold values beyond
+    ~28 significant digits — a DECIMAL(38,10) max aborts the batch with the
+    same TDS 8023 RPC error (X-25 live)."""
+    inner = getattr(cur, "_cur", cur)
+    return type(inner).__module__.startswith("pyodbc")
+
+
 def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
     """Bind one row for the SQL Server driver this cursor uses.
 
-    pymssql only: ``Decimal`` values are sent as canonical decimal text
+    pymssql: ``Decimal`` values are sent as canonical decimal text
     (``format(d, 'f')`` — never scientific notation), which the server
-    converts into the decimal column. pyodbc binds ``Decimal`` natively
-    and is untouched.
+    converts into the decimal column. pyodbc: only Decimals wider than 28
+    digits — beyond its numeric-struct capacity — go as text; ordinary
+    Decimals bind natively.
     """
-    if not _cursor_is_pymssql(cur):
-        return row
-    from decimal import Decimal
+    if _cursor_is_pymssql(cur):
+        from decimal import Decimal
 
-    return tuple(
-        format(v, "f") if isinstance(v, Decimal) else v for v in row
-    )
+        return tuple(
+            format(v, "f") if isinstance(v, Decimal) else v for v in row
+        )
+    if _cursor_is_pyodbc(cur):
+        from decimal import Decimal
+
+        return tuple(
+            format(v, "f")
+            if isinstance(v, Decimal) and len(v.as_tuple().digits) > 28
+            else v
+            for v in row
+        )
+    return row
 
 
 class _CopyExecutemanySink:
