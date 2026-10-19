@@ -141,15 +141,29 @@ def physical_temporal_digits(
     by the offset instead of by a fraction of a second.
     """
     from connectors.sql_temporal import is_temporal_ddl
+    from services.dest_dialect_facts import _normalize_dest_db
     from services.type_system import destination_temporal_fractional_digits
 
+    # ``db_type`` here is the routing key — ``resolve_driver_type("duckdb")``
+    # returns "generic_sql" — which has no temporal-digit defaults, so a bare
+    # ``TIME`` column read back as keeping 0 digits and Gate-8 restated the
+    # carrier as TIME(0), truncating the microseconds DuckDB TIME stores
+    # (X-34). Recover the real engine from the endpoint's own format/type.
+    engine = _normalize_dest_db(db_type)
+    if engine in {"", "generic_sql", "unknown"}:
+        engine = (
+            _normalize_dest_db(
+                str(cfg.get("format") or cfg.get("type") or "")
+            )
+            or engine
+        )
     out: dict[str, int] = {}
     for name, ddl in physical_column_types(
         db_type, cfg, table=table, columns=columns
     ).items():
         if not is_temporal_ddl(ddl):
             continue
-        digits = destination_temporal_fractional_digits(ddl, dest_db=db_type)
+        digits = destination_temporal_fractional_digits(ddl, dest_db=engine)
         if digits is not None:
             out[name] = digits
     return out

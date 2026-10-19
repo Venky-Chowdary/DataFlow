@@ -4762,6 +4762,14 @@ def _pin_norm(v: Any, ddl: str = "") -> str:
     if v is None:
         return "\x00NULL\x00"
     try:
+        # The read wire carries SQL NULL as the ``__DF_SQL_NULL__`` sentinel
+        # string (services.value_serializer.SQL_NULL_SENTINEL); the proof's
+        # re-read sees real None. Both must hash alike or every row holding
+        # a NULL is miscounted as "source changed during run" (X-33).
+        from services.value_serializer import SQL_NULL_SENTINEL
+
+        if v == SQL_NULL_SENTINEL:
+            return "\x00NULL\x00"
         if isinstance(v, str) and ddl and _TEXT_DDL_RE.match(str(ddl).strip()):
             return v
         from services.reconciliation import normalize_cell

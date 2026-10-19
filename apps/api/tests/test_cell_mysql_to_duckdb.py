@@ -347,3 +347,293 @@ def test_mysql_to_sqlite_dest_tamper_names_column_not_drift(
     assert "source changed during run" not in reason, proof
     culprit = proof.get("culprit_columns") or []
     assert "note" in culprit, proof
+
+
+def test_x33_loop_repro_dest_tamper_on_trimmed_column(
+    monkeypatch, tmp_path
+):
+    """X-33 loop repro verbatim: tamper the TRIMMED column on the
+    destination after write. Keys 1 and 4 (whitespace-padded names) were
+    miscounted as 'changed in source during run' — the verdict must be
+    failed with culprit column 'name', never 'source changed'.
+    """
+    import src.transfer.reconcile_step as rs
+
+    real = rs._run_reconciliation_with_rules
+
+    def tampered(*args, **kwargs):
+        con = duckdb.connect(str(dst_db))
+        con.execute("UPDATE out SET name='Zoe' WHERE id=3")
+        con.close()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(
+        rs, "_run_reconciliation_with_rules", tampered
+    )
+
+    table = "x33_loop_src"
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+            cur.execute(
+                f"CREATE TABLE `{table}` ("
+                "id INT PRIMARY KEY, name VARCHAR(64), qty VARCHAR(16), "
+                "amt VARCHAR(24), note VARCHAR(64))"
+            )
+            cur.executemany(
+                f"INSERT INTO `{table}` VALUES (%s,%s,%s,%s,%s)",
+                [
+                    (1, "  Ada  ", "7", "10.505", "keep"),
+                    (2, "Bob", "-3", "0.00", ""),
+                    (3, "Zo\u00eb", "2147483647", "99999999.9999", None),
+                    (4, "  ", "0", "-1.5", "   "),
+                    (5, None, None, None, "x"),
+                ],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    dst_db = tmp_path / "x33_loop.duckdb"
+    recipe = {
+        "steps": [
+            {"op": "trim", "column": "name", "options": {}},
+            {"op": "case", "column": "note", "options": {"mode": "upper"}},
+            {
+                "op": "cast_column",
+                "column": "qty",
+                "options": {"to_type": "integer"},
+            },
+            {
+                "op": "cast_column",
+                "column": "amt",
+                "options": {
+                    "to_type": "decimal",
+                    "precision": 12,
+                    "scale": 4,
+                },
+            },
+        ]
+    }
+    req = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="mysql", table=table, **MYSQL
+        ),
+        destination=EndpointConfig(
+            kind="database",
+            format="duckdb",
+            database=str(dst_db),
+            table="out",
+        ),
+        source_filename=table,
+        mappings=[
+            {
+                "source": c,
+                "target": c,
+                "confidence": 1.0,
+                "user_override": True,
+                "transform": "none",
+            }
+            for c in ["id", "name", "qty", "amt", "note"]
+        ],
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=__import__(
+            "services.shape_models", fromlist=["ShapeRecipe"]
+        ).ShapeRecipe.parse(
+            recipe,
+            source_columns=["id", "name", "qty", "amt", "note"],
+        ).recipe_hash,
+        stream_contracts=[
+            {
+                "name": table,
+                "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }
+        ],
+        skip_preflight=True,
+        validation_mode="strict",
+    )
+    res = UniversalTransferEngine().execute_tracked(req, "0" * 24)
+    assert not res.success, "dest tamper must fail the proof"
+    proof = (res.reconciliation or {}).get("transform_applied") or {}
+    reason = str(proof.get("reason") or "")
+    assert "source changed during run" not in reason, proof
+    assert proof.get("status") == "failed", proof
+    culprit = proof.get("culprit_columns") or []
+    assert "name" in culprit, proof
+
+
+def _time_request(
+    src_table: str, dst_db: Path, dest_table: str = "out"
+) -> TransferRequest:
+    return TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="mysql", table=src_table, **MYSQL
+        ),
+        destination=EndpointConfig(
+            kind="database",
+            format="duckdb",
+            database=str(dst_db),
+            table=dest_table,
+        ),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {
+                "source": c,
+                "target": c,
+                "confidence": 1.0,
+                "user_override": True,
+                "transform": "none",
+            }
+            for c in ["id", "t"]
+        ],
+        stream_contracts=[
+            {
+                "name": src_table,
+                "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }
+        ],
+        skip_preflight=True,
+        validation_mode="strict",
+    )
+
+
+def test_x34_time6_micros_to_duckdb(tmp_path):
+    """MySQL TIME(6) -> DuckDB TIME: micros preserved, verified/full_checksum.
+
+    Regression: the routing key 'generic_sql' resolved 0 temporal digits for
+    a bare DuckDB TIME column and Gate-8 restated it TIME(0), truncating the
+    microseconds DuckDB stores natively (X-34).
+    """
+    table = "x34_src"
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+            cur.execute(
+                f"CREATE TABLE `{table}` (id INT PRIMARY KEY, t TIME(6))"
+            )
+            cur.executemany(
+                f"INSERT INTO `{table}` VALUES (%s,%s)",
+                [
+                    (1, "01:23:45"),
+                    (2, "00:00:00.123456"),
+                    (3, "23:59:59.999999"),
+                    (4, None),
+                    (5, "09:05:00"),
+                ],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    dst = tmp_path / "x34.duckdb"
+    res = UniversalTransferEngine().execute_tracked(
+        _time_request(table, dst), "0" * 24
+    )
+    assert res.success, res.error
+
+    import datetime as _dt
+
+    con = duckdb.connect(str(dst))
+    rows = con.execute("SELECT id, t FROM out ORDER BY id").fetchall()
+    con.close()
+    assert rows[1] == (2, _dt.time(0, 0, 0, 123456)), rows
+    assert rows[2] == (3, _dt.time(23, 59, 59, 999999)), rows
+    assert rows[3] == (4, None), rows
+
+
+def test_x34_time6_dest_tamper_names_column(monkeypatch, tmp_path):
+    """Dest tamper on a TIME(6) column post-write: failed, culprit 't'."""
+    import src.transfer.reconcile_step as rs
+
+    real = rs._run_reconciliation_with_rules
+
+    def tampered(*args, **kwargs):
+        con = duckdb.connect(str(dst))
+        con.execute("UPDATE out SET t = TIME '00:00:01' WHERE id = 2")
+        con.close()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(rs, "_run_reconciliation_with_rules", tampered)
+
+    table = "x34_tamper_src"
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+            cur.execute(
+                f"CREATE TABLE `{table}` (id INT PRIMARY KEY, t TIME(6))"
+            )
+            cur.executemany(
+                f"INSERT INTO `{table}` VALUES (%s,%s)",
+                [(1, "01:23:45"), (2, "00:00:00.123456"), (3, "09:05:00")],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    dst = tmp_path / "x34_tamper.duckdb"
+    res = UniversalTransferEngine().execute_tracked(
+        _time_request(table, dst), "0" * 24
+    )
+    assert not res.success, "dest tamper must fail the proof"
+    recon = res.reconciliation or {}
+    blob = str(recon)
+    assert "source changed during run" not in blob, recon
+    mismatches = (recon.get("sample_compare") or {}).get("mismatches") or []
+    named = {str(m.get("target") or m.get("column") or "") for m in mismatches}
+    assert "t" in named or "column t" in str(recon.get("message") or ""), recon
+
+
+def test_x35_out_of_range_time_typed_finding_and_drop(tmp_path):
+    """MySQL TIME '-01:00:00' / '100:00:00' -> 0-24h TIME carrier.
+
+    The destination engine cannot hold a negative or >24h wall-clock TIME;
+    the run must end in a typed pre-write finding (quarantine), not a raw
+    driver error, and the table this run created must be dropped (X-35).
+    """
+    table = "x35_src"
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+            cur.execute(
+                f"CREATE TABLE `{table}` (id INT PRIMARY KEY, t TIME)"
+            )
+            cur.executemany(
+                f"INSERT INTO `{table}` VALUES (%s,%s)",
+                [
+                    (1, "-01:00:00"),
+                    (2, "100:00:00"),
+                    (3, "12:00:00"),
+                ],
+            )
+        conn.commit()
+    finally:
+        conn.close()
+
+    dst = tmp_path / "x35.duckdb"
+    res = UniversalTransferEngine().execute_tracked(
+        _time_request(table, dst), "0" * 24
+    )
+    assert not res.success, (
+        "out-of-range TIME must be a typed finding, not a silent bind"
+    )
+    blob = " ".join(
+        str(p)
+        for p in [
+            res.error,
+            (res.reconciliation or {}),
+            getattr(res, "rejected_rows", None),
+            getattr(res, "summary", None),
+        ]
+    )
+    assert "invalid input syntax" not in blob, blob
+    # The destination table this run created must be dropped.
+    con = duckdb.connect(str(dst))
+    tables = [r[0] for r in con.execute("SHOW TABLES").fetchall()]
+    con.close()
+    assert "out" not in tables, tables

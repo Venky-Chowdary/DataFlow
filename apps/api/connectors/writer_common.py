@@ -3429,6 +3429,67 @@ def _mysql_timestamp_range_violation(
     return mysql_timestamp_out_of_range(value)
 
 
+# Engines whose ``TIME`` carrier stores only a wall-clock in 0–24h. A
+# pymysql read-back of a MySQL ``'-01:00:00'`` / ``'100:00:00'`` arrives as
+# ``timedelta(days=-1, …)`` / ``timedelta(days=4, …)``; COPY binds its ``str``
+# ("-1 day, 23:00:00") and the engine rejects the literal — the load fails on
+# a raw driver error instead of a typed finding (X-35). MySQL/MariaDB/TiDB
+# ``TIME`` is a ±838h interval carrier and holds these; SQLite TEXT holds
+# anything. Held out here instead.
+_TIME_RANGE_LIMITED_ENGINES = frozenset(
+    {
+        "postgresql",
+        "mssql",
+        "duckdb",
+        "snowflake",
+        "oracle",
+        "db2",
+        "redshift",
+        "bigquery",
+        "clickhouse",
+        "trino",
+        "presto",
+        "databricks",
+        "iceberg",
+        "athena",
+    }
+)
+
+
+def _time_out_of_carrier_range(
+    target_type: str, value: Any, *, dest_db: str = ""
+) -> bool:
+    """True for a TIME cell outside the destination's 0–24h wall-clock range."""
+    import datetime as _dt
+    import re as _re
+
+    if not dest_db:
+        return False
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.type_system import normalize_logical_type
+
+    if _normalize_dest_db(dest_db) not in _TIME_RANGE_LIMITED_ENGINES:
+        return False
+    if normalize_logical_type(target_type) != "time":
+        return False
+    if isinstance(value, _dt.timedelta):
+        secs = value.total_seconds()
+        return secs < 0 or secs >= 86400
+    if isinstance(value, _dt.time):
+        return False
+    if isinstance(value, str):
+        text = value.strip()
+        m = _re.match(r"^(-?\d+)\s+day[s]?,\s*(\d+):(\d+)", text)
+        if m:
+            days = int(m.group(1))
+            return days < 0 or days >= 1
+        m = _re.match(r"^(-?)(\d+):(\d+):(\d+)", text)
+        if m:
+            hours = int(m.group(2))
+            return m.group(1) == "-" or hours >= 24
+    return False
+
+
 def _mysql_datetime_utc_normalizes(typ: str, dest_db: str) -> bool:
     """True when MySQL DATETIME will store the UTC clock, not strip an offset.
 
@@ -3532,6 +3593,12 @@ def quarantine_unfit_temporals(
                     f"value outside the MySQL TIMESTAMP epoch range for {typ} "
                     "— quarantined; map to DATETIME(6) with a UTC-normalize "
                     "contract to carry instants beyond 2038"
+                )
+            elif _time_out_of_carrier_range(typ, raw, dest_db=dest_db):
+                reason = (
+                    f"TIME value outside the 0–24h wall-clock range on {dest_db} "
+                    f"for {typ} — quarantined; map to an interval or text "
+                    "carrier to carry out-of-range TIME"
                 )
             elif check_tz and temporal_value_has_timezone(raw):
                 reason = (

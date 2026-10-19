@@ -84,6 +84,17 @@ def _decide(
         if isinstance(_eb, int):
             before = _eb
     if not isinstance(before, int):
+        # X-35: the run created the table (existence stamp False) — a
+        # nonexistent destination holds 0 rows by definition, so the missing
+        # precount must not leave a 0-row table behind on a write failure.
+        _existed = dest_summary.get("dest_table_existed_before")
+        if _existed is None:
+            _existed = (getattr(destination, "extra", None) or {}).get(
+                "dest_table_existed_before"
+            )
+        if _existed is False:
+            before = 0
+    if not isinstance(before, int):
         return (
             "retained",
             "Pre-write destination count was not measured, so the failed batch "
