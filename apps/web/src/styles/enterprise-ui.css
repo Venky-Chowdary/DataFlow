@@ -6703,7 +6703,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
      used to force landed on the page header and covered the Policy card on
      the Connectors empty state — toasts must never cover content (D-BP-4). */
   top: auto !important;
-  bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important;
+  /* No !important on bottom: the studio step-specific rules raise the
+     clearance through ``body:has()`` specificity and must be able to win. */
+  bottom: calc(60px + env(safe-area-inset-bottom, 0px));
   right: 16px !important;
   max-height: calc(100dvh - var(--df-header-height, 56px) - 88px) !important;
   z-index: var(--df-z-toast, 1100) !important;

@@ -10466,8 +10466,14 @@ button.df2-vd-assist-toggle:focus-visible {
 /* Footer wraps to ~two rows at ≤1440 (status + actions) — 84px clears the
    tallest wizard footer; the scroll body pads below so the last content row
    (contract search/select) is never painted under a toast (D-BP-11). */
+/* ``body:has()`` outranks the single-class base rules in dataflow-ui.css /
+   enterprise-ui.css on specificity alone — no !important needed (cascade
+   tranche: .dt-toast-host bottom overrides are !important-free). */
 body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
-  bottom: calc(84px + env(safe-area-inset-bottom, 0px)) !important;
+  bottom: calc(84px + env(safe-area-inset-bottom, 0px));
+  /* D-BP-17: cap the stack so toasts can't reach up into the centered
+     empty-state card — dedupe (D-BP-16) keeps the real stack short anyway. */
+  max-height: min(240px, 30vh);
 }
 
 .df2-page-transfer-studio .df2-transfer-step-viewport {
@@ -10477,7 +10483,7 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
 /* Transform's sticky footer is taller than the shared 60px clearance, and a
    success toast was painting over Review result and the sample. */
 body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
-  bottom: calc(104px + env(safe-area-inset-bottom, 0px)) !important;
+  bottom: calc(104px + env(safe-area-inset-bottom, 0px));
   max-height: min(240px, 32vh);
 }
 
@@ -12069,4 +12075,28 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   min-height: 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
+}
+
+/* D-BP-16: full probe refusal lives behind a disclosure so the inline error
+   stays one line and doesn't fight the toast for the same copy. */
+.df2-map-error-details {
+  max-width: 640px;
+  margin: 0.5rem auto 0;
+  font-size: 12px;
+  color: var(--df-text-secondary);
+  text-align: left;
+}
+.df2-map-error-details > summary {
+  cursor: pointer;
+  color: var(--df-accent, #2563eb);
+  text-align: center;
+}
+.df2-map-error-details > p {
+  margin: 0.5rem 0 0;
+  padding: 0.6rem 0.8rem;
+  background: var(--df-bg-subtle);
+  border: 1px solid var(--df-border);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

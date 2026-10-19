@@ -29,10 +29,20 @@ export function withEgressHint(
 ): string {
   const msg = message || "";
   if (!EGRESS_PATTERN.test(msg)) return msg;
+  // The probe refusal already carries the allowlist instruction — appending
+  // the hint a second time duplicated it in the same message (D-BP-16).
+  if (/DATAFLOW_EGRESS_ALLOWLIST/i.test(msg)) return msg;
   const host = destHost || sourceHost || "";
   return (
     `${msg} — the destination host${host ? ` “${host}”` : ""} is blocked by ` +
     "the API's egress allowlist. Add the host to " +
     "DATAFLOW_EGRESS_ALLOWLIST on the API service, or pick a reachable host."
   );
+}
+
+/** First sentence of a mapping error — the concise line the Map step shows
+ * inline; the full text lives in the collapsible Details block (D-BP-16). */
+export function mappingErrorSummary(message: string): string {
+  const first = (message || "").split(/(?<=[.!?])\s| — /)[0].trim();
+  return first || "Column mappings could not be loaded.";
 }

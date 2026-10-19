@@ -1969,9 +1969,11 @@ def _transform_applied_proof(
         if any(map_source_to_target(c, mappings) in culprits for c in cols):
             culprit_steps.append(f"step {i + 1} ({s.get('op')} on '{cols[0]}')")
     unexplained_cols = sorted(set(culprits) - set(declared_tcols))
+    non_recipe_drift_cols: list[str] = []
     if not culprit_steps and unexplained_cols:
         # Drift sits on columns no recipe step produces — name them and say
         # so; blaming every step would misdirect the operator.
+        non_recipe_drift_cols = unexplained_cols
         culprit_steps = [
             "drift on "
             + ", ".join(unexplained_cols[:8])
@@ -2005,6 +2007,7 @@ def _transform_applied_proof(
         "actual_rows": actual_rows,
         "culprit_columns": culprits,
         "culprit_steps": culprit_steps,
+        "non_recipe_drift_columns": non_recipe_drift_cols,
         "culprit_keys": key_culprits,
         "key_note": key_note,
         "actual_label": actual_label,
@@ -6421,11 +6424,21 @@ def run_reconciliation(
                 steps_txt = ", ".join(proof.get("culprit_steps") or [])
                 recon["passed"] = False
                 recon["verification_verdict"] = "failed"
-                why_txt = (
-                    f"{steps_txt} did not apply as declared"
-                    if steps_txt
-                    else str(proof.get("reason") or "the recipe output differs")
-                )
+                non_recipe = list(proof.get("non_recipe_drift_columns") or [])
+                if non_recipe:
+                    cols_txt = ", ".join(str(c) for c in non_recipe[:8])
+                    if len(non_recipe) > 8:
+                        cols_txt += "…"
+                    why_txt = (
+                        f"Destination drift on column {cols_txt} "
+                        f"is not explained by any recipe step"
+                    )
+                else:
+                    why_txt = (
+                        f"{steps_txt} did not apply as declared"
+                        if steps_txt
+                        else str(proof.get("reason") or "the recipe output differs")
+                    )
                 recon["message"] = (
                     f"Transform-applied proof failed: the destination does not "
                     f"hold the approved recipe's output — {why_txt} (recipe "

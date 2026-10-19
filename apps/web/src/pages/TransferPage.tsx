@@ -13,7 +13,7 @@ import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
-import { MAPPING_TIMEOUT_MS, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
+import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
 import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { TransferMapStep } from "./transfer/TransferMapStep";
@@ -3743,9 +3743,12 @@ export function TransferPage({
           loadedSchemaMessage || "Retry mapping, or go back and confirm the destination table schema is reachable."
         );
         setMappingError(detail);
+        // D-BP-16: the full refusal renders inline on the step (with a
+        // collapsible Details block) — the toast stays a short pointer, not a
+        // second copy of the same ~80-word message.
         toast({
           title: "Mappings did not load",
-          message: detail,
+          message: "See the error on the Map step.",
           tone: "warning",
         });
       }
@@ -3753,7 +3756,7 @@ export function TransferPage({
       const message = e instanceof Error ? e.message : "Could not prepare column mappings.";
       const detail = hintEgress(message);
       setMappingError(detail);
-      toast({ title: "Mapping setup failed", message: detail, tone: "error" });
+      toast({ title: "Mapping setup failed", message: "See the error on the Map step.", tone: "error" });
       console.error(e);
     } finally {
       setAnalyzing(false);
@@ -6631,10 +6634,10 @@ export function TransferPage({
       {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && !analyzing && columnMappings.length === 0 && (
         <div className="df2-transfer-step-panel">
           <EmptyState
-            icon="sparkle"
-            title="Preparing column mappings"
+            icon={mappingError ? "warning" : "sparkle"}
+            title={mappingError ? "Couldn't load column mappings" : "Preparing column mappings"}
             description={mappingError
-              ? mappingError
+              ? mappingErrorSummary(mappingError)
               : analysis?.columns.length
               ? "Analysis finished but mappings did not load — retry to map source columns to your destination."
               : "Configure your destination first, then we will fetch the existing schema and map source columns intelligently."}
@@ -6648,6 +6651,12 @@ export function TransferPage({
               </button>
             }
           />
+          {mappingError && (
+            <details className="df2-map-error-details">
+              <summary>Details</summary>
+              <p>{mappingError}</p>
+            </details>
+          )}
         </div>
       )}
 
