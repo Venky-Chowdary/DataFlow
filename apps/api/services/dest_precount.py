@@ -494,6 +494,58 @@ def _pgvector_identity_count(
         conn.close()
 
 
+def destination_table_exists(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> bool | None:
+    """Whether the destination object exists before this run writes it.
+
+    ``True``/``False`` when provable, ``None`` when the driver cannot say —
+    callers must treat ``None`` as "do not drop": a missed existence probe
+    must never turn a failed-run undo into a destructive drop.
+
+    Only engines with a cheap metadata probe answer a value today; extend
+    per dialect as more create-new undo cells are gated.
+    """
+    table = (table_name or "").strip()
+    if not table:
+        return None
+    if db_type == "generic_sql":
+        db_type = count_dialect(str(cfg.get("type") or db_type))
+    try:
+        if db_type == "sqlite":
+            import sqlite3
+
+            from connectors.sqlite_common import sqlite_file_path
+
+            database = sqlite_file_path(
+                str(cfg.get("database") or ""),
+                str(cfg.get("connection_string") or ""),
+                str(cfg.get("host") or ""),
+            )
+            if not database or database == ":memory:":
+                return None
+            with closing(sqlite3.connect(database)) as conn:
+                row = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (table,),
+                ).fetchone()
+            return row is not None
+        if db_type == "mongodb":
+            from connectors.table_manager import _mongo_db
+
+            mdb = _mongo_db(cfg)
+            names = mdb.list_collection_names()
+            return table in names
+    except Exception as exc:  # noqa: BLE001 - unknown is not False
+        logger.debug("destination_table_exists probe failed for %s: %s", db_type, exc)
+        return None
+    return None
+
+
 def destination_row_count(
     db_type: str,
     cfg: dict[str, Any],

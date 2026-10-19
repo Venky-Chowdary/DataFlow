@@ -123,9 +123,25 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
         if isinstance(info, dict) and info.get("table")
     ]
     tables = route_tables or [table]
+    # Byte-identical undo distinguishes two "empty before" shapes: the run
+    # created the table (drop it — the destination had no table) or the table
+    # existed empty (delete rows — its DDL must stay).
+    drop_created = dest_summary.get("dest_table_existed_before") is False
     removed_any = False
     remaining_after: list[int] = []
+    dropped_all = drop_created
     for _t in tables:
+        if drop_created:
+            try:
+                from connectors.table_manager import drop_table
+
+                dropped = bool(drop_table(db_type, cfg, _t, schema=schema))
+            except Exception:  # noqa: BLE001 - a failed drop still deletes rows
+                dropped = False
+            if dropped:
+                remaining_after.append(0)
+                continue
+            dropped_all = False
         removed = _delete_all_rows(
             db_type,
             cfg,
@@ -134,12 +150,18 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
             job_id=str(dest_summary.get("job_id") or ""),
         )
         removed_any = removed_any or removed
-        remaining_after.append(precount_table(db_type, cfg, _t))
+        remaining_after.append(precount_table(db_type, cfg, _t) or 0)
     removed = removed_any
     after = max(remaining_after) if remaining_after else 0
     dest_summary["partial_batch_rows_after_undo"] = after
-    if after == 0 and removed:
+    if after == 0 and (removed or dropped_all):
         dest_summary["partial_batch_removed"] = True
+        if dropped_all:
+            return (
+                "The destination had no such table before this run. The table "
+                "this run created was dropped, so the destination is "
+                "byte-identical to before."
+            )
         return (
             "The destination was empty before this run. The partial batch was "
             "removed, so the table is empty again."

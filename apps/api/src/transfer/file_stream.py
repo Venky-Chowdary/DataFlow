@@ -107,7 +107,6 @@ from services.read_options import ReadOptions
 from services.reconciliation import (
     _TEXT_FAMILY_DDL_RE,
     FingerprintAccumulator,
-    overlay_physical_dest_types,
 )
 from services.tabular_window import header_and_rows, row_to_record
 
@@ -1583,6 +1582,21 @@ def stream_file_to_database(
         rows_before = None
     if rows_before is not None:
         dest_summary[PRECOUNT_KEY] = int(rows_before)
+    if not resumed:
+        # X-9: a failed run must restore byte-identical state. A precount of 0
+        # cannot tell "created this run" from "emptied existing" — the undo
+        # needs existence to DROP (create-new) vs DELETE (existing-empty).
+        # None is not stamped: unknown must never justify a drop.
+        from services.dest_precount import destination_table_exists
+
+        _existed = destination_table_exists(
+            dest_type,
+            dest_cfg,
+            schema=schema_from_cfg(dest_type, dest_cfg),
+            table_name=dest_table,
+        )
+        if _existed is not None:
+            dest_summary["dest_table_existed_before"] = bool(_existed)
     if isinstance(pinned_before, int) or not resumed:
         from services.file_load_ledger import (
             file_already_loaded,
@@ -2821,6 +2835,25 @@ def stream_file_to_database(
                 dest_summary["rows_written"] = 0
                 dest_summary["source_row_count"] = 0
                 dest_summary["source_row_count_source"] = "file_manifest"
+    except BaseException as _write_exc:
+        # X-9: undo ran only on reconcile-verification failures, so a transform
+        # refusal / writer reject / cancel mid-run left committed batches in
+        # the destination. Run the same undo here (empty-dest cleanup, table
+        # drop on create-new) and carry the note on the exception so the
+        # engine's failure message reports it.
+        try:
+            from services.batch_undo import undo_failed_batch_if_dest_was_empty
+
+            _undo_note = undo_failed_batch_if_dest_was_empty(
+                destination=destination,
+                dest_summary=dest_summary,
+                sync_mode=effective_sync,
+            )
+            if _undo_note:
+                setattr(_write_exc, "failed_batch_undo_note", _undo_note)
+        except Exception:  # noqa: BLE001 - undo must not hide the write failure
+            pass
+        raise
     finally:
         if snowflake_stage:
             staged = sf_conn_state.get("conn")
