@@ -42,6 +42,8 @@ def _open_shape_runner(
     recipe that changes source-side truth has to run first or those decisions
     describe data that never reaches the writer.
     """
+    from services.shape_apply import is_typed_value_source
+
     return build_shape_runner(
         getattr(request, "shape_recipe", None),
         source_columns=list(columns or []),
@@ -49,6 +51,13 @@ def _open_shape_runner(
         approved_hash=str(getattr(request, "approved_shape_recipe_hash", "") or ""),
         approved_set_hash=str(getattr(request, "approved_set_hash", "") or ""),
         workspace_id=str(getattr(request, "workspace_id", "") or ""),
+        # X-1 live: the materialized-read path ran the recipe untyped, so
+        # database-sourced '' / '   ' collapsed to NULL at write while the
+        # proof's expected side (typed re-read) still held them — every
+        # blank-text cell flagged 'did not apply as declared'.
+        typed_values=is_typed_value_source(
+            str(getattr(getattr(request, "source", None), "format", "") or "")
+        ),
     )
 
 

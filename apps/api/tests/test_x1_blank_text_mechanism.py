@@ -80,3 +80,45 @@ def test_contextvar_isolation_between_calls():
     assert typed.records([{"v": "   "}])[0]["v"] == ""
     assert untyped.records([{"v": "   "}])[0]["v"] is None
     assert typed.records([{"v": "   "}])[0]["v"] == ""
+
+
+def test_engine_shape_runner_is_typed_for_db_source():
+    """X-1 live: _open_shape_runner ran the write-side recipe untyped —
+    database '' / '   ' collapsed to NULL on the materialized path while
+    the typed proof expected '' — the 'did not apply as declared' culprit
+    rows 1,2 on every shaped DB run."""
+    from src.transfer.engine_shape import _open_shape_runner
+
+    class _Src:
+        kind = "database"
+        format = "postgresql"
+
+    class _Req:
+        source = _Src()
+        shape_recipe = {"steps": [{"op": "trim", "column": "v"}]}
+        approved_shape_recipe_hash = ""
+        approved_set_hash = ""
+        workspace_id = ""
+        column_types = {}
+
+    runner = _open_shape_runner(_Req(), ["v"], {})
+    assert runner is not None and runner.typed_values is True
+
+
+def test_engine_shape_runner_stays_untyped_for_file_source():
+    from src.transfer.engine_shape import _open_shape_runner
+
+    class _Src:
+        kind = "file"
+        format = "csv"
+
+    class _Req:
+        source = _Src()
+        shape_recipe = {"steps": [{"op": "trim", "column": "v"}]}
+        approved_shape_recipe_hash = ""
+        approved_set_hash = ""
+        workspace_id = ""
+        column_types = {}
+
+    runner = _open_shape_runner(_Req(), ["v"], {})
+    assert runner is not None and runner.typed_values is False
