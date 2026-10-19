@@ -267,6 +267,8 @@ def test_x9_writer_reject_preserves_prior_rows(tmp_path, monkeypatch):
 
 
 def test_x9_db_source_refusal_empty_dest_leaves_nothing(tmp_path, monkeypatch):
+    """DB->DB create-new drop: the run-created table must be absent, not just
+    empty — byte-identical means the destination had no such table before."""
     _engine_env(monkeypatch)
     src_table = f"x9s_{uuid.uuid4().hex[:8]}"
     dst_table = f"x9d_{uuid.uuid4().hex[:8]}"
@@ -278,4 +280,4 @@ def test_x9_db_source_refusal_empty_dest_leaves_nothing(tmp_path, monkeypatch):
     )
     assert not result.success
     snap = _dest_snapshot(dst_db, dst_table)
-    assert snap is None or snap["rows"] == [], snap
+    assert snap is None, f"table this run created must be dropped, got {snap}"
