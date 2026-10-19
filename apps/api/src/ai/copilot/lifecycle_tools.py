@@ -249,11 +249,19 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                 },
                 "private_key": {
                     "type": "string",
-                    "description": "PKCS#8 private key for key_pair auth (never echoed).",
+                    "description": (
+                        "PKCS#8 private key for key_pair auth (never echoed). "
+                        "Omit to leave unchanged; pass \"\" to explicitly clear "
+                        "a stored key (stray-key repair)."
+                    ),
                 },
                 "private_key_passphrase": {
                     "type": "string",
-                    "description": "Passphrase for the private key (never echoed).",
+                    "description": (
+                        "Passphrase for the private key (never echoed; stored in "
+                        "the password field). Omit to leave unchanged; pass \"\" "
+                        "to clear it."
+                    ),
                 },
                 "secret_sha256": {
                     "type": "string",
@@ -1094,8 +1102,8 @@ def update_connector(  # nosec B107
     warehouse: str = "",
     auth_role: str = "",
     auth_mode: str = "",
-    private_key: str = "",
-    private_key_passphrase: str = "",
+    private_key: str | None = None,
+    private_key_passphrase: str | None = None,
     secret_sha256: str = "",
     secret_length: int = 0,
     secret_field: str = "",
@@ -1148,9 +1156,23 @@ def update_connector(  # nosec B107
         # — distinct from the topology ``role`` (source/destination/both).
         "auth_role": (auth_role or "").strip(),
         "auth_mode": (auth_mode or "").strip().lower(),
-        "private_key": private_key or "",
         "name": (new_name or "").strip(),
     }
+    # private_key: omitted = unchanged; "" = explicit clear (stray key removal);
+    # value = replace. The clear rides a sentinel so the store can tell it from
+    # the masked "" placeholder.
+    clears: dict[str, str] = {}
+    if private_key is not None:
+        if private_key == "":
+            clears["private_key"] = ""
+        else:
+            requested["private_key"] = private_key
+    if private_key_passphrase is not None and private_key_passphrase != "":
+        requested["password"] = private_key_passphrase
+    # passphrase "" clears it too — the passphrase rides the ``password``
+    # field on key-pair records, so clearing it clears that field.
+    if private_key_passphrase is not None and private_key_passphrase == "":
+        clears["password"] = ""
     # Trust extras live under ``extra`` on the stored record — compare against
     # that, not the record root.
     trust_requested = {
@@ -1164,10 +1186,25 @@ def update_connector(  # nosec B107
     # Snowflake key-pair records carry the key passphrase in the ``password``
     # field (the driver passes ``private_key_passphrase=password``) — the
     # save DTO has no separate passphrase column.
-    if (private_key_passphrase or "").strip():
-        requested["password"] = private_key_passphrase
     changes = {k: v for k, v in requested.items() if v and v != conn.get(k)}
     changes.update(trust_changes)
+    # Explicit clears stage as the store's erase sentinel — masked "" would
+    # otherwise preserve the stored secret (X-PAT stray-key repair).
+    from services.connector_store import SECRET_CLEAR_SENTINEL
+
+    for field, _ in clears.items():
+        if conn.get(field):
+            changes[field] = SECRET_CLEAR_SENTINEL
+    shown = {
+        k: (
+            "(cleared)"
+            if v == SECRET_CLEAR_SENTINEL
+            else "(changed — hidden)"
+            if k in _CONNECTOR_SECRET_FIELDS
+            else v
+        )
+        for k, v in changes.items()
+    }
     if ssl is not None and bool(ssl) != bool(conn.get("ssl")):
         changes["ssl"] = bool(ssl)
     if trust_server_certificate is not None and bool(trust_server_certificate) != bool(
@@ -1221,10 +1258,6 @@ def update_connector(  # nosec B107
         )
         if refusal:
             return _tool_result("update_connector", success=False, output=None, error=refusal)
-    shown = {
-        k: ("(changed — hidden)" if k in _CONNECTOR_SECRET_FIELDS else v)
-        for k, v in changes.items()
-    }
     _logger.info(
         "update_connector staged for %s (%s): fields=%s",
         brief["connector_id"], brief["type"], sorted(changes),

@@ -204,11 +204,19 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "private_key": {
                     "type": "string",
-                    "description": "PKCS#8 private key for key_pair auth (never echoed).",
+                    "description": (
+                        "PKCS#8 private key for key_pair auth (never echoed). "
+                        "Omit to leave unchanged; pass \"\" to explicitly clear "
+                        "a stored key (stray-key repair)."
+                    ),
                 },
                 "private_key_passphrase": {
                     "type": "string",
-                    "description": "Passphrase for the private key (never echoed).",
+                    "description": (
+                        "Passphrase for the private key (never echoed; stored in "
+                        "the password field). Omit to leave unchanged; pass \"\" "
+                        "to clear it."
+                    ),
                 },
                 "secret_sha256": {
                     "type": "string",
@@ -3589,8 +3597,8 @@ class DataPilotTools:
         warehouse: str = "",
         auth_role: str = "",
         auth_mode: str = "",
-        private_key: str = "",
-        private_key_passphrase: str = "",
+        private_key: str | None = None,
+        private_key_passphrase: str | None = None,
         secret_sha256: str = "",
         secret_length: int = 0,
         secret_field: str = "",

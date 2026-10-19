@@ -696,8 +696,18 @@ def _is_masked_placeholder(value: Any) -> bool:
     return False
 
 
+SECRET_CLEAR_SENTINEL = "__clear__"
+
+
 def _coerce_secret_update(new: Any, existing: Any) -> Any:
-    """Preserve an existing secret when the update payload only carries a placeholder."""
+    """Preserve an existing secret when the update payload only carries a placeholder.
+
+    ``SECRET_CLEAR_SENTINEL`` is the explicit erase: it writes ``""`` over the
+    stored value. Anything masked/empty keeps the stored value verbatim —
+    ciphertext is never decrypted just to re-encrypt it on save.
+    """
+    if isinstance(new, str) and new == SECRET_CLEAR_SENTINEL:
+        return ""
     if _is_masked_placeholder(new) and existing not in (None, ""):
         return existing
     return new
@@ -721,16 +731,37 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
 
     if _use_mongo():
         try:
-            existing = _get_mongo(connector_id, workspace_id)
-            if not existing:
-                return None
-            updated = _merge(existing)
             coll = _mongo_collection()
-            coll.replace_one(
-                _connector_id_query(connector_id, workspace_id),
-                _connector_to_doc(updated),
+            query = _connector_id_query(connector_id, workspace_id)
+            raw = coll.find_one(query)
+            if not raw:
+                return None
+            # Merge on the raw document, not the decrypted connector: a stored
+            # enc:v1 secret is preserved byte-for-byte when the update carries
+            # only a masked/empty placeholder, and a legacy plaintext secret is
+            # re-encrypted by _encrypt_connector_doc — every successful update
+            # heals the record instead of refusing it.
+            merged = {**raw, **data, "_id": raw.get("_id")}
+            merged.pop("id", None)
+            for secret_field in _DOC_SECRET_KEYS:
+                merged[secret_field] = _coerce_secret_update(
+                    merged.get(secret_field), raw.get(secret_field)
+                )
+            merged["role"] = normalize_connector_role(
+                str(merged.get("type") or raw.get("type") or ""),
+                merged.get("role"),
             )
-            return updated
+            doc = _encrypt_connector_doc(merged)
+            coll.replace_one(query, doc)
+            try:
+                return _doc_to_connector(doc)
+            except Exception:
+                # The write already healed what it could; report the stored
+                # shape without decrypting rather than failing the update.
+                return SavedConnector.from_dict(
+                    {**doc, "id": str(doc.get("_id") or connector_id)},
+                    secrets_encrypted=False,
+                )
         except Exception as exc:
             raise _mongo_write_failed("update", connector_id, exc) from exc
 
