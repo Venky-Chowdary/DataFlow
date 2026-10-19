@@ -4436,8 +4436,11 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if _text_declared and isinstance(value, (int, float, Decimal)):
         # Declared TEXT carrier: compare the bound repr, not a canonicalized
         # number — '1000.00' the writer rendered equals read-back '1000.00',
-        # while '01' vs '1' stays a real change.
-        return str(value)
+        # while '01' vs '1' stays a real change. Decimal needs format(d, "f"):
+        # writers bind fixed-point text ('0.0000000150') but str(Decimal) is
+        # scientific ('1.5E-8') — the reprs of the same value must agree
+        # (X-26 live: tiny decimals flagged 'did not apply as declared').
+        return format(value, "f") if isinstance(value, Decimal) else str(value)
     if isinstance(value, _datetime):
         if value.tzinfo is not None:
             value = value.astimezone(timezone.utc).replace(tzinfo=None)
