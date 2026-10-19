@@ -75,6 +75,25 @@ def probe_saved_connector(
     from services.connector_store import get_connector
 
     conn = get_connector(connector_id, workspace_id=workspace_id)
+    if conn is None and workspace_id:
+        # The connector was already resolved by exact id before this probe —
+        # a stored workspace value that disagrees with the caller's scope must
+        # not make an addressable doc "not found" (X-24). The scope narrows a
+        # lookup; it cannot be the reason an id that resolved stops resolving.
+        conn = get_connector(connector_id, workspace_id=None)
+    if conn is None:
+        # Some deployments list connectors through mongodb_service while the
+        # store layer misses the same doc (file fallback, collection shape).
+        # The probe must resolve any id list_connectors can show (X-24).
+        try:
+            from services.connector_store import _doc_to_connector
+            from services.mongodb_service import get_mongodb_service
+
+            raw = get_mongodb_service().get_connector(connector_id)
+            if isinstance(raw, dict):
+                conn = _doc_to_connector(raw)
+        except Exception:
+            conn = None
     with connector_operation(
         "probe",
         driver_family=driver_family(getattr(conn, "type", "") if conn else ""),
