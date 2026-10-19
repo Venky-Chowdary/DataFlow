@@ -337,6 +337,16 @@ class MongoDBService:
         connector_data["created_at"] = datetime.now(timezone.utc)
         connector_data["updated_at"] = datetime.now(timezone.utc)
 
+        # ``_id`` is the identity every lookup queries. A payload that already
+        # carries ``id`` (uuid from the canonical store) must keep it as ``_id``
+        # — a divergent ``id`` field under a generated ``_id`` would be
+        # list-visible but unreachable by id.
+        public_id = str(connector_data.pop("id", "") or "").strip()
+        if "_id" in connector_data:
+            connector_data["_id"] = str(connector_data["_id"])
+        elif public_id:
+            connector_data["_id"] = public_id
+
         result = collection.insert_one(connector_data)
         return str(result.inserted_id)
 
@@ -346,10 +356,15 @@ class MongoDBService:
         collection = db["connectors"]
 
         oid = _as_object_id(connector_id)
-        if not oid:
-            return None
+        id_clauses: list[dict] = []
+        if oid:
+            id_clauses.append({"_id": oid})
+        # Non-ObjectId ids (uuid strings from the canonical store) live in
+        # ``_id`` verbatim; older docs may carry them in an ``id`` field.
+        id_clauses.append({"_id": connector_id})
+        id_clauses.append({"id": connector_id})
 
-        result = collection.find_one({"_id": oid})
+        result = collection.find_one({"$or": id_clauses})
         if result:
             result["_id"] = str(result["_id"])
             return _decrypt_connector_secrets(result)
@@ -372,16 +387,17 @@ class MongoDBService:
         collection = db["connectors"]
 
         oid = _as_object_id(connector_id)
-        if not oid:
-            return False
+        clauses: list[dict] = [{"_id": connector_id}, {"id": connector_id}]
+        if oid:
+            clauses.insert(0, {"_id": oid})
 
         updates = _encrypt_connector_secrets(updates)
         updates["updated_at"] = datetime.now(timezone.utc)
         result = collection.update_one(
-            {"_id": oid},
+            {"$or": clauses},
             {"$set": updates}
         )
-        return result.modified_count > 0
+        return result.matched_count > 0
 
     def delete_connector(self, connector_id: str) -> bool:
         """Delete a connector"""
@@ -389,10 +405,11 @@ class MongoDBService:
         collection = db["connectors"]
 
         oid = _as_object_id(connector_id)
-        if not oid:
-            return False
+        clauses: list[dict] = [{"_id": connector_id}, {"id": connector_id}]
+        if oid:
+            clauses.insert(0, {"_id": oid})
 
-        result = collection.delete_one({"_id": oid})
+        result = collection.delete_one({"$or": clauses})
         return result.deleted_count > 0
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -1372,8 +1389,9 @@ class MemoryMongoDBService:
             return True
 
     def save_connector(self, connector_data: dict) -> str:
-        oid = self._new_id()
         rec = _encrypt_connector_secrets(dict(connector_data))
+        public_id = str(rec.pop("id", "") or "").strip()
+        oid = str(rec.get("_id") or public_id or self._new_id())
         rec["_id"] = oid
         rec.setdefault("created_at", datetime.now(timezone.utc))
         rec.setdefault("updated_at", datetime.now(timezone.utc))
@@ -1382,6 +1400,13 @@ class MemoryMongoDBService:
 
     def get_connector(self, connector_id: str) -> Optional[dict]:
         rec = self._connectors.get(connector_id)
+        if rec is None:
+            # Mirror the live lookup: ids stored in an ``id`` field under a
+            # generated ``_id`` must still resolve.
+            rec = next(
+                (c for c in self._connectors.values() if str(c.get("id") or "") == str(connector_id)),
+                None,
+            )
         if rec:
             rec = dict(rec)
             rec["_id"] = str(rec["_id"])

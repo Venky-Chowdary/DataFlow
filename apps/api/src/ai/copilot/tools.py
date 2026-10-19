@@ -176,6 +176,16 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "ssl": {"type": "boolean"},
                 "schema": {"type": "string"},
+                "warehouse": {
+                    "type": "string",
+                    "description": "Warehouse/database-engine resource name where required "
+                    "(Snowflake warehouse e.g. COMPUTE_WH, Databricks SQL warehouse).",
+                },
+                "role": {
+                    "type": "string",
+                    "description": "Topology role: source, destination, or both.",
+                    "enum": ["source", "destination", "both"],
+                },
                 "host_key": {
                     "type": "string",
                     "description": "SFTP only: operator-approved server key fingerprint "
@@ -1755,6 +1765,8 @@ class DataPilotTools:
         service_account: str = "",
         ssl: bool = False,
         schema: str = "",
+        warehouse: str = "",
+        role: str = "",
         message: str = "",
         test_first: bool = True,
         host_key: str = "",
@@ -1786,6 +1798,8 @@ class DataPilotTools:
                 "ssl": ssl,
                 "host_key": host_key,
                 "schema": schema,
+                "warehouse": warehouse,
+                "role": role,
             },
         )
         ok, missing = draft_is_complete(draft)

@@ -520,12 +520,29 @@ def _get_file(connector_id: str, workspace_id: str | None = None) -> SavedConnec
     return None
 
 
+def _connector_id_query(connector_id: str, workspace_id: str | None = None) -> dict[str, Any]:
+    """Match a connector by its public id regardless of storage shape.
+
+    Canonical docs store the connector id in ``_id`` (uuid or ObjectId).
+    Docs written through older/other paths (e.g. ``save_connector`` given a
+    payload that already carried ``id``) may keep the public id in an ``id``
+    field under a generated ``_id``. A lookup restricted to ``_id`` leaves
+    those connectors list-visible but untestable — match both.
+    """
+    query: dict[str, Any] = {"$or": [{"_id": connector_id}, {"id": connector_id}]}
+    if workspace_id is not None:
+        query = {
+            "$and": [
+                query,
+                {"$or": [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]},
+            ]
+        }
+    return query
+
+
 def _get_mongo(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     coll = _mongo_collection()
-    query: dict[str, Any] = {"_id": connector_id}
-    if workspace_id is not None:
-        query["$or"] = [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]
-    doc = coll.find_one(query)
+    doc = coll.find_one(_connector_id_query(connector_id, workspace_id))
     return _doc_to_connector(doc) if doc else None
 
 
@@ -643,7 +660,10 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
                 return None
             updated = _merge(existing)
             coll = _mongo_collection()
-            coll.replace_one({"_id": connector_id}, _connector_to_doc(updated))
+            coll.replace_one(
+                _connector_id_query(connector_id, workspace_id),
+                _connector_to_doc(updated),
+            )
             return updated
         except Exception as exc:
             raise _mongo_write_failed("update", connector_id, exc) from exc
@@ -665,10 +685,7 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
     if _use_mongo():
         try:
             coll = _mongo_collection()
-            query: dict[str, Any] = {"_id": connector_id}
-            if workspace_id is not None:
-                query["$or"] = [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]
-            result = coll.delete_one(query)
+            result = coll.delete_one(_connector_id_query(connector_id, workspace_id))
             return result.deleted_count > 0
         except Exception as exc:
             raise _mongo_write_failed("delete", connector_id, exc) from exc
@@ -695,7 +712,7 @@ def mark_tested(connector_id: str, ok: bool) -> None:
     if _use_mongo():
         try:
             coll = _mongo_collection()
-            coll.update_one({"_id": connector_id}, {"$set": patch})
+            coll.update_one(_connector_id_query(connector_id), {"$set": patch})
             # Keep file mirror in sync when present so dual-backend reads cannot
             # resurrect a stale failed badge after a green probe.
             try:
@@ -737,7 +754,7 @@ def note_transfer_succeeded(*connector_ids: str | None) -> int:
         if _use_mongo():
             try:
                 coll = _mongo_collection()
-                result = coll.update_one({"_id": cid}, {"$set": patch})
+                result = coll.update_one(_connector_id_query(cid), {"$set": patch})
                 if result.matched_count:
                     stamped += 1
                     continue
@@ -807,7 +824,7 @@ def mark_used(*connector_ids: str | None) -> int:
         if _use_mongo():
             try:
                 coll = _mongo_collection()
-                result = coll.update_one({"_id": cid}, {"$set": patch})
+                result = coll.update_one(_connector_id_query(cid), {"$set": patch})
                 if result.matched_count:
                     stamped += 1
                     try:
