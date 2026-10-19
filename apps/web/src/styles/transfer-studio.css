@@ -3522,7 +3522,7 @@ th.df2-type-string .df2-type-badge {
   max-width: 100%;
   overflow: hidden;
   box-sizing: border-box;
-  border: 1px solid #e2e8f0;
+  border: 1px solid var(--df-border);
   border-radius: 8px;
   background: var(--df-surface);
   cursor: pointer;
@@ -7239,27 +7239,6 @@ th.df2-type-string .df2-type-badge {
   overflow: hidden !important;
   align-items: stretch !important;
 }
-.df2-transfer-studio-body.is-validate-step .df2-transfer-main-panel {
-  flex: 1 1 0 !important;
-  min-height: 0 !important;
-  max-height: 100% !important;
-  overflow: hidden !important;
-  display: flex !important;
-  flex-direction: column !important;
-}
-.df2-transfer-step-viewport.df2-validate-dashboard-host,
-.df2-transfer-step-viewport.df2-validate-split,
-.df2-validate-dashboard-host {
-  flex: 1 1 0 !important;
-  min-height: 0 !important;
-  max-height: 100% !important;
-  height: 100% !important;
-  overflow-x: hidden !important;
-  overflow-y: auto !important;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-  padding: 0 !important;
-}
 .df2-vd {
   display: flex;
   flex-direction: column;
@@ -7271,14 +7250,6 @@ th.df2-type-string .df2-type-badge {
   min-height: min-content;
   overflow: visible;
 }
-.df2-transfer-studio-body.is-validate-step .df2-validate-rail {
-  min-height: 0 !important;
-  max-height: 100% !important;
-  overflow-y: auto !important;
-  overscroll-behavior: contain;
-  -webkit-overflow-scrolling: touch;
-}
-
 /* Remediation audit ? what AI / operator fixed */
 .df2-vd-remediation-log {
   margin: 0 0 14px;
@@ -10013,7 +9984,11 @@ button.df2-vd-assist-toggle:focus-visible {
   overflow: hidden !important;
 }
 
+/* Validate step layout — canonical rule (earlier copies consolidated here:
+ * flex/height/align-self kept; !important retained where enterprise-ui
+ * flatteners declare the same properties with !important). */
 .df2-transfer-studio-body.is-validate-step .df2-transfer-main-panel {
+  flex: 1 1 0 !important;
   min-height: 0 !important;
   max-height: 100% !important;
   height: 100% !important;
@@ -10029,12 +10004,13 @@ button.df2-vd-assist-toggle:focus-visible {
   height: 100% !important;
   align-self: stretch;
   overflow-x: hidden;
-  overflow-y: auto;
+  overflow-y: auto !important;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
 
 .df2-transfer-step-viewport.df2-validate-dashboard-host,
+.df2-transfer-step-viewport.df2-validate-split,
 .df2-validate-dashboard-host {
   flex: 1 1 0 !important;
   min-height: 0 !important;
@@ -10044,6 +10020,7 @@ button.df2-vd-assist-toggle:focus-visible {
   overflow-x: hidden !important;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
+  padding: 0 !important;
 }
 
 /* Multi-load history (Validate + Run remediation) */
@@ -11339,14 +11316,14 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 .df2-page-transfer-studio .df2-dest-connector-card-meta {
   font-size: 11px !important;
   font-weight: 500 !important;
-  color: #64748b !important;
+  color: var(--df-text-tertiary) !important;
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card-status {
   font-size: 10px !important;
   font-weight: 700 !important;
   text-transform: uppercase !important;
-  color: #059669 !important;
+  color: var(--df-success) !important;
 }
 
 .df2-page-transfer-studio .df2-dest-picker-empty {
