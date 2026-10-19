@@ -142,3 +142,90 @@ def test_x9_transform_refusal_preserves_prior_rows(tmp_path, monkeypatch):
         f"destination changed by a failed run: before={before['rows']} "
         f"after={after and after['rows']} ddl_same={after and after['ddl'] == before['ddl']}"
     )
+
+
+def _make_db_source(dbfile: str, table: str, n: int = N_ROWS) -> None:
+    conn = sqlite3.connect(dbfile)
+    try:
+        conn.execute(f'CREATE TABLE "{table}" (id INTEGER, amt TEXT)')
+        conn.executemany(
+            f'INSERT INTO "{table}" (id, amt) VALUES (?, ?)',
+            [(i, f"{i}.50") for i in range(1, n)] + [(n, "abc")],
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _db_request(src_db: str, src_table: str, dst_db: str, dst_table: str) -> TransferRequest:
+    recipe = _recipe()
+    return TransferRequest(
+        source=EndpointConfig(
+            kind="database",
+            format="sqlite",
+            host="",
+            port=0,
+            database=src_db,
+            username="",
+            password="",
+            table=src_table,
+        ),
+        destination=EndpointConfig(
+            kind="database",
+            format="sqlite",
+            host="",
+            port=0,
+            database=dst_db,
+            username="",
+            password="",
+            table=dst_table,
+        ),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+        skip_preflight=True,
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=["id", "amt"]
+        ).recipe_hash,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 1.0, "target_type": "integer"},
+            {"source": "amt", "target": "amt", "confidence": 1.0, "target_type": "DECIMAL(10,2)"},
+        ],
+    )
+
+
+def test_x9_db_source_refusal_preserves_prior_rows(tmp_path, monkeypatch):
+    """DB->DB path: dest with 3 prior rows must be byte-identical after a
+    mid-run transform refusal (same undo as the file path)."""
+    _engine_env(monkeypatch)
+    src_table = f"x9s_{uuid.uuid4().hex[:8]}"
+    dst_table = f"x9d_{uuid.uuid4().hex[:8]}"
+    src_db = str(tmp_path / "src.sqlite")
+    dst_db = str(tmp_path / "dst.sqlite")
+    _make_db_source(src_db, src_table)
+    _make_prior(dst_db, dst_table)
+    before = _dest_snapshot(dst_db, dst_table)
+    result = UniversalTransferEngine().execute(
+        _db_request(src_db, src_table, dst_db, dst_table)
+    )
+    assert not result.success
+    after = _dest_snapshot(dst_db, dst_table)
+    assert after == before, (
+        f"destination changed by a failed run: before={before['rows']} "
+        f"after={after and after['rows']}"
+    )
+
+
+def test_x9_db_source_refusal_empty_dest_leaves_nothing(tmp_path, monkeypatch):
+    _engine_env(monkeypatch)
+    src_table = f"x9s_{uuid.uuid4().hex[:8]}"
+    dst_table = f"x9d_{uuid.uuid4().hex[:8]}"
+    src_db = str(tmp_path / "src.sqlite")
+    dst_db = str(tmp_path / "dst.sqlite")
+    _make_db_source(src_db, src_table)
+    result = UniversalTransferEngine().execute(
+        _db_request(src_db, src_table, dst_db, dst_table)
+    )
+    assert not result.success
+    snap = _dest_snapshot(dst_db, dst_table)
+    assert snap is None or snap["rows"] == [], snap
