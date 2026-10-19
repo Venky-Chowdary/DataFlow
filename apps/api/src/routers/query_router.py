@@ -584,9 +584,14 @@ async def query_schema(
             "Query schema introspection failed for %s: %s", body.connector_id, exc
         )
         driver = getattr(endpoint, "format", "") or ""
+        _ep_mode = str(
+            (getattr(endpoint, "extra", None) or {}).get("auth_mode")
+            or getattr(endpoint, "auth_mode", "")
+            or ""
+        )
         raise HTTPException(
             status_code=400,
-            detail=f"Schema introspection failed: {humanize_connection_error(driver, exc)}",
+            detail=f"Schema introspection failed: {humanize_connection_error(driver, exc, auth_mode=_ep_mode)}",
         ) from exc
 
     col_types: dict[str, str] = dict(info.get("schema") or {})
@@ -1065,7 +1070,10 @@ def _run_sql_query(connector, body):
     except Exception as exc:
         raise HTTPException(
             status_code=400,
-            detail=humanize_connection_error(connector.type or "", exc),
+            detail=humanize_connection_error(
+                connector.type or "", exc,
+                auth_mode=str(getattr(connector, "auth_mode", "") or ""),
+            ),
         ) from exc
 
     from services.dialect_profiles import append_result_limit

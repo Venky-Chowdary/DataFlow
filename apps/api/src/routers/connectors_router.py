@@ -289,7 +289,10 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
         op.errored(e)
         return {
             "success": False,
-            "message": humanize_connection_error(resolve_driver_type(request.type or ""), e),
+            "message": humanize_connection_error(
+                resolve_driver_type(request.type or ""), e,
+                auth_mode=request.auth_mode or "",
+            ),
         }
 
 

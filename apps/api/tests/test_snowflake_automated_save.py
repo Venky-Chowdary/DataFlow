@@ -380,3 +380,39 @@ def test_empty_mode_non_pem_key_no_password_still_reports_key_error():
         snowflake_connect_kwargs(
             account="acct", username="u", private_key="not-a-pem", auth_mode=""
         )
+
+
+def test_router_test_endpoint_jwt_refusal_names_pat(monkeypatch):
+    """The modal Test button (unsaved config) must also name the PAT — the
+    outer except in connectors_router was classifying without auth_mode."""
+    import asyncio
+    import importlib
+
+    router_mod = importlib.import_module("src.routers.connectors_router")
+
+    def fake_run_probe(driver, cfg):
+        raise RuntimeError("JWT token is invalid. [390144]")
+
+    monkeypatch.setattr(router_mod, "run_probe", fake_run_probe)
+
+    class _Op:
+        def update(self, **kw):
+            pass
+
+        def errored(self, exc):
+            pass
+
+    async def _go():
+        req = router_mod.TestConnectionRequest(
+            type="snowflake",
+            host="acct",
+            username="u",
+            password="tok",
+            auth_mode="pat",
+        )
+        return await router_mod._test_connection_impl(req, _Op())
+
+    out = asyncio.run(_go())
+    assert out["success"] is False
+    assert "programmatic access token" in out["message"]
+    assert "ALTER USER" not in out["message"]
