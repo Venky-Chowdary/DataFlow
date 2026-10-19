@@ -39,18 +39,28 @@ async function visibleBoxes(
   return boxes;
 }
 
-async function assertToastClearance(page: Page, label: string) {
+async function assertToastClearance(
+  page: Page,
+  label: string,
+  opts: { requireToast?: boolean } = {},
+) {
+  const requireToast = opts.requireToast ?? true;
   const toasts = page.locator(".dt-toast:visible");
-  await expect(toasts.first(), `a toast must be visible on ${label}`).toBeVisible();
+  if (requireToast) {
+    await expect(toasts.first(), `a toast must be visible on ${label}`).toBeVisible();
+  }
   const toastBoxes = await visibleBoxes(toasts);
-  expect(
-    toastBoxes.length,
-    `at least one rendered toast must have a box on ${label}`,
-  ).toBeGreaterThan(0);
+  if (requireToast) {
+    expect(
+      toastBoxes.length,
+      `at least one rendered toast must have a box on ${label}`,
+    ).toBeGreaterThan(0);
+  }
 
   // D-BP-20: docked toasts must live inside the header toast dock — never
   // over the step content. The content column also keeps the full width:
   // its right edge stays aligned to the stepper's right edge (+/-8px).
+  // The shell-clear check runs on every leg, toast or not.
   const dock = page.locator(".df2-toast-dock").first();
   const stepPanel = page.locator(".df2-transfer-step-viewport:visible").first();
   const stepper = page.locator(".df2-transfer-studio-chrome").first();
@@ -59,19 +69,28 @@ async function assertToastClearance(page: Page, label: string) {
     stepPanel.boundingBox(),
     stepper.boundingBox(),
   ]);
+  const vw = page.viewportSize()?.width ?? 1440;
   if (dockBox && panelBox && stepperBox) {
-    for (const t of toastBoxes) {
-      expect(
-        t.y >= dockBox.y - 4 &&
-          t.y + t.height <= dockBox.y + dockBox.height + 4,
-        `docked toast ${JSON.stringify(t)} must stay within the dock row on ${label}`,
-      ).toBe(true);
+    if (vw > 900) {
+      // >=901px: dock lives in the header chrome row — pills must stay inside it.
+      for (const t of toastBoxes) {
+        expect(
+          t.y >= dockBox.y - 4 &&
+            t.y + t.height <= dockBox.y + dockBox.height + 4,
+          `docked toast ${JSON.stringify(t)} must stay within the dock row on ${label}`,
+        ).toBe(true);
+      }
     }
+    // <=900px: the dock drops below the chrome as an overlay strip by design
+    // — the card/footer intersection checks below still apply.
     const edgeDelta = Math.abs(panelBox.x + panelBox.width - (stepperBox.x + stepperBox.width));
     expect(
       edgeDelta,
       `content right edge must align to the stepper right edge (+/-8px) on ${label} (delta=${edgeDelta.toFixed(1)})`,
     ).toBeLessThanOrEqual(8);
+  }
+  if (toastBoxes.length === 0) {
+    return; // shell asserted; no live toast to intersect
   }
 
   const targets = page.locator(
@@ -109,7 +128,7 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
     });
   });
 
-  for (const width of [1440, 1280, 1024]) {
+  for (const width of [1440, 1280, 1024, 390]) {
     test(`no toast overlap with footer, primary actions, or cards @${width}px`, async ({
       page,
     }) => {
@@ -121,26 +140,41 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
       await loadSample(page);
       await assertToastClearance(page, `Source @${width}px`);
 
-      // Validate step — HARD assertion: the spec must actually reach the
-      // Validate panel (the "Preflight passed" toast covered the contract
-      // search/select and a metric card — the original complaint). Any
-      // conditional path that skips this leg is a spec bug.
+      // P1-1: walk every classic step and assert the shell stays clear on
+      // each — not only Source/Validate. The Validate leg stays HARD (the
+      // spec must actually reach it); Run is asserted when reachable —
+      // preview mode cannot execute a transfer, so a missing Run button is
+      // reported, not hidden.
       const clickIf = async (re: RegExp, ms = 2500) => {
         const b = page.getByRole("button", { name: re }).first();
         if (await b.isVisible().catch(() => false)) {
           await b.click().catch(() => {});
           await page.waitForTimeout(ms);
+          return true;
         }
+        return false;
       };
-      await clickIf(/Continue to Destination/);
+      if (await clickIf(/Continue to Destination/)) {
+        await assertToastClearance(page, `Destination @${width}px`, {
+          requireToast: false,
+        });
+      }
       const fileTab = page.getByRole("tab", { name: /File export|File/ }).first();
       if (await fileTab.isVisible().catch(() => false)) {
         await fileTab.click();
         await page.waitForTimeout(400);
       }
-      await clickIf(/Continue to Review|Continue to Transform/);
+      if (await clickIf(/Continue to Review|Continue to Transform/)) {
+        await assertToastClearance(page, `Transform/Review @${width}px`, {
+          requireToast: false,
+        });
+      }
       await clickIf(/Review result/);
-      await clickIf(/Continue without transforming/);
+      if (await clickIf(/Continue without transforming/)) {
+        await assertToastClearance(page, `Map @${width}px`, {
+          requireToast: false,
+        });
+      }
       const toValidate = page
         .getByRole("button", { name: /Continue to Validate/ })
         .first();
@@ -153,6 +187,26 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
       });
       await expect(page.locator(".df2-vd-metric").first()).toBeVisible();
       await assertToastClearance(page, `Validate step @${width}px`);
+
+      // Run leg: reachable only when the preview can advance — assert when
+      // it lands, record plainly when it cannot.
+      const toRun = page
+        .getByRole("button", { name: /Continue to Run|Run transfer|Execute/i })
+        .first();
+      if (
+        await toRun.isVisible().catch(() => false)
+      ) {
+        await toRun.click().catch(() => {});
+        await page.waitForTimeout(1500);
+        await assertToastClearance(page, `Run @${width}px`, {
+          requireToast: false,
+        });
+      } else {
+        test.info().annotations.push({
+          type: "note",
+          description: `Run step not reachable in preview @${width}px — leg skipped honestly`,
+        });
+      }
     });
   }
 });
