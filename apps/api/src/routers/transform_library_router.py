@@ -465,17 +465,22 @@ def upgrade_preview(
             detail=f"Transform recipe version {target_version} not found",
         )
 
-    from services.transform_library import recipe_step_diff
+    from services.transform_library import recipe_diff_hash, recipe_step_diff
 
+    step_diff = recipe_step_diff(
+        [st.to_dict() for st in old.steps],
+        [st.to_dict() for st in new.steps],
+    )
     return {
         "recipe_id": recipe_id,
         "recipe_name": recipe.name,
         "from_version": bound_version,
         "to_version": target_version,
-        "step_diff": recipe_step_diff(
-            [st.to_dict() for st in old.steps],
-            [st.to_dict() for st in new.steps],
+        "step_diff": step_diff,
+        "diff_hash": recipe_diff_hash(
+            recipe_id, bound_version, target_version, step_diff
         ),
+        "rollback": int(target_version) < int(bound_version),
         "enabled_changed": bool(old.enabled) != bool(new.enabled),
         "used_by": _schedule_users(recipe_id, int(recipe.version or 1)),
         "mutates_nothing": True,

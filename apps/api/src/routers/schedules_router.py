@@ -918,9 +918,18 @@ async def accept_source_schema(
 
 
 class ScheduleRecipeUpgrade(BaseModel):
-    """Explicit recipe-version upgrade for a bound schedule (B3)."""
+    """Explicit recipe-version upgrade for a bound schedule (B3).
+
+    ``expected_from_version`` is optimistic concurrency: the operator
+    reviewed a preview at version N — if another operator re-pinned the
+    schedule to something else since, the upgrade refuses with 409.
+    ``expected_diff_hash`` binds the upgrade to the exact diff hash the
+    preview returned, refusing a stale review after further recipe edits.
+    """
 
     target_version: int = Field(ge=1)
+    expected_from_version: Optional[int] = Field(default=None, ge=1)
+    expected_diff_hash: Optional[str] = None
 
 
 @router.post("/{schedule_id}/transform-recipe/upgrade")
@@ -951,9 +960,22 @@ def upgrade_schedule_recipe(
             detail="Schedule has no transform recipe binding to upgrade",
         )
     from_version = int(getattr(existing, "transform_recipe_version", 0) or 0)
+    if (
+        body.expected_from_version is not None
+        and int(body.expected_from_version) != from_version
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Schedule binding moved: expected pinned version "
+                f"{int(body.expected_from_version)}, currently {from_version}. "
+                "Re-run upgrade-preview before re-pinning."
+            ),
+        )
 
     from services.transform_library import (
         get_transform_library,
+        recipe_diff_hash,
         recipe_step_diff,
     )
 
@@ -971,6 +993,28 @@ def upgrade_schedule_recipe(
                 f"{body.target_version} not found"
             ),
         )
+    step_diff = (
+        recipe_step_diff(
+            [st.to_dict() for st in old.steps],
+            [st.to_dict() for st in new.steps],
+        )
+        if old is not None
+        else []
+    )
+    if body.expected_diff_hash:
+        actual_hash = recipe_diff_hash(
+            recipe_id, from_version, int(body.target_version), step_diff
+        )
+        if actual_hash != body.expected_diff_hash.strip():
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Stale preview: the recipe or binding changed after "
+                    "the preview was taken. Re-run upgrade-preview before "
+                    "re-pinning."
+                ),
+            )
+    is_rollback = int(body.target_version) < from_version
     try:
         updated = update_schedule(
             schedule_id,
@@ -994,6 +1038,7 @@ def upgrade_schedule_recipe(
             "recipe_id": recipe_id,
             "from_version": from_version,
             "to_version": int(body.target_version),
+            "rollback": is_rollback,
         },
     )
     return {
@@ -1001,17 +1046,11 @@ def upgrade_schedule_recipe(
         "recipe_id": recipe_id,
         "from_version": from_version,
         "to_version": int(body.target_version),
+        "rollback": is_rollback,
         "bound_version": int(
             getattr(updated, "transform_recipe_version", 0) or 0
         ),
-        "step_diff": (
-            recipe_step_diff(
-                [st.to_dict() for st in old.steps],
-                [st.to_dict() for st in new.steps],
-            )
-            if old is not None
-            else []
-        ),
+        "step_diff": step_diff,
     }
 
 

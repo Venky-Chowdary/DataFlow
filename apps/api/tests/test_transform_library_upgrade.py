@@ -134,3 +134,186 @@ def test_schedule_upgrade_409_without_binding(monkeypatch):
             "sched-2", body, Request(_scope()), workspace_id=""
         )
     assert exc.value.status_code == 409
+
+
+def _sched(version=1, workspace_id=""):
+    return SimpleNamespace(
+        id="sched-1", name="nightly", transform_recipe_id="rec-1",
+        transform_recipe_version=version, transform_recipe_version_mode="pin",
+        workspace_id=workspace_id,
+    )
+
+
+def _wire_sched(monkeypatch, sched):
+    monkeypatch.setattr(sched_router, "get_schedule", lambda sid: sched)
+    monkeypatch.setattr(
+        sched_router, "update_schedule",
+        lambda sid, data: SimpleNamespace(
+            id=sid, transform_recipe_version=data["transform_recipe_version"]
+        ),
+    )
+    monkeypatch.setattr(
+        sched_router, "record_security_event", lambda *a, **k: None
+    )
+    import services.transform_library as tl
+    monkeypatch.setattr(tl, "get_transform_library", lambda: _Store())
+
+
+def _scope_ws(ws, method="POST", path="/"):
+    return {
+        "type": "http", "method": method, "path": path,
+        "headers": [(b"x-workspace-id", ws.encode())],
+        "query_string": b"", "server": ("t", 80),
+    }
+
+
+def test_upgrade_preview_returns_diff_hash(monkeypatch):
+    monkeypatch.setattr(router, "get_transform_library", lambda: _Store())
+    sched = _sched()
+    monkeypatch.setattr(schedule_store, "list_schedules", lambda: [sched])
+    monkeypatch.setattr(schedule_store, "get_schedule", lambda sid: sched)
+    body = router.UpgradePreviewPayload(schedule_id="sched-1")
+    out = router.upgrade_preview("rec-1", body, Request(_scope()), workspace_id="")
+    assert out["diff_hash"]
+    assert out["rollback"] is False
+
+
+def test_upgrade_409_on_expected_from_version_mismatch(monkeypatch):
+    from fastapi import HTTPException
+
+    _wire_sched(monkeypatch, _sched(version=2))
+    body = sched_router.ScheduleRecipeUpgrade(
+        target_version=3, expected_from_version=1
+    )
+    with pytest.raises(HTTPException) as exc:
+        sched_router.upgrade_schedule_recipe(
+            "sched-1", body, Request(_scope()), workspace_id=""
+        )
+    assert exc.value.status_code == 409
+
+
+def test_upgrade_requires_matching_diff_hash(monkeypatch):
+    from fastapi import HTTPException
+
+    _wire_sched(monkeypatch, _sched(version=1))
+    body = sched_router.ScheduleRecipeUpgrade(
+        target_version=2, expected_diff_hash="deadbeef"
+    )
+    with pytest.raises(HTTPException) as exc:
+        sched_router.upgrade_schedule_recipe(
+            "sched-1", body, Request(_scope()), workspace_id=""
+        )
+    assert exc.value.status_code == 409
+
+
+def test_upgrade_accepts_preview_diff_hash(monkeypatch):
+    """The hash the preview returns is accepted by upgrade end-to-end."""
+    monkeypatch.setattr(router, "get_transform_library", lambda: _Store())
+    sched = _sched(version=1)
+    monkeypatch.setattr(schedule_store, "list_schedules", lambda: [sched])
+    monkeypatch.setattr(schedule_store, "get_schedule", lambda sid: sched)
+    prev = router.upgrade_preview(
+        "rec-1",
+        router.UpgradePreviewPayload(schedule_id="sched-1"),
+        Request(_scope()),
+        workspace_id="",
+    )
+    _wire_sched(monkeypatch, sched)
+    body = sched_router.ScheduleRecipeUpgrade(
+        target_version=2,
+        expected_from_version=1,
+        expected_diff_hash=prev["diff_hash"],
+    )
+    out = sched_router.upgrade_schedule_recipe(
+        "sched-1", body, Request(_scope()), workspace_id=""
+    )
+    assert out["to_version"] == 2
+    assert out["bound_version"] == 2
+
+
+def test_downgrade_is_labeled_rollback_in_response_and_audit(monkeypatch):
+    events = []
+    sched = _sched(version=2)
+    monkeypatch.setattr(sched_router, "get_schedule", lambda sid: sched)
+    monkeypatch.setattr(
+        sched_router, "update_schedule",
+        lambda sid, data: SimpleNamespace(
+            id=sid, transform_recipe_version=data["transform_recipe_version"]
+        ),
+    )
+    monkeypatch.setattr(
+        sched_router, "record_security_event",
+        lambda *a, **k: events.append(k),
+    )
+    import services.transform_library as tl
+    monkeypatch.setattr(tl, "get_transform_library", lambda: _Store())
+    body = sched_router.ScheduleRecipeUpgrade(target_version=1)
+    out = sched_router.upgrade_schedule_recipe(
+        "sched-1", body, Request(_scope()), workspace_id=""
+    )
+    assert out["rollback"] is True
+    assert out["to_version"] == 1
+    assert events and events[0]["details"]["rollback"] is True
+
+
+def test_forward_upgrade_not_labeled_rollback(monkeypatch):
+    events = []
+    sched = _sched(version=1)
+    monkeypatch.setattr(sched_router, "get_schedule", lambda sid: sched)
+    monkeypatch.setattr(
+        sched_router, "update_schedule",
+        lambda sid, data: SimpleNamespace(
+            id=sid, transform_recipe_version=data["transform_recipe_version"]
+        ),
+    )
+    monkeypatch.setattr(
+        sched_router, "record_security_event",
+        lambda *a, **k: events.append(k),
+    )
+    import services.transform_library as tl
+    monkeypatch.setattr(tl, "get_transform_library", lambda: _Store())
+    body = sched_router.ScheduleRecipeUpgrade(target_version=2)
+    out = sched_router.upgrade_schedule_recipe(
+        "sched-1", body, Request(_scope()), workspace_id=""
+    )
+    assert out["rollback"] is False
+    assert events and events[0]["details"]["rollback"] is False
+
+
+def _patch_ws_membership(monkeypatch):
+    """Actor is a member of workspace b only."""
+    import services.workspace_access as wa
+    monkeypatch.setattr(wa, "can_read_workspace", lambda ws, email: ws == "b")
+    monkeypatch.setattr(wa, "can_write_workspace", lambda ws, email: ws == "b")
+    monkeypatch.setattr(wa, "require_workspace_isolation", lambda: False)
+
+
+def test_cross_workspace_preview_denied(monkeypatch):
+    """Workspace B cannot preview a workspace A recipe — 404/403."""
+    from fastapi import HTTPException
+
+    _patch_ws_membership(monkeypatch)
+    store = _Store()
+    store._versions[1].workspace_id = "a"
+    store._versions[2].workspace_id = "a"
+    monkeypatch.setattr(router, "get_transform_library", lambda: store)
+    body = router.UpgradePreviewPayload(target_version=2)
+    with pytest.raises(HTTPException) as exc:
+        router.upgrade_preview(
+            "rec-1", body, Request(_scope_ws("b")), workspace_id="b"
+        )
+    assert exc.value.status_code in (403, 404)
+
+
+def test_cross_workspace_upgrade_denied(monkeypatch):
+    """Workspace B cannot re-pin a workspace A schedule — 404/403."""
+    from fastapi import HTTPException
+
+    _patch_ws_membership(monkeypatch)
+    _wire_sched(monkeypatch, _sched(version=1, workspace_id="a"))
+    body = sched_router.ScheduleRecipeUpgrade(target_version=2)
+    with pytest.raises(HTTPException) as exc:
+        sched_router.upgrade_schedule_recipe(
+            "sched-1", body, Request(_scope_ws("b")), workspace_id="b"
+        )
+    assert exc.value.status_code in (403, 404)
