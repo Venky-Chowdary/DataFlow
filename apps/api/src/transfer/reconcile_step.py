@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import logging
 import re
-from collections import Counter
 import os
 import hashlib
 import json
@@ -321,6 +320,14 @@ class _PinStore:
             "CREATE TABLE rawh (k TEXT PRIMARY KEY, h TEXT)",
             "CREATE TABLE exp (k TEXT PRIMARY KEY, fp TEXT, decl TEXT)",
             "CREATE TABLE destk (k TEXT PRIMARY KEY, fp TEXT, vals TEXT)",
+            "CREATE TABLE fpm (side TEXT, h TEXT)",
+            "CREATE INDEX fpm_i ON fpm(h, side)",
+            "CREATE TABLE cv (col TEXT, side TEXT, vh TEXT)",
+            "CREATE INDEX cv_i ON cv(col, vh, side)",
+            "CREATE TABLE eo (col TEXT, rvh TEXT, ovh TEXT)",
+            "CREATE INDEX eo_i ON eo(col, rvh)",
+            "CREATE TABLE orc (col TEXT, rvh TEXT, ovh TEXT)",
+            "CREATE INDEX orc_i ON orc(col, rvh)",
         ):
             self.db.execute(ddl)
 
@@ -334,6 +341,60 @@ class _PinStore:
 
     def flush(self) -> None:
         self.db.commit()
+
+    def side_count(self, side: str) -> int:
+        return int(
+            self.db.execute(
+                "SELECT COUNT(*) FROM fpm WHERE side=?", (side,)
+            ).fetchone()[0]
+        )
+
+    def fp_extra(self):
+        # (h, extra, raw_count) -- dest fingerprints exceeding expected.
+        return self.db.execute(
+            "SELECT d.h, d.n - COALESCE(e.n,0), COALESCE(r.n,0) FROM "
+            "(SELECT h, COUNT(*) n FROM fpm WHERE side='d' GROUP BY h) d "
+            "LEFT JOIN (SELECT h, COUNT(*) n FROM fpm WHERE side='e' "
+            "GROUP BY h) e ON e.h = d.h "
+            "LEFT JOIN (SELECT h, COUNT(*) n FROM fpm WHERE side='r' "
+            "GROUP BY h) r ON r.h = d.h "
+            "WHERE d.n > COALESCE(e.n,0)"
+        )
+
+    def fp_missing_total(self) -> int:
+        return int(
+            self.db.execute(
+                "SELECT COALESCE(SUM(n_e - n_d),0) FROM ("
+                "SELECT e.n n_e, COALESCE(d.n,0) n_d FROM "
+                "(SELECT h, COUNT(*) n FROM fpm WHERE side='e' GROUP BY h) e "
+                "LEFT JOIN (SELECT h, COUNT(*) n FROM fpm WHERE side='d' "
+                "GROUP BY h) d ON d.h = e.h) WHERE n_e > n_d"
+            ).fetchone()[0]
+        )
+
+    def col_extra(self, tcol: str, scol: str):
+        # (vh, extra, raw_count) -- dest col values exceeding expected.
+        return self.db.execute(
+            "SELECT d.vh, d.n - COALESCE(e.n,0), COALESCE(r.n,0) FROM "
+            "(SELECT vh, COUNT(*) n FROM cv WHERE col=? AND side='d' "
+            "GROUP BY vh) d "
+            "LEFT JOIN (SELECT vh, COUNT(*) n FROM cv WHERE col=? AND "
+            "side='e' GROUP BY vh) e ON e.vh = d.vh "
+            "LEFT JOIN (SELECT vh, COUNT(*) n FROM cv WHERE col=? AND "
+            "side='r' GROUP BY vh) r ON r.vh = d.vh "
+            "WHERE d.n > COALESCE(e.n,0)",
+            (tcol, tcol, scol),
+        )
+
+    def oracle_mismatch_cols(self) -> list[str]:
+        return [
+            r[0]
+            for r in self.db.execute(
+                "SELECT DISTINCT o.col FROM orc o "
+                "JOIN eo e ON e.col = o.col AND e.rvh = o.rvh "
+                "WHERE e.ovh IS NOT o.ovh"
+            )
+        ]
 
     def drift_stats(self) -> tuple[int, int, int]:
         """(exp keys unpinned, exp key count, dest-only key count)."""
@@ -625,15 +686,13 @@ def _transform_applied_proof(
     # row-fingerprint Counters and per-declared-column value Counters, so
     # memory is bounded by distinct values, not row count.
     raw_count = 0
-    raw_fp: Counter = Counter()
-    exp_fp: Counter = Counter()
-    raw_col: dict[str, Counter] = {c: Counter() for c in set(declared_src)}
-    exp_col: dict[str, Counter] = {c: Counter() for c in set(declared_tcols)}
-    # Oracle pairing: raw value -> recipe-produced value, per declared col
-    # (deterministic for row-local ops).
-    exp_out: dict[str, dict[str, str]] = {
-        t: {} for t in set(declared_tcols)
-    }
+    # G-1h: the multiset fingerprints, per-column value multisets and the
+    # oracle raw->output pairing live in the sqlite proof store — the
+    # in-memory Counters/dicts they replaced were O(distinct values),
+    # which degenerates to O(rows) on unique-valued columns
+    # (~1.6 KB/row at 1M rows, 1.7 GB RSS).
+    raw_src_cols = list(dict.fromkeys(declared_src))
+    exp_tcols = list(dict.fromkeys(declared_tcols))
     scope_keys: _DiskKeySet | None = _DiskKeySet() if scope_pk else None
 
     def _fp(row: dict[str, Any]) -> tuple:
@@ -643,6 +702,9 @@ def _transform_applied_proof(
         return hashlib.sha256(
             "\x1f".join(_key_norm(row.get(c)) for c in digest_cols).encode()
         ).hexdigest()[:16]
+
+    def _vh(v: Any) -> str:
+        return hashlib.sha256(str(v).encode()).hexdigest()[:16]
 
     # G-1d part 1: write-time raw-pin ledger. key -> hash of the raw row
     # the write consumed. A key whose re-read hash matches is pinned and
@@ -692,9 +754,33 @@ def _transform_applied_proof(
                 os.unlink(_pin_path)
             except OSError:
                 pass
+    keyed = pin_store is not None
+    if pin_store is None:
+        # Keyless runs still need the store: the multiset fingerprint and
+        # per-column value state lives on disk for them too (G-1h).
+        pin_store = _PinStore()
     _rawh_buf: list[tuple] = []
     _exp_buf: list[tuple] = []
     _destk_buf: list[tuple] = []
+    _fpm_buf: list[tuple] = []
+    _cv_buf: list[tuple] = []
+    _eo_buf: list[tuple] = []
+
+    def _flush_ms() -> None:
+        pin_store.put("fpm", _fpm_buf)
+        pin_store.put("cv", _cv_buf)
+        pin_store.put("eo", _eo_buf)
+        _fpm_buf.clear()
+        _cv_buf.clear()
+        _eo_buf.clear()
+        if keyed:
+            pin_store.put("rawh", _rawh_buf)
+            pin_store.put("exp", _exp_buf)
+            pin_store.put("destk", _destk_buf)
+            _rawh_buf.clear()
+            _exp_buf.clear()
+            _destk_buf.clear()
+        pin_store.flush()
 
     def _expected_iter():
         nonlocal raw_count
@@ -711,10 +797,12 @@ def _transform_applied_proof(
                     map_source_to_target(k, mappings): v
                     for k, v in row.items()
                 }
-                raw_fp[_fp(trow)] += 1
-                for sc in raw_col:
-                    raw_col[sc][_key_norm(row.get(sc))] += 1
-                if pin_store is not None:
+                _fpm_buf.append(("r", _fph(trow)))
+                for sc in raw_src_cols:
+                    _cv_buf.append(
+                        (sc, "r", _vh(_key_norm(row.get(sc))))
+                    )
+                if keyed:
                     _rawh_buf.append(
                         (
                             "\x1f".join(
@@ -734,8 +822,8 @@ def _transform_applied_proof(
                     map_source_to_target(k, mappings): v
                     for k, v in out.items()
                 }
-                exp_fp[_fp(orow)] += 1
-                if pin_store is not None:
+                _fpm_buf.append(("e", _fph(orow)))
+                if keyed:
                     _exp_buf.append(
                         (
                             "\x1f".join(
@@ -758,25 +846,26 @@ def _transform_applied_proof(
                         )
                     )
                 for sc, tc in col_pairs:
-                    exp_col[tc][_key_norm(orow.get(tc))] += 1
+                    _cv_buf.append(
+                        (tc, "e", _vh(_key_norm(orow.get(tc))))
+                    )
                     if i < len(batch):
-                        exp_out[tc].setdefault(
-                            _key_norm(batch[i].get(sc)),
-                            _key_norm(orow.get(tc)),
+                        _eo_buf.append(
+                            (
+                                tc,
+                                _vh(_key_norm(batch[i].get(sc))),
+                                _vh(_key_norm(orow.get(tc))),
+                            )
                         )
                 yield orow
-            if pin_store is not None:
-                pin_store.put("rawh", _rawh_buf)
-                pin_store.put("exp", _exp_buf)
-                _rawh_buf.clear()
-                _exp_buf.clear()
+            _flush_ms()
         for out in runner.drain() or []:
             orow = {
                 map_source_to_target(k, mappings): v
                 for k, v in out.items()
             }
-            exp_fp[_fp(orow)] += 1
-            if pin_store is not None:
+            _fpm_buf.append(("e", _fph(orow)))
+            if keyed:
                 _exp_buf.append(
                     (
                         "\x1f".join(
@@ -798,12 +887,11 @@ def _transform_applied_proof(
                     )
                 )
             for _sc, tc in col_pairs:
-                exp_col[tc][_key_norm(orow.get(tc))] += 1
+                _cv_buf.append(
+                    (tc, "e", _vh(_key_norm(orow.get(tc))))
+                )
             yield orow
-        if pin_store is not None:
-            pin_store.put("exp", _exp_buf)
-            _exp_buf.clear()
-            pin_store.flush()
+        _flush_ms()
 
     try:
         parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
@@ -822,7 +910,7 @@ def _transform_applied_proof(
             "status": "unverifiable",
             "reason": f"expected-output recompute failed: {exc!s}"[:300],
         }
-    exp_n = sum(exp_fp.values())
+    exp_n = pin_store.side_count("e")
 
     # --- G-1d: independent SQL oracle for row-local ops ----------------
     # The recipe is re-applied in Python; a bug in _transform_value then
@@ -933,28 +1021,35 @@ def _transform_applied_proof(
             stmt = sa.text(
                 f"SELECT {sel} FROM {src_ref_sql}"  # nosec B608
             ).bindparams(**oracle_params)
-            oracle_out: dict[str, dict[str, str]] = {
-                c: {} for c in oracle_exprs
-            }
             sel_cols = [
                 x for c in oracle_exprs for x in (f"__raw_{c}", f"__o_{c}")
             ]
+            _orc_buf: list[tuple] = []
             with warehouse_sql_engine(src_type, src_cfg) as oeng:
                 with oeng.connect() as oconn:
                     for batch in iter_select_row_dicts(
                         oconn, stmt, sel_cols
                     ):
                         for r in batch:
-                            for c in oracle_out:
-                                rv = _key_norm(r.get(f"__raw_{c}"))
-                                oracle_out[c][rv] = _key_norm(
-                                    r.get(f"__o_{c}")
+                            for c in oracle_exprs:
+                                _orc_buf.append(
+                                    (
+                                        c,
+                                        _vh(
+                                            _key_norm(r.get(f"__raw_{c}"))
+                                        ),
+                                        _vh(
+                                            _key_norm(r.get(f"__o_{c}"))
+                                        ),
+                                    )
                                 )
-            for scol in oracle_exprs:
-                tcol = map_source_to_target(scol, mappings)
-                for rv, ov in oracle_out[scol].items():
-                    if rv in exp_out[tcol] and exp_out[tcol][rv] != ov:
-                        oracle_bad.add(tcol)
+                        if len(_orc_buf) >= 5000:
+                            pin_store.put("orc", _orc_buf)
+                            _orc_buf.clear()
+            pin_store.put("orc", _orc_buf)
+            pin_store.flush()
+            for scol in pin_store.oracle_mismatch_cols():
+                oracle_bad.add(map_source_to_target(scol, mappings))
         except Exception:
             oracle_ok = False
     if oracle_bad:
@@ -993,20 +1088,17 @@ def _transform_applied_proof(
         )
         actual_label = "destination current rows"
         comparable = bool(actual_checksum)
-        dest_fp: Counter | None = None
-        dest_col: dict[str, Counter] | None = None
+        dest_scanned = False
     elif scope_keys is None:
         actual_checksum = str(recon.get("target_checksum") or "")
         actual_rows = int(recon.get("target_rows") or 0)
         actual_label = "destination read-back"
         comparable = bool(actual_checksum)
-        dest_fp = None
-        dest_col = None
+        dest_scanned = False
     else:
         actual_label = "destination rows for this run's keys"
         comparable = True
-        dest_fp = Counter()
-        dest_col = {t: Counter() for t in set(declared_tcols)}
+        dest_scanned = True
         try:
             dst_cfg0 = resolve_connector_config(endpoint)
             dest_ref0 = warehouse_sql_table_ref(
@@ -1048,10 +1140,12 @@ def _transform_applied_proof(
                         ):
                             continue
                         row = {c: r.get(c) for c in digest_cols}
-                        dest_fp[_fp(row)] += 1
+                        _fpm_buf.append(("d", _fph(row)))
                         for _sc, tc in col_pairs:
-                            dest_col[tc][_key_norm(row.get(tc))] += 1
-                        if pin_store is not None:
+                            _cv_buf.append(
+                                (tc, "d", _vh(_key_norm(row.get(tc))))
+                            )
+                        if keyed:
                             _destk_buf.append(
                                 (
                                     "\x1f".join(
@@ -1068,9 +1162,7 @@ def _transform_applied_proof(
                                 )
                             )
                         yield row
-                    if pin_store is not None:
-                        pin_store.put("destk", _destk_buf)
-                        _destk_buf.clear()
+                    _flush_ms()
 
             with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
                 with e0.connect() as c0:
@@ -1080,7 +1172,7 @@ def _transform_applied_proof(
                         dest_db_type=dest_db_type,
                         dest_types=dest_types,
                     )
-            actual_rows = sum(dest_fp.values())
+            actual_rows = pin_store.side_count("d")
         except Exception as exc:
             return {
                 "status": "unverifiable",
@@ -1158,7 +1250,7 @@ def _transform_applied_proof(
     drift = False
     drift_counts: tuple | None = None
     try:
-        if dest_fp is None:
+        if not dest_scanned:
             dst_cfg = resolve_connector_config(endpoint)
             dest_ref = warehouse_sql_table_ref(
                 dest_db_type,
@@ -1190,8 +1282,7 @@ def _transform_applied_proof(
                 stmt = sa.text(  # nosec B608
                     f"SELECT {qc} FROM {dest_ref} WHERE {cur_pred}"
                 )
-            dest_fp = Counter()
-            dest_col = {t: Counter() for t in set(declared_tcols)}
+            dest_scanned = True
             with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
                 with deng.connect() as dconn:
                     for batch in iter_select_row_dicts(
@@ -1206,10 +1297,16 @@ def _transform_applied_proof(
                             ):
                                 continue
                             row = {c: r.get(c) for c in digest_cols}
-                            dest_fp[_fp(row)] += 1
+                            _fpm_buf.append(("d", _fph(row)))
                             for _sc, tc in col_pairs:
-                                dest_col[tc][_key_norm(row.get(tc))] += 1
-                            if pin_store is not None:
+                                _cv_buf.append(
+                                    (
+                                        tc,
+                                        "d",
+                                        _vh(_key_norm(row.get(tc))),
+                                    )
+                                )
+                            if keyed:
                                 _destk_buf.append(
                                     (
                                         "\x1f".join(
@@ -1225,11 +1322,9 @@ def _transform_applied_proof(
                                         ),
                                     )
                                 )
-                        if pin_store is not None:
-                            pin_store.put("destk", _destk_buf)
-                            _destk_buf.clear()
+                        _flush_ms()
 
-        if pin_store is not None:
+        if keyed:
             # Pinned-key judging (disk-backed — G-1g): a key whose
             # re-read raw hash equals the write-time hash is stable, so
             # dest != expected on it is a provable defect (wrong value,
@@ -1264,24 +1359,28 @@ def _transform_applied_proof(
             drift = (drift_n > 0) and not culprits
             drift_counts = (drift_n, n_keys)
         else:
-            extra = dest_fp - exp_fp
-            missing = exp_fp - dest_fp
+            # Multiset classification on the sqlite store (G-1h): a dest
+            # fingerprint exceeding its expected count is a culprit row
+            # iff it matches a raw re-read fingerprint — raw values on
+            # the destination can only come from an un-transformed
+            # write. Anything else is ambiguous (drift or wrong values).
+            pin_store.flush()
             culprit_n = 0
-            for fp, n in extra.items():
-                culprit_n += min(n, raw_fp.get(fp, 0))
-            ambiguous = sum(extra.values()) - culprit_n + sum(
-                missing.values()
+            ambiguous_extra = 0
+            for _h, xtra, n_raw in pin_store.fp_extra():
+                culprit_n += min(xtra, n_raw)
+                ambiguous_extra += xtra
+            ambiguous = (
+                ambiguous_extra - culprit_n + pin_store.fp_missing_total()
             )
             if culprit_n:
                 culprit_cols: set[str] = set()
                 for scol, tcol in col_pairs:
-                    if tcol not in exp_col:
+                    if tcol not in exp_tcols:
                         continue
-                    extra_c = dest_col[tcol] - exp_col[tcol]
-                    hit = sum(
-                        min(n, raw_col[scol].get(v, 0))
-                        for v, n in extra_c.items()
-                    )
+                    hit = 0
+                    for _v, xtra, n_raw in pin_store.col_extra(tcol, scol):
+                        hit += min(xtra, n_raw)
                     if hit:
                         culprit_cols.add(tcol)
                 culprits = sorted(culprit_cols or declared_tcols)

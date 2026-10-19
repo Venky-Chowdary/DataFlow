@@ -1865,3 +1865,75 @@ def test_g1f_catalog_pk_drift_counts_pg(tmp_path, monkeypatch):
     assert "changed in source during run" in (proof.get("reason") or ""), proof
     assert "1 of 3 keys" in (proof.get("reason") or ""), proof
     conn.close()
+
+
+def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
+    """G-1h: the shaped write+proof path must stay memory-bounded — the
+    multiset/pin/oracle state lives on disk, not in Counters/dicts.
+
+    Runs a 120k-row keyed overwrite in a subprocess (ru_maxrss is
+    per-process), asserting peak RSS stays under a ceiling that the old
+    O(rows) structures blew past (~1.6 KB/row -> ~190 MB at 120k). The
+    ceiling is generous for CI variance but far below the defect's cost.
+    """
+    import subprocess as sp
+    import sys
+    import os
+    probe = tmp_path / "probe.py"
+    probe.write_text(
+        "import os, sys, resource, uuid\n"
+        "sys.path.insert(0, 'tests')\n"
+        "import psycopg2\n"
+        "from urllib.parse import urlparse\n"
+        "u = urlparse(os.environ['DATAFLOW_PG_TEST_DSN'])\n"
+        "conn = psycopg2.connect(dbname=u.path[1:], user=u.username,"
+        " password=u.password, host=u.hostname, port=u.port)\n"
+        "cur = conn.cursor()\n"
+        "TBL = 'rss_' + uuid.uuid4().hex[:10]\n"
+        "cur.execute(f'CREATE TABLE {TBL} (id INT PRIMARY KEY, name TEXT,"
+        " price TEXT, note TEXT)')\n"
+        "cur.execute(f\"INSERT INTO {TBL} SELECT g, 'n'||g, '1.00',"
+        " repeat('x',200)||g FROM generate_series(1, 120000) g\")\n"
+        "conn.commit()\n"
+        "import src.transfer.engine as engine_mod\n"
+        "from tests.test_property2_golden_path_never_blocked import _FakeMongo\n"
+        "fake = _FakeMongo()\n"
+        "engine_mod.get_mongodb_service = lambda: fake\n"
+        "from src.transfer.models import EndpointConfig, TransferRequest\n"
+        "from services.shape_models import ShapeRecipe\n"
+        "ep = lambda t: EndpointConfig(kind='database', format='postgresql',"
+        " host=u.hostname, port=u.port, database=u.path[1:],"
+        " username=u.username, password=u.password, table=t)\n"
+        "recipe = {'steps': [{'op': 'case', 'column': 'note',"
+        " 'options': {'mode': 'upper'}}]}\n"
+        "req = TransferRequest(source=ep(TBL), destination=ep(TBL + '_d'),"
+        " sync_mode='full_refresh_overwrite', mappings=[{'source': c,"
+        " 'target': c, 'confidence': 1.0, 'user_override': True,"
+        " 'transform': 'none'} for c in ['id','name','price','note']],"
+        " skip_preflight=True, validation_mode='strict',"
+        " shape_recipe=recipe, approved_shape_recipe_hash=ShapeRecipe.parse("
+        "recipe, source_columns=['id','name','price','note']).recipe_hash)\n"
+        "job = 'rss' + uuid.uuid4().hex[:10]\n"
+        "fake.update_job_status(job, 'pending', transfer_request={})\n"
+        "res = engine_mod.UniversalTransferEngine().execute_tracked(req, job)\n"
+        "proof = (res.reconciliation or {}).get('transform_applied') or {}\n"
+        "assert res.success and proof.get('status') == 'verified'\n"
+        "print('peakMB', resource.getrusage(resource.RUSAGE_SELF).ru_maxrss"
+        " // 1024)\n"
+    )
+    env = dict(os.environ)
+    env["PYTHONPATH"] = (
+        "/home/ubuntu/repos/DataFlow/apps/api:"
+        "/home/ubuntu/repos/DataFlow/packages/preflight/src"
+    )
+    out = sp.run(
+        [sys.executable, str(probe)],
+        capture_output=True, text=True, env=env, timeout=600,
+        cwd="/home/ubuntu/repos/DataFlow/apps/api",
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    peak = int(out.stdout.strip().rsplit(" ", 1)[-1])
+    # Old in-memory multisets/pin maps cost ~1.6 KB/row -> ~190 MB at 120k
+    # ON TOP OF the ~300 MB baseline; the bounded path measured ~320 MB at
+    # 200k. Ceiling allows CI variance without letting the defect back in.
+    assert peak < 520, f"shaped peak RSS {peak} MB — proof state grew O(rows)"

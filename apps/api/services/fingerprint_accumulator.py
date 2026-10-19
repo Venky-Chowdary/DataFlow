@@ -31,7 +31,7 @@ from collections.abc import Iterable
 from services.brand_env import getenv_brand
 from services.reconcile_progress import note_hashed_rows
 
-SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "1000000"))
+SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "100000"))
 # Publish scan progress in batches. A per-row Mongo write is what made a
 # million-row checksum look frozen; the heartbeat reads the counter.
 _PROGRESS_EVERY = 8192

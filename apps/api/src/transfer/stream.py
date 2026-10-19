@@ -4654,7 +4654,7 @@ class _StepRawLedger:
     so memory stays bounded on million-key runs.
     """
 
-    _SPILL_AT = 200_000
+    _SPILL_AT = 50_000
 
     def __init__(self, key_columns: list[str]) -> None:
         self.key_columns = list(key_columns or [])
