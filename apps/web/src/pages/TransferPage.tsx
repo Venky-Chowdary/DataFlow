@@ -14,6 +14,7 @@ import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState"
 import { useToast } from "../components/Toast";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { MAPPING_TIMEOUT_MS, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
+import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { TransferMapStep } from "./transfer/TransferMapStep";
 import { DestinationPicker } from "../components/transfer/DestinationPicker";
@@ -3525,6 +3526,14 @@ export function TransferPage({
     });
   };
 
+  const apiChecksPassedCopy = (pf: PreflightResult): string => {
+    const skipped = countGateStatuses(pf.gates).skipped;
+    const head = skipped > 0
+      ? `${pf.passed_count} of ${pf.total_gates} API checks passed (${skipped} skipped — not counted)`
+      : `All ${pf.total_gates} API checks passed`;
+    return `${head}. Review the gate cards, then Execute when ready.`;
+  };
+
   const hintEgress = (msg: string): string =>
     withEgressHint(
       msg,
@@ -4703,7 +4712,7 @@ export function TransferPage({
             toast({
               title: decision === "approve" ? "Preflight passed" : "Review-grade preflight",
               message: decision === "approve"
-                ? `All ${pf.total_gates} API checks passed. Review gate cards, then Execute when ready.`
+                ? apiChecksPassedCopy(pf)
                 : "Checks completed with review-grade decision — re-run or fix blockers before Execute unlocks.",
               tone: decision === "approve" ? "success" : "warning",
             });
@@ -4926,7 +4935,7 @@ export function TransferPage({
         } else {
           toast({
             title: "Preflight passed",
-            message: `All ${pf.total_gates} API checks passed. Review the gate cards, then Execute when ready.`,
+            message: apiChecksPassedCopy(pf),
             tone: "success",
           });
         }

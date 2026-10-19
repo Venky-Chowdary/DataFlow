@@ -464,13 +464,13 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
     # SFTP host-key and preauth failures contain "key" / "authentication".
     # The generic auth rewrite below would tell the operator to rotate a
     # password that was never sent (DEF-A-001). The probe text already names
-    # the fingerprint or the preauth close.
+    # the fingerprint or the preauth close — return it intact: truncating to a
+    # driver snippet cuts the SHA256 pin the operator must save (D-BP SFTP).
     if driver == "sftp" and re.search(
         r"host key|not trusted|fingerprint|known_hosts|preauth|before authentication",
         text,
     ):
-        cleaned = _driver_snippet(raw_s)
-        return cleaned
+        return " ".join(raw_s.split())
 
     # A wrong SFTP folder used to become "Authentication failed".
     # "SFTP authenticated but path not found" contains the substring "auth",

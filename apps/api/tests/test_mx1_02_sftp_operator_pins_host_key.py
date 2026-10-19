@@ -39,6 +39,26 @@ def test_create_connector_tool_accepts_host_key():
     assert "host_key" in inspect.signature(DataPilotTools._create_connector).parameters
 
 
+def test_untrusted_host_message_keeps_the_full_pinable_fingerprint():
+    """D-BP: the probe used to return a 117-char driver snippet, cutting the
+    host_key=SHA256:... instruction — an operator could never pin."""
+    from src.transfer.connector_registry import humanize_connection_error
+
+    fp = "SHA256:" + base64.b64encode(hashlib.sha256(b"mx1-02-live").digest()).decode().rstrip("=")
+    raw = (
+        f"SFTP host key for 127.0.0.1:2222 is not trusted (ssh-ed25519 {fp}). After "
+        "confirming this fingerprint with the server's administrator, approve "
+        f"it for this connector by saving host_key={fp} (pins this connector only). "
+        "Alternatively pin it process-wide with DATAFLOW_SFTP_HOST_KEY, add it to a "
+        "known_hosts file (DATAFLOW_SFTP_KNOWN_HOSTS), or set "
+        "DATAFLOW_SFTP_HOST_KEY_POLICY=insecure_ignore to accept an unverified transport."
+    )
+    msg = humanize_connection_error("sftp", raw)
+    m = re.search(r"host_key=(SHA256:[A-Za-z0-9+/=]+)", msg)
+    assert m, msg
+    assert m.group(1) == fp
+
+
 @pytest.mark.skipif(not _up(), reason="SFTP container not on 127.0.0.1:2222")
 def test_untrusted_host_names_fingerprint_and_operator_pin_then_pin_connects(monkeypatch):
     for env in ("DATAFLOW_SFTP_HOST_KEY", "DATAFLOW_SFTP_KNOWN_HOSTS", "DATAFLOW_SFTP_HOST_KEY_POLICY"):

@@ -1513,7 +1513,7 @@
 .df2-transfer-step-panel .df2-card-footer,
 .df2-transfer-step-panel .df2-wizard-footer {
   padding: 8px 4px;
-  border-top: 1px solid #e2e8f0;
+  border-top: 1px solid var(--df-border);
   background: transparent;
   display: flex;
   align-items: center;
@@ -10440,8 +10440,15 @@ button.df2-vd-assist-toggle:focus-visible {
   line-height: 1.3;
 }
 
+/* Footer wraps to ~two rows at ≤1440 (status + actions) — 84px clears the
+   tallest wizard footer; the scroll body pads below so the last content row
+   (contract search/select) is never painted under a toast (D-BP-11). */
 body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
-  bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important;
+  bottom: calc(84px + env(safe-area-inset-bottom, 0px)) !important;
+}
+
+.df2-page-transfer-studio .df2-transfer-step-viewport {
+  scroll-padding-bottom: 110px;
 }
 
 /* Transform's sticky footer is taller than the shared 60px clearance, and a
