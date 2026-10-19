@@ -22,9 +22,9 @@ import src.transfer.reconcile_step as _rs  # noqa: E402
 _recipe_step_sql = getattr(_rs, "_recipe_step_sql", None)
 
 
-def _call(op, opts, col, src_type):
+def _call(op, opts, col, src_type, dest_ddl=""):
     assert _recipe_step_sql is not None, "_recipe_step_sql missing (pre-fix)"
-    return _recipe_step_sql(op, opts, col, {}, src_type=src_type)
+    return _recipe_step_sql(op, opts, col, {}, src_type=src_type, dest_ddl=dest_ddl)
 
 
 def test_cast_integer_pg_rounds_like_engine():
@@ -62,9 +62,42 @@ def test_cast_decimal_uses_declared_precision():
 
 
 def test_cast_decimal_without_precision_stays_uncovered():
+    # No declared width anywhere -> still honestly uncovered (X-3 honesty).
     assert _call("cast_column", {"to_type": "decimal"}, '"amt"', "postgresql") is None
     assert _call(
         "cast_column", {"to_type": "decimal", "precision": "abc"}, '"amt"', "postgresql"
+    ) is None
+
+
+def test_cast_decimal_bare_uses_declared_dest_type():
+    """X-3: bare cast_column->decimal is covered when the approved mapping's
+    target_type (or the resolved destination column type) declares a width,
+    e.g. the reported recipe mapping amt -> DECIMAL(20,4)."""
+    sql = _call(
+        "cast_column", {"to_type": "decimal"}, '"amt"', "postgresql",
+        dest_ddl="DECIMAL(20,4)",
+    )
+    assert sql == 'CAST("amt" AS DECIMAL(20,4))'
+    sql = _call(
+        "cast_column", {"to_type": "decimal"}, '"amt"', "sqlserver",
+        dest_ddl="numeric(38,10)",
+    )
+    assert sql == 'TRY_CAST("amt" AS decimal(38,10))'
+    sql = _call(
+        "cast_column", {"to_type": "decimal"}, '`amt`', "mysql",
+        dest_ddl="DECIMAL(38)",
+    )
+    assert sql == 'CAST(`amt` AS DECIMAL(38,0))'
+    # Explicit options still win over the declared dest type.
+    sql = _call(
+        "cast_column", {"to_type": "decimal", "precision": 10, "scale": 2},
+        '"amt"', "postgresql", dest_ddl="DECIMAL(20,4)",
+    )
+    assert sql == 'CAST("amt" AS DECIMAL(10,2))'
+    # A non-decimal dest type gives no width -> stays uncovered.
+    assert _call(
+        "cast_column", {"to_type": "decimal"}, '"amt"', "postgresql",
+        dest_ddl="VARCHAR(64)",
     ) is None
 
 

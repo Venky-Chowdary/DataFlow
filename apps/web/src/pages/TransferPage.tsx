@@ -6503,6 +6503,9 @@ export function TransferPage({
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           live={routeBarLiveWhileWriting(transferring)}
         />
+        {/* D-BP-20: toasts dock into the header chrome as compact pills —
+            never over content, no permanent lane, no reflow. */}
+        <div className="df2-toast-dock" data-df2-toast-dock />
         </div>
       </header>
 

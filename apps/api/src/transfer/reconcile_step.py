@@ -606,6 +606,7 @@ def _recipe_step_sql(
     params: dict[str, Any],
     *,
     src_type: str,
+    dest_ddl: str = "",
 ) -> str | None:
     """Faithful SQL equivalent of one recipe step, or None when the dialect
     has none. The G-1d independent oracle recomputes declared columns in the
@@ -724,7 +725,19 @@ def _recipe_step_sql(
             precision = opts.get("precision")
             scale = opts.get("scale")
             if precision in (None, ""):
-                return None  # unbounded decimal — no faithful target width
+                # X-3: a bare cast_column->decimal can still be proven when the
+                # approved mapping / resolved destination column declares the
+                # target width, e.g. DECIMAL(20,4). No declared width -> stay
+                # honestly uncovered (never invent a precision).
+                m_decl = re.search(
+                    r"(?:DECIMAL|NUMERIC|NUMBER)\s*\(\s*(\d{1,2})\s*(?:,\s*(\d{1,2})\s*)?\)",
+                    str(dest_ddl or ""),
+                    re.I,
+                )
+                if not m_decl:
+                    return None
+                precision = int(m_decl.group(1))
+                scale = int(m_decl.group(2) or 0)  # unbounded decimal — no faithful target width
             try:
                 width = int(precision)
                 sc = 0 if scale in (None, "") else int(scale)
@@ -1243,6 +1256,25 @@ def _transform_applied_proof(
             for st in steps
         )
     )
+    # X-3: resolve each step's source column to the approved mapping's
+    # declared destination type so bare casts can be proven against the
+    # contract width rather than staying uncovered.
+    src_to_dest_ddl: dict[str, str] = {}
+    for _m in mappings or []:
+        _msrc = str(_m.get("source") or "")
+        if not _msrc:
+            continue
+        _mtgt = str(_m.get("target") or _msrc)
+        _mdl = str(
+            dest_types.get(_mtgt)
+            or dest_types.get(_mtgt.lower())
+            or _m.get("target_type")
+            or _m.get("inferredType")
+            or ""
+        )
+        if _mdl:
+            src_to_dest_ddl[_msrc] = _mdl
+            src_to_dest_ddl[_msrc.lower()] = _mdl
     _covered_step_idx: set[int] = set()
     if oracle_ok:
         for _si, st in enumerate(steps):
@@ -1255,7 +1287,15 @@ def _transform_applied_proof(
                 expr = oracle_exprs.get(scol) or quote_sql_identifier(
                     scol, qs
                 )
-                expr = _recipe_step_sql(op, opts, expr, oracle_params, src_type=src_type)
+                _step_ddl = str(
+                    src_to_dest_ddl.get(scol)
+                    or src_to_dest_ddl.get(str(scol).lower())
+                    or ""
+                )
+                expr = _recipe_step_sql(
+                    op, opts, expr, oracle_params,
+                    src_type=src_type, dest_ddl=_step_ddl,
+                )
                 if expr is None:
                     oracle_ok = False
                     _step_ok = False

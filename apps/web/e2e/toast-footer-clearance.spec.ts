@@ -48,6 +48,32 @@ async function assertToastClearance(page: Page, label: string) {
     `at least one rendered toast must have a box on ${label}`,
   ).toBeGreaterThan(0);
 
+  // D-BP-20: docked toasts must live inside the header toast dock — never
+  // over the step content. The content column also keeps the full width:
+  // its right edge stays aligned to the stepper's right edge (+/-8px).
+  const dock = page.locator(".df2-toast-dock").first();
+  const stepPanel = page.locator(".df2-transfer-step-viewport:visible").first();
+  const stepper = page.locator(".df2-transfer-studio-chrome").first();
+  const [dockBox, panelBox, stepperBox] = await Promise.all([
+    dock.boundingBox(),
+    stepPanel.boundingBox(),
+    stepper.boundingBox(),
+  ]);
+  if (dockBox && panelBox && stepperBox) {
+    for (const t of toastBoxes) {
+      expect(
+        t.y >= dockBox.y - 4 &&
+          t.y + t.height <= dockBox.y + dockBox.height + 4,
+        `docked toast ${JSON.stringify(t)} must stay within the dock row on ${label}`,
+      ).toBe(true);
+    }
+    const edgeDelta = Math.abs(panelBox.x + panelBox.width - (stepperBox.x + stepperBox.width));
+    expect(
+      edgeDelta,
+      `content right edge must align to the stepper right edge (+/-8px) on ${label} (delta=${edgeDelta.toFixed(1)})`,
+    ).toBeLessThanOrEqual(8);
+  }
+
   const targets = page.locator(
     ".df2-wizard-footer, .df2-run-footer, .df2-transfer-step-panel .df2-btn-primary, " +
       ".df2-empty-state, .df2-map-empty-state, .df2-card, " +
@@ -83,7 +109,7 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
     });
   });
 
-  for (const width of [1440, 1280]) {
+  for (const width of [1440, 1280, 1024]) {
     test(`no toast overlap with footer, primary actions, or cards @${width}px`, async ({
       page,
     }) => {
