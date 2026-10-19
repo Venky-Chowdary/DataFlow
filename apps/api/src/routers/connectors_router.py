@@ -42,6 +42,11 @@ def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
+def _actor_is_platform_admin(request: Request) -> bool:
+    user = getattr(request.state, "user", None) or {}
+    return str(user.get("role") or "").lower() == "admin"
+
+
 def _resolve_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
     workspace_id = (x_workspace_id or "").strip()
     if workspace_id and not can_read_workspace(workspace_id, _actor_email(request)):
@@ -389,6 +394,11 @@ async def list_connectors(
             connector for connector in fs_list(workspace_id=workspace_id)
             if workspace_resource_is_visible(connector.workspace_id, workspace_id)
         ]
+        if not workspace_id and not _actor_is_platform_admin(request):
+            # No scope header: a non-admin sees only unscoped connectors; scoped
+            # docs are reached via X-Workspace-Id. Store-level "" means "all"
+            # since the census fix, so re-apply the unscoped view here.
+            items = [c for c in items if not getattr(c, "workspace_id", "")]
         if items:
             return {
                 "connectors": [
@@ -423,8 +433,11 @@ async def list_connectors(
         connectors = mongo.list_connectors()
 
         result = []
+        unscoped_only = not workspace_id and not _actor_is_platform_admin(request)
         for c in connectors:
             if not workspace_resource_is_visible(c.get("workspace_id"), workspace_id):
+                continue
+            if unscoped_only and (c.get("workspace_id") or "").strip():
                 continue
             created = c.get("created_at")
             result.append({

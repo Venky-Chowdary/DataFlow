@@ -211,12 +211,15 @@ def get_saved_connectors(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     workspace_id = _resolve_workspace(request, workspace_id)
+    conns = list_connectors(role, workspace_id=workspace_id)
+    if not workspace_id and not _actor_is_platform_admin(request):
+        # No scope header: a non-admin sees only unscoped connectors, even when
+        # they happen to be a member of another workspace (workspace-scoped docs
+        # are reached via the X-Workspace-Id header). Store-level "" means
+        # "no filter" since the census fix, so re-apply the unscoped view here.
+        conns = [c for c in conns if not getattr(c, "workspace_id", "")]
     return {
-        "connectors": [
-            _to_ui(c)
-            for c in list_connectors(role, workspace_id=workspace_id)
-            if _can_access_connector(request, c)
-        ]
+        "connectors": [_to_ui(c) for c in conns if _can_access_connector(request, c)]
     }
 
 

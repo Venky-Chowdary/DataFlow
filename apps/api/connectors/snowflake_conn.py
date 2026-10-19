@@ -261,11 +261,17 @@ def snowflake_connect_kwargs(
     # populated (Snowflake then returns a JWT/invalid-token error that ops
     # read as a key-pair failure). Empty mode keeps the legacy inference.
     mode = (auth_mode or "").strip().lower()
-    pem = (
-        ""
-        if mode in ("user_pass", "connection_string", "pat")
-        else (private_key or "").strip()
-    )
+    raw_pem = (private_key or "").strip()
+    if mode in ("user_pass", "connection_string", "pat"):
+        pem = ""
+    elif raw_pem and "BEGIN" not in raw_pem and (merged_password or "").strip():
+        # No declared auth_mode: a stored secret that is not a PEM — a masked
+        # "****" placeholder or truncated key material — is not a usable
+        # key-pair credential. Route by the present secret type (password/PAT)
+        # instead of silently falling back to key-pair.
+        pem = ""
+    else:
+        pem = raw_pem
 
     if not normalize_account(merged_account):
         raise ValueError(SNOWFLAKE_MISSING_ACCOUNT_MSG)
