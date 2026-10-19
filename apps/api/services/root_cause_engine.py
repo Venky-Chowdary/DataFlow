@@ -1899,7 +1899,15 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
                 "root_causes": [r.to_dict() for r in roots],
             }
             if has_blocking:
-                titles = [r.title for r in block_roots] or [
+                # Name the element, not just the title — a bare "Sync contract
+                # incomplete" reason told the operator nothing was missing
+                # (QA X-29). The summary carries the named issue and fix.
+                titles = [
+                    f"{r.title}: {r.summary}"
+                    if str(r.summary or "").strip()
+                    else str(r.title or "")
+                    for r in block_roots
+                ] or [
                     str(b.get("title") or b.get("message") or b.get("id") or "blocking issue")
                     for b in collapsed[:3]
                 ]

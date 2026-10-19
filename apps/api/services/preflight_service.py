@@ -1375,6 +1375,44 @@ def run_file_preflight(
         if schemaless:
             sample_quality["blocks_transfer"] = False
 
+    # A keyed mode whose contracts declare no key falls back to the live
+    # source catalog — the same fallback Validate (preflight_router) and the
+    # Execute policy pass (_catalog_pk_for_policy) already apply. Without it,
+    # an API-created CDC schedule (synthesized contract carries
+    # ``primary_key: ""``) refused at this gate even though the read side keys
+    # on the catalog. Unreadable catalogs stay empty so the gate still
+    # refuses and names the missing declaration.
+    source_primary_key_columns: list[str] = []
+    try:
+        from services.preflight_cursor_gate import (
+            MODES_REQUIRING_PRIMARY_KEY,
+            contract_declares_primary_key,
+        )
+
+        if sync_mode in MODES_REQUIRING_PRIMARY_KEY:
+            _pk_selected = [
+                c
+                for c in (stream_contracts or [])
+                if isinstance(c, dict) and c.get("selected", True)
+            ]
+            if not _pk_selected or not all(
+                contract_declares_primary_key(c) for c in _pk_selected
+            ):
+                from services.source_schema_authority import (
+                    live_source_primary_key_columns,
+                )
+
+                src_cfg = source_config if isinstance(source_config, dict) else {}
+                source_primary_key_columns = live_source_primary_key_columns(
+                    source_connector_id=source_connector_id,
+                    source_table=source_table,
+                    source_collection=str((source_config or {}).get("collection") or ""),
+                    source_schema=str(src_cfg.get("schema") or ""),
+                    source_database=str(src_cfg.get("database") or ""),
+                )
+    except Exception:  # noqa: BLE001 — unread catalog blocks, it does not approve
+        source_primary_key_columns = []
+
     plan = TransferPlan(
         source=SourceConfig(
             kind=source_kind,
@@ -1425,6 +1463,7 @@ def run_file_preflight(
         validation_mode=validation_mode,
         sync_mode=sync_mode,
         contract_primary_key=str(contract_primary_key or "").strip(),
+        source_primary_key_columns=list(source_primary_key_columns),
         destination_pk_columns=list(destination_pk_columns or []),
         destination_table=str(destination_table or ""),
         destination_dynamo_key_schema=[
