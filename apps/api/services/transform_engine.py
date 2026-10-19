@@ -2239,7 +2239,19 @@ def apply_transform(
         base = raw if type(raw) is str else str(raw)
         search, _, repl = transform[len("replace:"):].partition(":")
         return base.replace(search, repl), None
-    raw_s = raw if type(raw) is str else str(raw)
+    if type(raw) is str:
+        raw_s = raw
+    elif isinstance(raw, Decimal):
+        # str() spells tiny/huge decimals in scientific form ('1.50E-8'), and an
+        # identity/carry then binds that text verbatim (X-27). Emit the same
+        # canonical wire the readers already produce via cell_to_string —
+        # safe_decimal_text keeps scale-exact fixed-point (and a short exact
+        # scientific form only for exponents a DECIMAL column cannot hold).
+        from services.value_serializer import safe_decimal_text
+
+        raw_s = safe_decimal_text(raw) or str(raw)
+    else:
+        raw_s = str(raw)
     # Every engine sentinel is underscore-delimited, so a value without an
     # underscore cannot be one. The check keeps the identity path — the most
     # common transform on the widest tables — off ``strip().lower()`` of every
