@@ -689,17 +689,21 @@ def resolve_create_fidelity_plan(
                 "Source schema catalog unavailable; create-new emitted column "
                 "types only — PK/NOT NULL/DEFAULT/UNIQUE not certified carried."
             )
-        return CreateFidelityPlan(
-            report=empty_unsupported_report(
-                source_dialect="",
-                dest_dialect=dest,
-                reason=reason,
+        return _retarget_explode_parent_pk(
+            CreateFidelityPlan(
+                report=empty_unsupported_report(
+                    source_dialect="",
+                    dest_dialect=dest,
+                    reason=reason,
+                ),
+                dest_columns=list(target_columns),
+                column_suffixes=suffixes,
+                table_constraints=constraints,
+                primary_key=list(keys),
+                not_null_columns=not_null,
             ),
-            dest_columns=list(target_columns),
-            column_suffixes=suffixes,
-            table_constraints=constraints,
-            primary_key=list(keys),
-            not_null_columns=not_null,
+            mappings,
+            target_columns,
         )
     plan = plan_create_new_fidelity(
         catalog,
@@ -714,6 +718,7 @@ def resolve_create_fidelity_plan(
     )
     if not carry_keys:
         plan = withhold_append_key_constraints(plan)
+    plan = _retarget_explode_parent_pk(plan, mappings, target_columns)
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.
         for item in plan.report.items:
@@ -735,6 +740,102 @@ def resolve_create_fidelity_plan(
         plan.column_defaults = {}
         plan.create_suffix = ""
         plan.placement_decisions = []
+    return plan
+
+
+def _retarget_explode_parent_pk(
+    plan: "CreateFidelityPlan",
+    mappings: list[dict[str, Any]] | None,
+    target_columns: list[str],
+) -> "CreateFidelityPlan":
+    """explode_rows duplicates the parent row once per array element — a PRIMARY
+    KEY carried on the parent key is a constraint the landed data provably
+    violates (X-30: a schedule full-refresh failed COPY with a duplicate key).
+
+    Landed child identity is (parent_pk, <col>_idx): keep a composite PK only
+    when every exploded column's ``_idx`` column is itself mapped to the
+    destination; otherwise withhold the PK and certify the skip honestly —
+    never emit a constraint the write violates, never silently invent one.
+    """
+    if not plan.primary_key:
+        return plan
+    from services.json_intelligence import (
+        ARRAY_POLICY_EXPLODE,
+        struct_policies_from_mappings,
+    )
+
+    explode_cols = [
+        src
+        for src, pol in struct_policies_from_mappings(mappings).items()
+        if pol == ARRAY_POLICY_EXPLODE
+    ]
+    if not explode_cols:
+        return plan
+
+    dest = str(getattr(plan.report, "dest_dialect", "") or "").strip().lower()
+    src_to_tgt = source_to_target_from_mappings(mappings)
+    idx_targets = [src_to_tgt.get(f"{c}_idx") for c in explode_cols]
+    composite_ok = bool(idx_targets) and all(
+        t and t in target_columns for t in idx_targets
+    )
+
+    if composite_ok:
+        plan.primary_key = [
+            *plan.primary_key,
+            *[t for t in idx_targets if t not in plan.primary_key],
+        ]
+        quoted = ", ".join(_q(c, dest) for c in plan.primary_key)
+        plan.table_constraints = [
+            f"PRIMARY KEY ({quoted})"
+            if str(c).lstrip().upper().startswith("PRIMARY KEY")
+            else c
+            for c in plan.table_constraints
+        ]
+        for t in idx_targets:
+            if t not in plan.not_null_columns:
+                plan.not_null_columns.append(t)
+                plan.column_suffixes.setdefault(t, []).append("NOT NULL")
+        for item in plan.report.items:
+            if item.aspect == "primary_key" and item.status == "carried":
+                item.reason = (
+                    f"{item.reason} Extended to composite "
+                    f"({', '.join(plan.primary_key)}) — explode_rows duplicates "
+                    "the parent key per element; (pk, <col>_idx) is the "
+                    "landed child identity."
+                )
+                item.dest_ddl = f"PRIMARY KEY ({quoted})"
+    else:
+        plan.table_constraints = [
+            c
+            for c in plan.table_constraints
+            if not str(c).lstrip().upper().startswith("PRIMARY KEY")
+        ]
+        withheld = ", ".join(plan.primary_key)
+        plan.primary_key = []
+        for item in plan.report.items:
+            if item.aspect == "primary_key" and item.status == "carried":
+                item.status = "skipped"
+                item.reason = (
+                    f"explode_rows duplicates parent key ({withheld}) per "
+                    "array element — a PRIMARY KEY on it is a constraint the "
+                    "write provably violates, so it is withheld. Map the "
+                    "<col>_idx column to keep (pk, idx) composite identity on "
+                    "the destination."
+                )
+                item.dest_ddl = ""
+        if not any(i.aspect == "primary_key" for i in plan.report.items):
+            plan.report.items.append(
+                SchemaFidelityItem(
+                    aspect="primary_key",
+                    name=withheld,
+                    status="skipped",
+                    reason=(
+                        f"explode_rows duplicates parent key ({withheld}) per "
+                        "array element — PRIMARY KEY withheld (child identity "
+                        "is (pk, <col>_idx))."
+                    ),
+                )
+            )
     return plan
 
 

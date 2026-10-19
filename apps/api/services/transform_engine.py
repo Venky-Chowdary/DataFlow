@@ -2575,6 +2575,23 @@ def dry_run_sample(
     # failure — the honest operator action was punished with a data error.
     mappings = write_mappings(mappings)
 
+    # STRUCT flatten/explode rewrites the row matrix before the writer binds:
+    # an explode mapping introduces ``<col>_elem``/``<col>_idx`` columns that do
+    # not exist in the raw source headers, and the element values are what the
+    # transform actually sees. Dry-run on the materialized sample or the elem
+    # mapping is a false "Source column missing" and exploded children are
+    # never validated (X-30).
+    from services.json_intelligence import (
+        materialize_struct_policies,
+        struct_policies_from_mappings,
+    )
+
+    if struct_policies_from_mappings(mappings):
+        headers, sample_rows = materialize_struct_policies(
+            headers, sample_rows[:sample_size], mappings
+        )
+        sample_rows = sample_rows[:sample_size]
+
     dest_types = {
         str(m.get("target")): str(m.get("target_type"))
         for m in mappings

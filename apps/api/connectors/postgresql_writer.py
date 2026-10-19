@@ -3072,6 +3072,20 @@ def write_mapped_rows(
                 load_method=load_method,
             )
         meta_out = write_acc.gate8_meta(conflict_columns=conflict_columns or None)
+        # STRUCT explode: the spool holds the expanded matrix and records the
+        # pre-expand input count itself (data_rows may already be materialized
+        # upstream). Gate-8 expected = source - filtered + expanded — without
+        # this stamp every exploded row reads as extra.
+        try:
+            _unexpanded = int(
+                getattr(spool, "unexpanded_row_count", 0) or len(data_rows)
+            )
+        except TypeError:
+            _unexpanded = int(source_row_count or 0)
+        _expanded = int(source_row_count or 0) - _unexpanded
+        if _expanded > 0:
+            meta_out = dict(meta_out or {})
+            meta_out["rows_expanded"] = _expanded
         if skipped_identity_keys:
             meta_out = dict(meta_out or {})
             meta_out["skipped_identity_keys"] = list(skipped_identity_keys)

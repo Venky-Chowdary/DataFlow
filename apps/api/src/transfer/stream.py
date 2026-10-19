@@ -419,12 +419,12 @@ def _merge_chunk_write_summaries(
     incoming = dict(incoming or {})
     if not merged:
         return incoming
-    for key in ("rejected_rows", "coerced_null_rows", "orphan_fk_rows"):
+    for key in ("rejected_rows", "coerced_null_rows", "orphan_fk_rows", "rows_expanded"):
         merged[key] = int(merged.get(key) or 0) + int(incoming.get(key) or 0)
     for key in ("rejected_details", "warnings"):
         merged[key] = list(merged.get(key) or []) + list(incoming.get(key) or [])
     for key, value in incoming.items():
-        if key in ("rejected_rows", "coerced_null_rows", "orphan_fk_rows", "rejected_details", "warnings"):
+        if key in ("rejected_rows", "coerced_null_rows", "orphan_fk_rows", "rows_expanded", "rejected_details", "warnings"):
             continue
         merged[key] = value
     return merged
@@ -1917,6 +1917,11 @@ def _stream_database_transfer_impl(
     rejected_total = int(getattr(checkpoint, "rejected_rows", 0) or 0) if resumed_pass else 0
     coerced_null_total = (
         int(getattr(checkpoint, "coerced_null_rows", 0) or 0) if resumed_pass else 0
+    )
+    # STRUCT explode expansion — cumulative for the same reason the quarantine
+    # counters are: a resumed pass re-commits earlier pages' exploded children.
+    expanded_total = (
+        int(getattr(checkpoint, "rows_expanded", 0) or 0) if resumed_pass else 0
     )
     # Rows a declared source filter or an approved recipe removed on the read,
     # counted only for pages that actually committed and cumulative across
@@ -3706,7 +3711,7 @@ def _stream_database_transfer_impl(
         }
 
     def _apply_result(idx: int, result: dict[str, Any]) -> None:
-        nonlocal written, rejected_total, coerced_null_total, removed_on_read_total, filtered_on_read_total, cursor_bounded_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
+        nonlocal written, rejected_total, coerced_null_total, removed_on_read_total, filtered_on_read_total, cursor_bounded_total, expanded_total, last_checksum, running_cursor, committed_offset, committed_keyset, dest_summary, batches_completed, kafka_cursor, reconcile_sample
         if overwrite_keys_acc is not None:
             if "overwrite_keys" in result:
                 overwrite_keys_acc.observe_tuples(result.get("overwrite_keys"))
@@ -3795,12 +3800,16 @@ def _stream_database_transfer_impl(
             # reader-side population is committed_offset, applied at finalize.
             incoming.pop("source_row_count", None)
             incoming.pop("source_row_count_source", None)
+            expanded_total += int(incoming.get("rows_expanded") or 0)
             dest_summary = {
                 **prev,
                 **incoming,
                 "rejected_details": merged_details,
                 "rejected_rows": rejected_total,
                 "coerced_null_rows": coerced_null_total,
+                # Per-batch STRUCT explode deltas sum — the writer stamps only
+                # what its own batch expanded (X-30).
+                "rows_expanded": expanded_total,
             }
             if merged_usage is not None:
                 dest_summary["embedding_usage"] = merged_usage
@@ -3846,6 +3855,7 @@ def _stream_database_transfer_impl(
         # Gate-8 conservation balances across passes.
         checkpoint.rejected_rows = rejected_total
         checkpoint.coerced_null_rows = coerced_null_total
+        checkpoint.rows_expanded = expanded_total
         checkpoint.rows_removed_on_read = removed_on_read_total
         checkpoint.rows_source_filtered = filtered_on_read_total
         checkpoint.rows_cursor_bounded = cursor_bounded_total
