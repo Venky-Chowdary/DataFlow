@@ -43,11 +43,15 @@ def test_snowflake(
     # PAT/password records must not silently fall back to a stray stored
     # private_key — honor the declared auth mode (X-PAT).
     mode = (auth_mode or "").strip().lower()
-    pem = (
-        ""
-        if mode in ("user_pass", "connection_string", "pat")
-        else (private_key or "").strip()
-    )
+    raw_pem = (private_key or "").strip()
+    if mode in ("user_pass", "connection_string", "pat"):
+        pem = ""
+    elif raw_pem and "BEGIN" not in raw_pem and (secret or "").strip():
+        # Masked/truncated stored key is not usable key material — a present
+        # password/PAT must route to password auth, never silent key-pair.
+        pem = ""
+    else:
+        pem = raw_pem
     if not account or not user:
         return ConnectResult(
             ok=False,

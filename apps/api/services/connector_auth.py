@@ -72,8 +72,13 @@ def infer_auth_mode(
     mode = (auth_mode or "").strip().lower()
     if mode:
         return mode
-    if (private_key or "").strip() and (driver or "").lower() in ("snowflake", "sftp"):
-        return "key_pair"
+    pk = (private_key or "").strip()
+    if pk and (driver or "").lower() in ("snowflake", "sftp"):
+        # Real PEM material may select key-pair. A masked/truncated/garbage
+        # stored key must not outrank a present password — that silently
+        # routes a PAT/password record to key-pair auth.
+        if "BEGIN" in pk or not (password or "").strip():
+            return "key_pair"
     if (connection_string or "").strip():
         return "connection_string"
     if (service_account or "").strip():
@@ -251,11 +256,18 @@ def snowflake_session_kwargs(
     # A declared password/PAT mode must not be silently overridden by a stray
     # stored private_key — the driver would then route to key-pair auth and
     # Snowflake answers with a JWT error ops read as a bad key.
-    pk = (
-        str(src.get("private_key") or extra_nested.get("private_key") or "").strip()
-        if mode not in ("user_pass", "connection_string", "pat")
-        else ""
+    raw_pk = str(src.get("private_key") or extra_nested.get("private_key") or "").strip()
+    has_password = bool(
+        str(src.get("password") or extra_nested.get("password") or "").strip()
     )
+    if mode in ("user_pass", "connection_string", "pat"):
+        pk = ""
+    elif raw_pk and "BEGIN" not in raw_pk and has_password:
+        # Same rule as snowflake_connect_kwargs: no declared mode + a masked or
+        # truncated stored key + a present password must route by the password.
+        pk = ""
+    else:
+        pk = raw_pk
     role = engine_login_role(
         src.get("auth_role"),
         src.get("role"),
