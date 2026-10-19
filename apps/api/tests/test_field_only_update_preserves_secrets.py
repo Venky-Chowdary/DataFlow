@@ -230,3 +230,92 @@ def test_lifecycle_omitted_private_key_stages_no_change(monkeypatch):
     out = lt.update_connector(connector_id="c1", auth_mode="pat")
     assert out.success, out.error
     assert "private_key" not in staged["changes"]
+
+
+def test_invalid_token_under_pat_names_the_token_not_key_pair():
+    """A PAT is a JWT — an invalid-token refusal under auth_mode=pat must say
+    the token was refused, never send operators to ALTER USER."""
+    from connectors.snowflake_conn import classify_snowflake_connect_error
+
+    msg = classify_snowflake_connect_error(
+        "JWT token is invalid. [390144]", auth_mode="pat"
+    )
+    assert "programmatic access token" in msg.lower()
+    assert "RSA_PUBLIC_KEY" not in msg
+
+
+def test_invalid_token_under_key_pair_keeps_the_hint():
+    from connectors.snowflake_conn import classify_snowflake_connect_error
+
+    msg = classify_snowflake_connect_error(
+        "JWT token is invalid. [390144]", auth_mode="key_pair"
+    )
+    assert "RSA_PUBLIC_KEY" in msg
+    # empty mode keeps the legacy copy
+    assert "RSA_PUBLIC_KEY" in classify_snowflake_connect_error(
+        "JWT token is invalid. [390144]"
+    )
+
+
+def test_test_snowflake_pat_invalid_token_reports_pat_failure():
+    """End-to-end: mode=pat + driver raising an invalid-token error surfaces
+    the PAT copy, proving the routing used the token (not a stored key)."""
+    from connectors.snowflake import test_snowflake
+    from unittest.mock import patch
+
+    def boom(**kwargs):
+        assert kwargs.get("auth_mode") == "pat"
+        assert kwargs.get("password") == "stored-token"
+        assert kwargs.get("private_key") in ("", None)
+        raise RuntimeError("JWT token is invalid. [390144]")
+
+    with patch("connectors.snowflake.get_connection", boom):
+        res = test_snowflake(
+            host="MYOFKOK-UA81716",
+            port=0,
+            database="DATAFLOW_QA",
+            username="u",
+            password="stored-token",
+            schema="PUBLIC",
+            connection_string="",
+            ssl=True,
+            private_key="-----BEGIN PRIVATE KEY-----\nX\n-----END PRIVATE KEY-----\n",
+            auth_mode="pat",
+        )
+    assert res.ok is False
+    assert "programmatic access token" in res.error.lower()
+    assert "RSA_PUBLIC_KEY" not in res.error
+
+
+def test_lifecycle_clear_on_empty_field_shows_already_empty(monkeypatch):
+    """private_key='' on a record with no stored key still stages the request —
+    the preview must show it was honored, not silently drop it."""
+    import src.ai.copilot.lifecycle_tools as lt
+    import src.ai.copilot.ack_ledger as ledger_mod
+
+    staged: dict = {}
+
+    class _Ledger:
+        def put(self, *, kind, payload, preview):
+            staged.update(payload)
+            staged["preview"] = preview
+            return "ack-z"
+
+    monkeypatch.setattr(ledger_mod, "get_ack_ledger", lambda: _Ledger())
+    monkeypatch.setattr(
+        lt,
+        "_connector_dict",
+        lambda *a, **k: {
+            "id": "c1",
+            "name": "C",
+            "type": "snowflake",
+            "host": "h",
+            "auth_mode": "",
+            "private_key": "",
+            "extra": {},
+        },
+    )
+    out = lt.update_connector(connector_id="c1", private_key="")
+    assert out.success, out.error
+    assert staged["changes"].get("private_key") == cs.SECRET_CLEAR_SENTINEL
+    assert staged["preview"]["changes"]["private_key"] == "(already empty)"
