@@ -6699,7 +6699,10 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .dt-toast-host {
-  top: calc(var(--df-header-height, 56px) + 12px) !important;
+  /* Docked bottom-right (dataflow-ui.css): the top-right stack this rule
+     used to force landed on the page header and covered the Policy card on
+     the Connectors empty state — toasts must never cover content (D-BP-4). */
+  top: auto !important;
   bottom: calc(60px + env(safe-area-inset-bottom, 0px)) !important;
   right: 16px !important;
   max-height: calc(100dvh - var(--df-header-height, 56px) - 88px) !important;

@@ -71,6 +71,27 @@ describe("canvas document", () => {
     assert.equal(reorderByDrag(steps, 5, 0), steps);
   });
 
+  it("keeps a separator edge between every pair of a full six-step flow", () => {
+    // D-BP batch: the canvas must never drop a connector inside the chain —
+    // a 6-step recipe renders exactly 5 order edges, step i -> step i+1.
+    const steps: ShapeStepWire[] = [
+      { op: "trim", column: "name" },
+      { op: "derive_column", options: { to: "domain", expression: "lower([email])" } },
+      { op: "filter_rows", options: { condition: "[name] <> ''" } },
+      { op: "replace", column: "name", options: { search: "a", replacement: "b" } },
+      { op: "null_if", column: "name", options: { values: ["x"] } },
+      { op: "default_if_null", column: "name", options: { value: "d" } },
+    ];
+    const flow = stepsToFlow(steps, [trim, filter], "customers", false);
+    assert.equal(flow.nodes.length, 6);
+    assert.equal(flow.edges.length, 5);
+    for (let i = 0; i < 5; i += 1) {
+      assert.equal(flow.edges[i].id, `order-${i}`);
+      assert.equal(flow.edges[i].source, `step-${i}`);
+      assert.equal(flow.edges[i].target, `step-${i + 1}`);
+    }
+  });
+
   it("refuses a self, backward, or skip link and accepts only the next step", () => {
     assert.equal(classifyChainLink(3, 0, 1).ok, true);
     assert.equal(classifyChainLink(3, 0, 0).ok, false);
