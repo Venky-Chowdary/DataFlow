@@ -92,6 +92,22 @@ def _mask_without_pii(text: str) -> str:
     return text[:6] + "…" + text[-4:]
 
 
+def _is_decimal_literal(text: str) -> bool:
+    """Pure decimal wire (digits + at most one fraction point, optional
+    exponent) — e.g. '0.0000000150', '1.50E-8', '-12.5'. Plain integers are
+    deliberately NOT exempt: a 10-digit column can be a phone number."""
+    s = text.strip()
+    if not s or ("." not in s and "e" not in s.lower()):
+        return False
+    try:
+        from decimal import Decimal, InvalidOperation
+
+        Decimal(s)
+        return True
+    except (InvalidOperation, ValueError):
+        return False
+
+
 def pii_findings(value: Any) -> dict[str, int]:
     """Pattern label → match count for one value; empty when nothing matched.
 
@@ -100,6 +116,12 @@ def pii_findings(value: Any) -> dict[str, int]:
     """
     text = str(value) if value is not None else ""
     if not _PII_REQUIRED_CHARS.intersection(text):
+        return {}
+    if _is_decimal_literal(text):
+        # A decimal literal (has a fraction point or exponent) can never be a
+        # phone, card, SSN, or IP — those formats have no '.'/'e'. Without this
+        # the phone pattern matched '0.0000000150' as '0.'+000-000-0150 and a
+        # numeric mismatch detail got masked (X-26).
         return {}
     if _PII_UNION.search(text) is None:
         return {}

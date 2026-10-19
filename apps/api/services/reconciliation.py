@@ -94,6 +94,13 @@ _UUID_RE = re.compile(
 _NULL_SENTINEL = "\x00NULL\x00"
 # SQL / CSV scale padding: one dot, digits only. Not ``1,000`` and not ``1.000.000``.
 _PLAIN_SQL_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+\.\d+|\d+\.|\.\d+)$")
+# Numeric-family DDL where two spellings of one value ('1.50E-8' vs
+# '0.0000000150') are the same cell, not a mismatch (X-26).
+_NUMERIC_FAMILY_DDL_RE = re.compile(
+    r"\b(?:NUMERIC|DECIMAL|DEC|INT|INTEGER|BIGINT|SMALLINT|TINYINT|NUMBER|"
+    r"FLOAT|DOUBLE|REAL|MONEY|SERIAL|BIGSERIAL|INT2|INT4|INT8|BOOLEAN|BOOL)\b",
+    re.I,
+)
 
 
 def _looks_like_numeric_wire(text: str) -> bool:
@@ -5149,6 +5156,64 @@ def sample_compare_rows(
             converted = raw
         return normalize_cell(converted)
 
+    def _numeric_equal_on_numeric_column(
+        a: str,
+        b: str,
+        *,
+        tgt_col: str,
+        mappings: list[dict[str, Any]],
+        dest_types: dict[str, str],
+        raw_source: Any = None,
+    ) -> bool:
+        """Two fingerprints render the same number differently ('1.50E-8' vs
+        '0.0000000150' — a str() of a Decimal vs the stored text). On a
+        numeric-family column they are equal at the declared scale; on a text
+        column '001' vs '1' must still mismatch (X-26)."""
+        ddl = (
+            dest_types.get(tgt_col)
+            or dest_types.get(tgt_col.lower())
+            or ""
+        )
+        declared = ""
+        for m in mappings:
+            if str(m.get("target") or "") == tgt_col:
+                declared = str(
+                    m.get("target_type")
+                    or m.get("inferredType")
+                    or m.get("type")
+                    or ""
+                )
+                break
+        if (
+            declared
+            and ddl
+            and _TEXT_FAMILY_DDL_RE.match(ddl.strip())
+            and not _TEXT_FAMILY_DDL_RE.match(declared.strip())
+        ):
+            # Same degrade rule as _fingerprint: a TEXT carrier (sqlite has no
+            # DECIMAL affinity) still compares under the declared type.
+            ddl = declared
+        elif not ddl:
+            ddl = declared
+        numeric_column = bool(_NUMERIC_FAMILY_DDL_RE.search(ddl or ""))
+        if not numeric_column:
+            # No declared type at all: a TEXT carrier holding a value the
+            # source driver delivered as a Decimal/int is still a numeric
+            # column — the carrier is storage, not the type. A str '001'
+            # source has no numeric provenance and stays strict.
+            numeric_column = (
+                bool(ddl)
+                and bool(_TEXT_FAMILY_DDL_RE.match(ddl.strip()))
+                and isinstance(raw_source, (Decimal, int, float))
+                and not isinstance(raw_source, bool)
+            )
+        if not numeric_column:
+            return False
+        try:
+            return Decimal(a) == Decimal(b)
+        except Exception:
+            return False
+
     def _row_key(rec: Any, *, source_side: bool = False) -> Any:
         if isinstance(rec, dict):
             key = source_sort_key if source_side else sort_key
@@ -5449,10 +5514,18 @@ def sample_compare_rows(
                 raw_tgt, transform=None, tgt_col=tgt_col
             )
             compared += 1
-            if src_val != tgt_val and not _skip_kept_existing_key(
-                duplicate_policy,
-                key=key if keyed else "",
-                inserted_keys=inserted_keys,
+            if (
+                src_val != tgt_val
+                and not _numeric_equal_on_numeric_column(
+                    src_val, tgt_val, tgt_col=tgt_col,
+                    mappings=mappings, dest_types=dest_types,
+                    raw_source=raw_src,
+                )
+                and not _skip_kept_existing_key(
+                    duplicate_policy,
+                    key=key if keyed else "",
+                    inserted_keys=inserted_keys,
+                )
             ):
                 mismatches.append(
                     {

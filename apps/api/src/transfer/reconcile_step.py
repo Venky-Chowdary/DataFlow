@@ -1376,9 +1376,14 @@ def _transform_applied_proof(
                 with warehouse_sql_engine(dest_db_type, dst_cfg0) as e0:
                     with e0.connect() as c0:
                         c0.rollback()
-                        c0 = c0.execution_options(
-                            isolation_level="READ COMMITTED"
-                        )
+                        if dest_db_type != "sqlite":
+                            # SQLite only accepts SERIALIZABLE/READ
+                            # UNCOMMITTED/AUTOCOMMIT — setting READ COMMITTED
+                            # raised and made every shaped DB→SQLite proof
+                            # 'unverifiable' (X-26).
+                            c0 = c0.execution_options(
+                                isolation_level="READ COMMITTED"
+                            )
                         actual_checksum = canonical_checksum_from_iter(
                             _scoped_gen(
                                 iter_select_row_dicts(
