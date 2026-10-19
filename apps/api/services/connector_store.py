@@ -392,11 +392,63 @@ def _doc_to_connector(doc: dict[str, Any]) -> SavedConnector:
     return SavedConnector.from_dict(d)
 
 
+_DOC_SECRET_KEYS = (
+    "password",
+    "api_key",
+    "service_account",
+    "private_key",
+    "connection_string",
+)
+
+
+def _doc_to_connector_degraded(doc: dict[str, Any]) -> SavedConnector | None:
+    """Listing-only entry for a doc whose stored fields cannot be parsed —
+    typically an undecryptable credential. Keeps the connector VISIBLE in
+    lists (id/name/type/status read fine) while carrying no credential; the
+    X-24 probe path still reports the record as unreadable on Test, and the
+    record is marked so the UI can flag 're-save required'."""
+    d = dict(doc)
+    d["id"] = str(d.pop("_id", d.get("id", "")))
+    for key in _DOC_SECRET_KEYS:
+        d.pop(key, None)
+    if "created_at" in d and hasattr(d["created_at"], "isoformat"):
+        d["created_at"] = d["created_at"].isoformat()
+    d.pop("updated_at", None)
+    try:
+        conn = SavedConnector.from_dict(d, secrets_encrypted=False)
+    except Exception:
+        return None
+    conn.extra = dict(conn.extra or {})
+    conn.extra["record_unreadable"] = True
+    return conn
+
+
+def _materialize_docs(docs: Any) -> list[SavedConnector]:
+    """Per-doc materialization for list paths: one malformed record must
+    never zero the whole saved-connector list (prod census defect — two
+    corrupt trial docs made brief_workspace + /connectors/saved return []
+    while the raw store held 66)."""
+    out: list[SavedConnector] = []
+    for doc in docs:
+        try:
+            out.append(_doc_to_connector(doc))
+        except Exception as exc:
+            logger.warning(
+                "saved connector doc %s unreadable (%s) — listing degraded entry",
+                doc.get("_id") or doc.get("id") if isinstance(doc, dict) else "?",
+                type(exc).__name__,
+            )
+            conn = _doc_to_connector_degraded(doc)
+            if conn is not None:
+                out.append(conn)
+    return out
+
+
 def _load_all() -> list[SavedConnector]:
     if _use_mongo():
         try:
             coll = _mongo_collection()
-            return [_doc_to_connector(c) for c in coll.find()]
+            return _materialize_docs(coll.find())
         except Exception as exc:
             logger.warning("MongoDB connector load failed, falling back to file: %s", exc)
 
@@ -477,7 +529,7 @@ def _list_mongo(role: str | None, workspace_id: str | None = None) -> list[Saved
     if workspace_id is not None:
         filters.append({"$or": [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]})
     query = {"$and": filters} if len(filters) > 1 else (filters[0] if filters else {})
-    return [_doc_to_connector(c) for c in coll.find(query)]
+    return _materialize_docs(coll.find(query))
 
 
 def connector_name_conflict_message(name: str) -> str:

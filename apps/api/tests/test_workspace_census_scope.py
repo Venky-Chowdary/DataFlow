@@ -135,3 +135,60 @@ def test_non_admin_non_member_still_denied(monkeypatch):
     monkeypatch.setattr(r, "can_read_workspace", lambda ws, actor: False)
     req = _Req("dev@example.com", "developer")
     assert r._can_access_connector(req, _conn("ws-prod")) is False
+
+
+def test_malformed_doc_does_not_zero_the_list(monkeypatch):
+    """Layer-5 prod defect: a doc whose stored credential cannot be parsed
+    used to kill the entire list (find() comprehension threw -> file
+    fallback -> []). List paths now materialize per-doc and keep a
+    degraded entry marked record_unreadable."""
+    from services import connector_store as store
+
+    good = {"_id": "c1", "name": "Good", "type": "postgresql",
+            "role": "source", "workspace_id": "", "password": ""}
+    bad = {"_id": "c2", "name": "Snowflake Trial", "type": "snowflake",
+           "role": "source", "workspace_id": "",
+           "password": "not-valid-ciphertext"}
+
+    class _Coll:
+        def find(self, query=None):
+            return iter([good, bad])
+
+    monkeypatch.setattr(store, "_use_mongo", lambda: True)
+    monkeypatch.setattr(store, "_mongo_collection", lambda: _Coll())
+    monkeypatch.setattr(
+        store.SavedConnector, "from_dict",
+        classmethod(
+            lambda cls, data, **kw: (
+                (_ for _ in ()).throw(ValueError("undecryptable"))
+                if data.get("name") == "Snowflake Trial"
+                and kw.get("secrets_encrypted", True)
+                else store.SavedConnector(
+                    id=data["id"], name=data["name"], type=data["type"],
+                    role="source",
+                )
+            )
+        ),
+    )
+    rows = store.list_connectors()
+    ids = {c.id for c in rows}
+    assert ids == {"c1", "c2"}
+    degraded = {c.id: c for c in rows}["c2"]
+    assert degraded.extra.get("record_unreadable") is True
+
+
+def test_resolve_workspace_admin_bypass_and_nonadmin_403(monkeypatch):
+    """Layer-3: X-Workspace-Id naming a workspace the actor cannot read 403s
+    the whole list before _can_access_connector — platform admin bypasses,
+    non-admin still fails closed."""
+    import pytest
+    from fastapi import HTTPException
+
+    from src.routers import saved_connectors_router as r
+
+    monkeypatch.setattr(r, "can_read_workspace", lambda ws, actor: False)
+    admin = _Req("admin@example.com", "admin")
+    assert r._resolve_workspace(admin, "ws-prod") == "ws-prod"
+    dev = _Req("dev@example.com", "developer")
+    with pytest.raises(HTTPException):
+        r._resolve_workspace(dev, "ws-prod")

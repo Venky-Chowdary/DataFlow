@@ -95,13 +95,29 @@ def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
+def _actor_is_platform_admin(request: Request) -> bool:
+    user = getattr(request.state, "user", None) or {}
+    return str(user.get("role") or "").lower() == "admin"
+
+
 def _resolve_workspace(
     request: Request,
     x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> str:
-    """Return the workspace id after verifying the actor can read it."""
+    """Return the workspace id after verifying the actor can read it.
+
+    Platform admins administer every workspace — the same bypass
+    ``_can_access_connector`` applies per-doc, or a browser whose
+    ``df2.workspace`` points at a workspace the admin is not a member of
+    403s the whole saved-connector list and the UI falls back to empty
+    (prod UI census defect). Non-admins still fail closed.
+    """
     workspace_id = (x_workspace_id or "").strip()
-    if workspace_id and not can_read_workspace(workspace_id, _actor_email(request)):
+    if (
+        workspace_id
+        and not _actor_is_platform_admin(request)
+        and not can_read_workspace(workspace_id, _actor_email(request))
+    ):
         raise HTTPException(status_code=403, detail="Access to workspace denied")
     return workspace_id
 
@@ -112,7 +128,11 @@ def _require_write_workspace(
 ) -> str:
     """Return the workspace id after verifying the actor can write to it."""
     workspace_id = (x_workspace_id or "").strip()
-    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
+    if (
+        workspace_id
+        and not _actor_is_platform_admin(request)
+        and not can_write_workspace(workspace_id, _actor_email(request))
+    ):
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
     return workspace_id
 
@@ -160,8 +180,7 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
 def _can_access_connector(request: Request, conn: Any) -> bool:
     """True if the actor may see or mutate this connector (workspace + optional ACL)."""
     actor = _actor_email(request)
-    user = getattr(request.state, "user", None) or {}
-    is_admin = str(user.get("role") or "").lower() == "admin"
+    is_admin = _actor_is_platform_admin(request)
     # Platform admins bypass workspace membership (they administer all
     # workspaces); non-admins still need membership to see a scoped doc.
     if conn.workspace_id and not is_admin and not can_read_workspace(conn.workspace_id, actor):
