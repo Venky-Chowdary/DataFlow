@@ -1081,10 +1081,10 @@ def _transform_applied_proof(
                             ),
                             _fph(orow),
                             json.dumps(
-                                [
-                                    _val_norm(orow.get(t), _val_ddl(t))
-                                    for _s, t in col_pairs
-                                ]
+                                {
+                                    c: _val_norm(orow.get(c), _val_ddl(c))
+                                    for c in digest_cols
+                                }
                             ),
                         )
                     )
@@ -1122,10 +1122,10 @@ def _transform_applied_proof(
                         ),
                         _fph(orow),
                         json.dumps(
-                            [
-                                _val_norm(orow.get(t), _val_ddl(t))
-                                for _s, t in col_pairs
-                            ]
+                            {
+                                c: _val_norm(orow.get(c), _val_ddl(c))
+                                for c in digest_cols
+                            }
                         ),
                     )
                 )
@@ -1878,8 +1878,11 @@ def _transform_applied_proof(
                         # provable loss on a stable population.
                         culprit_cols_p.update(declared_tcols)
                         continue
-                    for (_sc, _tc), _ev in zip(col_pairs, _evals):
-                        if _val_norm(_dvals.get(_tc), _val_ddl(_tc)) != _ev:
+                    # Compare every digest column — a tampered or wrongly
+                    # written column that no recipe step touches must name
+                    # itself, not blame the recipe's declared columns.
+                    for _tc in digest_cols:
+                        if _val_norm(_dvals.get(_tc), _val_ddl(_tc)) != _evals.get(_tc):
                             culprit_cols_p.add(_tc)
             culprits = (
                 sorted(culprit_cols_p or declared_tcols)
@@ -1965,7 +1968,17 @@ def _transform_applied_proof(
         cols = declared_map.get(i) or []
         if any(map_source_to_target(c, mappings) in culprits for c in cols):
             culprit_steps.append(f"step {i + 1} ({s.get('op')} on '{cols[0]}')")
-    if not culprit_steps:
+    unexplained_cols = sorted(set(culprits) - set(declared_tcols))
+    if not culprit_steps and unexplained_cols:
+        # Drift sits on columns no recipe step produces — name them and say
+        # so; blaming every step would misdirect the operator.
+        culprit_steps = [
+            "drift on "
+            + ", ".join(unexplained_cols[:8])
+            + ("…" if len(unexplained_cols) > 8 else "")
+            + " — not explained by a recipe step"
+        ]
+    elif not culprit_steps:
         culprit_steps = [
             f"step {i + 1} ({s.get('op')})"
             for i, s in enumerate(steps)

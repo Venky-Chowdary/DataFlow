@@ -1763,10 +1763,10 @@ export function ValidateDashboard({
           <div className="df2-vd-hero-counts">
             <span className="df2-vd-count ok"><strong>{passedCount}</strong> passed</span>
             <span
-              className="df2-vd-count block"
-              title={blockedCount > 0 ? `${blockedCount} distinct blocking gate(s)` : undefined}
+              className={`df2-vd-count ${blockedCount > 0 ? "block" : "ok"}`}
+              title={blockedCount > 0 ? `${blockedCount} distinct blocking ${blockedCount === 1 ? "gate" : "gates"}` : undefined}
             >
-              <strong>{blockedCount}</strong> blocked gate(s)
+              <strong>{blockedCount}</strong> blocked {blockedCount === 1 ? "gate" : "gates"}
             </span>
             <span
               className="df2-vd-count skip"
