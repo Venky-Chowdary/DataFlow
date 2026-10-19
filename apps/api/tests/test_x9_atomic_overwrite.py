@@ -216,6 +216,56 @@ def test_x9_db_source_refusal_preserves_prior_rows(tmp_path, monkeypatch):
     )
 
 
+def _reject_request(tmp_path: Path, table: str) -> TransferRequest:
+    """Writer-reject shape: values cast fine but violate dest CHECK(amt<100)."""
+    lines = [f"{i},{i}.50" for i in range(1, 30000)]
+    lines.append("30000,500.00")
+    content = ("id,amt\n" + "\n".join(lines) + "\n").encode()
+    return TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=EndpointConfig(
+            kind="database",
+            format="sqlite",
+            host="",
+            port=0,
+            database=str(tmp_path / "dest.sqlite"),
+            username="",
+            password="",
+            table=table,
+        ),
+        source_filename="amt.csv",
+        source_content=content,
+        sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+        skip_preflight=True,
+        shape_recipe={"steps": [{"op": "cast_column", "column": "amt", "options": {"to_type": "decimal"}}]},
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            {"steps": [{"op": "cast_column", "column": "amt", "options": {"to_type": "decimal"}}]},
+            source_columns=["id", "amt"],
+        ).recipe_hash,
+        mappings=[
+            {"source": "id", "target": "id", "confidence": 1.0, "target_type": "integer"},
+            {"source": "amt", "target": "amt", "confidence": 1.0, "target_type": "DECIMAL(10,2)"},
+        ],
+    )
+
+
+def test_x9_writer_reject_preserves_prior_rows(tmp_path, monkeypatch):
+    """CHECK violation mid-run: prior rows + DDL must stay byte-identical."""
+    _engine_env(monkeypatch)
+    table = f"x9r_{uuid.uuid4().hex[:8]}"
+    dbfile = str(tmp_path / "dest.sqlite")
+    _make_prior(dbfile, table)
+    before = _dest_snapshot(dbfile, table)
+    result = UniversalTransferEngine().execute(_reject_request(tmp_path, table))
+    assert not result.success
+    after = _dest_snapshot(dbfile, table)
+    assert after == before, (
+        f"destination changed by a writer reject: before={before['rows']} "
+        f"after={after and after['rows']} ddl_same={after and after['ddl'] == before['ddl']}"
+    )
+
+
 def test_x9_db_source_refusal_empty_dest_leaves_nothing(tmp_path, monkeypatch):
     _engine_env(monkeypatch)
     src_table = f"x9s_{uuid.uuid4().hex[:8]}"
