@@ -359,8 +359,12 @@ def _with_cause(message: str, raw: str) -> str:
     return f"{message} Driver: {snippet}"
 
 
-def humanize_connection_error(driver: str, raw: Any) -> str:
-    """Convert low-level driver/connection errors into user-friendly messages."""
+def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str:
+    """Convert low-level driver/connection errors into user-friendly messages.
+
+    ``auth_mode`` is the credential actually attempted (pat/user_pass/key_pair)
+    so re-classification of raw driver text can name the right credential —
+    a refused PAT is not a key-pair failure."""
     raw_s = redact_log_text(str(raw)).strip()
     if _already_operator_copy(raw_s):
         return raw_s
@@ -445,7 +449,7 @@ def humanize_connection_error(driver: str, raw: Any) -> str:
     if driver == "snowflake":
         from connectors.snowflake_conn import classify_snowflake_connect_error
 
-        classified = classify_snowflake_connect_error(raw_s)
+        classified = classify_snowflake_connect_error(raw_s, auth_mode=auth_mode)
         if classified:
             return classified
 
@@ -699,7 +703,7 @@ def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:
             return True, f"{label} readable — {int(total or 0)} rows, {n_cols} columns."
         except Exception as exc:
             op.errored(exc)
-            return False, humanize_connection_error(kind, exc)
+            return False, humanize_connection_error(kind, exc, auth_mode=str(cfg.get("auth_mode") or "").strip().lower())
 
 
 def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
@@ -719,7 +723,7 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
             return False, str(exc)
         except Exception as exc:
             op.errored(exc)
-            return False, humanize_connection_error((db_type or "").lower(), exc)
+            return False, humanize_connection_error((db_type or "").lower(), exc, auth_mode=str(cfg.get("auth_mode") or "").strip().lower())
         if result[0]:
             op.succeeded()
         else:
@@ -747,6 +751,7 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     db_type = (db_type or "").lower()
     catalog_id = db_type
     resolved = resolve_driver_type(db_type)
+    _attempted_auth_mode = str(cfg.get("auth_mode") or "").strip().lower()
 
     # Resolve catalog aliases (e.g. cockroachdb -> postgresql) to a registered driver
     db_type = resolved
@@ -758,10 +763,10 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
 
             ok, raw = probe_mongodb(cfg)
         except Exception as exc:
-            return False, humanize_connection_error(db_type, exc)
+            return False, humanize_connection_error(db_type, exc, auth_mode=_attempted_auth_mode)
         if ok:
             return True, raw
-        return False, humanize_connection_error(db_type, raw)
+        return False, humanize_connection_error(db_type, raw, auth_mode=_attempted_auth_mode)
 
     from services.dialect_profiles import default_schema_for, normalize_schema
 
@@ -820,10 +825,10 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
 
             ok, raw = test_generic_sql(type=engine_type, **probe_kwargs)
         except Exception as exc:
-            return False, humanize_connection_error(engine_type, exc)
+            return False, humanize_connection_error(engine_type, exc, auth_mode=_attempted_auth_mode)
         if ok:
             return True, raw
-        return False, humanize_connection_error(engine_type, raw)
+        return False, humanize_connection_error(engine_type, raw, auth_mode=_attempted_auth_mode)
 
     if not spec:
         return False, (
@@ -840,7 +845,7 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         mod = importlib.import_module(mod_name)
         probe_fn = getattr(mod, fn_name)
     except Exception as exc:
-        return False, humanize_connection_error(db_type, exc)
+        return False, humanize_connection_error(db_type, exc, auth_mode=_attempted_auth_mode)
     sig = inspect.signature(probe_fn)
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
     if not accepts_var_kw:
@@ -854,14 +859,14 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     try:
         result = probe_fn(**probe_kwargs)
     except Exception as exc:
-        return False, humanize_connection_error(db_type, exc)
+        return False, humanize_connection_error(db_type, exc, auth_mode=_attempted_auth_mode)
     if hasattr(result, "ok"):
         if result.ok:
             return True, str(result.message or "Connection successful")
-        return False, humanize_connection_error(db_type, str(result.error or result.message or "unknown error"))
+        return False, humanize_connection_error(db_type, str(result.error or result.message or "unknown error"), auth_mode=_attempted_auth_mode)
     if isinstance(result, tuple) and len(result) >= 2:
         ok = bool(result[0])
         if ok:
             return True, str(result[1])
-        return False, humanize_connection_error(db_type, str(result[1]))
-    return bool(result), "OK" if result else humanize_connection_error(db_type, "Probe failed")
+        return False, humanize_connection_error(db_type, str(result[1]), auth_mode=_attempted_auth_mode)
+    return bool(result), "OK" if result else humanize_connection_error(db_type, "Probe failed", auth_mode=_attempted_auth_mode)

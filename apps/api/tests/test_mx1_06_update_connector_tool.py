@@ -40,6 +40,15 @@ def staged(monkeypatch):
         "_connector_dict",
         lambda cid="", name="", **_kw: dict(_EXISTING) if (name or cid) in {"Warehouse", "c-wh"} else None,
     )
+    # Hermetic: staging a host change must not depend on what "new-host"
+    # resolves to on the box running the test (private range -> refusal).
+    import services.egress_guard as _egress
+
+    monkeypatch.setattr(
+        _egress,
+        "metadata_endpoint_refusal",
+        lambda host="", endpoint_url="", connection_string="", workspace_id="": "",
+    )
     return acks
 
 

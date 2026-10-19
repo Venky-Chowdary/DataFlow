@@ -15,6 +15,7 @@ Gate (user-declared):
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 
 import pytest
@@ -186,9 +187,23 @@ def test_session_kwargs_strip_private_key_for_password_modes():
     assert out["role"] == "ACCOUNTADMIN"
 
 
+
+def _no_egress(monkeypatch):
+    """Hermetic probe runs: no DNS / metadata-endpoint lookups."""
+    monkeypatch.setattr(
+        "services.egress_guard.metadata_endpoint_refusal",
+        lambda host="", endpoint_url="", connection_string="", workspace_id="": "",
+    )
+    monkeypatch.setattr(
+        "services.egress_guard.pinned_egress",
+        lambda workspace_id="": contextlib.nullcontext(),
+    )
+
+
 def test_probe_honors_declared_auth_mode(monkeypatch):
     """A PAT record with a stray private_key field must NOT open key-pair auth —
     the probe passes auth_mode through to test_snowflake."""
+    _no_egress(monkeypatch)
     seen: dict = {}
 
     def fake_test_snowflake(**kw):
@@ -223,6 +238,69 @@ def test_probe_honors_declared_auth_mode(monkeypatch):
     )
     assert ok
     assert seen.get("auth_mode") == "pat"
+
+
+def _pat_jwt_probe(monkeypatch, auth_mode, *, raises=False):
+    """Drive run_probe (the entry MCP test_connector uses) with a raw
+    'JWT token is invalid' driver error and return the operator message."""
+    _no_egress(monkeypatch)
+
+    def fake_test_snowflake(**kw):
+        if raises:
+            raise RuntimeError("JWT token is invalid. [390144]")
+
+        class R:
+            ok = False
+            tables: list = []
+            error = "JWT token is invalid. [390144]"
+            message = ""
+            user = "u"
+            database = "d"
+            objects: list = []
+
+        return R()
+
+    monkeypatch.setattr("connectors.snowflake.test_snowflake", fake_test_snowflake)
+    from src.transfer.connector_registry import run_probe
+
+    return run_probe(
+        "snowflake",
+        {
+            "type": "snowflake",
+            "host": "acct",
+            "username": "u",
+            "password": "stored-secret",
+            "auth_mode": auth_mode,
+            "warehouse": "DATAFLOW_WH",
+        },
+    )
+
+
+def test_probe_pat_record_jwt_refusal_names_pat(monkeypatch):
+    """auth_mode=pat + 'JWT token is invalid' -> PAT copy, never ALTER USER —
+    via the ConnectResult error path and the raise path alike."""
+    ok, msg = _pat_jwt_probe(monkeypatch, "pat")
+    assert not ok
+    assert "programmatic access token" in msg
+    assert "ALTER USER" not in msg
+
+    ok, msg = _pat_jwt_probe(monkeypatch, "pat", raises=True)
+    assert not ok
+    assert "programmatic access token" in msg
+    assert "ALTER USER" not in msg
+
+
+def test_probe_user_pass_jwt_refusal_names_password(monkeypatch):
+    ok, msg = _pat_jwt_probe(monkeypatch, "user_pass")
+    assert not ok
+    assert "password" in msg.lower()
+    assert "ALTER USER" not in msg
+
+
+def test_probe_key_pair_jwt_refusal_keeps_hint(monkeypatch):
+    ok, msg = _pat_jwt_probe(monkeypatch, "key_pair")
+    assert not ok
+    assert "ALTER USER" in msg
 
 
 # --- 4. create path accepts the same fields ----------------------------------
