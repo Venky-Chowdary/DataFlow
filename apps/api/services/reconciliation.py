@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass
 from datetime import date as _date
 from datetime import datetime as _datetime
 from datetime import time as _time
+from datetime import timedelta
 from datetime import timezone
 from decimal import Decimal, InvalidOperation, Overflow, localcontext
 from functools import lru_cache
@@ -4452,6 +4453,27 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         return value.strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, _date):
         return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
+    if isinstance(value, _time):
+        # X-4: TIME columns — DuckDB/PG drivers hand back datetime.time while
+        # MySQL drivers hand back timedelta; both must fingerprint identically
+        # ("01:23:45" on both sides) or every cross-engine TIME cell drifts.
+        if value.microsecond:
+            return value.strftime("%H:%M:%S.%f").rstrip("0").rstrip(".")
+        return value.strftime("%H:%M:%S")
+    if isinstance(value, timedelta):
+        # MySQL TIME read-back is timedelta; normalize to the same wall-clock
+        # form as datetime.time (TIME is a clock value, not an interval — the
+        # carry can exceed 24h on interval semantics but DDL TIME is <=23:59:59).
+        total = value.total_seconds()
+        sign = "-" if total < 0 else ""
+        total = abs(total)
+        hh = int(total // 3600)
+        rem = total - hh * 3600
+        mm = int(rem // 60)
+        ss = rem - mm * 60
+        if abs(ss - round(ss)) > 1e-9:
+            return f"{sign}{hh:02d}:{mm:02d}:{ss:09.6f}".rstrip("0").rstrip(".")
+        return f"{sign}{hh:02d}:{mm:02d}:{int(ss):02d}"
     if isinstance(value, float):
         # Pass the float through — str(float) keeps IEEE residue and false-fails
         # Gate-8 vs DECIMAL sinks (106.60000000000001 vs 106.6).

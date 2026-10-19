@@ -288,6 +288,26 @@ def test_mysql_to_duckdb_dest_tamper_names_column_not_drift(
     assert "note" in culprit, proof
 
 
+def test_x4_time_semantics_agree_across_drivers():
+    """X-4: TIME read-back differs per driver — pymysql returns timedelta for
+    MySQL TIME, duckdb/psycopg return datetime.time. Gate-8's fingerprint must
+    canonicalize both to the same wall-clock text or every cross-engine TIME
+    cell would report false drift."""
+    from datetime import time as dtime, timedelta
+
+    from services.reconciliation import normalize_cell
+
+    assert normalize_cell(timedelta(hours=1, minutes=23, seconds=45), ddl_type="TIME") == "01:23:45"
+    assert normalize_cell(dtime(1, 23, 45), ddl_type="TIME") == "01:23:45"
+    assert normalize_cell(timedelta(hours=1, minutes=23, seconds=45)) == \
+        normalize_cell(dtime(1, 23, 45))
+    assert normalize_cell(dtime(9, 8, 7, 654321)) == "09:08:07.654321"
+    assert normalize_cell(timedelta(hours=9, minutes=8, seconds=7, microseconds=654321)) == \
+        "09:08:07.654321"
+    # distinct times still differ — no over-equation
+    assert normalize_cell(dtime(1, 23, 45)) != normalize_cell(dtime(1, 23, 46))
+
+
 def test_mysql_to_sqlite_dest_tamper_names_column_not_drift(
     monkeypatch, tmp_path
 ):
