@@ -2335,6 +2335,16 @@ def _maybe_attach_verification_ladder(
 
     from .connector_capabilities import resolve_driver_type
 
+    def _return(report_: dict[str, Any], reason: str) -> dict[str, Any]:
+        """Early-exit guard: a route whose only proof is an engine count token
+        may never keep a 'verified' stamp when the cell ladder did not run
+        (X-22 live). Every skip names itself so the next run shows which exit
+        fired instead of looking like value proof."""
+        report_["ladder_declined_reason"] = reason
+        if _report_is_count_proof_only(report_):
+            report_["unproven"] = True
+        return report_
+
     dest_type = resolve_driver_type(endpoint.format)
 
     # Oversized same-engine SQL routes: the in-memory ladder below declines, but
@@ -2362,7 +2372,10 @@ def _maybe_attach_verification_ladder(
         # Every oversized dest, not just PG/SQLite: a MySQL/MariaDB route that
         # could not profile must still name the decline instead of returning a
         # bare Gate-8 report with no ladder at all.
-        return _ladder_declined(report, known, MAX_LADDER_ROWS)
+        return _return(
+            _ladder_declined(report, known, MAX_LADDER_ROWS),
+            "population_exceeds_ladder_budget",
+        )
 
     if dest_type not in {
         "sqlite",
@@ -2375,10 +2388,10 @@ def _maybe_attach_verification_ladder(
     }:
         # X-22: MySQL/SQL Server dests used to exit here — the row read below
         # would have thrown under the PG reader and the run stayed count-only.
-        return report
+        return _return(report, "destination_engine_not_in_ladder")
     target_cols = _mapped_targets(mappings, columns) if mappings else list(columns or [])
     if not target_cols:
-        return report
+        return _return(report, "no_mapped_target_columns")
 
     pk_cols: list[str] = []
     for key in ("primary_key_columns", "conflict_columns"):
@@ -2446,13 +2459,16 @@ def _maybe_attach_verification_ladder(
                 ssl=bool(dest_cfg.get("ssl", False)),
             )
     except PopulationTooLarge as exc:
-        return _ladder_declined(report, exc.rows_read, exc.budget)
+        return _return(
+            _ladder_declined(report, exc.rows_read, exc.budget),
+            "dest_population_exceeds_budget",
+        )
     except Exception as exc:
         logging.getLogger(__name__).debug("ladder dest load failed: %s", exc)
         # X-22: a covered destination whose population could not be read has no
         # value proof — a count-only green must not stamp "verified".
         report["unproven"] = True
-        return report
+        return _return(report, "dest_population_read_failed")
 
     # A shaping recipe rewrote source-side values on the read, so the rows still
     # in the source table are no longer what this run wrote. Re-reading them here
@@ -2462,7 +2478,12 @@ def _maybe_attach_verification_ladder(
     # re-read, not a source/destination cell equality that shaping made false.
     shaped_run = bool(dest_summary.get("shape_recipe_hash"))
     if source_endpoint is not None and not source_rows and shaped_run:
-        return _ladder_declined_for_shape(report, str(dest_summary["shape_recipe_hash"]))
+        return _return(
+            _ladder_declined_for_shape(
+                report, str(dest_summary["shape_recipe_hash"])
+            ),
+            "shaped_run_pinned_recipe",
+        )
     source_reread = False
     if source_endpoint is not None and not source_rows:
         from services.procedure_source import is_callable_source
@@ -2519,7 +2540,10 @@ def _maybe_attach_verification_ladder(
                         columns=target_cols,
                     )
             except PopulationTooLarge as exc:
-                return _ladder_declined(report, exc.rows_read, exc.budget)
+                return _return(
+                    _ladder_declined(report, exc.rows_read, exc.budget),
+                    "source_population_exceeds_budget",
+                )
             except Exception as exc:
                 logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
 
@@ -2529,7 +2553,7 @@ def _maybe_attach_verification_ladder(
         # value proof — do not let the count-only green stamp "verified".
         if source_reread and target_rows:
             report["unproven"] = True
-        return report
+        return _return(report, "source_or_dest_population_empty")
 
     dest_types = {
         str(m.get("target") or ""): str(m.get("target_type") or m.get("inferredType") or "")
@@ -2904,6 +2928,23 @@ _COUNT_PROOF_SCOPES = (
 def is_count_proof_token(checksum: Any) -> bool:
     """True for an engine copy's ``dest_count:<n>`` / ``pk_join_count:<n>`` token."""
     return bool(_COUNT_PROOF_TOKEN.match(str(checksum or "").strip()))
+
+
+def _report_is_count_proof_only(report: dict[str, Any] | None) -> bool:
+    """True when the reconcile report's only proof is an engine count token —
+    dest COUNT(*) against the source snapshot, or the dest key join against
+    staging. Such a run has no value proof until the cell ladder attaches
+    (X-22 live): no early exit may leave it reading 'verified'."""
+    r = report or {}
+    if is_count_proof_token(r.get("checksum")) or is_count_proof_token(
+        r.get("target_checksum")
+    ):
+        return True
+    scope = str(r.get("proof_scope") or "")
+    if scope and any(known in scope for known in _COUNT_PROOF_SCOPES):
+        return True
+    scope = str(r.get("checksum_scope") or "")
+    return bool(scope) and any(known in scope for known in _COUNT_PROOF_SCOPES)
 
 
 _SOURCE_DIGEST_MODES = ("inline_write_pass", "source_reread")

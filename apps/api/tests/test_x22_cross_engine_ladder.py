@@ -209,3 +209,123 @@ def test_sqlite_dest_read_failure_marks_unproven(tmp_path, monkeypatch):
     )
     out = _run(monkeypatch, dest=dest, records=CLEAN)
     assert out.get("unproven") is True
+
+
+def _count_proof_run(monkeypatch, *, dest, source=None, records, dest_reader=None, src_reader=None, report_extra=None):
+    """Same as _run but the report carries an engine count token — the live
+    X-22 shape (dest_count:N, assurance=row_count)."""
+    import services.verification_ladder as vl
+
+    real_sqlite = vl.read_sqlite_rows
+
+    def explode(**kw):
+        raise AssertionError("wrong reader used for this route")
+
+    for name in ("read_sqlite_rows", "read_postgres_rows", "read_mysql_rows", "read_sqlserver_rows"):
+        monkeypatch.setattr(f"{LADDER}.{name}", explode)
+    if dest_reader is not None:
+        monkeypatch.setattr(f"{LADDER}.{dest_reader[0]}", dest_reader[1])
+    if src_reader is not None:
+        monkeypatch.setattr(f"{LADDER}.{src_reader[0]}", src_reader[1])
+    if dest.format == "sqlite":
+        monkeypatch.setattr(f"{LADDER}.read_sqlite_rows", real_sqlite)
+
+    report = {
+        "passed": True,
+        "source_rows": len(records) if records else 2,
+        "target_rows": 2,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "rows_skipped": 0,
+        "checksum": "dest_count:2",
+        "proof_scope": "dest_count_equals_source_snapshot",
+        "assurance_level": "row_count",
+    }
+    report.update(report_extra or {})
+    return _maybe_attach_verification_ladder(
+        report,
+        endpoint=dest,
+        source_endpoint=source,
+        records=records,
+        columns=["id", "amount", "name"],
+        dest_summary={"sync_mode": "overwrite"},
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "name", "target": "name"},
+        ],
+        validation_mode="strict",
+    )
+
+
+def test_count_proof_uncovered_dest_never_stays_verified(monkeypatch):
+    """X-22 live: a dest engine outside the ladder exits early — a count-only
+    report must then read unproven, never verified."""
+    dest = EndpointConfig(kind="database", format="oracle", table="t", host="h")
+    out = _count_proof_run(monkeypatch, dest=dest, records=CLEAN)
+    assert out.get("unproven") is True
+    assert out.get("ladder_declined_reason") == "destination_engine_not_in_ladder"
+
+
+def test_count_proof_no_targets_never_stays_verified(monkeypatch):
+    """X-22 live: empty mapped columns exits early — count-only green banned."""
+    dest = EndpointConfig(kind="database", format="mysql", table="t", host="h")
+    import services.verification_ladder as vl
+
+    def explode(**kw):
+        raise AssertionError("must not reach readers")
+
+    for name in ("read_mysql_rows", "read_sqlserver_rows"):
+        monkeypatch.setattr(f"{LADDER}.{name}", explode)
+    report = {
+        "passed": True,
+        "source_rows": 2,
+        "target_rows": 2,
+        "checksum": "dest_count:2",
+        "proof_scope": "dest_count_equals_source_snapshot",
+    }
+    out = _maybe_attach_verification_ladder(
+        report,
+        endpoint=dest,
+        source_endpoint=None,
+        records=[],
+        columns=[],
+        dest_summary={"sync_mode": "overwrite"},
+        mappings=[],
+        validation_mode="strict",
+    )
+    assert out.get("unproven") is True
+    assert out.get("ladder_declined_reason") == "no_mapped_target_columns"
+
+
+def test_count_proof_tamper_still_fails_closed(monkeypatch):
+    """X-22 live: the count-proof report reaching the ladder still catches a
+    tamper — the guard only covers exits that never ran the ladder."""
+    dest = EndpointConfig(kind="database", format="mysql", table="t", host="h")
+    out = _count_proof_run(
+        monkeypatch,
+        dest=dest,
+        records=CLEAN,
+        dest_reader=("read_mysql_rows", lambda **kw: TAMPERED),
+    )
+    assert out.get("passed") is False
+
+
+def test_count_proof_clean_passes_when_ladder_ran(monkeypatch):
+    dest = EndpointConfig(kind="database", format="mysql", table="t", host="h")
+    out = _count_proof_run(
+        monkeypatch,
+        dest=dest,
+        records=CLEAN,
+        dest_reader=("read_mysql_rows", lambda **kw: CLEAN),
+    )
+    assert out.get("unproven") is not True
+    assert out.get("passed") is not False
+
+
+def test_non_count_proof_early_exit_unchanged(monkeypatch):
+    """Non-count reports keep the old quiet decline — no new unproven stamp."""
+    dest = EndpointConfig(kind="database", format="oracle", table="t", host="h")
+    out = _run(monkeypatch, dest=dest, records=CLEAN)
+    assert out.get("unproven") is not True
+    assert out.get("ladder_declined_reason") == "destination_engine_not_in_ladder"

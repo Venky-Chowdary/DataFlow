@@ -127,8 +127,14 @@ def fidelity_veto(recon: dict[str, Any]) -> FidelityVeto | None:
             layers = ladder.get("layers") or {}
             l1_ok = (layers.get("L1") or {}).get("passed") is not False
             l3_ok = (layers.get("L3") or {}).get("passed") is not False
-            # Dest-before already closed; whole-table hashes are not a cell failure.
-            if _append_delta_scope(recon) and l1_ok:
+            l4_ok = (layers.get("L4") or {}).get("passed") is not False
+            l5_ok = (layers.get("L5") or {}).get("passed") is not False
+            # Dest-before already closed; whole-table hashes are not a cell
+            # failure — but a keyed cell mismatch (L4/L5) still is, even on a
+            # row_count-assurance route. An engine-copy count proof
+            # (dest_count:N, assurance=row_count) used to pass this exemption
+            # and keep "verified" on tampered cells (X-22 live).
+            if _append_delta_scope(recon) and l1_ok and l4_ok and l5_ok:
                 skip_veto = True
             # Keyed-batch cells matched; extra dest rows sit outside that proof.
             elif (
