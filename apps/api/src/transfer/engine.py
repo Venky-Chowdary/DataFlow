@@ -146,6 +146,7 @@ from .models import (
 from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
 from .stream import (
+    _discard_unconsumed_pin_ledgers,
     run_non_cdc_multi_stream_sequential,
     stream_database_transfer,
     stream_scd2_mirror_transfer,
@@ -4635,6 +4636,10 @@ class UniversalTransferEngine:
         finally:
             reset_strict_number_reading(strict_number_token)
             reset_active_number_locale(number_token)
+            # Same pin-ledger cleanup as the file path: a ledger that died
+            # inside _stream before the proof consumed it is still
+            # registered and must not leave df_pin_*.tsv behind.
+            _discard_unconsumed_pin_ledgers()
 
     def _execute_file_streaming(
         self,
@@ -4652,6 +4657,11 @@ class UniversalTransferEngine:
         contract_id = ""
         load_history_report: dict[str, Any] = {}
         verified = False
+        # Bound before the stream runs so the finally block never raises
+        # UnboundLocalError on runs refused before the stream returns
+        # (preflight / mapping / risk refusals) — that masked the real
+        # refusal reason behind a bookkeeping crash.
+        dest_summary: dict[str, Any] = {}
         number_token = set_active_number_locale(_run_number_locale(request))
         from services.transform_engine import (
             reset_strict_number_reading,
@@ -5419,6 +5429,22 @@ class UniversalTransferEngine:
         finally:
             reset_strict_number_reading(strict_number_token)
             reset_active_number_locale(number_token)
+            # The write-time pin ledger's spill file outlives _stream and is
+            # normally consumed (and unlinked) by the transform proof; a run
+            # that fails before reconcile — e.g. the dedupe failure path —
+            # would leak it otherwise. Unconsumed ledgers discard
+            # deterministically via the registry; dest_summary is bound at
+            # the top of this function so a refusal cannot mask its reason.
+            _discard_unconsumed_pin_ledgers()
+            _ledger = (dest_summary or {}).get("shape_raw_ledger")
+            _pin_file = (
+                _ledger.get("file") if isinstance(_ledger, dict) else None
+            )
+            if _pin_file:
+                try:
+                    os.unlink(str(_pin_file))
+                except OSError:
+                    pass
 
     def _create_pending_job(self, request: TransferRequest) -> str:
         return job_submission.create_pending_job(self, request)

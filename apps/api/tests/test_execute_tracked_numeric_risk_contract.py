@@ -82,6 +82,29 @@ def test_execute_blocks_decimal_narrowing_at_g3_without_contract(tmp_path, monke
     assert "amount" in evidence.lower()
 
 
+def test_refused_before_stream_surfaces_real_reason_not_unboundlocalerror(
+    tmp_path, monkeypatch
+):
+    """G-1i: a run refused before the stream binds dest_summary (here the
+    G3 decimal-narrowing refusal on a file upload) must surface its real
+    refusal reason — never an UnboundLocalError from the exit-path
+    bookkeeping that runs before the stream returns."""
+    from src.transfer import engine as engine_module
+
+    monkeypatch.setenv("DATAFLOW_JOB_STORE", "memory")
+    monkeypatch.setenv("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+    monkeypatch.setattr(engine_module, "get_mongodb_service", lambda: _JobStore())
+    request = _request(tmp_path / "refused.db", _mappings())
+
+    result = UniversalTransferEngine().execute_tracked(request, "c" * 24)
+
+    assert not result.success
+    evidence = f"{result.error} {result.validation_plan}"
+    assert "g3" in evidence.lower()
+    assert "unboundlocalerror" not in evidence.lower()
+    assert "local variable" not in evidence.lower()
+
+
 def test_signed_decimal_risk_contract_executes_and_is_persisted(tmp_path, monkeypatch):
     from services.migration_risk_contract import create_migration_risk_contract
     from src.transfer import engine as engine_module

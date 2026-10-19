@@ -685,9 +685,23 @@ def _write_mapped_csv(
     if digest is not None:
         from services.reconciliation import _iter_fingerprints
 
-        dest_types = {
-            dest: ddl for dest, ddl in zip(dest_cols, physicals, strict=True) if ddl
-        }
+        # Same type basis as Gate-8 and the independent re-read: declared
+        # types win over physical carriers (SQLite TEXT degrade class), so
+        # write-pass and re-read fingerprints canonicalize identically.
+        from services.reconciliation import overlay_physical_dest_types
+
+        dest_types = overlay_physical_dest_types(
+            {
+                dest: ddl
+                for dest, ddl in zip(dest_cols, carriers, strict=True)
+                if ddl
+            },
+            {
+                dest: ddl
+                for dest, ddl in zip(dest_cols, physicals, strict=True)
+                if ddl
+            },
+        )
 
         def fingerprints(rows: list[dict[str, str | None]]) -> None:
             digest.add_many(

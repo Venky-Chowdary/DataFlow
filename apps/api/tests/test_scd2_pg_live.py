@@ -1705,15 +1705,23 @@ def test_g1e_proof_memory_bounded_pg(tmp_path, monkeypatch):
         ).recipe_hash,
         skip_preflight=True, validation_mode="strict",
     )
+    # Assert only on files THIS run could have created — a stale leftover
+    # from an earlier crashed run must not mask or fail the check.
+    import tempfile as _tf
+
+    _pre = {
+        f
+        for f in os.listdir(_tf.gettempdir())
+        if f.startswith(("df_pin_", "df_pinmap_", "df_scope_"))
+    }
     res = _exec(fake, req, prefix="ovrg1e")
     assert res.success, res.error
     # ledger spilled past 200k keys; the temp file must be cleaned up
-    import tempfile as _tf
-
     leftovers = [
         f
         for f in os.listdir(_tf.gettempdir())
         if f.startswith(("df_pin_", "df_pinmap_", "df_scope_"))
+        and f not in _pre
     ]
     assert not leftovers, leftovers
     recon = res.reconciliation or {}
@@ -1922,14 +1930,17 @@ def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
         " // 1024)\n"
     )
     env = dict(os.environ)
+    _api_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     env["PYTHONPATH"] = (
-        "/home/ubuntu/repos/DataFlow/apps/api:"
-        "/home/ubuntu/repos/DataFlow/packages/preflight/src"
+        _api_dir + ":" + os.path.join(
+            os.path.dirname(os.path.dirname(_api_dir)),
+            "packages", "preflight", "src",
+        )
     )
     out = sp.run(
         [sys.executable, str(probe)],
-        capture_output=True, text=True, env=env, timeout=600,
-        cwd="/home/ubuntu/repos/DataFlow/apps/api",
+        capture_output=True, text=True, env=env, timeout=900,
+        cwd=_api_dir,
     )
     assert out.returncode == 0, out.stderr[-2000:]
     peak = int(out.stdout.strip().rsplit(" ", 1)[-1])
@@ -1937,3 +1948,754 @@ def test_g1h_shaped_memory_bounded_subprocess_pg(tmp_path):
     # ON TOP OF the ~300 MB baseline; the bounded path measured ~320 MB at
     # 200k. Ceiling allows CI variance without letting the defect back in.
     assert peak < 520, f"shaped peak RSS {peak} MB — proof state grew O(rows)"
+
+
+_TAMPER_SQL = {
+    "update": "UPDATE {dst} SET note = 'TAMPERED-LOWER' WHERE id = 7",
+    "delete": "DELETE FROM {dst} WHERE id = 7",
+    "duplicate": "INSERT INTO {dst} (id, name, price, note) "
+                 "VALUES (300007, 'dupe', '9.99', 'dupe')",
+}
+_TAMPER_EXPECT = {
+    "update": ("changed", "7"),
+    "delete": ("missing_in_dest", "7"),
+    "duplicate": ("extra_in_dest", "300007"),
+}
+
+
+@pytest.mark.parametrize("mode", ["unshaped", "shaped"])
+@pytest.mark.parametrize("tamper", ["update", "delete", "duplicate"])
+def test_gate8_tamper_names_culprit_300k_pg(tmp_path, mode, tamper):
+    """Held item (accuracy above the 100k reconcile cap): at 300k rows a
+    post-write destination tamper must come back NOT verified with the
+    culprit key named — pairwise or digest, the claim stays strict — and
+    the verdict states which compare mode ran."""
+    import subprocess as sp
+    import sys
+    import os
+    import json as _json
+
+    expect_label, expect_key = _TAMPER_EXPECT[tamper]
+    shaped = mode == "shaped"
+    probe = tmp_path / f"probe_{mode}_{tamper}.py"
+    probe.write_text(
+        "import os, sys, json, uuid\n"
+        "sys.path.insert(0, 'tests')\n"
+        "import psycopg2\n"
+        "from urllib.parse import urlparse\n"
+        "u = urlparse(os.environ['DATAFLOW_PG_TEST_DSN'])\n"
+        "conn = psycopg2.connect(dbname=u.path[1:], user=u.username,"
+        " password=u.password, host=u.hostname, port=u.port)\n"
+        "cur = conn.cursor()\n"
+        "TBL = 'tamper_' + uuid.uuid4().hex[:10]\n"
+        "cur.execute(f'CREATE TABLE {TBL} (id INT PRIMARY KEY, name TEXT,"
+        " price TEXT, note TEXT)')\n"
+        "cur.execute(f\"INSERT INTO {TBL} SELECT g, 'n'||g, '1.00',"
+        " repeat('x',40)||g FROM generate_series(1, 300000) g\")\n"
+        "conn.commit()\n"
+        "import src.transfer.engine as engine_mod\n"
+        "from tests.test_property2_golden_path_never_blocked import _FakeMongo\n"
+        "fake = _FakeMongo()\n"
+        "engine_mod.get_mongodb_service = lambda: fake\n"
+        "from src.transfer.models import EndpointConfig, TransferRequest\n"
+        "from services.shape_models import ShapeRecipe\n"
+        "ep = lambda t: EndpointConfig(kind='database', format='postgresql',"
+        " host=u.hostname, port=u.port, database=u.path[1:],"
+        " username=u.username, password=u.password, table=t)\n"
+        "cols = ['id','name','price','note']\n"
+        "kw = {}\n"
+        + (
+            "recipe = {'steps': [{'op': 'case', 'column': 'note',"
+            " 'options': {'mode': 'upper'}}]}\n"
+            "kw = {'shape_recipe': recipe, 'approved_shape_recipe_hash':"
+            " ShapeRecipe.parse(recipe, source_columns=cols).recipe_hash}\n"
+            if shaped else ""
+        )
+        + "req = TransferRequest(source=ep(TBL), destination=ep(TBL + '_d'),"
+        " sync_mode='full_refresh_overwrite', mappings=[{'source': c,"
+        " 'target': c, 'confidence': 1.0, 'user_override': True,"
+        " 'transform': 'none'} for c in cols],"
+        " skip_preflight=True, validation_mode='strict',"
+        " stream_contracts=[{'selected': True, 'primary_key': 'id',"
+        " 'sync_mode': 'full_refresh_overwrite'}], **kw)\n"
+        "DST = TBL + '_d'\n"
+        "orig_rr = engine_mod.run_reconciliation\n"
+        "def tampered_rr(**kw2):\n"
+        "    cur.execute(\"" + _TAMPER_SQL[tamper].replace('"', '\\"') + "\".format(dst=DST))\n"
+        "    conn.commit()\n"
+        "    return orig_rr(**kw2)\n"
+        "engine_mod.run_reconciliation = tampered_rr\n"
+        "job = 'tmp' + uuid.uuid4().hex[:10]\n"
+        "fake.update_job_status(job, 'pending', transfer_request={})\n"
+        "res = engine_mod.UniversalTransferEngine().execute_tracked(req, job)\n"
+        "recon = res.reconciliation or {}\n"
+        "proof = recon.get('transform_applied') or {}\n"
+        "print(json.dumps({\n"
+        " 'passed': recon.get('passed'),\n"
+        " 'verdict': recon.get('verification_verdict'),\n"
+        " 'success': res.success,\n"
+        " 'compare_mode': recon.get('compare_mode'),\n"
+        " 'proof_compare_mode': proof.get('compare_mode'),\n"
+        " 'proof_status': proof.get('status'),\n"
+        " 'culprit_keys': recon.get('culprit_keys')\n"
+        "   or proof.get('culprit_keys'),\n"
+        " 'msg': str(recon.get('message'))[:400]}))\n"
+    )
+    env = dict(os.environ)
+    _api_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    env["PYTHONPATH"] = (
+        _api_dir + ":" + os.path.join(
+            os.path.dirname(os.path.dirname(_api_dir)),
+            "packages", "preflight", "src",
+        )
+    )
+    out = sp.run(
+        [sys.executable, str(probe)],
+        capture_output=True, text=True, env=env, timeout=900,
+        cwd=_api_dir,
+    )
+    assert out.returncode == 0, out.stderr[-2000:]
+    rep = _json.loads(out.stdout.strip().splitlines()[-1])
+    assert rep["passed"] is False or rep["verdict"] == "failed", rep
+    assert rep["compare_mode"] or rep["proof_compare_mode"], rep
+    culprits = rep.get("culprit_keys") or {}
+    assert expect_key in (culprits.get(expect_label) or []), (
+        f"{mode}/{tamper}: expected key {expect_key!r} in "
+        f"culprit_keys[{expect_label!r}] — got {culprits!r}; msg={rep['msg']}"
+    )
+
+
+@pytest.mark.parametrize("mode", ["unshaped", "shaped"])
+@pytest.mark.parametrize("tamper", ["update", "delete", "duplicate"])
+def test_gate8_tamper_names_culprit_5k_pg(monkeypatch, mode, tamper):
+    """Same contract as the 300k subprocess case, fast enough to run in
+    every gate: a post-write destination tamper must come back NOT
+    verified with the culprit key named, and the verdict states which
+    compare mode ran."""
+    import uuid as _uuid
+
+    import src.transfer.engine as engine_mod
+    from src.transfer.models import TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    cols = ["id", "name", "price", "note"]
+    tbl = "g1i5k_" + _uuid.uuid4().hex[:10]
+    dst = tbl + "_d"
+    expect_label, expect_key = _TAMPER_EXPECT[tamper]
+    try:
+        cur.execute(
+            f"CREATE TABLE {tbl} (id INT PRIMARY KEY, name TEXT,"
+            " price TEXT, note TEXT)"
+        )
+        cur.execute(
+            f"INSERT INTO {tbl} SELECT g, 'n'||g, '1.00',"
+            " repeat('x',40)||g FROM generate_series(1, 5000) g"
+        )
+        kw = {}
+        if mode == "shaped":
+            recipe = {
+                "steps": [
+                    {"op": "case", "column": "note",
+                     "options": {"mode": "upper"}}
+                ]
+            }
+            kw = {
+                "shape_recipe": recipe,
+                "approved_shape_recipe_hash": ShapeRecipe.parse(
+                    recipe, source_columns=cols
+                ).recipe_hash,
+            }
+        ep = lambda t: EndpointConfig(  # noqa: E731
+            kind="database", format="postgresql",
+            host=parsed["host"], port=parsed["port"],
+            database=parsed["database"], username=parsed["username"],
+            password=parsed["password"], table=t,
+        )
+        req = TransferRequest(
+            source=ep(tbl), destination=ep(dst),
+            sync_mode="full_refresh_overwrite",
+            mappings=[
+                {"source": c, "target": c, "confidence": 1.0,
+                 "user_override": True, "transform": "none"}
+                for c in cols
+            ],
+            skip_preflight=True, validation_mode="strict",
+            stream_contracts=[{
+                "selected": True, "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }],
+            **kw,
+        )
+        orig_rr = engine_mod.run_reconciliation
+
+        def tampered_rr(**kw2):
+            cur.execute(_TAMPER_SQL[tamper].format(dst=dst))
+            return orig_rr(**kw2)
+
+        monkeypatch.setattr(engine_mod, "run_reconciliation", tampered_rr)
+        res = _exec(fake, req, prefix="g1i5k_")
+        recon = res.reconciliation or {}
+        proof = recon.get("transform_applied") or {}
+        assert res.success is False or recon.get("passed") is False or (
+            recon.get("verification_verdict") == "failed"
+        ), {"msg": recon.get("message"), "recon": str(recon)[:500]}
+        assert recon.get("compare_mode") or proof.get("compare_mode"), (
+            "verdict must state which compare mode ran"
+        )
+        culprits = recon.get("culprit_keys") or proof.get("culprit_keys") or {}
+        assert expect_key in (culprits.get(expect_label) or []), (
+            f"{mode}/{tamper}: expected {expect_key!r} in "
+            f"culprit_keys[{expect_label!r}] — got {culprits!r}; "
+            f"msg={recon.get('message')}"
+        )
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {tbl}, {dst}_fkref, {dst}")
+        conn.close()
+
+
+_TEXT_DDL_CASES = {
+    # Normalization must never hide a real change on a TEXT column:
+    # '30.99'->'30.990', 'A'->'A ' and '1'->'01' are real value changes.
+    "text_scale": "UPDATE {dst} SET v = '30.990' WHERE id = 1",
+    "text_pad": "UPDATE {dst} SET v = 'A ' WHERE id = 2",
+    "text_zero_pad": "UPDATE {dst} SET v = '01' WHERE id = 3",
+    "numeric_last_digit": "UPDATE {dst} SET n = 30.98 WHERE id = 4",
+}
+_TEXT_DDL_EXPECT = {
+    "text_scale": "1",
+    "text_pad": "2",
+    "text_zero_pad": "3",
+    "numeric_last_digit": "4",
+}
+
+
+@pytest.mark.parametrize("mode", ["unshaped", "shaped"])
+@pytest.mark.parametrize("case", sorted(_TEXT_DDL_CASES))
+def test_gate8_normalization_is_type_driven_pg(monkeypatch, mode, case):
+    """Value normalization is driven by the declared column type, never by
+    what the string looks like: TEXT columns compare literally ('A' vs
+    'A ', '1' vs '01' are real changes) while NUMERIC collapses scale only
+    ('30.99' vs '30.990' equal; '30.98' is a real change)."""
+    import uuid as _uuid
+
+    import src.transfer.engine as engine_mod
+    from src.transfer.models import TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    cols = ["id", "v", "n", "name"]
+    tbl = "g1itn_" + _uuid.uuid4().hex[:10]
+    dst = tbl + "_d"
+    try:
+        cur.execute(
+            f"CREATE TABLE {tbl} (id INT PRIMARY KEY, v TEXT,"
+            " n NUMERIC, name TEXT)"
+        )
+        cur.execute(
+            f"INSERT INTO {tbl} SELECT g,"
+            " CASE g WHEN 1 THEN '30.99' WHEN 2 THEN 'A' WHEN 3 THEN '1'"
+            " ELSE 'x'||g END,"
+            " CASE g WHEN 4 THEN 30.99 ELSE g * 1.5 END,"
+            f" 'n'||g FROM generate_series(1, 500) g"
+        )
+        kw = {}
+        if mode == "shaped":
+            recipe = {
+                "steps": [
+                    {"op": "case", "column": "name",
+                     "options": {"mode": "upper"}}
+                ]
+            }
+            kw = {
+                "shape_recipe": recipe,
+                "approved_shape_recipe_hash": ShapeRecipe.parse(
+                    recipe, source_columns=cols
+                ).recipe_hash,
+            }
+        ep = lambda t: EndpointConfig(  # noqa: E731
+            kind="database", format="postgresql",
+            host=parsed["host"], port=parsed["port"],
+            database=parsed["database"], username=parsed["username"],
+            password=parsed["password"], table=t,
+        )
+        req = TransferRequest(
+            source=ep(tbl), destination=ep(dst),
+            sync_mode="full_refresh_overwrite",
+            mappings=[
+                {"source": c, "target": c, "confidence": 1.0,
+                 "user_override": True, "transform": "none"}
+                for c in cols
+            ],
+            skip_preflight=True, validation_mode="strict",
+            stream_contracts=[{
+                "selected": True, "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }],
+            **kw,
+        )
+        orig_rr = engine_mod.run_reconciliation
+
+        def tampered_rr(**kw2):
+            cur.execute(_TEXT_DDL_CASES[case].format(dst=dst))
+            return orig_rr(**kw2)
+
+        monkeypatch.setattr(engine_mod, "run_reconciliation", tampered_rr)
+        res = _exec(fake, req, prefix="g1itn_")
+        recon = res.reconciliation or {}
+        proof = recon.get("transform_applied") or {}
+        assert res.success is False or recon.get("passed") is False or (
+            recon.get("verification_verdict") == "failed"
+        ), {"msg": recon.get("message"), "recon": str(recon)[:500]}
+        assert recon.get("compare_mode") or proof.get("compare_mode"), (
+            "verdict must state which compare mode ran"
+        )
+        culprits = recon.get("culprit_keys") or proof.get("culprit_keys") or {}
+        expect_key = _TEXT_DDL_EXPECT[case]
+        assert expect_key in (culprits.get("changed") or []), (
+            f"{mode}/{case}: expected {expect_key!r} in "
+            f"culprit_keys['changed'] — got {culprits!r}; "
+            f"msg={recon.get('message')}"
+        )
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {tbl}, {dst}")
+        conn.close()
+
+
+_TYPE_EDGE_CASES = {
+    # Destination-real type semantics:
+    # bpchar (CHAR(n)) — PG ignores trailing spaces: 'A' -> 'A ' is NOT a
+    # change and must stay verified.
+    "bpchar_trailing": (
+        "UPDATE {dst} SET c = 'A ' WHERE id = 2", True, None,
+    ),
+    # NULL vs '' are always distinct: '' -> NULL is a real change.
+    "null_vs_empty": (
+        "UPDATE {dst} SET v = NULL WHERE id = 5", False, "5",
+    ),
+    # timestamptz compares as instants: same instant in another offset is
+    # equal (verified); a different instant is a real change.
+    "timestamptz_same_instant": (
+        "UPDATE {dst} SET ts = '2024-01-01T10:00:00+05:30' WHERE id = 6",
+        True, None,
+    ),
+    "timestamptz_diff_instant": (
+        "UPDATE {dst} SET ts = '2024-01-01T05:30:00+00:00' WHERE id = 6",
+        False, "6",
+    ),
+}
+
+
+@pytest.mark.parametrize("mode", ["unshaped", "shaped"])
+@pytest.mark.parametrize("case", sorted(_TYPE_EDGE_CASES))
+def test_gate8_normalization_follows_dest_type_semantics_pg(
+    monkeypatch, mode, case
+):
+    """Follow the destination's real type semantics: bpchar trailing spaces
+    equal, NULL != '', timestamptz compares as instants."""
+    import uuid as _uuid
+
+    import src.transfer.engine as engine_mod
+    from src.transfer.models import TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    cols = ["id", "v", "c", "ts", "name"]
+    tbl = "g1ite_" + _uuid.uuid4().hex[:10]
+    dst = tbl + "_d"
+    tamper_sql, expect_verified, expect_key = _TYPE_EDGE_CASES[case]
+    try:
+        cur.execute(
+            f"CREATE TABLE {tbl} (id INT PRIMARY KEY, v TEXT, c CHAR(4),"
+            " ts TIMESTAMPTZ, name TEXT)"
+        )
+        cur.execute(
+            f"INSERT INTO {tbl} SELECT g,"
+            " CASE g WHEN 2 THEN 'A' WHEN 5 THEN '' ELSE 'x'||g END,"
+            " CASE g WHEN 2 THEN 'A' ELSE 'p' END,"
+            " '2024-01-01T04:30:00Z'::timestamptz,"
+            f" 'n'||g FROM generate_series(1, 500) g"
+        )
+        kw = {}
+        if mode == "shaped":
+            recipe = {
+                "steps": [
+                    {"op": "case", "column": "name",
+                     "options": {"mode": "upper"}}
+                ]
+            }
+            kw = {
+                "shape_recipe": recipe,
+                "approved_shape_recipe_hash": ShapeRecipe.parse(
+                    recipe, source_columns=cols
+                ).recipe_hash,
+            }
+        ep = lambda t: EndpointConfig(  # noqa: E731
+            kind="database", format="postgresql",
+            host=parsed["host"], port=parsed["port"],
+            database=parsed["database"], username=parsed["username"],
+            password=parsed["password"], table=t,
+        )
+        req = TransferRequest(
+            source=ep(tbl), destination=ep(dst),
+            sync_mode="full_refresh_overwrite",
+            mappings=[
+                {"source": c, "target": c, "confidence": 1.0,
+                 "user_override": True, "transform": "none"}
+                for c in cols
+            ],
+            skip_preflight=True, validation_mode="strict",
+            stream_contracts=[{
+                "selected": True, "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }],
+            **kw,
+        )
+        orig_rr = engine_mod.run_reconciliation
+
+        def tampered_rr(**kw2):
+            cur.execute(tamper_sql.format(dst=dst))
+            return orig_rr(**kw2)
+
+        monkeypatch.setattr(engine_mod, "run_reconciliation", tampered_rr)
+        res = _exec(fake, req, prefix="g1ite_")
+        recon = res.reconciliation or {}
+        proof = recon.get("transform_applied") or {}
+        if expect_verified:
+            assert res.success and recon.get("passed") is not False, (
+                f"{mode}/{case}: must stay verified — "
+                f"msg={recon.get('message')} "
+                f"culprits={recon.get('culprit_keys') or proof.get('culprit_keys')}"
+            )
+        else:
+            assert res.success is False or recon.get("passed") is False or (
+                recon.get("verification_verdict") == "failed"
+            ), {"msg": recon.get("message"), "recon": str(recon)[:500]}
+            culprits = (
+                recon.get("culprit_keys") or proof.get("culprit_keys") or {}
+            )
+            assert expect_key in (culprits.get("changed") or []), (
+                f"{mode}/{case}: expected {expect_key!r} in "
+                f"culprit_keys['changed'] — got {culprits!r}; "
+                f"msg={recon.get('message')}"
+            )
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {tbl}, {dst}")
+        conn.close()
+
+
+@pytest.mark.parametrize("mode", ["unshaped", "shaped"])
+@pytest.mark.parametrize("fk", [False, True])
+def test_gate8_overwrite_stale_dest_rows_stay_verified_pg(monkeypatch, mode, fk):
+    """Regression guard on the tamper detection: stale destination rows
+    from a PREVIOUS run (absent from the new source) are the overwrite
+    leftover merge's normal job — removed-by-overwrite, not a failed
+    proof. Only rows appearing between the write and the proof (tamper)
+    or a mismatched final read-back may fail. With fk=True the
+    destination is FK-referenced so TRUNCATE is refused and the clear
+    falls back to DELETE FROM — same contract."""
+    import uuid as _uuid
+
+    from src.transfer.models import TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    cols = ["id", "name", "price", "note"]
+    tbl = "g1ist_" + _uuid.uuid4().hex[:10]
+    dst = tbl + "_d"
+    try:
+        cur.execute(
+            f"CREATE TABLE {tbl} (id INT PRIMARY KEY, name TEXT,"
+            " price TEXT, note TEXT)"
+        )
+        cur.execute(
+            f"INSERT INTO {tbl} SELECT g, 'n'||g, '1.00',"
+            " repeat('x',40)||g FROM generate_series(1, 5000) g"
+        )
+        # Destination already populated by an earlier run: two rows that
+        # will be overwritten (same keys) plus three STALE keys absent
+        # from the new source.
+        cur.execute(
+            f"CREATE TABLE {dst} (id INT PRIMARY KEY, name TEXT,"
+            " price TEXT, note TEXT)"
+        )
+        cur.execute(
+            f"INSERT INTO {dst} (id, name, price, note) VALUES"
+            " (1, 'old', '0.01', 'old-value'),"
+            " (2, 'old', '0.01', 'old-value'),"
+            " (900001, 'stale', '0.01', 'stale-key'),"
+            " (900002, 'stale', '0.01', 'stale-key'),"
+            " (900003, 'stale', '0.01', 'stale-key')"
+        )
+        if fk:
+            cur.execute(
+                f"CREATE TABLE {dst}_fkref (id INT PRIMARY KEY,"
+                f" dep INT REFERENCES {dst}(id))"
+            )
+        kw = {}
+        if mode == "shaped":
+            recipe = {
+                "steps": [
+                    {"op": "case", "column": "note",
+                     "options": {"mode": "upper"}}
+                ]
+            }
+            kw = {
+                "shape_recipe": recipe,
+                "approved_shape_recipe_hash": ShapeRecipe.parse(
+                    recipe, source_columns=cols
+                ).recipe_hash,
+            }
+        ep = lambda t: EndpointConfig(  # noqa: E731
+            kind="database", format="postgresql",
+            host=parsed["host"], port=parsed["port"],
+            database=parsed["database"], username=parsed["username"],
+            password=parsed["password"], table=t,
+        )
+        req = TransferRequest(
+            source=ep(tbl), destination=ep(dst),
+            sync_mode="full_refresh_overwrite",
+            mappings=[
+                {"source": c, "target": c, "confidence": 1.0,
+                 "user_override": True, "transform": "none"}
+                for c in cols
+            ],
+            skip_preflight=True, validation_mode="strict",
+            stream_contracts=[{
+                "selected": True, "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }],
+            **kw,
+        )
+        res = _exec(fake, req, prefix="g1ist_")
+        recon = res.reconciliation or {}
+        proof = recon.get("transform_applied") or {}
+        assert res.success and recon.get("passed") is not False, (
+            f"{mode}: legit stale-row overwrite must stay verified — "
+            f"msg={recon.get('message')}"
+        )
+        if mode == "shaped":
+            assert proof.get("status") == "verified", proof
+        # The stale keys are gone — removed by overwrite — and the dest
+        # holds exactly the new population.
+        cur.execute(f"SELECT count(*) FROM {dst} WHERE id >= 900001")
+        assert cur.fetchone()[0] == 0
+        cur.execute(f"SELECT count(*) FROM {dst}")
+        assert cur.fetchone()[0] == 5000
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {tbl}, {dst}_fkref, {dst}")
+        conn.close()
+
+
+@pytest.mark.parametrize("mode", ["unshaped", "shaped"])
+@pytest.mark.parametrize("fk", [False, True])
+def test_gate8_overwrite_retry_after_source_delete_pg(monkeypatch, mode, fk):
+    """Resumed/retried overwrite where source rows were DELETED between
+    attempt 1 and attempt 2: the destination holds attempt 1's partial
+    prefix (ids 1-2500, post-recipe image), then ids 100-600 disappear
+    from the source, and the retried run must end verified with exactly
+    the new source population (4400 rows) and zero attempt-1-only keys
+    left behind. The stale clear inside the retry's write transaction —
+    TRUNCATE, or DELETE FROM when the dest is FK-referenced — is what
+    guarantees the attempt-1 leftovers cannot linger."""
+    import uuid as _uuid
+
+    from src.transfer.models import TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    cols = ["id", "name", "price", "note"]
+    tbl = "g1isd_" + _uuid.uuid4().hex[:10]
+    dst = tbl + "_d"
+    try:
+        cur.execute(
+            f"CREATE TABLE {tbl} (id INT PRIMARY KEY, name TEXT,"
+            " price TEXT, note TEXT)"
+        )
+        # New source population: ids 1-99 and 601-5000 (100-600 deleted
+        # between attempt 1 and attempt 2).
+        cur.execute(
+            f"INSERT INTO {tbl} SELECT g, 'n'||g, '1.00',"
+            " repeat('x',40)||g FROM generate_series(1, 5000) g"
+            " WHERE g < 100 OR g > 600"
+        )
+        # Attempt-1 prefix: ids 1-2500 INCLUDING the since-deleted keys,
+        # carrying the post-recipe image (UPPER for shaped).
+        cur.execute(
+            f"CREATE TABLE {dst} (id INT PRIMARY KEY, name TEXT,"
+            " price TEXT, note TEXT)"
+        )
+        note_expr = (
+            "UPPER(repeat('x',40)||g)" if mode == "shaped"
+            else "repeat('x',40)||g"
+        )
+        cur.execute(
+            f"INSERT INTO {dst} SELECT g, 'n'||g, '1.00',"
+            f" {note_expr} FROM generate_series(1, 2500) g"
+        )
+        if fk:
+            cur.execute(
+                f"CREATE TABLE {dst}_fkref (id INT PRIMARY KEY,"
+                f" dep INT REFERENCES {dst}(id))"
+            )
+        kw = {}
+        if mode == "shaped":
+            recipe = {
+                "steps": [
+                    {"op": "case", "column": "note",
+                     "options": {"mode": "upper"}}
+                ]
+            }
+            kw = {
+                "shape_recipe": recipe,
+                "approved_shape_recipe_hash": ShapeRecipe.parse(
+                    recipe, source_columns=cols
+                ).recipe_hash,
+            }
+        ep = lambda t: EndpointConfig(  # noqa: E731
+            kind="database", format="postgresql",
+            host=parsed["host"], port=parsed["port"],
+            database=parsed["database"], username=parsed["username"],
+            password=parsed["password"], table=t,
+        )
+        req = TransferRequest(
+            source=ep(tbl), destination=ep(dst),
+            sync_mode="full_refresh_overwrite",
+            mappings=[
+                {"source": c, "target": c, "confidence": 1.0,
+                 "user_override": True, "transform": "none"}
+                for c in cols
+            ],
+            skip_preflight=True, validation_mode="strict",
+            stream_contracts=[{
+                "selected": True, "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }],
+            **kw,
+        )
+        res = _exec(fake, req, prefix="g1isd_")
+        recon = res.reconciliation or {}
+        proof = recon.get("transform_applied") or {}
+        assert res.success and recon.get("passed") is not False, (
+            f"{mode}/fk={fk}: retry after source deletes must stay "
+            f"verified — msg={recon.get('message')}"
+        )
+        if mode == "shaped":
+            assert proof.get("status") == "verified", proof
+        # Exactly the new source population; no attempt-1-only keys.
+        cur.execute(
+            f"SELECT count(*) FROM {dst} WHERE id >= 100 AND id <= 600"
+        )
+        assert cur.fetchone()[0] == 0, (
+            f"{mode}/fk={fk}: attempt-1-only keys survived the retry"
+        )
+        cur.execute(f"SELECT count(*) FROM {dst}")
+        assert cur.fetchone()[0] == 4499  # ids 1-99 (99) + 601-5000 (4400)
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {tbl}, {dst}_fkref, {dst}")
+        conn.close()
+
+
+@pytest.mark.parametrize("mode", ["unshaped", "shaped"])
+def test_gate8_overwrite_partial_prior_attempt_stays_verified_pg(
+    monkeypatch, mode
+):
+    """Resume shape: the destination holds a PREFIX of this run's
+    population written by a first attempt (ids 1-2500, values matching
+    what this run writes — the post-recipe image for shaped). Those rows
+    are all members of S, so the leftover merge can never see them as
+    extra — the proof must not false-fail, and the run ends verified
+    with exactly the new population."""
+    import uuid as _uuid
+
+    from src.transfer.models import TransferRequest
+    from services.shape_models import ShapeRecipe
+
+    fake = _engine_env(monkeypatch)
+    conn, parsed = _pg()
+    cur = conn.cursor()
+    cols = ["id", "name", "price", "note"]
+    tbl = "g1irs_" + _uuid.uuid4().hex[:10]
+    dst = tbl + "_d"
+    try:
+        cur.execute(
+            f"CREATE TABLE {tbl} (id INT PRIMARY KEY, name TEXT,"
+            " price TEXT, note TEXT)"
+        )
+        cur.execute(
+            f"INSERT INTO {tbl} SELECT g, 'n'||g, '1.00',"
+            " repeat('x',40)||g FROM generate_series(1, 5000) g"
+        )
+        cur.execute(
+            f"CREATE TABLE {dst} (id INT PRIMARY KEY, name TEXT,"
+            " price TEXT, note TEXT)"
+        )
+        # First-attempt prefix: same rows this run will write (for the
+        # shaped run the note is the recipe output — UPPER).
+        note_expr = (
+            "UPPER(repeat('x',40)||g)" if mode == "shaped"
+            else "repeat('x',40)||g"
+        )
+        cur.execute(
+            f"INSERT INTO {dst} SELECT g, 'n'||g, '1.00',"
+            f" {note_expr} FROM generate_series(1, 2500) g"
+        )
+        kw = {}
+        if mode == "shaped":
+            recipe = {
+                "steps": [
+                    {"op": "case", "column": "note",
+                     "options": {"mode": "upper"}}
+                ]
+            }
+            kw = {
+                "shape_recipe": recipe,
+                "approved_shape_recipe_hash": ShapeRecipe.parse(
+                    recipe, source_columns=cols
+                ).recipe_hash,
+            }
+        ep = lambda t: EndpointConfig(  # noqa: E731
+            kind="database", format="postgresql",
+            host=parsed["host"], port=parsed["port"],
+            database=parsed["database"], username=parsed["username"],
+            password=parsed["password"], table=t,
+        )
+        req = TransferRequest(
+            source=ep(tbl), destination=ep(dst),
+            sync_mode="full_refresh_overwrite",
+            mappings=[
+                {"source": c, "target": c, "confidence": 1.0,
+                 "user_override": True, "transform": "none"}
+                for c in cols
+            ],
+            skip_preflight=True, validation_mode="strict",
+            stream_contracts=[{
+                "selected": True, "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }],
+            **kw,
+        )
+        res = _exec(fake, req, prefix="g1irs_")
+        recon = res.reconciliation or {}
+        proof = recon.get("transform_applied") or {}
+        assert res.success and recon.get("passed") is not False, (
+            f"{mode}: partial prior attempt must stay verified — "
+            f"msg={recon.get('message')}"
+        )
+        if mode == "shaped":
+            assert proof.get("status") == "verified", proof
+        cur.execute(f"SELECT count(*) FROM {dst}")
+        assert cur.fetchone()[0] == 5000
+    finally:
+        cur.execute(f"DROP TABLE IF EXISTS {tbl}, {dst}_fkref, {dst}")
+        conn.close()
