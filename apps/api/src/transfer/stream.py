@@ -1844,6 +1844,24 @@ def _stream_database_transfer_impl(
         if rows_before is not None:
             dest_summary[PRECOUNT_KEY] = int(rows_before)
             checkpoint.target_rows_before = int(rows_before)
+        if not resumed_pass:
+            # X-9: same existence stamp as the file path — a precount of 0
+            # cannot tell "created this run" from "emptied existing", so the
+            # undo needs it to DROP (create-new) vs DELETE. None is not
+            # stamped: unknown must never justify a drop.
+            try:
+                from services.dest_precount import destination_table_exists
+
+                _existed = destination_table_exists(
+                    dest_type,
+                    dest_cfg,
+                    schema=schema_from_cfg(dest_type, dest_cfg),
+                    table_name=str(dest_table),
+                )
+                if _existed is not None:
+                    dest_summary["dest_table_existed_before"] = bool(_existed)
+            except Exception:  # noqa: BLE001 - probe failure must not abort the run
+                pass
     elif checkpoint.target_rows_before is not None:
         # Resume: restore the first-pass dest-before. A live COUNT now includes
         # rows this job already wrote and is not a pre-write cardinality.

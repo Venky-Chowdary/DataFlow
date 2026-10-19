@@ -540,6 +540,57 @@ def destination_table_exists(
             mdb = _mongo_db(cfg)
             names = mdb.list_collection_names()
             return table in names
+        if db_type == "postgresql":
+            from connectors.postgresql_conn import get_connection
+
+            conn = get_connection(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 5432),
+                database=str(cfg.get("database") or ""),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+                ssl=bool(cfg.get("ssl", False)),
+            )
+            try:
+                sch = schema or "public"
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT to_regclass(%s)", (f'"{sch}"."{table}"',)
+                    )
+                    row = cur.fetchone()
+                return bool(row and row[0] is not None)
+            finally:
+                conn.close()
+        if db_type == "mysql":
+            from connectors.mysql_conn import get_connection
+
+            conn = get_connection(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 3306),
+                database=str(cfg.get("database") or ""),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+                ssl=bool(cfg.get("ssl", False)),
+            )
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT COUNT(*) FROM information_schema.tables "
+                        "WHERE table_schema = DATABASE() AND table_name = %s",
+                        (table,),
+                    )
+                    row = cur.fetchone()
+                return bool(row and int(row[0]) > 0)
+            finally:
+                conn.close()
+        from src.transfer.connector_capabilities import resolve_driver_type
+
+        if resolve_driver_type(db_type) == "generic_sql":
+            from connectors.generic_sql import table_exists
+
+            return table_exists(cfg, table, schema=schema)
     except Exception as exc:  # noqa: BLE001 - unknown is not False
         logger.debug("destination_table_exists probe failed for %s: %s", db_type, exc)
         return None

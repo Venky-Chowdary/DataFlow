@@ -3295,6 +3295,30 @@ def _count_table_raw(
         return None
 
 
+def table_exists(cfg: dict[str, Any], table: str, *, schema: str = "") -> bool | None:
+    """Whether the destination object exists, via SQLAlchemy inspection.
+
+    ``None`` when the dialect/driver cannot answer — callers must treat
+    unknown as "do not drop", never as "safe to drop".
+    """
+    if not SQLALCHEMY_AVAILABLE:
+        return None
+    name = (table or "").strip()
+    if not name:
+        return None
+    engine = None
+    try:
+        engine = _engine(cfg)
+        schema_name = schema or _schema_name(cfg)
+        return bool(inspect(engine).has_table(name, schema=schema_name))
+    except Exception:
+        logger.warning("generic_sql table_exists failed for %s", name, exc_info=True)
+        return None
+    finally:
+        if engine is not None:
+            release_engine(engine)
+
+
 def count_table(cfg: dict[str, Any], table: str) -> int | None:
     """``COUNT(*)`` of a table through this engine's own connection.
 
