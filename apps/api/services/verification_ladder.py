@@ -777,6 +777,126 @@ def read_postgres_rows(
         conn.close()
 
 
+def read_mysql_rows(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    table: str,
+    columns: list[str] | None = None,
+    connection_string: str = "",
+    ssl: bool = False,
+    max_rows: int = MAX_LADDER_ROWS,
+) -> list[dict[str, Any]]:
+    """Population read of a MySQL table, bounded by the ladder row budget.
+
+    Same contract as :func:`read_postgres_rows` — without it every MySQL
+    destination and source silently declined the cell-value ladder and the
+    verdict stayed row_count-only green on a tampered table (X-22).
+    """
+    from connectors.mysql_conn import get_connection
+    from connectors.sql_identifiers import (
+        quote_column_list,
+        quote_table_ref,
+        require_safe_identifier,
+    )
+
+    conn = get_connection(
+        host=host,
+        port=port,
+        database=database,
+        username=username,
+        password=password,
+        connection_string=connection_string,
+        ssl=ssl,
+    )
+    col_sql = (
+        "*"
+        if not columns
+        else quote_column_list(
+            [require_safe_identifier(c, preserve_case=True) for c in columns],
+            quote_char="`",
+        )
+    )
+    table_ref = quote_table_ref(table, dialect="mysql")
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT {col_sql} FROM {table_ref}")  # nosec B608
+            rows: list[dict[str, Any]] = []
+            names: list[str] = []
+            while True:
+                batch = cur.fetchmany(_fetch_size(max_rows, len(rows)))
+                if not batch:
+                    return rows
+                if not names:
+                    names = [d[0] for d in cur.description] if cur.description else []
+                rows.extend(_row_cells(dict(zip(names, rec))) for rec in batch)
+                if max_rows and len(rows) > max_rows:
+                    raise PopulationTooLarge(len(rows), max_rows)
+    finally:
+        conn.close()
+
+
+def read_sqlserver_rows(
+    *,
+    host: str,
+    port: int,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    table: str,
+    columns: list[str] | None = None,
+    max_rows: int = MAX_LADDER_ROWS,
+) -> list[dict[str, Any]]:
+    """Population read of a SQL Server table, bounded by the ladder row budget.
+
+    Mirrors the MySQL reader: pymssql streams through the same row-budget
+    accounting so a tampered norecipe run can no longer stay count-only (X-22).
+    """
+    import pymssql
+
+    from connectors.sql_identifiers import quote_table_ref, require_safe_identifier
+
+    col_sql = (
+        "*"
+        if not columns
+        else ", ".join(
+            f"[{require_safe_identifier(c, preserve_case=True).replace(']', ']]')}]"
+            for c in columns
+        )
+    )
+    sch = (schema or "dbo").strip() or "dbo"
+    table_ref = quote_table_ref(table, schema=sch, dialect="sqlserver")
+    conn = pymssql.connect(
+        server=host or "127.0.0.1",
+        port=int(port or 1433),
+        user=username or "sa",
+        password=password or "",
+        database=database or "master",
+        login_timeout=10,
+        timeout=30,
+    )
+    try:
+        cur = conn.cursor()
+        cur.execute(f"SELECT {col_sql} FROM {table_ref}")  # nosec B608
+        rows: list[dict[str, Any]] = []
+        names: list[str] = []
+        while True:
+            batch = cur.fetchmany(_fetch_size(max_rows, len(rows)))
+            if not batch:
+                return rows
+            if not names:
+                names = [d[0] for d in cur.description] if cur.description else []
+            rows.extend(_row_cells(dict(zip(names, rec))) for rec in batch)
+            if max_rows and len(rows) > max_rows:
+                raise PopulationTooLarge(len(rows), max_rows)
+    finally:
+        conn.close()
+
+
 def run_five_layer_verification(
     *,
     source_rows: list[dict[str, Any]],

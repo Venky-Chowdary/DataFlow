@@ -2319,8 +2319,10 @@ def _maybe_attach_verification_ladder(
         PopulationTooLarge,
         attach_ladder_to_reconcile_report,
         mappings_rewrite_written_cells,
+        read_mysql_rows,
         read_postgres_rows,
         read_sqlite_rows,
+        read_sqlserver_rows,
         run_five_layer_verification,
     )
 
@@ -2355,7 +2357,17 @@ def _maybe_attach_verification_ladder(
         # bare Gate-8 report with no ladder at all.
         return _ladder_declined(report, known, MAX_LADDER_ROWS)
 
-    if dest_type not in {"sqlite", "postgresql", "redshift"}:
+    if dest_type not in {
+        "sqlite",
+        "postgresql",
+        "redshift",
+        "mysql",
+        "sqlserver",
+        "mssql",
+        "azure_sql",
+    }:
+        # X-22: MySQL/SQL Server dests used to exit here — the row read below
+        # would have thrown under the PG reader and the run stayed count-only.
         return report
     target_cols = _mapped_targets(mappings, columns) if mappings else list(columns or [])
     if not target_cols:
@@ -2387,6 +2399,32 @@ def _maybe_attach_verification_ladder(
                 connection_string=str(dest_cfg.get("connection_string") or ""),
                 host=str(dest_cfg.get("host") or ""),
             )
+        elif dest_type == "mysql":
+            # X-22: a non-sqlite dest used to take the PG reader unconditionally
+            # — MySQL/SQL Server throws made the whole ladder decline and the
+            # verdict stayed row_count-only on a tampered table.
+            target_rows = read_mysql_rows(
+                host=str(dest_cfg.get("host") or ""),
+                port=int(dest_cfg.get("port") or 3306),
+                database=str(dest_cfg.get("database") or ""),
+                username=str(dest_cfg.get("username") or ""),
+                password=str(dest_cfg.get("password") or ""),
+                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                columns=target_cols,
+                connection_string=str(dest_cfg.get("connection_string") or ""),
+                ssl=bool(dest_cfg.get("ssl", False)),
+            )
+        elif dest_type in {"sqlserver", "mssql", "azure_sql"}:
+            target_rows = read_sqlserver_rows(
+                host=str(dest_cfg.get("host") or ""),
+                port=int(dest_cfg.get("port") or 1433),
+                database=str(dest_cfg.get("database") or ""),
+                username=str(dest_cfg.get("username") or ""),
+                password=str(dest_cfg.get("password") or ""),
+                schema=str(dest_cfg.get("schema") or "dbo"),
+                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                columns=target_cols,
+            )
         else:
             target_rows = read_postgres_rows(
                 host=str(dest_cfg.get("host") or ""),
@@ -2404,6 +2442,9 @@ def _maybe_attach_verification_ladder(
         return _ladder_declined(report, exc.rows_read, exc.budget)
     except Exception as exc:
         logging.getLogger(__name__).debug("ladder dest load failed: %s", exc)
+        # X-22: a covered destination whose population could not be read has no
+        # value proof — a count-only green must not stamp "verified".
+        report["unproven"] = True
         return report
 
     # A shaping recipe rewrote source-side values on the read, so the rows still
@@ -2445,12 +2486,42 @@ def _maybe_attach_verification_ladder(
                         connection_string=str(src_cfg.get("connection_string") or ""),
                         ssl=bool(src_cfg.get("ssl", False)),
                     )
+                elif src_type == "mysql":
+                    # X-22: MySQL sources declined the ladder — the run stayed
+                    # count-only and reported verified on a tampered table.
+                    source_rows = read_mysql_rows(
+                        host=str(src_cfg.get("host") or ""),
+                        port=int(src_cfg.get("port") or 3306),
+                        database=str(src_cfg.get("database") or ""),
+                        username=str(src_cfg.get("username") or ""),
+                        password=str(src_cfg.get("password") or ""),
+                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        columns=target_cols,
+                        connection_string=str(src_cfg.get("connection_string") or ""),
+                        ssl=bool(src_cfg.get("ssl", False)),
+                    )
+                elif src_type in {"sqlserver", "mssql", "azure_sql"}:
+                    source_rows = read_sqlserver_rows(
+                        host=str(src_cfg.get("host") or ""),
+                        port=int(src_cfg.get("port") or 1433),
+                        database=str(src_cfg.get("database") or ""),
+                        username=str(src_cfg.get("username") or ""),
+                        password=str(src_cfg.get("password") or ""),
+                        schema=str(src_cfg.get("schema") or "dbo"),
+                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        columns=target_cols,
+                    )
             except PopulationTooLarge as exc:
                 return _ladder_declined(report, exc.rows_read, exc.budget)
             except Exception as exc:
                 logging.getLogger(__name__).debug("ladder source load failed: %s", exc)
 
     if not source_rows or not target_rows:
+        # X-22: a covered source whose re-read attempted but came back empty
+        # (driver threw, or zero rows) while the destination holds rows has no
+        # value proof — do not let the count-only green stamp "verified".
+        if source_reread and target_rows:
+            report["unproven"] = True
         return report
 
     dest_types = {
