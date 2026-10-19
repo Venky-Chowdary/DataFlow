@@ -27,6 +27,51 @@ const FILE_FORMAT_TYPES = [
   "pdf", "docx", "html", "yaml", "fixed_width",
 ] as const;
 
+/** Minimal connector fields auth-mode inference reads (structural — any
+ * record/list row shape qualifies). */
+export interface AuthModeConnectorFields {
+  auth_mode?: string | null;
+  private_key?: string | null;
+  password?: string | null;
+  api_key?: string | null;
+  service_account?: string | null;
+  connection_string?: string | null;
+  username?: string | null;
+}
+
+/** Resolve the auth-mode tab a connector form should pre-select.
+ * Mirrors services.connector_auth.infer_auth_mode: a stored/masked private_key
+ * must not outrank a present password — the backend now refuses the silent
+ * key-pair route, so the edit form must not pre-select it either. */
+export function inferConnectorAuthMode(
+  conn: AuthModeConnectorFields | null | undefined,
+  type: string,
+): AuthMode {
+  const resolved = resolveCatalogIdToType(type);
+  if (conn?.auth_mode) return conn.auth_mode as AuthMode;
+  if (resolved === "snowflake" && conn?.private_key) {
+    // Stored secrets come back masked ("****"), not PEM material — a stray
+    // key field is not proof of key-pair auth. Infer it only when no
+    // password/PAT competes for the route.
+    if (!conn?.password) return "key_pair";
+  }
+  if (FILE_FORMAT_TYPES.includes(resolved as (typeof FILE_FORMAT_TYPES)[number]))
+    return "file_path";
+  if (conn?.api_key) return "api_key";
+  if (conn?.service_account) return "service_account";
+  if (conn?.connection_string) return "connection_string";
+  if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
+  if (["bigquery", "gcs"].includes(resolved)) return "service_account";
+  if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
+  if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
+  if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
+  if (resolved === "milvus") return conn?.api_key ? "api_key" : "user_pass";
+  if (resolved === "adls" && conn?.connection_string) return "connection_string";
+  if (resolved === "sftp" && conn?.connection_string) return "connection_string";
+  if (resolved === "email" && conn?.connection_string) return "connection_string";
+  return "user_pass";
+}
+
 /** Single form field descriptor. */
 export interface FormField {
   key: string;
