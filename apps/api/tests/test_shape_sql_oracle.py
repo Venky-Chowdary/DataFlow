@@ -358,3 +358,399 @@ def test_oracle_dedupe_keep_first_matches_mysql_group_min_ord():
     assert [(r["id"], _text(r["v"]), _text(r["ts"])) for r in out] == [
         (eid, _text(ev), _text(ets)) for eid, ev, ets in expected
     ]
+
+
+# ---------------------------------------------------------------------------
+# New-ops batch: filter_rows / concat_columns / split_column / rename_column /
+# keep_columns / parse_date / lookup — independent SQL on SQLite, MySQL mirrors
+# where the dialect matters.
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_filter_rows_matches_sql_where(tmp_path):
+    rows = [
+        {"id": "1", "qty": "5"},
+        {"id": "2", "qty": "15"},
+        {"id": "3", "qty": "10"},
+        {"id": "4", "qty": "25"},
+        {"id": "5", "qty": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "qty"],
+            "steps": [
+                {"op": "filter_rows", "options": {"condition": "to_number([qty]) > 10"}}
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path,
+        rows,
+        ["id", "qty"],
+        "SELECT id, qty FROM src WHERE CAST(qty AS REAL) > 10 "
+        "ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["qty"])) for r in out] == [
+        (eid, _text(eq)) for eid, eq in expected
+    ]
+
+
+def test_oracle_concat_columns_matches_sql_concat_ws(tmp_path):
+    rows = [
+        {"id": "1", "first": "Ada", "last": "Lovelace"},
+        {"id": "2", "first": None, "last": "Hopper"},
+        {"id": "3", "first": "Alan", "last": None},
+        {"id": "4", "first": None, "last": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "first", "last"],
+            "steps": [
+                {
+                    "op": "concat_columns",
+                    "options": {"to": "full", "columns": ["first", "last"], "separator": ":"},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path,
+        rows,
+        ["id", "first", "last"],
+        # Engine joins only the non-NULL parts — the oracle strips the edge
+        # separators a missing part would leave.
+        "SELECT id, TRIM(COALESCE(first, '') || ':' || COALESCE(last, ''), ':') "
+        "FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["full"])) for r in out] == [
+        (eid, _text(eq)) for eid, eq in expected
+    ]
+
+
+def test_oracle_split_column_matches_sql_substr(tmp_path):
+    rows = [
+        {"id": "1", "code": "US-CA"},
+        {"id": "2", "code": "GB-LDN"},
+        {"id": "3", "code": "NODASH"},
+        {"id": "4", "code": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "code"],
+            "steps": [
+                {
+                    "op": "split_column",
+                    "column": "code",
+                    "options": {"separator": "-", "into": ["country", "region"]},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path,
+        rows,
+        ["id", "code"],
+        "SELECT id, "
+        "CASE WHEN code IS NULL THEN NULL WHEN INSTR(code,'-')>0 "
+        "THEN SUBSTR(code,1,INSTR(code,'-')-1) ELSE code END, "
+        "CASE WHEN code IS NOT NULL AND INSTR(code,'-')>0 "
+        "THEN SUBSTR(code,INSTR(code,'-')+1) ELSE NULL END "
+        "FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["country"]), _text(r["region"])) for r in out] == [
+        (eid, _text(ec), _text(er)) for eid, ec, er in expected
+    ]
+
+
+def test_oracle_rename_column_matches_sql_aliased_projection(tmp_path):
+    rows = [
+        {"id": "1", "qty": "7"},
+        {"id": "2", "qty": "0"},
+        {"id": "3", "qty": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "qty"],
+            "steps": [{"op": "rename_column", "column": "qty", "options": {"to": "quantity"}}],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path,
+        rows,
+        ["id", "qty"],
+        "SELECT id, qty FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["quantity"]), "qty" in r) for r in out] == [
+        (eid, _text(eq), False) for eid, eq in expected
+    ]
+
+
+def test_oracle_keep_columns_matches_sql_projection(tmp_path):
+    rows = [
+        {"id": "1", "a": "x", "b": "y", "dropme": "z"},
+        {"id": "2", "a": None, "b": "w", "dropme": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "a", "b", "dropme"],
+            "steps": [{"op": "keep_columns", "options": {"columns": ["id", "a", "b"]}}],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path,
+        rows,
+        ["id", "a", "b", "dropme"],
+        "SELECT id, a, b FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r.get("a")), _text(r.get("b")), sorted(r)) for r in out] == [
+        (eid, _text(ea), _text(eb), ["a", "b", "id"]) for eid, ea, eb in expected
+    ]
+
+
+def test_oracle_parse_date_matches_sql_reformat(tmp_path):
+    rows = [
+        {"id": "1", "d": "01/15/2026"},
+        {"id": "2", "d": "12/31/2025"},
+        {"id": "3", "d": "07/04/2026"},
+        {"id": "4", "d": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "d"],
+            "steps": [
+                {
+                    "op": "parse_date",
+                    "column": "d",
+                    "options": {"format": "%m/%d/%Y", "output_format": "%Y-%m-%d"},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path,
+        rows,
+        ["id", "d"],
+        # Engine REFUSES unparseable values (on_error=refuse) — the oracle
+        # only models the valid inputs; NULL passes through as NULL.
+        "SELECT id, CASE WHEN d IS NULL THEN NULL "
+        "ELSE SUBSTR(d,7,4)||'-'||SUBSTR(d,1,2)||'-'||SUBSTR(d,4,2) "
+        "END FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], str(r["d"]) if r.get("d") is not None else None) for r in out] == [
+        (eid, ed) for eid, ed in expected
+    ]
+
+
+def test_oracle_lookup_matches_sql_left_join(tmp_path):
+    rows = [
+        {"id": "1", "ccy": "USD"},
+        {"id": "2", "ccy": "EUR"},
+        {"id": "3", "ccy": "XXX"},
+        {"id": "4", "ccy": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "ccy"],
+            "steps": [
+                {
+                    "op": "lookup",
+                    "column": "ccy",
+                    "options": {
+                        "lookup_key": "code",
+                        "rows": [
+                            {"code": "USD", "name": "US Dollar"},
+                            {"code": "EUR", "name": "Euro"},
+                        ],
+                        "map": {"name": "ccy_name"},
+                        "unmatched": "null",
+                    },
+                }
+            ],
+        },
+        rows,
+    )
+    db = tmp_path / "oracle_lookup.db"
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("CREATE TABLE src (id TEXT, ccy TEXT)")
+        conn.execute("CREATE TABLE ref (code TEXT, name TEXT)")
+        conn.executemany(
+            "INSERT INTO src VALUES (?, ?)", [(r["id"], r["ccy"]) for r in rows]
+        )
+        conn.executemany(
+            "INSERT INTO ref VALUES (?, ?)",
+            [("USD", "US Dollar"), ("EUR", "Euro")],
+        )
+        expected = conn.execute(
+            "SELECT s.id, r.name FROM src s LEFT JOIN ref r ON r.code = s.ccy "
+            "ORDER BY CAST(s.id AS INTEGER)"
+        ).fetchall()
+    finally:
+        conn.close()
+    assert [(r["id"], _text(r["ccy_name"])) for r in out] == [
+        (eid, _text(en)) for eid, en in expected
+    ]
+
+
+def test_oracle_filter_rows_matches_mysql_where():
+    rows = [
+        {"id": "1", "qty": "5"},
+        {"id": "2", "qty": "15"},
+        {"id": "3", "qty": "10"},
+        {"id": "4", "qty": "25"},
+        {"id": "5", "qty": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "qty"],
+            "steps": [
+                {"op": "filter_rows", "options": {"condition": "to_number([qty]) > 10"}}
+            ],
+        },
+        rows,
+    )
+    expected = _mysql_oracle(
+        rows,
+        ["id", "qty"],
+        "SELECT id, qty FROM `{t}` WHERE CAST(qty AS DECIMAL(30,12)) > 10 "
+        "ORDER BY CAST(id AS SIGNED)",
+    )
+    assert [(r["id"], _text(r["qty"])) for r in out] == [
+        (eid, _text(eq)) for eid, eq in expected
+    ]
+
+
+def test_oracle_concat_columns_matches_mysql_concat_ws():
+    rows = [
+        {"id": "1", "first": "Ada", "last": "Lovelace"},
+        {"id": "2", "first": None, "last": "Hopper"},
+        {"id": "3", "first": "Alan", "last": None},
+        {"id": "4", "first": None, "last": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "first", "last"],
+            "steps": [
+                {
+                    "op": "concat_columns",
+                    "options": {"to": "full", "columns": ["first", "last"], "separator": ":"},
+                }
+            ],
+        },
+        rows,
+    )
+    # CONCAT_WS natively skips NULL parts — exactly the engine's rule.
+    expected = _mysql_oracle(
+        rows,
+        ["id", "first", "last"],
+        "SELECT id, CONCAT_WS(':', first, last) FROM `{t}` "
+        "ORDER BY CAST(id AS SIGNED)",
+    )
+    assert [(r["id"], _text(r["full"])) for r in out] == [
+        (eid, _text(eq)) for eid, eq in expected
+    ]
+
+
+def test_oracle_split_column_matches_mysql_substring_index():
+    rows = [
+        {"id": "1", "code": "US-CA"},
+        {"id": "2", "code": "GB-LDN"},
+        {"id": "3", "code": "NODASH"},
+        {"id": "4", "code": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "code"],
+            "steps": [
+                {
+                    "op": "split_column",
+                    "column": "code",
+                    "options": {"separator": "-", "into": ["country", "region"]},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _mysql_oracle(
+        rows,
+        ["id", "code"],
+        "SELECT id, "
+        "CASE WHEN code IS NULL THEN NULL WHEN INSTR(code,'-')>0 "
+        "THEN SUBSTRING_INDEX(code,'-',1) ELSE code END, "
+        "CASE WHEN code IS NOT NULL AND INSTR(code,'-')>0 "
+        "THEN SUBSTRING_INDEX(code,'-',-1) ELSE NULL END "
+        "FROM `{t}` ORDER BY CAST(id AS SIGNED)",
+    )
+    assert [(r["id"], _text(r["country"]), _text(r["region"])) for r in out] == [
+        (eid, _text(ec), _text(er)) for eid, ec, er in expected
+    ]
+
+
+def test_oracle_lookup_matches_mysql_left_join():
+    rows = [
+        {"id": "1", "ccy": "USD"},
+        {"id": "2", "ccy": "EUR"},
+        {"id": "3", "ccy": "XXX"},
+        {"id": "4", "ccy": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "ccy"],
+            "steps": [
+                {
+                    "op": "lookup",
+                    "column": "ccy",
+                    "options": {
+                        "lookup_key": "code",
+                        "rows": [
+                            {"code": "USD", "name": "US Dollar"},
+                            {"code": "EUR", "name": "Euro"},
+                        ],
+                        "map": {"name": "ccy_name"},
+                        "unmatched": "null",
+                    },
+                }
+            ],
+        },
+        rows,
+    )
+    conn = _mysql_conn()
+    if conn is None:
+        pytest.skip("local MySQL (127.0.0.1:3306) unreachable")
+    t_src = f"oracle_lk_{uuid.uuid4().hex[:10]}"
+    t_ref = f"oracle_lr_{uuid.uuid4().hex[:10]}"
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"CREATE TABLE `{t_src}` (ord INT AUTO_INCREMENT PRIMARY KEY, id TEXT, ccy TEXT)")
+            cur.execute(f"CREATE TABLE `{t_ref}` (code TEXT, name TEXT)")
+            cur.executemany(
+                f"INSERT INTO `{t_src}` (id, ccy) VALUES (%s, %s)",
+                [(r["id"], r["ccy"]) for r in rows],
+            )
+            cur.executemany(
+                f"INSERT INTO `{t_ref}` (code, name) VALUES (%s, %s)",
+                [("USD", "US Dollar"), ("EUR", "Euro")],
+            )
+            conn.commit()
+            cur.execute(
+                f"SELECT s.id, r.name FROM `{t_src}` s LEFT JOIN `{t_ref}` r "
+                f"ON r.code = s.ccy ORDER BY s.ord"
+            )
+            expected = list(cur.fetchall())
+    finally:
+        try:
+            with conn.cursor() as cur:
+                cur.execute(f"DROP TABLE IF EXISTS `{t_src}`")
+                cur.execute(f"DROP TABLE IF EXISTS `{t_ref}`")
+            conn.commit()
+        finally:
+            conn.close()
+    assert [(r["id"], _text(r["ccy_name"])) for r in out] == [
+        (eid, _text(en)) for eid, en in expected
+    ]
