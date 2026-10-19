@@ -329,3 +329,75 @@ def test_non_count_proof_early_exit_unchanged(monkeypatch):
     out = _run(monkeypatch, dest=dest, records=CLEAN)
     assert out.get("unproven") is not True
     assert out.get("ladder_declined_reason") == "destination_engine_not_in_ladder"
+
+def test_comparable_count_proof_scope_runs_l4_l5_and_fails(monkeypatch):
+    """X-22 live: a dest_count_equals_source_snapshot report used to stamp
+    checksum_scope=whole_table_not_comparable — L4/L5 never ran and a failed
+    L2 rode out as verified on row_count assurance."""
+    dest = EndpointConfig(kind="database", format="mysql", table="t", host="h")
+    report = {
+        "passed": True,
+        "source_rows": 2,
+        "target_rows": 2,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "rows_skipped": 0,
+        "checksum": "dest_count:2",
+        "checksum_scope": "dest_count_equals_source_snapshot",
+        "assurance_level": "row_count",
+    }
+    monkeypatch.setattr(
+        f"{LADDER}.read_mysql_rows", lambda **kw: TAMPERED
+    )
+    out = _maybe_attach_verification_ladder(
+        report,
+        endpoint=dest,
+        source_endpoint=None,
+        records=CLEAN,
+        columns=["id", "amount", "name"],
+        dest_summary={"sync_mode": "overwrite"},
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "name", "target": "name"},
+        ],
+        validation_mode="strict",
+    )
+    layers = (out.get("verification_ladder") or {}).get("layers") or {}
+    assert "L4" in layers and "L5" in layers
+    assert out.get("passed") is False
+
+
+def test_append_count_scope_stays_incomparable(monkeypatch):
+    """dest_count_equals_before_plus_staging is stamped
+    whole_table_not_comparable in the production report — the dest
+    legitimately holds pre-existing rows, so L4/L5 stay off."""
+    dest = EndpointConfig(kind="database", format="mysql", table="t", host="h")
+    report = {
+        "passed": True,
+        "source_rows": 2,
+        "target_rows": 4,
+        "rejected_rows": 0,
+        "coerced_null_rows": 0,
+        "rows_skipped": 0,
+        "checksum": "dest_count:4",
+        "checksum_scope": "whole_table_not_comparable",
+        "assurance_level": "row_count",
+    }
+    monkeypatch.setattr(f"{LADDER}.read_mysql_rows", lambda **kw: TAMPERED)
+    out = _maybe_attach_verification_ladder(
+        report,
+        endpoint=dest,
+        source_endpoint=None,
+        records=CLEAN,
+        columns=["id", "amount", "name"],
+        dest_summary={"sync_mode": "append"},
+        mappings=[
+            {"source": "id", "target": "id"},
+            {"source": "amount", "target": "amount"},
+            {"source": "name", "target": "name"},
+        ],
+        validation_mode="strict",
+    )
+    layers = (out.get("verification_ladder") or {}).get("layers") or {}
+    assert "L4" not in layers

@@ -5743,6 +5743,21 @@ def _run_reconciliation_impl(
             balanced = target_rows == expected_rows or (
                 allow_extra_early and target_rows >= expected_rows
             )
+        # X-22 live: a full-equality engine-copy count proof
+        # (dest==source snapshot, or dest keys join the staged population)
+        # describes COMPARABLE populations — stamping WHOLE_TABLE_NOT_COMPARABLE
+        # skipped L3's checksum, suppressed L4/L5 localization, and let a
+        # failed L2 ride out as 'verified' on row_count assurance. Only the
+        # append scope (dest == before + staging) and resumed tails are
+        # genuinely incomparable.
+        _count_scope = str(dest_summary.get("proof_scope") or "")
+        _populations_comparable = any(
+            known in _count_scope
+            for known in (
+                "dest_count_equals_source_snapshot",
+                "dest_pk_join_equals_staging",
+            )
+        )
         return _finalize(
             ReconciliationReport(
                 passed=balanced,
@@ -5753,7 +5768,11 @@ def _run_reconciliation_impl(
                 rejected_rows=rejected_rows,
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
-                checksum_scope=WHOLE_TABLE_NOT_COMPARABLE,
+                checksum_scope=(
+                    _count_scope
+                    if _populations_comparable
+                    else WHOLE_TABLE_NOT_COMPARABLE
+                ),
                 message=(
                     (
                         f"Row count verified {source_checksum_scope_label}: "
