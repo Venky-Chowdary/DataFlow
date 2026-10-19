@@ -21,6 +21,7 @@ import {
   ConnectorFormConfig,
   FormField,
   getConnectorFormConfig,
+  inferConnectorAuthMode,
   validateConnectorPayload,
 } from "../lib/connectorFormConfig";
 import { ConnectorIcon } from "../app/brand-icons";
@@ -46,26 +47,6 @@ function isFileFormat(type: string): boolean {
     "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel",
     "avro", "orc", "xml", "pdf", "docx", "html",
   ].includes(type);
-}
-
-function inferAuthMode(conn: Connector | null | undefined, type: string): AuthMode {
-  const resolved = resolveCatalogIdToType(type);
-  if (conn?.auth_mode) return conn.auth_mode as AuthMode;
-  if (resolved === "snowflake" && conn?.private_key) return "key_pair";
-  if (isFileFormat(resolved)) return "file_path";
-  if (conn?.api_key) return "api_key";
-  if (conn?.service_account) return "service_account";
-  if (conn?.connection_string) return "connection_string";
-  if (["s3", "dynamodb"].includes(resolved)) return "aws_keys";
-  if (["bigquery", "gcs"].includes(resolved)) return "service_account";
-  if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
-  if (resolved === "elasticsearch") return conn?.username ? "user_pass" : "api_key";
-  if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
-  if (resolved === "milvus") return conn?.api_key ? "api_key" : "user_pass";
-  if (resolved === "adls" && conn?.connection_string) return "connection_string";
-  if (resolved === "sftp" && conn?.connection_string) return "connection_string";
-  if (resolved === "email" && conn?.connection_string) return "connection_string";
-  return "user_pass";
 }
 
 function normalizeSqlDsn(connectionString: string, type: string): string {
@@ -151,7 +132,7 @@ export function ConnectorModal({
   const [trustServerCertificate, setTrustServerCertificate] = useState(
     Boolean((editing as { extra?: Record<string, unknown> } | null)?.extra?.trust_server_certificate)
   );
-  const [authMode, setAuthMode] = useState<AuthMode>(inferAuthMode(editing, startType));
+  const [authMode, setAuthMode] = useState<AuthMode>(inferConnectorAuthMode(editing, startType));
   const [helpOpen, setHelpOpen] = useState(false);
 
   const resolvedType = useMemo(() => resolveCatalogIdToType(type), [type]);
@@ -344,7 +325,9 @@ export function ConnectorModal({
     if (authMode === "user_pass" || authMode === "pat") {
       payload.username = username || undefined;
       payload.password = password || undefined;
-      if ((resolvedType === "sftp" || resolvedType === "snowflake") && privateKey.trim()) {
+      // Never re-send private_key in password/PAT mode — a stale prefilled
+      // value must not travel with a password-mode save.
+      if (resolvedType === "sftp" && privateKey.trim()) {
         payload.private_key = privateKey || undefined;
       }
     }
