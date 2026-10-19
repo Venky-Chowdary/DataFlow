@@ -41,6 +41,8 @@ from services.copy_pg_sqlserver import (
     _enable_fast_executemany,
     bind_row_for_sqlserver,
     pg_sqlserver_copy_batch,
+    set_wide_decimal_inputsizes,
+    sqlserver_insert_placeholders,
 )
 from services.copy_sqlserver_pg import _close_ss
 from services.copy_sqlserver_sqlserver import (
@@ -137,7 +139,7 @@ def copy_iceberg_to_sqlserver(
     dst_schema = _ss_schema_of(dest_cfg, dest_schema)
     dest_ref = _ss_table_ref(dst_schema, dest_table)
     col_sql = ", ".join(_ss_ident(c) for c in target_cols)
-    placeholders = ", ".join(["%s"] * len(target_cols))
+    placeholders = sqlserver_insert_placeholders(sqlserver_ddls)
     insert_sql = (
         f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
         f"VALUES ({placeholders})"
@@ -148,6 +150,7 @@ def copy_iceberg_to_sqlserver(
     created_here = False
     dst_cur = dest_conn.cursor()
     _enable_fast_executemany(dst_cur)
+    set_wide_decimal_inputsizes(dst_cur, sqlserver_ddls)
     try:
         source_count = _iceberg_source_count(endpoint)
 
