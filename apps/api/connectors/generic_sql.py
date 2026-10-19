@@ -186,6 +186,7 @@ from connectors.writer_common import (
     _is_nullish_conflict_key,
     _rejected_row_count,
     compare_lsn,
+    early_array_strategy_gate,
     flush_normalized_child_batches,
     materialize_missing_as_null_for_dense_write,
     quote_sql_identifier,
@@ -4715,6 +4716,16 @@ def write_mapped_rows(
         mappings=mappings,
         schema_policy=_kwargs.get("schema_policy"),
     )
+    # X-31: normalize/hybrid contract gate must block before the parent
+    # INSERT — a bad child_table_spec must never half-write on the
+    # schedule path (interactive preflight already blocked it).
+    _array_gate = early_array_strategy_gate(headers=headers, mappings=mappings)
+    if _array_gate:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name,
+            target_schema=database, checksum="", chunks_completed=0,
+            error=_array_gate,
+        )
     if not SQLALCHEMY_AVAILABLE:
         return WriteResult(
             ok=False,

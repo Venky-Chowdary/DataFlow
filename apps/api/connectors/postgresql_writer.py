@@ -39,6 +39,7 @@ from connectors.writer_common import (
     _coerced_null_row_count,
     _is_nullish_conflict_key,
     _rejected_row_count,
+    early_array_strategy_gate,
     flush_normalized_child_batches,
     filter_stale_lsn_rows,
     postgres_lsn_update_guard_sql,
@@ -1468,6 +1469,16 @@ def write_mapped_rows(
         mappings=mappings,
         schema_policy=_kwargs.get("schema_policy"),
     )
+    # X-31: normalize/hybrid contract gate must block before the parent
+    # INSERT — a bad child_table_spec must never half-write on the
+    # schedule path (interactive preflight already blocked it).
+    _array_gate = early_array_strategy_gate(headers=headers, mappings=mappings)
+    if _array_gate:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table_name,
+            target_schema=database, checksum="", chunks_completed=0,
+            error=_array_gate,
+        )
     # Shared connection (stream reuse): default to not closing the caller's conn.
     if close_connection is None:
         close_connection = connection is None

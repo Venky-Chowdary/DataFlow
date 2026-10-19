@@ -923,6 +923,22 @@ def write_mapped_rows(
         mappings=mappings,
         schema_policy=_kwargs.get("schema_policy"),
     )
+    # X-31: normalize/hybrid contract gate must block before the parent
+    # INSERT — a bad child_table_spec must never half-write on the
+    # schedule path (interactive preflight already blocked it).
+    from connectors.writer_common import early_array_strategy_gate
+
+    _array_gate = early_array_strategy_gate(headers=headers, mappings=mappings)
+    if _array_gate:
+        return WriteResult(
+            ok=False,
+            rows_written=0,
+            table_name=table_name,
+            target_schema=schema or "main",
+            checksum="",
+            chunks_completed=0,
+            error=_array_gate,
+        )
     path = sqlite_file_path(database, connection_string, host)
     if not path:
         return WriteResult(

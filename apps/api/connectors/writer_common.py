@@ -2135,6 +2135,30 @@ def build_mapped_rows_with_details(
     return mapped, errors, rejected_details
 
 
+def early_array_strategy_gate(
+    *,
+    headers: list[str],
+    mappings: list[dict[str, Any]] | None,
+) -> str | None:
+    """X-31: array_strategy_gate_issues must block BEFORE the parent INSERT.
+
+    Until now the normalize/hybrid contract check only ran inside
+    ``flush_normalized_child_batches`` — after parent rows were already
+    committed, so a scheduled run with a missing ``child_table_spec``
+    half-wrote and then failed. Call this at the top of every writer's
+    mapped-rows path; the returned text is the joined gate issues (or None
+    when the contract is clean)."""
+    try:
+        from services.structural_array import array_strategy_gate_issues
+
+        issues = array_strategy_gate_issues(
+            mappings, known_source_columns=set(headers or [])
+        )
+    except Exception:
+        return None
+    return "; ".join(issues) if issues else None
+
+
 def flush_normalized_child_batches(
     *,
     headers: list[str],
