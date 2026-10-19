@@ -10476,19 +10476,34 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   max-height: min(240px, 30vh);
 }
 
-/* D-BP-11 Validate leg: while any toast is on screen, the step viewport
-   reserves the toast column outright — contract search/select, metric cards,
-   footers and content reflow left of the gutter instead of painting under the
-   toasts. Engages only while .dt-toast exists, so there is no dead space.
-   margin-right, not padding-right: the Validate host pins padding: 0
-   !important and a padded rule can never win that fight. */
-body:has(.df2-page-transfer-studio .df2-transfer-step-panel):has(.dt-toast)
-  .df2-transfer-step-viewport {
-  margin-right: calc(var(--df-toast-width) + 32px);
+/* D-BP-11/19: on wide screens the studio step viewport reserves the toast
+   column permanently — a :has(.dt-toast) gutter made the whole step reflow
+   every time a toast appeared or dismissed. A fixed lane means toasts are
+   never over content AND the column never jumps. margin-right, not
+   padding-right: the Validate host pins padding: 0 !important. Toasts run
+   a narrower width on studio so the lane stays proportionate. */
+@media (min-width: 1024px) {
+  /* The toast host is a body-level fixed element — the narrower studio toast
+     width must be declared where it inherits, not on the studio subtree. */
+  body:has(.df2-page-transfer-studio) {
+    --df-toast-width: 320px;
+  }
+  .df2-page-transfer-studio .df2-transfer-step-viewport {
+    margin-right: calc(var(--df-toast-width) + 32px);
+  }
 }
 
 .df2-page-transfer-studio .df2-transfer-step-viewport {
   scroll-padding-bottom: 110px;
+}
+
+/* D-BP-18: the actual scroller is .df2-validate-scroll (overflow-y:auto),
+   not the viewport — scroll-padding on the viewport was dead code and the
+   Column matches card could rest cropped against the contract rail. The
+   padding keeps the last card fully above the rail boundary. */
+.df2-page-transfer-studio .df2-validate-scroll {
+  scroll-padding-bottom: 160px;
+  padding-bottom: 16px;
 }
 
 /* Transform's sticky footer is taller than the shared 60px clearance, and a
