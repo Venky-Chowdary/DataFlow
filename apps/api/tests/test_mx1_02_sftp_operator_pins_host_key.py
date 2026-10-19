@@ -14,6 +14,10 @@ import socket
 
 import pytest
 
+from src.ai.copilot.lifecycle_tools import (
+    LIFECYCLE_TOOL_DEFINITIONS,
+    update_connector as lifecycle_update_connector,
+)
 from src.ai.copilot.tools import TOOL_DEFINITIONS, DataPilotTools
 from src.transfer.connector_registry import run_probe
 
@@ -118,8 +122,114 @@ def test_create_connector_preview_has_no_pin_line_without_a_pin():
     assert "Pins SFTP host key" not in answer
 
 
-def test_update_connector_explicitly_refuses_host_key_changes():
-    res = DataPilotTools().execute("update_connector", {"name": "any-sftp", "host_key": _FP})
+# --- X-28: trust fields are real MCP surface on both create and update ------
+#
+# ConnectorSaveDTO carries host_key / known_hosts / host_key_policy /
+# trust_server_certificate and the store lifts them into ``extra`` — so the
+# earlier "update has no host-key field" refusal was stale: it told operators
+# to re-create the connector (losing bound pipelines) for a field the PUT
+# already persists.
+
+
+def test_update_connector_tool_accepts_trust_fields():
+    spec = next(t for t in LIFECYCLE_TOOL_DEFINITIONS if t["name"] == "update_connector")
+    props = spec["input_schema"]["properties"]
+    for field in ("host_key", "known_hosts", "host_key_policy", "trust_server_certificate"):
+        assert field in props, field
+    sig = inspect.signature(lifecycle_update_connector)
+    for field in ("host_key", "known_hosts", "host_key_policy", "trust_server_certificate"):
+        assert field in sig.parameters, field
+
+
+def test_create_connector_tool_accepts_trust_fields():
+    spec = next(t for t in TOOL_DEFINITIONS if t["name"] == "create_connector")
+    props = spec["input_schema"]["properties"]
+    for field in ("host_key", "known_hosts", "host_key_policy", "trust_server_certificate"):
+        assert field in props, field
+
+
+def test_update_connector_refuses_a_malformed_pin_before_resolving():
+    # A garbage pin fails loudly at stage time — before connector resolution.
+    res = DataPilotTools().execute(
+        "update_connector", {"name": "no-such-connector", "host_key": "SHA256:abc"}
+    )
     assert not res.success
-    err = res.error or ""
-    assert "host key" in err.lower() and "create_connector" in err, err
+    assert "SHA256:" in (res.error or ""), res.error
+
+
+def test_update_connector_stages_host_key_and_trust_fields(monkeypatch):
+    staged: list[dict] = []
+
+    class Ledger:
+        def put(self, *, kind, payload, preview):
+            staged.append({"kind": kind, "payload": payload, "preview": preview})
+            return f"ack-{len(staged)}"
+
+    import src.ai.copilot.ack_ledger as ledger_mod
+    from src.ai.copilot import lifecycle_tools as lt
+
+    existing = {
+        "id": "sftp-1",
+        "name": "SFTP Prod",
+        "type": "sftp",
+        "role": "destination",
+        "host": "sftp.example.com",
+        "port": 22,
+        "username": "df",
+        "extra": {"host_key": "SHA256:old-pin"},
+    }
+    monkeypatch.setattr(ledger_mod, "get_ack_ledger", lambda: Ledger())
+    monkeypatch.setattr(
+        lt, "_connector_dict",
+        lambda cid="", name="", **_kw: dict(existing) if (name or cid) in {"SFTP Prod", "sftp-1"} else None,
+    )
+    res = DataPilotTools().execute(
+        "update_connector",
+        {
+            "connector_id": "sftp-1",
+            "host_key": _FP,
+            "host_key_policy": "strict",
+            "trust_server_certificate": True,
+        },
+    )
+    assert res.success, res.error
+    changes = staged[0]["payload"]["changes"]
+    assert changes["host_key"] == _FP
+    assert changes["host_key_policy"] == "strict"
+    assert changes["trust_server_certificate"] is True
+
+
+def test_store_round_trips_trust_fields_into_extra(monkeypatch, tmp_path):
+    from services import connector_store
+
+    monkeypatch.setenv("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+    monkeypatch.setattr(connector_store, "STORE_PATH", tmp_path / "connectors.json")
+    conn = connector_store.create_connector(
+        {
+            "name": "sqlsrv-x28",
+            "type": "sqlserver",
+            "host": "db.example.com",
+            "port": 1433,
+            "username": "sa",
+            "password": "x",
+            "trust_server_certificate": True,
+        }
+    )
+    assert conn.extra.get("trust_server_certificate") is True
+
+    updated = connector_store.update_connector(
+        conn.id,
+        {
+            "name": "sqlsrv-x28",
+            "type": "sqlserver",
+            "host": "db.example.com",
+            "host_key": _FP,
+            "host_key_policy": "strict",
+        },
+    )
+    assert updated is not None
+    # New root-level trust fields lift into extra on update…
+    assert updated.extra.get("host_key") == _FP
+    assert updated.extra.get("host_key_policy") == "strict"
+    # …and the previously stored trust flag survives the merge.
+    assert updated.extra.get("trust_server_certificate") is True
