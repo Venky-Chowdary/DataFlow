@@ -160,13 +160,15 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
 def _can_access_connector(request: Request, conn: Any) -> bool:
     """True if the actor may see or mutate this connector (workspace + optional ACL)."""
     actor = _actor_email(request)
-    if conn.workspace_id and not can_read_workspace(conn.workspace_id, actor):
+    user = getattr(request.state, "user", None) or {}
+    is_admin = str(user.get("role") or "").lower() == "admin"
+    # Platform admins bypass workspace membership (they administer all
+    # workspaces); non-admins still need membership to see a scoped doc.
+    if conn.workspace_id and not is_admin and not can_read_workspace(conn.workspace_id, actor):
         return False
     try:
         from services.resource_acl import assert_resource_acl
 
-        user = getattr(request.state, "user", None) or {}
-        is_admin = str(user.get("role") or "").lower() == "admin"
         assert_resource_acl(
             tenant_id=conn.workspace_id or "",
             resource_type="connector",

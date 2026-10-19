@@ -504,7 +504,19 @@ def connector_name_taken(name: str, workspace_id: str | None = None) -> bool:
     return False
 
 
+def _workspace_scope(workspace_id: str | None) -> str | None:
+    """Empty/whitespace workspace ids mean "no scope", not "scope = ''".
+
+    ``connector_name_taken`` already normalizes this way; the list/get paths
+    did not, so callers passing ``workspace_id=""`` (e.g. workspace briefing)
+    matched only unscoped docs and reported zero saved connectors while
+    ``list_connectors()`` showed all of them (prod census defect).
+    """
+    return (workspace_id or "").strip() or None
+
+
 def list_connectors(role: str | None = None, workspace_id: str | None = None) -> list[SavedConnector]:
+    workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
             return _list_mongo(role, workspace_id)
@@ -547,6 +559,7 @@ def _get_mongo(connector_id: str, workspace_id: str | None = None) -> SavedConne
 
 
 def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
+    workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
             return _get_mongo(connector_id, workspace_id)
@@ -639,6 +652,7 @@ def _coerce_secret_update(new: Any, existing: Any) -> Any:
 
 
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
+    workspace_id = _workspace_scope(workspace_id)
     def _merge(existing: SavedConnector) -> SavedConnector:
         merged = {**existing.to_dict(), **data, "id": connector_id}
         # Never let a masked UI payload overwrite a saved secret / connection string.
@@ -682,6 +696,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
 
 
 def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool:
+    workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
             coll = _mongo_collection()
