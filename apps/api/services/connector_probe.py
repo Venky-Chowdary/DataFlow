@@ -102,7 +102,7 @@ def probe_saved_connector(
                     _LOG.warning(
                         "connector probe: doc %s could not be materialized: %s",
                         connector_id,
-                        exc,
+                        type(exc).__name__,  # never exc text: decrypt errors may carry secret material
                     )
         except Exception:
             conn = None
