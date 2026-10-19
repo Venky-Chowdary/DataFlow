@@ -50,7 +50,8 @@ async function assertToastClearance(page: Page, label: string) {
 
   const targets = page.locator(
     ".df2-wizard-footer, .df2-run-footer, .df2-transfer-step-panel .df2-btn-primary, " +
-      ".df2-empty-state, .df2-map-empty-state, .df2-card",
+      ".df2-empty-state, .df2-map-empty-state, .df2-card, " +
+      ".df2-contract-bind, .df2-vd-metric",
   );
   const targetBoxes = await visibleBoxes(targets);
   expect(
@@ -94,23 +95,38 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
       await loadSample(page);
       await assertToastClearance(page, `Source @${width}px`);
 
-      // Validate step: the "Preflight passed" toast used to cover the contract
-      // search/select row — the original complaint.
-      const next = page.getByRole("button", {
-        name: /Continue to (Destination|Validate|Transform)/,
+      // Validate step — HARD assertion: the spec must actually reach the
+      // Validate panel (the "Preflight passed" toast covered the contract
+      // search/select and a metric card — the original complaint). Any
+      // conditional path that skips this leg is a spec bug.
+      const clickIf = async (re: RegExp, ms = 2500) => {
+        const b = page.getByRole("button", { name: re }).first();
+        if (await b.isVisible().catch(() => false)) {
+          await b.click().catch(() => {});
+          await page.waitForTimeout(ms);
+        }
+      };
+      await clickIf(/Continue to Destination/);
+      const fileTab = page.getByRole("tab", { name: /File export|File/ }).first();
+      if (await fileTab.isVisible().catch(() => false)) {
+        await fileTab.click();
+        await page.waitForTimeout(400);
+      }
+      await clickIf(/Continue to Review|Continue to Transform/);
+      await clickIf(/Review result/);
+      await clickIf(/Continue without transforming/);
+      const toValidate = page
+        .getByRole("button", { name: /Continue to Validate/ })
+        .first();
+      await toValidate.waitFor({ state: "visible", timeout: 15_000 });
+      await toValidate.click();
+      // Validate panel + the contract bind field + at least one metric card
+      // must be on screen, and the Validate toasts must be live.
+      await expect(page.locator(".df2-contract-bind").first()).toBeVisible({
+        timeout: 15_000,
       });
-      if (await next.isVisible().catch(() => false)) {
-        await next.click();
-      }
-      // Reach Validate via the step rail if the wizard exposes it; otherwise
-      // settle for any step that still shows a live toast.
-      const validateTab = page.getByRole("tab", { name: /Validate/ });
-      if (await validateTab.isVisible().catch(() => false)) {
-        await validateTab.click();
-      }
-      if (await page.locator(".dt-toast:visible").count()) {
-        await assertToastClearance(page, `post-Source step @${width}px`);
-      }
+      await expect(page.locator(".df2-vd-metric").first()).toBeVisible();
+      await assertToastClearance(page, `Validate step @${width}px`);
     });
   }
 });

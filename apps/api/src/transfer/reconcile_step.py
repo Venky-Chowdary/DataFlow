@@ -697,13 +697,46 @@ def _recipe_step_sql(
         for v in opts.get("values") or []:
             expr = f"NULLIF({expr}, {_lit(v)})"
         return expr
-    if op == "cast_column" and str(
-        opts.get("to_type") or ""
-    ).casefold() == "text":
-        if tsql:
-            return f"CAST({col_expr} AS nvarchar(max))"
-        cast = "TEXT" if src_type in {"postgresql", "postgres"} else "CHAR"
-        return f"CAST({col_expr} AS {cast})"
+    if op == "cast_column":
+        to_type = str(opts.get("to_type") or "").casefold()
+        if to_type == "text":
+            if tsql:
+                return f"CAST({col_expr} AS nvarchar(max))"
+            cast = "TEXT" if src_type in {"postgresql", "postgres"} else "CHAR"
+            return f"CAST({col_expr} AS {cast})"
+        if to_type in {"integer", "bigint", "smallint", "int"}:
+            # Engine: to_number -> to_integral_value(ROUND_HALF_UP), refusing
+            # non-whole inputs. Each fragment rounds half-away-from-zero the
+            # same way; a source value the engine refused never lands in eo,
+            # so a NULL/0 oracle value for it simply never joins.
+            if tsql:
+                return (
+                    "CAST(ROUND(TRY_CAST("
+                    f"{col_expr} AS decimal(38,10)),0) AS bigint)"
+                )
+            if src_type in {"postgresql", "postgres"}:
+                # numeric -> bigint rounds half-away-from-zero.
+                return f"CAST(CAST({col_expr} AS numeric) AS bigint)"
+            # MySQL CAST(x AS SIGNED) rounds; verified against the engine in
+            # test_oracle_cast_column_integer_matches_mysql_cast.
+            return f"CAST({col_expr} AS SIGNED)"
+        if to_type == "decimal":
+            precision = opts.get("precision")
+            scale = opts.get("scale")
+            if precision in (None, ""):
+                return None  # unbounded decimal — no faithful target width
+            try:
+                width = int(precision)
+                sc = 0 if scale in (None, "") else int(scale)
+            except (TypeError, ValueError):
+                return None
+            # Engine quantizes ROUND_HALF_UP then refuses overflow; every
+            # dialect's CAST(.. AS DECIMAL(p,s)) applies the same rule —
+            # PG errors on overflow, MySQL clamps (harmless: the engine
+            # refused that row so no eo entry exists), T-SQL TRY_CAST NULLs.
+            if tsql:
+                return f"TRY_CAST({col_expr} AS decimal({width},{sc}))"
+            return f"CAST({col_expr} AS DECIMAL({width},{sc}))"
     return None
 
 

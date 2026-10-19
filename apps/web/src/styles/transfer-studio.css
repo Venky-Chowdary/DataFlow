@@ -10476,6 +10476,17 @@ body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
   max-height: min(240px, 30vh);
 }
 
+/* D-BP-11 Validate leg: while any toast is on screen, the step viewport
+   reserves the toast column outright — contract search/select, metric cards,
+   footers and content reflow left of the gutter instead of painting under the
+   toasts. Engages only while .dt-toast exists, so there is no dead space.
+   margin-right, not padding-right: the Validate host pins padding: 0
+   !important and a padded rule can never win that fight. */
+body:has(.df2-page-transfer-studio .df2-transfer-step-panel):has(.dt-toast)
+  .df2-transfer-step-viewport {
+  margin-right: calc(var(--df-toast-width) + 32px);
+}
+
 .df2-page-transfer-studio .df2-transfer-step-viewport {
   scroll-padding-bottom: 110px;
 }
@@ -12088,7 +12099,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 }
 .df2-map-error-details > summary {
   cursor: pointer;
-  color: var(--df-accent, #2563eb);
+  color: var(--df-brand-text);
   text-align: center;
 }
 .df2-map-error-details > p {

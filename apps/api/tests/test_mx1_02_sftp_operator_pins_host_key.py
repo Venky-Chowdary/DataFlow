@@ -27,8 +27,15 @@ from src.transfer.connector_registry import run_probe
 def _egress_hermetic(monkeypatch):
     """``sftp.example.com`` fixtures resolve to TEST-NET-1 (198.18.0.0/15) on
     this box, which the egress guard refuses without an explicit allowlist.
-    Pin the range here so the tests are hermetic wherever they run."""
-    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "198.18.0.0/15")
+    Merge — never replace — so the live pin-connect test keeps working on a
+    box whose SFTP container sits on loopback (127.0.0.1:2222)."""
+    existing = os.environ.get("DATAFLOW_EGRESS_ALLOWLIST") or ""
+    merged = ",".join(
+        p
+        for p in [existing, "127.0.0.0/8", "::1/128", "198.18.0.0/15"]
+        if p.strip()
+    )
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", merged)
 
 
 # Live pin-connect creds match the qa-sftp container by default and are
