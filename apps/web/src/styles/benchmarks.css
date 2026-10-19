@@ -176,7 +176,7 @@
 }
 
 .df2-page-benchmarks .df2-empty-state svg {
-  color: var(--df-ink-muted, #94a3b8);
+  color: var(--df-ink-muted);
 }
 
 @media (max-width: 767px) {

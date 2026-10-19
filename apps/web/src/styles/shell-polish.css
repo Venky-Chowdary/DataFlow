@@ -537,7 +537,7 @@
   padding: 12px;
   border-radius: 10px;
   background: #0f172a;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-family: ui-monospace, monospace;
   font-size: 11px;
   line-height: 1.5;
@@ -1241,7 +1241,7 @@ textarea.df2-pilot-composer textarea {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
 }
 
 .df2-workspace-switcher-name,
@@ -2408,7 +2408,7 @@ textarea.df2-pilot-composer textarea {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 @media (max-width: 560px) {
@@ -3126,7 +3126,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-structure-field-chip small {
   font-size: 10px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -3171,7 +3171,7 @@ textarea.df2-pilot-composer textarea {
 .df2-structure-table th small {
   display: block;
   font-weight: 500;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 10px;
   margin-top: 2px;
 }
@@ -3364,7 +3364,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .dt-flow-node-overflow .dt-connection-hub-node-label {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 11px;
 }
 
@@ -3862,7 +3862,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .dt-route-chip.muted {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   background: transparent;
   border-style: dashed;
 }
@@ -4769,7 +4769,7 @@ textarea.df2-pilot-composer textarea {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

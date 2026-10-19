@@ -154,7 +154,7 @@
 }
 
 .lp-btn--outline:hover {
-  border-color: #94a3b8;
+  border-color: var(--df-text-tertiary);
   background: #fff;
 }
 
@@ -1075,7 +1075,7 @@
 }
 
 .lp-home-proof-stage figcaption {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   border-top-color: rgba(94, 234, 212, 0.18);
 }
 
@@ -1282,7 +1282,7 @@
 
 .lp-home-trust-panel-row em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: right;
 }
 
@@ -7108,7 +7108,7 @@
 
 .lp-ent-stage-rows em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: right;
 }
 
@@ -7329,7 +7329,7 @@
 
 .lp-ent-panel-row em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: right;
 }
 
@@ -8562,7 +8562,7 @@
   padding: 16px 0 0 !important;
   border-top: 1px solid rgba(94, 234, 212, 0.12) !important;
   font-size: 12.5px !important;
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
 }
 
 @media (max-width: 960px) {

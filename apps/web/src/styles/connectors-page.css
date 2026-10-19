@@ -350,7 +350,7 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
 }
 
 .df2-drawer-kv dd {

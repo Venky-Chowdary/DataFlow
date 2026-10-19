@@ -538,7 +538,7 @@ html:has(.df2-app) #root {
   letter-spacing: 0.04em;
   text-transform: uppercase;
   line-height: 1.2;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
   white-space: nowrap;
 }
 
@@ -558,7 +558,7 @@ html:has(.df2-app) #root {
   background: var(--df-danger-bg, #fef2f2);
 }
 .df2-app .df2-context-stat--muted .df2-context-stat-value {
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
 }
 
 .df2-app .df2-context-bar-actions {

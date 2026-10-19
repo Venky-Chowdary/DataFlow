@@ -646,7 +646,7 @@
 }
 
 .df2-empty .dt-nav-icon {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   margin-bottom: 12px;
 }
 
@@ -1176,7 +1176,7 @@
 }
 
 .df2-column-arrow {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   width: 24px;
   text-align: center;
 }

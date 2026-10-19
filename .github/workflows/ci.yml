@@ -513,6 +513,12 @@ jobs:
         working-directory: apps/web
         run: node scripts/check_chunk_budgets.mjs
 
+      - name: !important ratchet (cascade budget)
+        id: important_budget
+        if: ${{ !cancelled() && (success() || failure()) }}
+        working-directory: apps/web
+        run: node scripts/check_important_budget.mjs
+
       # Surface which gate failed when earlier steps failed but proofs still ran.
       - name: Fail job if api tests or proof gates failed
         if: ${{ always() && !cancelled() }}
@@ -526,9 +532,10 @@ jobs:
           # A budget that cannot fail the job is not a budget: chunk_budgets ran
           # but its outcome was never read, so an oversized bundle merged green.
           chunks="${{ steps.chunk_budgets.outcome }}"
-          echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks"
+          imp="${{ steps.important_budget.outcome }}"
+          echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks important_budget=$imp"
           fail=0
-          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks"; do
+          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp"; do
             name="${name_out%%:*}"
             out="${name_out##*:}"
             # skipped only acceptable when job cancelled mid-flight; otherwise require success
@@ -544,6 +551,7 @@ jobs:
           echo "- frontend_tests: \`$fe\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- web_build: \`$web\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- chunk_budgets: \`$chunks\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- important_budget: \`$imp\`" >> "$GITHUB_STEP_SUMMARY"
           if [ "$fail" -ne 0 ]; then
             echo "Red CI blocks merge — fix failing gates before claiming production readiness." >> "$GITHUB_STEP_SUMMARY"
             exit 1

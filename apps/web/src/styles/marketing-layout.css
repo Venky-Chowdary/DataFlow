@@ -306,7 +306,7 @@
 
 .lp-cinema-band .lp-cinema-band-head p,
 .lp-cinema-band .lp-cinema-band-lead {
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
 }
 
 .lp-cinema-band .lp-mkt-kicker,
@@ -433,11 +433,11 @@
 
 .lp-mkt-hero-band--ink .lp-mkt-lead,
 .lp-mkt-hero-band--ink .lp-mkt-hero-copy p.lp-mkt-lead {
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
 }
 
 .lp-mkt-hero-band--ink .lp-mkt-breadcrumb {
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
 }
 
 .lp-mkt-hero-copy h1 {
@@ -566,7 +566,7 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-logos--float .lp-logo-float {
@@ -1009,7 +1009,7 @@
 
 .lp-price-plan-row--enterprise .lp-price-plan-period,
 .lp-price-plan-row--enterprise .lp-price-plan-row-blurb {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-price-plan-row--enterprise .lp-price-plan-name,
@@ -1151,7 +1151,7 @@
 
 .lp-enterprise-panel-row em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-mkt-security-flow {
@@ -2462,7 +2462,7 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-home-stack-row {
@@ -2765,7 +2765,7 @@
   display: grid;
   gap: 6px;
   font-size: 13px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-home-usecases {
@@ -2890,7 +2890,7 @@
   margin: 0 0 22px;
   font-size: 15px;
   line-height: 1.55;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   max-width: 48ch;
 }
 
@@ -3254,7 +3254,7 @@
 }
 
 .lp-pricing-no {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-pricing-v2-principles {
@@ -3315,7 +3315,7 @@
   margin: 0;
   max-width: 48ch;
   line-height: 1.5;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-pricing-v2-cta-actions {
