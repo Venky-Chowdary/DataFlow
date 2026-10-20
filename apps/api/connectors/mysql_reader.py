@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,7 +40,10 @@ def _cell(value: Any, *, instant: bool = False) -> str:
 def _mysql_column_types(cur, table: str) -> list[tuple[str, str]]:
     """Ordered (name, data_type) from the session's own database."""
     cur.execute(
-        "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS "
+        # X-52: COLUMN_TYPE carries the bit width ('bit(8)') — DATA_TYPE is bare
+        # 'bit' so BIT(1) and BIT(64) are indistinguishable downstream.
+        "SELECT COLUMN_NAME, CASE WHEN DATA_TYPE = 'bit' THEN COLUMN_TYPE "
+        "ELSE DATA_TYPE END FROM information_schema.COLUMNS "
         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
         "ORDER BY ORDINAL_POSITION",
         (table,),
@@ -71,12 +75,46 @@ def _json_names_from_types(types: list[tuple[str, str]]) -> frozenset[str]:
     )
 
 
+def mysql_bit_projection(quoted_col: str, width: int) -> str:
+    """X-52: BIT(n) arrives as opaque driver bytes that base64 onto the wire
+    ('BQ=='). Project the n-char '0'/'1' bit string (LPAD keeps the declared
+    width — 0 lands as '00000000', not '0') so PG bit/varbit and digit-VARCHAR
+    destinations bind exact values. Shared by every MySQL SELECT producer.
+    """
+    return (
+        f"CASE WHEN {quoted_col} IS NULL THEN NULL ELSE "
+        f"LPAD(BIN({quoted_col}), {int(width)}, '0') END AS {quoted_col}"
+    )
+
+
+def mysql_bit_widths(cur, table: str) -> dict[str, int]:
+    """``{column: bit width}`` for a MySQL table — see ``mysql_bit_projection``."""
+    return _bit_widths_from_types(_mysql_column_types(cur, table))
+
+
+def _bit_names_from_types(types: list[tuple[str, str]]) -> frozenset[str]:
+    return frozenset(_bit_widths_from_types(types))
+
+
+def _bit_widths_from_types(types: list[tuple[str, str]]) -> dict[str, int]:
+    widths: dict[str, int] = {}
+    for name, data_type in types:
+        m = re.fullmatch(r"bit\((\d{1,2})\)", data_type)
+        if m:
+            widths[name] = max(1, int(m.group(1)))
+        elif data_type == "bit":
+            widths[name] = 1
+    return widths
+
+
 def _mysql_select_list(
     columns: list[str] | None, types: list[tuple[str, str]]
 ) -> str | None:
     """Project JSON as CHAR so the engine spelling (not a decoded tree) is the wire."""
     json_cols = _json_names_from_types(types)
-    if not json_cols and not columns:
+    bit_cols = _bit_names_from_types(types)
+    bits_widths = _bit_widths_from_types(types)
+    if not json_cols and not bit_cols and not columns:
         return None
     names = list(columns) if columns else [name for name, _ in types]
     parts: list[str] = []
@@ -87,6 +125,8 @@ def _mysql_select_list(
                 f"CASE WHEN {q} IS NULL THEN NULL ELSE "
                 f"CAST({q} AS CHAR CHARACTER SET utf8mb4) END AS {q}"
             )
+        elif name in bit_cols:
+            parts.append(mysql_bit_projection(q, bits_widths.get(name, 64)))
         else:
             parts.append(q)
     return ", ".join(parts)

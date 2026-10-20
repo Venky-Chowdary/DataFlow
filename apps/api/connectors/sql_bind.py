@@ -1886,6 +1886,18 @@ def coerce_bitstring_wire(
     if handled:
         return bound
     bits: str
+    if isinstance(value, int) and not isinstance(value, bool):
+        # X-52: MySQL BIT(n) travels as the integer the bits represent — expand
+        # to the declared width (default enough digits to hold the value).
+        if value < 0:
+            raise ValueError("bitstring wire cannot bind a negative integer into BIT")
+        w = width if width is not None else max(1, int(value).bit_length())
+        if int(value).bit_length() > w:
+            raise ValueError(
+                f"integer {value} exceeds BIT({w}) capacity"
+            )
+        bits = format(int(value), f"0{w}b")
+        return bits
     if isinstance(value, (bytes, bytearray, memoryview)):
         bits = "".join(f"{b:08b}" for b in bytes(value))
     else:

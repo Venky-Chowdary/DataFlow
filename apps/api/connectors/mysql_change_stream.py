@@ -761,14 +761,6 @@ class MySqlChangeStreamCdc:
 
         table_ref = quote_table_ref(table, dialect="mysql")
         quoted = quoted_pk_columns(pk_cols, "`")
-        sql, params = snapshot_keyset_sql(
-            table_ref=table_ref,
-            quoted_pk_columns=quoted,
-            last_pk=last_pk,
-            limit=self.batch_size,
-            dialect="mysql",
-            select_list=quote_column_list(self.columns, quote_char="`"),
-        )
         close = conn is None
         if conn is None:
             conn = get_connection(
@@ -782,6 +774,25 @@ class MySqlChangeStreamCdc:
             )
         try:
             with conn.cursor() as cur:
+                # X-52: BIT(n) projects as its n-char '0'/'1' digit string —
+                # raw driver bytes would base64 onto the wire.
+                from connectors.mysql_reader import (
+                    _mysql_column_types,
+                    _mysql_select_list,
+                )
+
+                select_list = (
+                    _mysql_select_list(self.columns or None, _mysql_column_types(cur, table))
+                    or quote_column_list(self.columns, quote_char="`")
+                )
+                sql, params = snapshot_keyset_sql(
+                    table_ref=table_ref,
+                    quoted_pk_columns=quoted,
+                    last_pk=last_pk,
+                    limit=self.batch_size,
+                    dialect="mysql",
+                    select_list=select_list,
+                )
                 cur.execute(sql, params)
                 rows = cur.fetchall() or []
                 headers = [d[0] for d in (cur.description or [])]
@@ -1403,12 +1414,23 @@ class MySqlChangeStreamCdc:
                 # Optional operator filter (Debezium additional-conditions);
                 # binds only, compiled from the structured spec on the signal.
                 filter_sql, filter_params = signal_filter_sql(sig, dialect="mysql")
+                # X-52: BIT(n) projects as digit text, never driver bytes.
+                from connectors.mysql_reader import (
+                    _mysql_column_types,
+                    _mysql_select_list,
+                )
+
+                select_list = (
+                    _mysql_select_list(None, _mysql_column_types(cur, sig_table))
+                    or "*"
+                )
                 sql, params = snapshot_keyset_sql(
                     table_ref=qualified,
                     quoted_pk_columns=pk_quoted,
                     last_pk=last_pk,
                     limit=limit,
                     dialect="mysql",
+                    select_list=select_list,
                     filter_sql=filter_sql,
                     filter_params=filter_params,
                 )

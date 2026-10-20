@@ -23,11 +23,13 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from connectors.mysql_reader import mysql_bit_projection
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
     _mysql_connect,
     _mysql_ident,
     _mysql_table_pk_and_types,
+    mysql_bit_widths_from_types,
     mysql_type_is_copy_safe,
 )
 from services.copy_pg_mysql import mapping_is_plain_carry
@@ -118,11 +120,6 @@ def copy_mysql_to_s3(
     source_cols = [p[0] for p in pairs]
     target_cols = [p[1] for p in pairs]
     table_q = _mysql_ident(source_table)
-    select_list = ", ".join(
-        f"{_mysql_ident(src)} AS {_mysql_ident(tgt)}" if src != tgt else _mysql_ident(src)
-        for src, tgt in pairs
-    )
-    select_sql = f"SELECT {select_list} FROM {table_q}"  # nosec B608
     delim = "\t" if ext == "tsv" else ","
 
     source_conn = _mysql_connect(source_cfg)
@@ -133,6 +130,20 @@ def copy_mysql_to_s3(
             src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             src_cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
             _pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
+            bit_widths = mysql_bit_widths_from_types(live)
+            # X-52: BIT(n) projects as its n-char '0'/'1' digit string — raw
+            # driver bytes would base64 onto the wire.
+            select_list = ", ".join(
+                mysql_bit_projection(_mysql_ident(src), bit_widths[src])
+                if src in bit_widths
+                else (
+                    f"{_mysql_ident(src)} AS {_mysql_ident(tgt)}"
+                    if src != tgt
+                    else _mysql_ident(src)
+                )
+                for src, tgt in pairs
+            )
+            select_sql = f"SELECT {select_list} FROM {table_q}"  # nosec B608
             live_l = {k.lower(): v for k, v in live.items()}
             for col in source_cols:
                 declared = live_l.get(col.lower()) or ""
