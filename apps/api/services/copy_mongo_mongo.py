@@ -31,6 +31,7 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session, mongo_type_is_copy_safe
 from services.copy_mongo_sink import (
+    MongoCopyDigest,
     abort_created_mongo,
     insert_many_documents,
     mongo_copy_batch,
@@ -148,6 +149,7 @@ def copy_mongo_to_mongo(
             projection["_id"] = 0
         cursor = src_coll.find({}, projection, session=session, no_cursor_timeout=False)
         batch_size = mongo_copy_batch("MONGO_MONGO_COPY_BATCH")
+        digest = MongoCopyDigest()
         inserted = 0
         batch: list[dict[str, Any]] = []
         while True:
@@ -159,10 +161,10 @@ def copy_mongo_to_mongo(
                     {target: doc.get(source) for source, target in zip(source_cols, target_cols)}
                 )
                 if len(batch) >= batch_size:
-                    inserted += insert_many_documents(dest_coll, batch)
+                    inserted += insert_many_documents(dest_coll, batch, digest)
                     batch.clear()
         if batch:
-            inserted += insert_many_documents(dest_coll, batch)
+            inserted += insert_many_documents(dest_coll, batch, digest)
         extra_write = {**extra, "mongo_write": mongo_write}
         return prove_mongo_dest(
             dest_cfg=dest_cfg,
@@ -170,6 +172,7 @@ def copy_mongo_to_mongo(
             source_count=source_count,
             inserted=inserted,
             mongo_write=mongo_write,
+            source_digest=digest,
             extra_snapshot=extra_write,
         )
     except Exception:

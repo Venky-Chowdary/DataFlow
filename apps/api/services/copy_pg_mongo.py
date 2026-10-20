@@ -1,6 +1,10 @@
 """PostgreSQL COPY text → MongoDB insert_many (cross-engine bulk).
 
-This is **not** ``mongoimport``. One PostgreSQL ``REPEATABLE READ``
+This is **not** ``mongofrom services.copy_mongo_sink import (
+    MongoCopyDigest,
+    mongo_collection_counts,
+)
+import``. One PostgreSQL ``REPEATABLE READ``
 snapshot streams ``COPY (SELECT …) TO STDOUT`` text; decoded rows become
 BSON documents and ``insert_many`` (unordered) loads them. Dest COUNT is
 ``count_documents({})`` — never ``estimatedDocumentCount``. Empty dest
@@ -196,6 +200,7 @@ class _CopyInsertManySink:
         self._expected_cols = len(target_cols)
         self._raw = bytearray()
         self._batch: list[dict[str, Any]] = []
+        self._digest = MongoCopyDigest()
         self.rows = 0
 
     def write(self, data: Any) -> int:
@@ -254,6 +259,7 @@ class _CopyInsertManySink:
     def _flush_batch(self) -> None:
         if not self._batch:
             return
+        self._digest.update(self._batch)
         result = self._coll.insert_many(self._batch, ordered=False)
         inserted = len(result.inserted_ids)
         if inserted != len(self._batch):
@@ -363,7 +369,16 @@ def copy_postgres_to_mongo(
                 "PostgreSQL→Mongo COPY refused: dest count_documents "
                 f"{dest_count} != source snapshot {source_count}"
             )
-        proof = f"dest_count:{dest_count}"
+        _client2, coll2 = mongo_collection(dest_cfg, dest_table)
+        dest_counts = mongo_collection_counts(coll2)
+        if dest_counts != sink._digest.counts:
+            culprits = sink._digest.diff_render(dest_counts)
+            raise ValueError(
+                "PostgreSQL→Mongo COPY refused: destination document digest "
+                "differs from the bound source digest — culprit "
+                + "; ".join(culprits or ["<unidentified>"])
+            )
+        proof = f"mongo_docs_sha256:{sink._digest.digest_hex()}"
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -381,7 +396,7 @@ def copy_postgres_to_mongo(
                 "mongo_write": mongo_write,
                 "source_pk": list(shape.primary_key or []),
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mongo_doc_digest_full_checksum",
         )
     except Exception:
         if created_here:

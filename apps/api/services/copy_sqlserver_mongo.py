@@ -26,6 +26,7 @@ from typing import Any
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mongo_sink import (
+    MongoCopyDigest,
     abort_created_mongo,
     insert_many_documents,
     mongo_copy_batch,
@@ -79,6 +80,7 @@ def _select_insert_many(
     select_sql: str,
     target_cols: list[str],
     batch_size: int,
+    digest: "MongoCopyDigest",
 ) -> int:
     inserted = 0
     batch: list[dict[str, Any]] = []
@@ -101,10 +103,10 @@ def _select_insert_many(
                     }
                 )
                 if len(batch) >= batch_size:
-                    inserted += insert_many_documents(coll, batch)
+                    inserted += insert_many_documents(coll, batch, digest)
                     batch.clear()
         if batch:
-            inserted += insert_many_documents(coll, batch)
+            inserted += insert_many_documents(coll, batch, digest)
         return inserted
     finally:
         try:
@@ -180,12 +182,14 @@ def copy_sqlserver_to_mongo(
         if isinstance(prepared, FastPathResult):
             return prepared
         coll, created_here, mongo_write = prepared
+        digest = MongoCopyDigest()
         inserted = _select_insert_many(
             source_conn,
             coll,
             select_sql=select_sql,
             target_cols=target_cols,
             batch_size=mongo_copy_batch("SQLSERVER_MONGO_COPY_BATCH"),
+            digest=digest,
         )
         return prove_mongo_dest(
             dest_cfg=dest_cfg,
@@ -193,6 +197,7 @@ def copy_sqlserver_to_mongo(
             source_count=source_count,
             inserted=inserted,
             mongo_write=mongo_write,
+            source_digest=digest,
             extra_snapshot=extra,
         )
     except Exception:

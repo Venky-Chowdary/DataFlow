@@ -24,6 +24,7 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mongo_pg import mongo_type_is_copy_safe
 from services.copy_mongo_sink import (
+    MongoCopyDigest,
     abort_created_mongo,
     insert_many_documents,
     mongo_copy_batch,
@@ -115,6 +116,7 @@ def copy_s3_to_mongo(
     if isinstance(prepared, FastPathResult):
         return prepared
     coll, created_here, mongo_write = prepared
+    digest = MongoCopyDigest()
 
     tmp_paths: list[str] = []
     inserted = 0
@@ -143,16 +145,17 @@ def copy_s3_to_mongo(
                     }
                 )
                 if len(pending) >= batch_size:
-                    inserted += insert_many_documents(coll, pending)
+                    inserted += insert_many_documents(coll, pending, digest)
                     pending.clear()
         if pending:
-            inserted += insert_many_documents(coll, pending)
+            inserted += insert_many_documents(coll, pending, digest)
         return prove_mongo_dest(
             dest_cfg=dest_cfg,
             dest_table=dest_table,
             source_count=source_count,
             inserted=inserted,
             mongo_write=mongo_write,
+            source_digest=digest,
             extra_snapshot={"s3_read": "get_csv", "shard_mode": "object"},
         )
     except Exception:

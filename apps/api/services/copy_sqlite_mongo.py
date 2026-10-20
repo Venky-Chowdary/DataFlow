@@ -23,6 +23,7 @@ from typing import Any
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mongo_sink import (
+    MongoCopyDigest,
     abort_created_mongo,
     insert_many_documents,
     mongo_copy_batch,
@@ -157,6 +158,7 @@ def copy_sqlite_to_mongo(
         if isinstance(prepared, FastPathResult):
             return prepared
         coll, created_here, mongo_write = prepared
+        digest = MongoCopyDigest()
 
         src_cur = source_conn.cursor()
         src_cur.execute(select_sql)
@@ -176,10 +178,10 @@ def copy_sqlite_to_mongo(
                     }
                 )
                 if len(batch) >= batch_size:
-                    inserted += insert_many_documents(coll, batch)
+                    inserted += insert_many_documents(coll, batch, digest)
                     batch.clear()
         if batch:
-            inserted += insert_many_documents(coll, batch)
+            inserted += insert_many_documents(coll, batch, digest)
         try:
             source_conn.commit()
         except Exception:
@@ -190,6 +192,7 @@ def copy_sqlite_to_mongo(
             source_count=source_count,
             inserted=inserted,
             mongo_write=mongo_write,
+            source_digest=digest,
             extra_snapshot={"sqlite_read": "select"},
         )
     except Exception:
