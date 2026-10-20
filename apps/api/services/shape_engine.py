@@ -454,6 +454,26 @@ def _dedupe_is_null(value: Any) -> bool:
     return value is None or value == _SQL_NULL_SENTINEL
 
 
+def _group_key_part(value: Any) -> tuple[int, Any]:
+    """One grouping-key component — X-107: '' and NULL are different members.
+
+    ``_as_text`` maps both '' and None to None, so bare _as_text tuples merged
+    a typed empty string with NULL (and the NULL sentinel read as a real
+    string). Tag the part instead: 1 = null evidence, 0 = a real value whose
+    text is the identity ('' stays '' — SQL treats it as a distinct member).
+    Shared by aggregate group_by, rank_rows partition_by, dedupe keys, and
+    join/lookup on-keys so grouping is identical in preview and run.
+    """
+    if _dedupe_is_null(value):
+        return (1, None)
+    text = _as_text(value)
+    return (0, text if text is not None else str(value))
+
+
+def _group_key(row: Mapping[str, Any], cols: Sequence[str]) -> tuple[Any, ...]:
+    return tuple(_group_key_part(row.get(c)) for c in cols)
+
+
 def _dedupe_feed_fallback(
     fallbacks: dict[str, tuple],
     row: dict[str, Any],
@@ -530,14 +550,35 @@ def _sort_order(options: Mapping[str, Any]) -> list[tuple[str, bool]]:
 
 
 def _agg_init() -> dict[str, Any]:
-    return {"n": 0, "sum": None, "min": None, "max": None, "first": None, "last": None}
+    return {
+        "n": 0,
+        "sum": None,
+        "min": None,
+        "max": None,
+        "first": None,
+        "last": None,
+        "seen": set(),
+    }
 
 
-def _agg_add(state: dict[str, Any], fn: str, value: Any) -> None:
+def _agg_add(
+    state: dict[str, Any], fn: str, value: Any, *, has_column: bool = True
+) -> None:
+    # X-105/X-106 — one null predicate for every measure (SQL semantics):
+    # NULL evidence (None or the wire sentinel) is ignored by every
+    # column-scoped measure, and count(column) skips NULLs while count(*)
+    # still counts rows. Before this, count incremented before the null
+    # check and the sentinel slipped past `value is None`, so min/first
+    # returned the NULL marker as a value on the live path.
     if fn == "count":
-        state["n"] += 1
+        if not has_column or not _dedupe_is_null(value):
+            state["n"] += 1
         return
-    if value is None:
+    if fn == "count_distinct":
+        if not _dedupe_is_null(value):
+            state["seen"].add(_group_key_part(value))
+        return
+    if _dedupe_is_null(value):
         return
     if fn in ("sum", "avg"):
         try:
@@ -562,6 +603,8 @@ def _agg_add(state: dict[str, Any], fn: str, value: Any) -> None:
 def _agg_finish(state: dict[str, Any], fn: str) -> Any:
     if fn == "count":
         return state["n"]
+    if fn == "count_distinct":
+        return len(state["seen"])
     if fn == "sum":
         return state["sum"]
     if fn == "avg":
@@ -850,7 +893,7 @@ class ShapeEngine:
             for raw in self._secondary_rows(step, index, "join"):
                 if not isinstance(raw, Mapping):
                     continue
-                key = tuple(_as_text(raw.get(c)) for c in ref_cols)
+                key = _group_key(raw, ref_cols)
                 built.setdefault(key, []).append(dict(raw))
             self._state[cache_key] = built
         return built
@@ -910,17 +953,38 @@ class ShapeEngine:
             descending = str(options.get("direction") or "top").casefold() != "bottom"
             limit = max(0, int(options.get("limit") or 0))
             partitions = [str(c) for c in options.get("partition_by", [])]
+            then_by = [str(c) for c in options.get("then_by", [])]
+            nulls_first = (
+                str(options.get("nulls") or "last").casefold() == "first"
+            )
             groups: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
             for row in buffer:
                 pkey = (
-                    tuple(_as_text(row.get(c)) for c in partitions)
-                    if partitions
-                    else ("",)
+                    _group_key(row, partitions) if partitions else ("",)
                 )
                 groups.setdefault(pkey, []).append(row)
             out = []
             for rows in groups.values():
-                rows.sort(key=lambda r: _sort_val(r.get(order_col)), reverse=descending)
+                # X-108: NULLS LAST in both directions — "top N by value"
+                # must never let an unknown value win (and never float
+                # first under reverse=). then_by sorts first (last key
+                # first), then the order column, then the null flag as the
+                # primary partition; nulls='first' restores SQL NULLS
+                # FIRST. Ties keep input order — the documented default
+                # tie-break when no then_by/pk is given.
+                for col in reversed(then_by):
+                    rows.sort(
+                        key=lambda r, c=col: _sort_val(r.get(c)),
+                        reverse=descending,
+                    )
+                rows.sort(
+                    key=lambda r: _sort_val(r.get(order_col)),
+                    reverse=descending,
+                )
+                rows.sort(
+                    key=lambda r: _dedupe_is_null(r.get(order_col))
+                    != nulls_first
+                )
                 out.extend(rows[:limit] if limit else rows)
             return out
 
@@ -1026,7 +1090,7 @@ class ShapeEngine:
             for raw in rows:
                 if not isinstance(raw, Mapping):
                     continue
-                key = _as_text(raw.get(key_col)) or ""
+                key = _group_key_part(raw.get(key_col))
                 if key in table:
                     if match_policy == "refuse":
                         raise ValueError(
@@ -1177,8 +1241,8 @@ class ShapeEngine:
 
         if op == "lookup":
             table = self._lookup_table(step, index)
-            key = _as_text(row.get(step.column))
-            match = table.get(key) if key is not None else None
+            key = _group_key_part(row.get(step.column))
+            match = table.get(key)
             targets = {str(k): str(v) for k, v in (options.get("map") or {}).items()}
             if match is None:
                 unmatched = str(options.get("unmatched") or "null").casefold()
@@ -1211,7 +1275,7 @@ class ShapeEngine:
         if op == "join":
             join_index = self._join_index(step, index)
             on = {str(s): str(r) for s, r in (options.get("on") or {}).items()}
-            key = tuple(_as_text(row.get(c)) for c in on)
+            key = _group_key(row, list(on))
             matches = join_index.get(key) or []
             mapping = {str(k): str(v) for k, v in (options.get("map") or {}).items()}
             if not matches:
@@ -1256,7 +1320,7 @@ class ShapeEngine:
 
         if op == "dedupe_rows":
             keys = [str(c) for c in options.get("keys", [])]
-            key = tuple(_as_text(row.get(c)) for c in keys)
+            key = _group_key(row, keys)
             keep = str(options.get("keep") or "first").casefold()
             merge = str(options.get("merge") or "").casefold() == "non_null"
             rule = _dedupe_rule(options)
@@ -1351,7 +1415,7 @@ class ShapeEngine:
                     "raise 'max_keys' only deliberately"
                 )
             group_cols = [str(c) for c in options.get("group_by", [])]
-            gkey = tuple(_as_text(row.get(c)) for c in group_cols)
+            gkey = _group_key(row, group_cols)
             acc = groups.get(gkey)
             if acc is None:
                 acc = {"group": {c: row.get(c) for c in group_cols}, "measures": {}}
@@ -1361,7 +1425,12 @@ class ShapeEngine:
                 fn = str(measure.get("function") or "").casefold()
                 mcol = str(measure.get("column") or "")
                 state = acc["measures"].setdefault(name, _agg_init())
-                _agg_add(state, fn, row.get(mcol))
+                _agg_add(
+                    state,
+                    fn,
+                    row.get(mcol),
+                    has_column=bool(mcol and mcol != "*"),
+                )
             return _HELD
 
         if op == "sort_rows":

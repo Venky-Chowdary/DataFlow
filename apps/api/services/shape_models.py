@@ -306,12 +306,15 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
     ),
     _StepDef(
         "rank_rows",
-        "Keep the top or bottom N rows per partition by an ordering column",
+        "Keep the top or bottom N rows per partition by an ordering column "
+        "(NULLS LAST by default — 'nulls': 'first'| 'last'; deterministic "
+        "tie-break via 'then_by', else input order)",
         family="advanced",
         active=True,
         needs_column=False,
         buffered=True,
-        options=("order_by", "direction", "limit", "partition_by"),
+        options=("order_by", "direction", "limit", "partition_by",
+                 "then_by", "nulls"),
         required=("order_by", "limit"),
     ),
     _StepDef(
@@ -1157,7 +1160,12 @@ def _normalize_options(
         measures = out.get("measures")
         if not isinstance(measures, (list, tuple)) or not measures:
             raise ShapeError(f"{where}: aggregate needs a non-empty measures list")
-        allowed_fns = ("sum", "avg", "count", "min", "max", "first", "last")
+        # X-105: count(column) skips NULLs, count without a column counts
+        # rows (count(*)); count_distinct counts distinct non-NULL members.
+        allowed_fns = (
+            "sum", "avg", "count", "count_distinct",
+            "min", "max", "first", "last",
+        )
         normalized_measures = []
         for i, measure in enumerate(measures, start=1):
             if not isinstance(measure, Mapping):
