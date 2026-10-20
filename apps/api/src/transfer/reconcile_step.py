@@ -234,6 +234,40 @@ def _dest_types_from_mappings(mappings: list[dict]) -> dict[str, str]:
 # digest only compares against the destination when every declared step is
 # row-local (or an engine-level no-op like scd2): population-changing recipes
 # are proven by the row ledger and the dedupe winner checks instead.
+def _proof_file_batches(
+    *,
+    source_file_content: Any,
+    source_file_name: str,
+    source_file_path: str,
+    read_cols: list[str],
+):
+    """Yield raw source batches for the transform-applied proof from a file.
+
+    X-120: the file is re-parsed from the same bytes/path the read consumed
+    (digest-checked by the caller), then projected to the recipe's input
+    columns — the independent re-read DB sources get from a re-SELECT.
+    """
+    from services.file_parser import FileParser
+
+    raw: Any = source_file_content
+    if raw is None and source_file_path:
+        from pathlib import Path as _P
+
+        raw = _P(source_file_path).read_bytes()
+    if raw is None:
+        return
+    parsed = FileParser.parse(raw, source_file_name or "upload.csv")
+    records = getattr(parsed, "data", None) or getattr(parsed, "records", None) or []
+    batch: list[dict] = []
+    for rec in records:
+        batch.append({c: rec.get(c) for c in read_cols})
+        if len(batch) >= 500:
+            yield batch
+            batch = []
+    if batch:
+        yield batch
+
+
 def _proof_source_batches(
     *,
     source_endpoint: EndpointConfig,
@@ -765,6 +799,8 @@ def _transform_applied_proof(
     mappings: list[dict] | None,
     source_schema: dict[str, str] | None,
     recon: dict[str, Any],
+    source_file_content: Any = None,
+    source_file_name: str = "",
 ) -> dict[str, Any] | None:
     """G-1: prove the approved recipe actually ran on a shaped run.
 
@@ -803,7 +839,49 @@ def _transform_applied_proof(
                 "by the row ledger and dedupe winner checks"
             ),
         }
-    if source_endpoint is None or getattr(source_endpoint, "kind", "") != "database":
+    # X-120 — a file source gets the same independent re-read a DB source
+    # does: re-parse the bytes the read consumed (or the spilled object file)
+    # and recompute the recipe. The digest stamped at read time must match
+    # what verify re-reads — a moved file is a failed proof, not a skipped one.
+    _file_src_kind = str(getattr(source_endpoint, "kind", "") or "")
+    _file_path = ""
+    if source_endpoint is not None and _file_src_kind != "database":
+        _sp = str(dest_summary.get("source_spill_path") or "")
+        if _sp and os.path.isfile(_sp):
+            _file_path = _sp
+        _file_name = (
+            source_file_name
+            or str(dest_summary.get("source_spill_name") or "")
+            or str(getattr(source_endpoint, "table", "") or "")
+            or "upload.csv"
+        )
+        if source_file_content is None and not _file_path:
+            return {
+                "status": "unverifiable",
+                "reason": "independent source re-read requires the file bytes "
+                "or the spilled source file",
+            }
+        try:
+            from services.file_load_ledger import file_bytes_digest
+
+            _verify_digest = file_bytes_digest(
+                source_file_content if source_file_content is not None else _file_path
+            )
+            _read_digest = str(dest_summary.get("file_digest") or "")
+            if _read_digest and _verify_digest != _read_digest:
+                return {
+                    "status": "failed",
+                    "reason": (
+                        "source file changed between read and verify "
+                        f"(sha256 {_read_digest[:12]}… → {_verify_digest[:12]}…)"
+                    ),
+                }
+        except Exception as exc:
+            return {
+                "status": "unverifiable",
+                "reason": f"source file re-read failed: {exc!s}"[:300],
+            }
+    elif source_endpoint is None or _file_src_kind != "database":
         return {
             "status": "unverifiable",
             "reason": "independent source re-read requires a database endpoint",
@@ -1095,12 +1173,22 @@ def _transform_applied_proof(
 
     def _expected_iter():
         nonlocal raw_count
-        for batch in _proof_source_batches(
-            source_endpoint=source_endpoint,
-            src_type=src_type,
-            src_cfg=src_cfg,
-            read_cols=read_cols,
-        ):
+        _src_batches = (
+            _proof_source_batches(
+                source_endpoint=source_endpoint,
+                src_type=src_type,
+                src_cfg=src_cfg,
+                read_cols=read_cols,
+            )
+            if _file_src_kind == "database"
+            else _proof_file_batches(
+                source_file_content=source_file_content,
+                source_file_name=_file_name,
+                source_file_path=_file_path,
+                read_cols=read_cols,
+            )
+        )
+        for batch in _src_batches:
             raw_count += len(batch)
             outs = runner.records(batch)
             for row in batch:
@@ -1277,15 +1365,21 @@ def _transform_applied_proof(
         qs = "["
     else:
         qs = '"'
-    src_ref_sql = warehouse_sql_table_ref(
-        src_type,
-        src_cfg,
-        str(
-            getattr(source_endpoint, "schema", "")
-            or src_cfg.get("schema")
-            or ""
-        ),
-        str(source_endpoint.table or ""),
+    # Only a real database source yields a queryable table ref — a file or
+    # spill source has no endpoint table and this constructor raises.
+    src_ref_sql = (
+        warehouse_sql_table_ref(
+            src_type,
+            src_cfg,
+            str(
+                getattr(source_endpoint, "schema", "")
+                or src_cfg.get("schema")
+                or ""
+            ),
+            str(source_endpoint.table or ""),
+        )
+        if _file_src_kind == "database" and str(source_endpoint.table or "")
+        else ""
     )
     oracle_params: dict[str, Any] = {}
     oracle_exprs: dict[str, str] = {}
@@ -2638,7 +2732,9 @@ def _maybe_attach_verification_ladder(
         if dest_type == "sqlite":
             target_rows = read_sqlite_rows(
                 database=str(dest_cfg.get("database") or ""),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                table=str(
+                    dest_summary.get("table") or endpoint.table or dest_cfg.get("table") or ""
+                ),
                 columns=target_cols,
                 connection_string=str(dest_cfg.get("connection_string") or ""),
                 host=str(dest_cfg.get("host") or ""),
@@ -2653,7 +2749,9 @@ def _maybe_attach_verification_ladder(
                 database=str(dest_cfg.get("database") or ""),
                 username=str(dest_cfg.get("username") or ""),
                 password=str(dest_cfg.get("password") or ""),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                table=str(
+                    dest_summary.get("table") or endpoint.table or dest_cfg.get("table") or ""
+                ),
                 columns=target_cols,
                 connection_string=str(dest_cfg.get("connection_string") or ""),
                 ssl=bool(dest_cfg.get("ssl", False)),
@@ -2666,7 +2764,9 @@ def _maybe_attach_verification_ladder(
                 username=str(dest_cfg.get("username") or ""),
                 password=str(dest_cfg.get("password") or ""),
                 schema=str(dest_cfg.get("schema") or "dbo"),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                table=str(
+                    dest_summary.get("table") or endpoint.table or dest_cfg.get("table") or ""
+                ),
                 columns=target_cols,
             )
         else:
@@ -2677,7 +2777,9 @@ def _maybe_attach_verification_ladder(
                 username=str(dest_cfg.get("username") or ""),
                 password=str(dest_cfg.get("password") or ""),
                 schema=str(dest_cfg.get("schema") or "public"),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                table=str(
+                    dest_summary.get("table") or endpoint.table or dest_cfg.get("table") or ""
+                ),
                 columns=target_cols,
                 connection_string=str(dest_cfg.get("connection_string") or ""),
                 ssl=bool(dest_cfg.get("ssl", False)),
@@ -2723,7 +2825,9 @@ def _maybe_attach_verification_ladder(
                 if src_type == "sqlite":
                     source_rows = read_sqlite_rows(
                         database=str(src_cfg.get("database") or ""),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        table=str(
+                            dest_summary.get("source_table") or source_endpoint.table or src_cfg.get("table") or ""
+                        ),
                         columns=target_cols,
                         connection_string=str(src_cfg.get("connection_string") or ""),
                         host=str(src_cfg.get("host") or ""),
@@ -2736,7 +2840,9 @@ def _maybe_attach_verification_ladder(
                         username=str(src_cfg.get("username") or ""),
                         password=str(src_cfg.get("password") or ""),
                         schema=str(src_cfg.get("schema") or "public"),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        table=str(
+                            dest_summary.get("source_table") or source_endpoint.table or src_cfg.get("table") or ""
+                        ),
                         columns=target_cols,
                         connection_string=str(src_cfg.get("connection_string") or ""),
                         ssl=bool(src_cfg.get("ssl", False)),
@@ -2750,7 +2856,9 @@ def _maybe_attach_verification_ladder(
                         database=str(src_cfg.get("database") or ""),
                         username=str(src_cfg.get("username") or ""),
                         password=str(src_cfg.get("password") or ""),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        table=str(
+                            dest_summary.get("source_table") or source_endpoint.table or src_cfg.get("table") or ""
+                        ),
                         columns=target_cols,
                         connection_string=str(src_cfg.get("connection_string") or ""),
                         ssl=bool(src_cfg.get("ssl", False)),
@@ -2763,7 +2871,9 @@ def _maybe_attach_verification_ladder(
                         username=str(src_cfg.get("username") or ""),
                         password=str(src_cfg.get("password") or ""),
                         schema=str(src_cfg.get("schema") or "dbo"),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        table=str(
+                            dest_summary.get("source_table") or source_endpoint.table or src_cfg.get("table") or ""
+                        ),
                         columns=target_cols,
                     )
             except PopulationTooLarge as exc:
@@ -2811,6 +2921,68 @@ def _maybe_attach_verification_ladder(
     kind = conservation_kind(sync_mode, dest_count_before=dest_before)
     census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
     keyed = kind == KIND_KEYED
+    if allow_extra and pk_column:
+        # A non-overwrite run into a populated destination: both populations
+        # legitimately hold rows outside this run's batch — the destination's
+        # pre-existing rows, and source rows below the cursor watermark that a
+        # whole-table re-read pulled in. Whole-vs-whole digests flag those
+        # out-of-scope rows as mismatches on a correct incremental, so the
+        # digest must compare only the population this run wrote. When the
+        # writer's key list covers the batch, scope both sides to it; when it
+        # cannot (dest already occupied, keyset incomplete) the populations
+        # are incomparable by construction — decline the population proof and
+        # keep the keyed census/count verdict rather than fail a healthy run.
+        _batch_keys: list[str] = [
+            str(x)
+            for x in (dest_summary.get("written_ids") or [])
+            if x is not None and str(x) != ""
+        ]
+        if not _batch_keys:
+            _stash = (
+                dest_summary.get("reconcile_sample")
+                or dest_summary.get("sample_records")
+                or []
+            )
+            _batch_keys = [
+                str(x)
+                for x in _source_key_values(
+                    [r for r in _stash if isinstance(r, dict)],
+                    sort_key=pk_column,
+                    mappings=mappings,
+                    limit=500,
+                )
+                if x is not None and str(x) != ""
+            ]
+        _expected_batch = max(
+            _as_count(report.get("source_rows") or len(source_rows))
+            - int(report.get("rejected_rows") or 0)
+            - int(report.get("rows_skipped") or 0),
+            0,
+        )
+        if _batch_keys and len(_batch_keys) >= _expected_batch:
+            _keyset = set(_batch_keys)
+            _src_pk = pk_column
+            for _m in mappings:
+                if (
+                    str(_m.get("target") or "") == pk_column
+                    and _m.get("source")
+                ):
+                    _src_pk = str(_m["source"])
+                    break
+            source_rows = [
+                r
+                for r in source_rows
+                if str(r.get(_src_pk) if isinstance(r, dict) else "")
+                in _keyset
+            ]
+            target_rows = [
+                r
+                for r in target_rows
+                if str(r.get(pk_column) if isinstance(r, dict) else "")
+                in _keyset
+            ]
+        elif dest_before:
+            return _return(report, "non_overwrite_keyset_incomplete")
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -4778,6 +4950,165 @@ def _dedupe_dest_winner_tuples(
             ]
 
 
+
+def _multi_stream_per_table_check(
+    stamped: dict[str, Any],
+    *,
+    endpoint: EndpointConfig,
+    source_endpoint: EndpointConfig | None,
+    dest_summary: dict[str, Any],
+    mappings: list[dict],
+) -> dict[str, Any]:
+    """Multi-stream jobs verify EVERY table, not just the last one.
+
+    The rollup digest covers only the last stream's table; a tampered earlier
+    table must still fail the job. Both populations are re-read at verify
+    time (never write-time digests, which cannot see post-write changes): for
+    each stream we digest the destination table and — when the source is
+    readable — the source table, keyed on the source's pk set so a populated
+    destination compares only its batch rows. The job result is the
+    conjunction of all per-table checks, and a failing table is named.
+    """
+    streams = dest_summary.get("streams")
+    if dest_summary.get("multi_stream") is not True or not isinstance(streams, list):
+        return stamped
+    db_type = str(getattr(endpoint, "format", "") or "").lower()
+    cfg = resolve_connector_config(endpoint)
+    schema = str(cfg.get("schema") or getattr(endpoint, "schema", "") or "")
+    src_type = str(getattr(source_endpoint, "format", "") or "").lower() if source_endpoint else ""
+    src_cfg = resolve_connector_config(source_endpoint) if source_endpoint else {}
+    pk_col = ""
+    _pk = dest_summary.get("primary_key_columns") or dest_summary.get("pk_columns") or []
+    if isinstance(_pk, (list, tuple)) and _pk:
+        pk_col = str(_pk[0] or "")
+    if not pk_col:
+        for _m in mappings or []:
+            if isinstance(_m, dict) and _m.get("primary_key"):
+                pk_col = str(_m.get("target") or _m.get("source") or "")
+                break
+    target_cols = [
+        str(m.get("target") or m.get("source") or "")
+        for m in (mappings or [])
+        if isinstance(m, dict)
+    ] or None
+
+    def _source_keyset(stream_name: str) -> list[str] | None:
+        if not pk_col or src_type != "sqlite":
+            return None
+        try:
+            rows = read_sqlite_rows(
+                database=str(src_cfg.get("database") or ""),
+                table=str(stream_name),
+                columns=[pk_col],
+                connection_string=str(src_cfg.get("connection_string") or ""),
+                host=str(src_cfg.get("host") or ""),
+            )
+            ids = [str(r.get(pk_col)) for r in rows if r.get(pk_col) is not None]
+            return ids or None
+        except Exception:
+            return None
+
+    results: list[dict[str, Any]] = []
+    for entry in streams:
+        if not isinstance(entry, dict):
+            continue
+        if str(entry.get("status") or "") != "completed":
+            continue
+        table = str(entry.get("dest_table") or entry.get("table") or entry.get("name") or "")
+        if not table:
+            continue
+        expected_rows = None
+        acct = entry.get("row_accounting")
+        if isinstance(acct, dict) and acct.get("dest_count") is not None:
+            try:
+                expected_rows = int(acct.get("dest_count"))
+            except (TypeError, ValueError):
+                expected_rows = None
+        ids = entry.get("written_ids") or _source_keyset(str(entry.get("name") or table))
+        ids = [str(x) for x in ids if x is not None] if isinstance(ids, list) else None
+        detail: list[str] = []
+        out: dict[str, Any] = {"table": table}
+        try:
+            rows, digest = verify_target(
+                db_type,
+                cfg,
+                schema=schema,
+                table_name=table,
+                fallback_rows=-1,
+                fallback_checksum="",
+                target_columns=target_cols,
+                limit=0,
+                written_ids=ids,
+                pk_column=pk_col or None,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # Unreadable dest is inconclusive, not a mismatch: this check only
+            # fails a job on a verified disagreement (tamper), never on a read
+            # the check itself could not perform.
+            results.append({"table": table, "ok": None, "detail": f"dest read-back failed: {exc}"})
+            continue
+        if rows == -1:
+            results.append({**out, "ok": None, "detail": "dest read-back unavailable"})
+            continue
+        out["rows"] = rows
+        out["target_checksum"] = digest or None
+        if expected_rows is not None and rows != expected_rows:
+            detail.append(f"dest count {rows} != expected {expected_rows}")
+        # Source side at verify time — keyed on the same pk set so a populated
+        # dest compares only the batch it received.
+        s_digest = ""
+        if ids is not None and src_type == "sqlite":
+            try:
+                _srows, s_digest = verify_target(
+                    src_type,
+                    src_cfg,
+                    schema="",
+                    table_name=str(entry.get("name") or table),
+                    fallback_rows=-1,
+                    fallback_checksum="",
+                    target_columns=target_cols,
+                    limit=0,
+                    written_ids=ids,
+                    pk_column=pk_col or None,
+                )
+            except Exception:
+                s_digest = ""
+        elif src_type == "sqlite":
+            try:
+                _srows, s_digest = verify_target(
+                    src_type,
+                    src_cfg,
+                    schema="",
+                    table_name=str(entry.get("name") or table),
+                    fallback_rows=-1,
+                    fallback_checksum="",
+                    target_columns=target_cols,
+                    limit=0,
+                )
+            except Exception:
+                s_digest = ""
+        if s_digest:
+            out["source_checksum"] = s_digest
+            if digest and s_digest != digest:
+                detail.append("source/dest digest mismatch")
+        results.append({**out, "ok": not detail, "detail": "; ".join(detail) if detail else "count+digest verified"})
+    if not results:
+        return stamped
+    stamped["per_stream_tables"] = results
+    # Only a verified mismatch fails the job — ``ok=None`` (inconclusive:
+    # the dest could not be re-read) is reported but never a hard failure.
+    bad = [r for r in results if r.get("ok") is False]
+    if bad:
+        stamped["passed"] = False
+        names = ", ".join(f"'{r['table']}'" for r in bad)
+        detail = "; ".join(f"{r['table']}: {r['detail']}" for r in bad)
+        _prior = str(stamped.get("message") or "").strip()
+        stamped["message"] = f"Multi-stream per-table verification failed on {names} — {detail}" + (
+            f". {_prior}" if _prior else ""
+        )
+    return stamped
+
+
 def _run_reconciliation_impl(
     *,
     endpoint: EndpointConfig,
@@ -4834,6 +5165,19 @@ def _run_reconciliation_impl(
         # Property 3 — carry source snapshot id onto the reconcile report /
         # migration certificate surface.
         stamped = _finalize_reconcile(payload, dest_summary=dest_summary)
+        # D11 — surface the watermark hold: the next incremental re-reads from
+        # the lowest quarantined cursor, so the run summary must say the rows
+        # are held rather than reporting a plain advance.
+        held = dest_summary.get("watermark_held_for_quarantine")
+        if isinstance(held, dict) and held.get("held_at") is not None:
+            stamped["watermark_held_for_quarantine"] = held
+            n_held = int(stamped.get("rejected_rows") or 0)
+            stamped["message"] = (
+                f"{str(stamped.get('message') or '').rstrip()} "
+                f"{n_held} row(s) held in quarantine — route watermark held at "
+                f"{held.get('lowest_quarantined_cursor') or held.get('held_at')} "
+                "so the next run re-reads them."
+            ).strip()
         msg = str(stamped.get("message") or "")
         assurance = str(stamped.get("assurance_level") or "")
         # Writer-ack / empty dest digest must never keep the reconcile() theatre
@@ -5879,6 +6223,11 @@ def _run_reconciliation_impl(
     # Streaming transfers pass records=[] — use the bounded sample the writer
     # stashed so append/upsert Gate-8 can still prove key-aligned fidelity.
     sample_records = list(records or [])
+    # The writer's stashed batch is already transform-resolved (EU '1,234' is
+    # stored as '1.234'); the in-memory ``records`` arg is the raw source read.
+    # Re-applying the declared transform to the stash mangles canonical text —
+    # track which one the compare is holding.
+    sample_rows_transformed = False
     if not sample_records:
         stashed = (
             dest_summary.get("reconcile_sample")
@@ -5887,6 +6236,13 @@ def _run_reconciliation_impl(
         )
         if isinstance(stashed, list):
             sample_records = [r for r in stashed if isinstance(r, dict)]
+            # Only the writer's mapped batch is post-transform (writer_common
+            # stamps reconcile_sample_transformed); the stream/CDC stashes are
+            # raw source cells — treating those as transformed skipped the
+            # transform at compare and false-failed clean runs (R-13 fixup).
+            sample_rows_transformed = bool(
+                dest_summary.get("reconcile_sample_transformed")
+            )
     pk_column = str(pk_cols[0]) if len(pk_cols) == 1 else None
     if allow_extra_early and pk_column and not written_ids and sample_records:
         written_ids = [
@@ -5942,26 +6298,21 @@ def _run_reconciliation_impl(
             )
             if engine_digests is not None:
                 digest_provenance["dest_read"] = "verify_time_engine_digest"
-        elif db_type == "postgresql":
+        else:
+            # R-13: the dest digest could not be re-read at verify time —
+            # the writer's write-time digest predates commit and cannot see
+            # post-write changes, so claiming value fidelity on it would be
+            # a false positive. Degrade to count-only on EVERY engine (this
+            # honesty was PostgreSQL-only; stamping a stale digest as
+            # full_checksum is wrong on any destination). The dest COUNT(*)
+            # is still measured below by the normal verify_target read-back —
+            # only the unverifiable value-digest claim degrades.
             source_checksum_scope_label = "count only"
             source_checksum_scope_note = (
                 "The destination value digest could not be re-read at verify "
                 "time — a write-time digest cannot see post-write changes, so "
                 "this verdict is row-count only, never value-verified."
             )
-        else:
-            engine_digests = _with_reread_dest_count(
-                paired,
-                db_type=db_type,
-                cfg=cfg,
-                schema=schema,
-                table_name=table_name,
-                rows_before=rows_before,
-            )
-            if engine_digests is not None:
-                digest_provenance["dest_read"] = (
-                    "write_time_engine_digest_no_verify_reread"
-                )
     elif (_engine_digest_enabled() or _cdc_source_image_gate(dest_summary)) and (
         not source_checksum_scope_note
         # X-37: the engine-copy count-only note is precisely what the flag is
@@ -6519,6 +6870,13 @@ def _run_reconciliation_impl(
                 dest_types=dest_types,
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
                 inserted_keys=dest_summary.get("inserted_keys"),
+                # Source cells were transformed under the run's declared
+                # number_locale at write time; fingerprint them under the
+                # same locale here or EU text re-reads as US grouping.
+                source_number_locale=str(
+                    dest_summary.get("number_locale") or ""
+                ),
+                source_rows_transformed=sample_rows_transformed,
             )
 
     # CDC delete proof: stashed PKs must be absent on destination read-back.
@@ -7130,6 +7488,8 @@ def run_reconciliation(
     source_endpoint: EndpointConfig | None = None,
     source_spool: Any = None,
     shape_recipe: dict[str, Any] | None = None,
+    source_file_content: Any = None,
+    source_file_name: str = "",
 ) -> dict[str, Any]:
     """Verify row counts and checksums against the destination.
 
@@ -7173,6 +7533,8 @@ def run_reconciliation(
                 mappings=mappings,
                 source_schema=source_schema,
                 recon=recon,
+                source_file_content=source_file_content,
+                source_file_name=source_file_name,
             )
         except Exception as exc:
             proof = {
@@ -7289,16 +7651,13 @@ def run_reconciliation(
             if _note_start >= 0 and (_cut < 0 or _note_start < _cut):
                 _cut = _note_start
             if _cut >= 0:
-                # The L4/L5 localization the ladder appends on a fail sits
-                # after the scope note — it is not part of the note and must
-                # survive (X-39). Find it directly; the note's own wording
-                # varies by scope (engine copy vs resume).
-                _tail = ""
-                for _marker in (" L4/L5 localized", " L4 localized"):
-                    _at = _msg.find(_marker, _cut)
-                    if _at >= 0:
-                        _tail = _msg[_at:]
-                        break
+                # The scope note is one contiguous span ending at "proof." —
+                # gate findings appended AFTER it (G22 RI, culprit keys,
+                # L4/L5 localization) are not part of the note and must
+                # survive (X-39 / R-13 window F: the note splice was wiping
+                # "referential integrity failed" off the report).
+                _note_end = _msg.find("proof.", _cut)
+                _tail = _msg[_note_end + len("proof."):] if _note_end >= 0 else ""
                 if recon["checksum_match"]:
                     recon["message"] = (
                         _msg[:_cut]

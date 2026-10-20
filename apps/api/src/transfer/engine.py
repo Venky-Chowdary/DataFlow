@@ -3255,6 +3255,12 @@ class UniversalTransferEngine:
                         or len(resume_full_records)
                         or len(records)
                     )
+                # Gate-8's sample compare must resolve source transforms under
+                # the locale the writer used (EU '1,234' -> 1.234), not ambient.
+                dest_summary.setdefault(
+                    "number_locale",
+                    getattr(request, "number_locale", "") or "",
+                )
                 try:
                     recon = run_reconciliation(
                         endpoint=request.destination,
@@ -4294,6 +4300,10 @@ class UniversalTransferEngine:
                     # summary, so a shaped run balances instead of reporting a
                     # destination population short by the filtered rows.
                     _stamp_shape_evidence(dest_summary, shape_runner)
+                dest_summary.setdefault(
+                    "number_locale",
+                    getattr(request, "number_locale", "") or "",
+                )
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],
@@ -5207,6 +5217,10 @@ class UniversalTransferEngine:
                     # Before reconciliation, not after: the cell ladder decides
                     # whether a source re-read is still comparable from this stamp.
                     _stamp_shape_evidence(dest_summary, shape_runner)
+                dest_summary.setdefault(
+                    "number_locale",
+                    getattr(request, "number_locale", "") or "",
+                )
                 recon = run_reconciliation(
                     endpoint=request.destination,
                     records=[],
@@ -5220,6 +5234,11 @@ class UniversalTransferEngine:
                     validation_mode=request.validation_mode,
                     source_endpoint=request.source,
                     shape_recipe=getattr(request, "shape_recipe", None),
+                    # X-120 — file sources get the same independent re-read
+                    # proof as DB sources: re-parse these bytes at verify and
+                    # recompute the recipe (digest-checked against read time).
+                    source_file_content=content,
+                    source_file_name=filename,
                 )
             canonical_rejected_details = _snapshot_rejected_details(dest_summary)
             dest_summary = pii_guard.redact_destination_summary(dest_summary, mappings)

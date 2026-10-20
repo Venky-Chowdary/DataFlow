@@ -1048,4 +1048,9 @@ def stream_spilled_file_to_database(
 
     if isinstance(summary, dict):
         attach_direct_dated_file_warning(summary, filename)
+        # X-120 — the spilled source file is still on disk at verify time:
+        # stamp its path so the transform proof can re-read and recompute the
+        # recipe, same as a DB source re-SELECT.
+        summary["source_spill_path"] = str(path)
+        summary["source_spill_name"] = str(filename)
     return rows, ddl, summary, columns
