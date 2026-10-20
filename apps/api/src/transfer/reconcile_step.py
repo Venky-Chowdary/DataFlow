@@ -4009,6 +4009,15 @@ def _report_culprit_keys(
     report["message"] = f"{msg} Culprit key(s) — {'; '.join(parts)}."
 
 
+# X-139: one canonical set backs both the branch table in
+# _culprit_census_conn and the "no census driver" message — a hand-written
+# list in the message had drifted from the code (claimed mssql, which was
+# unreachable under the resolver, and snowflake before D8 landed it).
+_CENSUS_DRIVER_ENGINES = frozenset(
+    {"postgresql", "mysql", "sqlserver", "duckdb", "sqlite", "snowflake"}
+)
+
+
 def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | None:
     """(engine, connection) for the failure-path key census, or None when the
     engine cannot be read back for a census."""
@@ -4054,10 +4063,13 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
         return eng, sqlite3.connect(
             str(cfg.get("database") or cfg.get("path") or "")
         )
-    if eng == "mssql":
+    if eng in {"mssql", "sqlserver", "azure_sql"}:
+        # X-139: resolve_driver_type canonicalizes sqlserver/mssql/azure_sql
+        # to "sqlserver" — matching only the literal "mssql" left every SQL
+        # Server route without a census, so tamper failures never named keys.
         from services.copy_sqlserver_sqlserver import _ss_connect
 
-        return eng, _ss_connect(cfg)
+        return "sqlserver", _ss_connect(cfg)
     if eng == "snowflake":
         # D8: the census driver set had no Snowflake entry, so culprit keys
         # could never be named on Snowflake destinations.
@@ -4202,9 +4214,10 @@ def _generic_key_census(
                 _missing.append(f"source '{src_eng}'")
             if dst_conn_info is None:
                 _missing.append(f"destination '{dst_eng}'")
+            _verb = "have" if len(_missing) > 1 else "has"
             return [], [], [], (
                 " and ".join(_missing)
-                + " has no census driver (postgres/mysql/mssql/duckdb/sqlite/snowflake)"
+                + f" {_verb} no census driver ({'/'.join(sorted(_CENSUS_DRIVER_ENGINES))})"
             )
         changed: list[Any] = []
         missing: list[Any] = []
