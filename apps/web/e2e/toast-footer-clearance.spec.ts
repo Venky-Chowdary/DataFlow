@@ -136,6 +136,47 @@ async function assertToastClearance(
       !clipped && box !== null && box.width >= 80,
       `route chip must be readable on ${label}`,
     ).toBe(true);
+    // D-BP-25: the container being wide enough is not the contract — the
+    // source/destination NAME spans must render in full.
+    const routeLabels = routeChip.locator(".df2-route-bar-label");
+    const rlCount = await routeLabels.count();
+    for (let i = 0; i < rlCount; i++) {
+      const el = routeLabels.nth(i);
+      if (!(await el.isVisible().catch(() => false))) continue;
+      const labelClipped = await el.evaluate(
+        (n) => n.scrollWidth > n.clientWidth + 1,
+      );
+      const txt = ((await el.textContent()) || "").trim();
+      expect(
+        labelClipped,
+        `route-bar name '${txt}' must not be truncated on ${label}`,
+      ).toBe(false);
+    }
+  }
+
+  // D-BP-26: footer status words must not truncate mid-word at >=1024 —
+  // the CSS drops secondary detail spans instead of ellipsizing.
+  const vpw = page.viewportSize()?.width ?? 0;
+  if (vpw >= 1024) {
+    const statusSpans = page.locator(
+      ".df2-validate-footer-status:visible > span, " +
+        ".df2-run-footer-status:visible > span, " +
+        ".df2-map-footer-status:visible > span, " +
+        ".df2-wizard-footer:visible > .df2-label-hint",
+    );
+    const sCount = await statusSpans.count();
+    for (let i = 0; i < sCount; i++) {
+      const el = statusSpans.nth(i);
+      if (!(await el.isVisible().catch(() => false))) continue;
+      const clipped = await el.evaluate(
+        (n) => n.scrollWidth > n.clientWidth + 1,
+      );
+      const txt = ((await el.textContent()) || "").trim().slice(0, 48);
+      expect(
+        clipped,
+        `footer status '${txt}' must not be truncated on ${label}`,
+      ).toBe(false);
+    }
   }
 
   if (toastBoxes.length === 0) {
@@ -184,13 +225,37 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
     test(`no toast overlap with footer, primary actions, or cards @${width}px`, async ({
       page,
     }) => {
+      await runClearanceWalk(page, width, "");
+    });
+  }
+});
+
+// D-BP-24: the same clearance contract holds in canvas mode — docked toasts
+// must live inside the header band at every width there too.
+test.describe("toast/footer clearance — canvas mode (D-BP-24)", () => {
+  test.beforeEach(async ({ page }) => {
+    await installHermeticStubs(page);
+    await page.addInitScript(() => {
+      localStorage.setItem("df.studioCanvas", "1");
+      localStorage.setItem("df2.theme", "light");
+    });
+  });
+
+  for (const width of [1440, 1280, 1024, 390]) {
+    test(`canvas: no toast overlap @${width}px`, async ({ page }) => {
+      await runClearanceWalk(page, width, "canvas ");
+    });
+  }
+});
+
+async function runClearanceWalk(page: Page, width: number, mode: string) {
       await page.setViewportSize({ width, height: 900 });
       await openStudio(page);
 
       // Source step: the sample-file load fires "Source profiled", which used
       // to cover "Continue to Transform" in the wizard footer.
       await loadSample(page);
-      await assertToastClearance(page, `Source @${width}px`);
+      await assertToastClearance(page, `${mode}Source @${width}px`);
 
       // P1-1: walk every classic step and assert the shell stays clear on
       // each — not only Source/Validate. The Validate leg stays HARD (the
@@ -207,7 +272,7 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
         return false;
       };
       if (await clickIf(/Continue to Destination/)) {
-        await assertToastClearance(page, `Destination @${width}px`, {
+        await assertToastClearance(page, `${mode}Destination @${width}px`, {
           requireToast: false,
         });
       }
@@ -217,13 +282,13 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
         await page.waitForTimeout(400);
       }
       if (await clickIf(/Continue to Review|Continue to Transform/)) {
-        await assertToastClearance(page, `Transform/Review @${width}px`, {
+        await assertToastClearance(page, `${mode}Transform/Review @${width}px`, {
           requireToast: false,
         });
       }
       await clickIf(/Review result/);
       if (await clickIf(/Continue without transforming/)) {
-        await assertToastClearance(page, `Map @${width}px`, {
+        await assertToastClearance(page, `${mode}Map @${width}px`, {
           requireToast: false,
         });
       }
@@ -233,12 +298,18 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
       await toValidate.waitFor({ state: "visible", timeout: 15_000 });
       await toValidate.click();
       // Validate panel + the contract bind field + at least one metric card
-      // must be on screen, and the Validate toasts must be live.
+      // must be on screen, and the Validate toasts must be live. The leg
+      // waits for the preflight toast specifically so it cannot pass on a
+      // stale toast by timing (D-BP-24).
       await expect(page.locator(".df2-contract-bind").first()).toBeVisible({
         timeout: 15_000,
       });
       await expect(page.locator(".df2-vd-metric").first()).toBeVisible();
-      await assertToastClearance(page, `Validate step @${width}px`);
+      await expect(
+        page.locator(".dt-toast:visible", { hasText: /preflight|validat/i }).first(),
+        `a preflight/validate toast must be shown on ${mode}Validate @${width}px`,
+      ).toBeVisible({ timeout: 10_000 });
+      await assertToastClearance(page, `${mode}Validate step @${width}px`);
 
       // Run leg: reachable only when the preview can advance — assert when
       // it lands, record plainly when it cannot.
@@ -250,7 +321,7 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
       ) {
         await toRun.click().catch(() => {});
         await page.waitForTimeout(1500);
-        await assertToastClearance(page, `Run @${width}px`, {
+        await assertToastClearance(page, `${mode}Run @${width}px`, {
           requireToast: false,
         });
       } else {
@@ -259,6 +330,4 @@ test.describe("toast/footer clearance (D-BP-11)", () => {
           description: `Run step not reachable in preview @${width}px — leg skipped honestly`,
         });
       }
-    });
-  }
-});
+}

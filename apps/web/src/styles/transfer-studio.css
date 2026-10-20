@@ -2147,14 +2147,19 @@ button.df2-map-band-chip:hover {
    ignores flex-direction and left the wizard squeezed into the `auto`
    track at 150px (labels overlapping) at <=1280 (D-BP-23). */
 @media (max-width: 1280px) {
-  .df2-transfer-studio-chrome-row {
-    display: flex !important;
+  .df2-page-transfer-studio .df2-transfer-studio-chrome-row {
+    /* Specificity (0,2,0) beats the bare display:grid bases in
+       enterprise-ui — the row stacks as a flex column (D-BP-23). */
+    display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 6px;
   }
 
-  .df2-transfer-studio-chrome .df2-route-bar {
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar {
+    /* (0,4,0) — enterprise-ui's 768–1279 rules cap the bar at 150px with
+       (0,3,0) in a later-loaded file; the names ellipsized to "sam… → JS…"
+       (D-BP-25). Full width in the stacked column. */
     max-width: none;
     width: 100%;
     flex: 0 0 auto;
@@ -2162,6 +2167,46 @@ button.df2-map-band-chip:hover {
 
   .df2-transfer-studio-chrome .df2-wizard-studio {
     max-width: none;
+  }
+
+  /* D-BP-25: with the bar full-width in the stacked column, the per-name
+     caps (min(200px,28vw) / 220px flex basis) only exist to ellipsize —
+     drop them so the real source/destination names render in full. */
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-label {
+    max-width: none;
+  }
+}
+
+/* D-BP-25: above the stack breakpoint the chip must still show full endpoint
+   names — enterprise-ui.css (later in cascade) caps the bar at
+   flex-basis 220px / max-width 240px globally, ellipsizing ~110px names.
+   (0,4,0) restores a size-to-content bar with a sane outer cap. */
+@media (min-width: 1281px) {
+  /* shrink OTHER chrome first (D-BP-25): the wizard column takes the deficit
+     and its track wraps; the route-bar column sizes to content. */
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-wizard-studio .df2-wizard-track {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar {
+    flex: 0 0 auto;
+    /* the bar sits in a grid track ~230px wide at this range; width:max-content
+       makes it take its content width (overflowing a smaller track) instead
+       of shrinking to the track and ellipsizing the endpoint names. */
+    width: max-content;
+    max-width: 560px;
+    overflow: visible;
+  }
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-label {
+    max-width: none;
+  }
+  /* endpoints were flex:1 1 0% — the bar's intrinsic width collapsed to
+     ~min-content; size each endpoint to its content so the bar can grow. */
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-endpoint {
+    flex: 0 1 auto;
   }
 }
 
@@ -3064,6 +3109,19 @@ th.df2-type-string .df2-type-badge {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* D-BP-26: below ~1100px the nowrap footer cannot hold every status span —
+   ellipsizing mid-word reads as broken ("Validat…", "…uniquene…"). Keep the
+   primary status (first span: "Validate <state>" / "Route …" / map status)
+   and drop the secondary detail/blocker spans — the full text remains in
+   the status span's title and in the card content above. */
+@media (max-width: 1100px) {
+  .df2-page-transfer-studio .df2-map-footer-status > span:not(:first-child),
+  .df2-page-transfer-studio .df2-validate-footer-status > span:not(:first-child),
+  .df2-page-transfer-studio .df2-run-footer-status > span:not(:first-child) {
+    display: none;
+  }
 }
 
 /* Narrow / short viewports ? keep footer one compact band */
@@ -10518,17 +10576,19 @@ button.df2-vd-assist-toggle:focus-visible {
   max-width: 220px;
   font-size: 11px;
 }
-/* When the header row is too narrow to hold the dock, let the stepper and
-   route bar win — the dock drops out of the chrome row into an overlay
-   strip under the header rather than pushing chrome or overlapping
-   (D-BP-23: at <=1280 the stacked chrome still left a 44vw inline dock
-   crushing the stepper labels). */
+/* At <=1280 the chrome stacks as a flex column (D-BP-23); the dock becomes
+   a full-width in-flow row of that column — a reserved lane inside the
+   header band. An absolute overlay strip used to cover the content below
+   (D-BP-24); in-flow it covers nothing and overlaps nothing. */
 @media (max-width: 1280px) {
-  .df2-toast-dock:has(.dt-toast) {
-    position: absolute;
-    right: 8px;
-    top: 100%;
-    z-index: var(--df-z-sticky, 20);
+  .df2-page-transfer-studio .df2-toast-dock {
+    margin-left: 0;
+    width: 100%;
+    max-width: none;
+  }
+  .df2-page-transfer-studio .df2-toast-dock:has(.dt-toast) {
+    display: flex;
+    justify-content: flex-end;
   }
 }
 
@@ -11938,8 +11998,10 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   max-height: none !important;
   /* D-BP-21: one footer row at >=901px — wrap drops Back+status and the
      actions onto a second centered line (seen live at 1024). Below 900px
-     the deliberate stacked layout in the media rule below takes over. */
-  flex-wrap: nowrap !important;
+     the deliberate stacked layout in the media rule below takes over.
+     This selector's specificity already beats the shell-polish
+     .df2-card-footer.df2-wizard-footer wrap — no !important needed. */
+  flex-wrap: nowrap;
   height: auto !important;
 }
 
@@ -11950,7 +12012,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 .df2-page-transfer-studio .df2-validate-footer,
 .df2-page-transfer-studio .df2-run-footer {
   max-height: none !important;
-  flex-wrap: nowrap !important;
+  flex-wrap: nowrap;
   justify-content: flex-start !important;
   height: auto !important;
 }
@@ -11959,9 +12021,12 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   margin-left: auto;
 }
 @media (max-width: 900px) {
+  /* Match the nowrap rule's specificity so this later rule wins at <=900px. */
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-run-footer,
   .df2-page-transfer-studio .df2-validate-footer,
   .df2-page-transfer-studio .df2-run-footer {
-    flex-wrap: wrap !important;
+    flex-wrap: wrap;
     justify-content: space-between !important;
   }
   .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-card-footer.df2-wizard-footer,
@@ -11970,7 +12035,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-wizard-footer,
   .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer.df2-wizard-footer,
   .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer {
-    flex-wrap: wrap !important;
+    flex-wrap: wrap;
   }
 }
 
