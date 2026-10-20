@@ -34,6 +34,17 @@ except ImportError:
 STORE_PATH = data_dir() / "schedules.json"
 STORE_MIGRATED_PATH = data_dir() / "schedules.json.migrated"
 
+
+def _store_path():
+    # Resolved per call so a test that points DATAFLOW_DATA_DIR elsewhere
+    # after import still lands in its sandbox; the module-level constant
+    # stays for import-time compatibility only.
+    return data_dir() / "schedules.json"
+
+
+def _store_migrated_path():
+    return data_dir() / "schedules.json.migrated"
+
 INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}
 # Rolling minute steps. ``*/7`` is not every 7 minutes: the hour restarts at
 # :00, four minutes after :56 (R12-002). A step that does not divide 60 is
@@ -110,7 +121,9 @@ _NAME_LOCK = threading.RLock()
 _NAME_INDEX_READY = False
 
 
-def _load_schedules_from_file(path=STORE_PATH) -> list[PipelineSchedule]:
+def _load_schedules_from_file(path=None) -> list[PipelineSchedule]:
+    if path is None:
+        path = _store_path()
     if not path.exists():
         return []
     try:
@@ -141,17 +154,17 @@ def import_file_schedules_into_mongo(*, force: bool = False) -> int:
     if existing:
         return 0
 
-    file_schedules = _load_schedules_from_file(STORE_PATH)
-    if not file_schedules and STORE_MIGRATED_PATH.exists():
+    file_schedules = _load_schedules_from_file(_store_path())
+    if not file_schedules and _store_migrated_path().exists():
         # Allow re-import from the backup if the primary file was already renamed.
-        file_schedules = _load_schedules_from_file(STORE_MIGRATED_PATH)
+        file_schedules = _load_schedules_from_file(_store_migrated_path())
     if not file_schedules:
         return 0
 
     _save_mongo(svc, file_schedules)
     try:
-        if STORE_PATH.exists():
-            STORE_PATH.replace(STORE_MIGRATED_PATH)
+        if _store_path().exists():
+            _store_path().replace(_store_migrated_path())
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return len(file_schedules)
@@ -881,7 +894,7 @@ def _load_all() -> list[PipelineSchedule]:
     svc = _mongo_backend()
     if svc:
         return _load_mongo(svc)
-    return _load_schedules_from_file(STORE_PATH)
+    return _load_schedules_from_file(_store_path())
 
 
 def _save_all(schedules: list[PipelineSchedule], *, removed_ids: Sequence[str] = ()) -> None:
@@ -889,8 +902,8 @@ def _save_all(schedules: list[PipelineSchedule], *, removed_ids: Sequence[str] =
     if svc:
         _save_mongo(svc, schedules, removed_ids=removed_ids)
         return
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STORE_PATH.write_text(
+    _store_path().parent.mkdir(parents=True, exist_ok=True)
+    _store_path().write_text(
         json.dumps({"schedules": [s.to_dict() for s in schedules]}, indent=2, default=json_default),
         encoding="utf-8",
     )
