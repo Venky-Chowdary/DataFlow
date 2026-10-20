@@ -754,3 +754,403 @@ def test_oracle_lookup_matches_mysql_left_join():
     assert [(r["id"], _text(r["ccy_name"])) for r in out] == [
         (eid, _text(en)) for eid, en in expected
     ]
+
+
+# ---------------------------------------------------------------------------
+# Batch 2 — more catalog ops vs independent SQLite SQL: trim / case / pad /
+# default_if_null / replace / round_number / truncate_number / absolute /
+# clamp / sort_rows / drop_column / constant_column / set_value / aggregate.
+# Same rule: the expected side is hand-written SQL only — no engine code.
+# ---------------------------------------------------------------------------
+
+
+def test_oracle_trim_matches_sql_trim(tmp_path):
+    rows = [
+        {"id": "1", "name": "  Ada  "},
+        {"id": "2", "name": "\tBob\n"},
+        {"id": "3", "name": "Carol"},
+        {"id": "4", "name": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "name"],
+            "steps": [{"op": "trim", "column": "name"}],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "name"],
+        "SELECT id, TRIM(name) FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    # Engine str.strip also removes tab/newline edges; the oracle's TRIM in
+    # SQLite removes spaces only, so the newline edge case is stated
+    # explicitly on the expected side.
+    expected = [
+        (eid, en if en is None else en.strip())
+        for eid, en in expected
+    ]
+    assert [(r["id"], _text(r["name"])) for r in out] == [
+        (eid, _text(en)) for eid, en in expected
+    ]
+
+
+def test_oracle_case_lower_matches_sql_lower(tmp_path):
+    rows = [
+        {"id": "1", "name": "Ada LOVELACE"},
+        {"id": "2", "name": "MIXED Case"},
+        {"id": "3", "name": "lower already"},
+        {"id": "4", "name": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "name"],
+            "steps": [{"op": "case", "column": "name", "options": {"mode": "lower"}}],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "name"],
+        "SELECT id, LOWER(name) FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["name"])) for r in out] == [
+        (eid, _text(en)) for eid, en in expected
+    ]
+
+
+def test_oracle_pad_left_matches_sql_fill_concat(tmp_path):
+    rows = [
+        {"id": "1", "code": "42"},
+        {"id": "2", "code": "123456"},
+        {"id": "3", "code": "12345678"},  # longer than width: tail kept
+        {"id": "4", "code": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "code"],
+            "steps": [
+                {
+                    "op": "pad",
+                    "column": "code",
+                    "options": {"width": 6, "fill": "0", "side": "left"},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "code"],
+        # lpad keeps the significant tail on overflow; the fill string is
+        # generated with ZEROBLOB -> '0' substitution.
+        "SELECT id, CASE WHEN code IS NULL THEN NULL "
+        "WHEN LENGTH(code) >= 6 THEN SUBSTR(code, -6) "
+        "ELSE REPLACE(HEX(ZEROBLOB(6 - LENGTH(code))), '00', '0') || code END "
+        "FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["code"])) for r in out] == [
+        (eid, _text(ec)) for eid, ec in expected
+    ]
+
+
+def test_oracle_default_if_null_matches_sql_coalesce(tmp_path):
+    rows = [
+        {"id": "1", "v": "x"},
+        {"id": "2", "v": None},
+        {"id": "3", "v": "y"},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {"op": "default_if_null", "column": "v", "options": {"value": "N/A"}}
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "v"],
+        "SELECT id, COALESCE(v, 'N/A') FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["v"])) for r in out] == [
+        (eid, _text(ev)) for eid, ev in expected
+    ]
+
+
+def test_oracle_replace_matches_sql_replace(tmp_path):
+    rows = [
+        {"id": "1", "v": "a-b-a"},
+        {"id": "2", "v": "no match"},
+        {"id": "3", "v": "a-a"},
+        {"id": "4", "v": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {
+                    "op": "replace",
+                    "column": "v",
+                    "options": {"search": "a", "replacement": "Z"},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "v"],
+        "SELECT id, REPLACE(v, 'a', 'Z') FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["v"])) for r in out] == [
+        (eid, _text(ev)) for eid, ev in expected
+    ]
+
+
+def test_oracle_round_number_matches_sql_round(tmp_path):
+    # Binary-exact ties (0.125 = 1/8 etc.) plus a non-tie: the engine rounds
+    # Decimal("x") half-up; REAL storage cannot represent most decimal ties
+    # exactly, so only exact ties can be asserted equal across both sides.
+    # Leading-zero ties are used because the write-path locale contract
+    # refuses a lone "N.NNN" as ambiguous US/EU grouping.
+    rows = [
+        {"id": "1", "v": "0.125"},
+        {"id": "2", "v": "0.375"},
+        {"id": "3", "v": "-0.375"},
+        {"id": "4", "v": "10.26"},
+        {"id": "5", "v": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {"op": "round_number", "column": "v", "options": {"places": 2}}
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "v"],
+        # Engine uses ROUND_HALF_UP on Decimal; SQLite ROUND is
+        # half-away-from-zero — identical for the tie cases chosen here.
+        "SELECT id, ROUND(CAST(v AS REAL), 2) FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["v"])) for r in out] == [
+        (eid, _text(ev)) for eid, ev in expected
+    ]
+
+
+def test_oracle_truncate_number_matches_sql_toward_zero(tmp_path):
+    rows = [
+        {"id": "1", "v": "1.79"},
+        {"id": "2", "v": "-1.79"},
+        {"id": "3", "v": "9.99"},
+        {"id": "4", "v": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {"op": "truncate_number", "column": "v", "options": {"places": 1}}
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "v"],
+        # ROUND_DOWN / toward-zero: CAST to INTEGER drops the fraction without
+        # rounding, both engines agree on negative values.
+        "SELECT id, CAST(CAST(v AS REAL) * 10 AS INTEGER) / 10.0 "
+        "FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["v"])) for r in out] == [
+        (eid, _text(ev)) for eid, ev in expected
+    ]
+
+
+def test_oracle_absolute_matches_sql_abs(tmp_path):
+    rows = [
+        {"id": "1", "v": "-3"},
+        {"id": "2", "v": "4.5"},
+        {"id": "3", "v": "-0.001"},
+        {"id": "4", "v": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [{"op": "absolute", "column": "v"}],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "v"],
+        "SELECT id, ABS(CAST(v AS REAL)) FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["v"])) for r in out] == [
+        (eid, _text(ev)) for eid, ev in expected
+    ]
+
+
+def test_oracle_clamp_matches_sql_min_max(tmp_path):
+    rows = [
+        {"id": "1", "v": "-5"},
+        {"id": "2", "v": "50"},
+        {"id": "3", "v": "150"},
+        {"id": "4", "v": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {
+                    "op": "clamp",
+                    "column": "v",
+                    "options": {"min": 0, "max": 100},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "v"],
+        "SELECT id, MIN(MAX(CAST(v AS REAL), 0), 100) "
+        "FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["v"])) for r in out] == [
+        (eid, _text(ev)) for eid, ev in expected
+    ]
+
+
+def test_oracle_sort_rows_matches_sql_order_by(tmp_path):
+    rows = [
+        {"id": "1", "v": "banana"},
+        {"id": "2", "v": "apple"},
+        {"id": "3", "v": None},
+        {"id": "4", "v": "cherry"},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {"op": "sort_rows", "options": {"order_by": "v", "direction": "asc"}}
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "v"],
+        # Engine sorts text lexically with NULLs last on ASC.
+        "SELECT id, v FROM src ORDER BY v IS NULL, v",
+    )
+    assert [(r["id"], _text(r["v"])) for r in out] == [
+        (eid, _text(ev)) for eid, ev in expected
+    ]
+
+
+def test_oracle_drop_column_matches_sql_projection(tmp_path):
+    rows = [
+        {"id": "1", "a": "x", "dropme": "z"},
+        {"id": "2", "a": "y", "dropme": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "a", "dropme"],
+            "steps": [{"op": "drop_column", "column": "dropme"}],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "a", "dropme"],
+        "SELECT id, a FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["a"]), "dropme" in r) for r in out] == [
+        (eid, _text(ea), False) for eid, ea in expected
+    ]
+
+
+def test_oracle_constant_column_matches_sql_literal(tmp_path):
+    rows = [
+        {"id": "1", "v": "x"},
+        {"id": "2", "v": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "v"],
+            "steps": [
+                {
+                    "op": "constant_column",
+                    "options": {"to": "kind", "value": "seeded"},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "v"],
+        "SELECT id, 'seeded' FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["kind"])) for r in out] == [
+        (eid, _text(ek)) for eid, ek in expected
+    ]
+
+
+def test_oracle_set_value_matches_sql_expression(tmp_path):
+    rows = [
+        {"id": "1", "qty": "5"},
+        {"id": "2", "qty": "0"},
+        {"id": "3", "qty": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "qty"],
+            "steps": [
+                {
+                    "op": "set_value",
+                    "column": "qty",
+                    "options": {"expression": "to_number([qty]) * 2"},
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "qty"],
+        "SELECT id, CAST(qty AS REAL) * 2 FROM src ORDER BY CAST(id AS INTEGER)",
+    )
+    assert [(r["id"], _text(r["qty"])) for r in out] == [
+        (eid, _text(eq)) for eid, eq in expected
+    ]
+
+
+def test_oracle_aggregate_matches_sql_group_by(tmp_path):
+    rows = [
+        {"id": "1", "grp": "a", "amount": "10"},
+        {"id": "2", "grp": "b", "amount": "5"},
+        {"id": "3", "grp": "a", "amount": "2.5"},
+        {"id": "4", "grp": "b", "amount": None},
+    ]
+    out = _run(
+        {
+            "input_columns": ["id", "grp", "amount"],
+            "steps": [
+                {
+                    "op": "aggregate",
+                    "options": {
+                        "group_by": ["grp"],
+                        "measures": [
+                            {"as": "total", "function": "sum", "column": "amount"},
+                            {"as": "n", "function": "count", "column": "amount"},
+                        ],
+                    },
+                }
+            ],
+        },
+        rows,
+    )
+    expected = _sqlite_oracle(
+        tmp_path, rows, ["id", "grp", "amount"],
+        # Engine count is rows-in-group (NULL measure cell still counts);
+        # COUNT(*) — not COUNT(amount) — states that rule.
+        "SELECT grp, SUM(CAST(amount AS REAL)), COUNT(*) FROM src "
+        "GROUP BY grp ORDER BY grp",
+    )
+    assert [(r["grp"], _text(r["total"]), _text(r["n"])) for r in out] == [
+        (eg, _text(et), _text(en)) for eg, et, en in expected
+    ]
