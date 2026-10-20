@@ -349,7 +349,21 @@ def set_wide_decimal_inputsizes(cur: Any, sqlserver_ddls: list[str]) -> None:
         else:
             sizes.append(None)
     if any_wide:
-        setter(*sizes)
+        try:
+            # pyodbc takes ONE argument — the sizes sequence — not N
+            # positional args (X-40: 'setinputsizes() takes exactly one
+            # argument (N given)' reached the user as a raw TypeError).
+            setter(sizes)
+        except Exception as exc:
+            # Decline, don't swallow: without the varchar declarations a
+            # wide decimal could bind truncated by fast_executemany, so a
+            # rejected setinputsizes sends the copy to the row path where
+            # every bind failure is a typed finding and read-back verifies
+            # exact precision — never a silent precision loss, never a raw
+            # driver error reaching the user.
+            raise FastPathUnavailable(
+                f"pyodbc setinputsizes rejected wide-decimal declarations: {exc}"
+            ) from exc
 
 
 class _CopyExecutemanySink:

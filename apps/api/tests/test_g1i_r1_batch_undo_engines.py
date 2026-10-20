@@ -128,9 +128,12 @@ def test_bigquery_dest_batch_is_deleted_through_client(monkeypatch):
     note = batch_undo.undo_failed_batch_if_dest_was_empty(
         destination=destination, dest_summary=summary, sync_mode="full_refresh"
     )
-    assert ran and ran[0].startswith("DELETE FROM"), note
-    assert "batch" in ran[0]
-    # post-delete count is re-measured through the engine path
+    deletes = [s for s in ran if s.strip().upper().startswith("DELETE")]
+    assert deletes, f"expected a DELETE among issued statements {ran!r} — {note}"
+    assert "batch" in deletes[0]
+    # a pre-delete COUNT(*) probe may run first to decide whether the dest
+    # table existed before this run (undo must not DELETE a table it never
+    # created); the post-delete count is re-measured through the engine path
     assert summary.get("partial_batch_undo") in {"cleared", "retained"}
 
 
