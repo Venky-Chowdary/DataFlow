@@ -797,6 +797,100 @@ def _recipe_step_sql(
     return None
 
 
+def _expression_oracle_sql(
+    source: Any,
+    params: dict[str, Any],
+    *,
+    src_type: str,
+    qs: str,
+) -> str | None:
+    """Compile a derive_column/set_value expression to faithful source SQL.
+
+    Whitelist only — literals, columns, arithmetic, and a small set of
+    string/number calls whose semantics match across the supported dialects.
+    Anything outside the subset returns None and the step stays honestly
+    uncovered (never invent an approximation).
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+    from services.shape_expr import (
+        _Binary,
+        _Call,
+        _Column,
+        _Literal,
+        _Unary,
+        compile_expression,
+    )
+
+    tsql = src_type in _TSQL_DIALECTS
+
+    def _lit(v: Any) -> str:
+        key = f"ov{len(params)}"
+        params[key] = v
+        return f":{key}"
+
+    def _node(n: Any) -> str | None:
+        if isinstance(n, _Literal):
+            if n.value is None:
+                return "NULL"
+            return _lit(n.value)
+        if isinstance(n, _Column):
+            return quote_sql_identifier(n.name, qs)
+        if isinstance(n, _Unary):
+            inner = _node(n.operand)
+            if inner is None or n.op != "-":
+                return None
+            return f"(0 - {inner})"
+        if isinstance(n, _Binary):
+            if n.op not in {"+", "-", "*", "/", "%"}:
+                return None
+            left, right = _node(n.left), _node(n.right)
+            if left is None or right is None:
+                return None
+            return f"({left} {n.op} {right})"
+        if isinstance(n, _Call):
+            name = str(n.name).casefold()
+            args = [_node(a) for a in n.args]
+            if any(a is None for a in args):
+                return None
+            if name == "upper" and len(args) == 1:
+                return f"UPPER({args[0]})"
+            if name == "lower" and len(args) == 1:
+                return f"LOWER({args[0]})"
+            if name == "trim" and len(args) == 1:
+                return (
+                    f"LTRIM(RTRIM({args[0]}))"
+                    if tsql
+                    else f"TRIM({args[0]})"
+                )
+            if name in {"ltrim", "rtrim"} and len(args) == 1:
+                return f"{name.upper()}({args[0]})"
+            if name in {"length", "len"} and len(args) == 1:
+                return (
+                    f"LEN({args[0]})" if tsql else f"LENGTH({args[0]})"
+                )
+            if name == "concat" and args:
+                if src_type == "sqlite":
+                    joined = " || ".join(
+                        f"COALESCE({a}, '')" for a in args
+                    )
+                    return f"({joined})"
+                return f"CONCAT({', '.join(args)})"
+            if name == "coalesce" and args:
+                return f"COALESCE({', '.join(args)})"
+            if name == "abs" and len(args) == 1:
+                return f"ABS({args[0]})"
+            if name == "round" and len(args) in {1, 2}:
+                return f"ROUND({', '.join(args)})"
+            return None
+        return None
+
+    try:
+        expr = compile_expression(str(source or ""))
+    except Exception:
+        return None
+    return _node(expr.root)
+
+
 def _transform_applied_proof(
     *,
     shape_recipe: dict[str, Any] | None,
@@ -841,6 +935,44 @@ def _transform_applied_proof(
     unprovable = pop_ops - _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS
     if unprovable:
         if unprovable <= _TRANSFORM_PROOF_COVERED_POPULATION_OPS:
+            # Dedupe's removals are proven by the winner checks, not the
+            # SQL oracle — report what those checks actually found. All
+            # passed → verified by side evidence; any unverified → the
+            # honest skip naming why (the bare "skipped" read as a gap).
+            _ded_checks = (
+                (recon or {}).get("dedupe_checks")
+                if isinstance(recon, dict)
+                else None
+            ) or []
+            if _ded_checks:
+                _unv = [
+                    c for c in _ded_checks
+                    if c.get("status") == "unverified"
+                ]
+                if not _unv and all(
+                    c.get("status") == "passed" for c in _ded_checks
+                ):
+                    return {
+                        "status": "verified",
+                        "covered_by": "row ledger + dedupe winner checks",
+                        "provenance": "dedupe winner checks",
+                        "reason": (
+                            "dedupe removals proven by the row ledger and "
+                            "the winner uniqueness/ordering checks"
+                        ),
+                    }
+                if _unv:
+                    return {
+                        "status": "skipped",
+                        "covered_by": "row ledger + dedupe winner checks",
+                        "reason": (
+                            "dedupe winner check(s) unverified: "
+                            + "; ".join(
+                                str(c.get("reason") or c.get("check") or "")
+                                for c in _unv[:3]
+                            )
+                        ),
+                    }
             return {
                 "status": "skipped",
                 "covered_by": "row ledger + dedupe winner checks",
@@ -1430,12 +1562,38 @@ def _transform_applied_proof(
             src_to_dest_ddl[_msrc] = _mdl
             src_to_dest_ddl[_msrc.lower()] = _mdl
     _covered_step_idx: set[int] = set()
+    # The oracle keys each entry on the column the eo join expects — the
+    # destination name for produced columns (derive to=note2), the input
+    # name for in-place steps. The __raw select always reads a real source
+    # column: this maps oracle key -> source column to read raw.
+    oracle_raw_src: dict[str, str] = {}
     if oracle_ok:
         for _si, st in enumerate(steps):
             if not oracle_ok:
                 break
             op = str(st.get("op") or "")
             opts = st.get("options") or {}
+            if op in ("derive_column", "set_value"):
+                # The step's declared input column is the raw anchor for the
+                # eo join; the expression rewrites it (in-place) or produces
+                # a new column under options.to.
+                input_col = str(
+                    st.get("column") or opts.get("column") or ""
+                )
+                tgt = str(opts.get("to") or input_col or "")
+                compiled = _expression_oracle_sql(
+                    opts.get("expression") or st.get("expression"),
+                    oracle_params,
+                    src_type=src_type,
+                    qs=qs,
+                )
+                if compiled is None or not tgt or not input_col:
+                    oracle_ok = False
+                    continue
+                oracle_exprs[tgt] = compiled
+                oracle_raw_src[tgt] = input_col
+                _covered_step_idx.add(_si)
+                continue
             _step_ok = True
             for scol in _step_cols(st):
                 expr = oracle_exprs.get(scol) or quote_sql_identifier(
@@ -1473,7 +1631,7 @@ def _transform_applied_proof(
         # implementation.
         try:
             sel = ", ".join(
-                f"{quote_sql_identifier(c, qs)} AS "
+                f"{quote_sql_identifier(oracle_raw_src.get(c, c), qs)} AS "
                 f'{qs}__raw_{c}{qs}, {e} AS {qs}__o_{c}{qs}'
                 for c, e in oracle_exprs.items()
             )
