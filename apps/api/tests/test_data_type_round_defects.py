@@ -163,22 +163,23 @@ def test_oracle_number_keeps_38_digits_and_nan_does_not_crash():
     assert str(convert(pi)) == pi
 
 
-def test_sqlserver_subnormal_quarantines_one_row():
+def test_sqlserver_float_binds_full_binary64_range():
+    # X-56: SQL Server FLOAT binds the full IEEE binary64 range — subnormals
+    # like 5e-324 land exactly; the old doc-floor refused values pyodbc binds.
     from connectors.sql_bind import coerce_float_wire
     from connectors.writer_common import quarantine_unfit_floats
 
-    with pytest.raises(ValueError, match="quarantined"):
-        coerce_float_wire(5e-324, ddl_type="FLOAT", engine="sqlserver")
+    assert coerce_float_wire(5e-324, ddl_type="FLOAT", engine="sqlserver") == 5e-324
     # MySQL and SQLite REAL are IEEE-64. A float32 window quarantined 1e308
     # after preflight had accepted it (QA R2-009 / R2-010).
     assert coerce_float_wire(5e-324, ddl_type="REAL", engine="mysql") == 5e-324
     assert coerce_float_wire(1e308, ddl_type="REAL", engine="mysql") == 1e308
     assert coerce_float_wire(1e308, ddl_type="REAL", engine="sqlite") == 1e308
-    with pytest.raises(ValueError, match="quarantined"):
+    with pytest.raises(ValueError, match="quarantine"):
         coerce_float_wire(1e308, ddl_type="REAL", engine="postgresql")
-    with pytest.raises(ValueError, match="quarantined"):
+    with pytest.raises(ValueError, match="quarantine"):
         coerce_float_wire(1e308, ddl_type="REAL", engine="sqlserver")
-    with pytest.raises(ValueError, match="quarantined"):
+    with pytest.raises(ValueError, match="quarantine"):
         coerce_float_wire(1e308, ddl_type="FLOAT4", engine="sqlite")
     assert coerce_float_wire(5e-324, ddl_type="DOUBLE", engine="mysql") == 5e-324
     assert coerce_float_wire(1.5, ddl_type="FLOAT", engine="sqlserver") == 1.5
@@ -192,9 +193,9 @@ def test_sqlserver_subnormal_quarantines_one_row():
         "quarantine",
         dest_db="sqlserver",
     )
-    assert kept == [(1.5,)]
-    assert len(details) == 1
-    assert details[0]["column"] == "amt"
+    # Both rows bind on binary64 — nothing is quarantined (X-56).
+    assert kept == [(5e-324,), (1.5,)]
+    assert details == []
 
 
 def test_objectid_wire_does_not_block_every_collection_and_names_a_real_column():

@@ -4122,21 +4122,15 @@ def quarantine_unfit_floats(
                 # X-80: engines that store the literal keep it (the
                 # coerce layer already refused where it cannot).
                 from connectors.sql_bind import (
-                    _FLOAT_INF_DESTS,
-                    _FLOAT_NAN_DESTS,
+                    _float_nonfinite_kept,
                     _nonfinite_label,
                 )
 
-                eng_key = (engine or "").strip().lower()
-                ok = (
-                    eng_key in _FLOAT_NAN_DESTS
-                    if coerced != coerced
-                    else eng_key in _FLOAT_INF_DESTS
-                )
-                if not ok:
+                if not _float_nonfinite_kept(coerced, engine):
                     reason = (
                         f"{dialect_label}({typ}) cannot store "
-                        f"{_nonfinite_label(coerced)} — row held in quarantine"
+                        f"{_nonfinite_label(coerced)} (non-finite) "
+                        "— row held in quarantine"
                     )
             if not reason:
                 continue
@@ -4274,21 +4268,15 @@ def bind_rows_keeping_numbers(
                     # X-80: same non-finite policy as the float-column pass —
                     # only engines that cannot store the literal refuse.
                     from connectors.sql_bind import (
-                        _FLOAT_INF_DESTS,
-                        _FLOAT_NAN_DESTS,
+                        _float_nonfinite_kept,
                         _nonfinite_label,
                     )
 
-                    eng_key = (engine or "").strip().lower()
-                    ok = (
-                        eng_key in _FLOAT_NAN_DESTS
-                        if bound != bound
-                        else eng_key in _FLOAT_INF_DESTS
-                    )
-                    if not ok:
+                    if not _float_nonfinite_kept(bound, engine):
                         raise ValueError(
                             f"{dialect_label}({ddl}) cannot store "
-                            f"{_nonfinite_label(bound)} — row held in quarantine"
+                            f"{_nonfinite_label(bound)} (non-finite) "
+                            "— row held in quarantine"
                         )
                 cells[idx] = bound
             except ValueError as exc:

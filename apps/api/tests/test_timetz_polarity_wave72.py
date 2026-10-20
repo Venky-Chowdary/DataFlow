@@ -30,7 +30,9 @@ def test_pg_timetz_introspect_and_ddl():
 
     assert ddl_type("postgresql", "TIMETZ") == "TIME WITH TIME ZONE"
     assert ddl_type("postgresql", "TIMETZ(3)") == "TIME(3) WITH TIME ZONE"
-    assert ddl_type("snowflake", "TIMETZ") == "TIME"  # no native TIMETZ
+    # X-74: no native TIMETZ — the offset is payload, so carry it as TEXT
+    # byte-exact rather than inventing TIME and silently dropping the zone.
+    assert ddl_type("snowflake", "TIMETZ") == "VARCHAR"
     assert time_timezone_polarity_loss("TIMETZ", "TIME") is True
     assert is_precision_collapse_coercion("TIMETZ", "TIME") is True
     assert time_timezone_polarity_loss("TIMETZ", "TIME WITH TIME ZONE") is False

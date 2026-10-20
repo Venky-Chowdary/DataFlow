@@ -3181,6 +3181,12 @@ def _time_ddl_for_dest(db: str, inferred: str | None) -> str | None:
         # X-74: no engine timetz — the offset is payload, so carry it as TEXT
         # ('10:30:00+05:30' lands byte-exact and the verifier compares it)
         # rather than inventing TIME(n) and silently dropping the zone.
+        # Engines whose TIME carrier is already bounded text (Oracle
+        # VARCHAR2(32)) reuse it — 32 chars holds 'HH:MM:SS.ffffff±HH:MM'
+        # and beats CLOB as DDL.
+        time_base = DDL_TYPES.get(db, {}).get(LOGICAL_TIME)
+        if time_base and re.match(r"(?i)^(var)?char", str(time_base)):
+            return time_base
         base = DDL_TYPES.get(db, {}).get(LOGICAL_TEXT)
         return base or DDL_TYPES.get(db, {}).get("string")
     if base is None:

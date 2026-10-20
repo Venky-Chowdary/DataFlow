@@ -33,12 +33,10 @@ def test_true_overflow_still_refused():
         coerce_float_wire("3.5e38", ddl_type="REAL", engine="sqlserver")
 
 
-def test_mssql_has_no_subnormals_named():
-    with pytest.raises(ValueError) as exc:
-        coerce_float_wire("5e-324", ddl_type="FLOAT", engine="sqlserver")
-    msg = str(exc.value)
-    assert "subnormal" in msg and "2.2250738585072014e-308" in msg
-    # Min-normal itself binds.
+def test_mssql_binds_full_binary64_range():
+    # X-56: SQL Server FLOAT binds the full IEEE binary64 range — subnormals
+    # like 5e-324 land exactly; the old doc-floor refused values pyodbc binds.
+    assert coerce_float_wire("5e-324", ddl_type="FLOAT", engine="sqlserver") == 5e-324
     assert coerce_float_wire("-2.2250738585072014e-308", ddl_type="FLOAT", engine="sqlserver")
 
 
@@ -59,10 +57,12 @@ def test_inf_nan_refuse_with_plain_message():
             coerce_float_wire(math.inf, ddl_type="FLOAT", engine=eng)
         msg = str(exc.value)
         assert "cannot store Infinity" in msg and "quarantine" in msg
+        assert "non-finite" in msg
         assert "refuse invent" not in msg
-    # NaN on SQLite would bind as NULL — silent loss; refuse.
-    with pytest.raises(ValueError):
-        coerce_float_wire(math.nan, ddl_type="REAL", engine="sqlite")
+    # X-80: only the SQL Server/MySQL families refuse non-finite — every
+    # other engine keeps the explicit IEEE wire (SQLite included; how the
+    # destination stores NaN is its own documented behavior).
+    assert math.isnan(coerce_float_wire(math.nan, ddl_type="REAL", engine="sqlite"))
     # DuckDB and PG store NaN.
     assert math.isnan(coerce_float_wire(math.nan, ddl_type="DOUBLE", engine="duckdb"))
 

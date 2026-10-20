@@ -1580,14 +1580,13 @@ def _float_magnitude_bounds(
 ) -> tuple[float, float] | None:
     """Inclusive magnitude window the carrier can store, or None when IEEE fits.
 
-    SQL Server FLOAT(53) rejects subnormals (the documented floor is about
-    2.23e-308). ``5e-324`` then aborts the whole executemany instead of
-    quarantining that row. PostgreSQL and SQL Server REAL, plus FLOAT4 /
-    FLOAT32 / FLOAT(n≤24), are the 4-byte window. SQLite REAL is an 8-byte
-    double and MySQL/MariaDB REAL is DOUBLE (unless REAL_AS_FLOAT, which
-    this carrier check cannot see). Those stay IEEE-64 so 1e308 is not
-    quarantined after preflight accepted it. MySQL DOUBLE stores subnormals,
-    so a bare DOUBLE is not refused.
+    PostgreSQL and SQL Server REAL, plus FLOAT4 / FLOAT32 / FLOAT(n≤24),
+    are the 4-byte window; SQL Server binds the full IEEE binary32 range
+    including subnormals (X-56). SQLite REAL is an 8-byte double and
+    MySQL/MariaDB REAL is DOUBLE (unless REAL_AS_FLOAT, which this carrier
+    check cannot see). Binary64 carriers — including SQL Server FLOAT —
+    bind the full IEEE-64 range including subnormals like ``5e-324``
+    (pyodbc binds them exactly), so they return None here.
     """
     ddl = (ddl_type or "").strip().lower()
     base = ddl.split("(", 1)[0].strip()
@@ -1601,77 +1600,60 @@ def _float_magnitude_bounds(
     from services.type_system import REAL_IS_DOUBLE_DIALECTS, _normalize_dest_db
 
     dialect = _normalize_dest_db(eng) if eng else ""
-    sqlserver = eng in {
-        "sqlserver",
-        "mssql",
-        "sql_server",
-        "microsoft_sql_server",
-        "azure_sql",
-        "azure_sql_database",
-        "amazon_rds_sql_server",
-        "google_cloud_sql_sql_server",
-        "synapse",
-        "synapse_analytics",
-        "azure_synapse_dedicated",
-        "azure_synapse_serverless",
-    } or eng.startswith("mssql")
     if base == "real" and dialect in REAL_IS_DOUBLE_DIALECTS:
         return None
     if base in {"float4", "float32", "real"} or (
         base == "float" and width is not None and width <= 24
     ):
-        # X-56/X-79: exact IEEE-754 binary32 range — max 3.4028234663852886e38.
-        # SQL Server stores no subnormals: its REAL floor is the minimum
-        # normal (2**-126); engines with real IEEE subnormals keep 2**-149.
-        lo = (
-            1.1754943508222875e-38
-            if sqlserver
-            else float.fromhex("0x0.000002p-126")
-        )
-        return (lo, 3.4028234663852886e38)
-    if sqlserver:
-        # X-56/X-89: SQL Server stores no IEEE subnormals — the floor is the
-        # minimum NORMAL value 2**-1022. A 5e-324-class wire refuses (named
-        # subnormal in the message), never reaches a driver that would abort
-        # the whole executemany. NaN/±Inf refuse before the bounds check.
-        return (2.2250738585072014e-308, 1.7976931348623157e308)
+        # X-56/X-79: exact IEEE-754 binary32 range — max 3.4028234663852886e38,
+        # floor the minimum subnormal 2**-149. SQL Server binds the same
+        # binary32 range on REAL/float(24) (X-56).
+        return (float.fromhex("0x0.000002p-126"), 3.4028234663852886e38)
     return None
 
 
-# Destinations whose FLOAT/DOUBLE carriers store IEEE ±Infinity literally.
-_FLOAT_INF_DESTS = frozenset({
-    "postgresql",
-    "postgres",
-    "redshift",
-    "cockroachdb",
-    "timescaledb",
-    "alloydb",
-    "yugabytedb",
-    "citus",
-    "supabase",
-    "greenplum",
-    "duckdb",
-    "sqlite",
-    "trino",
-    "presto",
+# Engines with NO storage for IEEE non-finite literals at all: SQL Server
+# and the MySQL/MariaDB family reject NaN and ±Inf — the row is quarantined
+# rather than silently stored. Every other carrier (PG-class, DuckDB,
+# SQLite, file/unknown engine) keeps the explicit IEEE wire; how the
+# destination then stores it is that engine's documented behavior (X-80).
+_FLOAT_NONFINITE_REFUSE_ENGINES = frozenset({
+    "sqlserver",
+    "sql_server",
+    "microsoft_sql_server",
+    "azure_sql",
+    "azure_sql_database",
+    "amazon_rds_sql_server",
+    "google_cloud_sql_sql_server",
+    "synapse",
+    "synapse_analytics",
+    "azure_synapse_dedicated",
+    "azure_synapse_serverless",
+    "mysql",
+    "mariadb",
+    "mysql2",
+    "singlestore",
+    "tidb",
+    "aurora_mysql",
+    "google_cloud_sql_mysql",
+    "azure_mysql",
+    "azure_database_for_mysql",
 })
-# NaN is narrower: SQLite binds NaN as NULL (silent loss), MySQL/MSSQL have
-# no NaN literal at all.
-_FLOAT_NAN_DESTS = frozenset({
-    "postgresql",
-    "postgres",
-    "redshift",
-    "cockroachdb",
-    "timescaledb",
-    "alloydb",
-    "yugabytedb",
-    "citus",
-    "supabase",
-    "greenplum",
-    "duckdb",
-    "trino",
-    "presto",
-})
+
+
+def _float_nonfinite_kept(num: float, engine: str) -> bool:
+    """True when the destination accepts an IEEE non-finite float wire.
+
+    Finite values always keep; non-finite wires keep everywhere except the
+    SQL Server and MySQL/MariaDB families — including an empty or unknown
+    engine label, which must not refuse (X-56/X-80).
+    """
+    if num == num and num not in {float("inf"), float("-inf")}:
+        return True
+    eng = (engine or "").strip().lower().replace(" ", "_")
+    return eng not in _FLOAT_NONFINITE_REFUSE_ENGINES and not eng.startswith(
+        "mssql"
+    )
 
 
 def _float4_ddl(ddl_type: str | None) -> bool:
@@ -1709,24 +1691,22 @@ def coerce_float_wire(
     money the write path binds still lands. NaN/±Inf refuse with a clear
     message on bounded carriers (SQL Server); unbounded carriers keep the
     explicit IEEE wire. Boolean tokens refuse.
-    A finite value outside the destination carrier raises so that one row is
-    quarantined. SQL Server otherwise aborts the whole batch on ``5e-324``.
+    A finite value outside the destination carrier raises so that one row
+    is quarantined. SQL Server FLOAT binds the full binary64 range
+    (X-56); REAL/float(24) the binary32 range — wider values quarantine.
     """
     def _within_carrier(num: float) -> float:
         bounds = _float_magnitude_bounds(ddl_type, engine)
         if num != num or num in {float("inf"), float("-inf")}:
-            # X-80: ±Inf/NaN refuse only where the carrier cannot store them
-            # (SQL Server/MySQL). DuckDB/SQLite/PG-class engines store ±inf
-            # literally; SQLite cannot hold NaN (it binds as NULL).
-            eng_key = (engine or "").strip().lower()
-            if num != num:
-                if eng_key in _FLOAT_NAN_DESTS:
-                    return num
-            elif eng_key in _FLOAT_INF_DESTS:
+            # X-80: ±Inf/NaN refuse only where the carrier cannot store
+            # them at all (SQL Server/MySQL families). Every other engine
+            # — including an empty/unknown label — keeps the IEEE wire.
+            if _float_nonfinite_kept(num, engine):
                 return num
             raise ValueError(
                 f"{ddl_type or 'FLOAT'} on {engine or 'destination'} cannot "
-                f"store {_nonfinite_label(num)} — row held in quarantine"
+                f"store {_nonfinite_label(num)} (non-finite) "
+                "— row held in quarantine"
             )
         if num == 0.0:
             return num
