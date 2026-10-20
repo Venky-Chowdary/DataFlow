@@ -2389,6 +2389,13 @@ def apply_transform(
                 pass
             elif transform_l in {"json", "vector"} and low in _NONFINITE_TOKENS:
                 pass  # fall through to typed parsers that reject non-finite
+            elif transform_l in {
+                "decimal", "integer", "currency", "percentage",
+            } and low in _NONFINITE_TOKENS | {"inf", "+inf", "-inf"}:
+                # X-78: NaN/Infinity are IEEE values, not NULL sentinels —
+                # fall through so the decimal parser names them non-finite
+                # and refuses honestly, never "Null sentinel 'NaN'".
+                pass
             else:
                 return None, f"Null sentinel {text!r} cannot coerce to {transform_l}"
 
@@ -2399,6 +2406,12 @@ def apply_transform(
         # Currency and percent markers are part of an explicit decimal cast.
         # Inference still refuses to call a marked token an integer (R4-D07);
         # a bare integer transform stays strict below.
+        if low in _NONFINITE_TOKENS | {"inf", "+inf", "-inf"}:
+            # X-78: name the IEEE value — NaN/Infinity are not NULL sentinels.
+            return None, (
+                f"non-finite {text!r} cannot coerce to decimal — "
+                "NaN/Infinity refused, not a null sentinel"
+            )
         parsed = _parse_decimal(text, allow_markers=True)
         if parsed is None:
             return None, strict_decimal_comma_reason(text) or f"Invalid decimal: {text!r}"

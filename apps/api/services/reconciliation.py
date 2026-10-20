@@ -95,7 +95,7 @@ _TIME_FAMILY_DDL_RE = re.compile(
     re.IGNORECASE,
 )
 _TIME_WIRE_RE = re.compile(
-    r"^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?\s*(Z|z|[+-]\d{1,2}:\d{2})?$"
+    r"^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?\s*(Z|z|[+-]\d{1,2}(?::\d{2})?)?$"
 )
 # X-79: binary32 carriers — fingerprint at float4 precision.
 _FLOAT4_DDL_RE = re.compile(
@@ -126,7 +126,11 @@ def _canon_time_wire(text: str) -> str | None:
                 offset = timedelta(0)
             else:
                 sign = 1 if zone[0] == "+" else -1
-                zh, zm = int(zone[1:3]), int(zone[4:6])
+                if ":" in zone:
+                    zh, zm = int(zone[1:3]), int(zone[4:6])
+                else:
+                    # DuckDB/ISO bare-hour offset '+00' / '+0530'-less form.
+                    zh, zm = int(zone[1:]), 0
                 offset = sign * timedelta(hours=zh, minutes=zm)
             folded = (base - offset).time()
         else:

@@ -4221,9 +4221,10 @@ def money_domain_would_collapse(source_type: str, target_type: str) -> bool:
     tgt_named = tgt_base in named
     if src_named and not tgt_named:
         # Create-new PG/warehouse money-scale wire — not a polarity invent.
-        # MONEY → DECIMAL(19,4); SMALLMONEY → DECIMAL(10,4).
+        # MSSQL MONEY → DECIMAL(19,4); PG money → DECIMAL(19,2) (X-77);
+        # SMALLMONEY → DECIMAL(10,4).
         p, s = parse_numeric_precision_scale(target_type)
-        if p == 19 and s == 4 and src_base in {"MONEY", "CURRENCY"}:
+        if p == 19 and s in (2, 4) and src_base in {"MONEY", "CURRENCY"}:
             return False
         if p == 10 and s == 4 and src_base == "SMALLMONEY":
             return False
@@ -7110,11 +7111,17 @@ def year_value_fits(value: Any) -> bool:
 
 
 def is_money_carrier(inferred: str | None) -> bool:
-    """True for MONEY / SMALLMONEY / currency-scale DECIMAL(19,4)/(10,4) tokens."""
+    """True for MONEY / SMALLMONEY / currency-scale DECIMAL tokens.
+
+    MSSQL MONEY is scale-4 → (19,4); PG money is int64 cents → (19,2) (X-77).
+    """
     base = strip_identity_qualifier(inferred).upper().replace(" ", "")
     if base in {"MONEY", "SMALLMONEY", "CURRENCY"}:
         return True
-    if base in {"DECIMAL(19,4)", "NUMERIC(19,4)", "NUMBER(19,4)"}:
+    if base in {
+        "DECIMAL(19,4)", "NUMERIC(19,4)", "NUMBER(19,4)",
+        "DECIMAL(19,2)", "NUMERIC(19,2)", "NUMBER(19,2)",
+    }:
         return True
     if base in {"DECIMAL(10,4)", "NUMERIC(10,4)", "NUMBER(10,4)"}:
         return True

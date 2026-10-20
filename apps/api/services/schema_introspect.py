@@ -2159,8 +2159,10 @@ def _pg_to_logical(dtype: str) -> str:
         # PostgreSQL FLOAT without precision ≡ DOUBLE PRECISION.
         return "DOUBLE PRECISION"
     if d == "money":
-        # PostgreSQL money ≈ fixed-scale currency — mirror SQL Server MONEY fidelity.
-        return "DECIMAL(19,4)"
+        # PostgreSQL money is int64 cents: ±92,233,720,368,547,758.07 needs
+        # 17 integer digits + scale 2 — DECIMAL(19,4) (the MSSQL MONEY stamp)
+        # holds only 15 integer digits and quarantines the source max (X-77).
+        return "DECIMAL(19,2)"
     if d in ("numeric", "decimal"):
         return "DECIMAL"
     if d == "boolean":

@@ -650,17 +650,25 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
     ):
         return _decimal_ddl_for_dest(db, inferred)
     if base_early in {"MONEY", "CURRENCY"}:
+        # X-77: PG money is int64 cents → DECIMAL(19,2) domain (17 integer
+        # digits). MSSQL MONEY is scale-4 → DECIMAL(19,4). Stamping PG money
+        # as (19,4) leaves it 15 integer digits and quarantines the max.
+        _pg_money = _normalize_dest_db(active_source_engine()) in {
+            "postgresql",
+            "postgres",
+        }
         if db == "sqlserver":
-            return "MONEY"
+            return "DECIMAL(19,2)" if _pg_money else "MONEY"
+        money_stamp = "DECIMAL(19,2)" if _pg_money else "DECIMAL(19,4)"
         if db == "postgresql":
-            return "DECIMAL(19,4)"
+            return money_stamp
         # SQLite has no fixed-point — TEXT avoids NUMERIC affinity IEEE loss.
         if db == "sqlite":
             return "TEXT"
         return (
-            _decimal_ddl_for_dest(db, "DECIMAL(19,4)")
+            _decimal_ddl_for_dest(db, money_stamp)
             if db in _DECIMAL_PARAM_TEMPLATES
-            else "DECIMAL(19,4)"
+            else money_stamp
         )
     if base_early == "SMALLMONEY":
         if db == "sqlserver":
