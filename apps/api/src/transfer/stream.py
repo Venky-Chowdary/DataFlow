@@ -615,6 +615,7 @@ def _stream_database_transfer_impl(
         is_overwrite_sync,
         map_source_to_target,
         max_cursor_value,
+        get_watermark_record,
         quarantine_held_watermark,
         quarantine_hold_identity,
         requires_incremental,
@@ -623,6 +624,7 @@ def _stream_database_transfer_impl(
         resolve_incremental_read_scope,
         resolve_sync_contract,
         row_after_watermark,
+        row_in_quarantine_hold_delta,
         set_watermark,
         source_bounds_cursor_reads,
     )
@@ -743,6 +745,7 @@ def _stream_database_transfer_impl(
     )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
+    pre_copy_quarantine_hold: dict[str, Any] = {}
     if incremental and cursor_source_col and not pending_shape:
         _tbl = _source_name(source)
         if _tbl and not (is_callable_source(source) or is_callable_source(src_cfg)):
@@ -770,6 +773,11 @@ def _stream_database_transfer_impl(
             refuse_unusable_cursor_state(
                 _scope, dest_type, dest_cfg, _dest_obj
             )
+            _prior_wm, _prior_meta = get_watermark_record(pre_copy_cursor_key)
+            if isinstance(_prior_meta, dict):
+                _hold = _prior_meta.get("quarantine_holds")
+                if isinstance(_hold, dict):
+                    pre_copy_quarantine_hold = _hold
     # Gate-8 append proof needs the destination cardinality from before the
     # first write, whichever path performs it. Measured once here, ahead of the
     # COPY fast path, and reused by the row path below. A resumed run already
@@ -861,6 +869,7 @@ def _stream_database_transfer_impl(
             or dest_proc_plan is not None
             or fk_orphan_guard is not None
             or bool(risk_contract_columns)
+            or bool(pre_copy_quarantine_hold)
         ) else _try_copy_fast_path(
             source=source,
             destination=destination,
@@ -1013,6 +1022,7 @@ def _stream_database_transfer_impl(
 
     watermark = None
     cursor_key = ""
+    quarantine_hold_prior: dict[str, Any] = {}
     if incremental and cursor_source_col:
         # One resolver for the whole product: Validate's gates read this route's
         # watermark through the same call, so what they judge is what this run
@@ -1040,6 +1050,13 @@ def _stream_database_transfer_impl(
         refuse_unusable_cursor_state(
             scope, dest_type, dest_cfg, resolve_dest_table(dest_type, destination, table)
         )
+        _prior_wm, _prior_meta = get_watermark_record(cursor_key)
+        if isinstance(_prior_meta, dict):
+            _hold = _prior_meta.get("quarantine_holds")
+            if isinstance(_hold, dict):
+                quarantine_hold_prior = _hold
+        elif pre_copy_quarantine_hold:
+            quarantine_hold_prior = pre_copy_quarantine_hold
     # A source whose read call cannot carry the cursor bound (Redis SCAN, Dynamo
     # Scan, an ES search) hands its whole population over, so the bound is
     # applied to each page instead. Without it "incremental" degraded into a
@@ -1750,6 +1767,14 @@ def _stream_database_transfer_impl(
     # population checksum for this run.
     resumed_pass = bool(written or offset)
     dest_summary: dict[str, Any] = {}
+    if quarantine_hold_prior:
+        # D11b: name which behavior applied — the held band was re-read and
+        # only held identities + rows past the band high landed.
+        dest_summary["quarantine_hold_band_reread"] = {
+            "held_rows": len(quarantine_hold_prior.get("rows") or []),
+            "mode": quarantine_hold_prior.get("mode") or "",
+            "behavior": "band re-read lands held identities + new rows only",
+        }
     # Failed-Gate-8 restore guard: renamed-aside route tables (armed once,
     # inside the held txn) — stamped onto dest_summary at stream end.
     route_backup_state: dict[str, Any] = {}
@@ -2714,6 +2739,51 @@ def _stream_database_transfer_impl(
                         "incremental cursor bound excluded, so the run's source "
                         "population cannot be stated — refusing rather than "
                         "counting rows this run was never asked to move"
+                    ) from exc
+        if quarantine_hold_prior and batch.rows and incremental and cursor_source_col:
+            # D11b: a held band re-read hands back rows that already landed.
+            # A row lands iff it is past the band's high mark (genuinely new)
+            # or matches a held quarantined identity (the repair). Anything
+            # else in the band already landed — re-appending it duplicates.
+            # Same rule records_after_watermark applies on file/batch paths.
+            band_high = str(quarantine_hold_prior.get("band_high") or "")
+            held = quarantine_hold_prior.get("rows") or []
+            if not band_high or not held:
+                raise ValueError(
+                    "quarantine hold record is missing its band bounds — an "
+                    "incremental_append cannot prove which rows already landed, "
+                    "so it fails closed rather than risk duplicates"
+                )
+            pk_name = cursor_pk_source or ""
+            kept_rows: list[list[str]] = []
+            for row in batch.rows:
+                rec = dict(zip(batch.headers, row))
+                verdict = row_in_quarantine_hold_delta(
+                    rec,
+                    quarantine_hold_prior,
+                    cursor_column=cursor_source_col,
+                    primary_key=pk_name,
+                )
+                if verdict is None:
+                    raise ValueError(
+                        f"a row in the quarantine-hold band carries no value for "
+                        f"cursor '{cursor_source_col}' — an incremental_append "
+                        "cannot prove whether it already landed, so it fails "
+                        "closed rather than risk duplicates"
+                    )
+                if verdict:
+                    kept_rows.append(row)
+            excluded = len(batch.rows) - len(kept_rows)
+            batch.rows = kept_rows
+            if excluded:
+                try:
+                    batch.raw_page_quarantine_held = excluded
+                except AttributeError as exc:
+                    raise ValueError(
+                        "this source's read page cannot record how many rows the "
+                        "quarantine-hold exclusion dropped, so the run's source "
+                        "population cannot be stated — refusing rather than "
+                        "counting rows this run never moved"
                     ) from exc
         if source_filter and batch.rows:
             before = len(batch.rows)
@@ -4070,6 +4140,11 @@ def _stream_database_transfer_impl(
         # reject / cancel mid-run must not leave committed batches. The
         # note rides the exception into the engine's failure message.
         try:
+            # SDK paged sources commit each page as a durable checkpointed
+            # batch — that ledger is retained for at-least-once resume, not
+            # rolled back (see batch_undo._decide).
+            if sdk_source:
+                dest_summary["sdk_committed_ledger"] = True
             from services.batch_undo import undo_failed_batch_if_dest_was_empty
 
             _undo_note = undo_failed_batch_if_dest_was_empty(
@@ -4805,6 +4880,9 @@ def _stream_database_transfer_impl(
             ) + diverted
     if reconcile_sample:
         dest_summary["reconcile_sample"] = reconcile_sample[:_RECONCILE_SAMPLE_CAP]
+        # Raw batch rows — the writer-side stamp is the post-transform one;
+        # Gate-8 must not read this sample as already-shaped (R-13).
+        dest_summary["reconcile_sample_transformed"] = False
     if load_methods_seen:
         if "copy_into" in load_methods_seen:
             dest_summary["load_method"] = "copy_into"

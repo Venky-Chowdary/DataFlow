@@ -321,13 +321,22 @@ def sqlite_cursor_predicate_sql(
         pk_ident = sqlite_ident(pk)
         cursor_ident = sqlite_cursor_operand(cursor_ident, str(cur_val))
         cur_val = sqlite_normalize_cursor_watermark(str(cur_val))
+        if str(pk_val) == "":
+            # Held quarantine bookmark (cursor, "") = every row AT the cursor:
+            # ``pk > ''`` is unrepresentable for INTEGER pk columns (INTEGER
+            # sorts below TEXT in SQLite), so emit the equivalent ``>=``.
+            return f"{cursor_ident} >= {_sqlite_quoted_literal(cur_val)}"
         return (
             f"({cursor_ident}, {pk_ident}) > "
             f"({_sqlite_quoted_literal(cur_val)}, {_sqlite_quoted_literal(pk_val)})"
         )
-    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
+    cur_val, _pk_tail = split_cursor_bookmark(bookmark, has_tiebreak=False)
     cursor_ident = sqlite_cursor_operand(cursor_ident, str(cur_val))
     cur_val = sqlite_normalize_cursor_watermark(str(cur_val))
+    if str(_pk_tail) != "":
+        # Composite bookmark with no pk column to seek on — a plain ``>``
+        # drops same-cursor rows (the quarantined row never re-reads).
+        return f"{cursor_ident} >= {_sqlite_quoted_literal(cur_val)}"
     return f"{cursor_ident} > {_sqlite_quoted_literal(cur_val)}"
 
 

@@ -1070,20 +1070,46 @@ def records_after_watermark(
             # are new; rows inside the band land only when they match a held
             # quarantine identity — append-mode routes then never re-append
             # rows that already landed.
-            delta = [
-                rec
-                for rec in delta
-                if row_after_watermark(
-                    rec, cursor_column, band_high, primary_key=primary_key
-                )
-                or row_matches_quarantine_hold(
+            kept: list[dict[str, Any]] = []
+            for rec in delta:
+                verdict = row_in_quarantine_hold_delta(
                     rec,
-                    held,
+                    quarantine_hold,
                     cursor_column=cursor_column,
                     primary_key=primary_key,
                 )
-            ]
+                if verdict:
+                    kept.append(rec)
+            delta = kept
     return delta, unbounded
+
+
+def row_in_quarantine_hold_delta(
+    rec: dict[str, Any],
+    hold: dict[str, Any],
+    *,
+    cursor_column: str,
+    primary_key: str = "",
+) -> bool | None:
+    """Keep-verdict for one row in a quarantine-hold band re-read.
+
+    A row lands iff it is past the band's high mark (genuinely new since the
+    run that held the watermark) or it matches a held quarantined identity
+    (the repaired row). ``None`` = the cursor is unreadable — a write caller
+    must refuse rather than guess, or an append would duplicate blindly.
+    """
+    band_high = str(hold.get("band_high") or "")
+    held = hold.get("rows") or []
+    verdict = row_after_watermark(
+        rec, cursor_column, band_high or None, primary_key=primary_key
+    )
+    if verdict is None:
+        return None
+    if verdict:
+        return True
+    return row_matches_quarantine_hold(
+        rec, held, cursor_column=cursor_column, primary_key=primary_key
+    )
 
 
 def max_cursor_value(

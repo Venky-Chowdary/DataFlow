@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Sequence
 
-from services.value_serializer import present_cell_text
+from services.value_serializer import is_null_evidence, present_cell_text
 
 # Unit separator — stable for composite bookmarks (CDC + transfer).
 KEYSET_SEP = "\x1f"
@@ -75,6 +75,13 @@ def present_cursor_bookmark(value: Any) -> str | None:
     ``KEYSET_SEP`` bookmarks stay intact. Incremental empty-string
     watermarks are a different polarity — do not use this in CDC coalesce.
     """
+    if isinstance(value, str) and KEYSET_SEP in value:
+        # ``str.strip()`` eats \x1c-\x1f as whitespace, so the canonical
+        # ``present_cell_text`` normalizes a held ``cursor␟`` bookmark back
+        # to cursor-only — the re-read then skips every row AT the cursor
+        # (the quarantined row never lands again). Keep the bookmark whole.
+        text = value.strip(" \t\n\r\x0b\x0c")
+        return None if is_null_evidence(text) else text
     return present_cell_text(value)
 
 

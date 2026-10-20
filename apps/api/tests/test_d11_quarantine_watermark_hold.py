@@ -222,3 +222,173 @@ def test_d11_append_mode_re_read_never_re_appends_landed_rows(tmp_path, cursors)
         (4, "2024-01-04T00:00:00", 40),
         (5, "2024-01-05T00:00:00", 50),
     ]
+
+
+def _db_request(src_path: Path, dst_path: Path):
+    from src.transfer.models import EndpointConfig, TransferRequest
+
+    return TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="sqlite",
+            database=str(src_path), table="t",
+        ),
+        destination=EndpointConfig(
+            kind="database", format="sqlite",
+            database=str(dst_path), table="t",
+        ),
+        sync_mode="incremental_append",
+        stream_contracts=[{
+            "name": "t", "selected": True,
+            "sync_mode": "incremental_append",
+            "cursor_field": "updated_at",
+            "cursor_semantics": "modification_timestamp",
+            "primary_key": "id",
+        }],
+        skip_preflight=True,
+        validation_mode="balanced",
+    )
+
+
+def _db_exec(path: Path, sql: str, rows=None) -> None:
+    conn = sqlite3.connect(str(path))
+    try:
+        with conn:
+            if rows is None:
+                conn.execute(sql)
+            else:
+                conn.executemany(sql, rows)
+    finally:
+        conn.close()
+
+
+def _db_run(src_path: Path, dst_path: Path):
+    from src.transfer.engine import UniversalTransferEngine
+    from tests.test_property2_golden_path_never_blocked import _FakeMongo
+    import src.transfer.engine as engine_mod
+
+    fake = _FakeMongo()
+    orig = getattr(engine_mod, "get_mongodb_service", None)
+    engine_mod.get_mongodb_service = lambda: fake
+    try:
+        job_id = "d11db" + uuid.uuid4().hex[:14]
+        fake.update_job_status(job_id, "pending", transfer_request={})
+        return UniversalTransferEngine().execute_tracked(
+            _db_request(src_path, dst_path), job_id
+        )
+    finally:
+        if orig is not None:
+            engine_mod.get_mongodb_service = orig
+
+
+def test_d11_append_db_source_band_reread_never_re_appends(tmp_path, cursors):
+    """DB-source append: held band re-read lands held+new rows only."""
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _db_exec(src, "CREATE TABLE t (id INTEGER PRIMARY KEY, updated_at TEXT, amt INTEGER)")
+    _db_exec(src, "INSERT INTO t VALUES (?, ?, ?)", [
+        (1, "2024-01-01T00:00:00", "10"),
+        (2, "2024-01-02T00:00:00", "not-a-number"),  # quarantines on INTEGER map
+        (3, "2024-01-03T00:00:00", "30"),
+        (4, "2024-01-04T00:00:00", "40"),
+    ])
+    first = _db_run(src, dst)
+    assert first.success, getattr(first, "error", "")
+
+    conn = sqlite3.connect(str(dst))
+    landed = conn.execute("SELECT id, amt FROM t ORDER BY id").fetchall()
+    conn.close()
+    assert [r[0] for r in landed] == [1, 3, 4], landed
+    key = sc.list_cursor_keys()[0]
+    stored, meta = sc.get_watermark_record(key)
+    assert "2024-01-02" in (stored or ""), stored
+    assert (meta or {}).get("quarantine_holds", {}).get("rows"), meta
+
+    # repair row 2 and append row 5
+    _db_exec(src, "UPDATE t SET amt='20' WHERE id=2")
+    _db_exec(src, "INSERT INTO t VALUES (5, '2024-01-05T00:00:00', '50')")
+    second = _db_run(src, dst)
+    assert second.success, getattr(second, "error", "")
+
+    conn = sqlite3.connect(str(dst))
+    landed = conn.execute("SELECT id, amt FROM t ORDER BY id").fetchall()
+    conn.close()
+    ids = [r[0] for r in landed]
+    assert sorted(ids) == [1, 2, 3, 4, 5], landed
+    assert len(ids) == len(set(ids)) == 5, f"duplicate rows appended: {landed}"
+
+
+def test_d11_append_db_source_malformed_hold_fails_closed(tmp_path, cursors):
+    """A hold record without band bounds refuses rather than duplicating."""
+    src, dst = tmp_path / "src.db", tmp_path / "dst.db"
+    _db_exec(src, "CREATE TABLE t (id INTEGER PRIMARY KEY, updated_at TEXT, amt INTEGER)")
+    _db_exec(src, "INSERT INTO t VALUES (?, ?, ?)", [
+        (1, "2024-01-01T00:00:00", "10"),
+        (2, "2024-01-02T00:00:00", "not-a-number"),  # quarantines → real hold
+        (3, "2024-01-03T00:00:00", "30"),
+    ])
+    first = _db_run(src, dst)
+    assert first.success, getattr(first, "error", "")
+
+    key = sc.list_cursor_keys()[0]
+    stored, meta = sc.get_watermark_record(key)
+    assert (meta or {}).get("quarantine_holds"), meta
+    # Corrupt the hold: band bounds missing → the band re-read cannot prove
+    # which rows already landed, so the run must refuse, not duplicate.
+    sc.set_watermark(key, stored or "", metadata={
+        **(meta or {}),
+        "quarantine_holds": {"band_high": "", "rows": []},
+    })
+
+    _db_exec(src, "UPDATE t SET amt=20 WHERE id=2")
+    second = _db_run(src, dst)
+    assert not second.success, "malformed hold must refuse, not land"
+    err = str(getattr(second, "error", "") or "")
+    assert "fails closed" in err or "quarantine hold" in err.lower(), err
+
+
+def test_d11c_held_bookmark_round_trip_byte_exact():
+    """A held ``cursor␟pk`` bookmark persists and presents byte-identical.
+
+    Root cause pinned by the D11c fix: Python ``str.strip()`` eats \\x1c-\\x1f
+    as whitespace, so a held composite bookmark ``"2024-01-02T00:00:00\\x1f"``
+    silently degraded to ``"2024-01-02T00:00:00"`` — a cursor-only watermark
+    that re-reads rows strictly past it and skips the quarantined row
+    forever. The whole point of the composite bookmark is "cursor AND every
+    row AT that cursor", so the byte sequence must survive the round trip.
+    """
+    from services.keyset_pagination import (
+        KEYSET_SEP,
+        decode_keyset_bookmark,
+        encode_keyset_bookmark,
+        is_cursor_only_bookmark,
+        present_cursor_bookmark,
+    )
+    from services.sync_cursor import quarantine_held_watermark
+
+    # 1) The hold produces a composite (cursor, "") bookmark.
+    val, hold = quarantine_held_watermark(
+        rejected_details=[{"values": {"id": 2, "updated_at": "2024-01-02T00:00:00"}}],
+        cursor_column="updated_at", tiebreak_column="id",
+        entry_watermark=None, running_cursor="2024-01-04T00:00:00",
+    )
+    assert hold is not None
+    assert val.endswith(KEYSET_SEP), f"expected composite bookmark, got {val!r}"
+    assert not is_cursor_only_bookmark(val)
+
+    # 2) Byte-exact through the presentation path (the strip() regression).
+    presented = present_cursor_bookmark(val)
+    assert presented == val, f"bookmark degraded: {val!r} -> {presented!r}"
+
+    # 3) Byte-exact through a store->load round trip.
+    encoded = encode_keyset_bookmark(["2024-01-02T00:00:00", ""])
+    assert encoded == "2024-01-02T00:00:00" + KEYSET_SEP
+    assert present_cursor_bookmark(encoded) == encoded
+    assert decode_keyset_bookmark(encoded, expected_parts=2) == [
+        "2024-01-02T00:00:00", "",
+    ]
+
+    # 4) A composite pk part survives too (cursor␟pk, not just cursor␟).
+    full = encode_keyset_bookmark(["2024-01-02T00:00:00", "42"])
+    assert present_cursor_bookmark(full) == full
+    assert decode_keyset_bookmark(full, expected_parts=2) == [
+        "2024-01-02T00:00:00", "42",
+    ]

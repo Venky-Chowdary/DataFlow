@@ -3785,9 +3785,26 @@ def read_table_cursor_batch(
                     # Cursor-only watermark with a tie-break column: seek on
                     # the cursor alone, order on both (deterministic page edge).
                     seek_cols = key_cols[:1]
-                stmt = stmt.where(
-                    sqlalchemy_keyset_clause(sa, seek_cols, bookmark)
-                )
+                elif len(key_cols) == 1 and not is_cursor_only_bookmark(bookmark):
+                    # D11: a held quarantine watermark is composite
+                    # ``cursor␟`` — no pk column to keyset on. An empty tail
+                    # means "every row at the cursor" — a plain ``>`` skips the
+                    # quarantined row forever, so bind ``>=`` on the cursor.
+                    from services.keyset_pagination import split_cursor_bookmark
+
+                    _cur_part, _pk_part = split_cursor_bookmark(
+                        bookmark, has_tiebreak=True
+                    )
+                    if not _pk_part:
+                        marker = sa.cast(sa.literal(_cur_part), key_cols[0].type)
+                        stmt = stmt.where(key_cols[0] >= marker)
+                        bookmark = None
+                    # A real pk tail with no pk column is genuinely unreadable
+                    # — fall through and let the arity check refuse it.
+                if bookmark is not None:
+                    stmt = stmt.where(
+                        sqlalchemy_keyset_clause(sa, seek_cols, bookmark)
+                    )
             stmt = stmt.order_by(*key_cols).limit(limit)
 
             fetched = conn.execute(stmt).fetchall()

@@ -1738,6 +1738,14 @@ def stream_file_to_database(
                     quarantine_hold_prior = _qh
             except Exception:
                 quarantine_hold_prior = {}
+        if quarantine_hold_prior:
+            # D11b: name which behavior applied — the held band was re-read
+            # and only held identities + rows past the band high landed.
+            dest_summary["quarantine_hold_band_reread"] = {
+                "held_rows": len(quarantine_hold_prior.get("rows") or []),
+                "mode": quarantine_hold_prior.get("mode") or "",
+                "behavior": "band re-read lands held identities + new rows only",
+            }
         if scope.cursor_column_changed:
             from services.preflight_cursor_gate import cursor_identity_issue
 

@@ -13,6 +13,7 @@ from connectors.sql_snapshot_scan import (
 )
 from connectors.sqlite_common import require_sqlite_source_file, sqlite_file_path
 from connectors.writer_common import quote_sql_identifier
+from services.keyset_pagination import KEYSET_SEP
 from services.value_serializer import cell_to_string
 
 
@@ -153,10 +154,11 @@ def read_table_scan_batch(
     require_sqlite_source_file(path)
 
     table_quoted = quote_sql_identifier(table)
-    filter_value = scan_filter_value(filter_column, filter_after)
+    composite_filter = bool(filter_after) and KEYSET_SEP in str(filter_after)
+    filter_value = None if composite_filter else scan_filter_value(filter_column, filter_after)
     where_sql = ""
     params: tuple[Any, ...] = ()
-    if filter_value is not None:
+    if filter_value is not None and not composite_filter:
         from services.copy_incremental import (
             sqlite_cursor_operand,
             sqlite_normalize_cursor_watermark,
@@ -174,6 +176,25 @@ def read_table_scan_batch(
             shared = sqlite3.connect(path, timeout=8)
         shared.row_factory = sqlite3.Row
         cur = shared.cursor()
+        if composite_filter:
+            # D11: a held quarantine watermark is composite ``cursor␟pk`` — a
+            # plain ``cursor > '…␟'`` text compare drops every row AT the
+            # cursor (the quarantined row never re-reads). Seek on the
+            # (cursor, pk) tuple instead, like generic_sql's keyset.
+            from services.copy_incremental import sqlite_cursor_predicate_sql
+
+            pk_cols = _primary_key_columns(cur, table_quoted)
+            pred = sqlite_cursor_predicate_sql(
+                cursor_column=filter_column,
+                watermark=str(filter_after),
+                pk_column=pk_cols[0] if pk_cols else "",
+            )
+            if pred:
+                where_sql = f" WHERE {pred}"
+                params = ()
+            else:
+                where_sql = ""
+                params = ()
         try:
             if known_total_rows is not None:
                 total = known_total_rows
