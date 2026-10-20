@@ -7016,6 +7016,18 @@ def _run_reconciliation_impl(
                 "dest_pk_join_equals_staging",
             )
         )
+        # X-134: an append first load into a table this run created (or an
+        # empty one) has no pre-existing rows to excuse it — dest == staged
+        # population exactly, so the key census is a valid value compare.
+        # Only a later append run is incomparable (dest = before + delta).
+        _append_first_load = (
+            sync_mode_appends_without_key_resolution(sync_mode_early)
+            and rows_before == 0
+            and target_rows == expected_rows
+            and dest_summary.get("dest_table_existed_before") is not True
+        )
+        if _append_first_load:
+            _populations_comparable = True
         # X-68: a count-only engine copy proves counts, not values. When the
         # two populations are comparable and both sides are census engines,
         # run the (pk, row-hash) key census as the value compare — a
