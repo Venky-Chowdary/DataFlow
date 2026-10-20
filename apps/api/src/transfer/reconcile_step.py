@@ -7964,7 +7964,23 @@ def run_reconciliation(
     # real full_checksum on an engine-copy route, not count-only. Promote it
     # over the "no rows entered this process" stamp instead of telling the
     # operator to set the flag they already set.
-    if _engine_digest_enabled() and not recon.get("checksum_match"):
+    # X-133: on append-family modes the destination legitimately holds
+    # history the source no longer does — the two whole-population digests
+    # are comparable only on key-resolving routes. Promoting the mismatch
+    # here failed clean no-op polls and named the appended versions as
+    # culprits; append value proof is the (pk, cursor) delta scope above.
+    _append_family = sync_mode_appends_without_key_resolution(
+        str(
+            (dest_summary or {}).get("sync_mode")
+            or (dest_summary or {}).get("effective_sync_mode")
+            or ""
+        )
+    )
+    if (
+        _engine_digest_enabled()
+        and not _append_family
+        and not recon.get("checksum_match")
+    ):
         _l3_run = recon.get("verification_ladder") or {}
         _l3_layer = (_l3_run.get("layers") or {}).get("L3") or {}
         _l3_details = _l3_layer.get("details") or {}
@@ -8032,6 +8048,13 @@ def run_reconciliation(
         recon.get("checksum_match") is False
         and not recon.get("culprit_keys")
         and not recon.get("transform_applied")
+        # X-133: culprits name a defect — never attach them to a passed
+        # report (a no-op poll carries checksum_match=False only because
+        # its batch digest is empty), and never join a whole-table key
+        # census on an append-family destination where a repeated key is
+        # the documented history, not a value change.
+        and not recon.get("passed")
+        and not _append_family
     ):
         _loc_rows = (
             (recon.get("verification_ladder") or {}).get("localization") or {}

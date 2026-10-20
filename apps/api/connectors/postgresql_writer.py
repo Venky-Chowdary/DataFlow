@@ -2200,6 +2200,28 @@ def write_mapped_rows(
         if write_mode == "upsert" and conflict_columns and uses_pg_on_conflict_upsert(engine):
             conflict_cols = [c for c in conflict_columns if c in target_cols]
             if conflict_cols:
+                # X-135 — when the table's PRIMARY KEY already covers exactly
+                # the conflict columns, a second unique index on the same
+                # column set doubles index maintenance for zero benefit.
+                # Keep uidx only for a conflict key distinct from the PK.
+                pk_covers = False
+                try:
+                    cursor.execute(
+                        sql.SQL(
+                            "SELECT array_agg(a.attname ORDER BY a.attname) "
+                            "FROM pg_index i JOIN pg_attribute a "
+                            "ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
+                            "WHERE i.indrelid = {}::regclass AND i.indisprimary"
+                        ).format(
+                            sql.Literal(f"{schema}.{table_name}")
+                        )
+                    )
+                    _pk_row = cursor.fetchone()
+                    if _pk_row and _pk_row[0] == sorted(conflict_cols):
+                        pk_covers = True
+                except Exception:
+                    pk_covers = False
+            if conflict_cols and not pk_covers:
                 index_name = sanitize_identifier(
                     f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                 )
