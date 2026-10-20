@@ -156,7 +156,8 @@ def copy_mysql_to_sqlite(
             source_count = int(src_cur.fetchone()[0])
 
         dest_conn.execute("BEGIN IMMEDIATE")
-        exists = sqlite_table_exists(dest_conn, dest_table)
+        existed_before = sqlite_table_exists(dest_conn, dest_table)
+        exists = existed_before
         dest_count_before = 0
         if exists:
             dest_count_before = int(
@@ -244,6 +245,7 @@ def copy_mysql_to_sqlite(
                 "mysql_read": "consistent_snapshot",
                 "sqlite_write": sqlite_write,
             },
+            dest_table_existed_before=existed_before,
             proof_scope="dest_count_equals_source_snapshot_count",
         )
     except Exception:

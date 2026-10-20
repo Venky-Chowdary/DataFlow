@@ -1,0 +1,385 @@
+"""X-35 / X-36 / X-37: MySQL -> PostgreSQL engine-copy route defects.
+
+X-35: MySQL TIME is an interval (-838:59:59..+838:59:59); the PostgreSQL
+``time`` carrier is a 0-24h wall clock. Feeding out-of-range rows into the
+COPY fast path landed raw driver text (``-1 day, 23:00:00``) as an untyped
+parse error and left the created table behind. The route now pre-scans and
+declines to the row path, which emits a typed per-row finding.
+
+X-36: a failed run on this route (bad write, or a Gate-8 dest tamper) must
+drop the table this run created — the copy path now carries
+``dest_table_existed_before`` into the summary and rolls back the aborted
+transaction before the cleanup drop.
+
+X-37: ``DATAFLOW_ENGINE_DIGEST=1`` was exported but the count-only scope
+note still gated the engine-population digest off.
+
+P3: the Gate-8 culprit-key census no longer requires a postgres-to-postgres
+route — (pk, canonical row hash) is computed in Python for mysql/mssql/
+duckdb/sqlite sides.
+
+PG-dependent tests skip cleanly when 127.0.0.1:5432 dataflow creds are
+rejected (local env); they run live on the loop's box.
+"""
+
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
+import pytest
+
+_API_ROOT = Path(__file__).resolve().parents[1]
+if str(_API_ROOT) not in sys.path:
+    sys.path.insert(0, str(_API_ROOT))
+_SRC = _API_ROOT / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+import src.transfer.engine as engine_mod  # noqa: E402
+from src.transfer.engine import UniversalTransferEngine  # noqa: E402
+from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
+
+duckdb = pytest.importorskip("duckdb")
+
+MYSQL = {
+    "host": "localhost",
+    "port": 3306,
+    "database": "dataflow",
+    "username": "dataflow",
+    "password": "dataflow",
+    "connection_string": "",
+    "ssl": False,
+}
+
+PG = {
+    "host": "localhost",
+    "port": 5432,
+    "database": "dataflow",
+    "username": "dataflow",
+    "password": "dataflow",
+    "connection_string": "",
+    "ssl": False,
+}
+
+
+class _FakeMongo:
+    def __init__(self):
+        self.jobs: dict[str, dict] = {}
+
+    def get_job(self, job_id: str) -> dict | None:
+        return self.jobs.get(job_id)
+
+    def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
+        self.jobs.setdefault(job_id, {})
+        self.jobs[job_id].update(kwargs)
+        self.jobs[job_id]["status"] = status
+        return True
+
+    def list_jobs(self, limit: int = 50) -> list[dict]:
+        return list(self.jobs.values())
+
+    def create_transfer_job(self, job_data: dict) -> str:
+        job_id = "0" * 24
+        self.jobs[job_id] = job_data
+        return job_id
+
+    def update_job_fields(self, job_id: str, fields: dict) -> bool:
+        self.jobs.setdefault(job_id, {}).update(fields)
+        return True
+
+
+@pytest.fixture(autouse=True)
+def _patch_mongodb_service(monkeypatch):
+    fake_mongo = _FakeMongo()
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake_mongo)
+
+
+def _mysql_conn():
+    import pymysql
+
+    try:
+        return pymysql.connect(
+            host=MYSQL["host"],
+            port=MYSQL["port"],
+            user=MYSQL["username"],
+            password=MYSQL["password"],
+            database=MYSQL["database"],
+            connect_timeout=2,
+        )
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"local MySQL (127.0.0.1:3306) unreachable: {exc}")
+
+
+def _pg_conn():
+    import psycopg2
+
+    try:
+        return psycopg2.connect(
+            host=PG["host"],
+            port=PG["port"],
+            user=PG["username"],
+            password=PG["password"],
+            dbname=PG["database"],
+            connect_timeout=2,
+        )
+    except Exception as exc:  # noqa: BLE001
+        pytest.skip(f"local PostgreSQL (127.0.0.1:5432) unreachable: {exc}")
+
+
+def _seed_time(table: str, rows: list[tuple]) -> None:
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+            cur.execute(
+                f"CREATE TABLE `{table}` (id INT PRIMARY KEY, t TIME)"
+            )
+            cur.executemany(f"INSERT INTO `{table}` VALUES (%s,%s)", rows)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _pg_drop_table(table: str) -> None:
+    conn = _pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _pg_table_exists(table: str) -> bool:
+    conn = _pg_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema='public' AND table_name=%s",
+                (table,),
+            )
+            return cur.fetchone() is not None
+    finally:
+        conn.close()
+
+
+def _request(src_table: str, dest: dict, dest_table: str) -> TransferRequest:
+    return TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="mysql", table=src_table, **MYSQL
+        ),
+        destination=EndpointConfig(
+            kind="database", table=dest_table, **dest
+        ),
+        sync_mode="full_refresh_overwrite",
+        mappings=[
+            {
+                "source": c,
+                "target": c,
+                "confidence": 1.0,
+                "user_override": True,
+                "transform": "none",
+            }
+            for c in ["id", "t"]
+        ],
+        stream_contracts=[
+            {
+                "name": src_table,
+                "primary_key": "id",
+                "sync_mode": "full_refresh_overwrite",
+            }
+        ],
+        skip_preflight=True,
+        validation_mode="strict",
+    )
+
+
+def _blob(res) -> str:
+    return " ".join(
+        str(p)
+        for p in [
+            res.error,
+            (res.reconciliation or {}),
+            getattr(res, "rejected_rows", None),
+            getattr(res, "summary", None),
+        ]
+    )
+
+
+def test_x35_time_out_of_range_scan_names_column():
+    """The pre-scan must name the TIME column holding out-of-domain rows."""
+    from services.copy_mysql_pg import mysql_time_column_out_of_range
+
+    table = "x35_scan_src"
+    _seed_time(
+        table,
+        [(1, "-01:00:00"), (2, "100:00:00"), (3, "12:00:00")],
+    )
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            found = mysql_time_column_out_of_range(
+                cur,
+                f"`{table}`",
+                [("id", "id"), ("t", "t")],
+                ["INT", "time"],
+                {"id": "INT", "t": "TIME"},
+            )
+        assert found == "t"
+    finally:
+        conn.close()
+
+
+def test_x35_time_in_range_does_not_decline():
+    """In-range TIME rows keep the fast path — the scan returns None."""
+    from services.copy_mysql_pg import mysql_time_column_out_of_range
+
+    table = "x35_ok_src"
+    _seed_time(table, [(1, "01:23:45"), (2, "23:59:59"), (3, None)])
+    conn = _mysql_conn()
+    try:
+        with conn.cursor() as cur:
+            found = mysql_time_column_out_of_range(
+                cur,
+                f"`{table}`",
+                [("id", "id"), ("t", "t")],
+                ["INT", "time"],
+                {"id": "INT", "t": "TIME"},
+            )
+        assert found is None
+        # An interval/text dest carrier does not trigger the decline either.
+        with conn.cursor() as cur2:
+            found2 = mysql_time_column_out_of_range(
+                cur2,
+                f"`{table}`",
+                [("id", "id"), ("t", "t")],
+                ["INT", "text"],
+                {"id": "INT", "t": "TIME"},
+            )
+        assert found2 is None
+    finally:
+        conn.close()
+
+
+def test_x35_pg_copy_out_of_range_time_typed_finding_and_drop():
+    """MySQL -> PG with out-of-range TIME: typed finding, no raw COPY error,
+    and the table this run created is dropped."""
+    dest_table = "x35_out"
+    _pg_drop_table(dest_table)
+    table = "x35_pg_src"
+    _seed_time(
+        table,
+        [(1, "01:23:45"), (6, "-01:00:00"), (7, "100:00:00")],
+    )
+    res = UniversalTransferEngine().execute_tracked(
+        _request(table, {"format": "postgresql", **PG}, dest_table), "0" * 24
+    )
+    assert not res.success, "out-of-range TIME must not land silently"
+    blob = _blob(res)
+    assert "invalid input syntax" not in blob, blob
+    assert not _pg_table_exists(dest_table), (
+        "the table this run created must be dropped on failure"
+    )
+
+
+def test_x36_pg_dest_tamper_drops_created_table(monkeypatch):
+    """Tampered destination on MySQL -> PG: fail closed AND drop the table
+    this run created — the same contract the DuckDB path already meets."""
+    import src.transfer.reconcile_step as rs
+
+    dest_table = "x36_out"
+    _pg_drop_table(dest_table)
+    table = "x36_pg_src"
+    _seed_time(table, [(1, "01:23:45"), (2, "00:00:00"), (3, "09:05:00")])
+    conn = _mysql_conn()
+    conn.close()
+
+    real = rs._run_reconciliation_with_rules
+
+    def tampered(*a, **k):
+        pc = _pg_conn()
+        try:
+            with pc.cursor() as cur:
+                cur.execute(
+                    f'UPDATE public."{dest_table}" SET t = \'01:23:46\' '
+                    "WHERE id = 1"
+                )
+            pc.commit()
+        finally:
+            pc.close()
+        return real(*a, **k)
+
+    monkeypatch.setattr(rs, "_run_reconciliation_with_rules", tampered)
+    res = UniversalTransferEngine().execute_tracked(
+        _request(table, {"format": "postgresql", **PG}, dest_table), "0" * 24
+    )
+    assert not res.success, "dest tamper must fail the proof"
+    assert not _pg_table_exists(dest_table), (
+        "the table this run created must be dropped on reconcile failure"
+    )
+    recon = res.reconciliation or {}
+    culprits = str(recon.get("culprit_keys") or "") + str(
+        recon.get("culprit_columns") or ""
+    )
+    assert "postgres-to-postgres" not in str(
+        recon.get("culprit_keys_unavailable_reason") or ""
+    )
+
+
+def test_x36_culprit_keys_named_on_duckdb(monkeypatch, tmp_path):
+    """No-recipe MySQL -> DuckDB tamper: the cross-engine census names keys —
+    the old message claimed a postgres-to-postgres route was required (P3)."""
+    import src.transfer.reconcile_step as rs
+
+    table = "x36_ddb_src"
+    _seed_time(table, [(1, "01:23:45"), (2, "00:00:00"), (3, "09:05:00")])
+    dst = tmp_path / "x36.duckdb"
+    req = _request(
+        table,
+        {"format": "duckdb", "database": str(dst)},
+        "out",
+    )
+
+    real = rs._run_reconciliation_with_rules
+
+    def tampered(*a, **k):
+        con = duckdb.connect(str(dst))
+        con.execute("UPDATE out SET t = TIME '01:23:46' WHERE id = 1")
+        con.close()
+        return real(*a, **k)
+
+    monkeypatch.setattr(rs, "_run_reconciliation_with_rules", tampered)
+    res = UniversalTransferEngine().execute_tracked(req, "0" * 24)
+    assert not res.success, "dest tamper must fail the proof"
+    recon = res.reconciliation or {}
+    assert "postgres-to-postgres" not in str(
+        recon.get("culprit_keys_unavailable_reason") or ""
+    ), recon.get("culprit_keys_unavailable_reason")
+    keys = recon.get("culprit_keys") or {}
+    named = str(keys)
+    assert "1" in named or "t" in str(
+        recon.get("culprit_columns") or ""
+    ), f"culprit key 1 or column t must be named: {recon}"
+
+
+def test_x37_engine_digest_flag_pg(monkeypatch):
+    """DATAFLOW_ENGINE_DIGEST=1 on the engine-copy route must produce
+    full_checksum, not count-only 'none' assurance."""
+    monkeypatch.setenv("DATAFLOW_ENGINE_DIGEST", "1")
+    dest_table = "x37_out"
+    _pg_drop_table(dest_table)
+    table = "x37_pg_src"
+    _seed_time(table, [(1, "01:23:45"), (2, "00:00:00"), (3, "09:05:00")])
+    res = UniversalTransferEngine().execute_tracked(
+        _request(table, {"format": "postgresql", **PG}, dest_table), "0" * 24
+    )
+    assert res.success, f"clean in-range TIME run must succeed: {res.error}"
+    recon = res.reconciliation or {}
+    blob = _blob(res)
+    # With the digest flag on the verdict is full_checksum; the count-only
+    # prompt to set the flag must not appear.
+    assert "Set DATAFLOW_ENGINE_DIGEST" not in blob, blob
+    assert str(recon.get("checksum_mode") or recon.get("assurance") or "") != "none", blob
+    _pg_drop_table(dest_table)

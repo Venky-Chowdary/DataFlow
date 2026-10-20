@@ -83,6 +83,11 @@ class FastPathResult(NamedTuple):
     #: What the checksum proves. Mapped column values, not triggers, RLS,
     #: unmapped columns, or destination objects this path declined.
     proof_scope: str = "mapped_columns"
+    #: Whether the destination table existed before this run. Server-to-server
+    #: copies create the dest themselves, so the reconcile/undo layer cannot
+    #: learn the fact from the row writer's own census — it has to travel with
+    #: the result or a created-this-run table survives a failed run (X-36).
+    dest_table_existed_before: bool | None = None
 
     @property
     def verified(self) -> bool:

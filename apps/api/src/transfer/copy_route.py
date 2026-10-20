@@ -2496,6 +2496,7 @@ def _try_pg_mysql_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
         "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
@@ -2632,6 +2633,7 @@ def _try_pg_sqlserver_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
         "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
@@ -2741,6 +2743,7 @@ def _try_pg_oracle_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -2849,6 +2852,7 @@ def _try_pg_iceberg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -2948,6 +2952,7 @@ def _try_pg_mongo_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3087,6 +3092,7 @@ def _try_pg_sqlite_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3203,6 +3209,7 @@ def _try_pg_s3_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3307,6 +3314,7 @@ def _try_iceberg_pg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3410,6 +3418,7 @@ def _try_iceberg_mysql_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3517,6 +3526,7 @@ def _try_iceberg_sqlserver_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3625,6 +3635,7 @@ def _try_iceberg_oracle_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3732,6 +3743,7 @@ def _try_iceberg_mongo_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3843,6 +3855,7 @@ def _try_iceberg_sqlite_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -3944,6 +3957,7 @@ def _try_iceberg_s3_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -4048,6 +4062,7 @@ def _try_iceberg_iceberg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -4183,6 +4198,7 @@ def _try_sqlite_sqlite_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -4338,6 +4354,7 @@ def _try_sqlite_pg_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -4451,6 +4468,7 @@ def _try_sqlite_s3_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -4549,6 +4567,7 @@ def _try_sqlite_mongo_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -4688,6 +4707,7 @@ def _try_sqlite_mysql_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -4821,6 +4841,7 @@ def _try_sqlite_iceberg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -4934,6 +4955,7 @@ def _try_sqlite_sqlserver_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5048,6 +5070,7 @@ def _try_sqlite_oracle_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5145,6 +5168,7 @@ def _try_s3_s3_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5236,6 +5260,7 @@ def _try_gcs_gcs_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5328,6 +5353,7 @@ def _try_adls_adls_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5430,6 +5456,7 @@ def _try_dynamodb_dynamodb_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5534,6 +5561,7 @@ def _try_snowflake_snowflake_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5637,6 +5665,7 @@ def _try_bigquery_bigquery_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5733,6 +5762,7 @@ def _try_redis_redis_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5830,6 +5860,7 @@ def _try_elasticsearch_elasticsearch_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -5926,6 +5957,7 @@ def _try_kafka_kafka_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6032,6 +6064,7 @@ def _try_duckdb_duckdb_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6137,6 +6170,7 @@ def _try_qdrant_qdrant_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6246,6 +6280,7 @@ def _try_milvus_milvus_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6356,6 +6391,7 @@ def _try_weaviate_weaviate_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6466,6 +6502,7 @@ def _try_pinecone_pinecone_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6610,6 +6647,7 @@ def _try_pgvector_pgvector_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6724,6 +6762,7 @@ def _try_s3_pg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6822,6 +6861,7 @@ def _try_s3_mysql_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -6920,6 +6960,7 @@ def _try_s3_sqlite_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7022,6 +7063,7 @@ def _try_s3_mongo_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7132,6 +7174,7 @@ def _try_s3_iceberg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7243,6 +7286,7 @@ def _try_s3_sqlserver_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7359,6 +7403,7 @@ def _try_s3_oracle_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7469,6 +7514,7 @@ def _try_mongo_pg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7570,6 +7616,7 @@ def _try_mongo_mysql_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7675,6 +7722,7 @@ def _try_mongo_sqlserver_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7781,6 +7829,7 @@ def _try_mongo_oracle_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7883,6 +7932,7 @@ def _try_mongo_mongo_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -7988,6 +8038,7 @@ def _try_mongo_iceberg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -8089,6 +8140,7 @@ def _try_mongo_s3_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -8202,6 +8254,7 @@ def _try_mongo_sqlite_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -8307,6 +8360,7 @@ def _try_sqlserver_pg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
         "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
@@ -8444,6 +8498,7 @@ def _try_mysql_pg_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
         "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
@@ -8592,6 +8647,7 @@ def _try_mysql_mysql_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
         "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
@@ -8718,6 +8774,7 @@ def _try_mysql_sqlserver_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -8821,6 +8878,7 @@ def _try_sqlserver_mysql_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -8932,6 +8990,7 @@ def _try_sqlserver_sqlite_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9033,6 +9092,7 @@ def _try_sqlserver_s3_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9138,6 +9198,7 @@ def _try_mysql_oracle_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9247,6 +9308,7 @@ def _try_mysql_iceberg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9344,6 +9406,7 @@ def _try_mysql_mongo_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9441,6 +9504,7 @@ def _try_mysql_s3_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9579,6 +9643,7 @@ def _try_mysql_sqlite_copy_fast_path(
         "coerced_null_rows": 0,
         "sync_mode": sync_label,
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9699,6 +9764,7 @@ def _try_sqlserver_mongo_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9802,6 +9868,7 @@ def _try_sqlserver_iceberg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -9908,6 +9975,7 @@ def _try_oracle_iceberg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -10008,6 +10076,7 @@ def _try_oracle_mongo_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -10110,6 +10179,7 @@ def _try_oracle_mysql_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -10221,6 +10291,7 @@ def _try_oracle_sqlite_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -10323,6 +10394,7 @@ def _try_oracle_s3_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -10432,6 +10504,7 @@ def _try_sqlserver_oracle_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -10546,6 +10619,7 @@ def _try_oracle_sqlserver_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),
@@ -10645,6 +10719,7 @@ def _try_sqlserver_sqlserver_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
         "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
@@ -10745,6 +10820,7 @@ def _try_oracle_oracle_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": dict(result.source_snapshot or {}),
         "copy_workers": int((result.source_snapshot or {}).get("copy_workers") or 1),
         "copy_partitions": (result.source_snapshot or {}).get("copy_partitions"),
@@ -10850,6 +10926,7 @@ def _try_oracle_pg_copy_fast_path(
             "full_refresh_append" if not replace_destination else "full_refresh_overwrite"
         ),
         "proof_scope": result.proof_scope,
+        "dest_table_existed_before": result.dest_table_existed_before,
         "source_snapshot": snapshot,
         "copy_workers": int(snapshot.get("copy_workers") or 1),
         "copy_partitions": snapshot.get("copy_partitions"),

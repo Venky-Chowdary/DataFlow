@@ -83,6 +83,44 @@ def mysql_type_is_copy_safe(declared: str) -> bool:
     return True
 
 
+def _ddl_base(ddl: str) -> str:
+    return (ddl or "").strip().split("(")[0].strip().lower()
+
+
+def mysql_time_column_out_of_range(
+    src_cur: Any,
+    table_q: str,
+    pairs: list[tuple[str, str]],
+    dest_ddls: list[str],
+    live_types: dict[str, str],
+) -> str | None:
+    """Name a source TIME column whose rows fall outside the destination's
+    wall-clock ``time`` domain, or None.
+
+    MySQL ``TIME`` is an interval (-838:59:59 .. +838:59:59); the ``time``
+    carrier PostgreSQL and SQL Server expose is a wall clock
+    (00:00:00 .. 23:59:59.9999999). Feeding an out-of-range value into a
+    bulk load lands raw driver text (``-1 day, 23:00:00``) in COPY and
+    fails with an untyped parse error — the row path instead emits a typed
+    per-row finding naming the value (X-35). A destination carrier that
+    can hold an interval or the raw text (``interval``, ``text``, ...) does
+    not need the decline.
+    """
+    for idx, (src_col, _dest_col) in enumerate(pairs):
+        if _mysql_base(live_types.get(src_col.lower()) or "") != "TIME":
+            continue
+        if _ddl_base(dest_ddls[idx] if idx < len(dest_ddls) else "") != "time":
+            continue
+        col_q = _mysql_ident(src_col)
+        src_cur.execute(
+            f"SELECT COUNT(*) FROM {table_q} WHERE {col_q} IS NOT NULL "  # nosec B608
+            f"AND ({col_q} < '00:00:00' OR {col_q} >= '24:00:00')"
+        )
+        if int(src_cur.fetchone()[0]) > 0:
+            return src_col
+    return None
+
+
 def _mysql_ident(name: str) -> str:
     from connectors.sql_identifiers import quote_sql_identifier
 
@@ -414,6 +452,17 @@ def copy_mysql_to_postgres(
                     )
             pk_map = mapped_single_pk(pk_cols, pairs)
 
+            bad_time_col = mysql_time_column_out_of_range(
+                src_cur, table_q, pairs, pg_ddls, live_l
+            )
+            if bad_time_col:
+                raise FastPathUnavailable(
+                    f"source column {bad_time_col!r} holds MySQL TIME outside "
+                    "the 0-24h domain the PostgreSQL time carrier stores — "
+                    "row path emits a typed finding per row instead of a COPY "
+                    "parse error"
+                )
+
             dst_cur.execute(
                 "SELECT 1 FROM information_schema.tables "
                 "WHERE table_schema = %s AND table_name = %s LIMIT 1",
@@ -591,6 +640,7 @@ def copy_mysql_to_postgres(
                     "source_where": bool(cursor_where),
                     "partition_proof": partition_proof,
                 },
+            dest_table_existed_before=existed_before,
                 proof_scope=(
                     "partition_dest_count_equals_source_snapshot"
                     if partition_proof
@@ -598,6 +648,13 @@ def copy_mysql_to_postgres(
                 ),
             )
     except Exception:
+        # The failed COPY leaves the connection in an aborted transaction —
+        # without this rollback the cleanup statement errors inside it and the
+        # table this run created is left behind (X-35/X-36).
+        try:
+            dest_conn.rollback()
+        except Exception:
+            logger.debug("PostgreSQL dest rollback skipped", exc_info=True)
         if created_here:
             try:
                 with dest_conn.cursor() as cur:

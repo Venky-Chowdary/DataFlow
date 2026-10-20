@@ -3314,21 +3314,47 @@ def _name_gate8_culprits(
     source_endpoint: Any,
     endpoint: Any,
     dest_summary: dict[str, Any] | None,
+    mappings: list[dict[str, Any]] | None = None,
 ) -> None:
-    """Name culprit keys on a failed keyed PG→PG run.
+    """Name culprit keys on a failed keyed run.
 
     Gate-8 fails on a digest difference over the whole population; without a
-    named culprit the operator only has two hex strings. On keyed Postgres
-    routes we can do better in bounded memory: stream ``(pk, row hash)`` from
-    each side into a temp sqlite table, then join to name up to
-    ``_CULPRIT_KEYS_LIMIT`` keys that changed value, went missing, or exist
-    only on the destination. Runs only on the failure path, never on verify.
+    named culprit the operator only has two hex strings. On keyed routes we
+    can do better in bounded memory: stream ``(pk, row hash)`` from each side
+    into a temp sqlite table, then join to name up to ``_CULPRIT_KEYS_LIMIT``
+    keys that changed value, went missing, or exist only on the destination.
+    Runs only on the failure path, never on verify.
     """
     summary = dest_summary or {}
-    if str(getattr(endpoint, "format", "") or "") != "postgresql":
+    src_fmt = str(getattr(source_endpoint, "format", "") or "")
+    dst_fmt = str(getattr(endpoint, "format", "") or "")
+    if src_fmt == "postgresql" and dst_fmt == "postgresql":
+        _name_gate8_culprits_pg(
+            report,
+            source_endpoint=source_endpoint,
+            endpoint=endpoint,
+            dest_summary=summary,
+        )
         return
-    if source_endpoint is None or str(getattr(source_endpoint, "format", "") or "") != "postgresql":
-        return
+    _name_gate8_culprits_generic(
+        report,
+        source_endpoint=source_endpoint,
+        endpoint=endpoint,
+        dest_summary=summary,
+        mappings=mappings,
+    )
+    return
+
+
+def _name_gate8_culprits_pg(
+    report: dict[str, Any],
+    *,
+    source_endpoint: Any,
+    endpoint: Any,
+    dest_summary: dict[str, Any] | None,
+) -> None:
+    """PG→PG census — both sides hash in-engine with the same algorithm."""
+    summary = dest_summary or {}
     pk_cols = [
         str(c)
         for c in (summary.get("primary_key_columns") or [])
@@ -3409,33 +3435,7 @@ def _name_gate8_culprits(
             _load(src_cfg, stmt_src, 0)
             _load(dst_cfg, stmt_dst, 1)
 
-            lim = _CULPRIT_KEYS_LIMIT + 1
-            changed = [
-                r[0]
-                for r in db.execute(
-                    "SELECT s.pk FROM k s JOIN k d ON s.pk = d.pk AND d.side = 1 "
-                    "WHERE s.side = 0 AND s.h <> d.h LIMIT ?",
-                    (lim,),
-                )
-            ]
-            missing = [
-                r[0]
-                for r in db.execute(
-                    "SELECT s.pk FROM k s LEFT JOIN k d "
-                    "ON s.pk = d.pk AND d.side = 1 "
-                    "WHERE s.side = 0 AND d.pk IS NULL LIMIT ?",
-                    (lim,),
-                )
-            ]
-            extra = [
-                r[0]
-                for r in db.execute(
-                    "SELECT d.pk FROM k d LEFT JOIN k s "
-                    "ON d.pk = s.pk AND s.side = 0 "
-                    "WHERE d.side = 1 AND s.pk IS NULL LIMIT ?",
-                    (lim,),
-                )
-            ]
+            changed, missing, extra = _census_join(db)
             db.close()
         finally:
             try:
@@ -3447,6 +3447,47 @@ def _name_gate8_culprits(
             "Gate-8 culprit-key naming skipped: %s", exc, exc_info=exc
         )
         return
+    _report_culprit_keys(report, changed, missing, extra)
+
+
+def _census_join(db: Any) -> tuple[list[Any], list[Any], list[Any]]:
+    """Join a loaded (side, pk, h) census into changed/missing/extra keys."""
+    lim = _CULPRIT_KEYS_LIMIT + 1
+    changed = [
+        r[0]
+        for r in db.execute(
+            "SELECT s.pk FROM k s JOIN k d ON s.pk = d.pk AND d.side = 1 "
+            "WHERE s.side = 0 AND s.h <> d.h LIMIT ?",
+            (lim,),
+        )
+    ]
+    missing = [
+        r[0]
+        for r in db.execute(
+            "SELECT s.pk FROM k s LEFT JOIN k d "
+            "ON s.pk = d.pk AND d.side = 1 "
+            "WHERE s.side = 0 AND d.pk IS NULL LIMIT ?",
+            (lim,),
+        )
+    ]
+    extra = [
+        r[0]
+        for r in db.execute(
+            "SELECT d.pk FROM k d LEFT JOIN k s "
+            "ON d.pk = s.pk AND s.side = 0 "
+            "WHERE d.side = 1 AND s.pk IS NULL LIMIT ?",
+            (lim,),
+        )
+    ]
+    return changed, missing, extra
+
+
+def _report_culprit_keys(
+    report: dict[str, Any],
+    changed: list[Any],
+    missing: list[Any],
+    extra: list[Any],
+) -> None:
     culprits: dict[str, Any] = {}
     parts: list[str] = []
     for label, keys, desc in (
@@ -3466,6 +3507,207 @@ def _name_gate8_culprits(
     report["culprit_keys"] = culprits
     msg = str(report.get("message") or "")
     report["message"] = f"{msg} Culprit key(s) — {'; '.join(parts)}."
+
+
+def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | None:
+    """(engine, connection) for the failure-path key census, or None when the
+    engine cannot be read back for a census."""
+    from .connector_capabilities import resolve_driver_type
+
+    eng = resolve_driver_type(fmt or "") or str(fmt or "")
+    if eng in {"", "generic_sql", "unknown"}:
+        # DuckDB/SQLite resolve to the generic routing key — the census needs
+        # the real engine from the endpoint's own format.
+        eng = str(fmt or "").strip().lower() or eng
+    if eng == "postgresql":
+        from connectors.postgresql_conn import get_connection
+
+        return eng, get_connection(
+            host=cfg.get("host", ""),
+            port=int(cfg.get("port") or 5432),
+            database=cfg.get("database", ""),
+            username=cfg.get("username", ""),
+            password=cfg.get("password", ""),
+            connection_string=cfg.get("connection_string", ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+    if eng == "mysql":
+        from services.copy_mysql_pg import _mysql_connect
+
+        return eng, _mysql_connect(cfg)
+    if eng == "duckdb":
+        import duckdb
+
+        return eng, duckdb.connect(
+            database=str(cfg.get("database") or cfg.get("path") or ":memory:")
+        )
+    if eng == "sqlite":
+        return eng, sqlite3.connect(
+            str(cfg.get("database") or cfg.get("path") or "")
+        )
+    if eng == "mssql":
+        from services.copy_sqlserver_sqlserver import _ss_connect
+
+        return eng, _ss_connect(cfg)
+    return None
+
+
+def _culprit_table_ref(eng: str, cfg: dict[str, Any], table: str) -> str:
+    from connectors.sql_identifiers import quote_sql_identifier as _qi
+
+    if eng == "duckdb" or eng == "sqlite":
+        return _qi(table, '"')
+    from services.dest_precount import warehouse_sql_table_ref
+
+    return warehouse_sql_table_ref(
+        eng, cfg, str(cfg.get("schema") or ""), table
+    )
+
+
+def _name_gate8_culprits_generic(
+    report: dict[str, Any],
+    *,
+    source_endpoint: Any,
+    endpoint: Any,
+    dest_summary: dict[str, Any] | None,
+    mappings: list[dict[str, Any]] | None,
+) -> None:
+    """Cross-engine census — each side's (pk, row hash) is computed in Python
+    from streamed rows so engines with different in-engine hash functions
+    (MySQL vs DuckDB, MySQL vs Postgres, …) still compare honestly.
+
+    The hash runs ``normalize_cell`` — the same canonicalizer Gate-8 digests
+    use — over the mapped destination column order, so a timedalta-vs-time
+    or padded-CHAR pair is judged by the same rule the verdict used.
+    """
+    summary = dest_summary or {}
+    pk_cols = [
+        str(c)
+        for c in (summary.get("primary_key_columns") or [])
+        if str(c or "").strip()
+    ]
+    if len(pk_cols) != 1:
+        return
+    pk = pk_cols[0]
+    src_tbl = str(getattr(source_endpoint, "table", "") or "").strip()
+    dst_tbl = str(getattr(endpoint, "table", "") or "").strip()
+    if not src_tbl or not dst_tbl:
+        return
+    pairs = [
+        (
+            str(m.get("source") or ""),
+            str(m.get("target") or m.get("destination") or m.get("source") or ""),
+        )
+        for m in (mappings or [])
+        if isinstance(m, dict) and str(m.get("source") or "").strip()
+    ]
+    if not pairs:
+        return
+    src_pk = next((s for s, t in pairs if t.lower() == pk.lower()), pk)
+    src_cols = [s for s, _t in pairs if s.lower() != src_pk.lower()]
+    dst_cols = [t for s, t in pairs if s.lower() != src_pk.lower() and str(t or "").strip()]
+    if len(src_cols) != len(dst_cols) or not dst_cols:
+        return
+    try:
+        from services.reconciliation import normalize_cell
+        from .connector_capabilities import resolve_driver_type
+
+        src_cfg = resolve_connector_config(source_endpoint)
+        dst_cfg = resolve_connector_config(endpoint)
+        src_eng = resolve_driver_type(
+            getattr(source_endpoint, "format", "") or ""
+        ) or "unknown"
+        dst_eng = resolve_driver_type(endpoint.format or "") or "unknown"
+        if src_eng in {"", "generic_sql", "unknown"}:
+            src_eng = str(getattr(source_endpoint, "format", "") or "unknown").lower()
+        if dst_eng in {"", "generic_sql", "unknown"}:
+            dst_eng = str(getattr(endpoint, "format", "") or "unknown").lower()
+        src_conn_info = _culprit_census_conn(
+            getattr(source_endpoint, "format", "") or "", src_cfg
+        )
+        dst_conn_info = _culprit_census_conn(endpoint.format or "", dst_cfg)
+        if src_conn_info is None or dst_conn_info is None:
+            return
+        changed: list[Any] = []
+        missing: list[Any] = []
+        extra: list[Any] = []
+        fd, path = tempfile.mkstemp(prefix="df_culprits_", suffix=".sqlite3")
+        os.close(fd)
+        try:
+            db = sqlite3.connect(path)
+            db.execute("CREATE TABLE k(side INTEGER NOT NULL, pk TEXT, h TEXT)")
+            db.execute("CREATE INDEX ki ON k(side, pk)")
+
+            def _load(conn_info, cfg, eng, ref_table, pk_col, cols, side):
+                e2, conn = conn_info
+                q = '"' if e2 != "mysql" else "`"
+                from connectors.sql_identifiers import quote_sql_identifier as _qi
+
+                sel = ", ".join(
+                    [_qi(pk_col, q)] + [_qi(c, q) for c in cols]
+                )
+                stmt = f"SELECT {sel} FROM {ref_table}"  # nosec B608
+                try:
+                    cur = conn.cursor()
+                    cur.execute(stmt)
+                    while True:
+                        chunk = cur.fetchmany(5000)
+                        if not chunk:
+                            break
+                        db.executemany(
+                            "INSERT INTO k(side, pk, h) VALUES (?,?,?)",
+                            (
+                                (
+                                    side,
+                                    str(r[0]),
+                                    hashlib.md5(
+                                        "\x1f".join(
+                                            normalize_cell(v, engine=dst_eng)
+                                            for v in r[1:]
+                                        ).encode("utf-8", "replace")
+                                    ).hexdigest(),
+                                )
+                                for r in chunk
+                            ),
+                        )
+                    db.commit()
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
+
+            _load(
+                src_conn_info,
+                src_cfg,
+                src_eng,
+                _culprit_table_ref(src_eng, src_cfg, src_tbl),
+                src_pk,
+                src_cols,
+                0,
+            )
+            _load(
+                dst_conn_info,
+                dst_cfg,
+                dst_eng,
+                _culprit_table_ref(dst_eng, dst_cfg, dst_tbl),
+                pk,
+                dst_cols,
+                1,
+            )
+            changed, missing, extra = _census_join(db)
+            db.close()
+        finally:
+            try:
+                os.unlink(path)
+            except OSError:
+                pass
+    except Exception as exc:
+        _logger.warning(
+            "Gate-8 culprit-key naming skipped: %s", exc, exc_info=exc
+        )
+        return
+    _report_culprit_keys(report, changed, missing, extra)
 
 
 def _attach_match_summary(
@@ -5527,7 +5769,22 @@ def _run_reconciliation_impl(
                 digest_provenance["dest_read"] = (
                     "write_time_engine_digest_no_verify_reread"
                 )
-    elif (_engine_digest_enabled() or _cdc_source_image_gate(dest_summary)) and not source_checksum_scope_note:
+    elif (_engine_digest_enabled() or _cdc_source_image_gate(dest_summary)) and (
+        not source_checksum_scope_note
+        # X-37: the engine-copy count-only note is precisely what the flag is
+        # for — with DATAFLOW_ENGINE_DIGEST=1 the verify pass re-reads both
+        # populations in-engine for full_checksum proof instead of degrading
+        # to count-only. Only the resume window makes a whole-population
+        # digest non-comparable, so that scope still blocks.
+        or (
+            _engine_digest_enabled()
+            and _engine_count_proof_only(dest_summary) is not None
+            and not (
+                resume_full_source_rows
+                and (records or source_spool is not None)
+            )
+        )
+    ):
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
             dest_cfg=cfg,
@@ -5551,6 +5808,10 @@ def _run_reconciliation_impl(
         # digest can have here, and in particular not the writer's own account.
         source_checksum_provenance = SOURCE_DIGEST_ENGINE_POPULATION
         digest_provenance["source"] = source_checksum_provenance
+        # A digest now exists — the count-only scope note (and its
+        # "Set DATAFLOW_ENGINE_DIGEST=1" prompt) no longer applies (X-37).
+        source_checksum_scope_note = ""
+        source_checksum_scope_label = "by engine digest"
     elif routed_tables:
         target_rows = 0
         target_checksum = ""
@@ -6556,6 +6817,36 @@ def run_reconciliation(
                 note = f"transform proof {label} — {proof.get('reason')}"
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"
+    # X-37: with DATAFLOW_ENGINE_DIGEST=1 the L3 ladder already re-read both
+    # populations and digested them with the same canonical algorithm — a
+    # real full_checksum on an engine-copy route, not count-only. Promote it
+    # over the "no rows entered this process" stamp instead of telling the
+    # operator to set the flag they already set.
+    if _engine_digest_enabled() and not recon.get("checksum_match"):
+        _l3_run = recon.get("verification_ladder") or {}
+        _l3_layer = (_l3_run.get("layers") or {}).get("L3") or {}
+        _l3_details = _l3_layer.get("details") or {}
+        if (
+            _l3_run.get("assurance_level") == "full_checksum"
+            and _l3_run.get("population_checksum_proof")
+            and _l3_layer.get("passed")
+            and str(_l3_details.get("source_checksum") or "")
+            and _l3_details.get("source_checksum") == _l3_details.get("target_checksum")
+        ):
+            recon["source_checksum"] = str(_l3_details.get("source_checksum") or "")
+            recon["target_checksum"] = str(_l3_details.get("target_checksum") or "")
+            recon["checksum_match"] = True
+            recon["assurance_level"] = "full_checksum"
+            recon["checksum_scope"] = "verify_time_population_digest"
+            _msg = str(recon.get("message") or "")
+            _cut = _msg.find(" There is no source value digest")
+            if _cut >= 0:
+                recon["message"] = (
+                    _msg[:_cut]
+                    + " Both populations were re-read and digested "
+                    "order-independently at verify time; the digests match "
+                    "(full_checksum)."
+                )
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
     # src vs shaped dest here would flag every transformed row.
@@ -6591,16 +6882,18 @@ def run_reconciliation(
                 source_endpoint=source_endpoint,
                 endpoint=endpoint,
                 dest_summary=dest_summary,
+                mappings=mappings,
             )
             if not recon.get("culprit_keys"):
                 # Never leave a detected mismatch with empty culprits and no
                 # explanation: name why keys could not be produced (the
-                # census needs a single-column PK on a postgres route and
-                # both sides readable), so the verdict degrades honestly.
+                # census needs a single-column PK and both sides readable
+                # by a census driver), so the verdict degrades honestly.
                 recon["culprit_keys_unavailable_reason"] = (
                     "culprit keys could not be named — destination key "
-                    "census requires a single-column primary key on a "
-                    "postgres-to-postgres route with both sides readable"
+                    "census requires a single-column primary key and both "
+                    "sides readable by a census driver "
+                    "(postgres/mysql/mssql/duckdb/sqlite)"
                 )
                 if recon.get("message"):
                     recon["message"] = (

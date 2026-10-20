@@ -34,6 +34,7 @@ from services.copy_mysql_pg import (
     _mysql_table_pk_and_types,
     _plan_pk_partitions,
     _select_sql,
+    mysql_time_column_out_of_range,
     mysql_type_is_copy_safe,
 )
 from services.copy_pg_mysql import (
@@ -168,6 +169,17 @@ def copy_mysql_to_sqlserver(
                         f"source column {col!r} type {declared} is not COPY-safe"
                     )
             pk_map = mapped_single_pk(pk_cols, pairs)
+
+            bad_time_col = mysql_time_column_out_of_range(
+                src_cur, table_q, pairs, sqlserver_ddls, live_l
+            )
+            if bad_time_col:
+                raise FastPathUnavailable(
+                    f"source column {bad_time_col!r} holds MySQL TIME outside "
+                    "the 0-24h domain the SQL Server time carrier stores — "
+                    "row path emits a typed finding per row instead of a bulk "
+                    "bind error"
+                )
 
             exists = _ss_table_exists(dst_cur, dst_schema, dest_table)
             existed_before = bool(exists)
@@ -333,6 +345,7 @@ def copy_mysql_to_sqlserver(
                 "shard_mode": shard_mode,
                 "partition_proof": partition_proof,
             },
+            dest_table_existed_before=existed_before,
             proof_scope=(
                 "partition_dest_count_equals_source_snapshot"
                 if partition_proof
@@ -343,7 +356,13 @@ def copy_mysql_to_sqlserver(
         # A table this run created (or an existing dest that was empty before)
         # must end byte-identical to before the failure — never a partial
         # commit. PK-shard resume preserves committed rows only for a
-        # pre-existing occupied dest.
+        # pre-existing occupied dest. Roll back first: after a bind/insert
+        # failure the cleanup statements would otherwise run inside the
+        # aborted transaction and be silently skipped (X-35/X-36).
+        try:
+            dest_conn.rollback()
+        except Exception:
+            logger.debug("SQL Server dest rollback skipped", exc_info=True)
         if created_here:
             try:
                 dst_cur.execute(_ss_drop_sql(dest_ref))
