@@ -1128,18 +1128,21 @@ def _transform_applied_proof(
 
     def _src_norm(v: Any, ddl: str = "") -> str:
         # Source-side hash normalization — must match stream._pin_norm on
-        # the write ledger: declared text compares literally, numeric/date
-        # columns canonicalize so COPY-text and driver reprs hash alike.
-        if v is None:
-            return _NULL_SENTINEL
+        # the write ledger exactly (NULL token, SQL_NULL_SENTINEL, text-DDL
+        # literal rule, engine=""), so delegate to the canonical helper —
+        # any drift between them reads every re-read row as "changed in
+        # source during run".
         try:
-            if isinstance(v, str) and ddl and _TEXT_FAMILY_DDL_RE.match(
-                str(ddl).strip()
-            ):
-                return v
-            return normalize_cell(v, ddl_type=str(ddl or ""), engine=src_type)
+            from src.transfer.stream import _pin_norm
+
+            return _pin_norm(v, ddl)
         except Exception:
-            return str(v)
+            if v is None:
+                return _NULL_SENTINEL
+            try:
+                return normalize_cell(v, ddl_type=str(ddl or ""), engine="")
+            except Exception:
+                return str(v)
 
     def _src_ddl(col: str) -> str:
         ss = source_schema or {}
@@ -1501,9 +1504,15 @@ def _transform_applied_proof(
             str(c) for s in parsed.enabled_steps for c in s.writes
         }
         _src_col_set = {str(c) for c in (source_schema or {})}
+        # A produced name that is also a real source column must still be
+        # re-read: steps that transform in place (case/trim on 'note') both
+        # consume and write it — dropping it from the SELECT hands the
+        # runner NULL and hashes every key as "changed in source".
+        _real_src = {str(c) for c in (columns or [])}
+        _not_produced_only = lambda c: c not in _produced_cols or c in _real_src  # noqa: E731
         if _declared_inputs:
             read_cols = [
-                c for c in _declared_inputs if c not in _produced_cols
+                c for c in _declared_inputs if _not_produced_only(c)
             ]
         else:
             # No schema-set filter: the schema arriving here is the
@@ -1514,8 +1523,26 @@ def _transform_applied_proof(
             read_cols = [
                 c
                 for c in (runner.recipe.input_columns or columns)
-                if c not in _produced_cols
+                if _not_produced_only(c)
             ]
+        # Culprit coverage: pass-through columns the transfer maps but no
+        # recipe step references must be re-read too — destination drift
+        # on them is still drift and must name the column, not go unseen
+        # (X-99 narrowed the read to recipe inputs only).
+        _mapped_src = [
+            str(m.get("source"))
+            for m in mappings
+            if isinstance(m, dict) and m.get("source")
+        ]
+        _keep = {
+            c for c in (read_cols + _mapped_src) if _not_produced_only(c)
+        }
+        # Column order must match the write pass's pin ledger (source
+        # read order, i.e. `columns`) or every key reads as changed.
+        read_cols = [c for c in (columns or []) if c in _keep] + [
+            c for c in dict.fromkeys(read_cols + _mapped_src)
+            if c in _keep and c not in (columns or [])
+        ]
         if not read_cols:
             read_cols = list(columns)
         expected_checksum = canonical_checksum_from_iter(

@@ -112,19 +112,25 @@ def _request(src: Path, dst: Path) -> TransferRequest:
 def test_tampered_non_recipe_column_names_itself(monkeypatch):
     """Corrupt only ``amount`` (untouched by the recipe) on its way to the
     destination — the proof must name ``amount`` and no recipe step."""
-    from services import shape_apply as shape_apply_mod
+    # Corrupt rows on the destination-write seam only — patching
+    # ShapeRunner.matrix corrupts the Gate-8 source re-read identically,
+    # which is invisible by design.
+    from src.transfer import stream_write as stream_write_mod
 
-    real_matrix = shape_apply_mod.ShapeRunner.matrix
+    real_write = stream_write_mod._write_batch
 
-    def corrupt_amount(self, headers, rows):
-        out_headers, out_rows = real_matrix(self, headers, rows)
-        idx = out_headers.index("amount")
-        return out_headers, [
-            [("TAMPERED" if i == idx else v) for i, v in enumerate(r)]
-            for r in out_rows
-        ]
+    def corrupt_amount(*args, **kwargs):
+        args = list(args)
+        headers, data_rows = args[4], args[5]
+        if "amount" in headers:
+            idx = headers.index("amount")
+            args[5] = [
+                [("TAMPERED" if i == idx else v) for i, v in enumerate(r)]
+                for r in data_rows
+            ]
+        return real_write(*args, **kwargs)
 
-    monkeypatch.setattr(shape_apply_mod.ShapeRunner, "matrix", corrupt_amount)
+    monkeypatch.setattr(stream_write_mod, "_write_batch", corrupt_amount)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
@@ -152,19 +158,22 @@ def test_tampered_non_recipe_column_names_itself(monkeypatch):
 
 def test_tampered_recipe_column_still_names_the_step(monkeypatch):
     """Counterpart: corrupt the recipe's own column — the step is blamed."""
-    from services import shape_apply as shape_apply_mod
+    from src.transfer import stream_write as stream_write_mod
 
-    real_matrix = shape_apply_mod.ShapeRunner.matrix
+    real_write = stream_write_mod._write_batch
 
-    def corrupt_note(self, headers, rows):
-        out_headers, out_rows = real_matrix(self, headers, rows)
-        idx = out_headers.index("note")
-        return out_headers, [
-            [("TAMPERED" if i == idx else v) for i, v in enumerate(r)]
-            for r in out_rows
-        ]
+    def corrupt_note(*args, **kwargs):
+        args = list(args)
+        headers, data_rows = args[4], args[5]
+        if "note" in headers:
+            idx = headers.index("note")
+            args[5] = [
+                [("TAMPERED" if i == idx else v) for i, v in enumerate(r)]
+                for r in data_rows
+            ]
+        return real_write(*args, **kwargs)
 
-    monkeypatch.setattr(shape_apply_mod.ShapeRunner, "matrix", corrupt_note)
+    monkeypatch.setattr(stream_write_mod, "_write_batch", corrupt_note)
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_path = Path(tmp)
