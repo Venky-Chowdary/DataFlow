@@ -1013,6 +1013,15 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 "Open Transform and fix the recipe, then re-run Validate — "
                 "nothing was written to the destination."
             )
+        elif matched.get("code") == "destination_column_missing":
+            # X-51: an undefined-column write error is a mapping problem, not
+            # a capacity problem — the generic tail told users to "address
+            # capacity" for a missing column.
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "Create the column on the destination or fix the field mapping "
+                "in Map — this is not a capacity problem."
+            )
         else:
             message = (
                 f"{title}. Driver reported: {raw}. "
