@@ -62,6 +62,12 @@ class _SqliteMaterializedBatch:
 
 def sqlite_type(inferred: str) -> str:
     """CREATE DDL for SQLite — rematerializes DECIMAL/MONEY to TEXT (no affinity invent)."""
+    upper = (inferred or "").strip().upper()
+    if "BIGINT" in upper and "UNSIGNED" in upper:
+        # X-58: MySQL BIGINT UNSIGNED holds 0..2^64-1 — beyond signed INTEGER.
+        # TEXT digits are the exact carrier; NUMERIC affinity would store
+        # >2^63-1 digit text as REAL and lose the low bits.
+        return "TEXT"
     return materialize_dest_ddl("sqlite", inferred)
 
 
@@ -106,6 +112,13 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
     handled, bound = absent_sql_bind(value)
     if handled:
         return bound
+    if isinstance(value, int) and not isinstance(value, bool) and not (
+        -(2**63) <= value <= 2**63 - 1
+    ):
+        # X-58: >|int64| ints (BIGINT UNSIGNED) cannot bind to a signed SQLite
+        # INTEGER — digit TEXT is the exact carrier.
+        return str(value)
+    # (int within int64 falls through to the generic int bind below)
     # SQLite has no Decimal affinity — dest-canonical text (shared adapter).
     if isinstance(value, Decimal):
         from connectors.sqlite_common import sqlite_decimal_bind_text

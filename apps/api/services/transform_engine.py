@@ -2377,6 +2377,17 @@ def apply_transform(
             else _parse_boolean(text)
         )
         if parsed_bool is None:
+            # X-59: an integer-looking reject on a boolean carrier is almost
+            # always a tinyint(1)-style display-width column holding real
+            # integers — name the likely cause, not just the literal.
+            _int_probe = _parse_integer(text, allow_markers=False)
+            if _int_probe is not None and _int_probe not in (0, 1):
+                return None, (
+                    f"Invalid boolean: {text!r} — value is an integer outside "
+                    "0/1, so the column is not boolean (e.g. MySQL tinyint(1) "
+                    "is a display width, not a type); map it to a small "
+                    "integer carrier instead"
+                )
             return None, f"Invalid boolean: {text!r}"
         return parsed_bool, None
 

@@ -55,6 +55,16 @@ def sql_value_to_bson(value: Any) -> Any:
         from bson.decimal128 import Decimal128
 
         return Decimal128(value)
+    if isinstance(value, int) and not isinstance(value, bool) and not (
+        -(2**63) <= value <= 2**63 - 1
+    ):
+        # X-62: pymongo binds Python int as BSON int64 — BIGINT UNSIGNED tops
+        # out at 2^64-1 and raised a raw "MongoDB can only handle up to
+        # 8-byte ints". Decimal128 holds 34 significant digits, exact for
+        # any uint64; the verifier compares decoded integers.
+        from bson.decimal128 import Decimal128
+
+        return Decimal128(Decimal(value))
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise FastPathUnavailable("binary SQL field is not Mongo COPY-safe")
     return value

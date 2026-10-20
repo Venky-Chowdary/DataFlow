@@ -92,6 +92,63 @@ def mysql_bit_widths(cur, table: str) -> dict[str, int]:
     return _bit_widths_from_types(_mysql_column_types(cur, table))
 
 
+def mysql_tinyint1_wide_columns(cur, table: str, columns: list[str]) -> set[str]:
+    """tinyint(1) columns whose data proves they are NOT boolean (X-59).
+
+    ``tinyint(1)`` is a display width, not a type: MySQL stores -128..127.
+    The DDL mapper stamps it BOOLEAN off the width alone, which rejected
+    valid rows ('Invalid boolean: 127') or crashed COPY on PG. Evidence
+    decides instead: one short-circuit probe per tinyint(1) column returns
+    the set holding any value outside {0,1} — those must plan a small-int
+    carrier; the rest keep boolean.
+    """
+    cur.execute(
+        "SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+        (table,),
+    )
+    types = {str(n): str(t or "").lower() for n, t in cur.fetchall()}
+    table_q = quote_table_ref(table, dialect="mysql")
+    wide: set[str] = set()
+    for col in columns or []:
+        if str(types.get(col) or "").lower() != "tinyint(1)":
+            continue
+        col_q = quote_sql_identifier(require_safe_identifier(col, preserve_case=True), "`")
+        cur.execute(
+            f"SELECT 1 FROM {table_q} WHERE {col_q} NOT IN (0, 1) "
+            f"AND {col_q} IS NOT NULL LIMIT 1"
+        )
+        if cur.fetchone() is not None:
+            wide.add(col)
+    return wide
+
+
+def widen_tinyint1_ddls(
+    live_types: dict[str, str],
+    pairs: list[tuple[str, str]],
+    ddls: list[str],
+    smallint_ddl: str,
+) -> tuple[list[str], list[str]]:
+    """Rewrite BOOLEAN-stamped ddls to ``smallint_ddl`` for evidence-wide
+    tinyint(1) source columns (X-59). ``live_types`` maps source column →
+    COLUMN_TYPE ('tinyint(1)'); only those columns are candidates, and only
+    when their current ddl is boolean-carrier. Returns (ddls, widened_cols).
+    """
+    out = list(ddls)
+    widened: list[str] = []
+    live_l = {k.lower(): v for k, v in (live_types or {}).items()}
+    for idx, (src_col, _dest_col) in enumerate(pairs or []):
+        if str(live_l.get(str(src_col).lower()) or "").lower() != "tinyint(1)":
+            continue
+        if idx >= len(out):
+            break
+        if str(out[idx]).strip().lower() not in {"boolean", "bool", "bit"}:
+            continue
+        out[idx] = smallint_ddl
+        widened.append(str(src_col))
+    return out, widened
+
+
 def _bit_names_from_types(types: list[tuple[str, str]]) -> frozenset[str]:
     return frozenset(_bit_widths_from_types(types))
 

@@ -340,6 +340,26 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
+            "invalid input syntax for type",
+        ),
+        {
+            "code": "pg_invalid_input_syntax",
+            "category": "data_type",
+            "confidence": "high",
+            "title": "A value does not fit the PostgreSQL column type",
+            "fix": (
+                "PostgreSQL rejected a value during COPY because it does not parse as "
+                "the destination column's type (the server message names the type, "
+                "the offending literal, and the row/column). Common verified cause: a "
+                "source column whose declared type stamps narrower than its data (e.g. "
+                "tinyint(1) holds -128..127, not just 0/1). Fix the type in Map — pick "
+                "an integer or text carrier for that column — or correct the source "
+                "data, then Resume from checkpoint."
+            ),
+        },
+    ),
+    (
+        (
             "incorrect datetime value",
             "(1292,",
             " 1292,",
@@ -1012,6 +1032,15 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
                 f"{title}. Driver reported: {raw}. "
                 "Open Transform and fix the recipe, then re-run Validate — "
                 "nothing was written to the destination."
+            )
+        elif matched.get("code") == "pg_invalid_input_syntax":
+            # X-59: never surface the raw COPY line to the user — name the
+            # type the value must parse as and point at Map, not capacity.
+            message = (
+                f"{title}. Driver reported: {raw}. "
+                "Pick an integer or text carrier for that column in Map, or "
+                "fix the source values, then Resume — this is not a capacity "
+                "problem."
             )
         elif matched.get("code") == "destination_column_missing":
             # X-51: an undefined-column write error is a mapping problem, not

@@ -472,6 +472,23 @@ def copy_mysql_to_postgres(
             pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
             bit_widths = mysql_bit_widths_from_types(live)
             live_l = {k.lower(): v for k, v in live.items()}
+            # X-59: tinyint(1) is a display width (-128..127), not a type.
+            # Evidence decides boolean vs small-int: a column holding any
+            # value outside {0,1} widens to smallint here so COPY never
+            # feeds the raw 'invalid input syntax for type boolean' to PG.
+            from connectors.mysql_reader import (
+                mysql_tinyint1_wide_columns,
+                widen_tinyint1_ddls,
+            )
+            x59_wide = mysql_tinyint1_wide_columns(
+                src_cur, source_table, [s for s, _d in pairs]
+            )
+            if x59_wide:
+                pg_ddls, x59_widened = widen_tinyint1_ddls(
+                    live, pairs, pg_ddls, "smallint"
+                )
+            else:
+                x59_widened = []
             for col in source_cols:
                 declared = live_l.get(col.lower()) or ""
                 if not mysql_type_is_copy_safe(declared):
@@ -667,6 +684,7 @@ def copy_mysql_to_postgres(
                     "tsv_encoder": "fast_copy_text",
                     "source_where": bool(cursor_where),
                     "partition_proof": partition_proof,
+                    "tinyint1_evidence_widened": x59_widened,
                 },
             dest_table_existed_before=existed_before,
                 proof_scope=(

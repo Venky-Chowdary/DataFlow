@@ -70,6 +70,13 @@ def mysql_value_to_sqlite(value: Any) -> Any:
         return None
     if isinstance(value, bool):
         return int(value)
+    if isinstance(value, int):
+        # X-58: BIGINT UNSIGNED tops out at 2^64-1 — past sqlite3's signed
+        # 64-bit bind. TEXT digits are the exact carrier (column is TEXT via
+        # sqlite_type); int() decodes identically on the verifier side.
+        if not -(2**63) <= value <= 2**63 - 1:
+            return str(value)
+        return value
     if isinstance(value, timedelta):
         # pymysql returns TIME as timedelta — sqlite3 cannot bind it (X-38:
         # 'Error binding parameter 1 - probably unsupported type'). Store the
@@ -159,6 +166,28 @@ def copy_mysql_to_sqlite(
             src_cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
             _pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
             live_l = {k.lower(): v for k, v in live.items()}
+            # X-59: tinyint(1) is a display width (-128..127), not a type —
+            # evidence decides boolean vs small-int.
+            from connectors.mysql_reader import (
+                mysql_tinyint1_wide_columns,
+                widen_tinyint1_ddls,
+            )
+            x59_wide = mysql_tinyint1_wide_columns(
+                src_cur, source_table, [s for s, _d in pairs]
+            )
+            if x59_wide:
+                sqlite_ddls, x59_widened = widen_tinyint1_ddls(
+                    live, pairs, sqlite_ddls, 'INTEGER'
+                )
+            else:
+                x59_widened = []
+            # X-58: bigint unsigned columns land on the TEXT carrier (exact
+            # digits — signed 64-bit INTEGER cannot bind 2^63..2^64-1).
+            u64_text_cols = [
+                c for c in source_cols
+                if str(live_l.get(str(c).lower()) or "").lower()
+                == "bigint unsigned"
+            ]
             for col in source_cols:
                 declared = live_l.get(col.lower()) or ""
                 if not mysql_sqlite_type_is_copy_safe(declared):
@@ -258,6 +287,8 @@ def copy_mysql_to_sqlite(
                 "source_where": bool(cursor_where),
                 "mysql_read": "consistent_snapshot",
                 "sqlite_write": sqlite_write,
+                "tinyint1_evidence_widened": x59_widened,
+                "bigint_unsigned_text_carrier": u64_text_cols,
             },
             dest_table_existed_before=existed_before,
             proof_scope="dest_count_equals_source_snapshot_count",

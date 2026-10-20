@@ -164,6 +164,21 @@ def copy_mysql_to_sqlserver(
             pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
             bit_widths = mysql_bit_widths_from_types(live)
             live_l = {k.lower(): v for k, v in live.items()}
+            # X-59: tinyint(1) is a display width (-128..127), not a type —
+            # evidence decides boolean vs small-int.
+            from connectors.mysql_reader import (
+                mysql_tinyint1_wide_columns,
+                widen_tinyint1_ddls,
+            )
+            x59_wide = mysql_tinyint1_wide_columns(
+                src_cur, source_table, [s for s, _d in pairs]
+            )
+            if x59_wide:
+                sqlserver_ddls, x59_widened = widen_tinyint1_ddls(
+                    live, pairs, sqlserver_ddls, 'smallint'
+                )
+            else:
+                x59_widened = []
             for col in source_cols:
                 declared = live_l.get(col.lower()) or ""
                 if not mysql_type_is_copy_safe(declared):
@@ -353,6 +368,7 @@ def copy_mysql_to_sqlserver(
             target_checksum=proof,
             source_snapshot={
                 "mysql_consistent_snapshot": True,
+                    "tinyint1_evidence_widened": x59_widened,
                 "copy_workers": 1,
                 "copy_split": copy_split,
                 "copy_partitions": max(len(partitions), 1),
