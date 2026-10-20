@@ -2340,6 +2340,220 @@ def _sum_distinct_hits(
     return total
 
 
+def _keyed_rows_dbapi(
+    conn: Any,
+    table_ref: str,
+    key_col_sql: str,
+    select_col_sql: str,
+    key_cols: list[str],
+    keys: list[tuple[Any, ...]],
+    ph: str,
+    *,
+    dialect: str = "",
+    schema: str = "",
+    table_name: str = "",
+) -> list[tuple[Any, ...]]:
+    """SELECT the rows matching a bounded keyset (append delta proof, X-97).
+
+    Same chunked key predicate as ``_sum_distinct_hits`` but returns the
+    ``select_col_sql`` rows instead of a count, in arbitrary engine order.
+    """
+    from services.dest_key_typing import coerce_key_tuples, key_column_types_dbapi
+
+    col_types = key_column_types_dbapi(
+        conn,
+        dialect=dialect,
+        schema=schema,
+        table_name=table_name,
+        placeholder=ph,
+    )
+    keys, dropped = coerce_key_tuples(keys, key_cols, col_types)
+    if dropped:
+        logger.info(
+            "dest keyed re-read: %d key(s) not representable in %s key column type(s)",
+            dropped,
+            dialect or "destination",
+        )
+    out: list[tuple[Any, ...]] = []
+    width = len(key_cols)
+    for i in range(0, len(keys), _KEY_HIT_CHUNK):
+        chunk = keys[i : i + _KEY_HIT_CHUNK]
+        if width == 1:
+            in_sql = ", ".join(ph for _ in chunk)
+            sql = (
+                f"SELECT {select_col_sql} FROM {table_ref} "  # nosec B608
+                f"WHERE {key_col_sql} IN ({in_sql})"
+            )
+            params: tuple[Any, ...] = tuple(row[0] for row in chunk)
+        else:
+            row_ph = "(" + ", ".join(ph for _ in key_cols) + ")"
+            in_sql = ", ".join(row_ph for _ in chunk)
+            sql = (
+                f"SELECT {select_col_sql} FROM {table_ref} "  # nosec B608
+                f"WHERE ({key_col_sql}) IN ({in_sql})"
+            )
+            params = tuple(v for row in chunk for v in row)
+        cur = conn.cursor()
+        try:
+            cur.execute(sql, params)
+            out.extend(tuple(r) for r in cur.fetchall())
+        finally:
+            cur.close()
+    return out
+
+
+def destination_keyed_rows(
+    db_type: str,
+    cfg: Mapping[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    key_cols: list[str],
+    keys: list[tuple[Any, ...]],
+    select_cols: list[str],
+) -> list[tuple[Any, ...]] | None:
+    """Re-read destination rows for a bounded keyset (X-97 append delta proof).
+
+    ``keys`` is a list of key tuples over ``key_cols`` (``(pk, cursor)`` for
+    incremental_append); ``select_cols`` is returned in order. Returns None on
+    any failure (unsupported engine, missing table) — callers fall back to a
+    weaker assurance rather than guessing.
+    """
+    if not key_cols or not keys or not select_cols:
+        return []
+    from connectors.sql_identifiers import quote_sql_identifier, quote_table_ref
+
+    dialect = "mysql" if db_type == "mysql" else str(db_type or "")
+    qchar = "`" if dialect == "mysql" else '"'
+    table_ref = quote_table_ref(
+        table_name,
+        schema if dialect == "postgresql" else None,
+        dialect=dialect,
+    )
+    key_col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in key_cols)
+    select_col_sql = ", ".join(quote_sql_identifier(c, qchar) for c in select_cols)
+    ph = "%s" if dialect in {"postgresql", "mysql"} else "?"
+    try:
+        if dialect == "sqlite":
+            import sqlite3
+
+            database = str(cfg.get("database") or "")
+            if not database:
+                return None
+            with closing(sqlite3.connect(database)) as conn:
+                return _keyed_rows_dbapi(
+                    conn, table_ref, key_col_sql, select_col_sql,
+                    key_cols, keys, ph, dialect=dialect, schema=schema,
+                    table_name=table_name,
+                )
+        if dialect in {"postgresql", "redshift"}:
+            from connectors.postgresql_conn import get_connection
+
+            conn = get_connection(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or (5439 if db_type == "redshift" else 5432)),
+                database=str(cfg.get("database") or ""),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+                ssl=bool(cfg.get("ssl", False)),
+            )
+            try:
+                return _keyed_rows_dbapi(
+                    conn, table_ref, key_col_sql, select_col_sql,
+                    key_cols, keys, ph, dialect=dialect, schema=schema,
+                    table_name=table_name,
+                )
+            finally:
+                conn.close()
+        if dialect == "mysql":
+            from connectors.mysql_conn import get_connection
+
+            conn = get_connection(
+                host=str(cfg.get("host") or ""),
+                port=int(cfg.get("port") or 3306),
+                database=str(cfg.get("database") or ""),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+                ssl=bool(cfg.get("ssl", False)),
+            )
+            try:
+                return _keyed_rows_dbapi(
+                    conn, table_ref, key_col_sql, select_col_sql,
+                    key_cols, keys, ph, dialect=dialect, schema=schema,
+                    table_name=table_name,
+                )
+            finally:
+                conn.close()
+    except Exception as exc:
+        logger.warning("Destination keyed re-read failed: %s", exc)
+        return None
+    # Warehouse engines (sqlserver, duckdb, oracle, …) via SQLAlchemy — the
+    # same AND/OR named-bind predicate ``_warehouse_sql_key_hits`` uses so
+    # Oracle 19c (no row-value IN) still resolves the keyset.
+    import sqlalchemy as sa
+
+    from services.dialect_profiles import quote_char_for
+
+    wqchar = quote_char_for(dialect) or '"'
+    w_table_ref = warehouse_sql_table_ref(dialect, cfg, schema, table_name)
+    w_key_q = [quote_sql_identifier(c, wqchar) for c in key_cols]
+    w_select = ", ".join(quote_sql_identifier(c, wqchar) for c in select_cols)
+    out_w: list[tuple[Any, ...]] = []
+    try:
+        with warehouse_sql_engine(db_type, cfg) as engine:
+            with engine.connect() as conn:
+                from services.dest_key_typing import (
+                    coerce_key_tuples,
+                    key_column_types_sqlalchemy,
+                )
+
+                wkeys, dropped = coerce_key_tuples(
+                    list(keys),
+                    key_cols,
+                    key_column_types_sqlalchemy(
+                        conn, schema=schema, table_name=table_name
+                    ),
+                )
+                if dropped:
+                    logger.info(
+                        "dest keyed re-read: %d key(s) not representable in %s key column type(s)",
+                        dropped,
+                        dialect,
+                    )
+                for i in range(0, len(wkeys), _KEY_HIT_CHUNK):
+                    chunk = wkeys[i : i + _KEY_HIT_CHUNK]
+                    if len(key_cols) == 1:
+                        placeholders = ", ".join(f":k{j}" for j in range(len(chunk)))
+                        sql = (
+                            f"SELECT {w_select} FROM {w_table_ref} "  # nosec B608
+                            f"WHERE {w_key_q[0]} IN ({placeholders})"
+                        )
+                        params = {f"k{j}": row[0] for j, row in enumerate(chunk)}
+                    else:
+                        clauses: list[str] = []
+                        params = {}
+                        for j, row in enumerate(chunk):
+                            parts = []
+                            for c_i, quoted in enumerate(w_key_q):
+                                name = f"k{j}_{c_i}"
+                                parts.append(f"{quoted} = :{name}")
+                                params[name] = row[c_i]
+                            clauses.append("(" + " AND ".join(parts) + ")")
+                        sql = (
+                            f"SELECT {w_select} FROM {w_table_ref} "  # nosec B608
+                            f"WHERE {' OR '.join(clauses)}"
+                        )
+                    out_w.extend(
+                        tuple(r) for r in conn.execute(sa.text(sql), params).fetchall()
+                    )
+    except Exception as exc:
+        logger.warning("Warehouse destination keyed re-read failed: %s", exc)
+        return None
+    return out_w
+
+
 def _iceberg_endpoint(cfg: dict[str, Any], table_name: str, schema: str) -> dict[str, Any]:
     return {
         **dict(cfg),

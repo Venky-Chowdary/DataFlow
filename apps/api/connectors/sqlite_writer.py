@@ -819,20 +819,80 @@ def _sqlite_duplicate_key_message(
     conflict_cols: list[str],
     target_cols: list[str],
     batch: list[Any],
+    *,
+    cursor: Any = None,
+    table_quoted: str = "",
 ) -> str:
-    """Name the key columns and the first row's key values (QA R2-071)."""
+    """Name the key columns and the actual colliding key values (QA R2-071, X-98).
+
+    ``batch[0]`` is not the culprit — the colliding keys are the ones repeated
+    inside the batch or already present on the destination. Query both so the
+    message names e.g. ``id=2, id=3`` rather than the first row's brand-new key.
+    """
+    from collections import Counter
+
     names = [c for c in conflict_cols if c in target_cols]
-    sample = ""
+    culprits: list[tuple[Any, ...]] = []
     if names and batch:
+        idxs = [target_cols.index(n) for n in names]
+
+        def _key_of(row: Any) -> tuple[Any, ...]:
+            return tuple(
+                row[i]
+                if isinstance(row, (list, tuple)) and i < len(row)
+                else None
+                for i in idxs
+            )
+
+        key_counts = Counter(_key_of(r) for r in batch)
+        in_batch_dups = [k for k, n in key_counts.items() if n > 1]
+        existing: set[tuple[Any, ...]] = set()
+        if cursor is not None and table_quoted and any(
+            all(v is not None for v in k) for k in key_counts
+        ):
+            cols_sql = ", ".join(quote_sql_identifier(n) for n in names)
+            probe_keys = [k for k in key_counts if all(v is not None for v in k)]
+            try:
+                for i in range(0, len(probe_keys), 400):
+                    chunk = probe_keys[i : i + 400]
+                    if len(names) == 1:
+                        ph = ", ".join("?" for _ in chunk)
+                        sql = (
+                            f"SELECT {cols_sql} FROM {table_quoted} "  # nosec B608
+                            f"WHERE {cols_sql} IN ({ph})"
+                        )
+                        params = tuple(k[0] for k in chunk)
+                    else:
+                        rowph = "(" + ", ".join("?" for _ in names) + ")"
+                        ph = ", ".join(rowph for _ in chunk)
+                        sql = (
+                            f"SELECT {cols_sql} FROM {table_quoted} "  # nosec B608
+                            f"WHERE ({cols_sql}) IN ({ph})"
+                        )
+                        params = tuple(v for k in chunk for v in k)
+                    cursor.execute(sql, params)
+                    existing.update(tuple(r) for r in cursor.fetchall())
+            except Exception:  # noqa: BLE001 — naming is best-effort
+                existing = set()
+        culprits = in_batch_dups + [k for k in sorted(existing, key=repr) if k not in in_batch_dups]
+    key = ", ".join(names) or "PRIMARY KEY"
+    if culprits:
+        detail = " — colliding key(s): " + "; ".join(
+            ", ".join(f"{n}={v!r}" for n, v in zip(names, k))
+            for k in culprits[:5]
+        )
+        if len(culprits) > 5:
+            detail += f" (+{len(culprits) - 5} more)"
+    elif names and batch:
         row = batch[0]
         parts = []
         for name in names:
             idx = target_cols.index(name)
             value = row[idx] if isinstance(row, (list, tuple)) and idx < len(row) else "?"
             parts.append(f"{name}={value!r}")
-        sample = ", ".join(parts)
-    key = ", ".join(names) or "PRIMARY KEY"
-    detail = f" — first row {sample}" if sample else ""
+        detail = f" — first row {', '.join(parts)}"
+    else:
+        detail = ""
     return f"duplicate key ({key}){detail}: {exc}"
 
 
@@ -1672,7 +1732,9 @@ def write_mapped_rows(
                                 except sqlite3.IntegrityError as exc:
                                     raise sqlite3.IntegrityError(
                                         _sqlite_duplicate_key_message(
-                                            exc, conflict_cols, target_cols, batch
+                                            exc, conflict_cols, target_cols, batch,
+                                            cursor=cur,
+                                            table_quoted=table_quoted,
                                         )
                                     ) from exc
                                 written += len(batch)

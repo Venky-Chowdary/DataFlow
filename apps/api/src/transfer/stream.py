@@ -109,6 +109,10 @@ def _stream_source_read_driver(source_format: str) -> str:
 #: Distinct warning messages retained per transfer. Only the first 10 are shown,
 #: but keeping a few more lets the summary report an honest suppressed count.
 MAX_WARNING_SAMPLES = 200
+# X-97 — cap on the (pk, cursor)-keyed append delta fingerprint map: enough to
+# name culprit rows on normal delta batches while staying bounded on huge
+# appends (the accumulator itself is unbounded and still proves the digest).
+_APPEND_DELTA_CAP = 50_000
 #: Distinct load methods observed across batches (copy_into, merge_batch, ...).
 #: There are only a handful in the whole product, so this is generous.
 MAX_LOAD_METHODS = 16
@@ -738,10 +742,18 @@ def _stream_database_transfer_impl(
     write_mode = (
         "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
     )
+    from services.destination_key_collision_probe import (
+        sync_mode_appends_without_key_resolution,
+    )
+
     _create_scope_token, _create_scope = begin_fast_path_create_scope(
         _fast_path_source_catalog(src_read_type, mappings, schema, _src_rich_catalog),
         mappings,
         resolve_dest_table(dest_type, destination, _source_name(source)),
+        # X-98 — one rule for append history on every engine: an appending
+        # sync never re-declares the source key on the destination, so run 2
+        # can re-append the same PK. Upsert/deduped still carry it.
+        carry_keys=not sync_mode_appends_without_key_resolution(effective_sync),
     )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
@@ -1953,6 +1965,41 @@ def _stream_database_transfer_impl(
         )
         and src_read_type in REREAD_SCAN_SOURCES
     )
+    # X-97 — incremental_append delta proof: accumulate a (pk, cursor)-keyed
+    # fingerprint over exactly the appended batch. PK repeats across append
+    # versions, so the whole-key WRITTEN_BATCH_KEYS re-read cannot scope the
+    # delta; the composite (pk, cursor) keyset can, letting Gate-8 verify the
+    # delta and name a corrupted appended row.
+    append_delta: dict[str, Any] | None = None
+    _append_rstep = (
+        shape_runner.recipe.router_step
+        if shape_runner is not None
+        and getattr(shape_runner, "recipe", None) is not None
+        else None
+    )
+    if (
+        effective_sync == "incremental_append"
+        and inline_fingerprints_used
+        and _append_rstep is None
+        and len(pk_target_cols or []) == 1
+        and str(cursor_source_col or "").strip()
+        and not resumed_pass
+    ):
+        _append_cursor_target = map_source_to_target(cursor_source_col, mappings)
+        if (
+            _append_cursor_target in target_cols
+            and pk_target_cols[0] in target_cols
+        ):
+            append_delta = {
+                "pk_idx": target_cols.index(pk_target_cols[0]),
+                "cur_idx": target_cols.index(_append_cursor_target),
+                "key_columns": [pk_target_cols[0], _append_cursor_target],
+                "acc": FingerprintAccumulator(),
+                "fp_by_key": {},
+                "pairs": [],
+                "null_key_rows": 0,
+                "capped": False,
+            }
     # Restore cumulative quarantine counts on resume — Gate-8 conservation is
     # source - (rejected - coerced_null) - skipped. committed_offset already spans
     # the full population on resume, so these counters must be cumulative too or a
@@ -3659,6 +3706,32 @@ def _stream_database_transfer_impl(
                         dest_db_type=dest_bind_dialect,
                         dest_types=digest_dest_types,
                     )
+                    if append_delta is not None:
+                        from services.reconciliation import (
+                            normalize_cell as _ad_norm,
+                        )
+
+                        _adi = append_delta
+                        _pk_i = int(_adi["pk_idx"])
+                        _cur_i = int(_adi["cur_idx"])
+                        for _row, (_fkey, _fval) in zip(mapped_fp, inline_fps):
+                            _pkv = _row[_pk_i]
+                            _cv = _row[_cur_i]
+                            if _pkv is None or _cv is None:
+                                _adi["null_key_rows"] += 1
+                                continue
+                            _k = _ad_norm(
+                                _pkv, engine=dest_bind_dialect
+                            ) + "\x1f" + _ad_norm(
+                                _cv, engine=dest_bind_dialect
+                            )
+                            _adi["acc"].add(_k, _fval)
+                            if len(_adi["fp_by_key"]) < _APPEND_DELTA_CAP:
+                                if _k not in _adi["fp_by_key"]:
+                                    _adi["pairs"].append((_pkv, _cv))
+                                _adi["fp_by_key"][_k] = _fval
+                            else:
+                                _adi["capped"] = True
             except Exception as exc:
                 logger.warning(
                     "Inline write-pass fingerprint skipped for chunk %s: %s", idx, exc
@@ -4510,6 +4583,11 @@ def _stream_database_transfer_impl(
                         cursor_column=checksum_cursor_col,
                         cursor_after=checksum_cursor_after,
                         cursor_type=cursor_type_for_read,
+                        # The stored watermark may be composite ``cursor␟pk``
+                        # — a read that cannot decode it dies on the arity
+                        # check, so the tie-break column rides along (same
+                        # contract as ``_cursor_read_args``).
+                        cursor_primary_key=cursor_pk_source or None,
                         known_total_rows=total_rows,
                         **_scan_kw,
                     )
@@ -4690,6 +4768,25 @@ def _stream_database_transfer_impl(
         if dest_summary.get("checksum_mode") == "source_reread_unavailable"
         else (final_checksum or last_checksum)
     )
+    # X-97 — stamp the append delta proof payload for reconcile_step's keyed
+    # re-read. Rows whose (pk, cursor) is NULL cannot be key-bound — they are
+    # reported as unproven and the delta proof declines honestly.
+    if append_delta is not None and append_delta["acc"].total:
+        if append_delta["null_key_rows"]:
+            dest_summary["append_delta_unproven_rows"] = int(
+                append_delta["null_key_rows"]
+            )
+        else:
+            dest_summary["append_delta"] = {
+                "key_columns": append_delta["key_columns"],
+                "pk_idx": int(append_delta["pk_idx"]),
+                "cur_idx": int(append_delta["cur_idx"]),
+                "pairs": [list(p) for p in append_delta["pairs"]],
+                "fp_by_key": dict(append_delta["fp_by_key"]),
+                "rows": int(append_delta["acc"].total),
+                "digest_hex": append_delta["acc"].digest(),
+                "capped": bool(append_delta["capped"]),
+            }
     # The reconcile report names the actual source engine ("source Postgres was
     # not independently re-read"), not the generic "source warehouse" (D3).
     dest_summary["source_engine"] = src_type

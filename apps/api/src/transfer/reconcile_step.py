@@ -6470,6 +6470,18 @@ def _run_reconciliation_impl(
                 "sample_compare": {"passed": False, "error": str(exc)},
             })
         if target_sample:
+            _secondary_sk = ""
+            if sync_mode_appends_without_key_resolution(sync_mode_early):
+                # X-97 — append repeats the PK across versions; (pk, cursor)
+                # is the alignment identity for the sample compare too.
+                _ad = (
+                    dest_summary.get("append_delta")
+                    if isinstance(dest_summary, dict)
+                    else None
+                )
+                _ad_kc = (_ad or {}).get("key_columns") or []
+                if len(_ad_kc) == 2:
+                    _secondary_sk = str(_ad_kc[1])
             sample_compare = sample_compare_rows(
                 sample_records,
                 target_sample,
@@ -6477,6 +6489,7 @@ def _run_reconciliation_impl(
                 target_columns=target_cols,
                 sample_size=min(50, len(sample_records)),
                 sort_key=sort_key,
+                secondary_sort_key=_secondary_sk or None,
                 dest_db_type=db_type,
                 dest_types=dest_types,
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
@@ -6837,6 +6850,147 @@ def _run_reconciliation_impl(
         if keyed_checksum and keys_identify_one_row:
             target_checksum = keyed_checksum
             keyed_scope = WRITTEN_BATCH_KEYS
+
+    # X-97 — incremental_append delta proof: a two-sided value digest over
+    # exactly the appended batch keyed by (pk, cursor). PK repeats across
+    # append versions, so WRITTEN_BATCH_KEYS cannot scope the delta; the
+    # composite keyset re-read proves just this run's appended rows and a
+    # corrupted appended row names itself.
+    _append_delta = (
+        dest_summary.get("append_delta") if isinstance(dest_summary, dict) else None
+    )
+    if (
+        allow_extra
+        and not keyed_scope
+        and isinstance(_append_delta, dict)
+        and sync_mode_appends_without_key_resolution(sync_mode)
+        and str(db_type) in KEYED_READBACK_ENGINES
+    ):
+        _ad_pairs = [tuple(p) for p in (_append_delta.get("pairs") or [])]
+        _ad_key_cols = [str(c) for c in (_append_delta.get("key_columns") or [])]
+        _ad_expected = int(_append_delta.get("rows") or 0)
+        _ad_src_fp = dict(_append_delta.get("fp_by_key") or {})
+        # A repeated (pk, cursor) inside one batch makes fp_by_key lossy —
+        # decline rather than compare on partial keys.
+        if (
+            _ad_pairs
+            and len(_ad_key_cols) == 2
+            and _ad_expected > 0
+            and _ad_expected == len(_ad_pairs)
+            and not _append_delta.get("capped")
+        ):
+            from services.dest_precount import destination_keyed_rows
+            from services.reconciliation import ReconciliationReport, normalize_cell
+
+            _ad_rows = destination_keyed_rows(
+                str(db_type),
+                cfg,
+                schema=schema,
+                table_name=table_name,
+                key_cols=_ad_key_cols,
+                keys=_ad_pairs,
+                select_cols=list(target_cols),
+            )
+            if _ad_rows is not None:
+                _pk_i = int(_append_delta.get("pk_idx") or 0)
+                _cur_i = int(_append_delta.get("cur_idx") or 0)
+
+                def _ad_key_of(row: Any) -> str:
+                    return normalize_cell(
+                        row[_pk_i], engine=str(db_type or "")
+                    ) + "\x1f" + normalize_cell(
+                        row[_cur_i], engine=str(db_type or "")
+                    )
+
+                def _ad_key_label(key_text: str) -> str:
+                    _pk_t, _sep, _cur_t = key_text.partition("\x1f")
+                    return f"{_ad_key_cols[0]}={_pk_t}, {_ad_key_cols[1]}={_cur_t}"
+
+                if len(_ad_rows) < _ad_expected:
+                    _seen = {_ad_key_of(r) for r in _ad_rows}
+                    _missing = [
+                        _ad_key_label(k) for k in _ad_src_fp if k not in _seen
+                    ][:10]
+                    return _finalize(
+                        ReconciliationReport(
+                            passed=False,
+                            source_rows=source_rows,
+                            target_rows=target_rows
+                            if isinstance(target_rows, int)
+                            else 0,
+                            source_checksum="",
+                            target_checksum="",
+                            message=(
+                                "Append delta re-read is missing "
+                                f"{_ad_expected - len(_ad_rows)} of the "
+                                f"{_ad_expected} row(s) this run appended — "
+                                "missing key(s): "
+                                + "; ".join(_missing or ["<key unavailable>"])
+                            ),
+                            checksum_scope=WRITTEN_BATCH_KEYS,
+                            checksum_match=False,
+                            population_proof=False,
+                        ).to_dict()
+                    )
+                if len(_ad_rows) == _ad_expected:
+                    from connectors.writer_common import row_fingerprints
+
+                    _dest_fp: dict[str, list[str]] = {}
+                    for _r in _ad_rows:
+                        try:
+                            _dk = _ad_key_of(_r)
+                            _dfp = row_fingerprints(
+                                [list(_r)],
+                                list(target_cols),
+                                dest_db_type=str(db_type or ""),
+                                dest_types=dest_types,
+                            )
+                            _dest_fp.setdefault(_dk, []).append(
+                                _dfp[0][1] if _dfp else ""
+                            )
+                        except Exception:  # noqa: BLE001 — a row that cannot key/fp stays unmatched
+                            continue
+                    _dst_left = {k: list(v) for k, v in _dest_fp.items()}
+                    culprits: list[str] = []
+                    for _k, _sfp in _ad_src_fp.items():
+                        _lst = _dst_left.get(_k)
+                        if _lst and _sfp in _lst:
+                            _lst.remove(_sfp)
+                        else:
+                            culprits.append(_k)
+                    for _k, _lst in _dst_left.items():
+                        culprits.extend([_k] * len(_lst))
+                    if culprits:
+                        return _finalize(
+                            ReconciliationReport(
+                                passed=False,
+                                source_rows=source_rows,
+                                target_rows=target_rows
+                                if isinstance(target_rows, int)
+                                else 0,
+                                source_checksum="",
+                                target_checksum="",
+                                message=(
+                                    "Append delta value digest mismatch — "
+                                    "destination re-read of the appended batch "
+                                    "differs from the bound source rows; "
+                                    "culprit key(s): "
+                                    + "; ".join(
+                                        _ad_key_label(k) for k in culprits[:10]
+                                    )
+                                ),
+                                checksum_scope=WRITTEN_BATCH_KEYS,
+                                checksum_match=False,
+                                population_proof=False,
+                            ).to_dict()
+                        )
+                    keyed_scope = WRITTEN_BATCH_KEYS
+                    source_checksum = str(_append_delta.get("digest_hex") or "")
+                    target_checksum = source_checksum
+                # len(_ad_rows) > _ad_expected: a pre-existing row shares a
+                # (pk, cursor) key — the keyset is ambiguous and the delta
+                # stays on the row-count identity rather than comparing a
+                # superset.
 
     if (
         _cdc_source_image_gate(dest_summary)
