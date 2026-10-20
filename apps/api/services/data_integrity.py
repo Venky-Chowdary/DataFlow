@@ -1895,6 +1895,58 @@ def _check_encoding_anomalies(
     }
 
 
+def _mongo_sparse_field_findings(
+    source_schemas: list[dict[str, Any]],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """X-85: typed info findings for schemaless (Mongo) source fields.
+
+    Returns ``(warnings, findings)`` — warning text lines plus structured
+    finding entries for the run result:
+
+    * ``missing_field`` — the field was absent in N sampled docs and those
+      rows landed NULL (missing ≠ explicit null is preserved on the wire, but
+      the operator must see it).
+    * ``mixed_type_widened`` — the field mixed typed values with strings, so
+      the column was widened to TEXT.
+    """
+    warnings: list[str] = [
+        f"{s.get('name')}: {s.get('type_mix_warning')}"
+        for s in source_schemas
+        if s.get("type_mix_warning") and s.get("name")
+    ]
+    findings: list[dict[str, Any]] = []
+    for s in source_schemas:
+        name = s.get("name")
+        if not name:
+            continue
+        miss = int(s.get("missing_docs") or 0)
+        if miss > 0:
+            findings.append({
+                "kind": "missing_field",
+                "field": str(name),
+                "docs": miss,
+                "note": "landed NULL",
+            })
+            warnings.append(
+                f"field {name} missing in {miss} docs, landed NULL"
+            )
+        det = s.get("type_mix_detail") or {}
+        if det.get("widened"):
+            fams = "/".join(sorted((det.get("families") or {}).keys()))
+            dcount = int(det.get("docs") or 0)
+            findings.append({
+                "kind": "mixed_type_widened",
+                "field": str(name),
+                "docs": dcount,
+                "families": det.get("families") or {},
+                "note": "widened to TEXT",
+            })
+            warnings.append(
+                f"field {name} mixed {fams} in {dcount} docs, widened to TEXT"
+            )
+    return warnings, findings
+
+
 def run_integrity_audit(
     *,
     source_columns: list[str],
@@ -2098,11 +2150,9 @@ def run_integrity_audit(
 
     # Mongo majority typing can keep INTEGER while a few TEXT sentinels remain —
     # warn (never silent) so Validate honesty matches write-time quarantine risk.
-    mix_warnings = [
-        f"{s.get('name')}: {s.get('type_mix_warning')}"
-        for s in source_schemas
-        if s.get("type_mix_warning") and s.get("name")
-    ]
+    # X-85: also name (a) fields absent in sampled docs — they land NULL, and
+    # (b) fields whose typed/string mix widened the column to TEXT.
+    mix_warnings, mongo_findings = _mongo_sparse_field_findings(source_schemas)
     if mix_warnings:
         checks.append({
             "check": "mongo_type_mix",
@@ -2110,6 +2160,7 @@ def run_integrity_audit(
             "blocks_transfer": False,
             "issues": [],
             "warnings": mix_warnings[:12],
+            "findings": mongo_findings[:24],
         })
 
     if rows and source_columns:

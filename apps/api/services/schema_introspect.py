@@ -2900,7 +2900,16 @@ def _finalize_mongodb_type_with_note(
             )
         return best, mix_note
     if text_n / total >= (1.0 - _MONGO_TYPED_MAJORITY):
-        return "TEXT", None
+        if typed:
+            fams = ", ".join(
+                f"{k} x{v}"
+                for k, v in sorted(typed.items(), key=lambda kv: -kv[1])[:3]
+            )
+            mix_note = (
+                f"Mixed Mongo types in {total} docs (TEXT x{text_n}, {fams}) — "
+                "widened to TEXT"
+            )
+        return "TEXT", mix_note
     if text_n > 0:
         mix_note = (
             f"Mixed Mongo types ({text_n} TEXT / majority {best}) — "
@@ -2941,10 +2950,14 @@ def _mongodb_types_with_notes(
 ) -> tuple[dict[str, str], dict[str, str]]:
     """``({field: logical type}, {field: type-mix warning})`` from BSON cells."""
     counts: dict[str, dict[str, int]] = {}
+    present: dict[str, int] = {}
+    n_docs = 0
     for doc in documents or []:
         if not isinstance(doc, dict):
             continue
+        n_docs += 1
         for key, val in doc.items():
+            present[str(key)] = int(present.get(str(key), 0)) + 1
             if val is None:
                 continue
             observed = _sample_logical_type(val, str(key))
@@ -2954,13 +2967,20 @@ def _mongodb_types_with_notes(
             per[observed] = int(per.get(observed, 0)) + 1
     types: dict[str, str] = {}
     notes: dict[str, str] = {}
+    details: dict[str, dict[str, Any]] = {}
     for key, per in counts.items():
         resolved, note = _finalize_mongodb_type_with_note(per)
         if resolved:
             types[key] = resolved
         if note:
             notes[key] = note
-    return types, notes
+        details[key] = {
+            "families": dict(per),
+            "present": int(present.get(key, 0)),
+            "missing": max(0, n_docs - int(present.get(key, 0))),
+            "resolved": resolved,
+        }
+    return types, notes, details
 
 
 def mongodb_bson_column_types(documents: Any) -> dict[str, str]:
@@ -2971,7 +2991,7 @@ def mongodb_bson_column_types(documents: Any) -> dict[str, str]:
     one (:func:`_finalize_mongodb_type_with_note`), so a sentinel string among
     typed cells still keeps the typed majority.
     """
-    types, _notes = _mongodb_types_with_notes(documents)
+    types, _notes, _details = _mongodb_types_with_notes(documents)
     return types
 
 
@@ -3088,7 +3108,15 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     len(expanded),
                     ", ".join(expanded[:12]),
                 )
-        resolved, mix_notes = _mongodb_types_with_notes(docs)
+        resolved, mix_notes, type_details = _mongodb_types_with_notes(docs)
+        missing_by_name = {
+            name: sum(
+                1 for d in docs if isinstance(d, dict) and name not in d
+            )
+            for name in {
+                str(k) for d in docs if isinstance(d, dict) for k in d
+            }
+        }
         homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(docs)
         for doc in docs:
             for key, val in list(doc.items()):
@@ -3132,8 +3160,21 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     ]
                 if mix_notes.get(name):
                     col["type_mix_warning"] = mix_notes[name]
+                det = type_details.get(name) or {}
+                fams = {
+                    k: v for k, v in (det.get("families") or {}).items() if v
+                }
+                if len(fams) > 1 and det.get("resolved") == "TEXT":
+                    col["type_mix_detail"] = {
+                        "families": fams,
+                        "docs": int(det.get("present") or 0),
+                        "widened": True,
+                    }
             elif not col.get("inferred_type"):
                 col["inferred_type"] = "TEXT"
+            miss = int(missing_by_name.get(name) or 0)
+            if miss > 0:
+                col["missing_docs"] = miss
             # Re-infer from samples only when majority vote stayed textual / weak —
             # never overwrite a high-confidence sticky numeric/date/structural type.
             samples = [s for s in (col.get("samples") or []) if str(s).strip()]
