@@ -56,7 +56,12 @@ from services.transform_engine import (
     reset_active_number_locale,
     set_active_number_locale,
 )
-from services.type_system import instant_date_carrier, is_bitstring_carrier, normalize_logical_type
+from services.type_system import (
+    instant_date_carrier,
+    is_bitstring_carrier,
+    normalize_logical_type,
+    parse_bitstring_width,
+)
 from services.value_serializer import (
     cell_to_string,
     is_missing_sentinel,
@@ -4398,21 +4403,35 @@ def verify_target(
     return fallback_rows, fallback_checksum
 
 
-def _bit_cell_fingerprint(value: Any) -> str:
-    """Canonical integer fingerprint for BIT(n)/VARBIT cells (X-52)."""
+def _bit_cell_fingerprint(value: Any, width: int | None = None) -> str:
+    """Canonical fixed-width bit-string fingerprint for BIT(n)/VARBIT (X-52/X-82).
+
+    Compares bit strings as bit strings — '00000000' is NOT '0'. Width comes
+    from the declared DDL (BIT(8) -> 8) so an integer read-back (MySQL) and a
+    bit-literal source (PG) land on the same canonical text; mismatch
+    messages render the bits, not a stripped integer.
+    """
     if value is None or is_missing_sentinel(value):
         return _NULL_SENTINEL
+
+    def _emit(bits: str) -> str:
+        if width is not None:
+            return "bit:" + bits.rjust(width, "0")
+        return "bit:" + bits
+
     try:
         if isinstance(value, (bytes, bytearray, memoryview)):
-            return "bit:" + str(int.from_bytes(bytes(value), "big"))
+            return _emit("".join(f"{b:08b}" for b in bytes(value)))
         if isinstance(value, bool):
-            return "bit:" + ("1" if value else "0")
+            return _emit("1" if value else "0")
+        if isinstance(value, int):
+            return _emit(format(value, "b"))
         text = str(value).strip()
         if (text.startswith("B'") or text.startswith("b'")) and text.endswith("'"):
             text = text[2:-1]
         if re.fullmatch(r"[01]+", text):
-            return "bit:" + str(int(text, 2))
-        return "bit:" + str(int(text))
+            return _emit(text)
+        return _emit(format(int(text), "b"))
     except Exception:
         return normalize_cell(value)
 
@@ -4537,7 +4556,9 @@ def fingerprint_for_reconcile(
         # represent — '00000101' (PG bitstring read-back), 5 (integer wire)
         # and raw bytes are the same value.
         if is_bitstring_carrier(ddl_type):
-            return _bit_cell_fingerprint(wire)
+            return _bit_cell_fingerprint(
+                wire, width=parse_bitstring_width(str(ddl_type))
+            )
         # Dest read-back is storage-canonical. Re-applying the transfer locale
         # turns EU ``1.234`` (from ``1,234``) into 1234 and false-fails Gate-8.
         # WIRE reads that canonical form as itself — ``20.500`` out of

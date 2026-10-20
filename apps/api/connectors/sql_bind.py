@@ -1989,7 +1989,8 @@ def coerce_bitstring_wire(
     *,
     width: int | None = None,
     varying: bool = False,
-) -> str | None:
+    engine: str = "",
+) -> str | int | None:
     """Normalize BIT/VARBIT wire to a ``0``/``1`` digit string.
 
     PostgreSQL bit strings are not opaque bytes — refuse base64 invent into
@@ -2010,8 +2011,7 @@ def coerce_bitstring_wire(
                 f"integer {value} exceeds BIT({w}) capacity"
             )
         bits = format(int(value), f"0{w}b")
-        return bits
-    if isinstance(value, (bytes, bytearray, memoryview)):
+    elif isinstance(value, (bytes, bytearray, memoryview)):
         bits = "".join(f"{b:08b}" for b in bytes(value))
     else:
         text = str(value).strip()
@@ -2035,6 +2035,12 @@ def coerce_bitstring_wire(
             raise ValueError(
                 f"bitstring length {len(bits)} does not match BIT({width})"
             )
+    # X-81: MySQL BIT(n) binds the integer the bits represent — the driver
+    # packs it into n bits; a '00000000' text is n CHARACTERS and dies
+    # 'Data too long'. Bit text stays for engines that take a literal.
+    eng = (engine or "").strip().lower()
+    if eng in {"mysql", "mariadb", "aurora_mysql", "tidb"}:
+        return int(bits, 2)
     return bits
 
 
@@ -2441,7 +2447,7 @@ _BIND_DISPATCH: dict[str, Any] = {
     "set": lambda v, r: coerce_set_wire(v, ddl_type=r.ddl_arg, as_list=r.pg_list),
     "year": lambda v, r: coerce_year_wire(v),
     "bitstring": lambda v, r: coerce_bitstring_wire(
-        v, width=r.bit_width, varying=r.bit_varying
+        v, width=r.bit_width, varying=r.bit_varying, engine=r.eng
     ),
     "boolean": lambda v, r: coerce_boolean_wire(v, as_int=r.as_int),
     "rowversion": lambda v, r: coerce_rowversion_wire(v),

@@ -4675,7 +4675,12 @@ def apply_write_quarantine_matrix(
             dest_db=decimal_dest,
         )
         mapped_rows = quarantine_unfit_bitstrings(
-            mapped_rows, target_cols, target_types, rejected_details, policy
+            mapped_rows,
+            target_cols,
+            target_types,
+            rejected_details,
+            policy,
+            engine=dest_db or _infer_dest_db_from_dialect_label(dialect_label),
         )
         mapped_rows = quarantine_unfit_binaries(
             mapped_rows,
