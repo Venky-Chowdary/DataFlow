@@ -4944,6 +4944,11 @@ def _canonicalize_number(value: Any) -> str | None:
             return None
         from services.value_serializer import safe_decimal_text
 
+        if d == 0:
+            # X-91: decimal -0 ≡ 0 — no SQL decimal stores a sign bit on zero,
+            # so the digest canonicalizes it on both sides (float -0.0 already
+            # lands here through IEEE collapse).
+            d = d.copy_abs()
         s = safe_decimal_text(_normalize_exact(d) if d.is_finite() else d)
         if s is None:
             return None

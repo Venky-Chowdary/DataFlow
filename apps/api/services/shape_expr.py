@@ -675,11 +675,15 @@ def _quantize_wide(number: Decimal, quantum: Decimal, rounding: str) -> Decimal:
     with localcontext() as ctx:
         ctx.prec = max(28, width)
         try:
-            return number.quantize(quantum, rounding=rounding)
+            out = number.quantize(quantum, rounding=rounding)
         except InvalidOperation as exc:
             raise EvalError(
                 "value does not fit the requested decimal places"
             ) from exc
+        # X-91: no SQL decimal stores a signed zero (PG trunc(-0.01,1) is 0.0),
+        # so value ops never emit Decimal('-0.0') — truncate/round from a
+        # negative input that lands on zero is unsigned, same as the engines.
+        return out.copy_abs() if out == 0 else out
 
 
 def _round_half_up(value: Any, places: Any = 0) -> Any:
