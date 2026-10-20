@@ -525,27 +525,37 @@ def _sort_val(value: Any) -> tuple[int, Any]:
     return (1, _as_text(value) or "")
 
 
-def _sort_order(options: Mapping[str, Any]) -> list[tuple[str, bool]]:
-    """Normalise the sort spec into (column, descending) pairs.
+def _sort_order(options: Mapping[str, Any]) -> list[tuple[str, bool, str]]:
+    """Normalise the sort spec into (column, descending, nulls) triples.
 
-    Accepts ``order``: [{"column": ..., "direction": "asc"|"desc"}] or the
-    simpler ``order_by`` + ``direction`` pair.
+    Accepts ``order``: [{"column": ..., "direction": "asc"|"desc",
+    "nulls": "first"|"last"}] or the simpler ``order_by`` + ``direction``
+    pair. ``nulls`` defaults to 'last' — the documented rule (X-118): an
+    unknown value must never outrank a known one, either direction.
     """
-    out: list[tuple[str, bool]] = []
+    opt_nulls = str(options.get("nulls") or "last").casefold()
+    out: list[tuple[str, bool, str]] = []
     for entry in options.get("order", []) or []:
         if isinstance(entry, Mapping) and entry.get("column"):
             out.append(
                 (
                     str(entry["column"]),
                     str(entry.get("direction") or "asc").casefold() == "desc",
+                    str(entry.get("nulls") or opt_nulls).casefold(),
                 )
             )
         elif isinstance(entry, str) and entry:
-            out.append((entry, False))
+            out.append((entry, False, opt_nulls))
     if not out:
         col = str(options.get("order_by") or "")
         if col:
-            out.append((col, str(options.get("direction") or "asc").casefold() == "desc"))
+            out.append(
+                (
+                    col,
+                    str(options.get("direction") or "asc").casefold() == "desc",
+                    opt_nulls,
+                )
+            )
     return out
 
 
@@ -562,7 +572,12 @@ def _agg_init() -> dict[str, Any]:
 
 
 def _agg_add(
-    state: dict[str, Any], fn: str, value: Any, *, has_column: bool = True
+    state: dict[str, Any],
+    fn: str,
+    value: Any,
+    *,
+    has_column: bool = True,
+    decl: str | None = None,
 ) -> None:
     # X-105/X-106 — one null predicate for every measure (SQL semantics):
     # NULL evidence (None or the wire sentinel) is ignored by every
@@ -590,9 +605,20 @@ def _agg_add(
         state["sum"] = (state["sum"] or 0) + num
         state["n"] += 1
     elif fn == "min":
-        state["min"] = value if state["min"] is None or _sort_val(value) < _sort_val(state["min"]) else state["min"]
+        # X-117: declared-type compare — '9' < '10' under NUMERIC, never bytes.
+        state["min"] = (
+            value
+            if state["min"] is None
+            or _dedupe_sort_val(value, decl) < _dedupe_sort_val(state["min"], decl)
+            else state["min"]
+        )
     elif fn == "max":
-        state["max"] = value if state["max"] is None or _sort_val(value) > _sort_val(state["max"]) else state["max"]
+        state["max"] = (
+            value
+            if state["max"] is None
+            or _dedupe_sort_val(value, decl) > _dedupe_sort_val(state["max"], decl)
+            else state["max"]
+        )
     elif fn == "first":
         if state["first"] is None:
             state["first"] = value
@@ -944,8 +970,22 @@ class ShapeEngine:
             rows = list(buffer)
             # Stable-sort one key at a time, last key first, so mixed
             # asc/desc per column works with a single comparator.
-            for col, descending in reversed(order):
-                rows.sort(key=lambda r, c=col: _sort_val(r.get(c)), reverse=descending)
+            # X-117: the shared typed comparator — a declared NUMERIC column
+            # compares as Decimal ('100' < '12345678901234567.0000000002'
+            # < '2.5' < '9' is wrong); declared date/timestamp by instant;
+            # text by codepoint. X-118: NULL is never '' — pinned first or
+            # last per the entry's nulls option, either direction.
+            for col, descending, nulls in reversed(order):
+                rows.sort(
+                    key=lambda r, c=col: _dedupe_sort_val(
+                        r.get(c), self._column_types.get(c)
+                    ),
+                    reverse=descending,
+                )
+                rows.sort(
+                    key=lambda r, c=col: _dedupe_is_null(r.get(c))
+                    != (nulls == "first")
+                )
             return rows
 
         if op == "rank_rows":
@@ -974,11 +1014,15 @@ class ShapeEngine:
                 # tie-break when no then_by/pk is given.
                 for col in reversed(then_by):
                     rows.sort(
-                        key=lambda r, c=col: _sort_val(r.get(c)),
+                        key=lambda r, c=col: _dedupe_sort_val(
+                            r.get(c), self._column_types.get(c)
+                        ),
                         reverse=descending,
                     )
                 rows.sort(
-                    key=lambda r: _sort_val(r.get(order_col)),
+                    key=lambda r: _dedupe_sort_val(
+                        r.get(order_col), self._column_types.get(order_col)
+                    ),
                     reverse=descending,
                 )
                 rows.sort(
@@ -1430,6 +1474,7 @@ class ShapeEngine:
                     fn,
                     row.get(mcol),
                     has_column=bool(mcol and mcol != "*"),
+                    decl=self._column_types.get(mcol),
                 )
             return _HELD
 

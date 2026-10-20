@@ -301,7 +301,7 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
         family="advanced",
         needs_column=False,
         buffered=True,
-        options=("order", "order_by", "direction"),
+        options=("order", "order_by", "direction", "nulls"),
         required=(),
     ),
     _StepDef(
@@ -1212,7 +1212,17 @@ def _normalize_options(
             direction = str(spec.get("direction") or "asc").strip().casefold()
             if direction not in ("asc", "desc"):
                 raise ShapeError(f"{where}: sort order {i} direction must be asc or desc")
-            normalized_order.append({"column": col, "direction": direction})
+            # X-118: per-entry NULL placement — 'last' (default, an unknown
+            # value never outranks a known one) or 'first'.
+            nulls = str(spec.get("nulls") or "").strip().casefold()
+            entry = {"column": col, "direction": direction}
+            if nulls:
+                if nulls not in ("first", "last"):
+                    raise ShapeError(
+                        f"{where}: sort order {i} nulls must be first or last"
+                    )
+                entry["nulls"] = nulls
+            normalized_order.append(entry)
         out["order"] = normalized_order
 
     if op == "rank_rows":
