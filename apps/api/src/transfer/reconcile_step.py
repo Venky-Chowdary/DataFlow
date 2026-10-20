@@ -3581,14 +3581,21 @@ def _culprit_table_ref(eng: str, cfg: dict[str, Any], table: str) -> str:
     )
 
 
-def _name_gate8_culprits_generic(
-    report: dict[str, Any],
+def _generic_key_census(
     *,
     source_endpoint: Any,
     endpoint: Any,
     dest_summary: dict[str, Any] | None,
     mappings: list[dict[str, Any]] | None,
-) -> None:
+) -> tuple[list[Any], list[Any], list[Any], str | None]:
+    """Cross-engine key census: (changed, missing, extra, unavailable_reason).
+
+    Streams ``(pk, row hash)`` from each side into a temp sqlite table and
+    joins — usable both to *detect* a value difference on count-only routes
+    (X-68) and to *name* culprit keys on a failed run. ``reason`` is the
+    human-readable gate hit when the census could not run; empty lists with
+    ``reason=None`` mean a clean compare.
+    """
     """Cross-engine census — each side's (pk, row hash) is computed in Python
     from streamed rows so engines with different in-engine hash functions
     (MySQL vs DuckDB, MySQL vs Postgres, …) still compare honestly.
@@ -3637,31 +3644,27 @@ def _name_gate8_culprits_generic(
         except Exception:  # noqa: BLE001 — naming is best-effort, never fatal
             pass
     if len(pk_cols) != 1:
-        report["culprit_keys_unavailable_reason"] = (
-            "culprit keys could not be named — the run recorded no "
-            "single-column primary key to join the destination key census on"
+        return [], [], [], (
+            "the run recorded no single-column primary key to join the "
+            "destination key census on"
         )
-        return
     pk = pk_cols[0]
     src_tbl = str(getattr(source_endpoint, "table", "") or "").strip()
     dst_tbl = str(getattr(endpoint, "table", "") or "").strip()
     if not src_tbl or not dst_tbl:
-        report["culprit_keys_unavailable_reason"] = (
-            "culprit keys could not be named — source or destination table "
-            "name was not recorded for the census"
+        return [], [], [], (
+            "source or destination table name was not recorded for the census"
         )
-        return
     if not pairs:
-        report["culprit_keys_unavailable_reason"] = (
-            "culprit keys could not be named — no column mappings were "
-            "recorded for the census"
-        )
-        return
+        return [], [], [], "no column mappings were recorded for the census"
     src_pk = next((s for s, t in pairs if t.lower() == pk.lower()), pk)
     src_cols = [s for s, _t in pairs if s.lower() != src_pk.lower()]
     dst_cols = [t for s, t in pairs if s.lower() != src_pk.lower() and str(t or "").strip()]
     if len(src_cols) != len(dst_cols) or not dst_cols:
-        return
+        return [], [], [], (
+            "the recorded column mappings do not pair source and target "
+            "columns for the census join"
+        )
     try:
         from services.reconciliation import normalize_cell
         from .connector_capabilities import resolve_driver_type
@@ -3681,7 +3684,15 @@ def _name_gate8_culprits_generic(
         )
         dst_conn_info = _culprit_census_conn(endpoint.format or "", dst_cfg)
         if src_conn_info is None or dst_conn_info is None:
-            return
+            _missing = []
+            if src_conn_info is None:
+                _missing.append(f"source '{src_eng}'")
+            if dst_conn_info is None:
+                _missing.append(f"destination '{dst_eng}'")
+            return [], [], [], (
+                " and ".join(_missing)
+                + " has no census driver (postgres/mysql/mssql/duckdb/sqlite/snowflake)"
+            )
         changed: list[Any] = []
         missing: list[Any] = []
         extra: list[Any] = []
@@ -3758,7 +3769,33 @@ def _name_gate8_culprits_generic(
                 pass
     except Exception as exc:
         _logger.warning(
-            "Gate-8 culprit-key naming skipped: %s", exc, exc_info=exc
+            "Gate-8 key census skipped: %s", exc, exc_info=exc
+        )
+        return [], [], [], (
+            "the destination key census failed while reading a side "
+            f"({type(exc).__name__}: {exc})"
+        )
+    return changed, missing, extra, None
+
+
+def _name_gate8_culprits_generic(
+    report: dict[str, Any],
+    *,
+    source_endpoint: Any,
+    endpoint: Any,
+    dest_summary: dict[str, Any] | None,
+    mappings: list[dict[str, Any]] | None,
+) -> None:
+    """Name culprit keys on a failed keyed run via :func:`_generic_key_census`."""
+    changed, missing, extra, reason = _generic_key_census(
+        source_endpoint=source_endpoint,
+        endpoint=endpoint,
+        dest_summary=dest_summary,
+        mappings=mappings,
+    )
+    if reason is not None:
+        report["culprit_keys_unavailable_reason"] = (
+            "culprit keys could not be named — " + reason
         )
         return
     _report_culprit_keys(report, changed, missing, extra)
@@ -4994,6 +5031,14 @@ def _run_reconciliation_impl(
             stamped["verification_verdict"] = (
                 "verified" if _report_has_proven_value_match(stamped) else "partial"
             )
+        # X-57 tail: a failed reconcile must never ship a null verdict —
+        # "failed" is the explicit answer (unproven holds stay unproven).
+        if (
+            stamped.get("passed") is False
+            and not stamped.get("unproven")
+            and not stamped.get("verification_verdict")
+        ):
+            stamped["verification_verdict"] = "failed"
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
@@ -6192,9 +6237,67 @@ def _run_reconciliation_impl(
                 "dest_pk_join_equals_staging",
             )
         )
-        return _finalize(
-            ReconciliationReport(
-                passed=balanced,
+        # X-68: a count-only engine copy proves counts, not values. When the
+        # two populations are comparable and both sides are census engines,
+        # run the (pk, row-hash) key census as the value compare — a
+        # value-changing tamper must fail, never ride out as "partial".
+        _census_verdict: dict[str, Any] | None = None
+        _census_note = ""
+        _census_unverified_reason: str | None = None
+        if (
+            balanced
+            and _populations_comparable
+            and source_checksum_scope_label == "by engine copy"
+        ):
+            _changed, _missing, _extra, _reason = _generic_key_census(
+                source_endpoint=source_endpoint,
+                endpoint=endpoint,
+                dest_summary=dest_summary,
+                mappings=mapping_dicts,
+            )
+            if _reason is not None:
+                # The census could not run: no value compare happened at all.
+                # Partial stays honest — but only with a user-visible finding.
+                _census_unverified_reason = (
+                    "no value compare ran — " + _reason
+                )
+            else:
+                # extra_in_dest is a defect only under the exact-count scope —
+                # on the pk-join scope pre-existing dest rows legitimately hold
+                # keys that are not in this run's staged population.
+                _extra_defect = (
+                    _extra if "dest_count_equals_source_snapshot" in _count_scope else []
+                )
+                if _changed or _missing or _extra_defect:
+                    _culprit: dict[str, list[str]] = {}
+                    if _changed:
+                        _culprit["changed"] = [str(k) for k in _changed]
+                    if _missing:
+                        _culprit["missing_in_dest"] = [str(k) for k in _missing]
+                    if _extra_defect:
+                        _culprit["extra_in_dest"] = [str(k) for k in _extra_defect]
+                    _census_verdict = {
+                        "passed": False,
+                        "verification_verdict": "failed",
+                        "culprit_keys": _culprit,
+                        "message": (
+                            "Destination key census found differing row(s) on a "
+                            "count-only engine copy: "
+                            + ", ".join(
+                                f"{len(v)} {k}" for k, v in _culprit.items()
+                            )
+                            + " — value mismatch, not a count problem. "
+                            + source_checksum_scope_note
+                        ),
+                    }
+                else:
+                    _census_note = (
+                        " Destination key census compared the mapped columns "
+                        "key-by-key on both sides — all values agree."
+                    )
+        if _census_verdict is not None:
+            _base = ReconciliationReport(
+                passed=False,
                 source_rows=source_rows,
                 target_rows=target_rows,
                 source_checksum="",
@@ -6203,26 +6306,54 @@ def _run_reconciliation_impl(
                 coerced_null_rows=coerced_null_rows,
                 rows_skipped=rows_skipped,
                 checksum_scope=(
-                    _count_scope
-                    if _populations_comparable
-                    else WHOLE_TABLE_NOT_COMPARABLE
+                    _count_scope if _populations_comparable else WHOLE_TABLE_NOT_COMPARABLE
                 ),
-                message=(
-                    (
-                        f"Row count verified {source_checksum_scope_label}: "
-                        f"{target_rows:,} row(s) on the destination for "
-                        f"{source_rows:,} source row(s). "
-                        if balanced
-                        else (
-                            f"Row count mismatch {source_checksum_scope_label}: expected "
-                            f"{expected_rows:,} row(s) on the destination, found "
-                            f"{target_rows:,}. "
-                        )
-                    )
-                    + source_checksum_scope_note
-                ),
+                message=_census_verdict["message"],
             ).to_dict()
-        )
+            _base["culprit_keys"] = _census_verdict["culprit_keys"]
+            _base["verification_verdict"] = "failed"
+            return _finalize(_base)
+        _count_only_report = ReconciliationReport(
+            passed=balanced,
+            source_rows=source_rows,
+            target_rows=target_rows,
+            source_checksum="",
+            target_checksum=target_checksum,
+            rejected_rows=rejected_rows,
+            coerced_null_rows=coerced_null_rows,
+            rows_skipped=rows_skipped,
+            checksum_scope=(
+                _count_scope
+                if _populations_comparable
+                else WHOLE_TABLE_NOT_COMPARABLE
+            ),
+            message=(
+                (
+                    f"Row count verified {source_checksum_scope_label}: "
+                    f"{target_rows:,} row(s) on the destination for "
+                    f"{source_rows:,} source row(s). "
+                    if balanced
+                    else (
+                        f"Row count mismatch {source_checksum_scope_label}: expected "
+                        f"{expected_rows:,} row(s) on the destination, found "
+                        f"{target_rows:,}. "
+                    )
+                )
+                + source_checksum_scope_note
+                + _census_note
+            ),
+        ).to_dict()
+        if _census_unverified_reason:
+            # X-68: never a green-looking partial with no value compare and no
+            # stated reason — the operator must see that nothing compared
+            # values on this run.
+            _count_only_report["value_compare"] = {
+                "ran": False,
+                "reason": _census_unverified_reason,
+            }
+        elif _census_note:
+            _count_only_report["value_compare"] = {"ran": True, "method": "key_census"}
+        return _finalize(_count_only_report)
 
     sample_compare = None
     # A router partitioned the run into per-route tables — there is no single

@@ -253,10 +253,14 @@ def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
 
     pymssql: ``Decimal`` values are sent as canonical decimal text
     (``format(d, 'f')`` — never scientific notation), which the server
-    converts into the decimal column. pyodbc: only Decimals wider than 28
-    digits — beyond its numeric-struct capacity — go as text; ordinary
-    Decimals bind natively. ``timedelta`` (pymysql TIME) becomes
-    ``datetime.time`` on both drivers.
+    converts into the decimal column. pyodbc: Decimals bind the same way —
+    fast_executemany sizes each parameter buffer from the FIRST row's
+    Python type, so a column mixing ``str`` (the >28-digit wide values)
+    and ``Decimal`` across rows aborts with HY090 'Invalid string or
+    buffer length' (X-48b live). One canonical bind type per column —
+    plain decimal text, no exponent, scale kept — binds every row;
+    SQL Server converts varchar→decimal implicitly (X-25).
+    ``timedelta`` (pymysql TIME) becomes ``datetime.time`` on both drivers.
     """
     if _cursor_is_pymssql(cur):
         from decimal import Decimal
@@ -270,7 +274,7 @@ def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
 
         return tuple(
             format(v, "f")
-            if isinstance(v, Decimal) and len(v.as_tuple().digits) > 28
+            if isinstance(v, Decimal)
             else _sqlserver_time_bind(v)
             for v in row
         )
