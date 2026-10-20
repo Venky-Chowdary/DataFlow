@@ -25,7 +25,7 @@ from itertools import islice
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, SqlCopyDigest, sql_copy_proof
 from connectors.sqlite_common import sqlite_decimal_bind_text
 from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session
 from services.copy_mongo_sink import bson_to_python
@@ -171,6 +171,14 @@ def copy_mongo_to_sqlite(
         cursor = coll.find({}, projection, session=session, no_cursor_timeout=False)
         pending: list[tuple[Any, ...]] = []
         inserted = 0
+        # X-83: every row on this route passes through this process — fold the
+        # bound rows into a real value digest, never a dest_count: token.
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="sqlite",
+            dest_types=dict(zip(target_cols, sqlite_ddls, strict=True)),
+        )
         while True:
             batch = list(islice(cursor, _FIND_BATCH))
             if not batch:
@@ -184,10 +192,12 @@ def copy_mongo_to_sqlite(
                 )
                 if len(pending) >= batch_size:
                     dest_conn.executemany(insert_sql, pending)
+                    digest.update(pending)
                     inserted += len(pending)
                     pending.clear()
         if pending:
             dest_conn.executemany(insert_sql, pending)
+            digest.update(pending)
             inserted += len(pending)
         dest_count = int(
             dest_conn.execute(f"SELECT COUNT(*) FROM {dest_ref}").fetchone()[0]  # nosec B608
@@ -198,9 +208,16 @@ def copy_mongo_to_sqlite(
                 "Mongo→SQLite COPY refused: dest COUNT(*) "
                 f"{dest_count} inserted {inserted} != source snapshot {source_count}"
             )
+        reread = dest_conn.execute(
+            f"SELECT {col_sql} FROM {dest_ref}"  # nosec B608
+        ).fetchall()
+        try:
+            proof = sql_copy_proof(digest, reread)
+        except ValueError:
+            dest_conn.rollback()
+            raise
         dest_conn.commit()
         sqlite_write = "overwrite" if replace_destination and dest_occupied else "insert"
-        proof = f"dest_count:{dest_count}"
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -217,7 +234,7 @@ def copy_mongo_to_sqlite(
                 "mongo_read": "snapshot_find",
                 "sqlite_write": sqlite_write,
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         try:

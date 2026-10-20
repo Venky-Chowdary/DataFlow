@@ -32,7 +32,7 @@ from itertools import islice
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, SqlCopyDigest, sql_copy_proof
 from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session
 from services.copy_mongo_sink import bson_to_python
 from services.copy_mysql_oracle import python_bind_for_ora_ddl
@@ -148,6 +148,12 @@ def copy_mongo_to_oracle(
             docs = list(islice(cursor, _FIND_BATCH))
             if not docs:
                 break
+            digest = SqlCopyDigest(
+                target_cols,
+                sort_key=target_cols[0] if target_cols else None,
+                dest_db_type="oracle",
+                dest_types=dict(zip(target_cols, oracle_ddls, strict=True)),
+            )
             for doc in docs:
                 python_row = [
                     bson_to_python(doc.get(col), ddl)
@@ -158,10 +164,12 @@ def copy_mongo_to_oracle(
                 )
                 if len(batch) >= batch_size:
                     dst_cur.executemany(insert_sql, batch)
+                    digest.update(batch)
                     copied += len(batch)
                     batch.clear()
         if batch:
             dst_cur.executemany(insert_sql, batch)
+            digest.update(batch)
             copied += len(batch)
         dest_conn.commit()
         if copied != source_count:
@@ -175,7 +183,10 @@ def copy_mongo_to_oracle(
                 "Mongo→Oracle COPY refused: dest COUNT(*) "
                 f"{dest_count} != source snapshot {source_count}"
             )
-        proof = f"dest_count:{dest_count}"
+        col_list = ", ".join(_ora_ident(c) for c in target_cols)
+        dst_cur.execute(f"SELECT {col_list} FROM {dest_ref}")  # nosec B608
+        reread = dst_cur.fetchall()
+        proof = sql_copy_proof(digest, reread)
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -192,7 +203,7 @@ def copy_mongo_to_oracle(
                 "mongo_read": "snapshot_find",
                 "empty_string_as_null_cells": coerced[0],
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         if created_here:

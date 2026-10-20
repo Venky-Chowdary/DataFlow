@@ -1699,3 +1699,93 @@ def copy_between_postgres(
                 conn.close()
             except Exception as exc:
                 logger.debug("close after fast path: %s", exc)
+
+
+class SqlCopyDigest:
+    """Write-pass value digest + destination re-read for in-process copies (X-83).
+
+    A ``copy_mongo_*`` / ``copy_*`` route whose rows pass through this process
+    can never claim an engine copy — "no row entered this process" is false —
+    so the proof is a real two-sided digest on the canonical reconcile
+    fingerprint basis, never a ``dest_count:`` token. ``update`` folds each
+    bound batch (rows already converted to destination bind values);
+    ``verify_dest`` re-reads the destination with the same basis and returns
+    the differing row keys (the tampered row names itself). Equal digests earn
+    a ``sql_rows_sha256:`` pair — the same claim the row path's write pass +
+    Gate-8 read-back earns.
+    """
+
+    _MAP_CAP = 200_000
+
+    def __init__(
+        self,
+        columns: list[str],
+        *,
+        sort_key: str | None,
+        dest_db_type: str,
+        dest_types: dict[str, str],
+    ) -> None:
+        from services.fingerprint_accumulator import FingerprintAccumulator
+
+        self.columns = list(columns)
+        self.sort_key = sort_key
+        self.dest_db_type = dest_db_type
+        self.dest_types = dict(dest_types or {})
+        self.acc = FingerprintAccumulator()
+        self.fpmap: dict[str, str] = {}
+
+    def _fps(self, rows: list[Any]) -> list[tuple[str, str]]:
+        from connectors.writer_common import row_fingerprints
+
+        return row_fingerprints(
+            rows,
+            self.columns,
+            sort_key=self.sort_key,
+            dest_db_type=self.dest_db_type,
+            dest_types=self.dest_types,
+        )
+
+    def update(self, rows: list[Any]) -> None:
+        fps = self._fps(rows)
+        self.acc.add_many(fps)
+        for k, fp in fps:
+            if len(self.fpmap) < self._MAP_CAP:
+                self.fpmap.setdefault(k, fp)
+
+    def digest_hex(self) -> str:
+        return self.acc.digest()
+
+    def culprits_for(self, dest_rows: list[Any]) -> list[str] | None:
+        """Re-read digest comparison. Returns the differing row keys, or None
+        when the digests agree."""
+        dest = SqlCopyDigest(
+            self.columns,
+            sort_key=self.sort_key,
+            dest_db_type=self.dest_db_type,
+            dest_types=self.dest_types,
+        )
+        dest.update(list(dest_rows))
+        if dest.digest_hex() == self.digest_hex():
+            return None
+        keys = []
+        for k in set(self.fpmap) | set(dest.fpmap):
+            if self.fpmap.get(k) != dest.fpmap.get(k):
+                keys.append(k)
+        return sorted(keys)[:10] or ["<row key unavailable>"]
+
+
+def sql_copy_proof(digest: SqlCopyDigest, dest_rows: list[Any]) -> str:
+    """The shared verify-or-fail for in-process SQL copies (X-83).
+
+    Returns the ``sql_rows_sha256:`` proof string on an exact multiset match;
+    raises naming the differing row keys otherwise. The caller's failed run
+    rolls back whatever it created, the same way a Gate-8 failure does.
+    """
+    culprits = digest.culprits_for(dest_rows)
+    if culprits is not None:
+        raise ValueError(
+            "in-process SQL COPY refused: destination re-read differs from "
+            "the bound source rows — culprit key(s): "
+            + "; ".join(str(k) for k in culprits)
+        )
+    return f"sql_rows_sha256:{digest.digest_hex()}"

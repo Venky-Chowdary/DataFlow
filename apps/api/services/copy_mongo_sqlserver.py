@@ -31,6 +31,8 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import (
     FastPathResult,
     FastPathUnavailable,
+    SqlCopyDigest,
+    sql_copy_proof,
     settle_fast_path_create_on,
 )
 from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session
@@ -167,6 +169,12 @@ def copy_mongo_to_sqlserver(
         _enable_fast_executemany(write_cur)
         set_wide_decimal_inputsizes(write_cur, sqlserver_ddls)
         try:
+            digest = SqlCopyDigest(
+                target_cols,
+                sort_key=target_cols[0] if target_cols else None,
+                dest_db_type="sqlserver",
+                dest_types=dict(zip(target_cols, sqlserver_ddls, strict=True)),
+            )
             while True:
                 docs = list(islice(cursor, _FIND_BATCH))
                 if not docs:
@@ -180,10 +188,12 @@ def copy_mongo_to_sqlserver(
                     )
                     if len(batch) >= batch_size:
                         bulk_executemany(write_cur, insert_sql, [bind_row_for_sqlserver(write_cur, r) for r in batch])
+                        digest.update(batch)
                         copied += len(batch)
                         batch.clear()
             if batch:
                 bulk_executemany(write_cur, insert_sql, [bind_row_for_sqlserver(write_cur, r) for r in batch])
+                digest.update(batch)
                 copied += len(batch)
             dest_conn.commit()
         finally:
@@ -207,7 +217,9 @@ def copy_mongo_to_sqlserver(
                 "Mongo→SQL Server COPY refused: dest COUNT(*) "
                 f"{dest_count} != source snapshot {source_count}"
             )
-        proof = f"dest_count:{dest_count}"
+        dst_cur.execute(f"SELECT {col_sql} FROM {dest_ref}")  # nosec B608
+        reread = dst_cur.fetchall()
+        proof = sql_copy_proof(digest, reread)
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -223,7 +235,7 @@ def copy_mongo_to_sqlserver(
                 "shard_mode": "table",
                 "mongo_read": "snapshot_find",
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception as exc:
         if created_here:

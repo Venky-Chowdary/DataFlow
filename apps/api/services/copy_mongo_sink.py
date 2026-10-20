@@ -316,8 +316,14 @@ def prove_mongo_dest(
             "Mongo COPY refused: dest count_documents "
             f"{dest_count} != source snapshot {source_count}"
         )
-    proof = f"dest_count:{dest_count}"
-    proof_scope = "dest_count_equals_source_snapshot_count"
+    if source_digest is None:
+        # X-83: a Mongo destination copy cannot run inside the engines — the
+        # docs crossed this process, so dest_count: is not proof. Fail closed
+        # rather than emit an engine-count-only classification.
+        raise FastPathUnavailable(
+            "Mongo COPY requires the bound-doc digest "
+            "(no in-engine copy exists to prove a count)"
+        )
     if source_digest is not None:
         # X-60: this route is in-process — the bound docs were available, so
         # the proof is a two-sided value digest, not a count. Re-read the

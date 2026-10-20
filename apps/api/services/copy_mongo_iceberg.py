@@ -31,7 +31,7 @@ from itertools import islice
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, SqlCopyDigest, sql_copy_proof
 from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session, mongo_type_is_copy_safe
 from services.copy_mongo_sink import bson_to_python
 from services.copy_pg_iceberg import (
@@ -146,18 +146,28 @@ def copy_mongo_to_iceberg(
         handle, tmp_path = tempfile.mkstemp(prefix="df_mongo_iceberg_", suffix=".csv")
         os.close(handle)
         written = 0
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="iceberg",
+            dest_types=dict(zip(target_cols, iceberg_ddls, strict=True)),
+        )
         with open(tmp_path, "w", encoding="utf-8", newline="") as csv_handle:
             writer = csv.writer(csv_handle, lineterminator="\n")
             while True:
                 docs = list(islice(cursor, _FIND_BATCH))
                 if not docs:
                     break
+                bound: list[tuple[Any, ...]] = []
                 for doc in docs:
-                    writer.writerow(
-                        iceberg_csv_cell(bson_to_python(doc.get(col), ddl))
+                    vals = [
+                        bson_to_python(doc.get(col), ddl)
                         for col, ddl in zip(source_cols, iceberg_ddls, strict=True)
-                    )
+                    ]
+                    writer.writerow(iceberg_csv_cell(v) for v in vals)
+                    bound.append(tuple(vals))
                     written += 1
+                digest.update(bound)
         if written != source_count:
             raise ValueError(
                 "Mongo→Iceberg COPY refused: CSV rows "
@@ -185,7 +195,14 @@ def copy_mongo_to_iceberg(
                 "Mongo→Iceberg COPY refused: dest COUNT "
                 f"{dest_count} != source snapshot {source_count}"
             )
-        proof = f"dest_count:{dest_count}"
+        scan_arrow = tbl.scan(selected_fields=tuple(target_cols)).to_arrow()
+        reread = [
+            tuple(r)
+            for r in zip(
+                *(scan_arrow.column(c).to_pylist() for c in target_cols), strict=True
+            )
+        ]
+        proof = sql_copy_proof(digest, reread)
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -202,7 +219,7 @@ def copy_mongo_to_iceberg(
                 "mongo_read": "snapshot_find",
                 "iceberg_write": iceberg_write,
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         if created_here:

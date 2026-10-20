@@ -19,6 +19,8 @@ unavailable.
 
 from __future__ import annotations
 
+import csv
+import io
 import logging
 import os
 import tempfile
@@ -26,13 +28,15 @@ from itertools import islice
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, SqlCopyDigest, sql_copy_proof
 from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session, mongo_type_is_copy_safe
 from services.copy_mongo_sink import bson_to_python
 from services.copy_pg_mongo import mongo_collection
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_s3_common import (
     commit_local_object,
+    s3_bucket,
+    s3_client,
     s3_delete_keys,
     s3_dest_count,
     s3_ensure_bucket,
@@ -58,16 +62,23 @@ def _snapshot_docs_as_rows(
     cursor: Any,
     source_cols: list[str],
     ddls: list[str],
+    digest: Any = None,
 ):
     while True:
         batch = list(islice(cursor, _FIND_BATCH))
         if not batch:
             break
+        bound: list[tuple[Any, ...]] = []
         for doc in batch:
-            yield tuple(
-                bson_to_python(doc.get(col), ddl)
-                for col, ddl in zip(source_cols, ddls, strict=True)
+            bound.append(
+                tuple(
+                    bson_to_python(doc.get(col), ddl)
+                    for col, ddl in zip(source_cols, ddls, strict=True)
+                )
             )
+        if digest is not None:
+            digest.update(bound)
+        yield from bound
 
 
 def copy_mongo_to_s3(
@@ -153,10 +164,16 @@ def copy_mongo_to_s3(
 
         fd, tmp_path = tempfile.mkstemp(prefix="df-mongo-s3-", suffix=f".{ext}")
         os.close(fd)
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="s3",
+            dest_types=dict(zip(target_cols, s3_ddls, strict=True)),
+        )
         csv_rows = s3_write_delimited(
             tmp_path,
             target_cols,
-            _snapshot_docs_as_rows(cursor, source_cols, s3_ddls),
+            _snapshot_docs_as_rows(cursor, source_cols, s3_ddls, digest),
             delim,
         )
         if csv_rows != source_count:
@@ -172,7 +189,11 @@ def copy_mongo_to_s3(
                 f"{dest_count} != source snapshot {source_count}"
             )
         s3_write = "overwrite" if replace_destination and dest_occupied else "insert"
-        proof = f"dest_count:{dest_count}"
+        client = s3_client(dest_cfg)
+        obj = client.get_object(Bucket=s3_bucket(dest_cfg), Key=dest_table)
+        payload = obj["Body"].read().decode("utf-8")
+        reread = [tuple(r) for r in csv.reader(io.StringIO(payload), delimiter=delim)]
+        proof = sql_copy_proof(digest, reread)
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -190,7 +211,7 @@ def copy_mongo_to_s3(
                 "s3_write": s3_write,
                 "s3_key": dest_table,
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         if created_here:

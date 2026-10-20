@@ -29,7 +29,7 @@ from itertools import islice
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, _quote
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, SqlCopyDigest, sql_copy_proof, _quote
 from services.copy_mysql_pg import _pg_connect, _pg_create_sql, fast_copy_text_value
 from services.copy_pg_mongo import mongo_collection, pg_mongo_type_is_copy_safe
 from services.copy_pg_mysql import mapping_is_plain_carry
@@ -89,9 +89,9 @@ def _pg_ident(name: str) -> str:
     return _quote(name)
 
 
-def _bson_to_copy_cell(value: Any, ddl: str) -> str:
+def _bson_to_copy_value(value: Any, ddl: str) -> Any:
     if value is None:
-        return "\\N"
+        return None
     if isinstance(value, dict) or isinstance(value, list):
         raise FastPathUnavailable("nested Mongo document is not COPY-safe")
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -115,7 +115,11 @@ def _bson_to_copy_cell(value: Any, ddl: str) -> str:
             raise FastPathUnavailable("timestamptz Mongo Date is not COPY-safe")
     elif isinstance(value, date) and not isinstance(value, datetime):
         pass
-    return fast_copy_text_value(value)
+    return value
+
+
+def _bson_to_copy_cell(value: Any, ddl: str) -> str:
+    return fast_copy_text_value(_bson_to_copy_value(value, ddl))
 
 
 class _MongoCopyReader:
@@ -133,6 +137,7 @@ class _MongoCopyReader:
         self._buf = b""
         self._done = False
         self.rows = 0
+        self.digest = None
 
     def readable(self) -> bool:
         return True
@@ -146,13 +151,18 @@ class _MongoCopyReader:
                 self._done = True
                 break
             lines: list[str] = []
+            bound: list[tuple[Any, ...]] = []
             for doc in batch:
-                cells = [
-                    _bson_to_copy_cell(doc.get(col), ddl)
+                vals = [
+                    _bson_to_copy_value(doc.get(col), ddl)
                     for col, ddl in zip(self._source_cols, self._pg_ddls, strict=True)
                 ]
-                lines.append(join(cells))
+                lines.append(join("\\N" if v is None else fast_copy_text_value(v) for v in vals))
+                if self.digest is not None:
+                    bound.append(tuple(vals))
                 self.rows += 1
+            if bound and self.digest is not None:
+                self.digest.update(bound)
             if lines:
                 self._buf += ("\n".join(lines) + "\n").encode("utf-8")
         out = self._buf[:want]
@@ -272,6 +282,14 @@ def copy_mongo_to_postgres(
             projection["_id"] = 0
         cursor = coll.find({}, projection, session=session, no_cursor_timeout=False)
         reader = _MongoCopyReader(cursor, source_cols, pg_ddls)
+        # X-83: this route is in-process — fold the bound values into a real
+        # digest, never a dest_count: token.
+        reader.digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="postgresql",
+            dest_types=dict(zip(target_cols, pg_ddls, strict=True)),
+        )
         col_list = ", ".join(_pg_ident(c) for c in target_cols)
         copy_sql = (
             f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
@@ -292,7 +310,9 @@ def copy_mongo_to_postgres(
                 "Mongo→PostgreSQL COPY refused: dest COUNT(*) "
                 f"{dest_count} != source snapshot {source_count}"
             )
-        proof = f"dest_count:{dest_count}"
+        dst_cur.execute(f"SELECT {col_list} FROM {dest_ref}")  # nosec B608
+        reread = dst_cur.fetchall()
+        proof = sql_copy_proof(reader.digest, reread)
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -308,7 +328,7 @@ def copy_mongo_to_postgres(
                 "shard_mode": "table",
                 "mongo_read": "snapshot_find",
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         if created_here:

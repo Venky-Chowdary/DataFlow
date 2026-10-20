@@ -32,7 +32,7 @@ from itertools import islice
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import FastPathResult, FastPathUnavailable, SqlCopyDigest, sql_copy_proof
 from services.copy_mongo_pg import _FIND_BATCH, _start_snapshot_session
 from services.copy_mysql_mysql import fast_load_data_text_value
 from services.copy_mysql_pg import _mysql_connect, _mysql_ident
@@ -86,9 +86,9 @@ def _load_tsv_into_mysql(
         raise FastPathUnavailable(f"LOAD DATA warnings: {blocked[0]}")
 
 
-def _bson_to_load_data_cell(value: Any, ddl: str) -> str:
+def _bson_to_load_data_value(value: Any, ddl: str) -> Any:
     if value is None:
-        return "\\N"
+        return None
     if isinstance(value, dict) or isinstance(value, list):
         raise FastPathUnavailable("nested Mongo document is not COPY-safe")
     if isinstance(value, (bytes, bytearray, memoryview)):
@@ -110,7 +110,12 @@ def _bson_to_load_data_cell(value: Any, ddl: str) -> str:
                 value = value.date()
         elif value.tzinfo is not None:
             raise FastPathUnavailable("timestamptz Mongo Date is not COPY-safe")
-    return fast_load_data_text_value(value)
+    return value
+
+
+def _bson_to_load_data_cell(value: Any, ddl: str) -> str:
+    v = _bson_to_load_data_value(value, ddl)
+    return "\\N" if v is None else fast_load_data_text_value(v)
 
 
 def _snapshot_find_to_load_data_tsv(
@@ -118,6 +123,7 @@ def _snapshot_find_to_load_data_tsv(
     source_cols: list[str],
     mysql_ddls: list[str],
     path: str,
+    digest: Any = None,
 ) -> int:
     join = "\t".join
     written = 0
@@ -127,13 +133,20 @@ def _snapshot_find_to_load_data_tsv(
             if not batch:
                 break
             lines: list[str] = []
+            bound: list[tuple[Any, ...]] = []
             for doc in batch:
-                cells = [
-                    _bson_to_load_data_cell(doc.get(col), ddl)
+                vals = [
+                    _bson_to_load_data_value(doc.get(col), ddl)
                     for col, ddl in zip(source_cols, mysql_ddls, strict=True)
                 ]
-                lines.append(join(cells))
+                lines.append(
+                    join("\\N" if v is None else fast_load_data_text_value(v) for v in vals)
+                )
+                if digest is not None:
+                    bound.append(tuple(vals))
                 written += 1
+            if bound and digest is not None:
+                digest.update(bound)
             if lines:
                 writer.write(("\n".join(lines) + "\n").encode("utf-8"))
     return written
@@ -214,8 +227,14 @@ def copy_mongo_to_mysql(
         cursor = coll.find({}, projection, session=session, no_cursor_timeout=False)
         handle, tmp_path = tempfile.mkstemp(prefix="df_mongo_mysql_", suffix=".tsv")
         os.close(handle)
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="mysql",
+            dest_types=dict(zip(target_cols, mysql_ddls, strict=True)),
+        )
         written = _snapshot_find_to_load_data_tsv(
-            cursor, source_cols, mysql_ddls, tmp_path
+            cursor, source_cols, mysql_ddls, tmp_path, digest
         )
         if written != source_count:
             raise ValueError(
@@ -238,7 +257,10 @@ def copy_mongo_to_mysql(
                 "Mongo→MySQL COPY refused: dest COUNT(*) "
                 f"{dest_count} != source snapshot {source_count}"
             )
-        proof = f"dest_count:{dest_count}"
+        col_list = ", ".join(_mysql_ident(c) for c in target_cols)
+        dst_cur.execute(f"SELECT {col_list} FROM {dest_q}")  # nosec B608
+        reread = dst_cur.fetchall()
+        proof = sql_copy_proof(digest, reread)
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -255,7 +277,7 @@ def copy_mongo_to_mysql(
                 "mongo_read": "snapshot_find",
                 "load_data": "tempfile",
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         if created_here:
