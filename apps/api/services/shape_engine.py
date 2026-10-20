@@ -475,6 +475,18 @@ def _group_key(row: Mapping[str, Any], cols: Sequence[str]) -> tuple[Any, ...]:
     return tuple(_group_key_part(row.get(c)) for c in cols)
 
 
+def _group_key_display(key: tuple[Any, ...]) -> tuple[Any, ...]:
+    """Untag a grouped key for records/logs: (0,'a')->'a', (1,None)->NULL.
+
+    The tagged form distinguishes '' from NULL for membership; the record
+    shows the raw value (None reads as NULL in the quarantine/decision log).
+    """
+    return tuple(
+        part[1] if isinstance(part, tuple) and len(part) == 2 else part
+        for part in key
+    )
+
+
 def _dedupe_feed_fallback(
     fallbacks: dict[str, tuple],
     row: dict[str, Any],
@@ -1451,7 +1463,7 @@ class ShapeEngine:
                             f"#{winner_index + 1} under {rule}"
                         ),
                         step_index=index, op=op,
-                        dedupe_key=key,
+                        dedupe_key=_group_key_display(key),
                         winner_row_index=winner_index,
                     )
                 seen[key] = self._row_index
@@ -1468,7 +1480,14 @@ class ShapeEngine:
             parts, spec = _dedupe_rank(
                 options, row, self._row_index, self._column_types
             )
-            tie_last = str(options.get("tie_break") or "first_seen").casefold() == "last_seen"
+            # X-123: the tie-break default follows `keep` so the name is the
+            # rule — keep=last on a full ordering tie keeps the LATER row in
+            # source order, keep=first keeps the earlier. An explicit
+            # tie_break option still overrides.
+            tie_last = str(
+                options.get("tie_break")
+                or ("last_seen" if keep == "last" else "first_seen")
+            ).casefold() == "last_seen"
             current = winners.get(key)
             fallbacks = self._dedupe_fallbacks(index, key) if merge else None
             if current is None:
@@ -1886,7 +1905,7 @@ class ShapeEngine:
                 step=index,
                 op="dedupe_rows",
                 record=dict(row) if self.keep_diverted_records else {},
-                dedupe_key=key,
+                dedupe_key=_group_key_display(key),
                 winner_row_index=winner_index,
             )
         )
@@ -1894,7 +1913,7 @@ class ShapeEngine:
             self.dedupe_decisions.append(
                 {
                     "step": index + 1,
-                    "key": list(key),
+                    "key": list(_group_key_display(key)),
                     "loser_row": loser_index + 1,
                     "winner_row": winner_index + 1,
                     "reason": reason,

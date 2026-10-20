@@ -1130,8 +1130,13 @@ def _normalize_options(
             else:
                 out.pop("then_by", None)
         # tie_break: who wins when every ordering column compares equal —
-        # first_seen keeps the incumbent, last_seen replaces it.
-        tie_break = str(out.get("tie_break") or "first_seen").strip().casefold()
+        # first_seen keeps the incumbent, last_seen replaces it. X-123: when
+        # undeclared, the default follows `keep` so the name is the rule —
+        # keep=last keeps the later row on a tie, keep=first the earlier.
+        tie_break = str(
+            out.get("tie_break")
+            or ("last_seen" if keep == "last" else "first_seen")
+        ).strip().casefold()
         if tie_break not in ("first_seen", "last_seen"):
             raise ShapeError(f"{where}: dedupe tie_break must be first_seen or last_seen")
         out["tie_break"] = tie_break
