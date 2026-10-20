@@ -33,4 +33,7 @@ def test_reread_membership_matches_policy():
 
 def test_policy_admits_mssql_source():
     assert should_reread_source(src_type="sqlserver", dest_type="postgresql")
-    assert should_reread_source(src_type="mssql", dest_type="duckdb")
+    assert should_reread_source(src_type="mssql", dest_type="postgresql")
+    # DuckDB is not a warehouse-verify destination — the policy correctly
+    # declines; this pins that deliberate shape, not a re-read gap.
+    assert not should_reread_source(src_type="mssql", dest_type="duckdb")
