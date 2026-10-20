@@ -151,7 +151,11 @@ function PreviewBody({
       {showFieldStrip && (
         <details className="df2-structure-field-block">
           <summary className="df2-structure-field-summary">
-            {previewCols.length} fields
+            {/* nowrap: at <=480 this bare text flex-item used to get a ~30px
+                box and wrap to "5" / "fields" on two lines (D-BP-27 P3). */}
+            <span className="df2-structure-field-count">
+              {previewCols.length} fields
+            </span>
             <span>Expand field chips — sample rows stay visible below</span>
           </summary>
           <div className="df2-structure-field-strip" aria-label="Detected fields">
