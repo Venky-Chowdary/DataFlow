@@ -102,8 +102,14 @@ def _primary_key_columns(cur, schema: str, table: str) -> list[str] | None:
     return None
 
 
-def _json_column_names(cur, schema: str, table: str) -> frozenset[str]:
-    """Columns whose catalog type is json/jsonb — they must travel as engine text."""
+def _engine_text_column_names(cur, schema: str, table: str) -> frozenset[str]:
+    """Columns that must travel as engine text, not a driver-decoded value.
+
+    json/jsonb: ``\"1\"`` and ``1`` stay distinct only as engine text.
+    interval: psycopg2 decodes to ``timedelta`` which flattens year/month
+    components (1 year → 365 d, 1 mon → 30 d — X-72); ``::text`` keeps the
+    engine spelling ``'1 year 2 mons 3 days 04:05:06.789'``.
+    """
     cur.execute(
         """
         SELECT column_name, data_type, udt_name
@@ -113,14 +119,16 @@ def _json_column_names(cur, schema: str, table: str) -> frozenset[str]:
         """,
         (schema, table),
     )
-    def _json_row(row) -> bool:
+    def _text_row(row) -> bool:
         if len(row) < 2:
             return False
-        data_type = str(row[1] or "")
+        data_type = str(row[1] or "").lower()
         udt_name = str(row[2] or "") if len(row) > 2 else ""
+        if data_type == "interval":
+            return True
         return is_json_catalog_type(data_type, udt_name)
 
-    return frozenset(str(row[0]) for row in cur.fetchall() if _json_row(row))
+    return frozenset(str(row[0]) for row in cur.fetchall() if _text_row(row))
 
 
 def _ordered_column_names(cur, schema: str, table: str) -> list[str]:
@@ -137,32 +145,34 @@ def _ordered_column_names(cur, schema: str, table: str) -> list[str]:
 
 
 def _select_list(cur, schema: str, table: str, columns: list[str] | None, identity: str):
-    """Project JSON/JSONB as engine text so ``\"1\"`` and ``1`` stay distinct.
+    """Project JSON/JSONB and INTERVAL as engine text so semantics survive.
 
     ``SELECT *`` lets psycopg2 decode jsonb into Python, after which a JSON
     string ``\"1\"`` is the str ``'1'`` and ``json.loads`` makes it a number.
-    ``col::text`` is the engine's own JSON spelling — SQL NULL stays NULL,
-    JSON null stays the text ``null``.
+    ``col::text`` is the engine's own spelling — SQL NULL stays NULL,
+    JSON null stays the text ``null``. Same for INTERVAL: psycopg2's
+    ``timedelta`` flattens year/month components (X-72), while the engine
+    text keeps ``'1 year 2 mons 3 days 04:05:06.789'`` whole.
     """
     from psycopg2 import sql
 
     if identity:
-        json_cols = reflection_cache.get_or_load_by_identity(
+        text_cols = reflection_cache.get_or_load_by_identity(
             identity,
             schema,
             table,
-            "json_columns",
-            lambda: _json_column_names(cur, schema, table),
+            "engine_text_columns",
+            lambda: _engine_text_column_names(cur, schema, table),
         )
     else:
-        json_cols = _json_column_names(cur, schema, table)
-    if not json_cols and not columns:
+        text_cols = _engine_text_column_names(cur, schema, table)
+    if not text_cols and not columns:
         return None
     names = columns or _ordered_column_names(cur, schema, table)
     parts = []
     for name in names:
         ident = sql.Identifier(name)
-        if name in json_cols:
+        if name in text_cols:
             parts.append(
                 sql.SQL("CASE WHEN {c} IS NULL THEN NULL ELSE {c}::text END AS {c}").format(
                     c=ident

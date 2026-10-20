@@ -300,12 +300,13 @@ def _looks_like_interval(value: str) -> bool:
     if _SQL_INTERVAL_RE.match(s):
         return True
     # Python timedelta wire from cell_to_string: "1 day, 0:00:01" / "0:00:01"
-    if re.fullmatch(r"\d+:\d{2}:\d{2}(?:\.\d+)?", s):
-        # Ambiguous with TIME — only treat as INTERVAL when hours can exceed 23
-        # or when prefixed with day count elsewhere. Keep TIME for HH:MM:SS.
-        parts = s.split(":")
+    if re.fullmatch(r"[+-]?\d+:\d{2}:\d{2}(?:\.\d+)?", s):
+        # Ambiguous with TIME — treat as INTERVAL when hours exceed 23, or
+        # when explicitly signed: a leading +/− can never be a wall clock
+        # (X-73: DuckDB-native '-00:00:01' was refused and blocked the run).
+        parts = s.lstrip("+-").split(":")
         try:
-            return int(parts[0]) > 23
+            return int(parts[0]) > 23 or s[0] in "+-"
         except ValueError:
             return False
     if " day" in s.lower() or " days" in s.lower():
