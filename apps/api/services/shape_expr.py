@@ -832,7 +832,10 @@ def _fn_strip_characters(value: Any, kind: Any) -> Any:
         return None
     name = (_as_text(kind) or "").strip().casefold()
     if name == "punctuation":
-        return re.sub(r"[^\w\s]", "", text, flags=re.UNICODE)
+        # X-103: [^\w\s] keeps '_' because \w includes it, though '_' is
+        # Unicode connector punctuation (Pc). Strip it explicitly; symbols
+        # ($, €, +) were already removed and stay removed.
+        return re.sub(r"[^\w\s]|_", "", text, flags=re.UNICODE)
     if name == "digits":
         return re.sub(r"\d", "", text)
     if name == "letters":
