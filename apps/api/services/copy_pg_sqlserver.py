@@ -289,9 +289,9 @@ def _sqlserver_decimal_cast_placeholder(ddl: str) -> str | None:
     buffer that truncates the 39-char fixed-point text a >28-digit bind sends
     ('String data, right truncation: length 78 buffer 76'). Wrapping the
     placeholder in an explicit CAST declares the parameter a varchar-sizeable
-    input, so the canonical text reaches the server and converts. Only
-    ``DECIMAL(p>28)`` can receive a text-bound wide decimal, so narrower
-    columns keep the plain ``%s``.
+    input, so the canonical text reaches the server and converts. Narrower
+    columns keep the plain ``%s`` — varchar→decimal converts implicitly
+    (X-25), and X-128's varchar-sized declaration carries the text.
     """
     from services.type_system import (
         LOGICAL_DECIMAL,
@@ -340,12 +340,14 @@ def set_wide_decimal_inputsizes(cur: Any, sqlserver_ddls: list[str]) -> None:
     if setter is None:
         return
     sizes = [_pyodbc_size_for_ddl(ddl, pyodbc, normalize_logical_type) for ddl in sqlserver_ddls]
+    # X-128: bind_row_for_sqlserver sends fixed-point TEXT for every Decimal
+    # (uniform bind, X-48b) — a DECIMAL dest needs a varchar-sized param
+    # declaration at ANY precision, not only p>28. Without the call, pyodbc
+    # describes the param from the column and truncates the text at the
+    # precision-sized buffer ('String data, right truncation').
     if any(
-        isinstance(el, tuple)
-        and len(el) >= 2
-        and el[0] == pyodbc.SQL_VARCHAR
-        and _is_wide_decimal_ddl(ddl, normalize_logical_type)
-        for el, ddl in zip(sizes, sqlserver_ddls, strict=True)
+        normalize_logical_type(ddl or "") == LOGICAL_DECIMAL
+        for ddl in sqlserver_ddls
     ):
         try:
             # pyodbc takes ONE argument — the sizes sequence — not N
@@ -408,11 +410,13 @@ def _pyodbc_size_for_ddl(
     logical = normalize_logical_type(raw)
     if logical == LOGICAL_DECIMAL:
         p, s = parse_numeric_precision_scale(raw)
-        if p is not None and int(p) > 28:
-            # Wide decimals bind as text through the CAST placeholder.
-            return (pyodbc.SQL_VARCHAR, int(p) + 3)
         if p is not None:
-            return (pyodbc.SQL_DECIMAL, int(p), int(s or 0))
+            # Decimals bind as fixed-point text (bind_row_for_sqlserver).
+            # SQL_DECIMAL would size the buffer to precision and truncate
+            # '123456789012345678.0123456789' (29 chars > 28); varchar with
+            # room for sign + point + a leading zero (s == p: '-0.xxx')
+            # binds whole — the %s placeholder / CAST converts (X-25, X-128).
+            return (pyodbc.SQL_VARCHAR, int(p) + 3)
         return pyodbc.SQL_VARCHAR
     if logical == LOGICAL_INTEGER:
         if base == "BIGINT":

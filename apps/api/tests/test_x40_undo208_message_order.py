@@ -109,12 +109,15 @@ def test_x40_driver_quirk_declines_to_row_path(monkeypatch):
 
 
 def test_x40_narrow_precision_skips_setter(monkeypatch):
+    # X-128 changed the contract: narrow decimals are text-bound too, so the
+    # setter now runs for ANY decimal column. The remaining no-op case is a
+    # table with no decimal columns at all.
     monkeypatch.setitem(sys.modules, "pyodbc", _fake_pyodbc_module())
     from services.copy_pg_sqlserver import set_wide_decimal_inputsizes
 
     cur = _PyodbcCursor()
-    set_wide_decimal_inputsizes(cur, ["INT", "DECIMAL(28,10)", "VARCHAR(5)"])
-    assert cur.calls == [], "no wide decimals — setter must not be called"
+    set_wide_decimal_inputsizes(cur, ["INT", "VARCHAR(5)"])
+    assert cur.calls == [], "no decimals — setter must not be called"
 
 
 def test_undo208_no_delete_on_never_created_table(monkeypatch):

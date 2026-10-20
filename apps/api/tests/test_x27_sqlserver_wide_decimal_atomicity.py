@@ -102,21 +102,31 @@ def test_setinputsizes_declares_varchar_for_wide_decimal_positions():
         assert list(cur.input_sizes) == [
             4,  # SQL_INTEGER — real descriptor, never a None placeholder
             (-9, 41),  # 38 digits + sign + point
-            (3, 10, 2),  # SQL_DECIMAL(10,2)
+            (-9, 13),  # X-128: DECIMAL(10,2) binds text too — varchar p+3
             (-9, 41),
         ]
     finally:
         monkey.undo()
 
 
-def test_setinputsizes_noop_without_wide_decimal():
+def test_setinputsizes_varchar_for_narrow_decimal_too():
+    # X-128: the uniform bind sends fixed-point TEXT for every Decimal —
+    # DECIMAL(28,10) without the declaration truncated at a precision-sized
+    # buffer ('String data, right truncation: length 58 buffer 56').
     fake_pyodbc = _fake_pyodbc()
     monkey = pytest.MonkeyPatch()
     monkey.setitem(sys.modules, "pyodbc", fake_pyodbc)
     try:
         cur = _PyodbcCursor()
-        cps.set_wide_decimal_inputsizes(cur, ["DECIMAL(10,2)", "INT"])
-        assert cur.input_sizes is None
+        cps.set_wide_decimal_inputsizes(
+            cur, ["DECIMAL(28,10)", "DECIMAL(10,10)", "DECIMAL(18,4)", "INT"]
+        )
+        assert list(cur.input_sizes) == [
+            (-9, 31),  # 28 digits + sign + point + leading zero
+            (-9, 13),
+            (-9, 21),
+            4,
+        ]
     finally:
         monkey.undo()
 
