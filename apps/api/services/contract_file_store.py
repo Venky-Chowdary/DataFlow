@@ -22,7 +22,11 @@ def _default_path() -> Path:
     override = getenv_brand("CONTRACTS_PATH", "").strip()
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[1] / "data" / "contracts.json"
+    # Resolved per call: DATAFLOW_DATA_DIR (or a mounted volume) picks the dir
+    # even when set after import — never the module-relative apps/api/data.
+    from services.platform_config import data_dir
+
+    return data_dir() / "contracts.json"
 
 
 def _safe_stem(record_id: str) -> str:

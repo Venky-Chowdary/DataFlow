@@ -25,9 +25,15 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-PROOF_DIR = (
-    Path(__file__).resolve().parents[1] / "data" / "proofs" / "pair_assurance"
-)
+def _default_proof_dir() -> Path:
+    # Resolved per call: DATAFLOW_DATA_DIR (or a mounted volume) picks the dir
+    # even when set after import — never the module-relative apps/api/data.
+    from services.platform_config import data_dir
+
+    return data_dir() / "proofs" / "pair_assurance"
+
+
+PROOF_DIR = _default_proof_dir()
 
 # Logical carriers exercised as the offline type inventory (fixture population).
 # Every cell uses real ddl_type / create_new / lossy / risk / coercion APIs.
