@@ -5059,6 +5059,18 @@ def _run_reconciliation_impl(
             stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
         stamped = qualify_multi_stream_reconciliation(stamped, dest_summary)
+        try:
+            stamped = _multi_stream_per_table_check(
+                stamped,
+                endpoint=endpoint,
+                source_endpoint=source_endpoint,
+                dest_summary=dest_summary,
+                mappings=mappings or [],
+            )
+        except Exception as _ms_exc:  # noqa: BLE001
+            logging.getLogger(__name__).warning(
+                "multi-stream per-table check skipped: %s", _ms_exc, exc_info=True
+            )
         stamped = _attach_match_summary(stamped, dest_summary)
         if (
             stamped.get("passed")

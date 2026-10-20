@@ -615,6 +615,7 @@ def _stream_database_transfer_impl(
         is_overwrite_sync,
         map_source_to_target,
         max_cursor_value,
+        quarantine_held_watermark,
         requires_incremental,
         requires_upsert,
         resolve_effective_sync_mode,
@@ -3906,10 +3907,21 @@ def _stream_database_transfer_impl(
         # Ordering: watermark first — if the checkpoint save below fails the
         # route watermark still reflects committed rows, never behind them.
         if incremental and running_cursor and cursor_key:
+            # D11 — never advance past the lowest quarantined row's cursor.
+            wm_value, hold = quarantine_held_watermark(
+                rejected_details=dest_summary.get("rejected_details"),
+                cursor_column=cursor_source_col,
+                tiebreak_column=cursor_pk_source,
+                entry_watermark=watermark,
+                running_cursor=running_cursor,
+            )
+            wm_value = wm_value or running_cursor
+            if hold:
+                dest_summary["watermark_held_for_quarantine"] = hold
             try:
                 set_watermark(
                     cursor_key,
-                    running_cursor,
+                    wm_value,
                     metadata={
                         "job_id": job_id,
                         "sync_mode": effective_sync,
@@ -4224,9 +4236,20 @@ def _stream_database_transfer_impl(
         raise ValueError("Source table is empty")
 
     if incremental and running_cursor and cursor_key and running_cursor != watermark:
+        # D11 — never advance past the lowest quarantined row's cursor.
+        wm_value, hold = quarantine_held_watermark(
+            rejected_details=dest_summary.get("rejected_details"),
+            cursor_column=cursor_source_col,
+            tiebreak_column=cursor_pk_source,
+            entry_watermark=watermark,
+            running_cursor=running_cursor,
+        )
+        wm_value = wm_value or running_cursor
+        if hold:
+            dest_summary["watermark_held_for_quarantine"] = hold
         set_watermark(
             cursor_key,
-            running_cursor,
+            wm_value,
             metadata={
                 "job_id": job_id,
                 "sync_mode": effective_sync,

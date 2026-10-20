@@ -1437,6 +1437,60 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
     return compare_watermarks(sa, sb, wm_type)
 
 
+def quarantine_held_watermark(
+    *,
+    rejected_details: list[Any] | None,
+    cursor_column: str,
+    tiebreak_column: str,
+    entry_watermark: str | None,
+    running_cursor: str | None,
+) -> tuple[str, dict[str, Any] | None]:
+    """D11 — the route watermark a committed batch may advance to.
+
+    A quarantined/rejected row must never let the watermark move past its
+    cursor: the next incremental would skip the row forever while every run
+    reports success. Returns ``(value, hold_info)`` — ``value`` clamps to just
+    below the lowest quarantined cursor (a composite ``(cursor, "")`` bookmark
+    re-reads every row at that cursor, including the quarantined one);
+    ``hold_info`` is ``None`` when nothing was held. When a quarantined row's
+    cursor cannot be recovered, or no tie-break column exists to express
+    "just below", the watermark stays at the run's entry watermark — a full
+    re-read of the increment — rather than advancing past an unknown point.
+    """
+    low: str | None = None
+    unknown = False
+    for detail in rejected_details or []:
+        if not isinstance(detail, dict):
+            continue
+        src_row = detail.get("source_values")
+        if not isinstance(src_row, dict):
+            src_row = detail.get("values")
+        cell = src_row.get(cursor_column) if isinstance(src_row, dict) else None
+        cur_text = present_cell_text(cell)
+        if cur_text is None:
+            unknown = True
+            continue
+        if low is None or compare_cursor_values(cur_text, low) < 0:
+            low = cur_text
+    if low is None and not unknown:
+        return running_cursor or "", None
+    if low is None or (not tiebreak_column):
+        held = entry_watermark or ""
+        return held, {
+            "held_at": held,
+            "lowest_quarantined_cursor": low,
+            "quarantine_cursor_unknown": unknown,
+        }
+    if running_cursor and compare_cursor_values(low, running_cursor) > 0:
+        return running_cursor, None
+    held = encode_keyset_bookmark([low, ""])
+    return held, {
+        "held_at": held,
+        "lowest_quarantined_cursor": low,
+        "quarantine_cursor_unknown": unknown,
+    }
+
+
 def requires_incremental(sync_mode: str) -> bool:
     return (sync_mode or "").lower() in INCREMENTAL_MODES
 

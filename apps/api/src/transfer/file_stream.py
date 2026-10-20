@@ -1428,6 +1428,7 @@ def stream_file_to_database(
             resolve_effective_sync_mode,
             resolve_incremental_read_scope,
             resolve_sync_contract,
+            quarantine_held_watermark,
             set_watermark,
         )
     except ImportError:
@@ -1441,6 +1442,7 @@ def stream_file_to_database(
             resolve_effective_sync_mode,
             resolve_incremental_read_scope,
             resolve_sync_contract,
+            quarantine_held_watermark,
             set_watermark,
         )
     contract = resolve_sync_contract(stream_contracts)
@@ -1874,9 +1876,20 @@ def stream_file_to_database(
                 stamp_incremental_no_op(dest_summary)
                 dest_summary["watermark"] = watermark or ""
             elif wm and cursor_key:
+                # D11 — never advance past the lowest quarantined row's cursor.
+                wm_value, hold = quarantine_held_watermark(
+                    rejected_details=dest_summary.get("rejected_details"),
+                    cursor_column=cursor_source_col,
+                    tiebreak_column=cursor_pk_source,
+                    entry_watermark=watermark,
+                    running_cursor=wm,
+                )
+                wm_value = wm_value or wm
+                if hold:
+                    dest_summary["watermark_held_for_quarantine"] = hold
                 set_watermark(
                     cursor_key,
-                    wm,
+                    wm_value,
                     metadata={
                         "job_id": job_id,
                         "sync_mode": effective_sync,
@@ -1885,7 +1898,7 @@ def stream_file_to_database(
                         "tiebreak_column": cursor_pk_source,
                     },
                 )
-                dest_summary["watermark"] = wm
+                dest_summary["watermark"] = wm_value
         # COPY returns count tokens, not a value digest. Gate-8 refuses a
         # streaming append when no reconcile_sample was stashed. Overwrite
         # proves the whole table and must not switch to that sample: an empty
@@ -3049,9 +3062,20 @@ def stream_file_to_database(
         and running_cursor
         and running_cursor != watermark
     ):
+        # D11 — never advance past the lowest quarantined row's cursor.
+        wm_value, hold = quarantine_held_watermark(
+            rejected_details=dest_summary.get("rejected_details"),
+            cursor_column=cursor_source_col,
+            tiebreak_column=cursor_pk_source,
+            entry_watermark=watermark,
+            running_cursor=running_cursor,
+        )
+        wm_value = wm_value or running_cursor
+        if hold:
+            dest_summary["watermark_held_for_quarantine"] = hold
         set_watermark(
             cursor_key,
-            running_cursor,
+            wm_value,
             metadata={
                 "job_id": job_id,
                 "sync_mode": effective_sync,
@@ -3062,7 +3086,7 @@ def stream_file_to_database(
                 "tiebreak_column": cursor_pk_source,
             },
         )
-        dest_summary["incremental_watermark"] = running_cursor
+        dest_summary["incremental_watermark"] = wm_value
 
     dest_summary["checksum"] = final_checksum or last_checksum
     # A checksum with no mode is the write-pass digest. Do not overwrite
