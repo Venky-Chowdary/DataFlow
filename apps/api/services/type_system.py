@@ -3384,6 +3384,35 @@ def _bound_document_instant(inferred: str | None) -> bool:
     return normalize_logical_type(inferred) == LOGICAL_DATETIME
 
 
+def _mysql_source_time_duration(inferred: str | None) -> bool:
+    """True when a bound MySQL/MariaDB source declared TIME — a duration
+    (±838:59:59), not a wall clock. Unbound ``TIME`` stays a clock so a
+    PG/SQL Server source is unaffected.
+    """
+    if _normalize_dest_db(active_source_engine()) != "mysql":
+        return False
+    collapsed = re.sub(
+        r"\s*\(\s*\d+\s*\)",
+        "",
+        (inferred or "").strip().upper().replace("_", " "),
+    ).strip()
+    return collapsed == "TIME"
+
+
+def _mysql_time_duration_ddl_for_dest(db: str) -> str | None:
+    """Carrier for a MySQL TIME duration on create-new (X-95).
+
+    PostgreSQL and DuckDB hold real INTERVAL; MySQL keeps its own duration
+    TIME; engines with no interval or duration clock get the exact text
+    ('-838:59:59') — never a 24h TIME that silently wraps.
+    """
+    if db == "mysql":
+        return "TIME(6)"
+    if db in {"postgresql", "duckdb"}:
+        return "INTERVAL"
+    return DDL_TYPES.get(db, {}).get(LOGICAL_TEXT) or "VARCHAR"
+
+
 def _mysql_source_timestamp(inferred: str | None) -> bool:
     """True when a bound MySQL source declared its own TIMESTAMP carrier.
 

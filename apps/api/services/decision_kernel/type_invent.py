@@ -811,6 +811,18 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
         if tz_ddl:
             return tz_ddl
     if logical == LOGICAL_TIME:
+        # X-95: a bound MySQL source's TIME is a duration (±838:59:59), not
+        # a wall clock — carry it as INTERVAL where the engine holds one,
+        # exact duration text elsewhere, never a 24h TIME that wraps.
+        from services.type_system import (
+            _mysql_source_time_duration,
+            _mysql_time_duration_ddl_for_dest,
+        )
+
+        if _mysql_source_time_duration(inferred):
+            duration_ddl = _mysql_time_duration_ddl_for_dest(db)
+            if duration_ddl:
+                return duration_ddl
         time_ddl = _time_ddl_for_dest(db, inferred)
         if time_ddl:
             return time_ddl

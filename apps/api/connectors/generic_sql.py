@@ -1950,6 +1950,15 @@ def _to_sa_value(
             return value
 
         if base == "TIME":
+            # X-95: MySQL TIME is a ±838h duration; pymysql reads it back as
+            # timedelta and str() would spell "-1 day, 23:00:00" (refused).
+            # Duration carriers accept the canonical -HH:MM:SS literal.
+            import datetime as _dt
+
+            if isinstance(value, _dt.timedelta) and eng in _MYSQL_WIRES:
+                from services.value_serializer import _format_timedelta
+
+                return _format_timedelta(value)
             clock = bind_time_clock(value)
             if clock is None:
                 return None
@@ -2056,6 +2065,15 @@ def _to_sa_value(
         )
 
     if t in (LOGICAL_STRING, LOGICAL_TEXT) or _is_string_type(sa_type):
+        # X-95: a MySQL TIME cell is a duration read back as ``timedelta``;
+        # on a text carrier it must spell the canonical ``-838:59:59`` wire —
+        # ``str()`` would emit "-1 day, 23:00:00" and invent digits.
+        import datetime as _dt
+
+        from services.value_serializer import _format_timedelta
+
+        if isinstance(value, _dt.timedelta):
+            value = _format_timedelta(value)
         from services.encoding_capacity import bind_unicode_text
 
         # CESU-8 / surrogate leaks become Unicode scalars. Dest that cannot
