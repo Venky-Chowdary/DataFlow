@@ -610,6 +610,24 @@ def destination_table_exists(
                 return resolved is not None
             finally:
                 sf_conn.close()
+        if db_type in {"sqlserver", "mssql", "azure_sql"}:
+            # X-41 residual: the generic SQLAlchemy inspector path does not
+            # honour the connector's connection extras (trust_server_certificate
+            # et al.), so the probe returned None on real deployments and the
+            # FAIL_JOB undo fell back to "was empty before" — leaving the
+            # run-created table behind. Probe on the same connection the
+            # copy services use.
+            from services.copy_sqlserver_sqlserver import _ss_connect, _table_exists
+
+            ss_conn = _ss_connect(cfg)
+            try:
+                with ss_conn.cursor() as cur:
+                    return _table_exists(cur, schema or "dbo", table)
+            finally:
+                try:
+                    ss_conn.close()
+                except Exception:
+                    pass
         from src.transfer.connector_capabilities import resolve_driver_type
 
         if resolve_driver_type(db_type) == "generic_sql":

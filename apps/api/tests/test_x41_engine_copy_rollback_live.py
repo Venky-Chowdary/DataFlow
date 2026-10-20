@@ -136,6 +136,32 @@ def _drop_pg_source(pg: dict[str, Any], table: str) -> None:
         conn.close()
 
 
+def _seed_mysql_source(mysql: dict[str, Any], table: str) -> None:
+    conn = _mysql_conn(mysql)
+    try:
+        cur = conn.cursor()
+        cur.execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
+        cur.execute(
+            f"CREATE TABLE {table} (id BIGINT PRIMARY KEY, "
+            "t VARCHAR(50), label VARCHAR(50))"
+        )
+        for i, v in enumerate(_VALUES):
+            cur.execute(
+                f"INSERT INTO {table} (id, t, label) VALUES (%s, %s, %s)",  # nosec B608
+                (i + 1, v, f"lbl{i + 1}"),
+            )
+    finally:
+        conn.close()
+
+
+def _drop_mysql_source(mysql: dict[str, Any], table: str) -> None:
+    conn = _mysql_conn(mysql)
+    try:
+        conn.cursor().execute(f"DROP TABLE IF EXISTS {table}")  # nosec B608
+    finally:
+        conn.close()
+
+
 def _dest_exists_sqlite(path: str, table: str) -> bool:
     import sqlite3
 
@@ -283,17 +309,34 @@ def _endpoint(engine: str, cfg: dict[str, Any], table: str) -> EndpointConfig:
     )
 
 
-@pytest.mark.parametrize("dest_engine", ["sqlite", "mysql", "mssql", "duckdb"])
+@pytest.mark.parametrize(
+    "src_engine,dest_engine",
+    [
+        ("postgresql", "sqlite"),
+        ("postgresql", "mysql"),
+        ("postgresql", "mssql"),
+        ("postgresql", "duckdb"),
+        # X-41 reproduces on the MySQL-source engine-copy route too
+        # (loop probe on f92c09e0: table left behind, "was empty
+        # before" wording) — same pre-DDL probe must cover it.
+        ("mysql", "mssql"),
+    ],
+)
 @pytest.mark.parametrize("branch", ["checksum", "sample"])
 def test_x41_engine_copy_created_table_dropped_on_failed_verify(
-    dest_engine: str, branch: str, monkeypatch, tmp_path
+    src_engine: str, dest_engine: str, branch: str, monkeypatch, tmp_path
 ):
     """A tampered engine-copy run must fail, drop the table it created,
     say so, and report records_transferred=0 — the row-path (duckdb)
     control asserts the identical contract."""
-    pg = _cfg("DATAFLOW_TEST_PG", 5432)
-    if not pg or not _reachable(pg["host"], pg["port"]):
-        pytest.skip("set DATAFLOW_TEST_PG_* (reachable)")
+    if src_engine == "postgresql":
+        src_cfg = _cfg("DATAFLOW_TEST_PG", 5432)
+        if not src_cfg or not _reachable(src_cfg["host"], src_cfg["port"]):
+            pytest.skip("set DATAFLOW_TEST_PG_* (reachable)")
+    else:
+        src_cfg = _cfg("DATAFLOW_TEST_MYSQL", 3306)
+        if not src_cfg or not _reachable(src_cfg["host"], src_cfg["port"]):
+            pytest.skip("set DATAFLOW_TEST_MYSQL_* (reachable)")
 
     dest_table = f"x41_{dest_engine}_{branch}"
     if dest_engine == "sqlite":
@@ -311,8 +354,11 @@ def test_x41_engine_copy_created_table_dropped_on_failed_verify(
             pytest.skip("set DATAFLOW_TEST_MSSQL_* (reachable)")
         dest_cfg = c
 
-    src_table = "x41src_pg"
-    _seed_pg_source(pg, src_table)
+    src_table = f"x41src_{src_engine}"
+    if src_engine == "postgresql":
+        _seed_pg_source(src_cfg, src_table)
+    else:
+        _seed_mysql_source(src_cfg, src_table)
     tampered = {"done": False}
     orig_recon = engine_mod.run_reconciliation
 
@@ -325,7 +371,7 @@ def test_x41_engine_copy_created_table_dropped_on_failed_verify(
     monkeypatch.setattr(engine_mod, "run_reconciliation", _tampering_recon)
     try:
         request = TransferRequest(
-            source=_endpoint("postgresql", pg, src_table),
+            source=_endpoint(src_engine, src_cfg, src_table),
             destination=_endpoint(dest_engine, dest_cfg, dest_table),
             sync_mode="full_refresh_overwrite",
             skip_preflight=True,
@@ -334,7 +380,10 @@ def test_x41_engine_copy_created_table_dropped_on_failed_verify(
             request, "0000000000000000000000aa"
         )
     finally:
-        _drop_pg_source(pg, src_table)
+        if src_engine == "postgresql":
+            _drop_pg_source(src_cfg, src_table)
+        else:
+            _drop_mysql_source(src_cfg, src_table)
 
     assert tampered["done"], "tamper hook never fired before reconcile"
     assert result.success is False, (

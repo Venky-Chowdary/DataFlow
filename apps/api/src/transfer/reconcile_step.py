@@ -3150,6 +3150,23 @@ def _report_has_value_digest(report: dict[str, Any] | None) -> bool:
     )
 
 
+def _report_has_proven_value_match(report: dict[str, Any] | None) -> bool:
+    """True only when the report compares real value digests and they matched.
+
+    ``checksum_match is True`` plus a non-count-token digest on BOTH sides —
+    a count-only engine copy's one-sided read-back digest, or a ``dest_count:n``
+    token, never earns the green "verified" (X-41b).
+    """
+    r = report or {}
+    return bool(
+        r.get("checksum_match") is True
+        and r.get("source_checksum")
+        and r.get("target_checksum")
+        and not is_count_proof_token(r.get("source_checksum"))
+        and not is_count_proof_token(r.get("target_checksum"))
+    )
+
+
 _SOURCE_DIGEST_MODES = ("inline_write_pass", "source_reread")
 
 
@@ -4968,8 +4985,14 @@ def _run_reconciliation_impl(
             # only failed / partial / unproven runs may differ. A count-only
             # engine copy proves counts, not values: with no real digest it
             # stamps "partial", never a green "verified" (X-41 honesty ask).
+            # X-41b: a one-sided digest proves nothing — the count-only
+            # engine copy carries a real read-back digest on target_checksum
+            # with NO source digest and checksum_match=None, so the old
+            # "has a digest" test stamped "verified" over a run that never
+            # compared values. Verified requires a measured match on real
+            # digests (count tokens on either side are not value proof).
             stamped["verification_verdict"] = (
-                "verified" if _report_has_value_digest(stamped) else "partial"
+                "verified" if _report_has_proven_value_match(stamped) else "partial"
             )
         return stamped
 
@@ -6880,6 +6903,14 @@ def run_reconciliation(
             recon["checksum_match"] = _l3_src == _l3_dst
             recon["assurance_level"] = "full_checksum"
             recon["checksum_scope"] = "verify_time_population_digest"
+            # X-41b: _finalize already stamped verification_verdict="partial"
+            # before this promotion ran — a proven two-sided digest match
+            # upgrades it to "verified"; a proven mismatch stays failed.
+            if recon["checksum_match"]:
+                if recon.get("verification_verdict") in (None, "partial"):
+                    recon["verification_verdict"] = "verified"
+            else:
+                recon["verification_verdict"] = "failed"
             _msg = str(recon.get("message") or "")
             _cut = _msg.find(" There is no source value digest")
             # The count-only scope note starts two sentences earlier — leaving
