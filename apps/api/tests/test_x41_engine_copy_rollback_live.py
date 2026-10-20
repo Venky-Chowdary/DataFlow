@@ -69,7 +69,14 @@ class _FakeMongo:
 
 @pytest.fixture(autouse=True)
 def _patch_mongodb_service(monkeypatch):
-    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: _FakeMongo())
+    fake = _FakeMongo()
+    # execute_tracked demands a registered pending job as its durable resume
+    # point — an unregistered id fails with CheckpointPersistenceError before
+    # the tamper hook can fire.
+    fake.update_job_status(
+        "0000000000000000000000aa", "pending", transfer_request={}
+    )
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
 
 
 def _cfg(prefix: str, default_port: int) -> dict[str, Any] | None:
@@ -402,7 +409,9 @@ def test_x41_engine_copy_created_table_dropped_on_failed_verify(
     assert "was empty before" not in text.lower(), (
         f"rollback misread a run-created table as pre-existing-empty: {text[:300]}"
     )
-    assert int(getattr(result, "records_transferred", -1) or -1) == 0, (
+    assert getattr(result, "records_transferred", None) is not None and int(
+        result.records_transferred
+    ) == 0, (
         "a failed, rolled-back job must not report the attempted write as "
         f"transferred rows: {getattr(result, 'records_transferred', None)!r}"
     )

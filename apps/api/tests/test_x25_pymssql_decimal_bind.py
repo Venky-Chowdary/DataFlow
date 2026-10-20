@@ -48,10 +48,14 @@ def test_pyodbc_wide_decimal_binds_as_text():
     assert out[1] == "9999999999999999999999999999.9999999999"
 
 
-def test_pyodbc_narrow_decimal_binds_natively():
+def test_pyodbc_narrow_decimal_binds_as_text():
+    # X-48b: pyodbc now binds every Decimal as canonical text, not only >28
+    # digits — HY090 ("invalid precision") fired on narrow-but-odd scales
+    # too, so the uniform rule removes a second native-bind path that could
+    # still abort the copy. SQL Server converts varchar->decimal implicitly.
     narrow = Decimal("123456789012345.12345")
     out = bind_row_for_sqlserver(_PyodbcCursor(), (1, narrow))
-    assert out[1] is narrow  # 28-digit bound — native bind untouched
+    assert out[1] == "123456789012345.12345"
 
 
 def test_pyodbc_inner_wrapped_cursor_detected():
