@@ -3997,9 +3997,18 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
     if eng == "duckdb":
         import duckdb
 
-        return eng, duckdb.connect(
-            database=str(cfg.get("database") or cfg.get("path") or ":memory:")
+        # X-75: the file key has several spellings across connector/request
+        # shapes; without one the census silently opens :memory: and the
+        # table read fails — culprits could never be named on a DuckDB dest.
+        ddb_path = (
+            cfg.get("database")
+            or cfg.get("path")
+            or cfg.get("db_path")
+            or cfg.get("file")
+            or cfg.get("filename")
+            or ":memory:"
         )
+        return eng, duckdb.connect(database=str(ddb_path))
     if eng == "sqlite":
         return eng, sqlite3.connect(
             str(cfg.get("database") or cfg.get("path") or "")
@@ -4205,24 +4214,34 @@ def _generic_key_census(
                     except Exception:
                         pass
 
-            _load(
-                src_conn_info,
-                src_cfg,
-                src_eng,
-                _culprit_table_ref(src_eng, src_cfg, src_tbl),
-                src_pk,
-                src_cols,
-                0,
-            )
-            _load(
-                dst_conn_info,
-                dst_cfg,
-                dst_eng,
-                _culprit_table_ref(dst_eng, dst_cfg, dst_tbl),
-                pk,
-                dst_cols,
-                1,
-            )
+            try:
+                _load(
+                    src_conn_info,
+                    src_cfg,
+                    src_eng,
+                    _culprit_table_ref(src_eng, src_cfg, src_tbl),
+                    src_pk,
+                    src_cols,
+                    0,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"source side ({src_eng}) read failed: {exc}"
+                ) from exc
+            try:
+                _load(
+                    dst_conn_info,
+                    dst_cfg,
+                    dst_eng,
+                    _culprit_table_ref(dst_eng, dst_cfg, dst_tbl),
+                    pk,
+                    dst_cols,
+                    1,
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    f"destination side ({dst_eng}) read failed: {exc}"
+                ) from exc
             changed, missing, extra = _census_join(db)
             db.close()
         finally:
