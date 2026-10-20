@@ -15,6 +15,7 @@ the operator asked to remove is not a data-quality failure.
 from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Mapping, Sequence
+from decimal import Decimal
 from typing import Any
 
 from services.set_graph import block_message, set_hash_refusal
@@ -317,6 +318,274 @@ def apply_shape_type_ceilings(
     return resolved
 
 
+# X-104 — derived-column static typing. Sizing a produced column from the
+# first batch's observed values is a ticking overflow: a DECIMAL(4,2) created
+# because the sample's totals were small refuses a legitimate 9999999.9999 on
+# run 2, and fail-closed means a scheduled job goes red the first time the
+# data grows. An expression's declared type is a bound, not a measurement —
+# round(NUMERIC(12,4) * INT, 2) is DECIMAL(22,2) no matter what the sample
+# held. When the AST gives no bound the column takes the wide default and
+# says so in the plan summary.
+_DERIVE_WIDE_NUMERIC = "DECIMAL(38,10)"
+_NUMERIC_CAP = 38
+
+_STRING_RESULT_FNS = {
+    "lower", "upper", "title_case", "initcap", "trim", "ltrim", "rtrim",
+    "strip", "substr", "substring", "left", "right", "replace",
+    "regex_replace", "regex_extract", "split_part", "concat", "concat_ws",
+    "lpad", "rpad", "pad", "format_date", "format_timestamp", "repeat",
+    "reverse", "to_char", "str", "translate", "strip_characters",
+}
+_BOOL_RESULT_FNS = {
+    "is_null", "is_not_null", "is_blank", "regex_matches", "starts_with",
+    "ends_with", "contains", "between",
+}
+_INT_RESULT_FNS = {
+    "length", "len", "char_length", "character_length", "ascii", "position",
+    "strpos", "instr", "sign",
+}
+_DATE_RESULT_FNS = {"to_date", "date", "current_date"}
+_TIMESTAMP_RESULT_FNS = {"to_timestamp", "now", "current_timestamp", "to_datetime"}
+_NUMERIC_UNBOUNDED_FNS = {
+    "sqrt", "power", "pow", "exp", "ln", "log", "log10", "degrees", "radians",
+    "sin", "cos", "tan", "asin", "acos", "atan", "pi", "to_number",
+}
+_NUMERIC_UNION_FNS = {"least", "greatest", "min", "max"}
+_COMPARISON_OPS = {"=", "==", "!=", "<>", "<", "<=", ">", ">=",
+                   "like", "ilike", "in", "not in", "is", "is not",
+                   "and", "or"}
+_ARITHMETIC_OPS = {"+", "-", "*", "/", "%"}
+
+
+def _numeric_ps(declared: str | None) -> tuple[int | None, int | None]:
+    """(precision, scale) of a declared numeric type, else (None, None)."""
+    if not declared:
+        return None, None
+    from services.type_system import (
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+    try:
+        if normalize_logical_type(declared) not in {
+            "decimal", "number", "numeric", "integer", "float",
+        }:
+            return None, None
+    except Exception:
+        return None, None
+    precision, scale = parse_numeric_precision_scale(declared)
+    if precision is None:
+        # A bare numeric/integer declaration: bound it generously rather than
+        # pretend the column is not numeric.
+        return (19, 0) if "int" in declared.lower() else (_NUMERIC_CAP, 10)
+    return precision, scale or 0
+
+
+def _declare_numeric(precision: int, scale: int) -> str:
+    scale = max(scale, 0)
+    precision = min(max(precision, scale + 1), _NUMERIC_CAP)
+    return f"DECIMAL({precision},{scale})"
+
+
+def _union_expr_types(types: list[str | None]) -> str | None:
+    """The one type every branch can produce, or None when unbounded."""
+    known = [t for t in types if t]
+    if not known or len(known) != len(types):
+        return None
+    numerics = [_numeric_ps(t) for t in known]
+    if all(p is not None for p, _ in numerics):
+        int_digits = max((p - s) for p, s in numerics if p is not None)
+        scale = max(s for _, s in numerics if s is not None)
+        return _declare_numeric(int_digits + scale, scale)
+    if len(set(known)) == 1:
+        return known[0]
+    non_numeric = [
+        t for t in known
+        if normalize_expr_type_name(t) not in {"decimal", "number", "numeric",
+                                               "integer", "float"}
+    ]
+    return non_numeric[0] if len(set(non_numeric)) == 1 else "TEXT"
+
+
+def normalize_expr_type_name(declared: str) -> str:
+    from services.type_system import normalize_logical_type
+    try:
+        return normalize_logical_type(declared)
+    except Exception:
+        return ""
+
+
+def _static_expr_type(node: Any, col_types: Mapping[str, str]) -> str | None:
+    """Declared type provable from an expression AST and operand types.
+
+    Returns None when the expression has no static bound — the caller then
+    falls back to the wide numeric default (arithmetic) or the sample
+    inference (everything else).
+    """
+    from services.shape_expr import (
+        _Binary, _Call, _Case, _Column, _Literal, _Unary, Expression,
+    )
+
+    if isinstance(node, Expression):
+        return _static_expr_type(node.root, col_types)
+    if isinstance(node, _Literal):
+        value = node.value
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return "BOOLEAN"
+        if isinstance(value, Decimal):
+            tup = value.as_tuple()
+            digits = len(tup.digits)
+            scale = max(-tup.exponent, 0)
+            return _declare_numeric(digits, scale)
+        if isinstance(value, int):
+            return _declare_numeric(len(str(abs(value))), 0)
+        if isinstance(value, float):
+            return "FLOAT"
+        return "TEXT"
+    if isinstance(node, _Column):
+        return col_types.get(node.name)
+    if isinstance(node, _Unary):
+        if node.op == "not":
+            return "BOOLEAN"
+        inner = _static_expr_type(node.operand, col_types)
+        return inner if inner and _numeric_ps(inner)[0] is not None else None
+    if isinstance(node, _Case):
+        results = [result for _, result in node.whens]
+        if node.fallback is not None:
+            results.append(node.fallback)
+        return _union_expr_types(
+            [
+                _static_expr_type(r, col_types)
+                for r in results
+                if not (
+                    isinstance(r, _Literal) and r.value is None
+                )
+            ]
+        )
+    if isinstance(node, _Call):
+        name = str(node.name)
+        if name in _STRING_RESULT_FNS:
+            return "TEXT"
+        if name in _BOOL_RESULT_FNS:
+            return "BOOLEAN"
+        if name in _INT_RESULT_FNS:
+            return _declare_numeric(19, 0)
+        if name in _DATE_RESULT_FNS:
+            return "DATE"
+        if name in _TIMESTAMP_RESULT_FNS:
+            return "TIMESTAMP"
+        if name in {"if", "coalesce"}:
+            branch_args = node.args[1:] if name == "if" else node.args
+            return _union_expr_types(
+                [
+                    _static_expr_type(a, col_types)
+                    for a in branch_args
+                    if not (isinstance(a, _Literal) and a.value is None)
+                ]
+            )
+        if name in _NUMERIC_UNION_FNS:
+            return _union_expr_types(
+                [_static_expr_type(a, col_types) for a in node.args]
+            )
+        if name in _NUMERIC_UNBOUNDED_FNS:
+            return _DERIVE_WIDE_NUMERIC
+        if name in {"abs", "ceil", "ceiling", "floor"}:
+            operand = _static_expr_type(node.args[0], col_types)
+            p, s = _numeric_ps(operand)
+            if p is None:
+                return _DERIVE_WIDE_NUMERIC
+            if name == "abs":
+                return _declare_numeric(p, s or 0)
+            return _declare_numeric(p - (s or 0) + 1, 0)
+        if name in {"round", "truncate"}:
+            operand = _static_expr_type(node.args[0], col_types)
+            p, s = _numeric_ps(operand)
+            places = node.args[1] if len(node.args) > 1 else None
+            k = None
+            if isinstance(places, _Literal) and places.value is not None:
+                try:
+                    as_int = int(places.value)
+                    if as_int == places.value or str(places.value) == str(as_int):
+                        k = as_int
+                except (TypeError, ValueError):
+                    k = None
+            if p is None or k is None:
+                return _DERIVE_WIDE_NUMERIC
+            int_digits = max(p - (s or 0), 1)
+            # +1 headroom: rounding can carry into a new most-significant
+            # digit (99.5 → 100).
+            return _declare_numeric(int_digits + k + 1, k)
+        return None
+    if isinstance(node, _Binary):
+        op = str(node.op).casefold()
+        if op in _COMPARISON_OPS:
+            return "BOOLEAN"
+        if op in _ARITHMETIC_OPS:
+            left_p, left_s = _numeric_ps(
+                _static_expr_type(node.left, col_types)
+            )
+            right_p, right_s = _numeric_ps(
+                _static_expr_type(node.right, col_types)
+            )
+            if left_p is None or right_p is None:
+                return _DERIVE_WIDE_NUMERIC
+            left_i = max(left_p - (left_s or 0), 1)
+            right_i = max(right_p - (right_s or 0), 1)
+            if op in {"+", "-"}:
+                scale = max(left_s or 0, right_s or 0)
+                return _declare_numeric(max(left_i, right_i) + scale + 1, scale)
+            if op == "*":
+                return _declare_numeric(
+                    left_p + right_p + 1, (left_s or 0) + (right_s or 0)
+                )
+            if op == "/":
+                # Division is the unbounded case the defect named: declare the
+                # wide default rather than sizing off whatever the batch held.
+                return _DERIVE_WIDE_NUMERIC
+            scale = max(left_s or 0, right_s or 0)
+            return _declare_numeric(min(left_i, right_i) + scale, scale)
+    return None
+
+
+def derived_static_types(
+    recipe: ShapeRecipe,
+    prior_schema: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Declared types provable from derive_column/set_value expressions.
+
+    Steps run in order, so a derived column can reference an earlier produced
+    column — the working map tracks each step's declared output so later
+    expressions see it. Columns with no static bound keep the wide numeric
+    default; a column the AST cannot type at all is left to the sample
+    inference (``None`` → caller falls back).
+    """
+    working: dict[str, str] = {str(k): str(v) for k, v in (prior_schema or {}).items()}
+    declared: dict[str, str] = {}
+    for step in recipe.enabled_steps:
+        if step.op not in ("derive_column", "set_value"):
+            continue
+        target = (
+            str(step.options.get("to") or "")
+            if step.op == "derive_column"
+            else str(step.column or "")
+        )
+        if not target:
+            continue
+        static = (
+            _static_expr_type(
+                getattr(step.expression, "root", step.expression), working
+            )
+            if step.expression is not None
+            else None
+        )
+        if static is None:
+            continue
+        working[target] = static
+        declared[target] = static
+    return declared
+
+
 def shaped_schema(
     runner: ShapeRunner,
     shaped_rows: Sequence[Mapping[str, Any]],
@@ -356,6 +625,10 @@ def shaped_schema(
         }
         inferred, _ = infer_schema_map(samples)
 
+    # X-104: expression-derived columns declare their static type — a bound
+    # from the AST, not a measurement of the batch that happened to run first.
+    static = derived_static_types(runner.recipe, prior)
+
     out: dict[str, str] = {}
     for column in columns:
         if column not in touched and column in prior:
@@ -366,7 +639,12 @@ def shaped_schema(
         if origin and origin not in touched and origin in prior:
             out[column] = prior[origin]
             continue
-        declared = inferred.get(column) or prior.get(column) or "VARCHAR"
+        declared = (
+            static.get(column)
+            or inferred.get(column)
+            or prior.get(column)
+            or "VARCHAR"
+        )
         ceiling = ceilings.get(column)
         if ceiling is not None:
             declared = _capped_decimal(declared, ceiling)
@@ -453,4 +731,20 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
     ]
     if rk_steps:
         out["shape_hash_identity"] = rk_steps
+    # X-104: the plan shows each derived column's declared type — the static
+    # bound, not a batch measurement — and flags the ones with no static
+    # bound that took the wide default so an operator knows it was declared,
+    # not measured.
+    derived = derived_static_types(
+        runner.recipe, getattr(runner.recipe, "source_types", None)
+    )
+    if derived:
+        out["shape_derived_columns"] = [
+            {
+                "column": column,
+                "declared_type": declared,
+                "wide_default": declared == _DERIVE_WIDE_NUMERIC,
+            }
+            for column, declared in derived.items()
+        ]
     return out
