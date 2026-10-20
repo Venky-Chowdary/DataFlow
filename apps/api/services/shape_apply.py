@@ -438,4 +438,19 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
     if dedupe_steps:
         out["shape_dedupe"] = dedupe_steps
         out["shape_output_columns"] = list(runner.output_columns or ())
+    # X-101: hash_identity's encoding changed (rk1 \x1f-joined → rk2 tagged
+    # length-prefixed). State the version in the run summary so an operator
+    # comparing row keys across runs knows existing keys were re-keyed, not
+    # silently changed.
+    rk_steps = [
+        {
+            "step": i + 1,
+            "column": str(step.options.get("to") or "_df_row_key"),
+            "encoding": "rk2",
+        }
+        for i, step in enumerate(runner.recipe.enabled_steps)
+        if step.op == "hash_identity"
+    ]
+    if rk_steps:
+        out["shape_hash_identity"] = rk_steps
     return out

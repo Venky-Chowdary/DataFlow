@@ -1961,14 +1961,28 @@ def _hash_identity_value(row: Mapping[str, Any], columns: Sequence[str]) -> str:
     key. Gate-8 uses this as the align key when the source has no natural PK
     (flights-1m ``FL_DATE`` repeats).
     """
-    parts: list[str] = []
+    # rk2 encoding (X-101): rk1 joined cells with a raw \x1f and sentineled
+    # NULL as "\x1eEMPTY" — neither field was length-bound nor tagged, so
+    # ('a\x1f','b') ≡ ('a','\x1fb') and literal '\x1eEMPTY' ≡ NULL. rk2 tags
+    # every field and length-prefixes its bytes: A=absent, N=NULL, E=blank
+    # non-NULL (carries the raw text), V=value. No pair of distinct inputs
+    # produces the same payload, so Gate-8 can never silently mis-align rows.
+    parts: list[str] = ["rk2"]
     for name in columns:
         if name not in row:
-            parts.append("\x1eABSENT")
+            parts.append("\x1eA")
             continue
-        text = _as_text(row.get(name))
-        parts.append("\x1eEMPTY" if text is None else text)
-    payload = "\x1f".join(parts)
+        raw = row.get(name)
+        text = _as_text(raw)
+        if text is None:
+            if raw is None:
+                parts.append("\x1eN")
+            else:
+                raw_text = str(raw)
+                parts.append(f"\x1eE{len(raw_text.encode('utf-8'))}\x1e{raw_text}")
+            continue
+        parts.append(f"\x1eV{len(text.encode('utf-8'))}\x1e{text}")
+    payload = "".join(parts)
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 

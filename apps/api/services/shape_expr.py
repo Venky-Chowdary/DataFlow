@@ -656,10 +656,19 @@ def _fn_pad(value: Any, width: Any, fill: Any, *, left: bool) -> Any:
     filler = _as_text(fill) or " "
     if filler == "":
         filler = " "
-    if len(text) >= target:
-        # Truncation keeps the significant end: a left-pad is building a fixed
-        # width code, so the tail is what identifies it.
-        return text[len(text) - target :] if left else text[:target]
+    if len(text) > target:
+        # X-100: a pad op must never destroy characters — the old truncation
+        # silently kept the tail ('1234567' at width 6 landed '234567'). The
+        # value is uncomputable under the declared width, so it follows the
+        # step's on_error policy (refuse/quarantine/null) and is counted in
+        # the transform tally, not silently shortened.
+        side = "lpad" if left else "rpad"
+        raise EvalError(
+            f"{side} cannot place {len(text)} character(s) in width {target} "
+            f"— pad never truncates (value starts {text[:24]!r})"
+        )
+    if len(text) == target:
+        return text
     shortfall = target - len(text)
     grown = (filler * (shortfall // len(filler) + 1))[:shortfall]
     return grown + text if left else text + grown
