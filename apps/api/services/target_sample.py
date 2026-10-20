@@ -169,11 +169,62 @@ def read_target_sample(
             # fails closed with "no sample reader" after a successful write.
             from connectors.postgresql_conn import get_connection
 
+            # X-50: json/jsonb decodes under the driver — a JSON literal
+            # ``null`` arrives as Python ``None`` and is indistinguishable
+            # from SQL NULL. Read json columns as text; sample compare parses
+            # both sides semantically (jsonb rewrites key order/whitespace).
+            json_cols: set[str] = set()
+            sel_cols: list[str] = list(cols)
+            try:
+                from connectors.postgresql_conn import get_connection as _gc
+                _jconn = _gc(
+                    host=dest.get("host", ""),
+                    port=dest.get("port", 5432),
+                    database=dest.get("database", ""),
+                    username=dest.get("username", ""),
+                    password=dest.get("password", ""),
+                    connection_string=dest.get("connection_string", ""),
+                    ssl=_ssl_flag(False),
+                )
+                try:
+                    with _jconn.cursor() as jc:
+                        jc.execute(
+                            """
+                            SELECT a.attname, ty.typname FROM pg_attribute a
+                            JOIN pg_class c ON a.attrelid = c.oid
+                            JOIN pg_namespace n ON c.relnamespace = n.oid
+                            JOIN pg_type ty ON a.atttypid = ty.oid
+                            WHERE n.nspname = %s AND c.relname = %s
+                              AND a.attnum > 0 AND NOT a.attisdropped
+                            ORDER BY a.attnum
+                            """,
+                            (schema or "public", table_name),
+                        )
+                        _atts = jc.fetchall()
+                    json_cols = {
+                        n for n, t in _atts if t in {"json", "jsonb"}
+                    }
+                    if cols == ["*"]:
+                        sel_cols = [n for n, _ in _atts]
+                finally:
+                    _jconn.close()
+            except Exception:
+                json_cols = set()
+                sel_cols = list(cols)
+
             col_sql = (
                 "*"
-                if cols == ["*"]
-                else quote_column_list(
-                    [require_safe_identifier(c, preserve_case=True) for c in cols]
+                if not sel_cols or sel_cols == ["*"]
+                else ", ".join(
+                    (
+                        f"{quote_sql_identifier(require_safe_identifier(c, preserve_case=True))}::text"
+                        f" AS {quote_sql_identifier(require_safe_identifier(c, preserve_case=True))}"
+                        if c in json_cols
+                        else quote_sql_identifier(
+                            require_safe_identifier(c, preserve_case=True)
+                        )
+                    )
+                    for c in sel_cols
                 )
             )
             table_ref = quote_table_ref(

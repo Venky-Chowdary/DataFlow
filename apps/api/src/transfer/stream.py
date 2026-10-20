@@ -1700,6 +1700,15 @@ def _stream_database_transfer_impl(
         digest_dest_types = apply_physical_temporal_precision(
             digest_dest_types, dest_type, dest_cfg, table=str(dest_table)
         )
+        # X-50 follow-up: a JSON/JSONB source column that lands on a non-JSON
+        # carrier (TEXT on generic_sql/SQLite) must still fingerprint the parsed
+        # canonical form on BOTH digest sides — the independent re-read renders
+        # jsonb text (key order/whitespace from the engine), the destination
+        # stored the writer's form. Raw-text compare false-fails every such
+        # route. fingerprint_dest_types (remap pin check) keeps the real carrier.
+        for _i, _tcol in enumerate(target_cols):
+            if str(logical_types[_i] or "").strip().lower() in {"json", "jsonb"}:
+                digest_dest_types[_tcol] = "JSON"
     except Exception as exc:
         logger.warning(
             "physical destination temporal precision unavailable for the write-pass "

@@ -854,6 +854,9 @@ def _transform_applied_proof(
         except Exception:
             return str(v)
 
+    def _is_jsonish_ddl(ddl: str) -> bool:
+        return str(ddl or "").strip().lower() in {"json", "jsonb"}
+
     def _val_norm(v: Any, ddl: str = "") -> str:
         # Type-driven canonicalization for VALUE compares (recipe output vs
         # destination read-back). Strings stay literal unless the column is
@@ -883,7 +886,14 @@ def _transform_applied_proof(
             return str(v)
 
     def _val_ddl(col: str) -> str:
-        return str(dest_types.get(col) or dest_types.get(col.lower()) or "")
+        ddl = str(dest_types.get(col) or dest_types.get(col.lower()) or "")
+        if _is_jsonish_ddl(ddl):
+            return ddl
+        # X-50: canonicalize by the pair — a JSON source on a TEXT carrier
+        # (or a TEXT source on a JSON dest) must still fingerprint the parsed
+        # form on both sides or every such route false-fails the digest.
+        sddl = _src_ddl(col)
+        return sddl if _is_jsonish_ddl(sddl) else ddl
 
     def _src_norm(v: Any, ddl: str = "") -> str:
         # Source-side hash normalization — must match stream._pin_norm on
@@ -902,7 +912,11 @@ def _transform_applied_proof(
 
     def _src_ddl(col: str) -> str:
         ss = source_schema or {}
-        return str(ss.get(col) or ss.get(col.lower()) or "")
+        ddl = str(ss.get(col) or ss.get(col.lower()) or "")
+        if _is_jsonish_ddl(ddl):
+            return ddl
+        dddl = str(dest_types.get(col) or dest_types.get(col.lower()) or "")
+        return dddl if _is_jsonish_ddl(ddl) else ddl
 
     def _step_cols(s: dict[str, Any]) -> list[str]:
         opts = s.get("options") or {}

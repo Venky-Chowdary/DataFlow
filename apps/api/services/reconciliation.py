@@ -4320,6 +4320,36 @@ def verify_target(
     return fallback_rows, fallback_checksum
 
 
+_JSON_NULL_FINGERPRINT = "json:\x00null"
+
+def _json_cell_fingerprint(value: Any) -> str:
+    """Semantic JSON cell fingerprint (X-50).
+
+    ``None`` (SQL NULL) -> ``_NULL_SENTINEL``; a JSON literal ``null`` ->
+    ``_JSON_NULL_FINGERPRINT`` — distinct, so JSON-null <-> SQL-NULL tamper
+    still fails. Parsed structures dump sorted+compact so engine-specific
+    key order / whitespace do not drift the digest.
+    """
+    if value is None or is_missing_sentinel(value):
+        return _NULL_SENTINEL
+    parsed: Any
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return normalize_cell(value)
+    else:
+        parsed = value
+    if parsed is None:
+        return _JSON_NULL_FINGERPRINT
+    try:
+        return "json:" + json.dumps(
+            parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=False, default=str
+        )
+    except Exception:
+        return normalize_cell(str(value))
+
+
 def fingerprint_for_reconcile(
     value: Any,
     *,
@@ -4371,6 +4401,14 @@ def fingerprint_for_reconcile(
         wire = cell_to_string(value, preserve_sql_null=True)
 
     if ddl_type:
+        # X-50: JSON/JSONB compares semantically — parse the wire and dump a
+        # canonical form so `{"a":1}` (MySQL canonical) and `{"a": 1}` (jsonb
+        # canonical) fingerprint identically. A JSON literal ``null`` parses to
+        # Python ``None`` but is NOT SQL NULL: it gets its own token, so a
+        # tamper JSON-null -> SQL NULL (or back) still mismatches. Non-JSON
+        # garbage stays a plain string fingerprint (real corruption still fails).
+        if ddl_type.strip().lower() in {"json", "jsonb"}:
+            return _json_cell_fingerprint(wire)
         # Dest read-back is storage-canonical. Re-applying the transfer locale
         # turns EU ``1.234`` (from ``1,234``) into 1234 and false-fails Gate-8.
         # WIRE reads that canonical form as itself — ``20.500`` out of
@@ -4430,6 +4468,11 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # Oracle write-location: '' is stored/read as NULL — equate before other paths.
     if destination_empty_string_is_null(engine) and isinstance(value, str) and value == "":
         return _NULL_SENTINEL
+    if ddl_type and str(ddl_type).strip().lower() in {"json", "jsonb"}:
+        # X-50: JSON/JSONB compares semantically — parse and dump a canonical
+        # form so jsonb key order / whitespace cannot drift the digest. A JSON
+        # literal ``null`` gets its own token, distinct from SQL NULL.
+        return _json_cell_fingerprint(value)
     if isinstance(value, bool):
         return "1" if value else "0"
     _text_declared = bool(ddl_type) and bool(
@@ -4555,7 +4598,10 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             try:
                 parsed = json_loads_exact(text)
                 if isinstance(parsed, (dict, list)):
-                    return json.dumps(parsed, sort_keys=True, default=json_default)
+                    # X-50: fold to the same canonical form the json/jsonb ddl
+                    # branch emits — a TEXT carrier holding JSON must hash like
+                    # the source's canonical json, not a second spacing dialect.
+                    return _json_cell_fingerprint(parsed)
             except (json.JSONDecodeError, TypeError):
                 pass
         if (
@@ -4607,7 +4653,7 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         try:
             parsed = json_loads_exact(text)
             if isinstance(parsed, (dict, list)):
-                return json.dumps(parsed, sort_keys=True, default=json_default)
+                return _json_cell_fingerprint(parsed)
         except (json.JSONDecodeError, TypeError):
             pass
     # Date/time normalization: cheap heuristic first to avoid running the date

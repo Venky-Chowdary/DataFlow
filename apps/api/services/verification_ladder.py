@@ -588,16 +588,25 @@ def binary_search_row_diff(
                 from services.value_serializer import operator_binary_cell_text
 
                 _bin_ddl = str((dest_types or {}).get(col) or "")
+                # X-50: render SQL NULL as ``null`` (operator convention), not
+                # Python ``None`` — the sample-compare renderer already prints
+                # ``null`` for the same cell, so the message shows one spelling.
                 mismatches.append(
                     {
                         "pk_column": pk_column,
                         "pk": pk,
                         "column": col,
-                        "source_value": operator_binary_cell_text(
-                            _cell_text(srec.get(col)), _bin_ddl
+                        "source_value": (
+                            operator_binary_cell_text(
+                                _cell_text(srec.get(col)), _bin_ddl
+                            )
+                            or "null"
                         ),
-                        "target_value": operator_binary_cell_text(
-                            _cell_text(trec.get(col)), _bin_ddl
+                        "target_value": (
+                            operator_binary_cell_text(
+                                _cell_text(trec.get(col)), _bin_ddl
+                            )
+                            or "null"
                         ),
                         "source_fingerprint": sfp,
                         "target_fingerprint": tfp,
@@ -754,20 +763,55 @@ def read_postgres_rows(
     )
     cursor_name = f"df_ladder_{uuid.uuid4().hex}"
     try:
+        # X-50: psycopg2 decodes json/jsonb — a JSON literal ``null`` arrives
+        # as Python ``None`` and is indistinguishable from SQL NULL downstream.
+        # Read json columns as text; the fingerprint parses both sides
+        # semantically and keeps JSON null distinct from SQL NULL.
+        json_cols: set[str] = set()
+        with conn.cursor() as tc:
+            tc.execute(
+                """
+                SELECT a.attname
+                FROM pg_attribute a
+                JOIN pg_class c ON a.attrelid = c.oid
+                JOIN pg_namespace n ON c.relnamespace = n.oid
+                JOIN pg_type ty ON a.atttypid = ty.oid
+                WHERE n.nspname = %s AND c.relname = %s
+                  AND a.attnum > 0 AND NOT a.attisdropped
+                  AND ty.typname IN ('json', 'jsonb')
+                """,
+                (schema_n, table),
+            )
+            json_cols = {r[0] for r in tc.fetchall()}
         with conn.cursor(name=cursor_name) as cur:
             cur.itersize = _READ_BATCH
-            if columns:
-                col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
-                q = sql.SQL("SELECT {} FROM {}.{}").format(
-                    col_sql,
-                    sql.Identifier(schema_n),
-                    sql.Identifier(table),
-                )
-            else:
-                q = sql.SQL("SELECT * FROM {}.{}").format(
-                    sql.Identifier(schema_n),
-                    sql.Identifier(table),
-                )
+            sel_cols: list[str] = columns or []
+            if not sel_cols:
+                with conn.cursor() as tc2:
+                    tc2.execute(
+                        """
+                        SELECT a.attname FROM pg_attribute a
+                        JOIN pg_class c ON a.attrelid = c.oid
+                        JOIN pg_namespace n ON c.relnamespace = n.oid
+                        WHERE n.nspname = %s AND c.relname = %s
+                          AND a.attnum > 0 AND NOT a.attisdropped
+                        ORDER BY a.attnum
+                        """,
+                        (schema_n, table),
+                    )
+                    sel_cols = [r[0] for r in tc2.fetchall()]
+            def _sel(c: str):
+                if c in json_cols:
+                    return sql.SQL("{}::text AS {}").format(
+                        sql.Identifier(c), sql.Identifier(c)
+                    )
+                return sql.Identifier(c)
+            col_sql = sql.SQL(", ").join(_sel(c) for c in sel_cols)
+            q = sql.SQL("SELECT {} FROM {}.{}").format(
+                col_sql,
+                sql.Identifier(schema_n),
+                sql.Identifier(table),
+            )
             cur.execute(q)
             rows: list[dict[str, Any]] = []
             names: list[str] = []
