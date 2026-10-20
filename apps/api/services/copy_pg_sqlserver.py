@@ -564,9 +564,12 @@ def bulk_executemany(cur: Any, insert_sql: str, rows: list[Any]) -> None:
     ``FastPathUnavailable`` so the engine falls back to the row path, where
     every bind failure is reported as a typed finding naming the column.
     """
-    inner = getattr(cur, "_cur", cur)
+    # NOTE: call the cursor's own executemany — _MssqlQmarkCursor is what
+    # rewrites the pymssql-style ``%s`` markers to pyodbc ``?``. Unwrapping
+    # to ``cur._cur`` skips that adaptation and pyodbc reports "Expected 0
+    # parameters" — a silent row-path fallback on every insert (X-48).
     try:
-        inner.executemany(insert_sql, rows)
+        cur.executemany(insert_sql, rows)
     except FastPathUnavailable:
         raise
     except Exception as exc:

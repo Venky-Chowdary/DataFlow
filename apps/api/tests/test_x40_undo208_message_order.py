@@ -201,3 +201,44 @@ def test_undo208_existing_table_with_rows_still_deletes(monkeypatch):
 
     bu._clear(destination, dest_summary)
     assert issued == ["del"], "an occupied pre-existing table must be undone"
+
+
+def test_x48_bulk_executemany_uses_wrapped_cursor_for_qmark():
+    """X-48: ``bulk_executemany`` must call the cursor's own ``executemany`` —
+    ``_MssqlQmarkCursor`` is the layer that rewrites pymssql-style ``%s``
+    markers to pyodbc ``?``. Unwrapping ``cur._cur`` skipped the rewrite and
+    pyodbc reported "Expected 0 parameters, supplied N", silently declining
+    every MySQL/Oracle/Mongo/Iceberg→MSSQL fast path to the row route."""
+    from connectors.generic_sql import _MssqlQmarkCursor
+    from services.copy_pg_sqlserver import bulk_executemany
+
+    received: list[str] = []
+
+    class _Inner:
+        __module__ = "pyodbc"
+
+    class _RecordingQmark(_MssqlQmarkCursor):
+        def executemany(self, sql, rows):
+            received.append(sql)
+
+    cur = _RecordingQmark(_Inner())
+    bulk_executemany(cur, "INSERT INTO t (a, b) VALUES (%s, %s)", [(1, "x")])
+    # The wrapper's executemany saw the pymssql-style SQL — proving the call
+    # went through it (where %s -> ? adaptation lives), not the raw inner.
+    assert received == ["INSERT INTO t (a, b) VALUES (%s, %s)"], received
+
+
+def test_x48_bulk_executemany_decline_is_typed_not_raw():
+    """Any residual driver crash still folds into FastPathUnavailable —
+    never the raw driver text on the fast path."""
+    import pytest
+
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_pg_sqlserver import bulk_executemany
+
+    class _Boom:
+        def executemany(self, _sql, _rows):
+            raise RuntimeError("HY104 Invalid precision value")
+
+    with pytest.raises(FastPathUnavailable, match="bulk bind failed"):
+        bulk_executemany(_Boom(), "INSERT INTO t VALUES (%s)", [(1,)])

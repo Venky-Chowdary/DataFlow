@@ -111,6 +111,49 @@ def _drop(dest_cfg: dict[str, Any], table: str) -> None:
         conn.close()
 
 
+
+
+class _BulkRan:
+    """Wrap a service module's ``bulk_executemany`` and count real calls.
+
+    X-48: the live regression must prove the fast path *ran* — a silent
+    decline to the row path could fake the same read-back greens. Patch the
+    name inside the service module under test (each service imports it).
+    """
+
+    def __init__(self):
+        self.calls = 0
+        self.rows = 0
+
+    def wrap(self, module):
+        import types
+
+        real = module.bulk_executemany
+
+        def _counting(cur, insert_sql, rows):
+            self.calls += 1
+            self.rows += len(rows)
+            return real(cur, insert_sql, rows)
+
+        return _counting
+
+
+def _run_with_bulk_count(module, fn):
+    """Run ``fn`` with the module's bulk_executemany wrapped; assert it ran."""
+    counter = _BulkRan()
+    wrapped = counter.wrap(module)
+    orig = module.bulk_executemany
+    module.bulk_executemany = wrapped
+    try:
+        result = fn()
+    finally:
+        module.bulk_executemany = orig
+    assert counter.calls >= 1 and counter.rows == 5, (
+        f"bulk_executemany never ran (calls={counter.calls}, "
+        f"rows={counter.rows}) — the run silently declined to the row path"
+    )
+    return result
+
 def _assert_exact_readback(dest_cfg: dict[str, Any], table: str) -> None:
     rows = _dest_row_by_id(dest_cfg, table)
     assert len(rows) == 5, f"expected 5 rows, got {len(rows)}: {sorted(rows)}"
@@ -153,19 +196,23 @@ def test_live_mysql_to_mssql_wide_decimal_binds_exact():
     finally:
         conn.close()
 
+    import services.copy_mysql_sqlserver as _mysql_svc
     from services.copy_mysql_sqlserver import copy_mysql_to_sqlserver
 
     dest_table = "x40_mysql"
     _drop(mssql, dest_table)
     try:
-        result = copy_mysql_to_sqlserver(
+        result = _run_with_bulk_count(
+            _mysql_svc,
+            lambda: copy_mysql_to_sqlserver(
             source_cfg=mysql,
             source_table="x40src_mysql",
             dest_cfg=mssql,
             dest_table=dest_table,
-            pairs=[("id", "id"), ("t", "t"), ("label", "label")],
-            sqlserver_ddls=["BIGINT", "DECIMAL(38,10)", "VARCHAR(50)"],
-            replace_destination=True,
+                pairs=[("id", "id"), ("t", "t"), ("label", "label")],
+                sqlserver_ddls=["BIGINT", "DECIMAL(38,10)", "VARCHAR(50)"],
+                replace_destination=True,
+            ),
         )
         assert result.rows_copied == 5, (
             f"rows_copied {result.rows_copied!r} != 5"
@@ -214,20 +261,24 @@ def test_live_pg_to_mssql_wide_decimal_binds_exact():
     finally:
         conn.close()
 
+    import services.copy_pg_sqlserver as _pg_svc
     from services.copy_pg_sqlserver import copy_postgres_to_sqlserver
 
     dest_table = "x40_pg"
     _drop(mssql, dest_table)
     try:
-        result = copy_postgres_to_sqlserver(
-            source_cfg=pg,
-            source_schema="public",
-            source_table="x40src_pg",
-            dest_cfg=mssql,
-            dest_table=dest_table,
-            pairs=[("id", "id"), ("t", "t"), ("label", "label")],
-            sqlserver_ddls=["BIGINT", "DECIMAL(38,10)", "VARCHAR(50)"],
-            replace_destination=True,
+        result = _run_with_bulk_count(
+            _pg_svc,
+            lambda: copy_postgres_to_sqlserver(
+                source_cfg=pg,
+                source_schema="public",
+                source_table="x40src_pg",
+                dest_cfg=mssql,
+                dest_table=dest_table,
+                pairs=[("id", "id"), ("t", "t"), ("label", "label")],
+                sqlserver_ddls=["BIGINT", "DECIMAL(38,10)", "VARCHAR(50)"],
+                replace_destination=True,
+            ),
         )
         assert result.rows_copied == 5, (
             f"rows_copied {result.rows_copied!r} != 5"
@@ -313,3 +364,107 @@ def test_live_tamper_names_key_and_drops_table():
             conn.cursor().execute("DROP TABLE IF EXISTS x40src_tamper")
         finally:
             conn.close()
+
+
+def _seed_mongo_source(mongo):
+    import pymongo
+
+    client = pymongo.MongoClient(
+        host=mongo["host"], port=int(mongo["port"]),
+        username=mongo.get("username"), password=mongo.get("password"),
+        serverSelectionTimeoutMS=5000,
+    )
+    try:
+        col = client[mongo["database"]]["x40src_mongo"]
+        col.drop()
+        from bson.decimal128 import Decimal128
+
+        docs = [
+            {"id": i + 1,
+             "t": Decimal128(str(v)) if v is not None else None,
+             "label": _LABELS[i]}
+            for i, v in enumerate(_VALUES)
+        ]
+        col.insert_many(docs)
+    finally:
+        client.close()
+
+
+def test_live_mongo_to_mssql_wide_decimal_binds_exact():
+    """X-48 (c): the Mongo→SQL Server service shares the same
+    ``bulk_executemany`` — assert the bulk path really ran."""
+    mongo = _cfg("DATAFLOW_TEST_MONGO", 27017)
+    mssql = _cfg("DATAFLOW_TEST_MSSQL", 1433)
+    if not mongo or not mssql or not _reachable(mongo) or not _reachable(mssql):
+        pytest.skip("set DATAFLOW_TEST_MONGO_* and DATAFLOW_TEST_MSSQL_* (reachable)")
+    if _mongo_decimal128_unsupported(mssql):
+        pytest.skip("test env lacks bson/pyarrow for mongo leg")
+
+    _seed_mongo_source(mongo)
+
+    import services.copy_mongo_sqlserver as _mongo_svc
+    from services.copy_mongo_sqlserver import copy_mongo_to_sqlserver
+
+    dest_table = "x40_mongo"
+    _drop(mssql, dest_table)
+    try:
+        result = _run_with_bulk_count(
+            _mongo_svc,
+            lambda: copy_mongo_to_sqlserver(
+                source_cfg=mongo,
+                source_table="x40src_mongo",
+                dest_cfg=mssql,
+                dest_schema="dbo",
+                dest_table=dest_table,
+                pairs=[("id", "id"), ("t", "t"), ("label", "label")],
+                sqlserver_ddls=["BIGINT", "DECIMAL(38,10)", "VARCHAR(50)"],
+                replace_destination=True,
+            ),
+        )
+        assert result.rows_copied == 5
+        _assert_exact_readback(mssql, dest_table)
+    finally:
+        _drop(mssql, dest_table)
+
+
+def _mongo_decimal128_unsupported(_mssql):
+    try:
+        import pymongo  # noqa: F401
+        import bson  # noqa: F401
+    except Exception:
+        return True
+    return False
+
+
+def test_live_iceberg_to_mssql_bulk_path_ran():
+    """X-48 (c): Iceberg→SQL Server shares ``bulk_executemany`` — same
+    fast-path-ran assertion. Skip-gated on a local Iceberg catalog."""
+    iceberg = _cfg("DATAFLOW_TEST_ICEBERG", 0)
+    mssql = _cfg("DATAFLOW_TEST_MSSQL", 1433)
+    if not iceberg or not mssql or not _reachable(mssql):
+        pytest.skip(
+            "set DATAFLOW_TEST_ICEBERG_* (catalog env) and DATAFLOW_TEST_MSSQL_*"
+        )
+
+    import services.copy_iceberg_sqlserver as _ice_svc
+    from services.copy_iceberg_sqlserver import copy_iceberg_to_sqlserver
+
+    dest_table = "x40_iceberg"
+    _drop(mssql, dest_table)
+    try:
+        result = _run_with_bulk_count(
+            _ice_svc,
+            lambda: copy_iceberg_to_sqlserver(
+                source_cfg=iceberg,
+                source_table=iceberg.get("source_table", "x40src_iceberg"),
+                dest_cfg=mssql,
+                dest_table=dest_table,
+                dest_schema="dbo",
+                pairs=[("id", "id"), ("t", "t"), ("label", "label")],
+                sqlserver_ddls=["BIGINT", "DECIMAL(38,10)", "VARCHAR(50)"],
+                replace_destination=True,
+            ),
+        )
+        assert result.rows_copied >= 0
+    finally:
+        _drop(mssql, dest_table)

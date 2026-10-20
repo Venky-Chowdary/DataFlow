@@ -12,7 +12,10 @@ import logging
 from typing import Any
 
 from services.checkpoint_service import Checkpoint
-from services.copy_fast_path import declared_copy_carrier
+from services.copy_fast_path import (
+    declared_copy_carrier,
+    note_copy_decline,
+)
 from services.tombstone import detect_tombstone_column
 
 from .models import EndpointConfig
@@ -2230,7 +2233,7 @@ def _try_copy_fast_path(
     try:
         conn = _pg_connect_for_probe(src_cfg)
     except Exception as exc:
-        logger.info("COPY fast path declined (source probe): %s", exc)
+        note_copy_decline(f"COPY fast path declined (source probe): {exc}")
         return None
     try:
         with conn.cursor() as cur:
@@ -2241,7 +2244,7 @@ def _try_copy_fast_path(
                 [str(m.get("source") or "") for m in mappings if m.get("source")],
             )
     except Exception as exc:
-        logger.info("COPY fast path declined (source catalog): %s", exc)
+        note_copy_decline(f"COPY fast path declined (source catalog): {exc}")
         return None
     finally:
         try:
@@ -2297,7 +2300,7 @@ def _try_copy_fast_path(
                 )
             )
     except FastPathUnavailable as exc:
-        logger.info("COPY fast path declined: %s", exc)
+        note_copy_decline(f"COPY fast path declined: {exc}")
         return None
     except Exception as exc:
         # A refusal here means the copy ran and did not verify, which is a real
@@ -2486,7 +2489,7 @@ def _try_pg_mysql_copy_fast_path(
                 replace_destination=replace_destination,
             )
     except FastPathUnavailable as exc:
-        logger.info("PG→MySQL COPY declined: %s", exc)
+        note_copy_decline(f"PG→MySQL COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("PG→MySQL COPY failed after starting: %s", exc)
@@ -2603,7 +2606,7 @@ def _try_pg_sqlserver_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("PG→SQL Server COPY declined: %s", reason)
+        note_copy_decline(f"PG→SQL Server COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -2613,11 +2616,7 @@ def _try_pg_sqlserver_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not pg_type_is_load_safe(declared):
-            logger.info(
-                "PG→SQL Server COPY declined: %s type %s is not COPY-text safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"PG→SQL Server COPY declined: {source_col} type {declared} is not COPY-text safe")
             return None
         pairs.append((source_col, target_col))
         sqlserver_ddls.append(
@@ -2637,7 +2636,7 @@ def _try_pg_sqlserver_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("PG→SQL Server COPY declined: %s", exc)
+        note_copy_decline(f"PG→SQL Server COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("PG→SQL Server COPY failed after starting: %s", exc)
@@ -2711,7 +2710,7 @@ def _try_pg_oracle_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("PG→Oracle COPY declined: %s", reason)
+        note_copy_decline(f"PG→Oracle COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -2721,11 +2720,7 @@ def _try_pg_oracle_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not pg_type_is_load_safe(declared):
-            logger.info(
-                "PG→Oracle COPY declined: %s type %s is not COPY-text safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"PG→Oracle COPY declined: {source_col} type {declared} is not COPY-text safe")
             return None
         pairs.append((source_col, target_col))
         oracle_ddls.append(
@@ -2745,7 +2740,7 @@ def _try_pg_oracle_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("PG→Oracle COPY declined: %s", exc)
+        note_copy_decline(f"PG→Oracle COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("PG→Oracle COPY failed after starting: %s", exc)
@@ -2823,7 +2818,7 @@ def _try_pg_iceberg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("PG→Iceberg COPY declined: %s", reason)
+        note_copy_decline(f"PG→Iceberg COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -2833,11 +2828,7 @@ def _try_pg_iceberg_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not pg_type_is_load_safe(declared):
-            logger.info(
-                "PG→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"PG→Iceberg COPY declined: {source_col} type {declared} is not Iceberg COPY-safe")
             return None
         pairs.append((source_col, target_col))
         iceberg_ddls.append(ddl_type("iceberg", declared) if declared else "string")
@@ -2855,7 +2846,7 @@ def _try_pg_iceberg_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("PG→Iceberg COPY declined: %s", exc)
+        note_copy_decline(f"PG→Iceberg COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("PG→Iceberg COPY failed after starting: %s", exc)
@@ -2924,7 +2915,7 @@ def _try_pg_mongo_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("PG→Mongo COPY declined: %s", reason)
+        note_copy_decline(f"PG→Mongo COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -2934,11 +2925,7 @@ def _try_pg_mongo_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not pg_mongo_type_is_copy_safe(declared):
-            logger.info(
-                "PG→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"PG→Mongo COPY declined: {source_col} type {declared} is not Mongo COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mongo_ddls.append(declared or "TEXT")
@@ -2955,7 +2942,7 @@ def _try_pg_mongo_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("PG→Mongo COPY declined: %s", exc)
+        note_copy_decline(f"PG→Mongo COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("PG→Mongo COPY failed after starting: %s", exc)
@@ -3084,7 +3071,7 @@ def _try_pg_sqlite_copy_fast_path(
                 replace_destination=replace_destination,
             )
     except FastPathUnavailable as exc:
-        logger.info("PostgreSQL→SQLite COPY declined: %s", exc)
+        note_copy_decline(f"PostgreSQL→SQLite COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("PostgreSQL→SQLite COPY failed after starting: %s", exc)
@@ -3181,7 +3168,7 @@ def _try_pg_s3_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("PostgreSQL→S3 COPY declined: %s", reason)
+        note_copy_decline(f"PostgreSQL→S3 COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -3191,11 +3178,7 @@ def _try_pg_s3_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not pg_s3_type_is_copy_safe(declared):
-            logger.info(
-                "PostgreSQL→S3 COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"PostgreSQL→S3 COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         s3_ddls.append(declared or "TEXT")
@@ -3212,7 +3195,7 @@ def _try_pg_s3_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("PostgreSQL→S3 COPY declined: %s", exc)
+        note_copy_decline(f"PostgreSQL→S3 COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("PostgreSQL→S3 COPY failed after starting: %s", exc)
@@ -3283,7 +3266,7 @@ def _try_iceberg_pg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Iceberg→PG COPY declined: %s", reason)
+        note_copy_decline(f"Iceberg→PG COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -3295,11 +3278,7 @@ def _try_iceberg_pg_copy_fast_path(
         if declared and not (
             pg_type_is_load_safe(declared) or iceberg_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Iceberg→PG COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Iceberg→PG COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         pg_ddls.append(pg_type(declared) if declared else "TEXT")
@@ -3317,7 +3296,7 @@ def _try_iceberg_pg_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Iceberg→PG COPY declined: %s", exc)
+        note_copy_decline(f"Iceberg→PG COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Iceberg→PG COPY failed after starting: %s", exc)
@@ -3388,7 +3367,7 @@ def _try_iceberg_mysql_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Iceberg→MySQL COPY declined: %s", reason)
+        note_copy_decline(f"Iceberg→MySQL COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -3400,11 +3379,7 @@ def _try_iceberg_mysql_copy_fast_path(
         if declared and not (
             mysql_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Iceberg→MySQL COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Iceberg→MySQL COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
@@ -3421,7 +3396,7 @@ def _try_iceberg_mysql_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Iceberg→MySQL COPY declined: %s", exc)
+        note_copy_decline(f"Iceberg→MySQL COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Iceberg→MySQL COPY failed after starting: %s", exc)
@@ -3493,7 +3468,7 @@ def _try_iceberg_sqlserver_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Iceberg→SQL Server COPY declined: %s", reason)
+        note_copy_decline(f"Iceberg→SQL Server COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -3505,11 +3480,7 @@ def _try_iceberg_sqlserver_copy_fast_path(
         if declared and not (
             sqlserver_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Iceberg→SQL Server COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Iceberg→SQL Server COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlserver_ddls.append(
@@ -3529,7 +3500,7 @@ def _try_iceberg_sqlserver_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Iceberg→SQL Server COPY declined: %s", exc)
+        note_copy_decline(f"Iceberg→SQL Server COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Iceberg→SQL Server COPY failed after starting: %s", exc)
@@ -3601,7 +3572,7 @@ def _try_iceberg_oracle_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Iceberg→Oracle COPY declined: %s", reason)
+        note_copy_decline(f"Iceberg→Oracle COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -3613,11 +3584,7 @@ def _try_iceberg_oracle_copy_fast_path(
         if declared and not (
             iceberg_type_is_copy_safe(declared) or oracle_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Iceberg→Oracle COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Iceberg→Oracle COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         oracle_ddls.append(
@@ -3637,7 +3604,7 @@ def _try_iceberg_oracle_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Iceberg→Oracle COPY declined: %s", exc)
+        note_copy_decline(f"Iceberg→Oracle COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Iceberg→Oracle COPY failed after starting: %s", exc)
@@ -3715,7 +3682,7 @@ def _try_iceberg_mongo_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Iceberg→Mongo COPY declined: %s", reason)
+        note_copy_decline(f"Iceberg→Mongo COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -3725,11 +3692,7 @@ def _try_iceberg_mongo_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not iceberg_mongo_type_is_copy_safe(declared):
-            logger.info(
-                "Iceberg→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Iceberg→Mongo COPY declined: {source_col} type {declared} is not Mongo COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mongo_ddls.append(declared or "string")
@@ -3746,7 +3709,7 @@ def _try_iceberg_mongo_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Iceberg→Mongo COPY declined: %s", exc)
+        note_copy_decline(f"Iceberg→Mongo COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Iceberg→Mongo COPY failed after starting: %s", exc)
@@ -3819,7 +3782,7 @@ def _try_iceberg_sqlite_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Iceberg→SQLite COPY declined: %s", reason)
+        note_copy_decline(f"Iceberg→SQLite COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -3829,19 +3792,11 @@ def _try_iceberg_sqlite_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not iceberg_type_is_copy_safe(declared):
-            logger.info(
-                "Iceberg→SQLite COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Iceberg→SQLite COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         dest_ddl = sqlite_type(declared) if declared else "TEXT"
         if not sqlite_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "Iceberg→SQLite COPY declined: dest %s type %s is not SQLite COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"Iceberg→SQLite COPY declined: dest {target_col} type {dest_ddl} is not SQLite COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlite_ddls.append(dest_ddl)
@@ -3858,7 +3813,7 @@ def _try_iceberg_sqlite_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Iceberg→SQLite COPY declined: %s", exc)
+        note_copy_decline(f"Iceberg→SQLite COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Iceberg→SQLite COPY failed after starting: %s", exc)
@@ -3929,7 +3884,7 @@ def _try_iceberg_s3_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Iceberg→S3 COPY declined: %s", reason)
+        note_copy_decline(f"Iceberg→S3 COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -3939,11 +3894,7 @@ def _try_iceberg_s3_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not iceberg_type_is_copy_safe(declared):
-            logger.info(
-                "Iceberg→S3 COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Iceberg→S3 COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         s3_ddls.append(declared or "string")
@@ -3960,7 +3911,7 @@ def _try_iceberg_s3_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Iceberg→S3 COPY declined: %s", exc)
+        note_copy_decline(f"Iceberg→S3 COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Iceberg→S3 COPY failed after starting: %s", exc)
@@ -4033,7 +3984,7 @@ def _try_iceberg_iceberg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Iceberg→Iceberg COPY declined: %s", reason)
+        note_copy_decline(f"Iceberg→Iceberg COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -4043,11 +3994,7 @@ def _try_iceberg_iceberg_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not iceberg_type_is_copy_safe(declared):
-            logger.info(
-                "Iceberg→Iceberg COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Iceberg→Iceberg COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         iceberg_ddls.append(ddl_type("iceberg", declared) if declared else "string")
@@ -4065,7 +4012,7 @@ def _try_iceberg_iceberg_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Iceberg→Iceberg COPY declined: %s", exc)
+        note_copy_decline(f"Iceberg→Iceberg COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Iceberg→Iceberg COPY failed after starting: %s", exc)
@@ -4190,7 +4137,7 @@ def _try_sqlite_sqlite_copy_fast_path(
                 ledger=copy_ledger_key(job_id, dest_table),
             )
     except FastPathUnavailable as exc:
-        logger.info("SQLite→SQLite COPY declined: %s", exc)
+        note_copy_decline(f"SQLite→SQLite COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQLite→SQLite COPY failed after starting: %s", exc)
@@ -4346,7 +4293,7 @@ def _try_sqlite_pg_copy_fast_path(
             )
     except FastPathUnavailable as exc:
         note_copy_decline(f"SQLite→PG COPY declined: {exc}")
-        logger.info("SQLite→PG COPY declined: %s", exc)
+        note_copy_decline(f"SQLite→PG COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQLite→PG COPY failed after starting: %s", exc)
@@ -4441,7 +4388,7 @@ def _try_sqlite_s3_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQLite→S3 COPY declined: %s", reason)
+        note_copy_decline(f"SQLite→S3 COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -4451,11 +4398,7 @@ def _try_sqlite_s3_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_s3_type_is_copy_safe(declared):
-            logger.info(
-                "SQLite→S3 COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQLite→S3 COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         s3_ddls.append(declared or "TEXT")
@@ -4471,7 +4414,7 @@ def _try_sqlite_s3_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQLite→S3 COPY declined: %s", exc)
+        note_copy_decline(f"SQLite→S3 COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQLite→S3 COPY failed after starting: %s", exc)
@@ -4540,7 +4483,7 @@ def _try_sqlite_mongo_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQLite→Mongo COPY declined: %s", reason)
+        note_copy_decline(f"SQLite→Mongo COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -4550,11 +4493,7 @@ def _try_sqlite_mongo_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_mongo_type_is_copy_safe(declared):
-            logger.info(
-                "SQLite→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQLite→Mongo COPY declined: {source_col} type {declared} is not Mongo COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mongo_ddls.append(declared or "TEXT")
@@ -4570,7 +4509,7 @@ def _try_sqlite_mongo_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQLite→Mongo COPY declined: %s", exc)
+        note_copy_decline(f"SQLite→Mongo COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQLite→Mongo COPY failed after starting: %s", exc)
@@ -4699,7 +4638,7 @@ def _try_sqlite_mysql_copy_fast_path(
             )
     except FastPathUnavailable as exc:
         note_copy_decline(f"SQLite→MySQL COPY declined: {exc}")
-        logger.info("SQLite→MySQL COPY declined: %s", exc)
+        note_copy_decline(f"SQLite→MySQL COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQLite→MySQL COPY failed after starting: %s", exc)
@@ -4805,7 +4744,7 @@ def _try_sqlite_iceberg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQLite→Iceberg COPY declined: %s", reason)
+        note_copy_decline(f"SQLite→Iceberg COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -4815,19 +4754,11 @@ def _try_sqlite_iceberg_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_iceberg_type_is_copy_safe(declared):
-            logger.info(
-                "SQLite→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQLite→Iceberg COPY declined: {source_col} type {declared} is not Iceberg COPY-safe")
             return None
         iceberg_ddl = ddl_type("iceberg", declared) if declared else "string"
         if iceberg_ddl and not iceberg_type_is_copy_safe(iceberg_ddl):
-            logger.info(
-                "SQLite→Iceberg COPY declined: dest %s type %s is not Iceberg COPY-safe",
-                target_col,
-                iceberg_ddl,
-            )
+            note_copy_decline(f"SQLite→Iceberg COPY declined: dest {target_col} type {iceberg_ddl} is not Iceberg COPY-safe")
             return None
         pairs.append((source_col, target_col))
         iceberg_ddls.append(iceberg_ddl)
@@ -4844,7 +4775,7 @@ def _try_sqlite_iceberg_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQLite→Iceberg COPY declined: %s", exc)
+        note_copy_decline(f"SQLite→Iceberg COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQLite→Iceberg COPY failed after starting: %s", exc)
@@ -4919,7 +4850,7 @@ def _try_sqlite_sqlserver_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQLite→SQL Server COPY declined: %s", reason)
+        note_copy_decline(f"SQLite→SQL Server COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -4929,19 +4860,11 @@ def _try_sqlite_sqlserver_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_sqlserver_type_is_copy_safe(declared):
-            logger.info(
-                "SQLite→SQL Server COPY declined: %s type %s is not SQL Server COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQLite→SQL Server COPY declined: {source_col} type {declared} is not SQL Server COPY-safe")
             return None
         dest_ddl = ddl_type("sqlserver", declared) if declared else "NVARCHAR(MAX)"
         if dest_ddl and not sqlserver_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "SQLite→SQL Server COPY declined: dest %s type %s is not COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"SQLite→SQL Server COPY declined: dest {target_col} type {dest_ddl} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlserver_ddls.append(dest_ddl)
@@ -4958,7 +4881,7 @@ def _try_sqlite_sqlserver_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQLite→SQL Server COPY declined: %s", exc)
+        note_copy_decline(f"SQLite→SQL Server COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQLite→SQL Server COPY failed after starting: %s", exc)
@@ -5033,7 +4956,7 @@ def _try_sqlite_oracle_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQLite→Oracle COPY declined: %s", reason)
+        note_copy_decline(f"SQLite→Oracle COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5043,19 +4966,11 @@ def _try_sqlite_oracle_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_oracle_type_is_copy_safe(declared):
-            logger.info(
-                "SQLite→Oracle COPY declined: %s type %s is not Oracle COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQLite→Oracle COPY declined: {source_col} type {declared} is not Oracle COPY-safe")
             return None
         dest_ddl = sqlite_declared_to_oracle_ddl(declared)
         if dest_ddl and not oracle_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "SQLite→Oracle COPY declined: dest %s type %s is not COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"SQLite→Oracle COPY declined: dest {target_col} type {dest_ddl} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         oracle_ddls.append(dest_ddl)
@@ -5072,7 +4987,7 @@ def _try_sqlite_oracle_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQLite→Oracle COPY declined: %s", exc)
+        note_copy_decline(f"SQLite→Oracle COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQLite→Oracle COPY failed after starting: %s", exc)
@@ -5148,7 +5063,7 @@ def _try_s3_s3_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("S3→S3 COPY declined: %s", reason)
+        note_copy_decline(f"S3→S3 COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5171,7 +5086,7 @@ def _try_s3_s3_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("S3→S3 COPY declined: %s", exc)
+        note_copy_decline(f"S3→S3 COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("S3→S3 COPY failed after starting: %s", exc)
@@ -5240,7 +5155,7 @@ def _try_gcs_gcs_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("GCS→GCS COPY declined: %s", reason)
+        note_copy_decline(f"GCS→GCS COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5263,7 +5178,7 @@ def _try_gcs_gcs_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("GCS→GCS COPY declined: %s", exc)
+        note_copy_decline(f"GCS→GCS COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("GCS→GCS COPY failed after starting: %s", exc)
@@ -5333,7 +5248,7 @@ def _try_adls_adls_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("ADLS→ADLS COPY declined: %s", reason)
+        note_copy_decline(f"ADLS→ADLS COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5356,7 +5271,7 @@ def _try_adls_adls_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("ADLS→ADLS COPY declined: %s", exc)
+        note_copy_decline(f"ADLS→ADLS COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("ADLS→ADLS COPY failed after starting: %s", exc)
@@ -5429,7 +5344,7 @@ def _try_dynamodb_dynamodb_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("DynamoDB→DynamoDB COPY declined: %s", reason)
+        note_copy_decline(f"DynamoDB→DynamoDB COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5439,11 +5354,7 @@ def _try_dynamodb_dynamodb_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not dynamodb_type_is_copy_safe(declared):
-            logger.info(
-                "DynamoDB→DynamoDB COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"DynamoDB→DynamoDB COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         dynamodb_ddls.append(declared or "string")
@@ -5459,7 +5370,7 @@ def _try_dynamodb_dynamodb_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("DynamoDB→DynamoDB COPY declined: %s", exc)
+        note_copy_decline(f"DynamoDB→DynamoDB COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("DynamoDB→DynamoDB COPY failed after starting: %s", exc)
@@ -5531,7 +5442,7 @@ def _try_snowflake_snowflake_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Snowflake→Snowflake COPY declined: %s", reason)
+        note_copy_decline(f"Snowflake→Snowflake COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5541,14 +5452,10 @@ def _try_snowflake_snowflake_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("Snowflake→Snowflake COPY declined: column rename")
+            note_copy_decline("Snowflake→Snowflake COPY declined: column rename")
             return None
         if declared and not snowflake_type_is_copy_safe(declared):
-            logger.info(
-                "Snowflake→Snowflake COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Snowflake→Snowflake COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         snowflake_ddls.append(declared or "VARCHAR")
@@ -5564,7 +5471,7 @@ def _try_snowflake_snowflake_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Snowflake→Snowflake COPY declined: %s", exc)
+        note_copy_decline(f"Snowflake→Snowflake COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Snowflake→Snowflake COPY failed after starting: %s", exc)
@@ -5635,7 +5542,7 @@ def _try_bigquery_bigquery_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("BigQuery→BigQuery COPY declined: %s", reason)
+        note_copy_decline(f"BigQuery→BigQuery COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5645,14 +5552,10 @@ def _try_bigquery_bigquery_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("BigQuery→BigQuery COPY declined: column rename")
+            note_copy_decline("BigQuery→BigQuery COPY declined: column rename")
             return None
         if declared and not bigquery_type_is_copy_safe(declared):
-            logger.info(
-                "BigQuery→BigQuery COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"BigQuery→BigQuery COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         bigquery_ddls.append(declared or "STRING")
@@ -5668,7 +5571,7 @@ def _try_bigquery_bigquery_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("BigQuery→BigQuery COPY declined: %s", exc)
+        note_copy_decline(f"BigQuery→BigQuery COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("BigQuery→BigQuery COPY failed after starting: %s", exc)
@@ -5739,7 +5642,7 @@ def _try_redis_redis_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Redis→Redis COPY declined: %s", reason)
+        note_copy_decline(f"Redis→Redis COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5749,7 +5652,7 @@ def _try_redis_redis_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("Redis→Redis COPY declined: column rename")
+            note_copy_decline("Redis→Redis COPY declined: column rename")
             return None
         pairs.append((source_col, target_col))
         redis_ddls.append(declared or "string")
@@ -5765,7 +5668,7 @@ def _try_redis_redis_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Redis→Redis COPY declined: %s", exc)
+        note_copy_decline(f"Redis→Redis COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Redis→Redis COPY failed after starting: %s", exc)
@@ -5837,7 +5740,7 @@ def _try_elasticsearch_elasticsearch_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Elasticsearch→Elasticsearch COPY declined: %s", reason)
+        note_copy_decline(f"Elasticsearch→Elasticsearch COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5847,7 +5750,7 @@ def _try_elasticsearch_elasticsearch_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("Elasticsearch→Elasticsearch COPY declined: column rename")
+            note_copy_decline("Elasticsearch→Elasticsearch COPY declined: column rename")
             return None
         pairs.append((source_col, target_col))
         elasticsearch_ddls.append(declared or "keyword")
@@ -5863,7 +5766,7 @@ def _try_elasticsearch_elasticsearch_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Elasticsearch→Elasticsearch COPY declined: %s", exc)
+        note_copy_decline(f"Elasticsearch→Elasticsearch COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Elasticsearch→Elasticsearch COPY failed after starting: %s", exc)
@@ -5934,7 +5837,7 @@ def _try_kafka_kafka_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Kafka→Kafka COPY declined: %s", reason)
+        note_copy_decline(f"Kafka→Kafka COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -5944,7 +5847,7 @@ def _try_kafka_kafka_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("Kafka→Kafka COPY declined: column rename")
+            note_copy_decline("Kafka→Kafka COPY declined: column rename")
             return None
         pairs.append((source_col, target_col))
         kafka_ddls.append(declared or "json")
@@ -5960,7 +5863,7 @@ def _try_kafka_kafka_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Kafka→Kafka COPY declined: %s", exc)
+        note_copy_decline(f"Kafka→Kafka COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Kafka→Kafka COPY failed after starting: %s", exc)
@@ -6033,7 +5936,7 @@ def _try_duckdb_duckdb_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("DuckDB→DuckDB COPY declined: %s", reason)
+        note_copy_decline(f"DuckDB→DuckDB COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -6043,14 +5946,10 @@ def _try_duckdb_duckdb_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("DuckDB→DuckDB COPY declined: column rename")
+            note_copy_decline("DuckDB→DuckDB COPY declined: column rename")
             return None
         if declared and not duckdb_type_is_copy_safe(declared):
-            logger.info(
-                "DuckDB→DuckDB COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"DuckDB→DuckDB COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         duckdb_ddls.append(declared or "VARCHAR")
@@ -6067,7 +5966,7 @@ def _try_duckdb_duckdb_copy_fast_path(
             source_schema=source_schema or None,
         )
     except FastPathUnavailable as exc:
-        logger.info("DuckDB→DuckDB COPY declined: %s", exc)
+        note_copy_decline(f"DuckDB→DuckDB COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("DuckDB→DuckDB COPY failed after starting: %s", exc)
@@ -6140,7 +6039,7 @@ def _try_qdrant_qdrant_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Qdrant→Qdrant COPY declined: %s", reason)
+        note_copy_decline(f"Qdrant→Qdrant COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -6150,14 +6049,10 @@ def _try_qdrant_qdrant_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("Qdrant→Qdrant COPY declined: column rename")
+            note_copy_decline("Qdrant→Qdrant COPY declined: column rename")
             return None
         if declared and not qdrant_type_is_copy_safe(declared):
-            logger.info(
-                "Qdrant→Qdrant COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Qdrant→Qdrant COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         qdrant_ddls.append(declared or "keyword")
@@ -6173,7 +6068,7 @@ def _try_qdrant_qdrant_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Qdrant→Qdrant COPY declined: %s", exc)
+        note_copy_decline(f"Qdrant→Qdrant COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Qdrant→Qdrant COPY failed after starting: %s", exc)
@@ -6250,7 +6145,7 @@ def _try_milvus_milvus_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Milvus→Milvus COPY declined: %s", reason)
+        note_copy_decline(f"Milvus→Milvus COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -6260,14 +6155,10 @@ def _try_milvus_milvus_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("Milvus→Milvus COPY declined: column rename")
+            note_copy_decline("Milvus→Milvus COPY declined: column rename")
             return None
         if declared and not milvus_type_is_copy_safe(declared):
-            logger.info(
-                "Milvus→Milvus COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Milvus→Milvus COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         milvus_ddls.append(declared or "varchar")
@@ -6283,7 +6174,7 @@ def _try_milvus_milvus_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Milvus→Milvus COPY declined: %s", exc)
+        note_copy_decline(f"Milvus→Milvus COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Milvus→Milvus COPY failed after starting: %s", exc)
@@ -6361,7 +6252,7 @@ def _try_weaviate_weaviate_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Weaviate→Weaviate COPY declined: %s", reason)
+        note_copy_decline(f"Weaviate→Weaviate COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -6371,14 +6262,10 @@ def _try_weaviate_weaviate_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("Weaviate→Weaviate COPY declined: column rename")
+            note_copy_decline("Weaviate→Weaviate COPY declined: column rename")
             return None
         if declared and not weaviate_type_is_copy_safe(declared):
-            logger.info(
-                "Weaviate→Weaviate COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Weaviate→Weaviate COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         weaviate_ddls.append(declared or "text")
@@ -6394,7 +6281,7 @@ def _try_weaviate_weaviate_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Weaviate→Weaviate COPY declined: %s", exc)
+        note_copy_decline(f"Weaviate→Weaviate COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Weaviate→Weaviate COPY failed after starting: %s", exc)
@@ -6472,7 +6359,7 @@ def _try_pinecone_pinecone_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Pinecone→Pinecone COPY declined: %s", reason)
+        note_copy_decline(f"Pinecone→Pinecone COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -6482,14 +6369,10 @@ def _try_pinecone_pinecone_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("Pinecone→Pinecone COPY declined: column rename")
+            note_copy_decline("Pinecone→Pinecone COPY declined: column rename")
             return None
         if declared and not pinecone_type_is_copy_safe(declared):
-            logger.info(
-                "Pinecone→Pinecone COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Pinecone→Pinecone COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         pinecone_ddls.append(declared or "text")
@@ -6505,7 +6388,7 @@ def _try_pinecone_pinecone_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Pinecone→Pinecone COPY declined: %s", exc)
+        note_copy_decline(f"Pinecone→Pinecone COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Pinecone→Pinecone COPY failed after starting: %s", exc)
@@ -6587,7 +6470,7 @@ def _try_pgvector_pgvector_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("pgvector→pgvector COPY declined: %s", reason)
+        note_copy_decline(f"pgvector→pgvector COPY declined: {reason}")
         return None
 
     pgvector_ddls: list[str] = []
@@ -6596,21 +6479,17 @@ def _try_pgvector_pgvector_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if source_col != target_col:
-            logger.info("pgvector→pgvector COPY declined: column rename")
+            note_copy_decline("pgvector→pgvector COPY declined: column rename")
             return None
         if declared and not pgvector_type_is_copy_safe(declared):
-            logger.info(
-                "pgvector→pgvector COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"pgvector→pgvector COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pgvector_ddls.append(declared or "text")
 
     try:
         conn = _pg_connect_for_probe(src_cfg)
     except Exception as exc:
-        logger.info("pgvector→pgvector COPY declined (source probe): %s", exc)
+        note_copy_decline(f"pgvector→pgvector COPY declined (source probe): {exc}")
         return None
     try:
         with conn.cursor() as cur:
@@ -6621,7 +6500,7 @@ def _try_pgvector_pgvector_copy_fast_path(
                 [str(m.get("source") or "") for m in mappings if m.get("source")],
             )
     except Exception as exc:
-        logger.info("pgvector→pgvector COPY declined (source catalog): %s", exc)
+        note_copy_decline(f"pgvector→pgvector COPY declined (source catalog): {exc}")
         return None
     finally:
         try:
@@ -6633,7 +6512,7 @@ def _try_pgvector_pgvector_copy_fast_path(
         mappings, declared, declared, engine="postgresql"
     )
     if not pairs:
-        logger.info("pgvector→pgvector COPY declined: columns not comparable")
+        note_copy_decline("pgvector→pgvector COPY declined: columns not comparable")
         return None
 
     try:
@@ -6648,7 +6527,7 @@ def _try_pgvector_pgvector_copy_fast_path(
             source_schema=source.schema or "public",
         )
     except FastPathUnavailable as exc:
-        logger.info("pgvector→pgvector COPY declined: %s", exc)
+        note_copy_decline(f"pgvector→pgvector COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("pgvector→pgvector COPY failed after starting: %s", exc)
@@ -6734,7 +6613,7 @@ def _try_s3_pg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("S3→PG COPY declined: %s", reason)
+        note_copy_decline(f"S3→PG COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -6744,11 +6623,7 @@ def _try_s3_pg_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not pg_type_is_load_safe(declared):
-            logger.info(
-                "S3→PG COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"S3→PG COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         pg_ddls.append(pg_type(declared) if declared else "TEXT")
@@ -6765,7 +6640,7 @@ def _try_s3_pg_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("S3→PG COPY declined: %s", exc)
+        note_copy_decline(f"S3→PG COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("S3→PG COPY failed after starting: %s", exc)
@@ -6834,7 +6709,7 @@ def _try_s3_mysql_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("S3→MySQL COPY declined: %s", reason)
+        note_copy_decline(f"S3→MySQL COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -6844,11 +6719,7 @@ def _try_s3_mysql_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mysql_type_is_copy_safe(declared):
-            logger.info(
-                "S3→MySQL COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"S3→MySQL COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
@@ -6864,7 +6735,7 @@ def _try_s3_mysql_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("S3→MySQL COPY declined: %s", exc)
+        note_copy_decline(f"S3→MySQL COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("S3→MySQL COPY failed after starting: %s", exc)
@@ -6933,7 +6804,7 @@ def _try_s3_sqlite_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("S3→SQLite COPY declined: %s", reason)
+        note_copy_decline(f"S3→SQLite COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -6943,11 +6814,7 @@ def _try_s3_sqlite_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlite_type_is_copy_safe(declared):
-            logger.info(
-                "S3→SQLite COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"S3→SQLite COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlite_ddls.append(sqlite_type(declared) if declared else "TEXT")
@@ -6963,7 +6830,7 @@ def _try_s3_sqlite_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("S3→SQLite COPY declined: %s", exc)
+        note_copy_decline(f"S3→SQLite COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("S3→SQLite COPY failed after starting: %s", exc)
@@ -7034,7 +6901,7 @@ def _try_s3_mongo_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("S3→Mongo COPY declined: %s", reason)
+        note_copy_decline(f"S3→Mongo COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7046,11 +6913,7 @@ def _try_s3_mongo_copy_fast_path(
         if declared and not (
             mongo_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "S3→Mongo COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"S3→Mongo COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mongo_ddls.append(declared or "TEXT")
@@ -7066,7 +6929,7 @@ def _try_s3_mongo_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("S3→Mongo COPY declined: %s", exc)
+        note_copy_decline(f"S3→Mongo COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("S3→Mongo COPY failed after starting: %s", exc)
@@ -7138,7 +7001,7 @@ def _try_s3_iceberg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("S3→Iceberg COPY declined: %s", reason)
+        note_copy_decline(f"S3→Iceberg COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7149,18 +7012,10 @@ def _try_s3_iceberg_copy_fast_path(
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         dest_ddl = ddl_type("iceberg", declared) if declared else "string"
         if declared and not iceberg_type_is_copy_safe(declared) and not iceberg_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "S3→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"S3→Iceberg COPY declined: {source_col} type {declared} is not Iceberg COPY-safe")
             return None
         if dest_ddl and not iceberg_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "S3→Iceberg COPY declined: dest %s type %s is not Iceberg COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"S3→Iceberg COPY declined: dest {target_col} type {dest_ddl} is not Iceberg COPY-safe")
             return None
         pairs.append((source_col, target_col))
         iceberg_ddls.append(dest_ddl)
@@ -7177,7 +7032,7 @@ def _try_s3_iceberg_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("S3→Iceberg COPY declined: %s", exc)
+        note_copy_decline(f"S3→Iceberg COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("S3→Iceberg COPY failed after starting: %s", exc)
@@ -7250,7 +7105,7 @@ def _try_s3_sqlserver_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("S3→SQL Server COPY declined: %s", reason)
+        note_copy_decline(f"S3→SQL Server COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7261,18 +7116,10 @@ def _try_s3_sqlserver_copy_fast_path(
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         dest_ddl = ddl_type("sqlserver", declared) if declared else "NVARCHAR(MAX)"
         if declared and not sqlserver_type_is_copy_safe(declared) and not sqlite_sqlserver_type_is_copy_safe(declared):
-            logger.info(
-                "S3→SQL Server COPY declined: %s type %s is not SQL Server COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"S3→SQL Server COPY declined: {source_col} type {declared} is not SQL Server COPY-safe")
             return None
         if dest_ddl and not sqlserver_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "S3→SQL Server COPY declined: dest %s type %s is not COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"S3→SQL Server COPY declined: dest {target_col} type {dest_ddl} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlserver_ddls.append(dest_ddl)
@@ -7289,7 +7136,7 @@ def _try_s3_sqlserver_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("S3→SQL Server COPY declined: %s", exc)
+        note_copy_decline(f"S3→SQL Server COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("S3→SQL Server COPY failed after starting: %s", exc)
@@ -7364,7 +7211,7 @@ def _try_s3_oracle_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("S3→Oracle COPY declined: %s", reason)
+        note_copy_decline(f"S3→Oracle COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7376,19 +7223,11 @@ def _try_s3_oracle_copy_fast_path(
         if declared and not (
             sqlite_oracle_type_is_copy_safe(declared) or oracle_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "S3→Oracle COPY declined: %s type %s is not Oracle COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"S3→Oracle COPY declined: {source_col} type {declared} is not Oracle COPY-safe")
             return None
         dest_ddl = sqlite_declared_to_oracle_ddl(declared)
         if dest_ddl and not oracle_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "S3→Oracle COPY declined: dest %s type %s is not COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"S3→Oracle COPY declined: dest {target_col} type {dest_ddl} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         oracle_ddls.append(dest_ddl)
@@ -7405,7 +7244,7 @@ def _try_s3_oracle_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("S3→Oracle COPY declined: %s", exc)
+        note_copy_decline(f"S3→Oracle COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("S3→Oracle COPY failed after starting: %s", exc)
@@ -7484,7 +7323,7 @@ def _try_mongo_pg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Mongo→PG COPY declined: %s", reason)
+        note_copy_decline(f"Mongo→PG COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7496,11 +7335,7 @@ def _try_mongo_pg_copy_fast_path(
         if declared and not (
             mongo_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Mongo→PG COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Mongo→PG COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         pg_ddls.append(pg_type(declared) if declared else "TEXT")
@@ -7517,7 +7352,7 @@ def _try_mongo_pg_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Mongo→PG COPY declined: %s", exc)
+        note_copy_decline(f"Mongo→PG COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Mongo→PG COPY failed after starting: %s", exc)
@@ -7587,7 +7422,7 @@ def _try_mongo_mysql_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Mongo→MySQL COPY declined: %s", reason)
+        note_copy_decline(f"Mongo→MySQL COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7599,11 +7434,7 @@ def _try_mongo_mysql_copy_fast_path(
         if declared and not (
             mongo_type_is_copy_safe(declared) or mysql_mongo_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Mongo→MySQL COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Mongo→MySQL COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
@@ -7619,7 +7450,7 @@ def _try_mongo_mysql_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Mongo→MySQL COPY declined: %s", exc)
+        note_copy_decline(f"Mongo→MySQL COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Mongo→MySQL COPY failed after starting: %s", exc)
@@ -7690,7 +7521,7 @@ def _try_mongo_sqlserver_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Mongo→SQL Server COPY declined: %s", reason)
+        note_copy_decline(f"Mongo→SQL Server COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7702,11 +7533,7 @@ def _try_mongo_sqlserver_copy_fast_path(
         if declared and not (
             mongo_type_is_copy_safe(declared) or sqlserver_mongo_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Mongo→SQL Server COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Mongo→SQL Server COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlserver_ddls.append(
@@ -7725,7 +7552,7 @@ def _try_mongo_sqlserver_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Mongo→SQL Server COPY declined: %s", exc)
+        note_copy_decline(f"Mongo→SQL Server COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Mongo→SQL Server COPY failed after starting: %s", exc)
@@ -7796,7 +7623,7 @@ def _try_mongo_oracle_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Mongo→Oracle COPY declined: %s", reason)
+        note_copy_decline(f"Mongo→Oracle COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7808,11 +7635,7 @@ def _try_mongo_oracle_copy_fast_path(
         if declared and not (
             mongo_type_is_copy_safe(declared) or oracle_mongo_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Mongo→Oracle COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Mongo→Oracle COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         oracle_ddls.append(
@@ -7831,7 +7654,7 @@ def _try_mongo_oracle_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Mongo→Oracle COPY declined: %s", exc)
+        note_copy_decline(f"Mongo→Oracle COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Mongo→Oracle COPY failed after starting: %s", exc)
@@ -7905,7 +7728,7 @@ def _try_mongo_mongo_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Mongo→Mongo COPY declined: %s", reason)
+        note_copy_decline(f"Mongo→Mongo COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -7915,11 +7738,7 @@ def _try_mongo_mongo_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mongo_mongo_type_is_copy_safe(declared):
-            logger.info(
-                "Mongo→Mongo COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Mongo→Mongo COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mongo_ddls.append(declared or "string")
@@ -7935,7 +7754,7 @@ def _try_mongo_mongo_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Mongo→Mongo COPY declined: %s", exc)
+        note_copy_decline(f"Mongo→Mongo COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Mongo→Mongo COPY failed after starting: %s", exc)
@@ -8008,7 +7827,7 @@ def _try_mongo_iceberg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Mongo→Iceberg COPY declined: %s", reason)
+        note_copy_decline(f"Mongo→Iceberg COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8020,11 +7839,7 @@ def _try_mongo_iceberg_copy_fast_path(
         if declared and not (
             mongo_type_is_copy_safe(declared) or iceberg_mongo_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Mongo→Iceberg COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Mongo→Iceberg COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         iceberg_ddls.append(ddl_type("iceberg", declared) if declared else "string")
@@ -8041,7 +7856,7 @@ def _try_mongo_iceberg_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Mongo→Iceberg COPY declined: %s", exc)
+        note_copy_decline(f"Mongo→Iceberg COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Mongo→Iceberg COPY failed after starting: %s", exc)
@@ -8111,7 +7926,7 @@ def _try_mongo_s3_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Mongo→S3 COPY declined: %s", reason)
+        note_copy_decline(f"Mongo→S3 COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8123,11 +7938,7 @@ def _try_mongo_s3_copy_fast_path(
         if declared and not (
             mongo_s3_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Mongo→S3 COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Mongo→S3 COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         s3_ddls.append(declared or "TEXT")
@@ -8143,7 +7954,7 @@ def _try_mongo_s3_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Mongo→S3 COPY declined: %s", exc)
+        note_copy_decline(f"Mongo→S3 COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Mongo→S3 COPY failed after starting: %s", exc)
@@ -8217,7 +8028,7 @@ def _try_mongo_sqlite_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Mongo→SQLite COPY declined: %s", reason)
+        note_copy_decline(f"Mongo→SQLite COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8229,19 +8040,11 @@ def _try_mongo_sqlite_copy_fast_path(
         if declared and not (
             mongo_type_is_copy_safe(declared) or pg_mongo_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Mongo→SQLite COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Mongo→SQLite COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         dest_ddl = sqlite_type(declared) if declared else "TEXT"
         if not sqlite_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "Mongo→SQLite COPY declined: dest %s type %s is not SQLite COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"Mongo→SQLite COPY declined: dest {target_col} type {dest_ddl} is not SQLite COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlite_ddls.append(dest_ddl)
@@ -8257,7 +8060,7 @@ def _try_mongo_sqlite_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Mongo→SQLite COPY declined: %s", exc)
+        note_copy_decline(f"Mongo→SQLite COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Mongo→SQLite COPY failed after starting: %s", exc)
@@ -8332,7 +8135,7 @@ def _try_sqlserver_pg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQL Server→PG COPY declined: %s", reason)
+        note_copy_decline(f"SQL Server→PG COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8342,11 +8145,7 @@ def _try_sqlserver_pg_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not sqlserver_type_is_copy_safe(declared):
-            logger.info(
-                "SQL Server→PG COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQL Server→PG COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         pg_ddls.append(pg_type(declared) if declared else "TEXT")
@@ -8364,7 +8163,7 @@ def _try_sqlserver_pg_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQL Server→PG COPY declined: %s", exc)
+        note_copy_decline(f"SQL Server→PG COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQL Server→PG COPY failed after starting: %s", exc)
@@ -8491,7 +8290,7 @@ def _try_mysql_pg_copy_fast_path(
                 replace_destination=replace_destination,
             )
     except FastPathUnavailable as exc:
-        logger.info("MySQL→PG COPY declined: %s", exc)
+        note_copy_decline(f"MySQL→PG COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("MySQL→PG COPY failed after starting: %s", exc)
@@ -8634,7 +8433,7 @@ def _try_mysql_mysql_copy_fast_path(
                 replace_destination=replace_destination,
             )
     except FastPathUnavailable as exc:
-        logger.info("MySQL→MySQL copy declined: %s", exc)
+        note_copy_decline(f"MySQL→MySQL copy declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("MySQL→MySQL copy failed after starting: %s", exc)
@@ -8744,7 +8543,7 @@ def _try_mysql_sqlserver_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("MySQL→SQL Server COPY declined: %s", reason)
+        note_copy_decline(f"MySQL→SQL Server COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8754,11 +8553,7 @@ def _try_mysql_sqlserver_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not mysql_type_is_copy_safe(declared):
-            logger.info(
-                "MySQL→SQL Server COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"MySQL→SQL Server COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlserver_ddls.append(
@@ -8777,7 +8572,7 @@ def _try_mysql_sqlserver_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("MySQL→SQL Server COPY declined: %s", exc)
+        note_copy_decline(f"MySQL→SQL Server COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("MySQL→SQL Server COPY failed after starting: %s", exc)
@@ -8850,7 +8645,7 @@ def _try_sqlserver_mysql_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQL Server→MySQL COPY declined: %s", reason)
+        note_copy_decline(f"SQL Server→MySQL COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8860,11 +8655,7 @@ def _try_sqlserver_mysql_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not sqlserver_type_is_copy_safe(declared):
-            logger.info(
-                "SQL Server→MySQL COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQL Server→MySQL COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
@@ -8881,7 +8672,7 @@ def _try_sqlserver_mysql_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQL Server→MySQL COPY declined: %s", exc)
+        note_copy_decline(f"SQL Server→MySQL COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQL Server→MySQL COPY failed after starting: %s", exc)
@@ -8954,7 +8745,7 @@ def _try_sqlserver_sqlite_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQL Server→SQLite COPY declined: %s", reason)
+        note_copy_decline(f"SQL Server→SQLite COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -8964,19 +8755,11 @@ def _try_sqlserver_sqlite_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlserver_type_is_copy_safe(declared):
-            logger.info(
-                "SQL Server→SQLite COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQL Server→SQLite COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         dest_ddl = sqlite_type(declared) if declared else "TEXT"
         if not sqlite_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "SQL Server→SQLite COPY declined: dest %s type %s is not SQLite COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"SQL Server→SQLite COPY declined: dest {target_col} type {dest_ddl} is not SQLite COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlite_ddls.append(dest_ddl)
@@ -8993,7 +8776,7 @@ def _try_sqlserver_sqlite_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQL Server→SQLite COPY declined: %s", exc)
+        note_copy_decline(f"SQL Server→SQLite COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQL Server→SQLite COPY failed after starting: %s", exc)
@@ -9064,7 +8847,7 @@ def _try_sqlserver_s3_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQL Server→S3 COPY declined: %s", reason)
+        note_copy_decline(f"SQL Server→S3 COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -9074,11 +8857,7 @@ def _try_sqlserver_s3_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlserver_type_is_copy_safe(declared):
-            logger.info(
-                "SQL Server→S3 COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQL Server→S3 COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         s3_ddls.append(declared or "NVARCHAR(MAX)")
@@ -9095,7 +8874,7 @@ def _try_sqlserver_s3_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQL Server→S3 COPY declined: %s", exc)
+        note_copy_decline(f"SQL Server→S3 COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQL Server→S3 COPY failed after starting: %s", exc)
@@ -9167,7 +8946,7 @@ def _try_mysql_oracle_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("MySQL→Oracle COPY declined: %s", reason)
+        note_copy_decline(f"MySQL→Oracle COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -9177,11 +8956,7 @@ def _try_mysql_oracle_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not mysql_type_is_copy_safe(declared):
-            logger.info(
-                "MySQL→Oracle COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"MySQL→Oracle COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         oracle_ddls.append(
@@ -9200,7 +8975,7 @@ def _try_mysql_oracle_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("MySQL→Oracle COPY declined: %s", exc)
+        note_copy_decline(f"MySQL→Oracle COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("MySQL→Oracle COPY failed after starting: %s", exc)
@@ -9280,7 +9055,7 @@ def _try_mysql_iceberg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("MySQL→Iceberg COPY declined: %s", reason)
+        note_copy_decline(f"MySQL→Iceberg COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -9290,11 +9065,7 @@ def _try_mysql_iceberg_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not mysql_type_is_copy_safe(declared):
-            logger.info(
-                "MySQL→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"MySQL→Iceberg COPY declined: {source_col} type {declared} is not Iceberg COPY-safe")
             return None
         pairs.append((source_col, target_col))
         iceberg_ddls.append(ddl_type("iceberg", declared) if declared else "string")
@@ -9311,7 +9082,7 @@ def _try_mysql_iceberg_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("MySQL→Iceberg COPY declined: %s", exc)
+        note_copy_decline(f"MySQL→Iceberg COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("MySQL→Iceberg COPY failed after starting: %s", exc)
@@ -9379,7 +9150,7 @@ def _try_mysql_mongo_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("MySQL→Mongo COPY declined: %s", reason)
+        note_copy_decline(f"MySQL→Mongo COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -9389,11 +9160,7 @@ def _try_mysql_mongo_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mysql_mongo_type_is_copy_safe(declared):
-            logger.info(
-                "MySQL→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"MySQL→Mongo COPY declined: {source_col} type {declared} is not Mongo COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mongo_ddls.append(declared or "TEXT")
@@ -9409,7 +9176,7 @@ def _try_mysql_mongo_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("MySQL→Mongo COPY declined: %s", exc)
+        note_copy_decline(f"MySQL→Mongo COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("MySQL→Mongo COPY failed after starting: %s", exc)
@@ -9477,7 +9244,7 @@ def _try_mysql_s3_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("MySQL→S3 COPY declined: %s", reason)
+        note_copy_decline(f"MySQL→S3 COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -9487,11 +9254,7 @@ def _try_mysql_s3_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not mysql_s3_type_is_copy_safe(declared):
-            logger.info(
-                "MySQL→S3 COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"MySQL→S3 COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         s3_ddls.append(declared or "TEXT")
@@ -9507,7 +9270,7 @@ def _try_mysql_s3_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("MySQL→S3 COPY declined: %s", exc)
+        note_copy_decline(f"MySQL→S3 COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("MySQL→S3 COPY failed after starting: %s", exc)
@@ -9635,7 +9398,7 @@ def _try_mysql_sqlite_copy_fast_path(
                 replace_destination=replace_destination,
             )
     except FastPathUnavailable as exc:
-        logger.info("MySQL→SQLite COPY declined: %s", exc)
+        note_copy_decline(f"MySQL→SQLite COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("MySQL→SQLite COPY failed after starting: %s", exc)
@@ -9736,7 +9499,7 @@ def _try_sqlserver_mongo_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQL Server→Mongo COPY declined: %s", reason)
+        note_copy_decline(f"SQL Server→Mongo COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -9746,11 +9509,7 @@ def _try_sqlserver_mongo_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not sqlserver_mongo_type_is_copy_safe(declared):
-            logger.info(
-                "SQL Server→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQL Server→Mongo COPY declined: {source_col} type {declared} is not Mongo COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mongo_ddls.append(declared or "NVARCHAR(MAX)")
@@ -9767,7 +9526,7 @@ def _try_sqlserver_mongo_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQL Server→Mongo COPY declined: %s", exc)
+        note_copy_decline(f"SQL Server→Mongo COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQL Server→Mongo COPY failed after starting: %s", exc)
@@ -9839,7 +9598,7 @@ def _try_sqlserver_iceberg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQL Server→Iceberg COPY declined: %s", reason)
+        note_copy_decline(f"SQL Server→Iceberg COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -9849,11 +9608,7 @@ def _try_sqlserver_iceberg_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not sqlserver_type_is_copy_safe(declared):
-            logger.info(
-                "SQL Server→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQL Server→Iceberg COPY declined: {source_col} type {declared} is not Iceberg COPY-safe")
             return None
         pairs.append((source_col, target_col))
         iceberg_ddls.append(ddl_type("iceberg", declared) if declared else "string")
@@ -9871,7 +9626,7 @@ def _try_sqlserver_iceberg_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQL Server→Iceberg COPY declined: %s", exc)
+        note_copy_decline(f"SQL Server→Iceberg COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQL Server→Iceberg COPY failed after starting: %s", exc)
@@ -9944,7 +9699,7 @@ def _try_oracle_iceberg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Oracle→Iceberg COPY declined: %s", reason)
+        note_copy_decline(f"Oracle→Iceberg COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -9956,11 +9711,7 @@ def _try_oracle_iceberg_copy_fast_path(
         if declared and not (
             oracle_type_is_copy_safe(declared) or iceberg_type_is_copy_safe(declared)
         ):
-            logger.info(
-                "Oracle→Iceberg COPY declined: %s type %s is not Iceberg COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Oracle→Iceberg COPY declined: {source_col} type {declared} is not Iceberg COPY-safe")
             return None
         pairs.append((source_col, target_col))
         iceberg_ddls.append(ddl_type("iceberg", declared) if declared else "string")
@@ -9978,7 +9729,7 @@ def _try_oracle_iceberg_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Oracle→Iceberg COPY declined: %s", exc)
+        note_copy_decline(f"Oracle→Iceberg COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Oracle→Iceberg COPY failed after starting: %s", exc)
@@ -10048,7 +9799,7 @@ def _try_oracle_mongo_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Oracle→Mongo COPY declined: %s", reason)
+        note_copy_decline(f"Oracle→Mongo COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10058,11 +9809,7 @@ def _try_oracle_mongo_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not oracle_mongo_type_is_copy_safe(declared):
-            logger.info(
-                "Oracle→Mongo COPY declined: %s type %s is not Mongo COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Oracle→Mongo COPY declined: {source_col} type {declared} is not Mongo COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mongo_ddls.append(declared or "VARCHAR2(4000)")
@@ -10079,7 +9826,7 @@ def _try_oracle_mongo_copy_fast_path(
             replace_destination=replace_destination,
         )
     except FastPathUnavailable as exc:
-        logger.info("Oracle→Mongo COPY declined: %s", exc)
+        note_copy_decline(f"Oracle→Mongo COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Oracle→Mongo COPY failed after starting: %s", exc)
@@ -10151,7 +9898,7 @@ def _try_oracle_mysql_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Oracle→MySQL COPY declined: %s", reason)
+        note_copy_decline(f"Oracle→MySQL COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10161,11 +9908,7 @@ def _try_oracle_mysql_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not oracle_type_is_copy_safe(declared):
-            logger.info(
-                "Oracle→MySQL COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Oracle→MySQL COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         mysql_ddls.append(mysql_type(declared) if declared else "TEXT")
@@ -10182,7 +9925,7 @@ def _try_oracle_mysql_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Oracle→MySQL COPY declined: %s", exc)
+        note_copy_decline(f"Oracle→MySQL COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Oracle→MySQL COPY failed after starting: %s", exc)
@@ -10255,7 +9998,7 @@ def _try_oracle_sqlite_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Oracle→SQLite COPY declined: %s", reason)
+        note_copy_decline(f"Oracle→SQLite COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10265,19 +10008,11 @@ def _try_oracle_sqlite_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not oracle_type_is_copy_safe(declared):
-            logger.info(
-                "Oracle→SQLite COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Oracle→SQLite COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         dest_ddl = sqlite_type(declared) if declared else "TEXT"
         if not sqlite_type_is_copy_safe(dest_ddl):
-            logger.info(
-                "Oracle→SQLite COPY declined: dest %s type %s is not SQLite COPY-safe",
-                target_col,
-                dest_ddl,
-            )
+            note_copy_decline(f"Oracle→SQLite COPY declined: dest {target_col} type {dest_ddl} is not SQLite COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlite_ddls.append(dest_ddl)
@@ -10294,7 +10029,7 @@ def _try_oracle_sqlite_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Oracle→SQLite COPY declined: %s", exc)
+        note_copy_decline(f"Oracle→SQLite COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Oracle→SQLite COPY failed after starting: %s", exc)
@@ -10366,7 +10101,7 @@ def _try_oracle_s3_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Oracle→S3 COPY declined: %s", reason)
+        note_copy_decline(f"Oracle→S3 COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10376,11 +10111,7 @@ def _try_oracle_s3_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if declared and not oracle_type_is_copy_safe(declared):
-            logger.info(
-                "Oracle→S3 COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Oracle→S3 COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         s3_ddls.append(declared or "VARCHAR2(4000)")
@@ -10397,7 +10128,7 @@ def _try_oracle_s3_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Oracle→S3 COPY declined: %s", exc)
+        note_copy_decline(f"Oracle→S3 COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Oracle→S3 COPY failed after starting: %s", exc)
@@ -10472,7 +10203,7 @@ def _try_sqlserver_oracle_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQL Server→Oracle COPY declined: %s", reason)
+        note_copy_decline(f"SQL Server→Oracle COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10482,11 +10213,7 @@ def _try_sqlserver_oracle_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not sqlserver_type_is_copy_safe(declared):
-            logger.info(
-                "SQL Server→Oracle COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"SQL Server→Oracle COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         oracle_ddls.append(
@@ -10506,7 +10233,7 @@ def _try_sqlserver_oracle_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQL Server→Oracle COPY declined: %s", exc)
+        note_copy_decline(f"SQL Server→Oracle COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQL Server→Oracle COPY failed after starting: %s", exc)
@@ -10588,7 +10315,7 @@ def _try_oracle_sqlserver_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Oracle→SQL Server COPY declined: %s", reason)
+        note_copy_decline(f"Oracle→SQL Server COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10598,11 +10325,7 @@ def _try_oracle_sqlserver_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not oracle_type_is_copy_safe(declared):
-            logger.info(
-                "Oracle→SQL Server COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Oracle→SQL Server COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         sqlserver_ddls.append(
@@ -10622,7 +10345,7 @@ def _try_oracle_sqlserver_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Oracle→SQL Server COPY declined: %s", exc)
+        note_copy_decline(f"Oracle→SQL Server COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Oracle→SQL Server COPY failed after starting: %s", exc)
@@ -10696,7 +10419,7 @@ def _try_sqlserver_sqlserver_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("SQL Server→SQL Server copy declined: %s", reason)
+        note_copy_decline(f"SQL Server→SQL Server copy declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10723,7 +10446,7 @@ def _try_sqlserver_sqlserver_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("SQL Server→SQL Server copy declined: %s", exc)
+        note_copy_decline(f"SQL Server→SQL Server copy declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("SQL Server→SQL Server copy failed after starting: %s", exc)
@@ -10797,7 +10520,7 @@ def _try_oracle_oracle_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Oracle→Oracle copy declined: %s", reason)
+        note_copy_decline(f"Oracle→Oracle copy declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10824,7 +10547,7 @@ def _try_oracle_oracle_copy_fast_path(
             dest_schema=dest_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Oracle→Oracle copy declined: %s", exc)
+        note_copy_decline(f"Oracle→Oracle copy declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Oracle→Oracle copy failed after starting: %s", exc)
@@ -10897,7 +10620,7 @@ def _try_oracle_pg_copy_fast_path(
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
-        logger.info("Oracle→PG COPY declined: %s", reason)
+        note_copy_decline(f"Oracle→PG COPY declined: {reason}")
         return None
 
     pairs: list[tuple[str, str]] = []
@@ -10907,11 +10630,7 @@ def _try_oracle_pg_copy_fast_path(
         target_col = str(item.get("target") or "").strip()
         declared = declared_copy_carrier(item, schema, source_col, target_col)
         if not oracle_type_is_copy_safe(declared):
-            logger.info(
-                "Oracle→PG COPY declined: %s type %s is not COPY-safe",
-                source_col,
-                declared,
-            )
+            note_copy_decline(f"Oracle→PG COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
         pg_ddls.append(pg_type(declared) if declared else "TEXT")
@@ -10929,7 +10648,7 @@ def _try_oracle_pg_copy_fast_path(
             source_schema=source_schema,
         )
     except FastPathUnavailable as exc:
-        logger.info("Oracle→PG COPY declined: %s", exc)
+        note_copy_decline(f"Oracle→PG COPY declined: {exc}")
         return None
     except Exception as exc:
         logger.warning("Oracle→PG COPY failed after starting: %s", exc)
