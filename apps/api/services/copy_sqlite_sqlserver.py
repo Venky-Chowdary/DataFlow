@@ -74,11 +74,40 @@ def sqlite_sqlserver_type_is_copy_safe(declared: str) -> bool:
     return base not in _UNSAFE_SQLITE_SS_BASES
 
 
+def _decimal_text_for_sqlserver_bind(value: float, ddl: str) -> str:
+    """``repr`` (shortest round-trip) → ``Decimal`` → scale-s HALF_EVEN → fixed text.
+
+    pyodbc RPC-packs a Python ``float`` for a ``DECIMAL(p,s)`` column through a
+    float→SQL_NUMERIC_STRUCT conversion that can land a digit the source never
+    had (live: SQLite NUMERIC(18,4) cell '…34.568' — stored as the double
+    12345678901234.568 — bound to DECIMAL(18,4) on SQL Server as …34.5677 while
+    MySQL/PG/DuckDB all produce …34.5680). Binding the quantized fixed-point
+    text lets SQL Server's own varchar→decimal conversion preserve the value
+    every other destination receives (X-71).
+    """
+    from decimal import Decimal, ROUND_HALF_EVEN
+
+    from services.type_system import parse_numeric_precision_scale
+
+    dec = Decimal(repr(value))
+    _prec, scale = parse_numeric_precision_scale(ddl or "")
+    if scale is not None and -dec.as_tuple().exponent > int(scale):
+        dec = dec.quantize(
+            Decimal(1).scaleb(-int(scale)), rounding=ROUND_HALF_EVEN
+        )
+    return format(dec, "f")
+
+
 def sqlite_value_to_sqlserver(value: Any, ddl: str) -> Any:
     """SQLite cell → SQL Server bind. DATE ISO is a calendar day; DATETIME declines."""
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise FastPathUnavailable("BLOB values are not SQL Server COPY-safe")
     base = (ddl or "").split("(")[0].strip().upper().replace(" ", "")
+    if (
+        isinstance(value, float)
+        and base in {"DECIMAL", "NUMERIC", "MONEY", "SMALLMONEY"}
+    ):
+        return _decimal_text_for_sqlserver_bind(value, ddl)
     if base in _UNSAFE_SQLITE_SS_BASES:
         raise FastPathUnavailable(
             f"{base} SQLite value is not SQL Server COPY-safe"

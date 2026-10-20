@@ -6,9 +6,12 @@ read it as 2001-01-01 — corruption caught only by read-back. Every bind
 and every fingerprint/display render now goes through explicit fields.
 """
 
+import os
 import sys
 from datetime import datetime, date
 from pathlib import Path
+
+import pytest
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -48,10 +51,6 @@ def test_x69_date_only_pads_year():
     fp = fingerprint_for_reconcile(date(1752, 9, 14), ddl_type="date")
     assert fp.startswith("1752-09-14"), fp
 
-
-import pytest
-
-
 @pytest.mark.skipif(
     __import__("os").environ.get("DATAFLOW_X69_LIVE") != "1",
     reason="live engines required — DATAFLOW_X69_LIVE=1",
@@ -60,4 +59,31 @@ def test_x69_low_years_roundtrip_live():
     """DuckDB/PG/MySQL sources: {0001-01-01, 0099-06-15, 0999-12-31,
     1752-09-14, 1000-01-01} -> MSSQL datetime2/date/datetimeoffset, clean
     exact + tamper; plus one DATETIME(<1753) leg expecting the range finding."""
+    pytest.fail("live leg — runs on the user's engine matrix")
+
+
+def test_x71_sqlite_float_to_mssql_decimal_binds_shortest_roundtrip_text():
+    """REAL -> DECIMAL(p,s): repr -> Decimal -> HALF_EVEN quantize -> fixed text.
+
+    pyodbc's float->SQL_NUMERIC_STRUCT bind landed '…34.5677' on DECIMAL(18,4)
+    where every other destination received '…34.5680' (X-71 live)."""
+    from services.copy_sqlite_sqlserver import sqlite_value_to_sqlserver as cell
+
+    assert cell(12345678901234.568, "decimal(18,4)") == "12345678901234.568"
+    assert cell(-0.0001, "decimal(18,4)") == "-0.0001"
+    assert cell(99.5, "decimal(18,4)") == "99.5"
+    # INTEGER-stored cells and NULLs pass through untouched.
+    assert cell(0, "decimal(18,4)") == 0
+    assert cell(None, "decimal(18,4)") is None
+    # Non-decimal destinations keep the native float.
+    assert cell(1.5e300, "float") == 1.5e300
+
+
+@pytest.mark.skipif(
+    os.environ.get("DATAFLOW_X71_LIVE") != "1",
+    reason="live engines required — DATAFLOW_X71_LIVE=1",
+)
+def test_x71_sqlite_numeric_to_mssql_clean_and_tamper_live():
+    """NUMERIC(18,4) holding 12345678901234.568, -0.0001, 0 (INTEGER storage),
+    NULL, 99.5 -> MSSQL: clean exact + tamper, dest reads 12345678901234.5680."""
     pytest.fail("live leg — runs on the user's engine matrix")
