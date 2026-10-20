@@ -5035,7 +5035,9 @@ def _dedupe_winner_ordering_check(
         )
     except Exception as exc:
         _logger.warning(
-            "dedupe winner-ordering check failed: error_type=%s", type(exc).__name__
+            "dedupe winner-ordering check failed: %s: %s",
+            type(exc).__name__,
+            str(exc)[:400],
         )
         return {**base, "status": "unverified", "reason": "check_error"}
 
@@ -5136,7 +5138,12 @@ def _dedupe_source_extrema(
             qo_parts.append(qc)
             dir_sql = "DESC" if direction == "desc" else "ASC"
             null_sql = "DESC" if nulls == "first" else "ASC"
-            order_terms.append(f"({qc} IS NULL) {null_sql}")
+            # X-124: T-SQL and Oracle reject a bare boolean expression in
+            # ORDER BY ("(x IS NULL) ASC" -> ProgrammingError on an MSSQL
+            # source). CASE is portable on every dialect we serve.
+            order_terms.append(
+                f"CASE WHEN {qc} IS NULL THEN 1 ELSE 0 END {null_sql}"
+            )
             order_terms.append(f"{qc} {dir_sql}")
         qo = ", ".join(qo_parts)
         stmt = sa.text(
