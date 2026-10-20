@@ -113,6 +113,120 @@ def test_x118_nulls_first_opt_in():
     assert [r["id"] for r in out[1:]] == NUM_EXPECTED[:-1]
 
 
+# ---- live_616d_rsorti evidence (INT / BIGINT / DATE / TEXT keys) ----
+
+def _run(steps, rows, source_types):
+    recipe = ShapeRecipe.parse(
+        {"steps": steps},
+        source_columns=list(source_types),
+        source_types=source_types,
+    )
+    engine = ShapeEngine(recipe)
+    engine.apply_batch(rows)
+    return engine.drain()
+
+
+def test_x117_int_key_sorts_numeric_not_lexical():
+    rows = [
+        {"id": i, "v": v}
+        for i, v in enumerate([9, 10, -2, -10, 100, 0, None, 2147483647], 1)
+    ]
+    out = _run(
+        [{"op": "sort_rows", "options": {"order_by": "v", "direction": "asc"}}],
+        rows, {"id": "int", "v": "integer"},
+    )
+    # -10,-2,0,9,10,100,2147483647 then NULL last (was lexical + NULL first).
+    assert [r["v"] for r in out] == [-10, -2, 0, 9, 10, 100, 2147483647, None]
+
+
+def test_x117_bigint_desc_exact_int_never_float():
+    big = 2**53 + 1
+    big2 = 2**53
+    rows = [{"id": i, "v": v} for i, v in enumerate(
+        [9, 10, -2, -10, 100, big, big2, None], 1
+    )]
+    out = _run(
+        [{"op": "sort_rows", "options": {"order_by": "v", "direction": "desc"}}],
+        rows, {"id": "int", "v": "bigint"},
+    )
+    # 2^53+1 and 2^53 stay distinct — an exact int compare, never float.
+    assert [r["v"] for r in out] == [big, big2, 100, 10, 9, -2, -10, None]
+
+
+def test_x118_rank_bottom_n_excludes_nulls():
+    rows = [{"id": i, "v": v} for i, v in enumerate(
+        [9, 10, -2, -10, 100, 0, None, 2147483647], 1
+    )]
+    out = _run(
+        [{"op": "rank_rows",
+          "options": {"order_by": "v", "direction": "bottom", "limit": 2}}],
+        rows, {"id": "int", "v": "integer"},
+    )
+    # SQL bottom-2 is -10,-2 — the NULL is ineligible, not a rank winner.
+    assert [r["v"] for r in out] == [-10, -2]
+
+
+def test_x118_rank_top_n_excludes_nulls():
+    rows = [{"id": i, "v": v} for i, v in enumerate(
+        [9, 10, -2, -10, 100, 0, None, 2147483647], 1
+    )]
+    out = _run(
+        [{"op": "rank_rows",
+          "options": {"order_by": "v", "direction": "top", "limit": 2}}],
+        rows, {"id": "int", "v": "integer"},
+    )
+    assert [r["v"] for r in out] == [2147483647, 100]
+
+
+def test_x118_rank_null_never_fills_a_short_window():
+    """limit larger than the known values must not let a NULL backfill —
+    pre-fix rows[:limit] picked the tail NULL; the eligible-set cut leaves
+    it out."""
+    rows = [{"id": i, "v": v} for i, v in enumerate([9, -2, None], 1)]
+    out = _run(
+        [{"op": "rank_rows",
+          "options": {"order_by": "v", "direction": "bottom", "limit": 3}}],
+        rows, {"id": "int", "v": "integer"},
+    )
+    assert [r["v"] for r in out] == [-2, 9]
+
+
+def test_x118_rank_nulls_first_opt_in_may_elect_null():
+    rows = [{"id": i, "v": v} for i, v in enumerate([9, -2, None], 1)]
+    out = _run(
+        [{"op": "rank_rows",
+          "options": {"order_by": "v", "direction": "top", "limit": 1,
+                      "nulls": "first"}}],
+        rows, {"id": "int", "v": "integer"},
+    )
+    assert [r["v"] for r in out] == [None]
+
+
+def test_x117_date_key_compares_by_instant_incl_year_below_1000():
+    rows = [{"id": i, "d": v} for i, v in enumerate(
+        ["0001-01-01", "0999-01-01", "2025-12-31", "2026-01-09",
+         "2026-01-10", "2026-10-01", None], 1)]
+    out = _run(
+        [{"op": "sort_rows", "options": {"order_by": "d", "direction": "asc"}}],
+        rows, {"id": "int", "d": "date"},
+    )
+    assert [r["d"] for r in out] == [
+        "0001-01-01", "0999-01-01", "2025-12-31", "2026-01-09",
+        "2026-01-10", "2026-10-01", None]
+
+
+def test_x117_text_key_stays_codepoint_even_numeric_looking():
+    rows = [{"id": i, "t": v} for i, v in enumerate(
+        ["9", "10", "100", "-2", "B", "a", "", None], 1)]
+    out = _run(
+        [{"op": "sort_rows", "options": {"order_by": "t", "direction": "asc"}}],
+        rows, {"id": "int", "t": "text"},
+    )
+    # TEXT compares by codepoint — '10' < '100' < '9' — '' before letters,
+    # NULL last and never merged with ''.
+    assert [r["t"] for r in out] == ["", "-2", "10", "100", "9", "B", "a", None]
+
+
 @pytest.mark.skipif(not os.environ.get("DATAFLOW_X117_LIVE"), reason="live engines — user-run")
 def test_x117_live_rsort_doc_num_rank_dd():
     pytest.fail("harness: live_616d_rsort.py doc/num/rank/dd x 5 engines")

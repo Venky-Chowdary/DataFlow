@@ -1063,7 +1063,22 @@ class ShapeEngine:
                     key=lambda r: _dedupe_is_null(r.get(order_col))
                     != nulls_first
                 )
-                out.extend(rows[:limit] if limit else rows)
+                # X-118: under the default nulls='last', NULL rows are not
+                # eligible for top/bottom-N membership at all — a NULL must
+                # never win a rank slot merely because fewer than N values
+                # are known. nulls='first' is the explicit opt-in that may
+                # elect a NULL.
+                if limit:
+                    if nulls_first:
+                        out.extend(rows[:limit])
+                    else:
+                        eligible = [
+                            r for r in rows
+                            if not _dedupe_is_null(r.get(order_col))
+                        ]
+                        out.extend(eligible[:limit])
+                else:
+                    out.extend(rows)
             return out
 
         return list(buffer.values()) if isinstance(buffer, dict) else list(buffer)
