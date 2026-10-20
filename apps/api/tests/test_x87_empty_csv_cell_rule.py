@@ -12,6 +12,8 @@ summary names the rule and counts the cells.
 from __future__ import annotations
 
 import os
+import sqlite3
+import uuid
 
 import pytest
 
@@ -57,6 +59,44 @@ def test_stream_batches_apply_rule_with_schema():
         [{"amt": "", "name": "", "qty": "5"}], schema, "keep", [0]
     )
     assert out2[0]["name"] == "" and out2[0]["amt"] is None
+
+
+def test_recipe_leg_csv_empty_numeric_sqlite(tmp_path):
+    """CSV '' numeric under a recipe → SQLite lands NULL (was 'Empty value
+    cannot coerce to decimal' through the recipe path)."""
+    import src.transfer.engine as eng
+    from src.transfer.engine import UniversalTransferEngine
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from test_cell_mysql_to_duckdb import _FakeMongo
+
+    eng.get_mongodb_service = lambda *a, **k: _FakeMongo()
+    dst = tmp_path / "dst.db"
+    req = TransferRequest(
+        source=EndpointConfig(kind="file", format="csv"),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="out"
+        ),
+        source_filename="t.csv",
+        source_content=b"id,name,amt\n1,ann,\n2,bob,4.5\n3,cid,\n",
+        sync_mode="full_refresh_overwrite",
+        skip_preflight=True,
+        shape_recipe={"version": 1, "steps": [
+            {"op": "derive_column", "options": {"to": "nm", "expression": "upper(name)"}},
+        ]},
+        mappings=[
+            {"source": "id", "target": "id", "target_type": "INTEGER"},
+            {"source": "nm", "target": "nm", "target_type": "TEXT"},
+            {"source": "amt", "target": "amt", "target_type": "REAL"},
+        ],
+    )
+    res = UniversalTransferEngine().execute_tracked(req, uuid.uuid4().hex[:24])
+    assert res.success, getattr(res, "error", None)
+    conn = sqlite3.connect(tmp_path / "dst.db")
+    try:
+        rows = conn.execute("select id, amt from out order by id").fetchall()
+    finally:
+        conn.close()
+    assert rows == [(1, None), (2, 4.5), (3, None)]
 
 
 @pytest.mark.skipif(not os.environ.get("DATAFLOW_X87_LIVE"), reason="live engines — user-run")
