@@ -1195,7 +1195,9 @@ def attach_ladder_to_reconcile_report(
         base = str(out.get("message") or "").rstrip()
         loc = str(ladder["localization_summary"])
         if loc and loc not in base:
-            out["message"] = f"{base} — {loc}"
+            # Failure-first (X-44): the localized culprit is the cause and
+            # must lead; a "Row count verified …" fact is context after it.
+            out["message"] = f"{loc} — {base}" if base else loc
     # Never let sample screening language override ladder localization.
     if out.get("assurance_level") == "sample" and ladder.get("population_checksum_proof"):
         out["assurance_level"] = ladder.get("assurance_level") or out["assurance_level"]

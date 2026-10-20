@@ -24,6 +24,7 @@ from typing import Any
 
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from connectors.sqlite_common import sqlite_decimal_bind_text
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
     _mysql_connect,
@@ -87,7 +88,10 @@ def mysql_value_to_sqlite(value: Any) -> Any:
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, Decimal):
-        return str(value)
+        # dest-canonical text, never str()/float — str(Decimal) renders
+        # small magnitudes in scientific notation (-1E-10), which a
+        # value-exact read-back then flags as false mismatch (X-43).
+        return sqlite_decimal_bind_text(value)
     if isinstance(value, (bytes, bytearray, memoryview)):
         raise FastPathUnavailable("binary MySQL field is not SQLite COPY-safe")
     return value
