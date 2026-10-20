@@ -664,6 +664,11 @@ def operator_binary_cell_text(text: str | None, ddl_type: str = "") -> str | Non
         return text
     if text == "":
         return "0x"  # zero-length bytes — real value, distinct from NULL
+    if text == "null" or text in NULL_WIRE_SENTINELS:
+        # X-131: NULL is NULL in every culprit clause — the literal "null"
+        # spelling happens to be valid base64 (decodes to 9e e9 65) and
+        # rendered a SQL NULL as fake hex ``0x9ee965``.
+        return None
     try:
         return "0x" + base64.b64decode(text, validate=True).hex()
     except Exception:
