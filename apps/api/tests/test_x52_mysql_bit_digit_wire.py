@@ -150,3 +150,97 @@ def test_x52_mysql_bit_to_dest(dest_engine, bit_width, tamper, monkeypatch, tmp_
         f"tamper on MySQL BIT({bit_width}) -> {dest_engine} must fail: "
         f"{getattr(result, 'message', '')}"
     )
+
+
+# --- X-53: codepoint-exact fingerprint under CI/AI collations --------------
+
+def test_x53_case_and_accent_tampers_fingerprint_distinct():
+    """SQL Server CI_AS/CI_AI dest ddl must not fold a case/accent tamper."""
+    from services.reconciliation import fingerprint_for_reconcile, normalize_cell
+
+    for ddl in (
+        "nvarchar(50) COLLATE Latin1_General_CI_AS",
+        "nvarchar(50) COLLATE Latin1_General_CI_AI",
+        "varchar(20) COLLATE SQL_Latin1_General_CP1_CI_AS",
+    ):
+        assert fingerprint_for_reconcile("hello", ddl_type=ddl, engine="mssql") != (
+            fingerprint_for_reconcile("HELLO", ddl_type=ddl, engine="mssql")
+        )
+        assert fingerprint_for_reconcile("médium", ddl_type=ddl, engine="mssql") != (
+            fingerprint_for_reconcile("medium", ddl_type=ddl, engine="mssql")
+        )
+        # Rendering shows the real stored text, not the folded one.
+        assert fingerprint_for_reconcile("médium", ddl_type=ddl, engine="mssql") == "médium"
+    # Loose normalize keeps collation semantics for key alignment.
+    assert normalize_cell("HELLO", ddl_type="nvarchar(5) COLLATE Latin1_General_CI_AS") == "hello"
+
+
+# --- X-54: census reason names the real gate ------------------------------
+
+def test_x54_census_reason_names_unmapped_columns():
+    from src.transfer.reconcile_step import _name_gate8_culprits_generic
+
+    class _EP:
+        format = "duckdb"
+        table = "dst_t"
+        host = ""
+        port = 0
+        database = "/tmp/x54_dst.duckdb"
+        username = ""
+        password = ""
+        connection_string = ""
+        extra: dict = {}
+
+    class _SEP:
+        format = "mysql"
+        table = "src_t"
+        host = ""
+        port = 0
+        database = "x"
+        username = ""
+        password = ""
+        connection_string = ""
+        extra: dict = {}
+
+    # Gate 1: no single-column PK recorded and none recoverable from mappings.
+    report: dict = {}
+    _name_gate8_culprits_generic(
+        report,
+        source_endpoint=_SEP(),
+        endpoint=_EP(),
+        dest_summary={},
+        mappings=None,
+    )
+    assert "primary key" in report["culprit_keys_unavailable_reason"]
+
+    # Gate: table name missing.
+    report = {}
+
+    class _EPNoTable(_EP):
+        table = ""
+
+    _name_gate8_culprits_generic(
+        report,
+        source_endpoint=_SEP(),
+        endpoint=_EPNoTable(),
+        dest_summary={"primary_key_columns": ["id"]},
+        mappings=[{"source": "id", "target": "id"}, {"source": "t", "target": "t"}],
+    )
+    assert "table" in report["culprit_keys_unavailable_reason"]
+
+    # Gate: no mappings recorded.
+    report = {}
+    _name_gate8_culprits_generic(
+        report,
+        source_endpoint=_SEP(),
+        endpoint=_EP(),
+        dest_summary={"primary_key_columns": ["id"]},
+        mappings=None,
+    )
+    assert "mappings" in report["culprit_keys_unavailable_reason"]
+
+    # Whatever the gate, it must never blame the census driver set when both
+    # engines have drivers (mysql + duckdb both qualify).
+    for r in (report,):
+        reason = r.get("culprit_keys_unavailable_reason") or ""
+        assert "requires both sides readable" not in reason

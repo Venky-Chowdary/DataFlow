@@ -3463,8 +3463,18 @@ def _name_gate8_culprits_pg(
         _logger.warning(
             "Gate-8 culprit-key naming skipped: %s", exc, exc_info=exc
         )
+        report["culprit_keys_unavailable_reason"] = (
+            "culprit keys could not be named — the destination key census "
+            f"failed while reading a side ({type(exc).__name__}: {exc})"
+        )
         return
     _report_culprit_keys(report, changed, missing, extra)
+    if not report.get("culprit_keys"):
+        report["culprit_keys_unavailable_reason"] = (
+            "culprit keys could not be named — the destination key census ran "
+            "to completion but found no differing key; the checksum verdict "
+            "stands (the mismatch may live outside the census columns)"
+        )
 
 
 def _census_join(db: Any) -> tuple[list[Any], list[Any], list[Any]]:
@@ -3727,7 +3737,7 @@ def _generic_key_census(
                                     str(r[0]),
                                     hashlib.md5(
                                         "\x1f".join(
-                                            normalize_cell(v, engine=dst_eng)
+                                            normalize_cell(v, engine=dst_eng, strict_text=True)
                                             for v in r[1:]
                                         ).encode("utf-8", "replace")
                                     ).hexdigest(),

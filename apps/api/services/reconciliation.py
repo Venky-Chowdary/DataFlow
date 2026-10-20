@@ -4450,7 +4450,7 @@ def fingerprint_for_reconcile(
         # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
         # a whole-column checksum mismatch with no column named.
         wire = quantize_instant_for_carrier(wire, ddl_type=ddl_type, engine=engine)
-    return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
+    return normalize_cell(wire, ddl_type=ddl_type, engine=engine, strict_text=True)
 
 
 def operator_cell_text(fingerprint: str) -> str:
@@ -4464,7 +4464,7 @@ def operator_cell_text(fingerprint: str) -> str:
     return fingerprint
 
 
-def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
+def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "", strict_text: bool = False) -> str:
     """Canonical cell text for Gate-8 checksums.
 
     CHAR/NCHAR blank-pad is a storage artifact (Oracle/SQL Server/MySQL) — rtrim
@@ -4573,23 +4573,26 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             else:
                 text = raw_text.strip()
             # Collation equality must match the destination engine (CI/AI/WI/KI/VSS).
-            if plan.fold_width:
+            # X-53: strict_text (Gate-8 fingerprints) skips the equality folds —
+            # they are an approximation of query semantics, and a case/accent
+            # tamper is real corruption that must localize, not fold equal.
+            if plan.fold_width and not strict_text:
                 from services.type_system import fold_width_forms
 
                 text = fold_width_forms(text)
-            if plan.fold_kana:
+            if plan.fold_kana and not strict_text:
                 from services.type_system import fold_kana
 
                 text = fold_kana(text)
-            if plan.fold_variation:
+            if plan.fold_variation and not strict_text:
                 from services.type_system import fold_variation_selectors
 
                 text = fold_variation_selectors(text)
-            if plan.fold_accent:
+            if plan.fold_accent and not strict_text:
                 from services.type_system import fold_diacritics
 
                 text = fold_diacritics(text)
-            if plan.casefold:
+            if plan.casefold and not strict_text:
                 text = text.casefold()
             # UUID / UNIQUEIDENTIFIER / CHAR(36) UUID carriers — canonicalize
             # braces / 32-hex / case so source wire and dest read-back match
