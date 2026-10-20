@@ -4737,7 +4737,10 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "", strict_t
             logger.debug("Raw bytes are not valid base64; encoding as base64 for checksum")
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
-        return json.dumps(value, sort_keys=True, default=json_default)
+        # X-50 parity: a parsed JSON structure fingerprints through the same
+        # canonical token as a JSON document string — key order and engine
+        # whitespace cannot drift the digest in either direction.
+        return _json_cell_fingerprint(value)
     raw_text = str(value)
     if ddl_type:
         try:

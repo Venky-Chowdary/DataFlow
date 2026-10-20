@@ -132,8 +132,9 @@ def test_aggregate_drains_to_destination(tmp_path: Path, isolated):
         rows = conn.execute("SELECT dept, total, n FROM t ORDER BY dept").fetchall()
     finally:
         conn.close()
-    # Decimal sums land as fixed-point text in the untyped SQLite column.
-    assert sorted(rows) == [("ENG", "25", "2"), ("OPS", "30", "1")]
+    # Decimal sums land as fixed-point text in the untyped SQLite column;
+    # X-109 declares count→BIGINT, so the count lands as a real integer.
+    assert sorted(rows) == [("ENG", "25", 2), ("OPS", "30", 1)]
 
 
 def test_sort_rows_drains_ordered_tail(tmp_path: Path, isolated):

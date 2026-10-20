@@ -821,26 +821,23 @@ def test_oracle_pad_left_matches_sql_fill_concat(tmp_path):
     rows = [
         {"id": "1", "code": "42"},
         {"id": "2", "code": "123456"},
-        {"id": "3", "code": "12345678"},  # longer than width: tail kept
         {"id": "4", "code": None},
     ]
-    out = _run(
-        {
-            "input_columns": ["id", "code"],
-            "steps": [
-                {
-                    "op": "pad",
-                    "column": "code",
-                    "options": {"width": 6, "fill": "0", "side": "left"},
-                }
-            ],
-        },
-        rows,
-    )
+    payload = {
+        "input_columns": ["id", "code"],
+        "steps": [
+            {
+                "op": "pad",
+                "column": "code",
+                "options": {"width": 6, "fill": "0", "side": "left"},
+            }
+        ],
+    }
+    out = _run(payload, rows)
     expected = _sqlite_oracle(
         tmp_path, rows, ["id", "code"],
-        # lpad keeps the significant tail on overflow; the fill string is
-        # generated with ZEROBLOB -> '0' substitution.
+        # width-exact and short codes pad the same as SQL LPAD; the fill
+        # string is generated with ZEROBLOB -> '0' substitution.
         "SELECT id, CASE WHEN code IS NULL THEN NULL "
         "WHEN LENGTH(code) >= 6 THEN SUBSTR(code, -6) "
         "ELSE REPLACE(HEX(ZEROBLOB(6 - LENGTH(code))), '00', '0') || code END "
@@ -849,6 +846,12 @@ def test_oracle_pad_left_matches_sql_fill_concat(tmp_path):
     assert [(r["id"], _text(r["code"])) for r in out] == [
         (eid, _text(ec)) for eid, ec in expected
     ]
+    # X-100: pad never truncates — an over-width value refuses rather than
+    # silently keeping the tail like SQL LPAD.
+    from services.shape_engine import ShapeRowError
+
+    with pytest.raises(ShapeRowError, match="never truncates"):
+        _run(payload, [{"id": "3", "code": "12345678"}])
 
 
 def test_oracle_default_if_null_matches_sql_coalesce(tmp_path):
@@ -1146,9 +1149,9 @@ def test_oracle_aggregate_matches_sql_group_by(tmp_path):
     )
     expected = _sqlite_oracle(
         tmp_path, rows, ["id", "grp", "amount"],
-        # Engine count is rows-in-group (NULL measure cell still counts);
-        # COUNT(*) — not COUNT(amount) — states that rule.
-        "SELECT grp, SUM(CAST(amount AS REAL)), COUNT(*) FROM src "
+        # X-105: count(column) is SQL semantics — NULL measure cells are
+        # skipped; count(*) is the rows-in-group variant.
+        "SELECT grp, SUM(CAST(amount AS REAL)), COUNT(amount) FROM src "
         "GROUP BY grp ORDER BY grp",
     )
     assert [(r["grp"], _text(r["total"]), _text(r["n"])) for r in out] == [
