@@ -350,6 +350,24 @@ def coerce_sql_temporal(
             f"empty string cannot coerce to {base} — "
             "refuse silent NULL invent (quarantine or remap upstream)"
         )
+    # X-76: PG temporal specials ('infinity', '-infinity', 'epoch', 'allballs'…)
+    # are real stored values, not malformed text. Engines that accept the
+    # literal bind it; every other engine must refuse plainly — the wire token
+    # would otherwise reach the driver raw and fail opaquely, or worse, land
+    # clamped to a max sentinel nobody declared.
+    if (
+        base in _TEMPORAL_BASES
+        and isinstance(value, str)
+        and value.strip().lower() in _TEMPORAL_SPECIAL_TOKENS
+    ):
+        if (engine or "").strip().lower() in _TEMPORAL_SPECIAL_ENGINES:
+            return value
+        raise ValueError(
+            f"PostgreSQL temporal special {value!r} has no {base} "
+            f"representation on {engine or 'the destination'} — refuse "
+            "silent clamp/invent; map the column to a TEXT carrier or a "
+            "declared sentinel value"
+        )
     if base == "TIMESTAMP" and _is_mysql_engine(engine):
         from services.timezone_policy import (
             MYSQL_TIMESTAMP_MAX,
@@ -538,6 +556,33 @@ def bind_time_iso(value: Any) -> str | None:
     clock = bind_time_clock(value)
     return None if clock is None else clock.isoformat()
 
+
+# X-76: PG temporal special literals — stored values, not date text.
+_TEMPORAL_SPECIAL_TOKENS = frozenset({
+    "infinity",
+    "+infinity",
+    "-infinity",
+    "epoch",
+    "allballs",
+    "now",
+    "today",
+    "tomorrow",
+    "yesterday",
+})
+# Engines whose drivers accept the literal under a datetime bind.
+_TEMPORAL_SPECIAL_ENGINES = frozenset({
+    "postgresql",
+    "postgres",
+    "redshift",
+    "cockroachdb",
+    "timescaledb",
+    "alloydb",
+    "yugabytedb",
+    "citus",
+    "supabase",
+    "greenplum",
+    "duckdb",
+})
 
 _TEMPORAL_BASES = frozenset({
     "DATETIME",
