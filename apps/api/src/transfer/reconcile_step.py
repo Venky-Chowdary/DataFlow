@@ -1444,7 +1444,45 @@ def _transform_applied_proof(
         _flush_ms()
 
     try:
-        parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
+        # X-99: seed the re-parse with the recipe's declared inputs — a
+        # drop_column/keep_columns/keep_parent=False step removes an input
+        # from the output set, but the recipe still references it during
+        # re-apply, and a re-parse seeded with only output columns dies on
+        # "column 'code' is not available" before the recompute can run.
+        _declared_for_parse = [
+            str(c) for c in (shape_recipe.get("input_columns") or []) if c
+        ]
+        if not _declared_for_parse:
+            # Raw recipe dicts may omit input_columns — over-include from
+            # the column-ish option keys instead; extra members are
+            # harmless (parse only checks referenced columns exist).
+            _COL_KEYS = {
+                "column", "columns", "to", "from", "keys", "order_by",
+                "index_to", "then_by", "fields", "key", "pk", "targets",
+                "target",
+            }
+            for _st in shape_recipe.get("steps") or []:
+                if not isinstance(_st, dict):
+                    continue
+                _vals = [_st.get("column")] + [
+                    (_st.get("options") or {}).get(k) for k in _COL_KEYS
+                ]
+                for _v in _vals:
+                    if isinstance(_v, str) and _v:
+                        _declared_for_parse.append(_v)
+                    elif isinstance(_v, list):
+                        for _x in _v:
+                            if isinstance(_x, str):
+                                _declared_for_parse.append(_x)
+                            elif isinstance(_x, dict):
+                                _declared_for_parse.extend(
+                                    str(_x.get(k2) or "")
+                                    for k2 in ("from", "to", "column")
+                                )
+        parse_cols = list(
+            dict.fromkeys(list(columns) + _declared_for_parse)
+        )
+        parsed = ShapeRecipe.parse(shape_recipe, source_columns=parse_cols)
         src_type = resolve_driver_type(source_endpoint.format or "")
         from services.shape_apply import is_typed_value_source as _itvs
 
@@ -1468,11 +1506,15 @@ def _transform_applied_proof(
                 c for c in _declared_inputs if c not in _produced_cols
             ]
         else:
+            # No schema-set filter: the schema arriving here is the
+            # post-shape (output) contract — a drop_column/keep_columns
+            # input is absent from it but still a real source column the
+            # re-read must SELECT for the pin re-hash. Produced columns
+            # are the only non-source names possible; those are filtered.
             read_cols = [
                 c
                 for c in (runner.recipe.input_columns or columns)
                 if c not in _produced_cols
-                and (not _src_col_set or c in _src_col_set)
             ]
         if not read_cols:
             read_cols = list(columns)

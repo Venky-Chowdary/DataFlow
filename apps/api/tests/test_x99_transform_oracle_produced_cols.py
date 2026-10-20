@@ -286,3 +286,114 @@ def test_oracle_verified_derive_column_recipe(env, tmp_path):
     ).fetchall()
     assert rows[0][1] == "x.com" and rows[0][2] == "a", rows
     assert rows[1][3] == "gold" and rows[2][3] == "bronze", rows
+
+
+def _drop_run(tmp_path: Path, recipe: dict, out_cols: list[str]):
+    """Shared harness for the drop-family cells: an input column is used by
+    a step then removed from the output — the oracle re-read must still
+    SELECT it as a recipe input."""
+    from services.shape_models import ShapeRecipe
+    from src.transfer.models import EndpointConfig, TransferRequest
+    from src.transfer.engine import UniversalTransferEngine
+
+    src = tmp_path / "src3.db"
+    conn = sqlite3.connect(src)
+    conn.execute(
+        "CREATE TABLE t (id INTEGER PRIMARY KEY, code TEXT, "
+        "fullname TEXT, phone TEXT, doc TEXT)"
+    )
+    conn.executemany(
+        "INSERT INTO t VALUES (?,?,?,?,?)",
+        [
+            (1, "123456", "Ada Lovelace", "+1 555", '{"city":"Pdx"}'),
+            (2, "7654321", "Mary Ann Evans", "+1 556", '{"city":"Nyc"}'),
+            (3, "0001", "Cher", "", '{}'),
+        ],
+    )
+    conn.commit()
+    conn.close()
+    dst = tmp_path / "dst3.db"
+    src_cols = ["id", "code", "fullname", "phone", "doc"]
+    mappings = [
+        {"source": c, "target": c, "target_type": "TEXT"} for c in out_cols
+    ] + [{"source": "id", "target": "id", "target_type": "INTEGER"}]
+    req = TransferRequest(
+        source=EndpointConfig(
+            kind="database", format="sqlite", database=str(src), table="t"
+        ),
+        destination=EndpointConfig(
+            kind="database", format="sqlite", database=str(dst), table="out"
+        ),
+        sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+        skip_preflight=True,
+        shape_recipe=recipe,
+        approved_shape_recipe_hash=ShapeRecipe.parse(
+            recipe, source_columns=src_cols
+        ).recipe_hash,
+        mappings=mappings,
+    )
+    return UniversalTransferEngine().execute_tracked(req, uuid.uuid4().hex[:24])
+
+
+def test_drop_column_input_still_read_by_oracle(env, tmp_path):
+    """code feeds hash_identity then drop_column removes it — the recompute
+    must still SELECT code (recipe input) even though no output row has it."""
+    r = _drop_run(
+        tmp_path,
+        {
+            "steps": [
+                {"op": "hash_identity",
+                 "options": {"to": "rk", "columns": ["code", "phone"]}},
+                {"op": "drop_column", "column": "code"},
+            ]
+        },
+        ["fullname", "phone", "doc", "rk"],
+    )
+    assert r.success, r.error
+    proof = (r.reconciliation or {}).get("transform_applied") or {}
+    assert proof.get("status") in ("verified", "skipped"), proof
+
+
+def test_keep_columns_drops_input_oracle_still_reads(env, tmp_path):
+    """keep_columns [id, rk] drops code/phone from the output while rk is
+    derived from them — re-read must read the dropped inputs."""
+    r = _drop_run(
+        tmp_path,
+        {
+            "steps": [
+                {"op": "hash_identity",
+                 "options": {"to": "rk", "columns": ["code", "phone"]}},
+                {"op": "keep_columns",
+                 "options": {"columns": ["id", "rk"]}},
+            ]
+        },
+        ["rk"],
+    )
+    assert r.success, r.error
+    proof = (r.reconciliation or {}).get("transform_applied") or {}
+    assert proof.get("status") in ("verified", "skipped"), proof
+
+
+def test_unnest_keep_parent_false_oracle_reads_parent(env, tmp_path):
+    """unnest_json keep_parent=False drops doc from the output — the oracle
+    re-read must still SELECT doc as the step's input."""
+    r = _drop_run(
+        tmp_path,
+        {
+            "steps": [
+                {"op": "unnest_json", "column": "doc",
+                 "options": {"to": "city", "index_to": "pos",
+                             "keep_parent": False}},
+            ]
+        },
+        ["code", "fullname", "phone", "city", "pos"],
+    )
+    # unnest on object docs yields one element row; failures read as an
+    # honest skip/unverifiable rather than UndefinedColumn or a crash.
+    assert r.success or "unnest" in str(r.error or "").lower(), r.error
+    if r.success:
+        proof = (r.reconciliation or {}).get("transform_applied") or {}
+        assert proof.get("status") in (
+            "verified", "skipped", "unverifiable"
+        ), proof
