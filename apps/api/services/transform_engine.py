@@ -442,6 +442,11 @@ def ambiguous_number_columns(
     for col in cols:
         if _declared_text_column(declared, str(col)):
             continue
+        if _declared_nonnumeric_column(declared, str(col)):
+            # A declared datetime/date/etc. column can print samples that
+            # *look* grouped ("1,234.56"-shaped instants) — the numeric-locale
+            # check has no business on a column that is not a number (D2).
+            continue
         samples: list[str] = []
         for row in rows:
             if not isinstance(row, dict):
@@ -474,6 +479,47 @@ def _declared_text_column(column_types: dict[str, str], column: str) -> bool:
     from services.type_system import normalize_logical_type
 
     return normalize_logical_type(raw) in {"string", "text"}
+
+
+def _declared_nonnumeric_column(column_types: dict[str, str], column: str) -> bool:
+    """True when the column declares a type that cannot carry a number.
+
+    The numeric-locale check exists for columns that are (or could be)
+    numbers; a column already declared date/datetime/time/boolean/binary/
+    interval/geography/vector/objectid must not be re-examined because a
+    rendered value happens to be comma-grouped (D2 — an ISO instant like
+    ``…T00:00:00.000`` in orders.jsonl reads as "1,234.56" to the grouping
+    heuristic). Text stays handled by :func:`_declared_text_column` so an
+    undeclared or string column still gets the check (a number may be hiding
+    inside the text).
+    """
+    raw = str(column_types.get(column) or "").strip()
+    if not raw:
+        return False
+    from services.type_system import (
+        LOGICAL_BINARY,
+        LOGICAL_BOOLEAN,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_GEOGRAPHY,
+        LOGICAL_INTERVAL,
+        LOGICAL_OBJECTID,
+        LOGICAL_TIME,
+        LOGICAL_VECTOR,
+        normalize_logical_type,
+    )
+
+    return normalize_logical_type(raw) in {
+        LOGICAL_BOOLEAN,
+        LOGICAL_BINARY,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_GEOGRAPHY,
+        LOGICAL_INTERVAL,
+        LOGICAL_OBJECTID,
+        LOGICAL_TIME,
+        LOGICAL_VECTOR,
+    }
 
 
 def assumed_number_locale(

@@ -49,6 +49,7 @@ from services.source_reread import (
     alignment_when_write_pass_empty,
     reread_pagination_plan,
     should_reread_source,
+    _env_reread_mode,
 )
 from services.primary_key import dest_is_key_addressed
 from services.row_conservation import (
@@ -912,6 +913,12 @@ def _stream_database_transfer_impl(
             dest_summary.setdefault(PRECOUNT_KEY, int(pre_write_rows_before))
         if incremental:
             dest_summary["sync_mode"] = effective_sync
+            # obs: normalization must be visible — a request that spelled
+            # "incremental_upsert"/"dedupe" lands as incremental_deduped, and
+            # an operator reading the run should see what they asked for.
+            _req_sync = str(sync_mode or "").strip()
+            if _req_sync and _req_sync.lower() != effective_sync:
+                dest_summary["requested_sync_mode"] = _req_sync
             wm = str(dest_summary.get("incremental_watermark") or "").strip()
             if int(rows_copied or 0) == 0:
                 stamp_incremental_no_op(dest_summary)
@@ -4255,6 +4262,28 @@ def _stream_database_transfer_impl(
         incremental=incremental,
         partial_write_pass=_partial_write_pass,
     )
+    if (
+        not _reread
+        and effective_sync in {"incremental_append", "incremental_deduped"}
+        and src_read_type in REREAD_SCAN_SOURCES
+        and _env_reread_mode() != "off"
+    ):
+        # D3: keyed incremental routes stayed write-pass-only, so
+        # migration_proven was unreachable even on a fully independent route.
+        # The cursor-scoped re-read digests exactly the delta this run wrote;
+        # the destination keyed read-back (KEYED_READBACK_ENGINES) covers the
+        # same batch when the writer's key stash covers it (≤ its cap). Batches
+        # beyond the stash keep the honest write-pass — do not invent coverage.
+        _wids = dest_summary.get("written_ids") or []
+        _sample = (
+            reconcile_sample
+            or dest_summary.get("reconcile_sample")
+            or dest_summary.get("sample_records")
+            or []
+        )
+        _batch_n = int(total_rows or written or 0)
+        if _batch_n > 0 and (len(_wids) >= _batch_n or len(_sample) >= _batch_n):
+            _reread = True
     if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()
         final_checksum = write_pass_fp.digest()
@@ -4503,6 +4532,9 @@ def _stream_database_transfer_impl(
         if dest_summary.get("checksum_mode") == "source_reread_unavailable"
         else (final_checksum or last_checksum)
     )
+    # The reconcile report names the actual source engine ("source Postgres was
+    # not independently re-read"), not the generic "source warehouse" (D3).
+    dest_summary["source_engine"] = src_type
     if not isinstance(dest_summary.get("connector_versions"), dict):
         from services.connector_versions import capture_route_versions
 

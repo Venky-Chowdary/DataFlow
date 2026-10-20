@@ -495,7 +495,8 @@ def _stamp_post_write_phase_impl(report: dict[str, Any]) -> dict[str, Any]:
             if str(out.get("message") or "").lower().startswith("row fidelity verified"):
                 out["message"] = (
                     f"Gate-8 verified — destination read-back matches the "
-                    f"write-pass fingerprint ({rows} rows); source warehouse "
+                    f"write-pass fingerprint ({rows} rows); "
+                    f"{_source_display_label(out.get('source_engine'))} "
                     "was not independently re-read (migration_proven=false)."
                 )
             return out
@@ -520,6 +521,35 @@ def _stamp_post_write_phase_impl(report: dict[str, Any]) -> dict[str, Any]:
     out["coverage"] = "none"
     out["assurance_level"] = "none"
     return out
+
+
+_ENGINE_DISPLAY_LABELS: Final[dict[str, str]] = {
+    "postgresql": "PostgreSQL",
+    "postgres": "PostgreSQL",
+    "redshift": "Redshift",
+    "mysql": "MySQL",
+    "mariadb": "MariaDB",
+    "sqlserver": "SQL Server",
+    "mssql": "SQL Server",
+    "azure_sql": "Azure SQL",
+    "snowflake": "Snowflake",
+    "bigquery": "BigQuery",
+    "sqlite": "SQLite",
+    "duckdb": "DuckDB",
+    "mongodb": "MongoDB",
+    "oracle": "Oracle",
+    "databricks": "Databricks",
+}
+
+
+def _source_display_label(engine: Any) -> str:
+    """"source PostgreSQL" label for report prose — falls back to the generic
+    wording when the engine is unknown (D3: "source warehouse" read wrong when
+    the source was Postgres)."""
+    raw = str(engine or "").strip().lower()
+    if not raw:
+        return "the source warehouse"
+    return f"source {_ENGINE_DISPLAY_LABELS.get(raw, raw.replace('_', ' ').title())}"
 
 
 def _get_case_insensitive(rec: dict[str, Any], key: str | None) -> Any:

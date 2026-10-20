@@ -312,7 +312,10 @@ def is_precision_collapse_coercion(
     ):
         return True
     if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
+        # D4: a declared FSP ceiling is not a truncation when every measured
+        # cell fits — the population check g3f already runs for numerics.
+        if _temporal_population_fits(population, target_type, dest_db=dest_db) is not True:
+            return True
     return False
 
 
@@ -730,6 +733,44 @@ def _measured_text_preserves_scalar(
     return saw
 
 
+def _temporal_population_fits(
+    population: Any,
+    target_type: str,
+    *,
+    dest_db: str = "",
+) -> bool | None:
+    """True when every measured cell fits the destination FSP, else False/None.
+
+    D4: ``TIMESTAMP_LTZ(9)`` declares nanoseconds but the population can hold
+    only microsecond-exact values — blocking the pair on the declaration then
+    required CAST_AND_CONTINUE on data that fits whole. Follows the
+    g3f / ``population_fits_document_instant`` contract: measured-and-fits is
+    proof; an unmeasured or all-NULL population is not (None keeps the block).
+    """
+    if population is None:
+        return None
+    from services.type_system import (
+        destination_temporal_fractional_digits,
+        value_fractional_second_digits,
+    )
+
+    tgt_p = destination_temporal_fractional_digits(target_type, dest_db=dest_db)
+    if tgt_p is None:
+        return None
+    try:
+        values = list(population)
+    except TypeError:
+        return None
+    measured = False
+    for value in values:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        measured = True
+        if value_fractional_second_digits(value) > tgt_p:
+            return False
+    return True if measured else None
+
+
 def is_lossy_coercion(
     source_type: str,
     target_type: str,
@@ -895,7 +936,10 @@ def is_lossy_coercion(
         if bfile_locator_would_collapse(source_type, target_type):
             return True
         if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
-            return True
+            # D4: a declared FSP ceiling is not a truncation when every
+            # measured cell fits — the population check g3f already runs.
+            if _temporal_population_fits(population, target_type, dest_db=dest_db) is not True:
+                return True
         if src == LOGICAL_STRUCT and nested_struct_fields_incompatible(
             source_type, target_type, dest_db=dest_db
         ):
@@ -1096,7 +1140,10 @@ def is_lossy_coercion(
     if bfile_locator_would_collapse(source_type, target_type):
         return True
     if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
-        return True
+        # D4: a declared FSP ceiling is not a truncation when every measured
+        # cell fits — the population check g3f already runs for numerics.
+        if _temporal_population_fits(population, target_type, dest_db=dest_db) is not True:
+            return True
     if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
     if document_domain_would_invent(

@@ -131,6 +131,8 @@ def _finalize_reconcile(
             out["connector_versions"] = dict(versions)
         if dest_summary.get("source_independently_reread") is True:
             out["source_independently_reread"] = True
+        if dest_summary.get("source_engine"):
+            out["source_engine"] = str(dest_summary["source_engine"])
         snap = dest_summary.get("source_snapshot")
         raw_before = dest_summary.get(PRECOUNT_KEY)
         if out.get(PRECOUNT_KEY) is None and isinstance(raw_before, int):
@@ -3549,6 +3551,27 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
         from services.copy_sqlserver_sqlserver import _ss_connect
 
         return eng, _ss_connect(cfg)
+    if eng == "snowflake":
+        # D8: the census driver set had no Snowflake entry, so culprit keys
+        # could never be named on Snowflake destinations.
+        from connectors.snowflake_conn import get_connection
+
+        return eng, get_connection(
+            # Endpoints store the account locator in `host` (same convention
+            # as the query-router call site) — fall back so the census works
+            # on connector-shape and request-shape configs alike.
+            account=str(cfg.get("account") or cfg.get("host") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            database=str(cfg.get("database") or ""),
+            schema=str(cfg.get("schema") or "PUBLIC"),
+            warehouse=str(cfg.get("warehouse") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+            role=str(cfg.get("role") or ""),
+            private_key=str(cfg.get("private_key") or ""),
+            private_key_passphrase=str(cfg.get("private_key_passphrase") or ""),
+            auth_mode=str(cfg.get("auth_mode") or ""),
+        )
     return None
 
 

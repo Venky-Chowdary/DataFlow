@@ -1333,6 +1333,29 @@ def _create_new_mapping_target_type(
     # Declared FLOAT/DOUBLE/REAL must never invent DECIMAL from samples — that
     # collapses IEEE polarity (audit §2.1 twin). Sample→DECIMAL only for bare
     # fixed-point or open text sources (observe path elsewhere).
+    if normalize_logical_type(src_type) == LOGICAL_DECIMAL:
+        p, _s = parse_numeric_precision_scale(src_type)
+        # D7: a wide zero-scale source (Snowflake NUMBER(38,0), Oracle
+        # NUMBER(38,0), SQL Server NUMERIC(38,0)) round-trips an int4 source
+        # into NUMERIC(38,0) on the way back — a silly carrier. When the
+        # measured population proves every value fits signed BIGINT, stamp
+        # the BIGINT carrier instead of the declared-wide NUMERIC. No
+        # population → keep the declared typmod (fail-closed).
+        if (
+            p is not None
+            and int(_s or 0) <= 0
+            and not zero_scale_fits_signed_bigint(int(p))
+            and samples
+        ):
+            from services.decimal_observe import population_fits_signed_bigint
+
+            if population_fits_signed_bigint(samples) is True:
+                db0 = (dest_db_type or "").strip()
+                if db0:
+                    int_stamp = ddl_type(db0, "BIGINT")
+                    if int_stamp:
+                        return int_stamp
+                return "BIGINT"
     if samples and normalize_logical_type(src_type) == LOGICAL_DECIMAL:
         p, _s = parse_numeric_precision_scale(src_type)
         from services.decimal_observe import source_declares_numeric_domain

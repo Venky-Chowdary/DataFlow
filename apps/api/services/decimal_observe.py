@@ -1343,3 +1343,41 @@ def cursor_declared_carriers(
         if carrier:
             out[name] = carrier
     return out
+
+
+_SIGNED_BIGINT_MAX_ABS: int = 9223372036854775807
+
+
+def population_fits_signed_bigint(values: Any) -> bool | None:
+    """D7 tri-state: True when every measured value fits signed BIGINT.
+
+    A declared-wide zero-scale numeric (Snowflake/Oracle/SQL Server
+    ``NUMBER(38,0)`` / ``NUMERIC(38,0)``) declares a domain wider than its
+    population. Returns True only when at least one non-empty value was
+    measured and every value's integer magnitude fits ``int64``; False on any
+    out-of-range or non-integral value; None when nothing was measured —
+    callers keep the declared carrier fail-closed (same contract as
+    ``population_fits_document_instant``).
+    """
+    if values is None:
+        return None
+    try:
+        cells = list(values)
+    except TypeError:
+        return None
+    measured = False
+    for v in cells:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            continue
+        measured = True
+        try:
+            from decimal import Decimal, InvalidOperation
+
+            d = Decimal(str(v).strip())
+        except (InvalidOperation, ValueError):
+            return False
+        if d != d.to_integral_value():
+            return False
+        if abs(d) > _SIGNED_BIGINT_MAX_ABS:
+            return False
+    return True if measured else None
