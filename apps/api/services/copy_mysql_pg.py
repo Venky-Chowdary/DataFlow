@@ -178,10 +178,37 @@ def _mysql_table_pk_and_types(
     return pk, types
 
 
-def _select_sql(table_q: str, source_cols: list[str], predicate: str) -> str:
-    cols = ", ".join(_mysql_ident(c) for c in source_cols)
+def _select_sql(
+    table_q: str,
+    source_cols: list[str],
+    predicate: str,
+    bit_widths: dict[str, int] | None = None,
+) -> str:
+    from connectors.mysql_reader import mysql_bit_projection
+
+    bit_widths = bit_widths or {}
+    cols = ", ".join(
+        mysql_bit_projection(_mysql_ident(c), bit_widths[c])
+        if c in bit_widths
+        else _mysql_ident(c)
+        for c in source_cols
+    )
     where = f" WHERE {predicate}" if predicate else ""
     return f"SELECT {cols} FROM {table_q}{where}"  # nosec B608
+
+
+def mysql_bit_widths_from_types(types: dict[str, str]) -> dict[str, int]:
+    """`{col: width}` for ``bit(n)`` source columns (X-52 digit-string wire)."""
+    import re as _re
+
+    out: dict[str, int] = {}
+    for name, dtype in (types or {}).items():
+        m = _re.fullmatch(r"bit\((\d{1,2})\)", str(dtype or "").lower())
+        if m:
+            out[name] = max(1, int(m.group(1)))
+        elif str(dtype or "").lower() == "bit":
+            out[name] = 1
+    return out
 
 
 def _escape_copy_field(text: str) -> str:
@@ -443,6 +470,7 @@ def copy_mysql_to_postgres(
             src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             src_cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
             pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
+            bit_widths = mysql_bit_widths_from_types(live)
             live_l = {k.lower(): v for k, v in live.items()}
             for col in source_cols:
                 declared = live_l.get(col.lower()) or ""
@@ -507,7 +535,7 @@ def copy_mysql_to_postgres(
             n_parts = pg_mysql_copy_partitions(source_count, workers)
             partitions: list[dict[str, Any]] = []
             shard_mode = "ctid"
-            select_sql = _select_sql(table_q, source_cols, cursor_where)
+            select_sql = _select_sql(table_q, source_cols, cursor_where, bit_widths)
 
             if cursor_where:
                 if dest_occupied:
@@ -567,10 +595,10 @@ def copy_mysql_to_postgres(
                     if not to_copy:
                         select_sql = ""
                     elif len(to_copy) == 1:
-                        select_sql = _select_sql(table_q, source_cols, to_copy[0])
+                        select_sql = _select_sql(table_q, source_cols, to_copy[0], bit_widths)
                     else:
                         combined = " OR ".join(f"({p})" for p in to_copy if p)
-                        select_sql = _select_sql(table_q, source_cols, combined)
+                        select_sql = _select_sql(table_q, source_cols, combined, bit_widths)
 
             if dest_occupied and pk_map is None:
                 raise FastPathUnavailable(

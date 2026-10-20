@@ -89,9 +89,18 @@ def _insert_select_sql(
     source_ref: str,
     pairs: list[tuple[str, str]],
     predicate: str,
+    bit_widths: dict[str, int] | None = None,
 ) -> str:
+    from connectors.mysql_reader import mysql_bit_projection
+
+    bit_widths = bit_widths or {}
     dest_cols = ", ".join(_mysql_ident(t) for _s, t in pairs)
-    src_cols = ", ".join(_mysql_ident(s) for s, _t in pairs)
+    src_cols = ", ".join(
+        mysql_bit_projection(_mysql_ident(s), bit_widths[s])
+        if s in bit_widths
+        else _mysql_ident(s)
+        for s, _t in pairs
+    )
     where = f" WHERE {predicate}" if predicate else ""
     return (
         f"INSERT INTO {dest_ref} ({dest_cols}) "  # nosec B608
@@ -221,6 +230,9 @@ def copy_mysql_to_mysql(
     try:
         with source_conn.cursor() as src_cur, dest_conn.cursor() as dst_cur:
             pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
+            from services.copy_mysql_pg import mysql_bit_widths_from_types
+
+            bit_widths = mysql_bit_widths_from_types(live)
             live_l = {k.lower(): v for k, v in live.items()}
             create_ddls: list[str] = []
             for i, col in enumerate(source_cols):
@@ -349,7 +361,9 @@ def copy_mysql_to_mysql(
                 if use_insert_select:
                     for pred in predicates:
                         src_cur.execute(
-                            _insert_select_sql(dest_ref, source_ref, pairs, pred)
+                            _insert_select_sql(
+                                dest_ref, source_ref, pairs, pred, bit_widths
+                            )
                         )
                     source_conn.commit()
                     dest_conn.commit()

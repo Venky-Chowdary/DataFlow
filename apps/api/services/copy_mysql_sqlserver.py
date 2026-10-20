@@ -34,6 +34,7 @@ from services.copy_mysql_pg import (
     _mysql_table_pk_and_types,
     _plan_pk_partitions,
     _select_sql,
+    mysql_bit_widths_from_types,
     mysql_time_column_out_of_range,
     mysql_type_is_copy_safe,
 )
@@ -161,6 +162,7 @@ def copy_mysql_to_sqlserver(
             src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
             src_cur.execute("START TRANSACTION WITH CONSISTENT SNAPSHOT")
             pk_cols, live = _mysql_table_pk_and_types(src_cur, source_table, source_cols)
+            bit_widths = mysql_bit_widths_from_types(live)
             live_l = {k.lower(): v for k, v in live.items()}
             for col in source_cols:
                 declared = live_l.get(col.lower()) or ""
@@ -223,7 +225,7 @@ def copy_mysql_to_sqlserver(
             partitions: list[dict[str, Any]] = []
             shard_mode = "serial"
             copy_split = "serial"
-            to_copy: list[str] = [_select_sql(table_q, source_cols, "")]
+            to_copy: list[str] = [_select_sql(table_q, source_cols, "", bit_widths)]
 
             if pk_map is not None:
                 src_pk, dest_pk = pk_map
@@ -253,7 +255,8 @@ def copy_mysql_to_sqlserver(
                                 _select_sql(
                                     table_q,
                                     source_cols,
-                                    str(part.get("predicate") or ""),
+                                    str(part.get("predicate", "") or ""),
+                                    bit_widths,
                                 )
                             )
                         else:
@@ -266,12 +269,13 @@ def copy_mysql_to_sqlserver(
                                 _select_sql(
                                     table_q,
                                     source_cols,
-                                    str(part.get("predicate") or ""),
+                                    str(part.get("predicate", "") or ""),
+                                    bit_widths,
                                 )
                             )
                     dest_conn.commit()
                 else:
-                    to_copy = [_select_sql(table_q, source_cols, "")]
+                    to_copy = [_select_sql(table_q, source_cols, "", bit_widths)]
 
         identity = _has_identity(dst_cur, dst_schema, dest_table)
         if identity:
