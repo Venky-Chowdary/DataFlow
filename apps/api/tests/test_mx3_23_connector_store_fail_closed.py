@@ -50,10 +50,22 @@ def mongo_backend(monkeypatch, tmp_path):
 
 
 def test_update_connector_vault_refusal_fails_closed(monkeypatch, mongo_backend):
+    # update_connector merges on the raw Mongo doc (it no longer reads through
+    # _get_mongo), so the vault boundary on the update path is the doc
+    # encryption step. A vault refusal must still fail closed with the vault's
+    # own message — and never write the file fallback.
     def _refuse(*_a, **_k):
         raise SecretVaultError(_VAULT_MSG)
 
-    monkeypatch.setattr(cs, "_get_mongo", _refuse)
+    class _Coll:
+        def find_one(self, *_a, **_k):
+            return {"_id": "c-1", "type": "postgresql", "name": "pg"}
+
+        def replace_one(self, *_a, **_k):  # pragma: no cover - must not be reached
+            raise AssertionError("replace_one ran after the vault refused")
+
+    monkeypatch.setattr(cs, "_mongo_collection", lambda: _Coll())
+    monkeypatch.setattr(cs, "_encrypt_connector_doc", _refuse)
     with pytest.raises(cs.ConnectorStoreError) as exc_info:
         cs.update_connector("c-1", {"name": "pg", "password": "new-secret"})
     assert "Fernet-encrypted" in str(exc_info.value)

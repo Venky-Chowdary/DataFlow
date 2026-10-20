@@ -1454,6 +1454,7 @@ def _apply_change_batch(
         dest_summary = {}
     if sample_rows:
         dest_summary["reconcile_sample"] = sample_rows[:50]
+        dest_summary["reconcile_sample_transformed"] = False
     if change.deletes:
         # PK tombstones for post-write absence proof (not full after-images).
         dest_summary["reconcile_deletes"] = [str(k) for k in change.deletes[:50]]

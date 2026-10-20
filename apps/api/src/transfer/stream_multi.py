@@ -348,6 +348,15 @@ def run_non_cdc_multi_stream_sequential(
                         sync_mode, single_contracts[0].get("sync_mode")
                     ),
                     "error": error,
+                    # Per-table Gate-8 at the job rollup: each stream carries the
+                    # digest its write produced plus the object it wrote, so the
+                    # rollup can verify EVERY table — a clean last table can
+                    # never mask a tampered earlier one.
+                    "dest_table": stream_name,
+                    "write_pass_checksum": summary.get("write_pass_checksum"),
+                    "checksum": summary.get("checksum"),
+                    "checksum_mode": summary.get("checksum_mode"),
+                    "written_ids": summary.get("written_ids"),
                 },
                 sync_mode=sync_mode,
                 source=source,
@@ -388,6 +397,17 @@ def run_non_cdc_multi_stream_sequential(
     last_summary["streams"] = stream_health
     last_summary["multi_stream"] = True
     last_summary["multi_stream_mode"] = "sequential"
+    # The job rollup reconciles once, against the last stream's population:
+    # the endpoint objects are restored to the request's original table above,
+    # while this summary's digest covers the LAST stream written. Name that
+    # table on the summary so Gate-8 binds its dest read-back and the ladder's
+    # source re-read to the population the digest actually covers — the
+    # original endpoint would compare orders' digest against customers' table.
+    _last_stream_name = (stream_health[-1].get("name") or "") if stream_health else ""
+    _last_stream_name = str(_last_stream_name or "").strip()
+    if _last_stream_name:
+        last_summary.setdefault("table", _last_stream_name)
+        last_summary.setdefault("source_table", _last_stream_name)
     if shaped_out:
         # Summed across streams. The last stream's own tally is not the run.
         last_summary["rows_shaped_out"] = shaped_out

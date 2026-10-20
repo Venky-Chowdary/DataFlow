@@ -899,6 +899,15 @@ def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, 
         return None, DEST_UNMEASURED
     if source == "skipped_current_readback":
         return None, DEST_UNMEASURED
+    # A gate8 dest read-back records its own provenance under dest_readback.
+    # That count is a real independent measurement even when the value-digest
+    # verdict is unproven (engine-copy staged proof, declined ladder) —
+    # "unproven" concerns fidelity, not cardinality.
+    nested_rb = report.get("dest_readback")
+    if isinstance(nested_rb, Mapping) and str(nested_rb.get("source") or "").strip() == DEST_READBACK:
+        counted = _as_optional_int(nested_rb.get("dest_count"))
+        if counted is not None and counted >= 0:
+            return counted, DEST_READBACK
     msg = str(report.get("message") or "").lower()
     if report.get("skipped_readback") is True:
         return None, DEST_UNMEASURED

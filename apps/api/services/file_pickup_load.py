@@ -229,6 +229,9 @@ def load_picked_files(
             if isinstance(held, list):
                 held.extend(sample)
                 del held[50:]
+                # Merged samples may mix provenance — the raw default keeps
+                # Gate-8 fingerprinting honest (transform flag stays opt-in).
+                summary["reconcile_sample_transformed"] = False
         written_ids = one_summary.get("written_ids")
         if isinstance(written_ids, list):
             ids = summary.setdefault("written_ids", [])

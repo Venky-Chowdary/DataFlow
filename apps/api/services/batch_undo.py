@@ -69,6 +69,16 @@ def _decide(
             "retained",
             "CDC and history loads are not rolled back as a batch.",
         )
+    if dest_summary.get("sdk_committed_ledger"):
+        # SDK paged sources commit each page as a durable batch carrying its
+        # page-token checkpoint. That ledger is the at-least-once resume
+        # state — deleting it would destroy recorded progress, and the retry
+        # re-reads + PK-upserts those rows idempotently.
+        return (
+            "retained",
+            "Committed page batches are the run's resumable ledger and were "
+            "kept; a retry re-reads and upserts them idempotently.",
+        )
     store = _object_store_family(destination)
     if getattr(destination, "kind", "") != "database" and not store:
         return (

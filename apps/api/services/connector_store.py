@@ -20,7 +20,12 @@ from typing import Any, Mapping
 from services.platform_config import data_dir
 from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
-from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
+from services.secret_vault import (
+    SecretVaultError,
+    decrypt_secret,
+    encrypt_secret,
+    tenant_id_from_workspace,
+)
 
 _CONNECTOR_SECRET_KEYS = (
     "password",
@@ -54,6 +59,11 @@ def _mongo_write_failed(op: str, connector_id: str, exc: Exception) -> Connector
         "MongoDB %s failed for connector %s; refusing file-store fallback",
         op, connector_id or "<new>", exc_info=exc,
     )
+    if isinstance(exc, SecretVaultError):
+        # The vault's own message is the operator-facing reason (e.g. the
+        # plaintext-passthrough refusal) — masking it behind the generic
+        # store error hides a credentials-security failure.
+        return ConnectorStoreError(str(exc))
     return ConnectorStoreError(
         f"Connector {op} failed in MongoDB (the configured connector store); "
         f"nothing was saved: {_mask_conn_str(str(exc))}"

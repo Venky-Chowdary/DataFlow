@@ -396,25 +396,23 @@ def test_orphan_source_rows_are_an_ri_finding_not_a_green_checksum(tmp_path: Pat
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
+                # X-41: the run created these tables, so the undo drops the
+                # job's dest table — pre-run state is "no table", and the
+                # destination must be byte-identical to that. This assertion
+                # codified the X-41 defect before (it assumed the created
+                # table stayed behind emptied).
                 cur.execute(
-                    f'SELECT id, customer_id FROM public."{child}" ORDER BY id'
+                    "SELECT to_regclass(%s)",
+                    (f"public.{child}",),
                 )
-                assert cur.fetchall() == [], "child must equal its pre-run (empty) state"
-                cur.execute(
-                    f'SELECT COUNT(*) FROM public."{child}" c '
-                    f'LEFT JOIN public."{parent}" p ON c.customer_id = p.id '
-                    "WHERE c.customer_id IS NOT NULL AND p.id IS NULL"
+                assert cur.fetchone()[0] is None, (
+                    "run-created child table must be dropped after the failed run"
                 )
-                assert cur.fetchone()[0] == 0
-                cur.execute(
-                    """
-                    SELECT 1 FROM information_schema.table_constraints
-                     WHERE table_schema = 'public' AND table_name = %s
-                       AND constraint_type = 'FOREIGN KEY'
-                    """,
-                    (child,),
-                )
-                assert cur.fetchone() is None
+                # NOTE: the parent table (a secondary stream in the same job)
+                # is outside the undo's scope today — the existence stamp and
+                # rollback act on the job's dest table per stream. Extending
+                # created-and-dropped to every stream in a multi-table job is
+                # tracked as X-43; it is intentionally not asserted here.
         finally:
             conn.close()
     finally:

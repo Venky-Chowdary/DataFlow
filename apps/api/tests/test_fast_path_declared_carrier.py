@@ -123,7 +123,15 @@ def test_keyed_upsert_join_token_is_read_as_cardinality_too():
     )
 
 
-def test_engine_copy_reports_count_proof_without_claiming_value_fidelity(tmp_path: Path):
+def test_engine_copy_reports_count_proof_without_claiming_value_fidelity(
+    tmp_path: Path, monkeypatch
+):
+    # The contract under test is the count-proof carrier: without the digest
+    # flag the run must report cardinality only. With DATAFLOW_ENGINE_DIGEST=1
+    # (the suite env) the verify pass legitimately re-reads and digests both
+    # populations at verify time and earns full_checksum — a real verification
+    # upgrade, not an unverified claim — so the flag is pinned OFF here.
+    monkeypatch.delenv("DATAFLOW_ENGINE_DIGEST", raising=False)
     src_path = tmp_path / "count_src.db"
     dst_path = tmp_path / "count_dst.db"
     src = sqlite3.connect(str(src_path))

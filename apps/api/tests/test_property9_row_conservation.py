@@ -1085,3 +1085,86 @@ def test_iceberg_overwrite_e2e_merges_leftover_snapshot_keys(tmp_path: Path):
     assert dest_keys is not None
     assert {str(t[0]) for t in dest_keys} == {"1", "2", "3"}
 
+
+
+def test_sqlite_two_table_job_tampered_first_table_is_named(tmp_path: Path):
+    """Tamper customers AFTER a green run: the job must fail, naming that table.
+
+    A last-table-only rollup would miss it — per-table verification must not.
+    """
+    src_path = tmp_path / "p9_tamper_src.db"
+    dst_path = tmp_path / "p9_tamper_dst.db"
+    src = sqlite3.connect(str(src_path))
+    try:
+        src.execute("CREATE TABLE customers (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        src.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, label TEXT NOT NULL)")
+        src.executemany("INSERT INTO customers (id, label) VALUES (?, ?)", [(1, "a"), (2, "b")])
+        src.executemany(
+            "INSERT INTO orders (id, label) VALUES (?, ?)",
+            [(1, "o1"), (2, "o2"), (3, "o3")],
+        )
+        src.commit()
+    finally:
+        src.close()
+
+    def _req():
+        return TransferRequest(
+            source=EndpointConfig(
+                kind="database", format="sqlite", database=str(src_path), table="customers"
+            ),
+            destination=EndpointConfig(
+                kind="database", format="sqlite", database=str(dst_path), table="customers"
+            ),
+            mappings=_maps(),
+            sync_mode="full_refresh_overwrite",
+            validation_mode="warn",
+            skip_preflight=True,
+            stream_contracts=[
+                {"name": "customers", "selected": True, "sync_mode": "full_refresh_overwrite", "primary_key": "id", "mappings": _maps()},
+                {"name": "orders", "selected": True, "sync_mode": "full_refresh_overwrite", "primary_key": "id", "mappings": _maps()},
+            ],
+        )
+
+    # Control: untouched job verifies.
+    clean = _run(_req())
+    assert clean.success, clean.error
+
+    # Tamper one row in the FIRST table's destination after the write.
+    dst = sqlite3.connect(str(dst_path))
+    try:
+        dst.execute("UPDATE customers SET label='TAMPERED' WHERE id=1")
+        dst.commit()
+    finally:
+        dst.close()
+
+    # Re-run the job's verification against the tampered destination: the
+    # per-table check must name 'customers', not silently re-write it green.
+    # Simulate post-write tamper visibility by tampering between write and
+    # verify: easiest deterministic check is a fresh run whose verify reads
+    # the tampered table — but the run itself overwrites first. So instead we
+    # verify the per-table check directly on the tampered state.
+    from src.transfer.reconcile_step import _multi_stream_per_table_check
+    from src.transfer.models import EndpointConfig as EC
+
+    stamped = {"passed": True, "message": ""}
+    dest_summary = {
+        "multi_stream": True,
+        "streams": [
+            {"name": "customers", "dest_table": "customers", "status": "completed",
+             "records_processed": 2, "row_accounting": {"dest_count": 2}},
+            {"name": "orders", "dest_table": "orders", "status": "completed",
+             "records_processed": 3, "row_accounting": {"dest_count": 3}},
+        ],
+    }
+    out = _multi_stream_per_table_check(
+        stamped,
+        endpoint=EC(kind="database", format="sqlite", database=str(dst_path), table="customers"),
+        source_endpoint=EC(kind="database", format="sqlite", database=str(src_path), table="customers"),
+        dest_summary=dest_summary,
+        mappings=_maps(),
+    )
+    assert out["passed"] is False, out
+    assert "customers" in str(out.get("message") or ""), out.get("message")
+    tables = {t["table"]: t["ok"] for t in out.get("per_stream_tables") or []}
+    assert tables.get("customers") is False, out["per_stream_tables"]
+    assert tables.get("orders") is True, out["per_stream_tables"]

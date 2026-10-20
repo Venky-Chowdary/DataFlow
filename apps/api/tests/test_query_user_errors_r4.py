@@ -241,7 +241,10 @@ def test_snowflake_connection_error_uses_classifier_then_humanizer(monkeypatch):
     classified_inputs = []
     humanized_inputs = []
 
-    def classify(raw):
+    # The stub mirrors the real signature: ddd0fd3d threads the attempted
+    # auth_mode into the classifier; a stub without the kwarg fails before
+    # the assertion it exists to check.
+    def classify(raw, auth_mode=""):
         classified_inputs.append(raw)
         return "classified Snowflake login failure"
 
