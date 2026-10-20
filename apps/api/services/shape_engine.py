@@ -1262,7 +1262,20 @@ class ShapeEngine:
             separator = str(options.get("separator") or "")
             targets = [str(name) for name in options.get("into", [])]
             text = _as_text(row.get(step.column))
+            # ``limit`` caps the number of parts: the tail folds into the last
+            # piece (split with maxsplit = limit-1). And overflow beyond the
+            # declared ``into`` targets always folds into the LAST target —
+            # 'Mary Ann Evans' → ['Mary','Ann Evans'], never a dropped
+            # 'Evans' (X-102).
             pieces = text.split(separator) if text is not None else []
+            limit_opt = options.get("limit")
+            if pieces and limit_opt is not None:
+                max_parts = max(1, int(limit_opt))
+                pieces = text.split(separator, max_parts - 1)
+            if targets and len(pieces) > len(targets):
+                pieces = pieces[: len(targets) - 1] + [
+                    separator.join(pieces[len(targets) - 1:])
+                ]
             for position, name in enumerate(targets):
                 value = pieces[position] if position < len(pieces) else None
                 self._record_write(tally, before=row.get(name), after=value, existed=name in row)
