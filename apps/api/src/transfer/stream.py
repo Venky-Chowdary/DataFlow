@@ -769,6 +769,7 @@ def _stream_database_transfer_impl(
     )
     from services.destination_key_collision_probe import (
         sync_mode_appends_without_key_resolution,
+        sync_mode_is_pure_append,
     )
 
     # X-114 — computed once for every create path of this run (fast-path
@@ -779,10 +780,12 @@ def _stream_database_transfer_impl(
         _fast_path_source_catalog(src_read_type, mappings, schema, _src_rich_catalog),
         mappings,
         resolve_dest_table(dest_type, destination, _source_name(source)),
-        # X-98 — one rule for append history on every engine: an appending
+        # X-98 — one rule for append history on every engine: a pure-append
         # sync never re-declares the source key on the destination, so run 2
-        # can re-append the same PK. Upsert/deduped still carry it.
-        carry_keys=not sync_mode_appends_without_key_resolution(effective_sync),
+        # can re-append the same PK. Upsert/deduped — and incremental_append,
+        # whose watermark admits each key exactly once — still carry it, so a
+        # re-selected key fails closed instead of landing a silent duplicate.
+        carry_keys=not sync_mode_is_pure_append(effective_sync),
         # X-113/X-114 — an expanding recipe repeats the source PK per emitted
         # row; the declared produced key (unnest index_to, surrogate_key)
         # is the destination identity instead.

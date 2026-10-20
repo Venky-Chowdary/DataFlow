@@ -178,12 +178,25 @@ def _write_batch(
         write_mode = decided.write_mode
     match_token = set_match_action(decided.match_action if decided else "update")
     from services.sync_cursor import is_overwrite_sync
+    from services.destination_key_collision_probe import (
+        sync_mode_is_pure_append,
+    )
 
     # Overwrite rebuilds the table from one source snapshot, so the source key
     # holds on the copy. Only append create-new withholds it (write_mode alone
     # cannot tell them apart: both are "insert").
     key_carry: dict[str, Any] = (
-        {"carry_source_keys": True} if create_table and is_overwrite_sync(sync_mode) else {}
+        {"carry_source_keys": True}
+        if create_table
+        and (
+            is_overwrite_sync(sync_mode)
+            # incremental_append admits each key exactly once — the dest key
+            # must exist so a re-selected key fails closed (X-98 scoped the
+            # withholding to pure-append history modes only).
+            or (sync_mode or "").strip().lower()
+            in {"incremental_append", "incremental_append_only"}
+        )
+        else {}
     )
     if dest_type == "postgresql" or dest_type == "redshift":
         from connectors.postgresql_writer import write_mapped_rows
