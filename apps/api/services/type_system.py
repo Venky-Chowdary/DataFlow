@@ -2426,6 +2426,11 @@ def ddl_carrier_type(inferred: str | None) -> str:
         return strip_identity_qualifier(raw).strip() or raw
     logical = normalize_logical_type(raw)
     if logical == LOGICAL_DECIMAL:
+        # DuckDB HUGEINT/UHUGEINT (int128) needs 39 digits — a bare DECIMAL
+        # carrier would lose that and collapse to a platform default that
+        # cannot hold the range (or worse, a signed-64 invent downstream).
+        if upper in {"HUGEINT", "UHUGEINT"}:
+            return "DECIMAL(39,0)"
         # Preserve BIGNUMERIC polarity (76,38) vs bare DECIMAL/NUMERIC (38,9).
         if upper.startswith("BIGNUMERIC") or upper.startswith("BIGDECIMAL"):
             precision, scale = parse_numeric_precision_scale(raw)

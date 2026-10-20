@@ -137,3 +137,38 @@ def test_x59_all_01_column_lands_boolean_with_finding():
     """0/1-only tinyint(1) still lands boolean; plan/proof names the
     tinyint1_evidence_widened finding (empty set) and offers integer."""
     pytest.fail("live leg — runs on the user's engine matrix")
+
+
+def test_x70_hugeint_carrier_is_39_digit_decimal():
+    """X-70: DuckDB HUGEINT/UHUGEINT carries DECIMAL(39,0), never INTEGER —
+    a bare logical stamp would land BIGINT and quarantine the whole column."""
+    from services.type_system import ddl_carrier_type
+
+    assert ddl_carrier_type("HUGEINT") == "DECIMAL(39,0)"
+    assert ddl_carrier_type("UHUGEINT") == "DECIMAL(39,0)"
+    assert ddl_carrier_type("hugeint") == "DECIMAL(39,0)"
+
+
+def test_x70_hugeint_dest_ddl_picks_exact_carriers():
+    """PG gets NUMERIC(39,0); destinations past their DECIMAL cap take the
+    lossless digit-text carrier (exact) rather than a truncating type."""
+    from services.type_system import _decimal_ddl_for_dest
+
+    carrier = "DECIMAL(39,0)"
+    assert _decimal_ddl_for_dest("postgresql", carrier) == "NUMERIC(39,0)"
+    assert _decimal_ddl_for_dest("sqlserver", carrier).startswith("NVARCHAR")
+    assert _decimal_ddl_for_dest("sqlite", carrier) == "TEXT"
+    assert _decimal_ddl_for_dest("mysql", carrier) == "TEXT"
+    assert _decimal_ddl_for_dest("duckdb", carrier) == "VARCHAR"
+
+
+def test_x70_hugeint_digit_text_fingerprints_decode_equal():
+    """Digit-text carriers compare decoded-equal; a one-digit tamper differs."""
+    big = str(2**127 - 1)
+    for ddl in ("DECIMAL(39,0)", "NUMERIC(39,0)", "TEXT", "NVARCHAR(MAX)"):
+        assert fingerprint_for_reconcile(big, ddl_type=ddl) == fingerprint_for_reconcile(
+            str(2**127 - 1), ddl_type=ddl
+        )
+        assert fingerprint_for_reconcile(big, ddl_type=ddl) != fingerprint_for_reconcile(
+            str(2**127 - 2), ddl_type=ddl
+        )
