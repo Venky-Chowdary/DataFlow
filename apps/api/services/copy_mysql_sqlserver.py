@@ -24,8 +24,10 @@ from services.brand_env import getenv_brand
 from services.copy_fast_path import (
     FastPathResult,
     FastPathUnavailable,
+    SqlCopyDigest,
     occupied_pk_range_action,
     settle_fast_path_create_on,
+    sql_copy_proof,
 )
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
@@ -41,6 +43,7 @@ from services.copy_mysql_pg import (
 from services.copy_pg_mysql import (
     _jsonable_bound,
     mapped_single_pk,
+    mysql_pk_range_clause,
     pg_mysql_copy_partitions,
     pg_mysql_copy_workers,
 )
@@ -58,6 +61,7 @@ from services.copy_sqlserver_sqlserver import (
     _count as _ss_count,
     _create_sql as _ss_create_sql,
     _delete_range as _ss_delete_range,
+    _exec,
     _drop_sql as _ss_drop_sql,
     _has_identity,
     _ident as _ss_ident,
@@ -83,6 +87,7 @@ def _select_into_sqlserver(
     select_sql: str,
     insert_sql: str,
     batch_size: int,
+    digest: Any = None,
 ) -> int:
     from pymysql.cursors import SSCursor
 
@@ -99,10 +104,14 @@ def _select_into_sqlserver(
                 batch.append(bind_row_for_sqlserver(dst_cur, tuple(row)))
                 if len(batch) >= batch_size:
                     bulk_executemany(dst_cur, insert_sql, batch)
+                    if digest is not None:
+                        digest.update(batch)
                     copied += len(batch)
                     batch.clear()
         if batch:
             bulk_executemany(dst_cur, insert_sql, batch)
+            if digest is not None:
+                digest.update(batch)
             copied += len(batch)
         return copied
     finally:
@@ -292,6 +301,31 @@ def copy_mysql_to_sqlserver(
                 else:
                     to_copy = [_select_sql(table_q, source_cols, "", bit_widths)]
 
+        # X-93: the digest covers only the rows this run writes; when
+        # partitions were skipped the dest re-read must be scoped to the
+        # loaded partitions or skipped rows fail the digest. An unbounded
+        # loaded shard next to skipped ones cannot be scoped — decline to
+        # the row path, which verifies the whole table.
+        skipped_any = any(p.get("action") == "skip" for p in partitions)
+        loaded_clauses: list[tuple[str, list[Any]]] = []
+        if skipped_any and pk_map is not None:
+            dest_ident_scope = _ss_ident(pk_map[1])
+            for p in partitions:
+                if p.get("action") not in ("load", "reload"):
+                    continue
+                clause, clause_params = mysql_pk_range_clause(
+                    dest_ident_scope,
+                    p.get("lo"),
+                    p.get("hi"),
+                    null_shard=bool(p.get("null_shard")),
+                )
+                if clause == "1=1":
+                    raise FastPathUnavailable(
+                        "unbounded shard plus skipped partitions cannot "
+                        "scope the dest re-read digest"
+                    )
+                loaded_clauses.append((clause, clause_params))
+
         identity = _has_identity(dst_cur, dst_schema, dest_table)
         if identity:
             dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608
@@ -303,6 +337,14 @@ def copy_mysql_to_sqlserver(
         write_cur = dest_conn.cursor()
         _enable_fast_executemany(write_cur)
         set_wide_decimal_inputsizes(write_cur, sqlserver_ddls)
+        # X-93: every row on this route enters this process — fold the bound
+        # rows into a real value digest, never a dest_count: token.
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="sqlserver",
+            dest_types=dict(zip(target_cols, sqlserver_ddls, strict=True)),
+        )
         try:
             for sql in to_copy:
                 _select_into_sqlserver(
@@ -311,6 +353,7 @@ def copy_mysql_to_sqlserver(
                     select_sql=sql,
                     insert_sql=insert_sql,
                     batch_size=batch_size,
+                    digest=digest,
                 )
                 dest_conn.commit()
         finally:
@@ -347,7 +390,32 @@ def copy_mysql_to_sqlserver(
             source_conn.commit()
         except Exception:
             logger.debug("MySQL source commit skipped", exc_info=True)
-        proof = f"dest_count:{dest_count}"
+        # X-93: re-read the scope this run wrote and compare the digest —
+        # the proof is sql_rows_sha256, not a count token.
+        if to_copy:
+            if loaded_clauses:
+                where_sql = " OR ".join(
+                    f"({clause})" for clause, _p in loaded_clauses
+                )
+                params: list[Any] = []
+                for _c, p in loaded_clauses:
+                    params.extend(p)
+                _exec(
+                    dst_cur,
+                    f"SELECT {col_sql} FROM {dest_ref} WHERE {where_sql}",  # nosec B608
+                    params,
+                )
+            else:
+                dst_cur.execute(f"SELECT {col_sql} FROM {dest_ref}")  # nosec B608
+            reread = dst_cur.fetchall()
+            proof = sql_copy_proof(digest, reread)
+            proof_scope = "mapped_columns"
+        else:
+            # Nothing was written this run (every partition skipped —
+            # verified at its own copy run); the per-partition count checks
+            # above are this run's proof.
+            proof = f"pk_partition_counts:{dest_count}"
+            proof_scope = "partition_dest_count_equals_source_snapshot"
         partition_proof = [
             {
                 "lo": _jsonable_bound(p.get("lo")),
@@ -378,11 +446,7 @@ def copy_mysql_to_sqlserver(
                 "partition_proof": partition_proof,
             },
             dest_table_existed_before=existed_before,
-            proof_scope=(
-                "partition_dest_count_equals_source_snapshot"
-                if partition_proof
-                else "dest_count_equals_source_snapshot_count"
-            ),
+            proof_scope=proof_scope,
         )
     except Exception as exc:
         # A table this run created (or an existing dest that was empty before)

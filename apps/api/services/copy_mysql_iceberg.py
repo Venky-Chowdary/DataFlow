@@ -26,7 +26,12 @@ import tempfile
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    SqlCopyDigest,
+    sql_copy_proof,
+)
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
     _mysql_connect,
@@ -53,7 +58,9 @@ def mysql_iceberg_copy_enabled() -> bool:
     return raw not in {"0", "false", "no", "off"}
 
 
-def _select_to_csv(source_conn: Any, select_sql: str, path: str) -> int:
+def _select_to_csv(
+    source_conn: Any, select_sql: str, path: str, digest: Any = None
+) -> int:
     from pymysql.cursors import SSCursor
 
     written = 0
@@ -66,6 +73,10 @@ def _select_to_csv(source_conn: Any, select_sql: str, path: str) -> int:
                 rows = cur.fetchmany(_FETCH_BATCH)
                 if not rows:
                     break
+                if digest is not None:
+                    # X-93: rows cross this process — fold source values
+                    # into the two-sided digest as they are written.
+                    digest.update([tuple(r) for r in rows])
                 for row in rows:
                     writer.writerow(iceberg_csv_cell(v) for v in row)
                     written += 1
@@ -165,7 +176,15 @@ def copy_mysql_to_iceberg(
 
         handle, tmp_path = tempfile.mkstemp(prefix="df_mysql_iceberg_", suffix=".csv")
         os.close(handle)
-        csv_rows = _select_to_csv(source_conn, select_sql, tmp_path)
+        # X-93: every row on this route enters this process — fold the
+        # bound rows into a real value digest, never a dest_count: token.
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="iceberg",
+            dest_types=dict(zip(target_cols, iceberg_ddls, strict=True)),
+        )
+        csv_rows = _select_to_csv(source_conn, select_sql, tmp_path, digest)
         if csv_rows != source_count:
             raise ValueError(
                 "MySQL→Iceberg COPY refused: CSV rows "
@@ -197,7 +216,17 @@ def copy_mysql_to_iceberg(
             source_conn.commit()
         except Exception:
             logger.debug("MySQL source commit skipped", exc_info=True)
-        proof = f"dest_count:{dest_count}"
+        # X-93: re-read the committed table and compare the digest —
+        # sql_rows_sha256 is the proof, not a count token.
+        scan_arrow = tbl.scan(selected_fields=tuple(target_cols)).to_arrow()
+        reread = [
+            tuple(r)
+            for r in zip(
+                *(scan_arrow.column(c).to_pylist() for c in target_cols),
+                strict=True,
+            )
+        ]
+        proof = sql_copy_proof(digest, reread)
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -215,7 +244,7 @@ def copy_mysql_to_iceberg(
                 "iceberg_write": iceberg_write,
                 "source_pk": list(pk_cols or []),
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         if created_here:

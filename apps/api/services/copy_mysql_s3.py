@@ -22,7 +22,12 @@ import tempfile
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    SqlCopyDigest,
+    sql_copy_proof,
+)
 from connectors.mysql_reader import mysql_bit_projection
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
@@ -35,6 +40,8 @@ from services.copy_mysql_pg import (
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_s3_common import (
     commit_local_object,
+    s3_bucket,
+    s3_client,
     s3_delete_keys,
     s3_dest_count,
     s3_ensure_bucket,
@@ -64,14 +71,29 @@ def _select_to_delimited(
     *,
     header: list[str],
     delimiter: str,
+    digest: Any = None,
 ) -> int:
     from pymysql.cursors import SSCursor
+
+    def _rows() -> Any:
+        pending: list[Any] = []
+        for row in s3_iter_fetchmany(cur, _FETCH_BATCH):
+            pending.append(tuple(row))
+            if len(pending) >= _FETCH_BATCH:
+                if digest is not None:
+                    digest.update(pending)
+                yield from pending
+                pending = []
+        if pending:
+            if digest is not None:
+                digest.update(pending)
+            yield from pending
 
     cur = source_conn.cursor(SSCursor)
     try:
         cur.execute(select_sql)
         return s3_write_delimited(
-            path, header, s3_iter_fetchmany(cur, _FETCH_BATCH), delimiter
+            path, header, _rows(), delimiter
         )
     finally:
         try:
@@ -176,12 +198,21 @@ def copy_mysql_to_s3(
 
         fd, tmp_path = tempfile.mkstemp(prefix="df-mysql-s3-", suffix=f".{ext}")
         os.close(fd)
+        # X-93: rows pass through this process — fold the bound rows into a
+        # real value digest, never a dest_count: token.
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="s3",
+            dest_types=dict(zip(target_cols, s3_ddls, strict=True)),
+        )
         csv_rows = _select_to_delimited(
             source_conn,
             select_sql,
             tmp_path,
             header=target_cols,
             delimiter=delim,
+            digest=digest,
         )
         if csv_rows != source_count:
             raise ValueError(
@@ -200,7 +231,18 @@ def copy_mysql_to_s3(
         except Exception:
             logger.debug("MySQL source commit skipped", exc_info=True)
         s3_write = "overwrite" if replace_destination and dest_occupied else "insert"
-        proof = f"dest_count:{dest_count}"
+        # X-93: re-read the committed object and compare the digest —
+        # sql_rows_sha256 is the proof, not a count token.
+        import csv as _csv
+        import io as _io
+
+        client = s3_client(dest_cfg)
+        obj = client.get_object(Bucket=s3_bucket(dest_cfg), Key=dest_table)
+        payload = obj["Body"].read().decode("utf-8")
+        rdr = _csv.reader(_io.StringIO(payload), delimiter=delim)
+        next(rdr, None)  # header
+        reread = [tuple(r) for r in rdr]
+        proof = sql_copy_proof(digest, reread)
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -218,7 +260,7 @@ def copy_mysql_to_s3(
                 "s3_write": s3_write,
                 "s3_key": dest_table,
             },
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         if created_here:

@@ -23,7 +23,12 @@ from decimal import Decimal
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    SqlCopyDigest,
+    sql_copy_proof,
+)
 from connectors.sqlite_common import sqlite_decimal_bind_text
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
@@ -119,7 +124,12 @@ def copy_mysql_to_sqlite(
     source_schema: str | None = None,
     source_where: str = "",
 ) -> FastPathResult:
-    """INSERT MySQL snapshot rows into SQLite. Dest COUNT(*) before commit is the proof.
+    """INSERT MySQL snapshot rows into SQLite.
+
+    X-93: rows pass through this process, so the proof is a real two-sided
+    ``sql_rows_sha256:`` digest of the bound values vs a destination re-read —
+    never a ``dest_count:`` token (engine-count-only proof is only legal for
+    same-engine in-engine copies).
 
     ``source_where`` is a pre-quoted SQL fragment (incremental cursor predicate).
     When set, COUNT and SELECT use that filter and dest-occupied skip is disabled.
@@ -238,6 +248,14 @@ def copy_mysql_to_sqlite(
 
         pending: list[tuple[Any, ...]] = []
         inserted = 0
+        # X-93: every row on this route enters this process — fold the bound
+        # rows into a real value digest, never a dest_count: token.
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="sqlite",
+            dest_types=dict(zip(target_cols, sqlite_ddls, strict=True)),
+        )
         cur = source_conn.cursor(SSCursor)
         try:
             cur.execute(select_sql)
@@ -249,6 +267,7 @@ def copy_mysql_to_sqlite(
                     pending.append(tuple(mysql_value_to_sqlite(v) for v in row))
                     if len(pending) >= batch_size:
                         dest_conn.executemany(insert_sql, pending)
+                        digest.update(pending)
                         inserted += len(pending)
                         pending.clear()
         finally:
@@ -258,6 +277,7 @@ def copy_mysql_to_sqlite(
                 logger.debug("MySQL stream cursor close skipped", exc_info=True)
         if pending:
             dest_conn.executemany(insert_sql, pending)
+            digest.update(pending)
             inserted += len(pending)
         dest_count = int(
             dest_conn.execute(f"SELECT COUNT(*) FROM {dest_ref}").fetchone()[0]  # nosec B608
@@ -268,9 +288,16 @@ def copy_mysql_to_sqlite(
                 "MySQL→SQLite COPY refused: dest COUNT(*) "
                 f"{dest_count} inserted {inserted} != source snapshot {source_count}"
             )
+        reread = dest_conn.execute(
+            f"SELECT {col_sql} FROM {dest_ref}"  # nosec B608
+        ).fetchall()
+        try:
+            proof = sql_copy_proof(digest, reread)
+        except ValueError:
+            dest_conn.rollback()
+            raise
         dest_conn.commit()
         sqlite_write = "overwrite" if replace_destination and dest_occupied else "insert"
-        proof = f"dest_count:{dest_count}"
         return FastPathResult(
             rows_copied=dest_count,
             source_rows=source_count,
@@ -291,7 +318,7 @@ def copy_mysql_to_sqlite(
                 "bigint_unsigned_text_carrier": u64_text_cols,
             },
             dest_table_existed_before=existed_before,
-            proof_scope="dest_count_equals_source_snapshot_count",
+            proof_scope="mapped_columns",
         )
     except Exception:
         try:

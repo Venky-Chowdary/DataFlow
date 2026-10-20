@@ -25,7 +25,13 @@ import logging
 from typing import Any, Callable
 
 from services.brand_env import getenv_brand
-from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
+from services.copy_fast_path import (
+    FastPathResult,
+    FastPathUnavailable,
+    SqlCopyDigest,
+    occupied_pk_range_action,
+    sql_copy_proof,
+)
 from services.copy_mysql_pg import (
     _FETCH_BATCH,
     _mysql_connect,
@@ -39,6 +45,8 @@ from services.copy_oracle_oracle import (
     _count as _ora_count,
     _create_sql as _ora_create_sql,
     _delete_range as _ora_delete_range,
+    _exec,
+    oracle_pk_range_clause,
     _drop_sql as _ora_drop_sql,
     _ident as _ora_ident,
     _oracle_connect,
@@ -113,6 +121,7 @@ def _select_into_oracle(
     insert_sql: str,
     converters: list[Callable[[Any], Any]],
     batch_size: int,
+    digest: Any = None,
 ) -> int:
     from pymysql.cursors import SSCursor
 
@@ -129,10 +138,14 @@ def _select_into_oracle(
                 batch.append(tuple(conv(val) for conv, val in zip(converters, row)))
                 if len(batch) >= batch_size:
                     dst_cur.executemany(insert_sql, batch)
+                    if digest is not None:
+                        digest.update(batch)
                     copied += len(batch)
                     batch.clear()
         if batch:
             dst_cur.executemany(insert_sql, batch)
+            if digest is not None:
+                digest.update(batch)
             copied += len(batch)
         return copied
     finally:
@@ -284,6 +297,39 @@ def copy_mysql_to_oracle(
                 else:
                     to_copy = [_select_sql(table_q, source_cols, "")]
 
+        # X-93: the digest covers only the rows this run writes; when
+        # partitions were skipped the dest re-read must be scoped to the
+        # loaded partitions or skipped rows fail the digest. An unbounded
+        # loaded shard next to skipped ones cannot be scoped — decline to
+        # the row path, which verifies the whole table.
+        skipped_any = any(p.get("action") == "skip" for p in partitions)
+        loaded_clauses: list[tuple[str, list[Any]]] = []
+        if skipped_any and pk_map is not None:
+            dest_ident_scope = _ora_ident(pk_map[1])
+            for p in partitions:
+                if p.get("action") not in ("load", "reload"):
+                    continue
+                clause, clause_params = oracle_pk_range_clause(
+                    dest_ident_scope,
+                    p.get("lo"),
+                    p.get("hi"),
+                    null_shard=bool(p.get("null_shard")),
+                )
+                if clause == "1=1":
+                    raise FastPathUnavailable(
+                        "unbounded shard plus skipped partitions cannot "
+                        "scope the dest re-read digest"
+                    )
+                loaded_clauses.append((clause, clause_params))
+
+        # X-93: every row on this route enters this process — fold the bound
+        # rows into a real value digest, never a dest_count: token.
+        digest = SqlCopyDigest(
+            target_cols,
+            sort_key=target_cols[0] if target_cols else None,
+            dest_db_type="oracle",
+            dest_types=dict(zip(target_cols, oracle_ddls, strict=True)),
+        )
         for sql in to_copy:
             _select_into_oracle(
                 source_conn,
@@ -292,6 +338,7 @@ def copy_mysql_to_oracle(
                 insert_sql=insert_sql,
                 converters=converters,
                 batch_size=batch_size,
+                digest=digest,
             )
             dest_conn.commit()
 
@@ -318,7 +365,32 @@ def copy_mysql_to_oracle(
             source_conn.commit()
         except Exception:
             logger.debug("MySQL source commit skipped", exc_info=True)
-        proof = f"dest_count:{dest_count}"
+        # X-93: re-read the scope this run wrote and compare the digest —
+        # the proof is sql_rows_sha256, not a count token.
+        if to_copy:
+            if loaded_clauses:
+                where_sql = " OR ".join(
+                    f"({clause})" for clause, _p in loaded_clauses
+                )
+                params: list[Any] = []
+                for _c, p in loaded_clauses:
+                    params.extend(p)
+                _exec(
+                    dst_cur,
+                    f"SELECT {col_sql} FROM {dest_ref} WHERE {where_sql}",  # nosec B608
+                    params,
+                )
+            else:
+                dst_cur.execute(f"SELECT {col_sql} FROM {dest_ref}")  # nosec B608
+            reread = dst_cur.fetchall()
+            proof = sql_copy_proof(digest, reread)
+            proof_scope = "mapped_columns"
+        else:
+            # Nothing was written this run (every partition skipped —
+            # verified at its own copy run); the per-partition count checks
+            # above are this run's proof.
+            proof = f"pk_partition_counts:{dest_count}"
+            proof_scope = "partition_dest_count_equals_source_snapshot"
         partition_proof = [
             {
                 "lo": _jsonable_bound(p.get("lo")),
@@ -348,11 +420,7 @@ def copy_mysql_to_oracle(
                 "empty_string_as_null_cells": coerced[0],
                 "partition_proof": partition_proof,
             },
-            proof_scope=(
-                "partition_dest_count_equals_source_snapshot"
-                if partition_proof
-                else "dest_count_equals_source_snapshot_count"
-            ),
+            proof_scope=proof_scope,
         )
     except Exception:
         if preserve_dest_on_failure:

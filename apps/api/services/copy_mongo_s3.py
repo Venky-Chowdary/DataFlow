@@ -192,7 +192,9 @@ def copy_mongo_to_s3(
         client = s3_client(dest_cfg)
         obj = client.get_object(Bucket=s3_bucket(dest_cfg), Key=dest_table)
         payload = obj["Body"].read().decode("utf-8")
-        reread = [tuple(r) for r in csv.reader(io.StringIO(payload), delimiter=delim)]
+        rdr = csv.reader(io.StringIO(payload), delimiter=delim)
+        next(rdr, None)  # header line — digest covers data rows only
+        reread = [tuple(r) for r in rdr]
         proof = sql_copy_proof(digest, reread)
         return FastPathResult(
             rows_copied=dest_count,

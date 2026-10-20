@@ -28,6 +28,8 @@ from services.copy_fast_path import (
     occupied_pk_range_action,
     FastPathResult,
     FastPathUnavailable,
+    SqlCopyDigest,
+    sql_copy_proof,
     plan_fast_path_create,
     settle_fast_path_create_on,
     _quote,
@@ -252,6 +254,7 @@ def _fifo_mysql_into_pg(
     select_sql: str,
     dest_ref: str,
     columns: list[str],
+    digest: Any = None,
 ) -> None:
     col_list = ", ".join(_pg_ident(c) for c in columns)
     copy_sql = (
@@ -271,6 +274,10 @@ def _fifo_mysql_into_pg(
                     batch = stream.fetchmany(_FETCH_BATCH)
                     if not batch:
                         break
+                    if digest is not None:
+                        # X-93: rows cross this process — fold the source
+                        # values into the two-sided digest as they copy.
+                        digest.update(list(batch))
                     payload = "\n".join(join(encode(v) for v in row) for row in batch)
                     writer.write((payload + "\n").encode("utf-8"))
 
@@ -589,6 +596,16 @@ def copy_mysql_to_postgres(
                         elif already == 0:
                             part["action"] = "load"
                             to_copy.append(str(part.get("predicate") or ""))
+                            part["dest_pred"] = pk_range_predicate(
+                                dest_ident,
+                                _pg_quoted_literal(dst_cur, part["lo"])
+                                if part.get("lo") is not None
+                                else None,
+                                _pg_quoted_literal(dst_cur, part["hi"])
+                                if part.get("hi") is not None
+                                else None,
+                                null_shard=bool(part.get("null_shard")),
+                            )
                         else:
                             occupied_pk_range_action(already, expected, replace_destination=replace_destination)
                             pred = pk_range_predicate(
@@ -608,7 +625,23 @@ def copy_mysql_to_postgres(
                             )
                             part["action"] = "reload"
                             to_copy.append(str(part.get("predicate") or ""))
+                            part["dest_pred"] = pred
                     dest_conn.commit()
+                    # X-93: the digest covers only the rows this run wrote;
+                    # the dest re-read must be scoped to the same partitions
+                    # or skipped rows fail the digest. An unbounded loaded
+                    # shard next to skipped ones cannot be scoped — decline
+                    # to the row path, which verifies the whole table.
+                    any_skipped = any(
+                        p.get("action") == "skip" for p in partitions
+                    )
+                    for p in partitions:
+                        if p.get("action") in ("load", "reload"):
+                            if not p.get("dest_pred") and any_skipped:
+                                raise FastPathUnavailable(
+                                    "unbounded shard plus skipped partitions "
+                                    "cannot scope the dest re-read digest"
+                                )
                     if not to_copy:
                         select_sql = ""
                     elif len(to_copy) == 1:
@@ -623,6 +656,14 @@ def copy_mysql_to_postgres(
                 )
 
             src_cur.close()
+            # X-93: every row on this route enters this process — fold the
+            # bound values into a real value digest, never dest_count:.
+            digest = SqlCopyDigest(
+                target_cols,
+                sort_key=target_cols[0] if target_cols else None,
+                dest_db_type="postgresql",
+                dest_types=dict(zip(target_cols, pg_ddls, strict=True)),
+            )
             if select_sql:
                 _fifo_mysql_into_pg(
                     source_conn,
@@ -630,6 +671,7 @@ def copy_mysql_to_postgres(
                     select_sql=select_sql,
                     dest_ref=dest_ref,
                     columns=target_cols,
+                    digest=digest,
                 )
                 dest_conn.commit()
 
@@ -654,7 +696,31 @@ def copy_mysql_to_postgres(
                         )
             dest_conn.commit()
             source_conn.commit()
-            proof = f"dest_count:{dest_count}"
+            # X-93: re-read the scope this run wrote and compare the digest —
+            # the proof is sql_rows_sha256, not a count token.
+            if select_sql:
+                col_list = ", ".join(_pg_ident(c) for c in target_cols)
+                loaded_preds = [
+                    str(p.get("dest_pred") or "TRUE")
+                    for p in partitions
+                    if p.get("action") in ("load", "reload")
+                ]
+                if loaded_preds:
+                    dst_cur.execute(
+                        f"SELECT {col_list} FROM {dest_ref} WHERE "  # nosec B608
+                        + " OR ".join(f"({p})" for p in loaded_preds)
+                    )
+                else:
+                    dst_cur.execute(f"SELECT {col_list} FROM {dest_ref}")  # nosec B608
+                reread = dst_cur.fetchall()
+                proof = sql_copy_proof(digest, reread)
+                proof_scope = "mapped_columns"
+            else:
+                # Nothing was written this run (every partition skipped —
+                # verified at its own copy run); the per-partition count
+                # checks above are this run's proof.
+                proof = f"pk_partition_counts:{dest_count}"
+                proof_scope = "partition_dest_count_equals_source_snapshot"
             partition_proof = [
                 {
                     "lo": _jsonable_bound(p.get("lo")),
@@ -687,11 +753,7 @@ def copy_mysql_to_postgres(
                     "tinyint1_evidence_widened": x59_widened,
                 },
             dest_table_existed_before=existed_before,
-                proof_scope=(
-                    "partition_dest_count_equals_source_snapshot"
-                    if partition_proof
-                    else "dest_count_equals_source_snapshot_count"
-                ),
+                proof_scope=proof_scope,
             )
     except Exception:
         # The failed COPY leaves the connection in an aborted transaction —
