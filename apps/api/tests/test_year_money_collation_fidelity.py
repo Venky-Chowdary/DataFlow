@@ -71,7 +71,8 @@ def test_quarantine_unfit_years():
 
 
 def test_pg_money_and_sqlserver_money_scale():
-    assert _pg_to_logical("money") == "DECIMAL(19,4)"
+    # X-77: PG money stores int64 cents — scale 2, not MSSQL MONEY's scale 4.
+    assert _pg_to_logical("money") == "DECIMAL(19,2)"
     assert parse_decimal_precision_scale("MONEY") == (19, 4)
     assert parse_decimal_precision_scale("SMALLMONEY") == (10, 4)
     assert ddl_type("sqlserver", "MONEY") == "MONEY"

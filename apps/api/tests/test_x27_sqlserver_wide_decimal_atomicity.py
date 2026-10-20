@@ -155,6 +155,11 @@ class _FakeSrcCursor:
     def fetchone(self):
         return (self.count,)
 
+    def fetchall(self):
+        # X-59's information_schema probe asks for every column's declared
+        # type; an empty answer means no tinyint(1) evidence to widen.
+        return []
+
     def __enter__(self):
         return self
 

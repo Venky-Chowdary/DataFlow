@@ -123,6 +123,7 @@ def test_edge_types_csv_to_postgresql():
     assert rows[1][3] == Decimal("0.025")
     assert rows[1][4] == Decimal("0")
     assert bytes(rows[1][5]) == b"world"
-    # A present CSV blank is stored text. Numeric and temporal blanks stay NULL.
-    assert rows[1][6] == ""
+    # X-87/X-88 one rule: an unquoted empty CSV text cell is SQL NULL on
+    # every destination engine, same as numeric and temporal blanks.
+    assert rows[1][6] is None
     assert rows[1][7] is False

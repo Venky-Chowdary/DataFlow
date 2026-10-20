@@ -54,7 +54,9 @@ from services.transform_engine import (
     apply_transform,
     decimal_wire_value,
     reset_active_number_locale,
+    reset_strict_number_reading,
     set_active_number_locale,
+    set_strict_number_reading,
 )
 from services.type_system import (
     instant_date_carrier,
@@ -4592,7 +4594,14 @@ def fingerprint_for_reconcile(
             and re.search(r"(?:[+-]\d{1,2}:\d{2}|[Zz])\s*$", wire.strip())
             and _TIME_WIRE_RE.match(wire.strip())
         )
+        # Gate-8 compares what the writer stored — it does not re-decide
+        # whether strict validation would have accepted the source text.
+        # The writer parsed under the run's declared locale (where
+        # ``refuse_comma_decimal`` is suppressed); clearing strict here keeps
+        # the forensic fold symmetric, or a stored EU-comma value
+        # ('2.000,50' → 2000.50) false-fails its own read-back.
         token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+        strict_tok = set_strict_number_reading(False)
         try:
             try:
                 if not _offset_time_text:
@@ -4601,6 +4610,7 @@ def fingerprint_for_reconcile(
                 pass
         finally:
             reset_active_number_locale(token)
+            reset_strict_number_reading(strict_tok)
         # Fingerprint the instant at the granularity the carrier keeps, or a
         # declared narrowing (Snowflake TIMESTAMP → MySQL DATETIME) reports as
         # a whole-column checksum mismatch with no column named.

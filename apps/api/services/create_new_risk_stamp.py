@@ -175,13 +175,21 @@ def apply_create_new_risk_stamps(
         if locking_risks:
             row["requires_review"] = True
             if (
-                (not row.get("fidelity") or row.get("fidelity") == "lossless")
+                (
+                    not row.get("fidelity")
+                    or str(row.get("fidelity")) in {"preserve", "lossless"}
+                )
                 and (
                     is_lossy_coercion(src, tgt, dest_db=db)
                     or is_precision_collapse_coercion(src, tgt, dest_db=db)
                 )
             ):
                 row["fidelity"] = "lossy_cast"
+                # A locking precision collapse is a lossy conversion — the
+                # Lossy/POTENTIALLY_LOSSY band demands the Risk Contract
+                # before Execute, same as the verdict-derived flag.
+                row["conversion_class"] = "lossy"
+                row["requires_risk_contract"] = True
             # Vary confidence: lossy create-new must not look like identity slam-dunk.
             try:
                 base = float(row.get("confidence") or IDENTITY_PASSTHROUGH_CONFIDENCE)
