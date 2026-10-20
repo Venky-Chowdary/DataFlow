@@ -26,7 +26,9 @@ from typing import Any
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mongo_sink import (
+    mongo_temporal_preflight,
     MongoCopyDigest,
+    mongo_decimal_over34_columns,
     abort_created_mongo,
     insert_many_documents,
     mongo_copy_batch,
@@ -160,6 +162,7 @@ def copy_sqlserver_to_mongo(
         live_l = {k.lower(): v for k, v in live.items()}
         for col in source_cols:
             declared = live_l.get(col.lower()) or ""
+            mongo_temporal_preflight(col, declared)
             if not sqlserver_mongo_type_is_copy_safe(declared):
                 raise FastPathUnavailable(
                     f"source column {col!r} type {declared} is not Mongo COPY-safe"
@@ -183,6 +186,7 @@ def copy_sqlserver_to_mongo(
             return prepared
         coll, created_here, mongo_write = prepared
         digest = MongoCopyDigest()
+        x61_over34 = mongo_decimal_over34_columns(live)
         inserted = _select_insert_many(
             source_conn,
             coll,
@@ -198,7 +202,10 @@ def copy_sqlserver_to_mongo(
             inserted=inserted,
             mongo_write=mongo_write,
             source_digest=digest,
-            extra_snapshot=extra,
+            extra_snapshot=(
+                {**extra, "decimal_over34_text_carrier": x61_over34}
+                if x61_over34 else extra
+            ),
         )
     except Exception:
         abort_created_mongo(coll, created_here)

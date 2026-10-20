@@ -4426,7 +4426,11 @@ def fingerprint_for_reconcile(
         # Python ``None`` but is NOT SQL NULL: it gets its own token, so a
         # tamper JSON-null -> SQL NULL (or back) still mismatches. Non-JSON
         # garbage stays a plain string fingerprint (real corruption still fails).
-        if ddl_type.strip().lower() in {"json", "jsonb"}:
+        if ddl_type.strip().lower() in {"json", "jsonb", "object", "array"}:
+            # 'object'/'array' are the Mongo carrier spellings for
+            # LOGICAL_JSON/LOGICAL_ARRAY — a MySQL JSON column lands there
+            # as an embedded doc/string and must compare semantically too
+            # (X-63: JSON literal null vs 'null' string false-fail).
             return _json_cell_fingerprint(wire)
         # X-52: BIT(n>1)/VARBIT cells compare as the integer the bits
         # represent — '00000101' (PG bitstring read-back), 5 (integer wire)

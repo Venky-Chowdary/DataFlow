@@ -23,7 +23,9 @@ from typing import Any
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mongo_sink import (
+    mongo_temporal_preflight,
     MongoCopyDigest,
+    mongo_decimal_over34_columns,
     abort_created_mongo,
     insert_many_documents,
     mongo_copy_batch,
@@ -135,6 +137,7 @@ def copy_sqlite_to_mongo(
         live_l = {k.lower(): v for k, v in live.items()}
         for col, ddl in zip(source_cols, mongo_ddls, strict=True):
             declared = live_l.get(col.lower())
+            mongo_temporal_preflight(col, declared or "")
             if declared is None:
                 raise FastPathUnavailable(f"source column {col!r} absent")
             if not sqlite_mongo_type_is_copy_safe(declared) or (
@@ -159,6 +162,7 @@ def copy_sqlite_to_mongo(
             return prepared
         coll, created_here, mongo_write = prepared
         digest = MongoCopyDigest()
+        x61_over34 = mongo_decimal_over34_columns(live)
 
         src_cur = source_conn.cursor()
         src_cur.execute(select_sql)
@@ -193,7 +197,11 @@ def copy_sqlite_to_mongo(
             inserted=inserted,
             mongo_write=mongo_write,
             source_digest=digest,
-            extra_snapshot={"sqlite_read": "select"},
+            extra_snapshot=(
+                {"decimal_over34_text_carrier": x61_over34, "sqlite_read": "select"}
+                if x61_over34
+                else {"sqlite_read": "select"}
+            ),
         )
     except Exception:
         abort_created_mongo(coll, created_here)

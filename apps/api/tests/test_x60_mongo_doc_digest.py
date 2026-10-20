@@ -76,12 +76,12 @@ def test_x60_decimal128_and_null_wire_forms():
     assert d1.counts == d2.counts
 
 
-def test_x60_binary_value_declines_as_before():
-    # bytes still refuse in sql_value_to_bson (X-64 tracks Binary-typed dest)
-    from services.copy_fast_path import FastPathUnavailable
+def test_x60_binary_value_binds_as_bson_binary():
+    # X-64: bytes bind as BSON Binary subtype 0 (was FastPathUnavailable).
+    from bson.binary import Binary
 
-    with pytest.raises(FastPathUnavailable):
-        sql_value_to_bson(b"\x01")
+    bound = sql_value_to_bson(b"\x01")
+    assert isinstance(bound, Binary) and bound.subtype == 0
 
 
 _LIVE = os.environ.get("DATAFLOW_X60_LIVE") == "1"
@@ -94,3 +94,67 @@ def test_x60_mongo_clean_full_checksum_and_tamper(src):
     'inside the engines' text); tamper id 1 fails, names culprit id 1,
     records 0, collection dropped."""
     pytest.fail("live leg — runs on the user's engine matrix")
+
+
+def test_x61_decimal_over34_lands_as_exact_text() -> None:
+    from decimal import Decimal
+    from bson.decimal128 import Decimal128
+
+    from services.copy_mongo_sink import (
+        mongo_decimal_over34_columns,
+        sql_value_to_bson,
+    )
+
+    over = sql_value_to_bson(Decimal("12345678901234567890123456789012345.678"))
+    assert isinstance(over, str) and over.startswith("1234567890")
+    under = sql_value_to_bson(Decimal("1234567890123456789012345678901.23"))
+    assert isinstance(under, Decimal128)
+    assert mongo_decimal_over34_columns(
+        {"a": "decimal(38,10)", "b": "decimal(30,10)", "c": "int"}
+    ) == ["a"]
+
+
+def test_x63_mongo_object_array_ddls_fingerprint_json_semantically() -> None:
+    from services.reconciliation import fingerprint_for_reconcile as _fp
+
+    # MySQL JSON 'null' vs a Mongo string/doc carrier: equal as JSON null,
+    # distinct from SQL NULL — and whitespace/key-order insensitive.
+    assert _fp("null", ddl_type="json") == _fp("null", ddl_type="object")
+    assert _fp("null", ddl_type="json") != _fp(None, ddl_type="object")
+    assert _fp('{"a": 1, "b": [2,3]}', ddl_type="json") == _fp(
+        '{"b":[2,3],"a":1}', ddl_type="array"
+    )
+
+
+def test_x64_binary_binds_bson_binary_subtype0() -> None:
+    from bson.binary import Binary
+
+    from services.copy_mongo_sink import _mongo_val_wire, sql_value_to_bson
+
+    bound = sql_value_to_bson(b"\xde\xad\xbe\xef")
+    assert isinstance(bound, Binary) and bound.subtype == 0
+    # culprit renders hex (X-47), not base64
+    assert _mongo_val_wire(b"\xde\xad") == "bin:dead"
+
+
+def test_x64_mysql_mongo_gate_allows_binary_bases() -> None:
+    from services.copy_mysql_mongo import mysql_mongo_type_is_copy_safe
+
+    assert mysql_mongo_type_is_copy_safe("varbinary(16)")
+    assert mysql_mongo_type_is_copy_safe("blob")
+    assert not mysql_mongo_type_is_copy_safe("geometry")
+
+
+def test_x65_temporal_preflight_names_column_and_choices() -> None:
+    import pytest
+
+    from services.copy_fast_path import FastPathUnavailable
+    from services.copy_mongo_sink import mongo_temporal_preflight
+
+    mongo_temporal_preflight("c", "int")  # non-temporal: no-op
+    with pytest.raises(FastPathUnavailable) as exc:
+        mongo_temporal_preflight("my_col", "datetime(6)")
+    msg = str(exc.value)
+    assert "'my_col'" in msg and "datetime(6)" in msg
+    assert "BSON Date" in msg and "ISO text" in msg
+    assert "µs" in msg or "microsecond" in msg.lower()

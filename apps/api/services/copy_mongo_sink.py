@@ -56,6 +56,13 @@ def sql_value_to_bson(value: Any) -> Any:
     if isinstance(value, Decimal):
         from bson.decimal128 import Decimal128
 
+        # X-61: Decimal128 tops out at 34 significant digits — binding a
+        # DECIMAL(38,10) raised a raw decimal.Inexact. Carry canonical plain
+        # decimal text instead (exact); the verifier compares decoded
+        # Decimals, and the service records the column in the typed finding
+        # ``decimal_over34_text_carrier`` on the run's source_snapshot.
+        if len(value.as_tuple().digits) > 34:
+            return format(value, "f")
         return Decimal128(value)
     if isinstance(value, int) and not isinstance(value, bool) and not (
         -(2**63) <= value <= 2**63 - 1
@@ -68,7 +75,11 @@ def sql_value_to_bson(value: Any) -> Any:
 
         return Decimal128(Decimal(value))
     if isinstance(value, (bytes, bytearray, memoryview)):
-        raise FastPathUnavailable("binary SQL field is not Mongo COPY-safe")
+        # X-64: binary lands as BSON Binary subtype 0, byte-exact — never
+        # base64 text (that was a write-only self-verify like X-52).
+        from bson.binary import Binary
+
+        return Binary(bytes(value))
     return value
 
 
@@ -195,6 +206,43 @@ def mongo_collection_counts(coll: Any) -> Counter[str]:
             _mongo_doc_wire(doc).encode("utf-8")
         ).hexdigest()] += 1
     return counts
+
+
+_MONGO_TEMPORAL_BASES = frozenset(
+    {"DATETIME", "DATETIME2", "DATETIMEOFFSET", "TIMESTAMP", "TIME"}
+)
+
+
+def mongo_temporal_preflight(col: str, declared: str) -> None:
+    """X-65: refuse temporal source types at plan time, naming the column and
+    the two carrier choices — never a bare runtime bind error after the
+    user approved the plan. BSON Date is millisecond-precision, so a
+    DATETIME(6)/TIME(6) column also loses µs; that is stated in the refusal.
+    """
+    base = (declared or "").strip().upper().split("(")[0].strip()
+    if base in _MONGO_TEMPORAL_BASES:
+        raise FastPathUnavailable(
+            f"source column {col!r} type {declared} — MongoDB has no naive "
+            "wall-clock date type: choose the UTC-normalized BSON Date "
+            "carrier (assumes UTC, and µs truncate to ms — a typed info "
+            "finding is recorded) or the ISO text carrier (µs preserved) "
+            "in Map, then re-run"
+        )
+
+
+def mongo_decimal_over34_columns(types: Any) -> list[str]:
+    """Columns declared DECIMAL(p>34[,s]) — past Decimal128's exact range
+    (X-61). The service records these as ``decimal_over34_text_carrier``;
+    cells bind canonical text via ``sql_value_to_bson``. ``types`` maps
+    column -> declared type string."""
+    import re as _re
+
+    out: list[str] = []
+    for name, declared in (types or {}).items():
+        m = _re.match(r"decimal\((\d+)", str(declared or "").lower())
+        if m and int(m.group(1)) > 34:
+            out.append(str(name))
+    return out
 
 
 def insert_many_documents(

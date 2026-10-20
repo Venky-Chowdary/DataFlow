@@ -1,10 +1,6 @@
 """PostgreSQL COPY text → MongoDB insert_many (cross-engine bulk).
 
-This is **not** ``mongofrom services.copy_mongo_sink import (
-    MongoCopyDigest,
-    mongo_collection_counts,
-)
-import``. One PostgreSQL ``REPEATABLE READ``
+This is **not** ``mongoimport``. One PostgreSQL ``REPEATABLE READ``
 snapshot streams ``COPY (SELECT …) TO STDOUT`` text; decoded rows become
 BSON documents and ``insert_many`` (unordered) loads them. Dest COUNT is
 ``count_documents({})`` — never ``estimatedDocumentCount``. Empty dest
@@ -200,6 +196,8 @@ class _CopyInsertManySink:
         self._expected_cols = len(target_cols)
         self._raw = bytearray()
         self._batch: list[dict[str, Any]] = []
+        from services.copy_mongo_sink import MongoCopyDigest
+
         self._digest = MongoCopyDigest()
         self.rows = 0
 
@@ -322,6 +320,9 @@ def copy_postgres_to_mongo(
         live_l = {k.lower(): v for k, v in live.items()}
         for col in source_cols:
             declared = live_l.get(col.lower()) or ""
+            from services.copy_mongo_sink import mongo_temporal_preflight
+
+            mongo_temporal_preflight(col, declared)
             if not declared:
                 raise FastPathUnavailable(f"source column {col!r} absent")
             if not pg_mongo_type_is_copy_safe(declared):
@@ -370,6 +371,11 @@ def copy_postgres_to_mongo(
                 f"{dest_count} != source snapshot {source_count}"
             )
         _client2, coll2 = mongo_collection(dest_cfg, dest_table)
+        from services.copy_mongo_sink import (
+            mongo_collection_counts,
+            mongo_decimal_over34_columns,
+        )
+
         dest_counts = mongo_collection_counts(coll2)
         if dest_counts != sink._digest.counts:
             culprits = sink._digest.diff_render(dest_counts)
@@ -395,6 +401,7 @@ def copy_postgres_to_mongo(
                 "shard_mode": "table",
                 "mongo_write": mongo_write,
                 "source_pk": list(shape.primary_key or []),
+                "decimal_over34_text_carrier": mongo_decimal_over34_columns(live),
             },
             proof_scope="mongo_doc_digest_full_checksum",
         )
