@@ -649,9 +649,9 @@ def format_wire_value(value: Any, source_type: str, *, engine: str = "") -> str 
         # was gone even though the value had one.
         if coerced.tzinfo is not None and coerced.utcoffset() is not None:
             return coerced.isoformat(sep=" ")
-        if coerced.microsecond:
-            return coerced.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
-        return coerced.strftime("%Y-%m-%d %H:%M:%S")
+        from services.reconciliation import _canon_dt_text
+
+        return _canon_dt_text(coerced, sep=" ")
     if isinstance(coerced, date) and not isinstance(coerced, datetime):
         return coerced.isoformat()
     if isinstance(coerced, time):

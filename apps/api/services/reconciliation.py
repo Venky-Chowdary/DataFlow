@@ -4369,6 +4369,19 @@ def _json_cell_fingerprint(value: Any) -> str:
         return normalize_cell(str(value))
 
 
+
+def _canon_dt_text(value: _datetime, *, sep: str = "T") -> str:
+    """ISO wall-clock text with a 4-digit year — glibc ``strftime("%Y")`` is
+    unpadded below year 1000, so ``'0001-01-01'`` binds/prints as ``'1-01-01'``
+    and SQL Server reads it as 2001 (X-69 live)."""
+    base = (
+        f"{value.year:04d}-{value.month:02d}-{value.day:02d}{sep}"
+        f"{value.hour:02d}:{value.minute:02d}:{value.second:02d}"
+    )
+    if value.microsecond:
+        return f"{base}.{value.microsecond:06d}".rstrip("0").rstrip(".")
+    return base
+
 def fingerprint_for_reconcile(
     value: Any,
     *,
@@ -4397,7 +4410,17 @@ def fingerprint_for_reconcile(
     tname = (transform or "").strip().lower()
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
-        if value is None:
+        if (
+            isinstance(value, (Decimal, int))
+            and not isinstance(value, bool)
+            and tname in {"decimal", "number", "numeric", "float", "double", "integer", "int"}
+        ):
+            # The sample batch is the writer's post-transform rows: a Decimal/int
+            # is already a parsed number. Re-rendering it as text and re-parsing
+            # under the run's number_locale mangles it — EU reads the canonical
+            # "1.234" as thousands and reports source=1234 vs dest=1.234.
+            converted, err = value, None
+        elif value is None:
             converted, err = None, None
         else:
             converted, err = apply_transform(
@@ -4520,11 +4543,9 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "", strict_t
         # Canonical form is UTC wall-clock without a Z marker so TIMESTAMPTZ
         # sources match NTZ sinks that stored the same UTC components, while
         # offset-aware values still differ from a different naive wall clock.
-        if value.microsecond:
-            return value.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
-        return value.strftime("%Y-%m-%dT%H:%M:%S")
+        return _canon_dt_text(value)
     if isinstance(value, _date):
-        return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
+        return _canon_dt_text(_datetime.combine(value, _time.min))
     if isinstance(value, _time):
         # X-4: TIME columns — DuckDB/PG drivers hand back datetime.time while
         # MySQL drivers hand back timedelta; both must fingerprint identically
@@ -4740,9 +4761,7 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
             else:
                 obj = obj.astimezone(timezone.utc)
             obj = obj.replace(tzinfo=None)
-        if obj.microsecond:
-            return obj.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
-        return obj.strftime("%Y-%m-%dT%H:%M:%S")
+        return _canon_dt_text(obj)
     except ValueError:
         # Fall back: strip invented trailing Z from transform parser.
         if text.endswith("Z") and not aware_or_epoch:
@@ -5102,6 +5121,8 @@ def sample_compare_rows(
     rows_are_paired: bool = False,
     duplicate_policy: str = "",
     inserted_keys: set[str] | list[str] | None = None,
+    source_number_locale: str = "",
+    source_rows_transformed: bool = False,
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
@@ -5588,29 +5609,48 @@ def sample_compare_rows(
             # crosswalk. Comparing the source token to the rewritten dest cell
             # as identity is a false Gate-8 failure of a correct conversion.
             rule_contracts = m.get("rule_contracts")
-            if declared_crosswalk(m) is not None or rule_contracts:
-                converted, err = apply_transform(raw_src, transform or "none")
-                if not err and declared_crosswalk(m) is not None:
-                    converted, xwalk_err = apply_code_crosswalk(converted, m)
-                    if xwalk_err:
-                        converted = None
-                if not err and isinstance(rule_contracts, list):
-                    # Rows a rule contract rejects are quarantined at write —
-                    # never in the dest image. Fingerprint the value the
-                    # writer saw; a failing row must not read as a Gate-8 miss.
-                    from services.rule_compiler.apply import evaluate_contract
-
-                    for contract in rule_contracts:
-                        if evaluate_contract(converted, contract, missing=False):
+            # The writer resolved source transforms under the run's declared
+            # number_locale (EU ``1,234`` → 1.234); the compare must use the
+            # same locale or it re-reads the source text as US grouping
+            # (``1,234`` → 1234) and false-fails a correct write. When the
+            # sample holds the writer's post-transform batch
+            # (``source_rows_transformed``) the cells are already canonical —
+            # re-applying the transform under EU mangles ``1.234`` into 1234,
+            # so fingerprint them as-is.
+            _loc_token = (
+                set_active_number_locale(source_number_locale)
+                if source_number_locale
+                else None
+            )
+            try:
+                if declared_crosswalk(m) is not None or rule_contracts:
+                    converted, err = apply_transform(raw_src, transform or "none")
+                    if not err and declared_crosswalk(m) is not None:
+                        converted, xwalk_err = apply_code_crosswalk(converted, m)
+                        if xwalk_err:
                             converted = None
-                            break
-                src_val = _fingerprint(
-                    converted, transform=None, tgt_col=tgt_col
-                )
-            else:
-                src_val = _fingerprint(
-                    raw_src, transform=transform, tgt_col=tgt_col
-                )
+                    if not err and isinstance(rule_contracts, list):
+                        # Rows a rule contract rejects are quarantined at write —
+                        # never in the dest image. Fingerprint the value the
+                        # writer saw; a failing row must not read as a Gate-8 miss.
+                        from services.rule_compiler.apply import evaluate_contract
+
+                        for contract in rule_contracts:
+                            if evaluate_contract(converted, contract, missing=False):
+                                converted = None
+                                break
+                    src_val = _fingerprint(
+                        converted, transform=None, tgt_col=tgt_col
+                    )
+                else:
+                    src_val = _fingerprint(
+                        raw_src,
+                        transform=None if source_rows_transformed else transform,
+                        tgt_col=tgt_col,
+                    )
+            finally:
+                if _loc_token is not None:
+                    reset_active_number_locale(_loc_token)
             # Destination already applied bind at write — fingerprint without
             # re-transform so read-back bools/JSON match source write-path form.
             tgt_val = _fingerprint(

@@ -90,7 +90,14 @@ def sqlserver_datetime2_bind_text(value: Any, *, precision: int | None) -> Any:
         return clock if not isinstance(value, datetime) else value
     if clock.tzinfo is not None:
         clock = clock.replace(tzinfo=None)
-    text = clock.strftime("%Y-%m-%d %H:%M:%S.%f")
+    # Never strftime("%Y"): glibc does not zero-pad years below 1000, so
+    # '0001-01-01' binds as '1-01-01' and SQL Server silently reads 2001
+    # (X-69 live). isoformat-style explicit fields always give 4 digits.
+    text = (
+        f"{clock.year:04d}-{clock.month:02d}-{clock.day:02d} "
+        f"{clock.hour:02d}:{clock.minute:02d}:{clock.second:02d}"
+        f".{clock.microsecond:06d}"
+    )
     if digits < 6:
         text = text[: -(6 - digits)]
     elif digits > 6:
