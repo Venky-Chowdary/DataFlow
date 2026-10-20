@@ -1601,15 +1601,6 @@ def _float_magnitude_bounds(
     from services.type_system import REAL_IS_DOUBLE_DIALECTS, _normalize_dest_db
 
     dialect = _normalize_dest_db(eng) if eng else ""
-    if base == "real" and dialect in REAL_IS_DOUBLE_DIALECTS:
-        return None
-    if base in {"float4", "float32", "real"} or (
-        base == "float" and width is not None and width <= 24
-    ):
-        # X-56: exact IEEE-754 binary32 range — min positive subnormal
-        # (2**-149) to max (3.4028234663852886e38). Doc figures (1.18e-38 /
-        # 3.40e38) refuse real values the engine binds fine.
-        return (float.fromhex("0x0.000002p-126"), 3.4028234663852886e38)
     sqlserver = eng in {
         "sqlserver",
         "mssql",
@@ -1624,13 +1615,89 @@ def _float_magnitude_bounds(
         "azure_synapse_dedicated",
         "azure_synapse_serverless",
     } or eng.startswith("mssql")
+    if base == "real" and dialect in REAL_IS_DOUBLE_DIALECTS:
+        return None
+    if base in {"float4", "float32", "real"} or (
+        base == "float" and width is not None and width <= 24
+    ):
+        # X-56/X-79: exact IEEE-754 binary32 range — max 3.4028234663852886e38.
+        # SQL Server stores no subnormals: its REAL floor is the minimum
+        # normal (2**-126); engines with real IEEE subnormals keep 2**-149.
+        lo = (
+            1.1754943508222875e-38
+            if sqlserver
+            else float.fromhex("0x0.000002p-126")
+        )
+        return (lo, 3.4028234663852886e38)
     if sqlserver:
-        # X-56: exact IEEE-754 binary64 range — min positive subnormal
-        # (2**-1074) to DBL_MAX. The doc-rounded figures (2.23e-308 /
-        # 1.79e308) refused DBL_MIN/DBL_MAX/-0-class extremes pyodbc binds
-        # exactly; only NaN/±Inf refuse (handled before the bounds check).
-        return (float.fromhex("0x0.0000000000001p-1022"), 1.7976931348623157e308)
+        # X-56/X-89: SQL Server stores no IEEE subnormals — the floor is the
+        # minimum NORMAL value 2**-1022. A 5e-324-class wire refuses (named
+        # subnormal in the message), never reaches a driver that would abort
+        # the whole executemany. NaN/±Inf refuse before the bounds check.
+        return (2.2250738585072014e-308, 1.7976931348623157e308)
     return None
+
+
+# Destinations whose FLOAT/DOUBLE carriers store IEEE ±Infinity literally.
+_FLOAT_INF_DESTS = frozenset({
+    "postgresql",
+    "postgres",
+    "redshift",
+    "cockroachdb",
+    "timescaledb",
+    "alloydb",
+    "yugabytedb",
+    "citus",
+    "supabase",
+    "greenplum",
+    "duckdb",
+    "sqlite",
+    "trino",
+    "presto",
+})
+# NaN is narrower: SQLite binds NaN as NULL (silent loss), MySQL/MSSQL have
+# no NaN literal at all.
+_FLOAT_NAN_DESTS = frozenset({
+    "postgresql",
+    "postgres",
+    "redshift",
+    "cockroachdb",
+    "timescaledb",
+    "alloydb",
+    "yugabytedb",
+    "citus",
+    "supabase",
+    "greenplum",
+    "duckdb",
+    "trino",
+    "presto",
+})
+
+
+def _float4_ddl(ddl_type: str | None) -> bool:
+    """Binary32 carriers — value compare rounds through float4 (X-79)."""
+    ddl = (ddl_type or "").strip().lower()
+    base = ddl.split("(", 1)[0].strip()
+    if base in {"real", "float4", "float32"}:
+        return True
+    if base == "float" and "(" in ddl and ")" in ddl:
+        token = ddl[ddl.find("(") + 1 : ddl.find(")")].split(",", 1)[0].strip()
+        return token.isdigit() and int(token) <= 24
+    return False
+
+
+import struct as _struct
+
+
+def _to_float32(num: float) -> float:
+    """Round to the nearest IEEE binary32 — what a REAL/float4 column stores."""
+    return _struct.unpack("f", _struct.pack("f", num))[0]
+
+
+def _nonfinite_label(num: float) -> str:
+    if num != num:
+        return "NaN"
+    return "Infinity" if num > 0 else "-Infinity"
 
 
 def coerce_float_wire(
@@ -1648,26 +1715,51 @@ def coerce_float_wire(
     def _within_carrier(num: float) -> float:
         bounds = _float_magnitude_bounds(ddl_type, engine)
         if num != num or num in {float("inf"), float("-inf")}:
-            # X-56: on a bounded carrier only NaN/±Inf refuse — the engine has
-            # no storage for them (SQL Server aborts the batch on the bind).
-            if bounds is not None:
-                raise ValueError(
-                    f"float {num!r} is non-finite — {ddl_type or 'FLOAT'} on "
-                    f"{engine or 'destination'} stores no NaN/±Inf "
-                    "— quarantined (one unfit value must not abort the load)"
-                )
-            return num
+            # X-80: ±Inf/NaN refuse only where the carrier cannot store them
+            # (SQL Server/MySQL). DuckDB/SQLite/PG-class engines store ±inf
+            # literally; SQLite cannot hold NaN (it binds as NULL).
+            eng_key = (engine or "").strip().lower()
+            if num != num:
+                if eng_key in _FLOAT_NAN_DESTS:
+                    return num
+            elif eng_key in _FLOAT_INF_DESTS:
+                return num
+            raise ValueError(
+                f"{ddl_type or 'FLOAT'} on {engine or 'destination'} cannot "
+                f"store {_nonfinite_label(num)} — row held in quarantine"
+            )
         if num == 0.0:
             return num
         if bounds is None:
             return num
         lo, hi = bounds
         mag = abs(num)
-        if mag < lo or mag > hi:
+        if mag < lo:
+            raise ValueError(
+                f"float {num!r} is below the smallest representable "
+                f"{ddl_type or 'FLOAT'} on {engine or 'destination'} "
+                f"({lo!r}) — a subnormal this engine cannot store "
+                "— row held in quarantine"
+            )
+        if _float4_ddl(ddl_type):
+            # X-79: the wire renders FLT_MAX as '3.4028235e38' — a double
+            # hair above true FLT_MAX. The value fits iff it rounds to a
+            # finite float32, so compare through the cast, not the double.
+            try:
+                overflow = _to_float32(num) in {float("inf"), float("-inf")}
+            except OverflowError:
+                overflow = True
+            if overflow:
+                raise ValueError(
+                    f"float {num!r} is outside {ddl_type or 'FLOAT'} on "
+                    f"{engine or 'destination'} (carrier {lo!r}..{hi!r}) "
+                    "— row held in quarantine"
+                )
+        elif mag > hi:
             raise ValueError(
                 f"float {num!r} is outside {ddl_type or 'FLOAT'} on "
-                f"{engine or 'destination'} (carrier {lo:.2e}..{hi:.2e}) "
-                "— quarantined (one unfit value must not abort the load)"
+                f"{engine or 'destination'} (carrier {lo!r}..{hi!r}) "
+                "— row held in quarantine"
             )
         return num
 

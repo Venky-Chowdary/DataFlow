@@ -1090,6 +1090,9 @@ def gate8_writer_meta(
     meta: dict[str, Any] = {
         "reconcile_sample": sample,
         "source_row_count": len(mapped_rows),
+        # These rows are the writer's post-transform batch — the Gate-8
+        # compare must fingerprint them as-is, not re-apply the transform.
+        "reconcile_sample_transformed": True,
     }
     if ids is not None:
         meta["written_ids"] = [str(x) for x in ids[: max(0, int(id_limit))]]
@@ -4116,10 +4119,25 @@ def quarantine_unfit_floats(
             if not reason and isinstance(coerced, float) and (
                 coerced != coerced or coerced in {float("inf"), float("-inf")}
             ):
-                reason = (
-                    f"non-finite float into {dialect_label}({typ}) "
-                    "— quarantined (refuse invent)"
+                # X-80: engines that store the literal keep it (the
+                # coerce layer already refused where it cannot).
+                from connectors.sql_bind import (
+                    _FLOAT_INF_DESTS,
+                    _FLOAT_NAN_DESTS,
+                    _nonfinite_label,
                 )
+
+                eng_key = (engine or "").strip().lower()
+                ok = (
+                    eng_key in _FLOAT_NAN_DESTS
+                    if coerced != coerced
+                    else eng_key in _FLOAT_INF_DESTS
+                )
+                if not ok:
+                    reason = (
+                        f"{dialect_label}({typ}) cannot store "
+                        f"{_nonfinite_label(coerced)} — row held in quarantine"
+                    )
             if not reason:
                 continue
             sample = cell_to_string(raw)[:120]
@@ -4253,10 +4271,25 @@ def bind_rows_keeping_numbers(
                 if isinstance(bound, float) and (
                     bound != bound or bound in {float("inf"), float("-inf")}
                 ):
-                    raise ValueError(
-                        f"non-finite float into {dialect_label}({ddl}) "
-                        "— quarantined (refuse silent NULL)"
+                    # X-80: same non-finite policy as the float-column pass —
+                    # only engines that cannot store the literal refuse.
+                    from connectors.sql_bind import (
+                        _FLOAT_INF_DESTS,
+                        _FLOAT_NAN_DESTS,
+                        _nonfinite_label,
                     )
+
+                    eng_key = (engine or "").strip().lower()
+                    ok = (
+                        eng_key in _FLOAT_NAN_DESTS
+                        if bound != bound
+                        else eng_key in _FLOAT_INF_DESTS
+                    )
+                    if not ok:
+                        raise ValueError(
+                            f"{dialect_label}({ddl}) cannot store "
+                            f"{_nonfinite_label(bound)} — row held in quarantine"
+                        )
                 cells[idx] = bound
             except ValueError as exc:
                 sample = cell_to_string(val)[:120]

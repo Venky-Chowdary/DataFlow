@@ -92,6 +92,11 @@ _TIME_FAMILY_DDL_RE = re.compile(
 _TIME_WIRE_RE = re.compile(
     r"^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?\s*(Z|z|[+-]\d{1,2}:\d{2})?$"
 )
+# X-79: binary32 carriers — fingerprint at float4 precision.
+_FLOAT4_DDL_RE = re.compile(
+    r"^(real|float4|float32|float\s*\(\s*(?:[1-9]|1\d|2[0-4])\s*\))$",
+    re.IGNORECASE,
+)
 
 
 def _canon_time_wire(text: str) -> str | None:
@@ -4663,6 +4668,16 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "", strict_t
             return f"{sign}{hh:02d}:{mm:02d}:{ss:09.6f}".rstrip("0").rstrip(".")
         return f"{sign}{hh:02d}:{mm:02d}:{int(ss):02d}"
     if isinstance(value, float):
+        # X-79: a REAL/float4 column stores binary32 — compare at binary32
+        # precision so the source wire ('3.4028235e38') and the read-back
+        # double (3.4028234663852886e38) fold to the same cell.
+        if _FLOAT4_DDL_RE.match(str(ddl_type or "").strip()):
+            try:
+                import struct as _st
+
+                value = _st.unpack("f", _st.pack("f", value))[0]
+            except (OverflowError, _st.error):
+                pass
         # Pass the float through — str(float) keeps IEEE residue and false-fails
         # Gate-8 vs DECIMAL sinks (106.60000000000001 vs 106.6).
         return _canonicalize_number(value) or "nan"
@@ -4801,7 +4816,18 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "", strict_t
     if _looks_like_numeric_wire(text):
         canonical = _canonicalize_number(text)
         if canonical is not None:
-            return canonical
+            if _FLOAT4_DDL_RE.match(str(ddl_type or "").strip()):
+                # X-79: same binary32 fold as the float branch — wire text
+                # and stored float4 must land on one canonical value.
+                try:
+                    import struct as _st
+
+                    canonical = _canonicalize_number(
+                        _st.unpack("f", _st.pack("f", float(canonical)))[0]
+                    )
+                except (OverflowError, ValueError, _st.error):
+                    pass
+            return canonical if canonical is not None else text
         return text
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
