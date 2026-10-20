@@ -4365,6 +4365,19 @@ def _reread_dest_engine_digest(
     return paired[0], digest.checksum, int(digest.row_count)
 
 
+def _dedupe_ctx_engine(
+    cfg_type: Any, endpoint_format: Any, driver_type: str
+) -> str:
+    """Catalog engine type for dedupe-check dialect resolution (X-122).
+
+    ``resolve_driver_type`` canonicalizes duckdb → generic_sql (DuckDB runs
+    on the shared SQLAlchemy driver), which has no SQL dialect and reported
+    'unsupported_destination'. The catalog type is what the dialect map
+    keys on.
+    """
+    return str(cfg_type or endpoint_format or driver_type or "").lower()
+
+
 def _unique_check_dialect(db_type: str) -> str | None:
     """Identifier dialect for post-load rule checks, or ``None`` when the
     destination is not a SQL engine the shared warehouse helper serves
@@ -5663,7 +5676,9 @@ def _run_reconciliation_impl(
             cfg=cfg,
             schema=schema,
             table_name=table_name,
-            engine=db_type,
+            # X-122: catalog type, not the driver key (duckdb → generic_sql
+            # has no dialect and reported 'unsupported_destination').
+            engine=_dedupe_ctx_engine(cfg.get("type"), endpoint.format, db_type),
         )
 
     mapping_dicts = mappings or [{"source": col, "target": col} for col in columns]
@@ -5696,7 +5711,10 @@ def _run_reconciliation_impl(
         # it needs the same coordinates plus the mapping names.
         dedupe_stamp_ctx.update(
             source_cfg=dict(src_cfg),
-            source_db_type=src_type,
+            # X-122: catalog type — same fix as the destination stamp.
+            source_db_type=_dedupe_ctx_engine(
+                src_cfg.get("type"), source_endpoint.format, src_type
+            ),
             source_schema=n5_ctx["source_schema"],
             source_table=n5_ctx["source_table"],
             mappings=n5_ctx["mappings"],
