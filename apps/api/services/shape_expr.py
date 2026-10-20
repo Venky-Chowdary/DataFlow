@@ -773,9 +773,14 @@ def _fn_to_date(value: Any, fmt: Any = None) -> Any:
     pattern = _as_text(fmt) if fmt is not None else None
     if pattern:
         try:
-            return datetime.strptime(text, pattern)
+            moment = datetime.strptime(text, pattern)
         except ValueError as exc:
             raise EvalError(f"'{text}' does not match format '{pattern}'") from exc
+        # X-92: a format with no time directive is a calendar date, not a
+        # midnight datetime — landing datetime(6) widened every DATE column.
+        if not re.search(r"%(?:H|I|M|S|f|p|z|Z|X|c|T|R|r|\+)", pattern):
+            return moment.date()
+        return moment
     from services.transform_engine import apply_transform
 
     iso, err = apply_transform(text, "date")

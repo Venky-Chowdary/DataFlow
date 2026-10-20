@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass, field
+from datetime import date, datetime
 from decimal import Decimal, DecimalException, InvalidOperation
 from typing import Any, Iterable, Mapping, Sequence
 
@@ -1988,6 +1989,10 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
         parsed = _call("to_date", value, options.get("format"))
         zone = options.get("timezone")
         if parsed is not None and zone:
+            # A date-only format now returns a calendar date (X-92): attaching
+            # a zone needs a clock — read the date as local midnight first.
+            if type(parsed) is date:
+                parsed = datetime(parsed.year, parsed.month, parsed.day)
             parsed = _with_timezone(parsed, zone)
         output = options.get("output_format")
         if parsed is not None and output:
@@ -2086,7 +2091,10 @@ def _cast(
         if parsed is None:
             return None
         if to_type == "date":
-            return parsed.date()
+            # X-92: a date-only format already returns a calendar date.
+            return parsed if type(parsed) is date else parsed.date()
+        if type(parsed) is date:
+            parsed = datetime(parsed.year, parsed.month, parsed.day)
         return _with_timezone(parsed, timezone) if timezone else parsed
     raise EvalError(f"'{to_type}' is not a logical type")
 
