@@ -41,6 +41,7 @@ from services.copy_pg_sqlserver import (
     _enable_fast_executemany,
     bind_row_for_sqlserver,
     bulk_executemany,
+    driver_failure_decline,
     pg_sqlserver_copy_batch,
     set_wide_decimal_inputsizes,
     sqlserver_insert_placeholders,
@@ -119,8 +120,6 @@ def copy_mongo_to_sqlserver(
     created_here = False
     session = None
     dst_cur = dest_conn.cursor()
-    _enable_fast_executemany(dst_cur)
-    set_wide_decimal_inputsizes(dst_cur, sqlserver_ddls)
     try:
         session = _start_snapshot_session(client)
         source_count = int(coll.count_documents({}, session=session))
@@ -161,6 +160,12 @@ def copy_mongo_to_sqlserver(
         identity = _has_identity(dst_cur, dst_schema, dest_table)
         if identity:
             dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608
+        # Wide-decimal descriptors live ONLY on this write cursor — pyodbc
+        # applies setinputsizes positionally to every execute, so declaring
+        # them on dst_cur poisons the OBJECT_ID probe/counts (X-40: HY104).
+        write_cur = dest_conn.cursor()
+        _enable_fast_executemany(write_cur)
+        set_wide_decimal_inputsizes(write_cur, sqlserver_ddls)
         try:
             while True:
                 docs = list(islice(cursor, _FIND_BATCH))
@@ -174,14 +179,18 @@ def copy_mongo_to_sqlserver(
                         )
                     )
                     if len(batch) >= batch_size:
-                        bulk_executemany(dst_cur, insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
+                        bulk_executemany(write_cur, insert_sql, [bind_row_for_sqlserver(write_cur, r) for r in batch])
                         copied += len(batch)
                         batch.clear()
             if batch:
-                bulk_executemany(dst_cur, insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
+                bulk_executemany(write_cur, insert_sql, [bind_row_for_sqlserver(write_cur, r) for r in batch])
                 copied += len(batch)
             dest_conn.commit()
         finally:
+            try:
+                write_cur.close()
+            except Exception:
+                logger.debug("SQL Server write cursor close skipped", exc_info=True)
             if identity:
                 try:
                     dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} OFF")  # nosec B608
@@ -216,13 +225,18 @@ def copy_mongo_to_sqlserver(
             },
             proof_scope="dest_count_equals_source_snapshot_count",
         )
-    except Exception:
+    except Exception as exc:
         if created_here:
             try:
                 dst_cur.execute(_ss_drop_sql(dest_ref))
                 dest_conn.commit()
             except Exception:
                 logger.debug("SQL Server dest drop after copy failure skipped", exc_info=True)
+        # Residual driver failure declines to the row path — typed finding,
+        # never raw ODBC text in the job error (X-40).
+        _decline = driver_failure_decline(exc)
+        if _decline is not None:
+            raise _decline from exc
         raise
     finally:
         if session is not None:

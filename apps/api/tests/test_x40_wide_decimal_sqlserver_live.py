@@ -59,6 +59,10 @@ def _cfg(prefix: str, default_port: int) -> dict[str, Any] | None:
             if os.getenv(f"{prefix}_ENCRYPT")
             else {}
         ),
+        "trust_server_certificate": os.getenv(
+            f"{prefix}_TRUST_SERVER_CERTIFICATE", "yes"
+        )
+        in {"1", "true", "yes", "y", "on"},
     }
 
 
@@ -78,7 +82,8 @@ def _pyodbc_conn(dest_cfg: dict[str, Any]):
         f"SERVER={dest_cfg['host']},{dest_cfg['port']};"
         f"DATABASE={dest_cfg['database']};"
         f"UID={dest_cfg['username']};PWD={dest_cfg['password']};"
-        "TrustServerCertificate=yes;"
+        f"TrustServerCertificate={'yes' if dest_cfg.get('trust_server_certificate') else 'no'};"
+        f"Encrypt={dest_cfg.get('encrypt') or 'yes'};"
     )
     return pyodbc.connect(cs, timeout=10)
 
@@ -162,7 +167,9 @@ def test_live_mysql_to_mssql_wide_decimal_binds_exact():
             sqlserver_ddls=["BIGINT", "DECIMAL(38,10)", "VARCHAR(50)"],
             replace_destination=True,
         )
-        assert getattr(result, "rows", 0) == 5 or getattr(result, "count", 0) == 5
+        assert result.rows_copied == 5, (
+            f"rows_copied {result.rows_copied!r} != 5"
+        )
         _assert_exact_readback(mssql, dest_table)
     finally:
         _drop(mssql, dest_table)
@@ -222,7 +229,9 @@ def test_live_pg_to_mssql_wide_decimal_binds_exact():
             sqlserver_ddls=["BIGINT", "DECIMAL(38,10)", "VARCHAR(50)"],
             replace_destination=True,
         )
-        assert getattr(result, "rows", 0) == 5 or getattr(result, "count", 0) == 5
+        assert result.rows_copied == 5, (
+            f"rows_copied {result.rows_copied!r} != 5"
+        )
         _assert_exact_readback(mssql, dest_table)
     finally:
         _drop(mssql, dest_table)

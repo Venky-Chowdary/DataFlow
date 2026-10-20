@@ -41,6 +41,7 @@ from services.copy_pg_sqlserver import (
     _enable_fast_executemany,
     bind_row_for_sqlserver,
     bulk_executemany,
+    driver_failure_decline,
     pg_sqlserver_copy_batch,
     set_wide_decimal_inputsizes,
     sqlserver_insert_placeholders,
@@ -150,8 +151,6 @@ def copy_iceberg_to_sqlserver(
     dest_conn = _ss_connect(dest_cfg)
     created_here = False
     dst_cur = dest_conn.cursor()
-    _enable_fast_executemany(dst_cur)
-    set_wide_decimal_inputsizes(dst_cur, sqlserver_ddls)
     try:
         source_count = _iceberg_source_count(endpoint)
 
@@ -193,10 +192,20 @@ def copy_iceberg_to_sqlserver(
         identity = _has_identity(dst_cur, dst_schema, dest_table)
         if identity:
             dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608
+        # Wide-decimal descriptors live ONLY on this write cursor — pyodbc
+        # applies setinputsizes positionally to every execute, so declaring
+        # them on dst_cur poisons the OBJECT_ID probe/counts (X-40: HY104).
+        write_cur = dest_conn.cursor()
+        _enable_fast_executemany(write_cur)
+        set_wide_decimal_inputsizes(write_cur, sqlserver_ddls)
         try:
-            copied = _arrow_into_sqlserver(dst_cur, pa_table, insert_sql, batch_size)
+            copied = _arrow_into_sqlserver(write_cur, pa_table, insert_sql, batch_size)
             dest_conn.commit()
         finally:
+            try:
+                write_cur.close()
+            except Exception:
+                logger.debug("SQL Server write cursor close skipped", exc_info=True)
             if identity:
                 try:
                     dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} OFF")  # nosec B608
@@ -232,13 +241,18 @@ def copy_iceberg_to_sqlserver(
             },
             proof_scope="dest_count_equals_source_snapshot_count",
         )
-    except Exception:
+    except Exception as exc:
         if created_here:
             try:
                 dst_cur.execute(_ss_drop_sql(dest_ref))
                 dest_conn.commit()
             except Exception:
                 logger.debug("SQL Server dest drop after copy failure skipped", exc_info=True)
+        # Residual driver failure declines to the row path — typed finding,
+        # never raw ODBC text in the job error (X-40).
+        _decline = driver_failure_decline(exc)
+        if _decline is not None:
+            raise _decline from exc
         raise
     finally:
         try:

@@ -47,6 +47,7 @@ from services.copy_pg_sqlserver import (
     _enable_fast_executemany,
     bind_row_for_sqlserver,
     bulk_executemany,
+    driver_failure_decline,
     pg_sqlserver_copy_batch,
     set_wide_decimal_inputsizes,
     sqlserver_insert_placeholders,
@@ -155,8 +156,6 @@ def copy_mysql_to_sqlserver(
     pk_map: tuple[str, str] | None = None
     preserve_dest_on_failure = False
     dst_cur = dest_conn.cursor()
-    _enable_fast_executemany(dst_cur)
-    set_wide_decimal_inputsizes(dst_cur, sqlserver_ddls)
     try:
         with source_conn.cursor() as src_cur:
             src_cur.execute("SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ")
@@ -277,17 +276,29 @@ def copy_mysql_to_sqlserver(
         identity = _has_identity(dst_cur, dst_schema, dest_table)
         if identity:
             dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608
+        # Wide-decimal descriptors are declared ONLY on this write cursor.
+        # pyodbc applies ``setinputsizes`` positionally to every execute on
+        # the cursor, so declaring them on ``dst_cur`` poisons the
+        # OBJECT_ID probe / range counts with DECIMAL descriptors
+        # (X-40: HY104 'Invalid precision value' on the existence probe).
+        write_cur = dest_conn.cursor()
+        _enable_fast_executemany(write_cur)
+        set_wide_decimal_inputsizes(write_cur, sqlserver_ddls)
         try:
             for sql in to_copy:
                 _select_into_sqlserver(
                     source_conn,
-                    dst_cur,
+                    write_cur,
                     select_sql=sql,
                     insert_sql=insert_sql,
                     batch_size=batch_size,
                 )
                 dest_conn.commit()
         finally:
+            try:
+                write_cur.close()
+            except Exception:
+                logger.debug("SQL Server write cursor close skipped", exc_info=True)
             if identity:
                 try:
                     dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} OFF")  # nosec B608
@@ -353,7 +364,7 @@ def copy_mysql_to_sqlserver(
                 else "dest_count_equals_source_snapshot_count"
             ),
         )
-    except Exception:
+    except Exception as exc:
         # A table this run created (or an existing dest that was empty before)
         # must end byte-identical to before the failure — never a partial
         # commit. PK-shard resume preserves committed rows only for a
@@ -380,6 +391,11 @@ def copy_mysql_to_sqlserver(
                 )
         elif preserve_dest_on_failure:
             raise
+        # A residual driver failure declines to the row path — typed
+        # finding per row, never raw ODBC text in the job error (X-40).
+        _decline = driver_failure_decline(exc)
+        if _decline is not None:
+            raise _decline from exc
         raise
     finally:
         try:

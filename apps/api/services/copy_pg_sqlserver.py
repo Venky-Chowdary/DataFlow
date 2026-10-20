@@ -532,6 +532,30 @@ class _CopyExecutemanySink:
         self._batch.clear()
 
 
+def driver_failure_decline(exc: BaseException) -> "FastPathUnavailable | None":
+    """A driver-layer failure becomes a typed decline, or ``None``.
+
+    Residual pyodbc/pymssql/sqlalchemy errors must never reach the user as
+    raw ODBC text (``('HY090', ...)``). The engine falls back to the row
+    path where the same failure is reported as a typed finding naming the
+    column — so any exception carrying a driver signature is re-raised as
+    ``FastPathUnavailable``. Everything else is left alone (``None``).
+    """
+    if isinstance(exc, FastPathUnavailable):
+        return None
+    mod = type(exc).__module__ or ""
+    if mod.startswith(("pyodbc", "pymssql", "sqlalchemy", "pytds", "tds_")):
+        return FastPathUnavailable(
+            f"SQL Server driver failure ({type(exc).__name__}): {exc}"
+        )
+    text = str(exc)
+    if text.startswith("('") and "]" in text[:120]:
+        return FastPathUnavailable(
+            f"SQL Server driver failure ({type(exc).__name__}): {exc}"
+        )
+    return None
+
+
 def bulk_executemany(cur: Any, insert_sql: str, rows: list[Any]) -> None:
     """``executemany`` that folds driver bind errors into a typed decline.
 
@@ -622,8 +646,7 @@ def copy_postgres_to_sqlserver(
         source_conn.autocommit = False
         src_cur = source_conn.cursor()
         dst_cur = dest_conn.cursor()
-        fast = _enable_fast_executemany(dst_cur)
-        set_wide_decimal_inputsizes(dst_cur, sqlserver_ddls)
+        fast = False
         try:
             src_cur.execute(
                 "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
@@ -795,17 +818,29 @@ def copy_postgres_to_sqlserver(
             identity = _has_identity(dst_cur, dst_schema, dest_table)
             if identity:
                 dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608
+            # Wide-decimal descriptors are declared ONLY on this write
+            # cursor: pyodbc applies ``setinputsizes`` positionally to every
+            # execute on the cursor, so declaring them on ``dst_cur``
+            # poisons the OBJECT_ID probe / range counts with DECIMAL
+            # descriptors (X-40: HY104 'Invalid precision value' live).
+            write_cur = dest_conn.cursor()
+            fast = _enable_fast_executemany(write_cur)
+            set_wide_decimal_inputsizes(write_cur, sqlserver_ddls)
             try:
                 for sql in copy_sqls:
                     _copy_into_sqlserver(
                         src_cur,
-                        dst_cur,
+                        write_cur,
                         copy_sql=sql,
                         insert_sql=insert_sql,
                         converters=converters,
                     )
                     dest_conn.commit()
             finally:
+                try:
+                    write_cur.close()
+                except Exception:
+                    logger.debug("SQL Server write cursor close skipped", exc_info=True)
                 if identity:
                     try:
                         dst_cur.execute(
@@ -881,7 +916,7 @@ def copy_postgres_to_sqlserver(
                 dst_cur.close()
             except Exception:
                 logger.debug("SQL Server dest cursor close skipped", exc_info=True)
-    except Exception:
+    except Exception as exc:
         # A table this run created (or an existing dest that was empty before)
         # must end byte-identical to before the failure — never a partial
         # commit. PK-shard resume preserves committed rows only for a
@@ -902,6 +937,11 @@ def copy_postgres_to_sqlserver(
                 logger.debug("dest truncate after copy failure skipped", exc_info=True)
         elif preserve_dest_on_failure:
             raise
+        # A residual driver failure declines to the row path — typed
+        # finding per row, never raw ODBC text in the job error (X-40).
+        _decline = driver_failure_decline(exc)
+        if _decline is not None:
+            raise _decline from exc
         raise
     finally:
         try:
