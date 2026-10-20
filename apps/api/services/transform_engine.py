@@ -863,6 +863,11 @@ def _parse_datetime_worker(value: str, date_locale: str) -> str | None:
         # like "2026-01-01" must not read its day as an offset.
         if re.search(r"\d{2}:\d{2}", iso):
             iso = re.sub(r"([+-]\d{2})$", r"\1:00", iso)
+        # Sub-microsecond text (MSSQL scale-7 CONVERT read-back, X-66) cannot
+        # parse on py<3.11; the verifier compares at the destination carrier's
+        # microsecond granularity anyway — truncate, never round (the dropped
+        # digits are the declared narrowing disclosed on the report).
+        iso = re.sub(r"(\d{2}:\d{2}:\d{2})\.(\d{6})\d+", r"\1.\2", iso)
         return _to_utc_z(datetime.fromisoformat(iso))
     except ValueError:
         pass

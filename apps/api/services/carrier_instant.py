@@ -23,6 +23,8 @@ truncated instead would fail Gate-8 rather than pass it — the honest direction
 
 from __future__ import annotations
 
+import re
+
 from datetime import date, datetime, time, timedelta
 
 from connectors.sql_temporal import round_to_smalldatetime, sql_base_type
@@ -62,7 +64,12 @@ def carrier_rounded_columns(
     dropped, so the report has to say which columns those were instead of
     claiming full cell fidelity.
     """
-    from services.type_system import temporal_precision_would_narrow
+    from services.type_system import (
+        SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS,
+        destination_temporal_fractional_digits,
+        normalize_logical_type,
+        parse_temporal_fractional_precision,
+    )
 
     out: list[dict[str, object]] = []
     seen: set[str] = set()
@@ -84,9 +91,22 @@ def carrier_rounded_columns(
         ).strip()
         if not target_type or not source_type:
             continue
-        if not temporal_precision_would_narrow(
-            source_type, target_type, dest_db=dest_engine
-        ):
+        # Disclosure predicate, deliberately NOT temporal_precision_would_narrow:
+        # that helper exempts destinations already at their documented FSP cap
+        # (µs on PG/MySQL-class carriers) because the column cannot be widened —
+        # which silenced exactly the disclosure X-66 needs ("never a plain
+        # verified on a lossy column"). Here the question is only whether the
+        # source carries digits the destination cannot store: the comparison
+        # ran at the carrier's granularity, and the report says so.
+        src_digits = parse_temporal_fractional_precision(source_type)
+        if src_digits is None:
+            bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", source_type).strip().upper()
+            if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
+                src_digits = SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
+        tgt_digits = destination_temporal_fractional_digits(
+            target_type, dest_db=dest_engine
+        )
+        if src_digits is None or tgt_digits is None or src_digits <= tgt_digits:
             continue
         seen.add(target)
         out.append({

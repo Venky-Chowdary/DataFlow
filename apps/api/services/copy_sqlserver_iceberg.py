@@ -162,7 +162,7 @@ def copy_sqlserver_to_iceberg(
         isolation = _prepare_source_read(src_cur, source_conn)
         source_hint = "WITH (HOLDLOCK, TABLOCK)" if isolation == "holdlock" else ""
         source_count = _ss_count(src_cur, source_ref, source_hint)
-        select_sql = _select_sql(source_ref, source_cols, "", source_hint)
+        select_sql = _select_sql(source_ref, source_cols, "", source_hint, live)
         src_cur.close()
         src_cur = None  # type: ignore[assignment]
 

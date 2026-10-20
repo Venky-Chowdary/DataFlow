@@ -256,7 +256,7 @@ def copy_sqlserver_to_oracle(
                 source_conn,
                 dst_cur,
                 select_sql=_select_sql(
-                    source_ref, source_cols, clause, source_hint
+                    source_ref, source_cols, clause, source_hint, live
                 ),
                 params=params,
                 insert_sql=insert_sql,

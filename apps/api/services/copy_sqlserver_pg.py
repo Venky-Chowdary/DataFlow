@@ -19,6 +19,7 @@ a mapped single PK.
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 from services.brand_env import getenv_brand
@@ -123,13 +124,48 @@ def _close_ss(conn: Any) -> None:
         logger.debug("SQL Server wrapper close skipped", exc_info=True)
 
 
+_SCALE7_TEMPORAL_RE = re.compile(
+    r"^(datetime2|datetimeoffset|time)\s*\(\s*7\s*\)$", re.I
+)
+
+
+def sqlserver_scale7_select_expr(col: str, declared: str) -> str:
+    """SELECT expression for one source column.
+
+    Drivers hand datetime2(7)/datetimeoffset(7)/time(7) back as microsecond
+    ``datetime`` objects — the 7th fractional digit is silently truncated in
+    the driver, so a tamper in it can never be seen (X-66 live). Read those
+    columns as ISO text with all 7 digits: the fingerprint compares at the
+    destination carrier's granularity and names the narrowing via
+    ``carrier_rounded_columns``.
+    """
+    d = (declared or "").strip()
+    m = _SCALE7_TEMPORAL_RE.match(d)
+    ident = _ss_ident(col)
+    if not m:
+        return ident
+    base = m.group(1).lower()
+    if base == "datetime2":
+        # Style 126 (ISO8601) keeps the declared scale — never 121 (3 digits).
+        return f"CONVERT(varchar(27), {ident}, 126) AS {ident}"
+    if base == "datetimeoffset":
+        return f"CONVERT(varchar(34), {ident}, 127) AS {ident}"
+    # time(7): CAST renders 'hh:mm:ss.nnnnnnn' with all 7 digits.
+    return f"CAST({ident} AS varchar(16)) AS {ident}"
+
+
 def _select_sql(
     table_ref: str,
     source_cols: list[str],
     clause: str,
     source_hint: str,
+    live_types: dict[str, str] | None = None,
 ) -> str:
-    cols = ", ".join(_ss_ident(c) for c in source_cols)
+    live_l = {k.lower(): v for k, v in (live_types or {}).items()}
+    cols = ", ".join(
+        sqlserver_scale7_select_expr(c, live_l.get(c.lower()) or "")
+        for c in source_cols
+    )
     hint = f" {source_hint}" if source_hint else ""
     where = f" WHERE {clause}" if clause and clause != "1=1" else ""
     return f"SELECT {cols} FROM {table_ref}{hint}{where}"  # nosec B608
@@ -345,7 +381,7 @@ def copy_sqlserver_to_postgres(
                 source_conn,
                 dst_cur,
                 select_sql=_select_sql(
-                    source_ref, source_cols, clause, source_hint
+                    source_ref, source_cols, clause, source_hint, live
                 ),
                 params=params,
                 dest_ref=dest_ref,

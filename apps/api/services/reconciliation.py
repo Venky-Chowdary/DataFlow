@@ -4754,6 +4754,12 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     try:
         iso = text[:-1] + "+00:00" if text.endswith("Z") else text
+        # Sub-microsecond text (MSSQL scale-7 read back as CONVERT text, X-66)
+        # cannot parse on py<3.11 and compares at the destination carrier's
+        # microsecond granularity anyway — truncate the fraction to 6 digits,
+        # never round (the dropped 100ns is the declared narrowing Gate-8
+        # discloses via carrier_rounded_columns).
+        iso = re.sub(r"(\d{2}:\d{2}:\d{2})\.(\d{6})\d+", r"\1.\2", iso)
         obj = _datetime.fromisoformat(iso)
         if obj.tzinfo is not None or aware_or_epoch:
             if obj.tzinfo is None:
