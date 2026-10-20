@@ -24,3 +24,24 @@ def test_sandbox_is_writable_so_store_paths_land_inside_it():
 
     path = schedule_store._store_path()
     assert Path(path).resolve() != (_API_ROOT / "data" / "schedules.json").resolve()
+
+
+def test_env_dir_still_wins_when_store_path_is_not_patched(monkeypatch, tmp_path):
+    """The lazy-path contract: in production DATAFLOW_DATA_DIR picks the dir.
+
+    Only a monkeypatched ``STORE_PATH`` overrides it — nothing else may drag
+    the store back to a stale import-time constant.
+    """
+    from services import schedule_store
+
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    assert schedule_store._store_path() == tmp_path / "schedules.json"
+
+
+def test_patched_store_path_wins_over_the_env_dir(monkeypatch, tmp_path):
+    from services import schedule_store
+
+    own = tmp_path / "own.json"
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "env"))
+    monkeypatch.setattr(schedule_store, "STORE_PATH", own)
+    assert schedule_store._store_path() == own
