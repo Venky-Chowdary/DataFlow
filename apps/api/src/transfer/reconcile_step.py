@@ -1211,7 +1211,32 @@ def _transform_applied_proof(
 
         runner = ShapeRunner(parsed, typed_values=_itvs(src_type))
         src_cfg = resolve_connector_config(source_endpoint)
-        read_cols = list(runner.recipe.input_columns or columns)
+        # X-99 — the seeded column set can carry recipe-PRODUCED columns
+        # (rk, first, label, batch…): the source table has no such column,
+        # so the re-read SELECT died on UndefinedColumn and every shaped
+        # run ended "unverifiable". Read only real source columns — the
+        # recipe's declared inputs when it names them, else the seeded
+        # set minus produced columns, intersected with the source schema.
+        _declared_inputs = [
+            str(c) for c in (shape_recipe.get("input_columns") or []) if c
+        ]
+        _produced_cols = {
+            str(c) for s in parsed.enabled_steps for c in s.writes
+        }
+        _src_col_set = {str(c) for c in (source_schema or {})}
+        if _declared_inputs:
+            read_cols = [
+                c for c in _declared_inputs if c not in _produced_cols
+            ]
+        else:
+            read_cols = [
+                c
+                for c in (runner.recipe.input_columns or columns)
+                if c not in _produced_cols
+                and (not _src_col_set or c in _src_col_set)
+            ]
+        if not read_cols:
+            read_cols = list(columns)
         expected_checksum = canonical_checksum_from_iter(
             _expected_iter(),
             digest_cols,
