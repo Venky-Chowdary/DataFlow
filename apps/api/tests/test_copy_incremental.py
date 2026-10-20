@@ -2103,19 +2103,23 @@ def test_sqlite_pg_datetime_incremental_append_copy_delta_and_watermark(tmp_path
             ("2024-10-01 20:00:00",),
         )
         conn.commit()
-        with pytest.raises(Exception, match="duplicate|unique|UniqueViolation|Integrity"):
-            _run_inc_from_sqlite(
-                src_path=src_path,
-                src=src,
-                dst=dst,
-                sync_mode="incremental_append",
-                job_id=f"inc-sqlite-pg-dtap-dup-{suffix}",
-                cursor_type="DATETIME",
-            )
+        fourth, ddl4, summary4, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-dtap-dup-{suffix}",
+            cursor_type="DATETIME",
+        )
+        # Append history keeps both versions — the destination must not
+        # declare a unique key on the source PK, so the re-selected row lands.
+        assert fourth == 1, (fourth, ddl4, summary4)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
-            assert int(cur.fetchone()[0]) == 3
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}" WHERE "id" = 1')
+            assert int(cur.fetchone()[0]) == 2
+        assert get_watermark(str(summary4.get("cursor_key") or "")) != stored
     finally:
         conn.close()
         with pg.cursor() as cur:
@@ -2742,21 +2746,23 @@ def test_sqlite_sqlite_incremental_append_copy_delta_and_watermark(tmp_path):
             ("2025-03-02 20:00:00",),
         )
         conn.commit()
-        with pytest.raises(Exception, match="duplicate|unique|UNIQUE|Integrity"):
-            _run_inc_sqlite(
-                src_path=src_path,
-                dst_path=dst_path,
-                src=src,
-                dst=dst,
-                sync_mode="incremental_append",
-                job_id=f"inc-sqlite-ap-dup-{suffix}",
-            )
+        fourth, ddl4, summary4, _ = _run_inc_sqlite(
+            src_path=src_path,
+            dst_path=dst_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-ap-dup-{suffix}",
+        )
+        # Append history keeps both versions — no unique key on the source PK.
+        assert fourth == 1, (fourth, ddl4, summary4)
         dest = sqlite3.connect(dst_path)
         try:
-            assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 3
+            assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
+            assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}" WHERE "id" = 1').fetchone()[0]) == 2
         finally:
             dest.close()
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+        assert get_watermark(str(summary4.get("cursor_key") or "")) != stored
     finally:
         conn.close()
 
@@ -2973,20 +2979,22 @@ def test_sqlite_mysql_date_incremental_append_copy_delta_and_watermark(tmp_path)
             ("2026-04-03",),
         )
         conn.commit()
-        with pytest.raises(Exception, match="duplicate|unique|Duplicate|Integrity"):
-            _run_inc_from_sqlite(
-                src_path=src_path,
-                src=src,
-                dst=dst,
-                dest_mysql=True,
-                sync_mode="incremental_append",
-                job_id=f"inc-sqlite-mysql-date-dup-{suffix}",
-                cursor_type="DATE",
-            )
+        fourth, ddl4, summary4, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-mysql-date-dup-{suffix}",
+            cursor_type="DATE",
+        )
+        assert fourth == 1, (fourth, ddl4, summary4)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
-            assert int(cur.fetchone()[0]) == 3
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}` WHERE `id` = 1")
+            assert int(cur.fetchone()[0]) == 2
+        assert get_watermark(str(summary4.get("cursor_key") or "")) != stored
     finally:
         conn.close()
         with my.cursor() as cur:
@@ -3090,19 +3098,21 @@ def test_sqlite_pg_date_incremental_append_copy_delta_and_watermark(tmp_path):
             ("2026-05-03",),
         )
         conn.commit()
-        with pytest.raises(Exception, match="duplicate|unique|UniqueViolation|Integrity"):
-            _run_inc_from_sqlite(
-                src_path=src_path,
-                src=src,
-                dst=dst,
-                sync_mode="incremental_append",
-                job_id=f"inc-sqlite-pg-date-ap-dup-{suffix}",
-                cursor_type="DATE",
-            )
+        fourth, ddl4, summary4, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-date-ap-dup-{suffix}",
+            cursor_type="DATE",
+        )
+        assert fourth == 1, (fourth, ddl4, summary4)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
-            assert int(cur.fetchone()[0]) == 3
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}" WHERE "id" = 1')
+            assert int(cur.fetchone()[0]) == 2
+        assert get_watermark(str(summary4.get("cursor_key") or "")) != stored
     finally:
         conn.close()
         with pg.cursor() as cur:
@@ -3311,20 +3321,22 @@ def test_sqlite_pg_integer_incremental_append_copy_nine_then_ten(tmp_path):
             assert int(cur.fetchone()[0]) == 3
         conn.execute(f'UPDATE "{src}" SET version = 11 WHERE id = 1')
         conn.commit()
-        with pytest.raises(Exception, match="duplicate|unique|UniqueViolation|Integrity"):
-            _run_inc_from_sqlite(
-                src_path=src_path,
-                src=src,
-                dst=dst,
-                sync_mode="incremental_append",
-                job_id=f"inc-sqlite-pg-int-dup-{suffix}",
-                cursor_type="INTEGER",
-                cursor_field="version",
-            )
+        fourth, ddl4, summary4, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-pg-int-dup-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert fourth == 1, (fourth, ddl4, summary4)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
-            assert int(cur.fetchone()[0]) == 3
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}" WHERE "id" = 1')
+            assert int(cur.fetchone()[0]) == 2
+        assert get_watermark(str(summary4.get("cursor_key") or "")) != stored
     finally:
         conn.close()
         with pg.cursor() as cur:
@@ -3710,21 +3722,23 @@ def test_sqlite_mysql_integer_incremental_append_copy_nine_then_ten(tmp_path):
         assert third == 0, (third, ddl3, summary3)
         conn.execute(f'UPDATE "{src}" SET version = 11 WHERE id = 1')
         conn.commit()
-        with pytest.raises(Exception, match="duplicate|unique|Duplicate|Integrity"):
-            _run_inc_from_sqlite(
-                src_path=src_path,
-                src=src,
-                dst=dst,
-                dest_mysql=True,
-                sync_mode="incremental_append",
-                job_id=f"inc-sqlite-mysql-intap-dup-{suffix}",
-                cursor_type="INTEGER",
-                cursor_field="version",
-            )
+        fourth, ddl4, summary4, _ = _run_inc_from_sqlite(
+            src_path=src_path,
+            src=src,
+            dst=dst,
+            dest_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-sqlite-mysql-intap-dup-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert fourth == 1, (fourth, ddl4, summary4)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
-            assert int(cur.fetchone()[0]) == 3
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(f"SELECT COUNT(*) FROM `{dst}` WHERE `id` = 1")
+            assert int(cur.fetchone()[0]) == 2
+        assert get_watermark(str(summary4.get("cursor_key") or "")) != stored
     finally:
         conn.close()
         with my.cursor() as cur:
@@ -4218,21 +4232,23 @@ def test_mysql_pg_integer_incremental_append_copy_nine_then_ten():
         assert third == 0
         with my.cursor() as cur:
             cur.execute(f"UPDATE `{src}` SET version = 11 WHERE id = 1")
-        with pytest.raises(Exception, match="duplicate|unique|UniqueViolation|Integrity"):
-            _run_inc(
-                src=src,
-                dst=dst,
-                dest_mysql=False,
-                src_mysql=True,
-                sync_mode="incremental_append",
-                job_id=f"inc-mysql-pg-intap-dup-{suffix}",
-                cursor_type="INTEGER",
-                cursor_field="version",
-            )
+        fourth, ddl4, summary4, _ = _run_inc(
+            src=src,
+            dst=dst,
+            dest_mysql=False,
+            src_mysql=True,
+            sync_mode="incremental_append",
+            job_id=f"inc-mysql-pg-intap-dup-{suffix}",
+            cursor_type="INTEGER",
+            cursor_field="version",
+        )
+        assert fourth == 1, (fourth, ddl4, summary4)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
-            assert int(cur.fetchone()[0]) == 3
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+            assert int(cur.fetchone()[0]) == 4
+            cur.execute(f'SELECT COUNT(*) FROM "{dst}" WHERE "id" = 1')
+            assert int(cur.fetchone()[0]) == 2
+        assert get_watermark(str(summary4.get("cursor_key") or "")) != stored
     finally:
         with my.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{src}`")

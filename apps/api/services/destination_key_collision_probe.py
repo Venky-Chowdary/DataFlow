@@ -51,25 +51,6 @@ APPEND_ONLY_SYNC_MODES = frozenset(
     }
 )
 
-# Pure-append HISTORY modes: run N may legitimately re-land a key run N-1
-# already holds, so create-new withholds the source PK/UNIQUE (X-98).
-# incremental_append is NOT one: its watermark admits each key exactly once,
-# so a re-selected key is always an anomaly (source key or watermark
-# regressed) and the destination must carry the PRIMARY KEY to fail closed
-# — otherwise the duplicate lands silently.
-PURE_APPEND_SYNC_MODES = frozenset(
-    {
-        "append",
-        "insert",
-        "full_refresh_append",
-    }
-)
-
-
-def sync_mode_is_pure_append(sync_mode: str) -> bool:
-    """True when the sync's history semantics allow re-landing a held key."""
-    return (sync_mode or "").strip().lower() in PURE_APPEND_SYNC_MODES
-
 MAX_PROBE_VALUES = 500
 
 

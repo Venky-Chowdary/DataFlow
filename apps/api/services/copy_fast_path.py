@@ -324,6 +324,11 @@ def plan_fast_path_create(
     else:
         given = tuple(c for c in (primary_key or []) if c in targets)
     if scope is None or scope.catalog is None or not scope.owns(dest_table):
+        # The fidelity plan withholds the key on append create-new; the same
+        # decision must apply here — a catalog PK the builder "gives" itself
+        # is still a uniqueness constraint an append run cannot honour.
+        if scope is not None and not scope.carry_keys:
+            return FastPathCreate(primary_key=())
         return FastPathCreate(primary_key=given)
     from services.schema_fidelity import resolve_create_fidelity_plan
 

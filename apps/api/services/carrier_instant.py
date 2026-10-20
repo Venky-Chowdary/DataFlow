@@ -103,6 +103,15 @@ def carrier_rounded_columns(
             bare_src = re.sub(r"\s*\(\s*\d+\s*\)", "", source_type).strip().upper()
             if bare_src in {"DATETIME2", "DATETIMEOFFSET"}:
                 src_digits = SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
+            else:
+                # Logical carrier spellings carry no explicit precision —
+                # TIMESTAMP_NTZ et al. still hold the carrier's default
+                # fractional digits; the destination resolver returns the
+                # ANSI/logical family default (6) for them, None for
+                # non-temporal spellings.
+                src_digits = destination_temporal_fractional_digits(
+                    source_type, dest_db=""
+                )
         tgt_digits = destination_temporal_fractional_digits(
             target_type, dest_db=dest_engine
         )

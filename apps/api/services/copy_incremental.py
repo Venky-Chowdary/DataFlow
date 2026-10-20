@@ -44,6 +44,9 @@ from services.copy_fast_path import (
     _quote,
     settle_fast_path_create_on,
 )
+from services.destination_key_collision_probe import (
+    sync_mode_appends_without_key_resolution,
+)
 from services.copy_pg_mysql import _pg_quoted_literal
 from services.keyset_pagination import (
     encode_keyset_bookmark,
@@ -55,13 +58,15 @@ from services.keyset_pagination import (
 def create_key_for_mode(mode: str, dest_pk: str) -> list[str]:
     """Primary-key columns a new incremental table should declare.
 
-    ``incremental_append`` must not create a unique key: a later file that
-    repeats a key is an insert, and a ``{table}_pkey`` constraint fails it.
-    ``incremental_deduped`` still declares the key. An existing key is left
-    in place; this only decides CREATE.
+    Any append-mode run inserts rows without resolving an existing key, so a
+    declared unique key turns a legitimate re-selected row (append history
+    keeps both versions) into a raw driver conflict — the pipeline can never
+    advance past the first source update. ``incremental_deduped`` and upsert
+    still declare the key. An existing key is left in place; this only
+    decides CREATE.
     """
     normalized = (mode or "").strip().lower().replace("-", "_").replace(" ", "_")
-    if normalized == "incremental_append" or not str(dest_pk or "").strip():
+    if sync_mode_appends_without_key_resolution(normalized) or not str(dest_pk or "").strip():
         return []
     return [str(dest_pk)]
 
