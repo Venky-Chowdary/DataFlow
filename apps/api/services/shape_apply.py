@@ -605,6 +605,27 @@ def derived_static_types(
                 working[tgt] = "BIGINT"
                 declared[tgt] = "BIGINT"
             continue
+        # X-116: only structurally-typed outputs are declared here.
+        # nest_json's ``to`` is a JSON object by construction → json (PG
+        # jsonb, MySQL json — was inferred TEXT). unnest's ``index_to`` is a
+        # positional counter → BIGINT. flatten_json keys and unnest's ``to``
+        # are NOT statically typed: the same column legitimately mixes a
+        # JSON object and a plain string across rows, so forcing jsonb
+        # would mis-store the scalars — sample inference keeps them.
+        if step.op == "nest_json":
+            opts = step.options or {}
+            tgt = str(opts.get("to") or step.column or "")
+            if tgt:
+                working[tgt] = "json"
+                declared[tgt] = "json"
+            continue
+        if step.op == "unnest_json":
+            opts = step.options or {}
+            idx = str(opts.get("index_to") or "")
+            if idx:
+                working[idx] = "BIGINT"
+                declared[idx] = "BIGINT"
+            continue
         if step.op not in ("derive_column", "set_value"):
             continue
         target = (
