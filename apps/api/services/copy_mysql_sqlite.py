@@ -83,7 +83,10 @@ def mysql_value_to_sqlite(value: Any) -> Any:
                 "timestamptz MySQL value is not SQLite COPY-safe"
             )
         if value.hour or value.minute or value.second or value.microsecond:
-            return value.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
+            # X-55: keep the declared fractional precision — 'seconds' dropped
+            # .999999/.000001 and every DATETIME(6) transfer failed the census.
+            spec = "microseconds" if value.microsecond else "seconds"
+            return value.replace(tzinfo=None).isoformat(sep=" ", timespec=spec)
         return date(value.year, value.month, value.day).isoformat()
     if isinstance(value, date):
         return value.isoformat()

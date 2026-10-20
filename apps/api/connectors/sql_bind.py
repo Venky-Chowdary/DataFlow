@@ -1606,7 +1606,10 @@ def _float_magnitude_bounds(
     if base in {"float4", "float32", "real"} or (
         base == "float" and width is not None and width <= 24
     ):
-        return (1.18e-38, 3.40e38)
+        # X-56: exact IEEE-754 binary32 range — min positive subnormal
+        # (2**-149) to max (3.4028234663852886e38). Doc figures (1.18e-38 /
+        # 3.40e38) refuse real values the engine binds fine.
+        return (float.fromhex("0x0.000002p-126"), 3.4028234663852886e38)
     sqlserver = eng in {
         "sqlserver",
         "mssql",
@@ -1622,7 +1625,11 @@ def _float_magnitude_bounds(
         "azure_synapse_serverless",
     } or eng.startswith("mssql")
     if sqlserver:
-        return (2.23e-308, 1.79e308)
+        # X-56: exact IEEE-754 binary64 range — min positive subnormal
+        # (2**-1074) to DBL_MAX. The doc-rounded figures (2.23e-308 /
+        # 1.79e308) refused DBL_MIN/DBL_MAX/-0-class extremes pyodbc binds
+        # exactly; only NaN/±Inf refuse (handled before the bounds check).
+        return (float.fromhex("0x0.0000000000001p-1022"), 1.7976931348623157e308)
     return None
 
 
@@ -1632,15 +1639,26 @@ def coerce_float_wire(
     """Normalize IEEE FLOAT/REAL/DOUBLE bind — write-path digit strings → float.
 
     Auto ``1,234`` / ``1.234`` refuse (``float(token)`` invented 1.234). Locale
-    money the write path binds still lands. Non-finite Python floats are kept;
-    string ``NaN``/``Infinity`` stay explicit IEEE wire. Boolean tokens refuse.
+    money the write path binds still lands. NaN/±Inf refuse with a clear
+    message on bounded carriers (SQL Server); unbounded carriers keep the
+    explicit IEEE wire. Boolean tokens refuse.
     A finite value outside the destination carrier raises so that one row is
     quarantined. SQL Server otherwise aborts the whole batch on ``5e-324``.
     """
     def _within_carrier(num: float) -> float:
-        if num != num or num in {float("inf"), float("-inf")} or num == 0.0:
-            return num
         bounds = _float_magnitude_bounds(ddl_type, engine)
+        if num != num or num in {float("inf"), float("-inf")}:
+            # X-56: on a bounded carrier only NaN/±Inf refuse — the engine has
+            # no storage for them (SQL Server aborts the batch on the bind).
+            if bounds is not None:
+                raise ValueError(
+                    f"float {num!r} is non-finite — {ddl_type or 'FLOAT'} on "
+                    f"{engine or 'destination'} stores no NaN/±Inf "
+                    "— quarantined (one unfit value must not abort the load)"
+                )
+            return num
+        if num == 0.0:
+            return num
         if bounds is None:
             return num
         lo, hi = bounds
@@ -1694,7 +1712,10 @@ def coerce_float_wire(
                 f"refuse invent float from boolean token {value!r}"
             )
         if low in _IEEE_NONFINITE_TOKENS:
-            return float(token)
+            # X-56: route through the carrier check — bounded engines (SQL
+            # Server) refuse NaN/±Inf with the same clear message; unbounded
+            # carriers keep the explicit IEEE wire.
+            return _within_carrier(float(token))
         from services.transform_engine import decimal_wire_value
 
         parsed = decimal_wire_value(token)

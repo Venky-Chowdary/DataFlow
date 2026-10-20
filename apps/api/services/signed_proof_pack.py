@@ -97,7 +97,8 @@ def _ladder_fail_veto(ladder: dict[str, Any]) -> FidelityVeto:
     else:
         note = "Column-profile / verification ladder failed — migration not proven."
     if loc:
-        note = f"{note} {loc}"
+        # X-57: the localized culprit (value mismatch, row, column) leads.
+        note = f"{loc} — {note}"
     return FidelityVeto(
         claim_level="failed",
         phase="post_write_failed",
@@ -208,6 +209,11 @@ def apply_fidelity_veto(report: dict[str, Any]) -> dict[str, Any]:
             "row fidelity verified" in lowered
             or "checksums match" in lowered
             or "transfer verified" in lowered
+            # X-57: a count-only engine-copy success sentence is the same lie
+            # on a failed run — and it also explains a proof mode the run did
+            # not deliver. Lead with what failed; drop the count explanation.
+            or lowered.startswith("row count verified")
+            or "set dataflow_engine_digest" in lowered
         )
         if claims_verified or not base:
             # Never leave a success sentence as the job error. That is the
@@ -215,7 +221,8 @@ def apply_fidelity_veto(report: dict[str, Any]) -> dict[str, Any]:
             # Failed still said "Row fidelity verified".
             out["message"] = veto.note
         elif loc and loc not in base:
-            out["message"] = f"{base} — {loc}"
+            # X-57: failure-first — the localized culprit leads, context follows.
+            out["message"] = f"{loc} — {base}"
     return out
 
 
