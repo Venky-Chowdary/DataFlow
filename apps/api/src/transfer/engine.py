@@ -3291,6 +3291,9 @@ class UniversalTransferEngine:
                     dest_summary,
                     recon.get("message", "Reconciliation failed"),
                     recon=recon,
+                    job_id=job_id,
+                    already_persisted=_quarantine_persisted,
+                    canonical_details=canonical_rejected_details,
                 )
                 mongo.update_job_status(
                     job_id,
@@ -4332,6 +4335,9 @@ class UniversalTransferEngine:
                     dest_summary,
                     recon.get("message", "Reconciliation failed"),
                     recon=recon,
+                    job_id=job_id,
+                    already_persisted=_quarantine_persisted,
+                    canonical_details=canonical_rejected_details,
                 )
                 mongo.update_job_status(
                     job_id,
@@ -5254,6 +5260,9 @@ class UniversalTransferEngine:
                     dest_summary,
                     recon.get("message", "Reconciliation failed"),
                     recon=recon,
+                    job_id=job_id,
+                    already_persisted=_quarantine_persisted,
+                    canonical_details=canonical_rejected_details,
                 )
                 mongo.update_job_status(
                     job_id,

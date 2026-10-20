@@ -206,6 +206,9 @@ def _note_failed_batch_undo(
     message: str,
     *,
     recon: dict[str, Any] | None = None,
+    job_id: str = "",
+    already_persisted: list[int] | None = None,
+    canonical_details: list[dict[str, Any]] | None = None,
 ) -> str:
     """Undo note plus an honest quarantine pointer for the operator.
 
@@ -220,13 +223,36 @@ def _note_failed_batch_undo(
     )
     if not isinstance(dest_summary, dict):
         return out
+    # X-96: the undo just decided the destination's fate — only now can the
+    # DLQ write tell litter (dropped created-table) from a retained sibling.
+    # A retained destination keeps its ``{table}_df_quarantine`` table and
+    # the message must name it; a dropped one leaves findings in the
+    # control-plane record. Persist is fail-closed elsewhere, but a failure
+    # here must never mask the run's own verdict — log and fall through.
+    if job_id and request is not None:
+        try:
+            from .job_quarantine import _persist_job_quarantine
+
+            _persist_job_quarantine(
+                job_id,
+                dest_summary,
+                request,
+                already_persisted=already_persisted,
+                canonical_details=canonical_details,
+            )
+        except Exception:  # noqa: BLE001
+            logger.warning(
+                "failed-job dest quarantine persist raised; "
+                "findings remain in the job quarantine record",
+                exc_info=True,
+            )
     qt = str(dest_summary.get("dest_quarantine_table") or "")
     if qt:
         note = (
             f"Rejected row(s) were preserved in the destination table {qt} "
             "for review and replay."
         )
-    elif dest_summary.get("partial_batch_undo") == "cleared":
+    elif dest_summary.get("partial_batch_undo") in {"cleared", "removed"}:
         note = (
             "Rejected-row evidence is retained in this job's quarantine "
             "record for inspection and replay."
