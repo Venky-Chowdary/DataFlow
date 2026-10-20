@@ -2437,6 +2437,13 @@ def stream_file_to_database(
         ]
         return fingerprints, identities
 
+    # X-119 — the create belongs to the first batch that actually writes, not
+    # the first enumerated one: a buffering recipe (rank/sort/dedupe/
+    # aggregate) yields an empty image per source page and emits only its
+    # drain tail, so `idx == first_index` matched nothing and the load hit
+    # ALTER TABLE on a table that was never created.
+    _create_done = {"wrote": False}
+
     def _run_file_write(
         idx: int,
         headers: list[str],
@@ -2444,6 +2451,7 @@ def stream_file_to_database(
         *,
         source_spool: Any = None,
     ) -> tuple[int, str, dict]:
+        first_write = not _create_done["wrote"]
         write_op = partial(
             _write_batch,
             dest_type,
@@ -2454,7 +2462,7 @@ def stream_file_to_database(
             data_rows,
             mappings,
             column_types,
-            create_table=(idx == first_index),
+            create_table=first_write,
             on_checkpoint=None,
             chunk_idx=idx,
             total_chunks=chunks,
@@ -2490,7 +2498,7 @@ def stream_file_to_database(
             ),
         )
         try:
-            return with_retry(
+            wrote = with_retry(
                 write_op,
                 budget=RetryBudget(
                     max_attempts=retry.max_attempts,
@@ -2501,6 +2509,8 @@ def stream_file_to_database(
                 ),
                 replay_safety=replay_safety,
             )
+            _create_done["wrote"] = True
+            return wrote
         except WriteBatchBlocked as blocked:
             details = list(blocked.rejected_details or [])
             if details and job_id:
@@ -3277,6 +3287,27 @@ def stream_file_to_database(
     else:
         dest_summary["source_row_count_source"] = "unmeasured"
         dest_summary.pop("source_row_count", None)
+    if shape_runner is not None:
+        # X-119 — the file path never told Gate-8 what the recipe did, so a
+        # row-reducing recipe (dedupe/aggregate/rank limit) read as a short
+        # delivery: expected source_count vs the smaller written count. Same
+        # stamps the DB path emits.
+        _fx = getattr(shape_runner, "effect", None)
+        _shaped_out = int(getattr(_fx, "rows_shaped_out", 0) or 0)
+        _expanded = int(getattr(_fx, "rows_expanded", 0) or 0)
+        _diverted = int(getattr(_fx, "rows_diverted", 0) or 0)
+        if _shaped_out:
+            dest_summary["rows_shaped_out"] = _shaped_out
+        if _expanded:
+            dest_summary["rows_expanded"] = _expanded
+        if _diverted:
+            # Dedupe losers and divert_rows exits are charged like the DB
+            # path — quarantine evidence counted in rejected_rows so the
+            # conservation ledger balances, not removal.
+            dest_summary["rows_diverted"] = _diverted
+            dest_summary["rejected_rows"] = int(
+                dest_summary.get("rejected_rows") or 0
+            ) + _diverted
 
     if dest_type in ("postgresql", "mysql", "redshift") and job_id:
         try:
