@@ -6453,43 +6453,34 @@ export function TransferPage({
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
           variant="studio"
-          steps={studioFlags.canvas ? [
-            { n: STEP_SOURCE, label: "Connect", shortLabel: "Connect", icon: "upload" },
-            { n: STEP_MAP, label: "Review", shortLabel: "Review", icon: "sparkle" },
-            { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },
-          ] : STEPS}
-          current={studioFlags.canvas
-            ? (step <= STEP_SHAPE ? STEP_SOURCE : step === STEP_VALIDATE ? STEP_MAP : step)
-            : step}
+          // P1-3: canvas mode shows the same six-step flow with the same
+          // separators — the mandated Source→Destination→Transform→Map→
+          // Validate→Run sequence is the product's contract, not a mode.
+          steps={STEPS}
+          current={step}
           onStepClick={(n) => {
             if (!studioFlags.canvas) {
               setStep(n);
               return;
             }
-            if (n === STEP_SOURCE) setStep(STEP_SOURCE);
-            else if (n === STEP_MAP) {
-              if (columnMappings.length) {
-                setStep(STEP_MAP);
-                void executePreflight(undefined, undefined, { stayOnReview: true });
-              } else {
-                void goToMapping();
-              }
-            } else if (n === STEP_RUN) setStep(STEP_RUN);
-          }}
-          canGoTo={(n) => {
-            if (!studioFlags.canvas) {
-              return n < step ||
-                n === STEP_SOURCE ||
-                (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
-                (n === STEP_SHAPE && canRunPreflight) ||
-                (n === STEP_MAP && canRunPreflight) ||
-                (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
-                (n === STEP_RUN && canExecute);
+            if (n === STEP_MAP && columnMappings.length) {
+              setStep(STEP_MAP);
+              void executePreflight(undefined, undefined, { stayOnReview: true });
+            } else if (n === STEP_MAP) {
+              void goToMapping();
+            } else {
+              setStep(n);
             }
-            return n === STEP_SOURCE
-              || (n === STEP_MAP && canRunPreflight)
-              || (n === STEP_RUN && canExecute);
           }}
+          canGoTo={(n) =>
+            n < step ||
+            n === STEP_SOURCE ||
+            (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
+            (n === STEP_SHAPE && canRunPreflight) ||
+            (n === STEP_MAP && canRunPreflight) ||
+            (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
+            (n === STEP_RUN && canExecute)
+          }
         />
         <TransferRouteBar
           sourceLabel={sourceLabel}

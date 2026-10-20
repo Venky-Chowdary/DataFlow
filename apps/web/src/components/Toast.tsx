@@ -103,9 +103,19 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   // overlay, so toasts can never cover content and cannot reflow the page.
   const [dock, setDock] = useState<HTMLElement | null>(null);
   useEffect(() => {
-    const el = document.querySelector<HTMLElement>("[data-df2-toast-dock]");
-    if (el !== dock) setDock(el);
-  });
+    const sync = () => {
+      const el = document.querySelector<HTMLElement>("[data-df2-toast-dock]");
+      setDock((prev) => (prev === el ? prev : el));
+    };
+    sync();
+    // The dock mounts/unmounts inside children without re-rendering this
+    // provider (children prop is referentially stable), so a bare
+    // querySelector-on-render misses it — a toast emitted before the dock
+    // existed would float forever. Observe instead (D-BP-20 residual).
+    const mo = new MutationObserver(sync);
+    mo.observe(document.body, { childList: true, subtree: true });
+    return () => mo.disconnect();
+  }, []);
 
   const host = (
     <div className="dt-toast-host" aria-live="polite" aria-relevant="additions" aria-atomic="false">

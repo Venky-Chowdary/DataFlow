@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { installHermeticStubs } from "./hermetic";
 import { openStudio } from "./support";
 
 /**
@@ -71,8 +72,8 @@ async function assertToastClearance(
   ]);
   const vw = page.viewportSize()?.width ?? 1440;
   if (dockBox && panelBox && stepperBox) {
-    if (vw > 900) {
-      // >=901px: dock lives in the header chrome row — pills must stay inside it.
+    if (vw > 1280) {
+      // >1280px: dock lives in the header chrome row — pills must stay inside it.
       for (const t of toastBoxes) {
         expect(
           t.y >= dockBox.y - 4 &&
@@ -81,7 +82,7 @@ async function assertToastClearance(
         ).toBe(true);
       }
     }
-    // <=900px: the dock drops below the chrome as an overlay strip by design
+    // <=1280px: the dock drops below the chrome as an overlay strip by design
     // — the card/footer intersection checks below still apply.
     const edgeDelta = Math.abs(panelBox.x + panelBox.width - (stepperBox.x + stepperBox.width));
     expect(
@@ -89,6 +90,54 @@ async function assertToastClearance(
       `content right edge must align to the stepper right edge (+/-8px) on ${label} (delta=${edgeDelta.toFixed(1)})`,
     ).toBeLessThanOrEqual(8);
   }
+  // D-BP-23: the header stepper must never crush — every step label fully
+  // rendered (no clipping), labels never overlap each other or a toast,
+  // and the route chip stays readable, at every width.
+  const stepLabels = page.locator(
+    ".df2-transfer-studio-chrome .df2-wizard-studio .df2-wizard-label:visible, " +
+      ".df2-transfer-studio-chrome .df2-wizard-studio .df2-wizard-label-short:visible",
+  );
+  const labelCount = await stepLabels.count();
+  const labelBoxes: { x: number; y: number; width: number; height: number }[] = [];
+  for (let i = 0; i < labelCount; i++) {
+    const el = stepLabels.nth(i);
+    const clipped = await el.evaluate(
+      (n) => n.scrollWidth > n.clientWidth + 1,
+    );
+    expect(
+      clipped,
+      `step label ${i} must not be clipped on ${label}`,
+    ).toBe(false);
+    const box = await el.boundingBox();
+    if (box) labelBoxes.push(box);
+  }
+  const labelTexts = await stepLabels.allTextContents();
+  for (let i = 0; i < labelBoxes.length; i++) {
+    for (let j = i + 1; j < labelBoxes.length; j++) {
+      expect(
+        intersects(labelBoxes[i], labelBoxes[j]),
+        `step labels '${labelTexts[i]}'/'${labelTexts[j]}' must not overlap on ${label}: ${JSON.stringify(labelBoxes[i])} vs ${JSON.stringify(labelBoxes[j])}`,
+      ).toBe(false);
+    }
+    for (const t of toastBoxes) {
+      expect(
+        intersects(labelBoxes[i], t),
+        `step label ${i} must not sit under a toast on ${label}`,
+      ).toBe(false);
+    }
+  }
+  const routeChip = page.locator(".df2-route-bar:visible").first();
+  if (await routeChip.isVisible().catch(() => false)) {
+    const clipped = await routeChip.evaluate(
+      (n) => n.scrollWidth > n.clientWidth + 1,
+    );
+    const box = await routeChip.boundingBox();
+    expect(
+      !clipped && box !== null && box.width >= 80,
+      `route chip must be readable on ${label}`,
+    ).toBe(true);
+  }
+
   if (toastBoxes.length === 0) {
     return; // shell asserted; no live toast to intersect
   }
@@ -121,6 +170,9 @@ async function loadSample(page: Page) {
 
 test.describe("toast/footer clearance (D-BP-11)", () => {
   test.beforeEach(async ({ page }) => {
+    // Hermetic: every endpoint the Source→Validate walk hits is stubbed from
+    // captured fixtures — this spec must pass on plain `vite dev` (no API).
+    await installHermeticStubs(page);
     await page.addInitScript(() => {
       localStorage.removeItem("df.studioSchemaBrowser");
       localStorage.removeItem("df.studioCanvas");

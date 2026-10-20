@@ -2142,9 +2142,13 @@ button.df2-map-band-chip:hover {
   }
 }
 
-/* Viewport fallback when container queries unsupported / very narrow */
+/* Viewport fallback when container queries unsupported / very narrow.
+   display:flex is required — the base row is display:grid, which silently
+   ignores flex-direction and left the wizard squeezed into the `auto`
+   track at 150px (labels overlapping) at <=1280 (D-BP-23). */
 @media (max-width: 1280px) {
   .df2-transfer-studio-chrome-row {
+    display: flex !important;
     flex-direction: column;
     align-items: stretch;
     gap: 6px;
@@ -10515,8 +10519,11 @@ button.df2-vd-assist-toggle:focus-visible {
   font-size: 11px;
 }
 /* When the header row is too narrow to hold the dock, let the stepper and
-   route bar win — the dock hides rather than pushing chrome or overlapping. */
-@media (max-width: 900px) {
+   route bar win — the dock drops out of the chrome row into an overlay
+   strip under the header rather than pushing chrome or overlapping
+   (D-BP-23: at <=1280 the stacked chrome still left a 44vw inline dock
+   crushing the stepper labels). */
+@media (max-width: 1280px) {
   .df2-toast-dock:has(.dt-toast) {
     position: absolute;
     right: 8px;
@@ -10551,11 +10558,17 @@ button.df2-vd-assist-toggle:focus-visible {
    padding keeps the last card fully above the rail boundary. Residual: a
    clear scroll-edge separator (border + elevation) on the rail and a
    deliberate fade so a partially-scrolled card never looks sliced. */
-.df2-page-transfer-studio .df2-validate-scroll {
+.df2-page-transfer-studio .df2-validate-scroll,
+.df2-page-transfer-studio .df2-card-body.df2-validate-body {
   scroll-padding-bottom: 160px;
   padding-bottom: 16px;
-  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
-  mask-image: linear-gradient(to bottom, #000 calc(100% - 24px), transparent 100%);
+  /* Residual: the metric cards were still sliced crisp under the contract
+     rail — the fade must be tall enough to swallow a half-scrolled card
+     (was 24px, invisible) and must live on the element that actually
+     scrolls (.df2-validate-body — .df2-validate-scroll does not exist in
+     this DOM). */
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 64px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 64px), transparent 100%);
 }
 .df2-page-transfer-studio .df2-validate-footer-contract {
   border-top: 1px solid var(--df-border);
@@ -10572,6 +10585,7 @@ button.df2-vd-assist-toggle:focus-visible {
   --df-studio-gutter: 16px;
 }
 .df2-page-transfer-studio .df2-validate-scroll,
+.df2-page-transfer-studio .df2-card-body.df2-validate-body,
 .df2-page-transfer-studio .df2-validate-footer-cdc,
 .df2-page-transfer-studio .df2-validate-footer-contract,
 .df2-page-transfer-studio .df2-validate-footer {
@@ -11922,7 +11936,10 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer.df2-wizard-footer,
 .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer {
   max-height: none !important;
-  flex-wrap: wrap !important;
+  /* D-BP-21: one footer row at >=901px — wrap drops Back+status and the
+     actions onto a second centered line (seen live at 1024). Below 900px
+     the deliberate stacked layout in the media rule below takes over. */
+  flex-wrap: nowrap !important;
   height: auto !important;
 }
 
@@ -11946,6 +11963,14 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   .df2-page-transfer-studio .df2-run-footer {
     flex-wrap: wrap !important;
     justify-content: space-between !important;
+  }
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer {
+    flex-wrap: wrap !important;
   }
 }
 
