@@ -4570,6 +4570,7 @@ def _stream_database_transfer_impl(
     elif src_read_type in REREAD_SCAN_SOURCES:
         # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
         from connectors.sql_snapshot_scan import close_table_scan
+        from services.preflight_source_kind import source_is_record_batch
 
         checksum_started = time.perf_counter()
         fp_accumulator = FingerprintAccumulator()
@@ -4677,6 +4678,12 @@ def _stream_database_transfer_impl(
                     preserve_case=True,
                     dest_kind=dest_bind_dialect,
                     destination_pk_columns=list(pk_target_cols or []) or None,
+                    # The write pass folds '' → SQL NULL on record-batch
+                    # sources; the independent re-read must fold identically
+                    # or Gate-8 reports a false checksum mismatch on blanks.
+                    empty_cells_as_null=source_is_record_batch(
+                        getattr(source, "kind", "") or "database", src_type
+                    ),
                 )
                 reread_holdouts.extend(reread_rejected or [])
                 if mapped:

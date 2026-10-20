@@ -258,9 +258,23 @@ def _proof_file_batches(
         return
     parsed = FileParser.parse(raw, source_file_name or "upload.csv")
     records = getattr(parsed, "data", None) or getattr(parsed, "records", None) or []
+    # Delimited files cannot spell a literal empty string distinct from NULL —
+    # the write pass binds '' as SQL NULL (file_empty_cell_bind at the source
+    # edge), so the proof re-read must fold the same cells or every blank cell
+    # hashes differently and Gate-8 reports a false checksum mismatch.
+    _name_lower = (source_file_name or "").lower()
+    _delimited = _name_lower.endswith((".csv", ".tsv"))
+    if _delimited:
+        from src.transfer.file_stream import file_empty_cell_bind
     batch: list[dict] = []
     for rec in records:
-        batch.append({c: rec.get(c) for c in read_cols})
+        row = {c: rec.get(c) for c in read_cols}
+        if _delimited:
+            row = {
+                c: file_empty_cell_bind(v, "", empty_cell="null")
+                for c, v in row.items()
+            }
+        batch.append(row)
         if len(batch) >= 500:
             yield batch
             batch = []

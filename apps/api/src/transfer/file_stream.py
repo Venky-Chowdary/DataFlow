@@ -1077,6 +1077,16 @@ def fingerprint_parsed_file(
     full_iter = _batch_iterator_for_type(
         file_type, content, batch_size, read_options, declared_name=filename
     )
+    # Same source edge as the write pass: the re-read must see the cells the
+    # writer bound, or every ''→NULL file cell hashes differently and Gate-8
+    # reports a false checksum mismatch on equal data.
+    if file_type in {"csv", "tsv"}:
+        _rr_rule = getattr(read_options, "empty_cell", "null") or "null"
+        _rr_audit: list[int] = [0]
+        full_iter = (
+            _apply_empty_cell_rule(batch, column_types, _rr_rule, _rr_audit)
+            for batch in full_iter
+        )
     if source_filter:
         full_iter = (apply_row_filter(batch, source_filter) for batch in full_iter)
     if incremental and cursor_source_col:

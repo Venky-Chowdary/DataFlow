@@ -63,9 +63,10 @@ def _to_parquet(rows: list[dict]) -> bytes:
     return buf.getvalue()
 
 
-#: A text CSV/TSV cell that is ``""`` stays an empty string. Numeric, temporal,
-#: and boolean blanks are still SQL NULL. JSON, JSONL and Parquet spell a real
-#: null as ``null``, so this fixture writes those cells as None (see below).
+#: An unquoted empty delimited cell is SQL NULL on every engine (X-87/X-88 one
+#: rule) — a CSV cannot spell empty text apart from absent text. JSON, JSONL
+#: and Parquet spell a real null as ``null`` and a real empty string as ``""``,
+#: so this fixture writes those cells as None (see below).
 _NULL_CAPABLE = {"json", "jsonl", "parquet"}
 
 
@@ -141,15 +142,16 @@ def test_file_to_duckdb_preserves_types(fmt: str):
             '{"k":"v"}',
             '["a","b"]',
         )
-        text_blank = "" if fmt in {"csv", "tsv"} else None
+        # Unquoted empty cells land as SQL NULL under the X-87/X-88 rule —
+        # csv/tsv now match json/jsonl/parquet exactly on these cells.
         assert rows[1] == (
             2,
             Decimal("2000.5000"),
-            text_blank,
+            None,
             datetime(2024, 2, 28, 14, 30, 0),
             False,
-            text_blank,
-            text_blank,
+            None,
+            None,
         )
         assert rows[2] == (
             3,
