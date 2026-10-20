@@ -586,6 +586,65 @@ def withhold_append_key_constraints(plan: CreateFidelityPlan) -> CreateFidelityP
     return plan
 
 
+def _retarget_expanding_recipe_pk(
+    plan: CreateFidelityPlan,
+    operator_key_columns: list[str] | None,
+    target_columns: list[str],
+) -> CreateFidelityPlan:
+    """The transform recipe expands rows — the source PK is no longer unique.
+
+    unnest_json / join fanout / union land several rows per source row, so
+    every expanded row repeats its source PRIMARY KEY. Carrying it is a
+    constraint the write provably violates (X-114). A declared produced key
+    — e.g. (id, pos) from unnest index_to — replaces it; with no declared
+    key the destination is created unkeyed and the certificate says why.
+    """
+    if not plan.primary_key:
+        return plan
+    folded = {str(c).casefold(): str(c) for c in target_columns}
+    declared = [
+        folded[str(k).casefold()]
+        for k in (operator_key_columns or [])
+        if str(k or "").casefold() in folded
+    ]
+    source_pk = ", ".join(plan.primary_key)
+    dest = str(getattr(plan.report, "dest_dialect", "") or "").strip().lower()
+    plan.table_constraints = [
+        c
+        for c in plan.table_constraints
+        if not str(c).lstrip().upper().startswith("PRIMARY KEY")
+    ]
+    for item in plan.report.items:
+        if item.aspect == "primary_key" and item.status == "carried":
+            if declared:
+                item.reason = (
+                    f"{item.reason} The transform recipe expands rows "
+                    f"(unnest/fanout/union), so source key ({source_pk}) "
+                    f"repeats per expanded row — the declared key "
+                    f"({', '.join(declared)}) is the destination identity."
+                )
+                item.dest_ddl = f"PRIMARY KEY ({', '.join(_q(c, dest) for c in declared)})"
+            else:
+                item.status = "skipped"
+                item.reason = (
+                    f"The transform recipe expands rows (unnest/fanout/union), "
+                    f"so source key ({source_pk}) repeats per expanded row — "
+                    "carrying it would reject every duplicate. Withheld; "
+                    "declare a produced key (unnest index_to, surrogate_key) "
+                    "to keep destination identity."
+                )
+                item.dest_ddl = ""
+    plan.primary_key = list(declared)
+    if declared:
+        quoted = ", ".join(_q(c, dest) for c in declared)
+        plan.table_constraints.append(f"PRIMARY KEY ({quoted})")
+        for col in declared:
+            plan.column_suffixes.setdefault(col, []).append("NOT NULL")
+            if col not in plan.not_null_columns:
+                plan.not_null_columns.append(col)
+    return plan
+
+
 _FILE_SOURCE_DIALECTS = frozenset({
     "csv", "tsv", "file", "upload", "json", "jsonl", "excel", "xlsx",
     "parquet", "yaml", "yml",
@@ -657,6 +716,7 @@ def resolve_create_fidelity_plan(
     dest_tablespaces: set[str] | None = None,
     carry_keys: bool = True,
     operator_key_columns: list[str] | None = None,
+    expanding_rows: bool = False,
 ) -> CreateFidelityPlan:
     """Build a create-new fidelity plan; always returns a certificate (never silent)."""
     dest = (dest_dialect or "").strip().lower()
@@ -718,6 +778,10 @@ def resolve_create_fidelity_plan(
     )
     if not carry_keys:
         plan = withhold_append_key_constraints(plan)
+    if expanding_rows:
+        plan = _retarget_expanding_recipe_pk(
+            plan, operator_key_columns, target_columns
+        )
     plan = _retarget_explode_parent_pk(plan, mappings, target_columns)
     if table_already_exists:
         # CREATE IF NOT EXISTS will not re-apply constraints — certify honestly.

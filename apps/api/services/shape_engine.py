@@ -1595,13 +1595,24 @@ class ShapeEngine:
         )
 
         raw = row.get(step.column)
-        # SQL NULL and a JSON null are absent objects. Flattening them is a
-        # no-op so one null cell does not fail the run. A present non-object
+        # SQL NULL, the wire NULL sentinel (X-111) and a JSON null are absent
+        # objects. Flattening them never fails the run — and the declared
+        # keys are still produced as NULL (X-112), exactly as a missing key
+        # inside '{}' is: the output schema declared them, so downstream
+        # steps (nest_json) must find them on the row. A present non-object
         # still refuses — flatten will not guess a shape.
-        if raw is None or (
+        if _dedupe_is_null(raw) or (
             isinstance(raw, str) and raw.strip().lower() in {"", "null", "none"}
         ):
-            return dict(row)
+            clone = dict(row)
+            for name in step.options.get("keys", []):
+                if not str(name):
+                    continue
+                self._record_write(
+                    tally, before=row.get(str(name)), after=None, existed=str(name) in row
+                )
+                clone[str(name)] = None
+            return clone
         obj = parse_json_object(raw)
         if obj is None:
             raise ValueError(

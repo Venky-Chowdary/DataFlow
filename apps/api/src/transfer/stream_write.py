@@ -49,7 +49,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
         # ``rows_expanded`` is the STRUCT explode delta (spool out minus the
         # rows the reader fetched); without it Gate-8 reads exploded rows as
         # unexplained extras on the target (X-30).
-        for key in ("reconcile_sample", "written_ids", "source_row_count", "rows_expanded"):
+        for key in ("reconcile_sample", "reconcile_sample_transformed", "written_ids", "source_row_count", "rows_expanded"):
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]
     if isinstance(meta, dict) and isinstance(meta.get("embedding_usage"), dict):
@@ -130,6 +130,7 @@ def _write_batch(
     records: list[dict[str, Any]] | None = None,
     source_spool: Any = None,
     allow_equal_lsn: bool = False,
+    expands_rows: bool = False,
 ) -> tuple[int, str, dict]:
     # Live dest nullability for write-time NOT NULL escalate (G3 / adapters parity).
     dest_nullability = dict(
@@ -222,6 +223,7 @@ def _write_batch(
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
             source_schema_catalog=source_schema_catalog,
+            expands_rows=expands_rows,
             empty_cells_as_null=empty_cells_as_null,
             preserve_columns=list(
                 (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
@@ -282,6 +284,7 @@ def _write_batch(
             destination_column_types=dest_column_types,
             empty_cells_as_null=empty_cells_as_null,
             source_schema_catalog=source_schema_catalog,
+            expands_rows=expands_rows,
             preserve_columns=list(
                 (getattr(dest, "extra", None) or {}).get("preserve_columns") or []
             ),
@@ -383,6 +386,7 @@ def _write_batch(
             empty_cells_as_null=empty_cells_as_null,
             total_chunks=total_chunks,
             atomic_overwrite=is_overwrite_sync(sync_mode),
+            expands_rows=expands_rows,
             **source_handoff,
             **key_carry,
         )
@@ -531,6 +535,10 @@ def _write_batch(
             "on_checkpoint": lambda c, t, r: on_checkpoint(chunk_idx, total_chunks, rows_so_far + r) if on_checkpoint else None,
             "destination_column_nullability": dest_nullability,
             "destination_column_types": dest_column_types,
+            # X-114 — an expanding recipe repeats the source key per emitted
+            # row; create-new DDL must not carry it (declared produced key
+            # replaces it, when one exists).
+            "expands_rows": expands_rows,
         }
         if dest_type == "redis":
             kwargs["write_mode"] = write_mode

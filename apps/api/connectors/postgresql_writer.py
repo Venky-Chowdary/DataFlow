@@ -1926,8 +1926,11 @@ def write_mapped_rows(
                     carry_keys=write_mode != "insert"
                     or bool(_kwargs.get("carry_source_keys")),
                     operator_key_columns=(
-                        list(conflict_columns or []) if write_mode == "upsert" else None
+                        list(conflict_columns or [])
+                        if write_mode == "upsert" or _kwargs.get("expands_rows")
+                        else None
                     ),
+                    expanding_rows=bool(_kwargs.get("expands_rows")),
                 )
                 if fidelity_plan.column_renames and fidelity_plan.dest_columns:
                     target_cols[:] = list(fidelity_plan.dest_columns)

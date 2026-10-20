@@ -556,6 +556,31 @@ _PK_INTROSPECT_TYPES: tuple[str, ...] = (
 from .stream_catalog import fast_path_source_catalog as _fast_path_source_catalog  # noqa: E402
 
 
+def _shape_steps_expand_rows(
+    shape_steps: list[dict] | None, shape_runner: Any = None
+) -> bool:
+    """True when the recipe may emit more rows than it reads.
+
+    unnest_json, join fanout and union all repeat the source row's key on
+    every emitted row — the destination must not carry that key (X-114).
+    """
+    from services.shape_models import STEP_CATALOG
+
+    if shape_runner is not None:
+        for step in shape_runner.recipe.enabled_steps:
+            definition = STEP_CATALOG.get(step.op)
+            if definition is not None and definition.expands:
+                return True
+    if not shape_steps:
+        return False
+    for step in shape_steps:
+        op = str(step.get("op") or "") if isinstance(step, dict) else ""
+        definition = STEP_CATALOG.get(op)
+        if definition is not None and definition.expands:
+            return True
+    return False
+
+
 def _stream_database_transfer_impl(
     source: EndpointConfig,
     destination: EndpointConfig,
@@ -746,6 +771,10 @@ def _stream_database_transfer_impl(
         sync_mode_appends_without_key_resolution,
     )
 
+    # X-114 — computed once for every create path of this run (fast-path
+    # scope, writers' own create plans): an expanding recipe repeats the
+    # source key on every emitted row.
+    _shape_expands_rows = _shape_steps_expand_rows(shape_steps, shape_runner)
     _create_scope_token, _create_scope = begin_fast_path_create_scope(
         _fast_path_source_catalog(src_read_type, mappings, schema, _src_rich_catalog),
         mappings,
@@ -754,6 +783,11 @@ def _stream_database_transfer_impl(
         # sync never re-declares the source key on the destination, so run 2
         # can re-append the same PK. Upsert/deduped still carry it.
         carry_keys=not sync_mode_appends_without_key_resolution(effective_sync),
+        # X-113/X-114 — an expanding recipe repeats the source PK per emitted
+        # row; the declared produced key (unnest index_to, surrogate_key)
+        # is the destination identity instead.
+        operator_key_columns=pk_target_cols or None,
+        expands_rows=_shape_expands_rows,
     )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
@@ -3651,6 +3685,7 @@ def _stream_database_transfer_impl(
                             job_id=job_id,
                             skip_preflight=skip_preflight,
                             source_schema_catalog=source_schema_catalog,
+                            expands_rows=_shape_expands_rows,
                             **write_kwargs,
                         ),
                     )
@@ -4396,6 +4431,7 @@ def _stream_database_transfer_impl(
                 write_mode=write_mode,
                 conflict_columns=pk_target_cols or None,
                 sync_mode=effective_sync,
+                expands_rows=_shape_expands_rows,
                 backfill_new_fields=backfill_new_fields,
                 error_policy=stream_error_policy,
                 job_id=job_id,

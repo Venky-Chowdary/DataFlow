@@ -213,8 +213,29 @@ def _shape_stream_refusal(
         )
     touched = set(runner.recipe.touched_columns)
     outputs = set(runner.output_columns)
-    guarded = [c for c in ([cursor_field] if cursor_field else []) + list(key_columns) if c]
-    hit = [c for c in guarded if c in touched or c not in outputs]
+    inputs = set(runner.recipe.input_columns)
+    # X-113: a key column is guarded only on a route that actually resolves
+    # stored rows by it — append and whole-table overwrite routes do not, so
+    # declaring a produced key (unnest index_to, surrogate_key,
+    # hash_identity) there is legitimate. And a produced column is created,
+    # never rewritten, so it is a valid key member on any route — only a
+    # rewritten or dropped source column is refused.
+    from services.destination_key_collision_probe import (
+        sync_mode_appends_without_key_resolution,
+    )
+
+    keys_resolve = not (
+        sync_mode_appends_without_key_resolution(sync)
+        or sync in ("full_refresh_overwrite", "overwrite", "full_refresh")
+    )
+    guarded = ([cursor_field] if cursor_field else []) + (
+        list(key_columns) if keys_resolve else []
+    )
+    hit = [
+        c
+        for c in guarded
+        if c and ((c in touched and c in inputs) or c not in outputs)
+    ]
     if hit:
         return (
             "Transform (pre-load) refuses to rewrite the columns this sync mode "

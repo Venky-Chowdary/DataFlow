@@ -952,8 +952,11 @@ def write_mapped_rows(
                     carry_keys=write_mode != "insert"
                     or bool(_kwargs.get("carry_source_keys")),
                     operator_key_columns=(
-                        list(conflict_columns or []) if write_mode == "upsert" else None
+                        list(conflict_columns or [])
+                        if write_mode == "upsert" or _kwargs.get("expands_rows")
+                        else None
                     ),
+                    expanding_rows=bool(_kwargs.get("expands_rows")),
                 )
             except Exception as exc:  # noqa: BLE001 — planner failure is types-only + certificate
                 logger.warning(

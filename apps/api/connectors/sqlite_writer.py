@@ -1504,6 +1504,7 @@ def write_mapped_rows(
                             carry_keys=write_mode != "insert"
                             or bool(_kwargs.get("carry_source_keys")),
                             operator_key_columns=list(conflict_cols),
+                            expanding_rows=bool(_kwargs.get("expands_rows")),
                         )
                     except Exception as exc:
                         logger.warning(

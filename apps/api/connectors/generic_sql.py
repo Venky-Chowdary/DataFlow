@@ -5588,9 +5588,10 @@ def write_mapped_rows(
                         or bool(_kwargs.get("carry_source_keys")),
                         operator_key_columns=(
                             list(conflict_columns or [])
-                            if write_mode == "upsert"
+                            if write_mode == "upsert" or _kwargs.get("expands_rows")
                             else None
                         ),
+                        expanding_rows=bool(_kwargs.get("expands_rows")),
                     )
                     placement_suffix = fidelity_plan.create_suffix
                     table_obj = _build_table_for_write(

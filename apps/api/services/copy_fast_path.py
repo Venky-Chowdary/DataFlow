@@ -160,7 +160,16 @@ def occupied_pk_range_action(
 class _CreateScope:
     """Source catalog handed to a fast path, and the certificate it earned."""
 
-    __slots__ = ("catalog", "mappings", "dest_table", "pending", "report", "carry_keys")
+    __slots__ = (
+        "catalog",
+        "mappings",
+        "dest_table",
+        "pending",
+        "report",
+        "carry_keys",
+        "operator_key_columns",
+        "expands_rows",
+    )
 
     def __init__(
         self,
@@ -168,6 +177,8 @@ class _CreateScope:
         mappings: list[dict[str, Any]] | None,
         dest_table: str = "",
         carry_keys: bool = True,
+        operator_key_columns: list[str] | None = None,
+        expands_rows: bool = False,
     ) -> None:
         self.catalog = catalog
         self.mappings = list(mappings or [])
@@ -177,6 +188,12 @@ class _CreateScope:
         # X-98 — append history must not re-declare the source key: run 2
         # re-appends the same PK and a carried PRIMARY KEY/UNIQUE fails it.
         self.carry_keys = bool(carry_keys)
+        # X-113/X-114 — the operator's declared key (destination-side names),
+        # and whether the transform recipe expands rows (unnest_json, join
+        # fanout, union): an expanded row repeats its source PK, so the
+        # source key must not be carried — the declared produced key may be.
+        self.operator_key_columns = list(operator_key_columns or [])
+        self.expands_rows = bool(expands_rows)
 
     def owns(self, table: str) -> bool:
         """Whether ``table`` is the destination this scope certifies.
@@ -247,6 +264,8 @@ def begin_fast_path_create_scope(
     mappings: list[dict[str, Any]] | None,
     dest_table: str = "",
     carry_keys: bool = True,
+    operator_key_columns: list[str] | None = None,
+    expands_rows: bool = False,
 ) -> tuple[Token, _CreateScope]:
     """Make the source catalog visible to any CREATE a fast path renders.
 
@@ -256,7 +275,14 @@ def begin_fast_path_create_scope(
     carries the catalog in and the settled certificate out, so ``stream``
     stamps it on the summary.
     """
-    scope = _CreateScope(source_schema_catalog, mappings, dest_table, carry_keys)
+    scope = _CreateScope(
+        source_schema_catalog,
+        mappings,
+        dest_table,
+        carry_keys,
+        operator_key_columns=operator_key_columns,
+        expands_rows=expands_rows,
+    )
     return _CREATE_SCOPE.set(scope), scope
 
 
@@ -289,7 +315,14 @@ def plan_fast_path_create(
     """
     scope = _CREATE_SCOPE.get()
     targets = [t for _s, t in pairs]
-    given = tuple(c for c in (primary_key or []) if c in targets)
+    if scope is not None and scope.expands_rows:
+        # X-114 — an expanded row repeats its source PK, so the key the
+        # builder was given (the source key projected through mappings) is
+        # not a constraint the write can honour. The plan may still carry
+        # the operator-declared produced key.
+        given: tuple[str, ...] = ()
+    else:
+        given = tuple(c for c in (primary_key or []) if c in targets)
     if scope is None or scope.catalog is None or not scope.owns(dest_table):
         return FastPathCreate(primary_key=given)
     from services.schema_fidelity import resolve_create_fidelity_plan
@@ -304,6 +337,8 @@ def plan_fast_path_create(
         dest_table=dest_table,
         dest_schema=dest_schema,
         carry_keys=scope.carry_keys,
+        operator_key_columns=scope.operator_key_columns or None,
+        expanding_rows=scope.expands_rows,
     )
     planned_pk = sorted(c.lower() for c in plan.primary_key)
     given_pk = sorted(c.lower() for c in given)
