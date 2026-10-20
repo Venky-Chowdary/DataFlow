@@ -263,6 +263,18 @@ async def lifespan(app: FastAPI):
                 print(f"[+] Orphaned job sweep started (first pass: {counts or 'none'})")
             else:
                 print("[+] Orphan resume scan skipped")
+
+            # D10: the per-step stall watchdog flags and then fails a job whose
+            # active phase goes quiet past its threshold — an orphan sweep only
+            # sees a job once every owner signal is gone, which a live-but-stuck
+            # worker never is.
+            try:
+                from services.job_watchdog import start_stall_watchdog
+
+                start_stall_watchdog()
+                print("[+] Job stall watchdog started")
+            except Exception as e:  # noqa: BLE001 — a bad watchdog must not kill boot
+                print(f"[!] Stall watchdog failed to start: {e}")
         except Exception as e:
             print(f"[!] Orphaned job resume warning: {e}")
         finally:

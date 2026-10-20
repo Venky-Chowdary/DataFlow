@@ -488,18 +488,89 @@ def test_x37_residual_tamper_message_names_digest_mismatch(monkeypatch):
     blob = _blob(res)
     assert "Set DATAFLOW_ENGINE_DIGEST" not in blob, blob
     assert "mismatch" in blob.lower(), blob
+    # X-39: the digest promotion must not cut the ladder's L4/L5 localization
+    # tail off the fail message, and must not leave the count-only sentence
+    # next to the full_checksum verdict.
+    assert "L4/L5 localized" in blob, blob
+    assert "only proof the route produced" not in blob, blob
     _pg_drop_table(dest_table)
 
 
-def test_undo_skips_delete_when_table_never_created():
+def test_x39_sqlite_dest_tamper_keeps_l45_localization(monkeypatch, tmp_path):
+    """X-39 on a non-PG dest: engine-copy MySQL -> SQLite tamper must still
+    localize row + column and say digests mismatched — never count-only."""
+    monkeypatch.setenv("DATAFLOW_ENGINE_DIGEST", "1")
+    import sqlite3
+
+    import src.transfer.reconcile_step as rs
+
+    table = "x39_lite_src"
+    _seed_time(table, [(1, "01:23:45"), (2, "09:05:00"), (3, "00:00:00")])
+    dst = tmp_path / "x39.db"
+
+    real = rs._run_reconciliation_with_rules
+
+    def tampered(*a, **k):
+        con = sqlite3.connect(str(dst))
+        try:
+            con.execute("UPDATE out SET t = '01:23:46' WHERE id = 1")
+            con.commit()
+        finally:
+            con.close()
+        return real(*a, **k)
+
+    monkeypatch.setattr(rs, "_run_reconciliation_with_rules", tampered)
+    res = UniversalTransferEngine().execute_tracked(
+        _request(table, {"format": "sqlite", "database": str(dst)}, "out"),
+        "0" * 24,
+    )
+    assert not res.success, "dest tamper must fail the proof"
+    blob = _blob(res)
+    assert "L4/L5 localized" in blob, blob
+    assert "row id='1'" in blob or "row id=1" in blob, blob
+    assert "'t'" in blob, blob
+    assert "mismatch" in blob.lower(), blob
+    assert "only proof the route produced" not in blob, blob
+    assert "Set DATAFLOW_ENGINE_DIGEST" not in blob, blob
+
+
+def test_undo_skips_delete_when_table_never_created(tmp_path, monkeypatch):
     """The undo path must not DELETE a table the run never created —
-    SQL Server logged 'Invalid object name' 208 against the phantom ref."""
-    from services.batch_undo import _decide
+    SQL Server logged 'Invalid object name' 208 against the phantom ref
+    (drop raised, then DELETE hit the same missing ref)."""
+    import sqlite3
 
-    class _Dest:
-        kind = "database"
-        extra = {"dest_table_existed_before": False}
+    import connectors.table_manager as tm
+    import services.batch_undo as bu
 
-    decision, note = _decide(_Dest(), {"dest_table_existed_before": False}, "")
-    assert decision == "retained"
-    assert "did not exist" in note
+    db = tmp_path / "undo.db"
+    con = sqlite3.connect(str(db))
+    con.close()
+
+    def _drop_raises(db_type, cfg, table, schema=None):
+        raise Exception(f"Invalid object name 'dbo.{table}' (208)")
+
+    monkeypatch.setattr(tm, "drop_table", _drop_raises)
+    deletes: list[str] = []
+    monkeypatch.setattr(
+        bu, "_delete_all_rows", lambda *a, **k: deletes.append(str(a)) or True
+    )
+
+    _Dest = EndpointConfig(
+        kind="database",
+        format="sqlite",
+        database=str(db),
+        table="never_made",
+    )
+    _Dest.extra = {"dest_table_existed_before": False}
+
+    summary = {
+        "dest_table_existed_before": False,
+        "table": "never_made",
+        "dest_rows_before": 0,
+    }
+    note = bu.undo_failed_batch_if_dest_was_empty(
+        destination=_Dest, dest_summary=summary, sync_mode=""
+    )
+    assert not deletes, "no DELETE may run against a table that does not exist"
+    assert summary.get("partial_batch_removed"), note

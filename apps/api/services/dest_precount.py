@@ -585,6 +585,31 @@ def destination_table_exists(
                 return bool(row and int(row[0]) > 0)
             finally:
                 conn.close()
+        if db_type == "snowflake":
+            # FAIL_JOB undo must know whether the run created the Snowflake
+            # table (D1): resolve the schema-folded name the writer uses.
+            from connectors.snowflake_conn import (
+                get_connection,
+                resolve_snowflake_table_name,
+            )
+
+            sf_conn = get_connection(
+                account=str(cfg.get("account") or cfg.get("host") or ""),
+                username=str(cfg.get("username") or ""),
+                password=str(cfg.get("password") or ""),
+                database=str(cfg.get("database") or ""),
+                schema=str(schema or cfg.get("schema") or ""),
+                warehouse=str(cfg.get("warehouse") or ""),
+                connection_string=str(cfg.get("connection_string") or ""),
+            )
+            try:
+                with sf_conn.cursor() as cur:
+                    resolved = resolve_snowflake_table_name(
+                        cur, str(schema or cfg.get("schema") or ""), table
+                    )
+                return resolved is not None
+            finally:
+                sf_conn.close()
         from src.transfer.connector_capabilities import resolve_driver_type
 
         if resolve_driver_type(db_type) == "generic_sql":

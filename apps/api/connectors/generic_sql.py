@@ -1252,11 +1252,22 @@ def get_connection(
     )
 
     workspace_id = str(kwargs.get("workspace_id") or "")
-    refusal = metadata_endpoint_refusal(
-        host,
-        connection_string,
-        str(kwargs.get("endpoint_url") or ""),
-        workspace_id=workspace_id,
+    # File engines (duckdb/sqlite file binds) never dial the host — a
+    # "localhost" cfg field is a label, not a connection target, so the
+    # egress check must not refuse them (D5; mirrors _build_engine).
+    _file_engine = (db_type or kwargs.get("type") or "").lower().strip() in {
+        "duckdb",
+        "sqlite",
+    } or connection_string.lower().startswith(("sqlite:", "duckdb:"))
+    refusal = (
+        ""
+        if _file_engine
+        else metadata_endpoint_refusal(
+            host,
+            connection_string,
+            str(kwargs.get("endpoint_url") or ""),
+            workspace_id=workspace_id,
+        )
     )
     if refusal:
         raise ValueError(refusal)

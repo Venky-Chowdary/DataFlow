@@ -917,6 +917,13 @@ def cursor_declared_numeric_types(
             scale = int(col[5])
         except (TypeError, ValueError):
             continue
+        if type_code == 246:
+            # pymysql puts MySQL's column_length — precision plus the sign
+            # and decimal-point bytes — in the PEP 249 precision slot:
+            # ``CAST(x AS DECIMAL(38,10))`` arrives as DECIMAL(40,10) and
+            # rc-fidelity blocks it or it lands on Snowflake as VARCHAR
+            # (D9). Recover the declared precision.
+            precision -= 1 + (1 if scale > 0 else 0)
         name = str(header or "").strip()
         if not name:
             continue

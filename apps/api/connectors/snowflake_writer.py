@@ -190,6 +190,7 @@ def _sf_materialize_mapped_batch(
     source_spool: Any = None,
     extra: dict[str, Any] | None = None,
     materialize_batch: int | None = None,
+    empty_cells_as_null: bool = False,
 ) -> _SfMaterializedBatch:
     """Retain-contract concat of finished bundles. Write loop must not use this."""
     mapped_rows: list[tuple] = []
@@ -225,6 +226,7 @@ def _sf_materialize_mapped_batch(
         extra=extra,
         materialize_batch=materialize_batch,
         target_types=target_types,
+        empty_cells_as_null=empty_cells_as_null,
     ):
         mapped_rows.extend(finished.dense_rows)
         sparse_rows.extend(finished.sparse_rows)
@@ -265,6 +267,7 @@ def _sf_rematerialize_if_physical_differs(
     source_spool: Any = None,
     extra: dict[str, Any] | None = None,
     materialize_batch: int | None = None,
+    empty_cells_as_null: bool = False,
 ) -> _SfMaterializedBatch | None:
     """Rebuild from source when live DDL carriers differ from Map stamps.
 
@@ -295,6 +298,7 @@ def _sf_rematerialize_if_physical_differs(
         policy=policy,
         conflict_columns=conflict_columns,
         write_mode=write_mode,
+        empty_cells_as_null=empty_cells_as_null,
         live_dest_types=physical,
         destination_pk_columns=list(conflict_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
@@ -415,6 +419,7 @@ def iter_sf_finished_bundles(
     extra: dict[str, Any] | None = None,
     materialize_batch: int | None = None,
     target_types: list[str] | None = None,
+    empty_cells_as_null: bool = False,
 ) -> Any:
     from connectors.sql_write_materialize import iter_finished_sql_bundles
 
@@ -446,6 +451,7 @@ def iter_sf_finished_bundles(
         dest_kind="snowflake",
         destination_pk_columns=list(destination_pk_columns or []) or None,
         destination_column_nullability=destination_column_nullability,
+        empty_cells_as_null=empty_cells_as_null,
         records=records,
         source_spool=source_spool,
         extra=extra,
@@ -1260,6 +1266,7 @@ def write_mapped_rows(
     live_dest_types = _kwargs.get("destination_column_types")
     private_key = str(_kwargs.get("private_key") or "")
     auth_mode = str(_kwargs.get("auth_mode") or "")
+    empty_cells_as_null = bool(_kwargs.get("empty_cells_as_null"))
     from connectors.sql_write_materialize import sql_source_from_writer
 
     _sql_extra = (
@@ -1429,6 +1436,7 @@ def write_mapped_rows(
         extra=_sql_extra,
         materialize_batch=_sql_src["materialize_batch"],
         target_types=target_types,
+        empty_cells_as_null=empty_cells_as_null,
     )
 
     try:

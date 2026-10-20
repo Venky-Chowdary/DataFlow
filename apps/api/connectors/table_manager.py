@@ -566,7 +566,16 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
                     cur.execute(f'USE WAREHOUSE "{cfg["warehouse"]}"')
                 except Exception as exc:
                     logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-            cur.execute(f'DROP TABLE IF EXISTS "{table_name}"')
+            # A bare name is case-sensitive once quoted ("foo_df_quarantine" !=
+            # FOO_DF_QUARANTINE) — resolve the stored casing first so FAIL_JOB
+            # undo actually drops the DLQ table it created (D1).
+            from connectors.snowflake_conn import resolve_snowflake_table_name
+
+            resolved = resolve_snowflake_table_name(
+                cur, schema or cfg.get("schema", "PUBLIC"), table_name
+            )
+            target = resolved or table_name
+            cur.execute(f'DROP TABLE IF EXISTS "{target}"')
         return True
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
