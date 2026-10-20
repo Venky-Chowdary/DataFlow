@@ -117,9 +117,14 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     return () => mo.disconnect();
   }, []);
 
+  // D-BP-27: a docked lane can never render a partially visible toast — cap
+  // visible to the newest 2 and collapse the rest into a "+N more" chip.
+  const visible = dock ? items.slice(-2) : items;
+  const hiddenCount = dock ? Math.max(0, items.length - visible.length) : 0;
+
   const host = (
     <div className="dt-toast-host" aria-live="polite" aria-relevant="additions" aria-atomic="false">
-        {items.map((t) => (
+        {visible.map((t) => (
           <div key={t.id} className={`dt-toast dt-toast--${t.tone}`} role={t.tone === "error" ? "alert" : "status"}>
             <span className="dt-toast-icon" aria-hidden>
               <DtIcon name={TONE_ICON[t.tone]} size={18} />
@@ -134,6 +139,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <span className={`dt-toast-timer dt-toast-timer--${t.tone}`} aria-hidden />
           </div>
         ))}
+        {hiddenCount > 0 && (
+          <div className="dt-toast-more" role="status">
+            +{hiddenCount} more
+          </div>
+        )}
     </div>
   );
 

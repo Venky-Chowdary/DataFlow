@@ -2182,3 +2182,22 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
     display: flex;
   }
 }
+
+/* <=480 canvas: the route bar cannot keep one max-content line inside the
+   chrome band — "Choose destination" / real names clipped past the edge
+   (D-BP-27). Same wrap the classic bar gets in transfer-studio.css, set
+   here because this file owns the canvas bar rules (it loads last). */
+@media (max-width: 480px) {
+  .df2-page-transfer-studio.is-studio-next .df2-route-bar {
+    width: 100%;
+    min-width: 0;
+    max-width: 100%;
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+
+  .df2-page-transfer-studio.is-studio-next .df2-route-bar-endpoint {
+    min-width: 0;
+    max-width: 100%;
+  }
+}
