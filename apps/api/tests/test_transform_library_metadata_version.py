@@ -40,7 +40,11 @@ def test_step_change_bumps_version(tmp_path, monkeypatch):
 
 
 def test_dedupe_asc_tie_keeps_first_seen():
-    """Audit P2-2: equal order values keep the first-seen winner."""
+    """Audit P2-2 + X-123: on a full ordering tie the winner follows `keep`.
+
+    keep=first keeps the earlier source row; keep=last keeps the later one.
+    An explicit tie_break option still overrides the keep-derived default.
+    """
     from services.shape_apply import ShapeRunner
     from services.shape_models import ShapeRecipe
 
@@ -50,7 +54,7 @@ def test_dedupe_asc_tie_keeps_first_seen():
                 {
                     "op": "dedupe_rows",
                     "options": {
-                        "keys": ["k"], "keep": "last",
+                        "keys": ["k"], "keep": "first",
                         "order_by": "v", "order_dir": "asc",
                     },
                 }
@@ -71,3 +75,29 @@ def test_dedupe_asc_tie_keeps_first_seen():
     hdrs = tail_headers if tail_rows else headers
     assert len(winners) == 1
     assert dict(zip(hdrs, winners[0]))["tag"] == "first"
+
+    last_recipe = ShapeRecipe.parse(
+        {
+            "steps": [
+                {
+                    "op": "dedupe_rows",
+                    "options": {
+                        "keys": ["k"], "keep": "last",
+                        "order_by": "v", "order_dir": "asc",
+                    },
+                }
+            ]
+        },
+        source_columns=["k", "v", "tag"],
+    )
+    last_runner = ShapeRunner(last_recipe)
+    last_runner.matrix(
+        ["k", "v", "tag"],
+        [
+            ["a", 1, "first"],
+            ["a", 1, "second"],
+        ],
+    )
+    last_headers, last_rows = last_runner.drain_matrix()
+    assert len(last_rows) == 1
+    assert dict(zip(last_headers, last_rows[0]))["tag"] == "second"

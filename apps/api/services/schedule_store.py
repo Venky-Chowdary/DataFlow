@@ -31,18 +31,27 @@ try:
 except ImportError:
     from services.mongodb_service import get_mongodb_service
 
-STORE_PATH = data_dir() / "schedules.json"
-STORE_MIGRATED_PATH = data_dir() / "schedules.json.migrated"
+_DEFAULT_STORE_PATH = data_dir() / "schedules.json"
+_DEFAULT_MIGRATED_PATH = data_dir() / "schedules.json.migrated"
+STORE_PATH = _DEFAULT_STORE_PATH
+STORE_MIGRATED_PATH = _DEFAULT_MIGRATED_PATH
 
 
 def _store_path():
     # Resolved per call so a test that points DATAFLOW_DATA_DIR elsewhere
-    # after import still lands in its sandbox; the module-level constant
-    # stays for import-time compatibility only.
+    # after import still lands in its sandbox. A monkeypatched STORE_PATH
+    # wins over the env var: tests that isolate to their own file must not
+    # be dragged back onto the shared data dir.
+    if STORE_PATH != _DEFAULT_STORE_PATH:
+        return STORE_PATH
     return data_dir() / "schedules.json"
 
 
 def _store_migrated_path():
+    if STORE_PATH != _DEFAULT_STORE_PATH:
+        return STORE_PATH.parent / (STORE_PATH.name + ".migrated")
+    if STORE_MIGRATED_PATH != _DEFAULT_MIGRATED_PATH:
+        return STORE_MIGRATED_PATH
     return data_dir() / "schedules.json.migrated"
 
 INTERVALS = {"hourly": timedelta(hours=1), "daily": timedelta(days=1), "weekly": timedelta(weeks=1)}

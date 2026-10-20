@@ -4,6 +4,7 @@ import logging
 import os
 import socket
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -24,6 +25,19 @@ for path in (_src_root, _api_root):
 sys.path.insert(0, str(_src_root))
 sys.path.insert(0, str(_api_root))
 
+# Test isolation: no test may ever touch the real apps/api/data state. This
+# must run BEFORE `import services` — a few stores cache a path at import
+# while others resolve data_dir() per call. An externally provided
+# DATAFLOW_DATA_DIR still wins (setdefault), so CI can point elsewhere.
+_DATA_SANDBOX = Path(
+    tempfile.mkdtemp(
+        prefix="dataflow-test-data-"
+        f"{os.environ.get('PYTEST_XDIST_WORKER') or 'main'}-"
+    )
+)
+os.environ.setdefault("DATAFLOW_DATA_DIR", str(_DATA_SANDBOX))
+os.environ.setdefault("FAKESNOW_DB_PATH", str(_DATA_SANDBOX / "fakesnow.db"))
+
 # Pin the bare package name before tests import `src.*`.  Without this, Python
 # can cache src/services as `services` when a runner exposes src on sys.path,
 # causing compatibility shims to import themselves recursively.
@@ -34,6 +48,32 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 # Local proof dials Postgres and MySQL on loopback. Production deploy does
 # not set this. Metadata and link-local stay refused even when it is set.
 os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
+
+#: Real production state files no test run may rewrite. The autouse session
+#: fixture snapshots them at start and fails the run if any test wrote one.
+_REAL_DATA_FILES = (
+    _api_root / "data" / "schedules.json",
+    _api_root / "data" / "cdc_incremental_snapshots.json",
+)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _real_data_dir_guard():
+    """Fail the run if any test wrote to the real apps/api/data state."""
+    before = {
+        p.name: (p.read_bytes() if p.exists() else None)
+        for p in _REAL_DATA_FILES
+    }
+    yield
+    after = {
+        p.name: (p.read_bytes() if p.exists() else None)
+        for p in _REAL_DATA_FILES
+    }
+    changed = sorted(n for n in before if before[n] != after[n])
+    assert not changed, (
+        "a test wrote to apps/api/data (" + ", ".join(changed) + ") — "
+        "tests must stay on the DATAFLOW_DATA_DIR sandbox"
+    )
 
 
 def pytest_configure(config):

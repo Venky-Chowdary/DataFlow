@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
@@ -96,7 +96,8 @@ def test_to_date_never_guesses_day_month_order():
     with pytest.raises(EvalError, match="explicit format"):
         value("to_date('01/02/2024')")
     # Naive on purpose: a source date declares no zone (see _comparable_moment).
-    assert value("to_date('03/04/2026', '%d/%m/%Y')") == datetime(2026, 4, 3)  # noqa: DTZ001
+    # X-92: an explicit date-only format yields a calendar DATE, not a midnight datetime.
+    assert value("to_date('03/04/2026', '%d/%m/%Y')") == date(2026, 4, 3)
     assert value("to_date('2026-04-03')") == datetime(2026, 4, 3)  # noqa: DTZ001
 
 

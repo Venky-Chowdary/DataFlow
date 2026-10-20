@@ -172,7 +172,8 @@ def test_cleansing_steps_produce_the_values_an_operator_expects():
     assert shaped[1]["amount"] == Decimal("-9.99")
     assert shaped[2]["amount"] is None
     # Naive on purpose: a parsed source date declares no zone.
-    assert shaped[0]["when"] == datetime(2026, 4, 3)  # noqa: DTZ001
+    # X-92: the recipe's explicit date-only format yields a calendar DATE.
+    assert shaped[0]["when"] == date(2026, 4, 3)
     assert effect.rows_in == effect.rows_out == 3
 
 

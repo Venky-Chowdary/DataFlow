@@ -32,7 +32,9 @@ def test_timetz_invents_text_carrier_without_engine_timetz():
         ("sqlserver", "NVARCHAR(MAX)"),
         ("snowflake", "VARCHAR"),
         ("bigquery", "STRING"),
-        ("oracle", "CLOB"),
+        # Oracle reuses its bounded-text TIME carrier: 32 chars holds
+        # 'HH:MM:SS.ffffff±HH:MM' and beats CLOB as DDL (98237940).
+        ("oracle", "VARCHAR2(32)"),
         ("sqlite", "TEXT"),
     ):
         assert _time_ddl_for_dest(db, "TIMETZ") == carrier, db

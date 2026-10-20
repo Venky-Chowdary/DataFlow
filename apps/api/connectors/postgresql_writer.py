@@ -2206,14 +2206,23 @@ def write_mapped_rows(
                 # Keep uidx only for a conflict key distinct from the PK.
                 pk_covers = False
                 try:
+                    # relname/nspname literals compare case-exact — a
+                    # schema.table::regclass cast silently lowercases an
+                    # unquoted mixed-case name and errors on a missing
+                    # relation, which would abort the whole write txn.
                     cursor.execute(
                         sql.SQL(
                             "SELECT array_agg(a.attname ORDER BY a.attname) "
-                            "FROM pg_index i JOIN pg_attribute a "
+                            "FROM pg_index i "
+                            "JOIN pg_class c ON c.oid = i.indrelid "
+                            "JOIN pg_namespace n ON n.oid = c.relnamespace "
+                            "JOIN pg_attribute a "
                             "ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey) "
-                            "WHERE i.indrelid = {}::regclass AND i.indisprimary"
+                            "WHERE i.indisprimary AND c.relname = {} "
+                            "AND n.nspname = {}"
                         ).format(
-                            sql.Literal(f"{schema}.{table_name}")
+                            sql.Literal(table_name),
+                            sql.Literal(schema),
                         )
                     )
                     _pk_row = cursor.fetchone()
