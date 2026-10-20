@@ -83,6 +83,49 @@ _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _NUMERIC_WIRE_MARKS = ("$", "€", "£", "¥")
 _NUMERIC_WIRE_CODES = ("USD", "EUR", "GBP")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
+_EPOCH_DAY = _date(2000, 1, 1)
+# TIME-family carriers (TIME, TIME(6), TIMETZ, TIME WITH TIME ZONE).
+_TIME_FAMILY_DDL_RE = re.compile(
+    r"^time(\s*\(\s*\d+\s*\))?(tz| with time zone)?$|^timetz(\s*\(\s*\d+\s*\))?$",
+    re.IGNORECASE,
+)
+_TIME_WIRE_RE = re.compile(
+    r"^(\d{1,2}):(\d{2}):(\d{2})(?:\.(\d{1,9}))?\s*(Z|z|[+-]\d{1,2}:\d{2})?$"
+)
+
+
+def _canon_time_wire(text: str) -> str | None:
+    """Canonical fingerprint for a TIME/timetz wire string.
+
+    Offset-bearing text folds to UTC wall clock — identical to what an aware
+    ``datetime.time`` fingerprint produces — so '10:30:00+05:30' and
+    '10:30:00+00:00' compare different (X-74). Naive text stays wall clock.
+    ``None`` when the text is not a TIME literal.
+    """
+    match = _TIME_WIRE_RE.match(text.strip())
+    if not match:
+        return None
+    try:
+        hour, minute, second = int(match[1]), int(match[2]), int(match[3])
+        frac = (match[4] or "")[:6]
+        micro = int(frac.ljust(6, "0")) if frac else 0
+        zone = match[5]
+        base = _datetime.combine(_EPOCH_DAY, _time(hour, minute, second, micro))
+        if zone:
+            if zone.upper() == "Z":
+                offset = timedelta(0)
+            else:
+                sign = 1 if zone[0] == "+" else -1
+                zh, zm = int(zone[1:3]), int(zone[4:6])
+                offset = sign * timedelta(hours=zh, minutes=zm)
+            folded = (base - offset).time()
+        else:
+            folded = base.time()
+    except (ValueError, OverflowError):
+        return None
+    if folded.microsecond:
+        return folded.strftime("%H:%M:%S.%f").rstrip("0").rstrip(".")
+    return folded.strftime("%H:%M:%S")
 # RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
 _TEXT_FAMILY_DDL_RE = re.compile(
     r"^(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?|BPCHAR|(?:N)?(?:VAR)?CHAR2|TEXT|TINYTEXT|"
@@ -4495,10 +4538,22 @@ def fingerprint_for_reconcile(
         # WIRE reads that canonical form as itself — ``20.500`` out of
         # ``NUMERIC(12,3)`` is 20.5, not a refusal that left one side of the
         # compare unquantized and reported a faithful row as corruption.
+        # X-74: offset-bearing TIME text keeps its zone through the bind
+        # normalization — '10:30:00+05:30' parsed to a naive datetime.time
+        # would fingerprint identically to '10:30:00+00:00', hiding a zone
+        # tamper. Skip the bind fold; _canon_time_wire folds to UTC wall
+        # clock, the same canonical form an aware time object produces.
+        _offset_time_text = (
+            isinstance(wire, str)
+            and _TIME_FAMILY_DDL_RE.match(str(ddl_type).strip())
+            and re.search(r"(?:[+-]\d{1,2}:\d{2}|[Zz])\s*$", wire.strip())
+            and _TIME_WIRE_RE.match(wire.strip())
+        )
         token = set_active_number_locale(NUMBER_LOCALE_WIRE)
         try:
             try:
-                wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
+                if not _offset_time_text:
+                    wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
             except Exception:
                 pass
         finally:
@@ -4580,9 +4635,19 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "", strict_t
         # X-4: TIME columns — DuckDB/PG drivers hand back datetime.time while
         # MySQL drivers hand back timedelta; both must fingerprint identically
         # ("01:23:45" on both sides) or every cross-engine TIME cell drifts.
-        if value.microsecond:
-            return value.strftime("%H:%M:%S.%f").rstrip("0").rstrip(".")
-        return value.strftime("%H:%M:%S")
+        # X-74: an aware time (timetz) folds to its UTC wall clock — the same
+        # rule datetimes use — so '10:30:00+05:30' ≠ '10:30:00+00:00' and a
+        # zone tamper cannot hide inside a TIME-family column.
+        if value.tzinfo is not None and value.utcoffset() is not None:
+            folded = (
+                _datetime.combine(_EPOCH_DAY, value.replace(tzinfo=None))
+                - value.utcoffset()
+            ).time()
+        else:
+            folded = value
+        if folded.microsecond:
+            return folded.strftime("%H:%M:%S.%f").rstrip("0").rstrip(".")
+        return folded.strftime("%H:%M:%S")
     if isinstance(value, timedelta):
         # MySQL TIME read-back is timedelta; normalize to the same wall-clock
         # form as datetime.time (TIME is a clock value, not an interval — the
@@ -4710,6 +4775,14 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "", strict_t
         if _tl in _STRICT_BOOL_FALSE:
             return "0"
         return text
+    # X-74: TIME-family DDL holding offset-bearing text ('10:30:00+05:30')
+    # compares the offset — fold to the same UTC wall clock an aware
+    # datetime.time object produces, so a zone tamper ('+05:30' -> '+00:00')
+    # fingerprints differently. Naive time text stays a plain wall clock.
+    if ddl_type and _TIME_FAMILY_DDL_RE.match(str(ddl_type).strip()):
+        canon_time = _canon_time_wire(text)
+        if canon_time is not None:
+            return canon_time
     # Boolean and empty fast paths.
     if not text:
         return ""

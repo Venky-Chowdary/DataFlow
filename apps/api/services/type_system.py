@@ -3177,6 +3177,12 @@ def _time_ddl_for_dest(db: str, inferred: str | None) -> str | None:
     fsp = parse_temporal_fractional_precision(inferred)
     pol = time_timezone_polarity(inferred)
     base = _TIME_TZ_DDL.get(db) if pol == "tz" else None
+    if pol == "tz" and base is None:
+        # X-74: no engine timetz — the offset is payload, so carry it as TEXT
+        # ('10:30:00+05:30' lands byte-exact and the verifier compares it)
+        # rather than inventing TIME(n) and silently dropping the zone.
+        base = DDL_TYPES.get(db, {}).get(LOGICAL_TEXT)
+        return base or DDL_TYPES.get(db, {}).get("string")
     if base is None:
         base = DDL_TYPES.get(db, {}).get(LOGICAL_TIME)
     if not base:
