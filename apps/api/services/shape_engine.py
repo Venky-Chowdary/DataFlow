@@ -651,6 +651,29 @@ def _agg_finish(state: dict[str, Any], fn: str) -> Any:
     return None
 
 
+def _round_avg_to_declared(value: Any, decl: str | None) -> Any:
+    """Round an avg result HALF_UP to input_scale + 6 (X-109's declared
+    DECIMAL(38, s+6)); an unknown scale rounds to 6."""
+    scale = 0
+    if decl:
+        try:
+            from services.type_system import parse_numeric_precision_scale
+
+            _p, _s = parse_numeric_precision_scale(str(decl))
+            if _s:
+                scale = _s
+        except Exception:
+            scale = 0
+    try:
+        from decimal import Decimal, ROUND_HALF_UP
+
+        return Decimal(str(value)).quantize(
+            Decimal(1).scaleb(-(scale + 6)), rounding=ROUND_HALF_UP
+        )
+    except Exception:
+        return value
+
+
 class ShapeEngine:
     """Applies a recipe to rows, accumulating its effect across batches."""
 
@@ -953,15 +976,26 @@ class ShapeEngine:
                 (
                     str(m.get("as") or ""),
                     str(m.get("function") or "").casefold(),
+                    str(m.get("column") or ""),
                 )
                 for m in options.get("measures", [])
             ]
             for acc in buffer.values():
                 row = dict(acc["group"])
-                for name, fn in measures:
+                for name, fn, mcol in measures:
                     if not name:
                         continue
-                    row[name] = _agg_finish(acc["measures"].get(name) or _agg_init(), fn)
+                    value = _agg_finish(
+                        acc["measures"].get(name) or _agg_init(), fn
+                    )
+                    # X-109: avg lands DECIMAL(38, s+6) — emit it already
+                    # rounded HALF_UP so a TEXT carrier shows the same value
+                    # a DECIMAL carrier stores (was full-precision float text).
+                    if fn in ("avg", "average") and value is not None:
+                        value = _round_avg_to_declared(
+                            value, self._column_types.get(mcol)
+                        )
+                    row[name] = value
                 out.append(row)
             return out
 

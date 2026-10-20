@@ -563,6 +563,48 @@ def derived_static_types(
     working: dict[str, str] = {str(k): str(v) for k, v in (prior_schema or {}).items()}
     declared: dict[str, str] = {}
     for step in recipe.enabled_steps:
+        # X-109: row-set ops produce typed columns too — aggregate measures
+        # and surrogate keys were inferred as TEXT from the batch sample on
+        # every engine. SQL semantics: count → BIGINT; sum → DECIMAL(p+10,s)
+        # of the input; avg → DECIMAL(cap, s+6); min/max/first/last → the
+        # input's own type; surrogate_key → BIGINT.
+        if step.op == "aggregate":
+            for measure in (step.options or {}).get("measures") or []:
+                if not isinstance(measure, Mapping):
+                    continue
+                fn = str(measure.get("function") or "").lower()
+                tgt = str(measure.get("as") or measure.get("to") or "")
+                if not tgt:
+                    continue
+                src_t = working.get(str(measure.get("column") or ""))
+                if fn in ("count", "count_distinct", "countdistinct"):
+                    decl = "BIGINT"
+                elif fn == "sum":
+                    p, s = _numeric_ps(src_t)
+                    decl = _declare_numeric(
+                        min((p or _NUMERIC_CAP) + 10, _NUMERIC_CAP), s or 0
+                    )
+                elif fn in ("avg", "average"):
+                    p, s = _numeric_ps(src_t)
+                    decl = _declare_numeric(_NUMERIC_CAP, (s or 0) + 6)
+                elif fn in ("min", "max", "first", "last"):
+                    decl = src_t or "VARCHAR"
+                else:
+                    continue
+                working[tgt] = decl
+                declared[tgt] = decl
+            continue
+        if step.op == "surrogate_key":
+            tgt = str(
+                (step.options or {}).get("to")
+                or (step.options or {}).get("as")
+                or step.column
+                or ""
+            )
+            if tgt:
+                working[tgt] = "BIGINT"
+                declared[tgt] = "BIGINT"
+            continue
         if step.op not in ("derive_column", "set_value"):
             continue
         target = (
