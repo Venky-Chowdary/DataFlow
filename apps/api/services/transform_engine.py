@@ -2258,6 +2258,13 @@ def apply_transform(
         return base.replace(search, repl), None
     if type(raw) is str:
         raw_s = raw
+    elif isinstance(raw, (bytes, bytearray, memoryview)):
+        # Bytes must serialize through the canonical wire (base64), never
+        # str() — str(b'\x00') is the repr "b'\\x00'" which _parse_binary
+        # then refuses (X-46 sibling). Zero-length bytes serialize to "".
+        from services.value_serializer import cell_to_string
+
+        raw_s = cell_to_string(bytes(raw))
     elif isinstance(raw, Decimal):
         # str() spells tiny/huge decimals in scientific form ('1.50E-8'), and an
         # identity/carry then binds that text verbatim (X-27). Emit the same
@@ -2301,6 +2308,14 @@ def apply_transform(
 
     if text == "" and transform_l in _KEEP_EMPTY_TRANSFORMS:
         return "", None
+    if text == "" and transform_l == "binary":
+        # Zero-length binary is a real value — VARBINARY/bytea/BLOB accept it
+        # and it is distinct from NULL (which arrives as the null sentinel and
+        # short-circuits above). Only the truly empty wire means b'' here:
+        # whitespace cannot be a base64 payload, so it still errors (X-46).
+        if raw_s == "":
+            return "", None
+        return None, "Empty value cannot coerce to binary"
     # Typed + semantic transforms: empty/whitespace must not silently become SQL NULL.
     # That bypassed Risk Contracts (no err → no CAST/QUARANTINE path) and looked
     # like a successful write. Empty → error; continue policies may quarantine or

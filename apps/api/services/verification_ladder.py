@@ -585,13 +585,20 @@ def binary_search_row_diff(
                 engine=dest_db_type,
             )
             if sfp != tfp:
+                from services.value_serializer import operator_binary_cell_text
+
+                _bin_ddl = str((dest_types or {}).get(col) or "")
                 mismatches.append(
                     {
                         "pk_column": pk_column,
                         "pk": pk,
                         "column": col,
-                        "source_value": _cell_text(srec.get(col)),
-                        "target_value": _cell_text(trec.get(col)),
+                        "source_value": operator_binary_cell_text(
+                            _cell_text(srec.get(col)), _bin_ddl
+                        ),
+                        "target_value": operator_binary_cell_text(
+                            _cell_text(trec.get(col)), _bin_ddl
+                        ),
                         "source_fingerprint": sfp,
                         "target_fingerprint": tfp,
                     }

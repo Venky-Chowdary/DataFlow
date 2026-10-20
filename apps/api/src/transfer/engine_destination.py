@@ -199,7 +199,44 @@ def _pin_overwrite_rows_before(
         logger.warning("Overwrite pre-count was not checkpointed: %s", exc, exc_info=exc)
 
 
+
 def _note_failed_batch_undo(
+    request: Any,
+    dest_summary: Any,
+    message: str,
+    *,
+    recon: dict[str, Any] | None = None,
+) -> str:
+    """Undo note plus an honest quarantine pointer for the operator.
+
+    The pointer names the persisted evidence location: the sibling
+    ``{table}_df_quarantine`` when one was written and kept, or the job's
+    control-plane quarantine record when this run's destination table (and
+    its litter) was dropped — a FAIL_JOB message must never claim a table
+    that the undo just removed (X-46).
+    """
+    out = _failed_batch_undo_note_impl(
+        request, dest_summary, message, recon=recon
+    )
+    if not isinstance(dest_summary, dict):
+        return out
+    qt = str(dest_summary.get("dest_quarantine_table") or "")
+    if qt:
+        note = (
+            f"Rejected row(s) were preserved in the destination table {qt} "
+            "for review and replay."
+        )
+    elif dest_summary.get("partial_batch_undo") == "cleared":
+        note = (
+            "Rejected-row evidence is retained in this job's quarantine "
+            "record for inspection and replay."
+        )
+    else:
+        return out
+    return out if note in out else f"{out} {note}"
+
+
+def _failed_batch_undo_note_impl(
     request: Any,
     dest_summary: Any,
     message: str,
