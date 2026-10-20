@@ -1996,6 +1996,12 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
     if op in ("hash_pii", "mask_pii"):
         if is_blank(value):
             return None
+        # X-115: a typed '' is a stored value, not a maskable address —
+        # '' stays '' (NULL stays NULL above); a non-empty non-address is an
+        # EvalError the step's on_error handles (divert → quarantine), never
+        # a whole-run failure by default handling elsewhere.
+        if value == "":
+            return ""
         if op == "mask_pii" and options.get("pattern"):
             return _mask_pattern(str(value), str(options["pattern"]))
         from services.transform_engine import apply_transform
