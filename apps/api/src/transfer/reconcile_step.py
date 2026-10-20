@@ -324,8 +324,16 @@ _TRANSFORM_PROOF_POPULATION_OPS = frozenset(
         "router",
         "aggregate",
         "group_by",
+        "rank_rows",
     }
 )
+
+# X-110: only dedupe is covered by side evidence (row ledger + winner
+# uniqueness/arrival checks). Every other unprovable population op —
+# aggregate/group_by grouping, rank limit, router fan-out — must report an
+# honest skip so the verdict reads partial, never "verified" on a write
+# checksum alone.
+_TRANSFORM_PROOF_COVERED_POPULATION_OPS = frozenset({"dedupe", "dedupe_rows"})
 
 # G-1b: population-changing ops whose expected output is deterministic
 # given a stable source re-read (row-removing predicates only — no arrival-
@@ -830,13 +838,24 @@ def _transform_applied_proof(
         for s in steps
         if str(s.get("op") or "") in _TRANSFORM_PROOF_POPULATION_OPS
     }
-    if pop_ops - _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS:
+    unprovable = pop_ops - _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS
+    if unprovable:
+        if unprovable <= _TRANSFORM_PROOF_COVERED_POPULATION_OPS:
+            return {
+                "status": "skipped",
+                "covered_by": "row ledger + dedupe winner checks",
+                "reason": (
+                    "recipe changes the written population — removals are "
+                    "proven by the row ledger and dedupe winner checks"
+                ),
+            }
         return {
             "status": "skipped",
-            "covered_by": "row ledger + dedupe winner checks",
             "reason": (
-                "recipe changes the written population — removals are proven "
-                "by the row ledger and dedupe winner checks"
+                "recipe step(s) "
+                + ", ".join(sorted(unprovable))
+                + " change the written population with no transform recompute "
+                "— the write checksum does not prove the recipe's output"
             ),
         }
     # X-120 — a file source gets the same independent re-read a DB source
@@ -5477,6 +5496,7 @@ def _run_reconciliation_impl(
     # deliberately not at the destination, so conservation has to name them
     # instead of reading their absence as short delivery.
     rows_shaped_out = int(dest_summary.get("rows_shaped_out", 0) or 0)
+    rows_shape_diverted = int(dest_summary.get("rows_diverted", 0) or 0)
     rows_expanded = int(dest_summary.get("rows_expanded", 0) or 0)
     # Rows a declared source filter removed on the read. The source population
     # this run counted includes them (the source paged and counted them), so the
@@ -6147,6 +6167,7 @@ def _run_reconciliation_impl(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             rows_shaped_out=rows_shaped_out,
+            rows_shape_diverted=rows_shape_diverted,
             rows_source_filtered=rows_source_filtered,
             rows_expanded=rows_expanded,
             retained_rows=_retained,
@@ -7053,6 +7074,7 @@ def _run_reconciliation_impl(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             rows_shaped_out=rows_shaped_out,
+            rows_shape_diverted=rows_shape_diverted,
             rows_source_filtered=rows_source_filtered,
             rows_expanded=rows_expanded,
             sample_compare=sample_compare,
@@ -7079,6 +7101,7 @@ def _run_reconciliation_impl(
             coerced_null_rows=coerced_null_rows,
             rows_skipped=rows_skipped,
             rows_shaped_out=rows_shaped_out,
+            rows_shape_diverted=rows_shape_diverted,
             rows_source_filtered=rows_source_filtered,
             rows_expanded=rows_expanded,
         )
@@ -7462,6 +7485,7 @@ def _run_reconciliation_impl(
         coerced_null_rows=coerced_null_rows,
         rows_skipped=rows_skipped,
         rows_shaped_out=rows_shaped_out,
+        rows_shape_diverted=rows_shape_diverted,
         rows_source_filtered=rows_source_filtered,
         rows_expanded=rows_expanded,
         target_rows_before=rows_before,

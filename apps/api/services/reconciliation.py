@@ -1046,6 +1046,7 @@ def reconcile(
     coerced_null_rows: int = 0,
     rows_skipped: int = 0,
     rows_shaped_out: int = 0,
+    rows_shape_diverted: int = 0,
     rows_source_filtered: int = 0,
     rows_expanded: int = 0,
     target_rows_before: int | None = None,
@@ -1514,7 +1515,19 @@ def reconcile(
     else:
         message = f"Row fidelity verified — source and target checksums match ({target_rows} rows)"
         if rejected_rows:
-            message = f"Transfer verified ({target_rows} rows written, {rejected_rows} rejected)"
+            # X-110: charge each population movement to its own cause — a
+            # diverted row is quarantine evidence (in rejected_rows), a
+            # shaped-out row was filtered by the recipe. One bare "rejected"
+            # lumped a divert and a rank/filter removal together.
+            parts = [f"{target_rows} rows written"]
+            if rows_shape_diverted:
+                parts.append(f"{rows_shape_diverted} diverted to quarantine")
+            remainder = rejected_rows - rows_shape_diverted
+            if remainder:
+                parts.append(f"{remainder} rejected")
+            if rows_shaped_out:
+                parts.append(f"{rows_shaped_out} filtered by recipe")
+            message = f"Transfer verified ({', '.join(parts)})"
     return ReconciliationReport(
         passed=True,
         source_rows=source_rows,
