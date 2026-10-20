@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from src.transfer import engine as _engine
@@ -200,6 +201,28 @@ def _pin_overwrite_rows_before(
 
 
 
+_L45_TAIL_RE = re.compile(r"\s+—\s+(L4/L5 localized: .+)$", re.DOTALL)
+
+
+def _culprit_first_message(message: str) -> str:
+    """A failed job opens with the culprit clause, not a count fact (X-44).
+
+    Every ladder/veto path already leads with the localized cell, but at
+    least one count-only compose path appends it behind
+    \"Row count verified by engine copy … — L4/L5 localized: …\". This is
+    the single funnel every failed run's error text passes through, so the
+    ordering is enforced here regardless of which upstream path produced
+    the loc-last shape: culprit clause, then the rest.
+    """
+    base = str(message or "").rstrip()
+    m = _L45_TAIL_RE.search(base)
+    if not m or m.start() <= 0:
+        return base
+    loc = m.group(1).rstrip()
+    rest = base[: m.start()].rstrip()
+    return f"{loc} — {rest}" if rest else loc
+
+
 def _note_failed_batch_undo(
     request: Any,
     dest_summary: Any,
@@ -219,7 +242,7 @@ def _note_failed_batch_undo(
     that the undo just removed (X-46).
     """
     out = _failed_batch_undo_note_impl(
-        request, dest_summary, message, recon=recon
+        request, dest_summary, _culprit_first_message(message), recon=recon
     )
     if not isinstance(dest_summary, dict):
         return out
