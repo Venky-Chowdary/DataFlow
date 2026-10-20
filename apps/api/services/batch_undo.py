@@ -199,13 +199,64 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
                 remaining_after.append(0)
                 continue
             dropped_all = False
-        removed = _delete_all_rows(
-            db_type,
-            cfg,
-            schema=schema,
-            table_name=_t,
-            job_id=str(dest_summary.get("job_id") or ""),
-        )
+        # A table the run never reached CREATE on is already 'byte-identical
+        # to before' — a DELETE against it only raises a missing-object error
+        # (SQL Server 'Invalid object name' 208, MySQL 1146, PG 42P01) that
+        # then logs as a failed undo. Probe the row count first: 0 — missing
+        # or genuinely empty — means there is nothing to DELETE.
+        _probe: int | None
+        try:
+            _probe = precount_table(db_type, cfg, _t)
+        except Exception as _probe_exc:  # noqa: BLE001
+            _missing = any(
+                tok in str(_probe_exc).lower()
+                for tok in (
+                    "invalid object",
+                    "does not exist",
+                    "unknown table",
+                    "no such table",
+                    "not exist",
+                    "undefined table",
+                    "base table or view not found",
+                )
+            )
+            if not _missing:
+                raise
+            _probe = 0
+        if _probe == 0:
+            removed = True
+            remaining_after.append(0)
+            continue
+        try:
+            removed = _delete_all_rows(
+                db_type,
+                cfg,
+                schema=schema,
+                table_name=_t,
+                job_id=str(dest_summary.get("job_id") or ""),
+            )
+        except Exception as del_exc:  # noqa: BLE001
+            # Belt-and-suspenders for engines whose probe cannot distinguish
+            # 'missing' from 'unknowable' (returned None): a missing-object
+            # error on the DELETE itself means the table is already gone,
+            # not that the rollback failed.
+            _missing = any(
+                tok in str(del_exc).lower()
+                for tok in (
+                    "invalid object",
+                    "does not exist",
+                    "unknown table",
+                    "no such table",
+                    "not exist",
+                    "undefined table",
+                    "base table or view not found",
+                )
+            )
+            if not _missing:
+                raise
+            removed = True
+            remaining_after.append(0)
+            continue
         removed_any = removed_any or removed
         remaining_after.append(precount_table(db_type, cfg, _t) or 0)
     removed = removed_any

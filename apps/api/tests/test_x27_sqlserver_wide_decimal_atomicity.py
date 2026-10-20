@@ -65,8 +65,14 @@ class _PyodbcCursor:
     def __init__(self):
         self.input_sizes = None
 
-    def setinputsizes(self, *sizes):
-        self.input_sizes = sizes
+    def setinputsizes(self, *args):
+        # Real pyodbc takes exactly one argument — the sizes sequence.
+        if len(args) != 1:
+            raise TypeError(
+                "Cursor.setinputsizes() takes exactly one argument "
+                f"({len(args)} given)"
+            )
+        (self.input_sizes,) = args
 
 
 def test_setinputsizes_declares_varchar_for_wide_decimal_positions():
@@ -78,12 +84,12 @@ def test_setinputsizes_declares_varchar_for_wide_decimal_positions():
         cps.set_wide_decimal_inputsizes(
             cur, ["INT", "DECIMAL(38,10)", "DECIMAL(10,2)", "DECIMAL(38)"]
         )
-        assert cur.input_sizes == (
+        assert list(cur.input_sizes) == [
             None,
             (-9, 41),  # 38 digits + sign + point
             None,
             (-9, 41),
-        )
+        ]
     finally:
         monkey.undo()
 

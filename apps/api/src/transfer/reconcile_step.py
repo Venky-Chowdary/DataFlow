@@ -6867,12 +6867,16 @@ def run_reconciliation(
                         + _tail
                     )
                 else:
+                    # Failure-first on a FAILED job: lead with the digest
+                    # mismatch and the localized cell; the row-count fact is
+                    # secondary, not the headline.
+                    _count_fact = _msg[:_cut].strip()
                     recon["message"] = (
-                        _msg[:_cut]
-                        + " Both populations were re-read and digested "
-                        "order-independently at verify time; the digests "
-                        "mismatch (full_checksum)."
+                        "Checksum mismatch (full_checksum): both populations "
+                        "were re-read and digested order-independently at "
+                        "verify time; the digests mismatch."
                         + _tail
+                        + (f" {_count_fact}" if _count_fact else "")
                     )
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
