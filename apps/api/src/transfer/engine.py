@@ -2814,6 +2814,10 @@ class UniversalTransferEngine:
                             phase="writing",
                             message="Connecting to destination and creating table…",
                         )
+                    from services.preflight_source_kind import (
+                        source_is_record_batch,
+                    )
+
                     return write_destination_database(
                         request.destination,
                         records,
@@ -2828,6 +2832,13 @@ class UniversalTransferEngine:
                         job_id=job_id,
                         skip_preflight=request.skip_preflight,
                         sync_mode=request.sync_mode,
+                        # File/object-store blanks into typed columns are SQL
+                        # NULL (D1): the buffered path dropped the flag, so
+                        # Execute rejected blanks preflight accepted.
+                        empty_cells_as_null=source_is_record_batch(
+                            getattr(request.source, "kind", "") or "database",
+                            request.source.format,
+                        ),
                         release_records=True,
                         retain_engine_spill=True,
                         collect_mirror_keys=effective_sync_lower

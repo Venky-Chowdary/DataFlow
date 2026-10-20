@@ -1522,6 +1522,7 @@ def _write_destination_database(
     source_spool: Any = None,
     allow_equal_lsn: bool = False,
     protect_landed_object: bool = False,
+    empty_cells_as_null: bool = False,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1607,6 +1608,9 @@ def _write_destination_database(
         "skip_preflight": skip_preflight,
         "sync_mode": sync_mode,
         "protect_landed_object": protect_landed_object,
+        # File/object-store blanks into typed columns are SQL NULL (D1): the
+        # buffered engine path dropped the flag before writers ever saw it.
+        "empty_cells_as_null": empty_cells_as_null,
         # Live dest nullability for write-time NOT NULL escalate (G3 parity).
         "destination_column_nullability": dict(
             (cfg.get("extra") or {}).get("schema_nullability")

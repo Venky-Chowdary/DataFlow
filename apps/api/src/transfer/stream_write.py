@@ -432,6 +432,10 @@ def _write_batch(
             skip_session_setup=skip_session_setup,
             destination_column_nullability=dest_nullability,
             destination_column_types=dest_column_types,
+            # This dedicated branch bypassed the ``common`` payload, so the
+            # file/object-store blank→NULL opt-in never reached the writer
+            # (D1 — blanks preflight promised were rejected at write).
+            empty_cells_as_null=empty_cells_as_null,
             **source_handoff,
         )
         if not result.ok:

@@ -1668,6 +1668,20 @@ _ENGINE_ALIASES = {
     "to_json": "json",
     "date_iso": "datetime",
     "time_iso": "time",
+    # Natural-language case/whitespace names operators guess at (D6) — the
+    # engine ids are the short forms, so these spellings must not be refused.
+    "lowercase": "lower",
+    "lower_case": "lower",
+    "tolower": "lower",
+    "lcase": "lower",
+    "uppercase": "upper",
+    "upper_case": "upper",
+    "toupper": "upper",
+    "ucase": "upper",
+    "strip": "trim",
+    "strip_whitespace": "trim",
+    "trim_whitespace": "trim",
+    "remove_whitespace": "trim",
 }
 
 _PARAMETERIZED_PREFIXES = (
@@ -2212,7 +2226,10 @@ def apply_transform(
     """
     canon = normalize_engine_transform(transform)
     if str(transform or "").strip() and canon is None:
-        return None, f"Unknown transform: {transform!r}"
+        return None, (
+            f"Unknown transform: {transform!r} — valid names are listed by "
+            "describe_connector_transforms / KNOWN_TRANSFORMS."
+        )
     transform = canon or "none"
     transform_key = transform.lower()
     # Parameterised ops share the registry with plan. Empty is a real input

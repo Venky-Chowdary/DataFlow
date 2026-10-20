@@ -150,13 +150,18 @@ def slim_job_for_list(job: dict[str, Any] | None) -> dict[str, Any]:
             out["coerced_null_rows"] = ds.get("coerced_null_rows")
     # A live job that has not written a progress update past the stall window
     # is surfaced as stalled — the pg→Mongo run that sat at 0 records for
-    # ~49 minutes had no signal at all (QA hang report).
+    # ~49 minutes had no signal at all (QA hang report). The per-step watchdog
+    # stamps stalled/stall_seconds/stall_step on the document itself (D10);
+    # prefer those over the whole-job estimate when present.
     from services.job_status import job_stall_seconds
 
     stall = job_stall_seconds(job)
-    if stall:
+    persisted = int(job.get("stall_seconds") or 0)
+    if job.get("stalled") or stall or persisted:
         out["stalled"] = True
-        out["stall_seconds"] = int(stall)
+        out["stall_seconds"] = max(int(stall), persisted)
+        if job.get("stall_step"):
+            out["stall_step"] = str(job.get("stall_step"))
     # Tiny checkpoint summary for Resume affordance (no row samples).
     cp = job.get("checkpoint")
     if isinstance(cp, dict):

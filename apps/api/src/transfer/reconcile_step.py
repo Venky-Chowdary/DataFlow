@@ -6841,13 +6841,30 @@ def run_reconciliation(
             recon["checksum_scope"] = "verify_time_population_digest"
             _msg = str(recon.get("message") or "")
             _cut = _msg.find(" There is no source value digest")
+            # The count-only scope note starts two sentences earlier — leaving
+            # "…the only proof the route produced is destination COUNT(*)."
+            # next to "…digested (full_checksum)" is contradictory (X-39).
+            _note_start = _msg.find(" The copy ran inside the engines:")
+            if _note_start >= 0 and (_cut < 0 or _note_start < _cut):
+                _cut = _note_start
             if _cut >= 0:
+                # The L4/L5 localization the ladder appends on a fail sits
+                # after the scope note — it is not part of the note and must
+                # survive (X-39). Find it directly; the note's own wording
+                # varies by scope (engine copy vs resume).
+                _tail = ""
+                for _marker in (" L4/L5 localized", " L4 localized"):
+                    _at = _msg.find(_marker, _cut)
+                    if _at >= 0:
+                        _tail = _msg[_at:]
+                        break
                 if recon["checksum_match"]:
                     recon["message"] = (
                         _msg[:_cut]
                         + " Both populations were re-read and digested "
                         "order-independently at verify time; the digests match "
                         "(full_checksum)."
+                        + _tail
                     )
                 else:
                     recon["message"] = (
@@ -6855,6 +6872,7 @@ def run_reconciliation(
                         + " Both populations were re-read and digested "
                         "order-independently at verify time; the digests "
                         "mismatch (full_checksum)."
+                        + _tail
                     )
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw

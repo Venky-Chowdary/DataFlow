@@ -3150,7 +3150,13 @@ def _stream_database_transfer_impl(
         # carrier itself has no empty-string domain — that path stays in the
         # blank-cell contract and is not flipped on here.
         write_kwargs: dict[str, Any] = {
-            "empty_cells_as_null": source_is_record_batch("database", src_type),
+            # File uploads reaching this stream path must opt in by their
+            # real kind — hardcoding "database" made a csv upload fall back
+            # to the extract rule and reject blanks a file preflight had
+            # already promised as SQL NULL (D1).
+            "empty_cells_as_null": source_is_record_batch(
+                getattr(source, "kind", "") or "database", src_type
+            ),
         }
         if dest_type == "snowflake":
             write_kwargs["connection"] = _ensure_snowflake_conn()

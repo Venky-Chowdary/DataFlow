@@ -322,6 +322,12 @@ def _persist_job_quarantine(
         and getattr(request, "destination", None) is not None
         and not dest_summary.get("dest_quarantine_rows")
         and replay_all
+        # FAIL_JOB must not litter: when the destination provably has no
+        # table for these findings to sit beside (the run failed before
+        # CREATE, or the created-table undo already dropped it), a sibling
+        # ``{table}_df_quarantine`` is an orphan, not evidence — the findings
+        # stay durable in the control-plane DLQ (D1).
+        and not _destination_table_absent(request.destination, dest_summary)
     ):
         try:
             from services.dest_quarantine import write_dest_quarantine
@@ -345,6 +351,48 @@ def _persist_job_quarantine(
     from services.quarantine_dlq import assert_quarantine_durable_or_raise
 
     assert_quarantine_durable_or_raise(dest_summary)
+
+
+def _destination_table_absent(destination: Any, dest_summary: dict[str, Any]) -> bool:
+    """True only when the destination *provably* has no table right now.
+
+    ``False`` on any resolution/probe failure — a missed probe must never
+    suppress the evidence table for a live destination.
+    """
+    try:
+        from services.dest_precount import count_dialect, destination_table_exists
+        from services.dialect_profiles import schema_from_cfg
+        from src.transfer.adapters import (
+            resolve_connector_config,
+            resolve_dest_table,
+        )
+
+        cfg = resolve_connector_config(destination)
+        db_type = count_dialect(
+            str(cfg.get("type") or getattr(destination, "format", "") or "")
+        )
+        if db_type != "snowflake":
+            # Only Snowflake pairs the skip with the created-this-run
+            # _DF_QUARANTINE drop — on MySQL/PG/etc. the DLQ evidence write
+            # is the contract and created-table cleanup owns the litter.
+            return False
+        table = str(
+            dest_summary.get("table")
+            or dest_summary.get("collection")
+            or resolve_dest_table(db_type, destination, "dt_import")
+            or ""
+        ).strip()
+        if not table:
+            return False
+        exists = destination_table_exists(
+            db_type,
+            cfg,
+            schema=schema_from_cfg(db_type, cfg),
+            table_name=table,
+        )
+        return exists is False
+    except Exception:  # noqa: BLE001 - unknown is not absent
+        return False
 
 
 def fail_closed_on_silent_loss(

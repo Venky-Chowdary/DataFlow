@@ -93,14 +93,7 @@ def _decide(
                 "dest_table_existed_before"
             )
         if _existed is False:
-            # The created-table cleanup owns the drop; a DELETE here would
-            # hit a table the run may never have created (SQL Server logs
-            # 'Invalid object name' 208 against the never-created ref).
-            return (
-                "retained",
-                "The destination did not exist before this run; created-table "
-                "cleanup drops it instead of deleting rows.",
-            )
+            before = 0
     if not isinstance(before, int):
         return (
             "retained",
@@ -161,6 +154,13 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
         )
         is False
     )
+    if drop_created:
+        # FAIL_JOB litters the {table}_df_quarantine DLQ beside the dest
+        # table (D1): a destination that had no table before holds no
+        # quarantine table either — drop this run's litter with it.
+        from services.dest_quarantine import dlq_table_name
+
+        tables = tables + [dlq_table_name(_t) for _t in tables]
     removed_any = False
     remaining_after: list[int] = []
     dropped_all = drop_created
@@ -170,8 +170,31 @@ def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
                 from connectors.table_manager import drop_table
 
                 dropped = bool(drop_table(db_type, cfg, _t, schema=schema))
-            except Exception:  # noqa: BLE001 - a failed drop still deletes rows
-                dropped = False
+            except Exception as drop_exc:  # noqa: BLE001
+                # A table the run never reached CREATE on is already
+                # 'byte-identical to before' — missing-object errors (SQL
+                # Server 'Invalid object name' 208) must not fall through to
+                # a DELETE against the same phantom ref.
+                _missing = any(
+                    tok in str(drop_exc).lower()
+                    for tok in (
+                        "invalid object",
+                        "does not exist",
+                        "unknown table",
+                        "no such table",
+                        "not exist",
+                    )
+                )
+                dropped = _missing
+            if not dropped:
+                # drop_table answered False without erroring — check whether
+                # the table is even there before attempting a DELETE.
+                try:
+                    _still_there = precount_table(db_type, cfg, _t)
+                except Exception:  # noqa: BLE001
+                    _still_there = None
+                if _still_there is None:
+                    dropped = True
             if dropped:
                 remaining_after.append(0)
                 continue
