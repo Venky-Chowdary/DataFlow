@@ -10542,10 +10542,19 @@ button.df2-vd-assist-toggle:focus-visible {
   display: flex;
   flex-direction: row;
   justify-content: flex-end;
-  flex-wrap: nowrap;
-  gap: 6px;
+  /* wrap (not nowrap) + shrinkable pills: with nowrap + flex-shrink:0 a
+     second pill that didn't fit pushed the row past the dock's left edge,
+     and the dock's overflow:hidden clipped it — a partially visible toast
+     (the D-BP-27 class, at every width). Wrapped pills stay fully inside
+     the band, which grows in-flow and covers nothing. */
+  flex-wrap: wrap;
+  row-gap: 4px;
+  gap: 4px 6px;
   align-items: center;
-  width: auto;
+  /* width:100% (not auto): an auto-sized host can overhang the dock by a
+     sub-pixel, and the dock's overflow:hidden then shaves the pill's right
+     edge — a partially clipped toast (D-BP-27). */
+  width: 100%;
   max-width: 100%;
   max-height: none;
   overflow: hidden;
@@ -10556,7 +10565,7 @@ button.df2-vd-assist-toggle:focus-visible {
   width: auto;
   min-width: 0;
   max-width: min(300px, 100%);
-  flex-shrink: 0;
+  flex-shrink: 1;
   padding: 5px 8px;
   border-radius: 8px;
   gap: 6px;
@@ -10590,6 +10599,64 @@ button.df2-vd-assist-toggle:focus-visible {
     display: flex;
     justify-content: flex-end;
   }
+}
+
+/* D-BP-27: at <=480 the lane stacks — newest on top (column-reverse packs
+   from the bottom, so the last DOM toast lands at the top), a capped list
+   rendered by the provider (max 2 + a "+N more" chip pinned to the lane
+   bottom), every visible toast fully inside the dock band, and the band
+   keeps >=8px clearance above the stepper. */
+.df2-toast-dock .dt-toast-more {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  padding: 5px 8px;
+  border-radius: 8px;
+  border: 1px dashed var(--df-border);
+  color: var(--df-text-muted);
+  font-size: 11px;
+  white-space: nowrap;
+}
+@media (max-width: 480px) {
+  .df2-page-transfer-studio .df2-toast-dock {
+    overflow: visible;
+  }
+  .df2-page-transfer-studio .df2-toast-dock:has(.dt-toast),
+  .df2-page-transfer-studio .df2-toast-dock:has(.dt-toast-more) {
+    margin-bottom: 8px;
+  }
+  .df2-page-transfer-studio .df2-toast-dock .dt-toast-host {
+    flex-direction: column-reverse;
+    flex-wrap: nowrap;
+    justify-content: flex-start;
+    align-items: stretch;
+    gap: 4px;
+    width: 100%;
+  }
+  .df2-page-transfer-studio .df2-toast-dock .dt-toast {
+    width: 100%;
+    max-width: 100%;
+    flex-shrink: 0;
+  }
+  .df2-page-transfer-studio .df2-toast-dock .dt-toast-more {
+    order: -9999;
+    justify-content: center;
+  }
+  /* D-BP-27/route chip: two endpoints plus arrow + count can't share one
+     ~330px row — "Choose destination" clipped in both classic and canvas.
+     Let the bar wrap to a second in-flow line inside the chrome band;
+     names render in full (labels already uncapped above). */
+  .df2-page-transfer-studio .df2-route-bar {
+    flex-wrap: wrap;
+    row-gap: 2px;
+  }
+  .df2-page-transfer-studio .df2-route-bar-endpoint {
+    flex: 0 0 auto;
+    max-width: 100%;
+  }
+  /* canvas mode: same wrap lives in studio-next.css (the canonical
+     canvas rule owner — it loads last, so it must set the constrained
+     width itself; a same-specificity rule here would lose). */
 }
 
 /* D-BP-21 continued: generic wizard footers (hint + primary) keep one row
@@ -10714,6 +10781,16 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   font-weight: 600;
   color: var(--df-text-secondary);
   padding: 2px 0;
+}
+
+/* "5 fields" stays one line at every width; the hint takes the squeeze. */
+.df2-structure-field-summary .df2-structure-field-count {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.df2-structure-field-summary > span:last-child {
+  min-width: 0;
 }
 
 .df2-structure-field-summary::-webkit-details-marker {
@@ -12310,4 +12387,28 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   border-radius: 8px;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* P3 (D-BP-27 batch): the "<n> fields" subtitle in Detected structure wraps
+   mid-token at 390 — keep it on one line with an ellipsis instead. */
+.df2-source-step .df2-structure-preview-head > div:first-child p {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* P3 (D-BP-27 batch): the Detected structure table clips its last column
+   with no scroll affordance — paint a right-edge fade + a left-edge reveal
+   so a clipped cell reads as "scrollable", never as a truncated render.
+   Shadows are scroll-attached; the opaque covers hide them at each edge. */
+.df2-page-transfer-studio .df2-structure-table-wrap {
+  background:
+    linear-gradient(to right, var(--df-surface) 30%, rgba(255, 255, 255, 0)),
+    linear-gradient(to left, var(--df-surface) 30%, rgba(255, 255, 255, 0)),
+    radial-gradient(farthest-side at 0 50%, rgba(15, 23, 42, 0.22), rgba(15, 23, 42, 0)),
+    radial-gradient(farthest-side at 100% 50%, rgba(15, 23, 42, 0.22), rgba(15, 23, 42, 0));
+  background-attachment: local, local, scroll, scroll;
+  background-repeat: no-repeat;
+  background-size: 48px 100%, 48px 100%, 16px 100%, 16px 100%;
+  background-position: 0 0, 100% 0, 0 0, 100% 0;
 }
