@@ -75,8 +75,23 @@ class _PyodbcCursor:
         (self.input_sizes,) = args
 
 
+def _fake_pyodbc() -> types.SimpleNamespace:
+    # Constants the column-descriptor builder reads for every position —
+    # msodbcsql 18 drops declarations at the first ``None`` slot, so the
+    # fix gives every position a real type entry, not a placeholder.
+    return types.SimpleNamespace(
+        SQL_VARCHAR=-9,
+        SQL_WVARCHAR=-10,
+        SQL_DECIMAL=3,
+        SQL_INTEGER=4,
+        SQL_BIGINT=-5,
+        SQL_SMALLINT=5,
+        SQL_TINYINT=-6,
+    )
+
+
 def test_setinputsizes_declares_varchar_for_wide_decimal_positions():
-    fake_pyodbc = types.SimpleNamespace(SQL_VARCHAR=-9)
+    fake_pyodbc = _fake_pyodbc()
     monkey = pytest.MonkeyPatch()
     monkey.setitem(sys.modules, "pyodbc", fake_pyodbc)
     try:
@@ -85,9 +100,9 @@ def test_setinputsizes_declares_varchar_for_wide_decimal_positions():
             cur, ["INT", "DECIMAL(38,10)", "DECIMAL(10,2)", "DECIMAL(38)"]
         )
         assert list(cur.input_sizes) == [
-            None,
+            4,  # SQL_INTEGER — real descriptor, never a None placeholder
             (-9, 41),  # 38 digits + sign + point
-            None,
+            (3, 10, 2),  # SQL_DECIMAL(10,2)
             (-9, 41),
         ]
     finally:
@@ -95,7 +110,7 @@ def test_setinputsizes_declares_varchar_for_wide_decimal_positions():
 
 
 def test_setinputsizes_noop_without_wide_decimal():
-    fake_pyodbc = types.SimpleNamespace(SQL_VARCHAR=-9)
+    fake_pyodbc = _fake_pyodbc()
     monkey = pytest.MonkeyPatch()
     monkey.setitem(sys.modules, "pyodbc", fake_pyodbc)
     try:

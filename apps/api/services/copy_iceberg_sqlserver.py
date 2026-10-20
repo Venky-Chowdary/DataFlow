@@ -40,6 +40,7 @@ from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_pg_sqlserver import (
     _enable_fast_executemany,
     bind_row_for_sqlserver,
+    bulk_executemany,
     pg_sqlserver_copy_batch,
     set_wide_decimal_inputsizes,
     sqlserver_insert_placeholders,
@@ -80,11 +81,11 @@ def _arrow_into_sqlserver(
         for row in zip(*cols):
             batch.append(tuple(row))
             if len(batch) >= batch_size:
-                dst_cur.executemany(insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
+                bulk_executemany(dst_cur, insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
                 copied += len(batch)
                 batch.clear()
     if batch:
-        dst_cur.executemany(insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
+        bulk_executemany(dst_cur, insert_sql, [bind_row_for_sqlserver(dst_cur, r) for r in batch])
         copied += len(batch)
     return copied
 

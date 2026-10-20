@@ -46,6 +46,7 @@ from services.copy_pg_mysql import (
 from services.copy_pg_sqlserver import (
     _enable_fast_executemany,
     bind_row_for_sqlserver,
+    bulk_executemany,
     pg_sqlserver_copy_batch,
     set_wide_decimal_inputsizes,
     sqlserver_insert_placeholders,
@@ -95,11 +96,11 @@ def _select_into_sqlserver(
             for row in rows:
                 batch.append(bind_row_for_sqlserver(dst_cur, tuple(row)))
                 if len(batch) >= batch_size:
-                    dst_cur.executemany(insert_sql, batch)
+                    bulk_executemany(dst_cur, insert_sql, batch)
                     copied += len(batch)
                     batch.clear()
         if batch:
-            dst_cur.executemany(insert_sql, batch)
+            bulk_executemany(dst_cur, insert_sql, batch)
             copied += len(batch)
         return copied
     finally:

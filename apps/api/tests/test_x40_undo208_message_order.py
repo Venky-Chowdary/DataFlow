@@ -25,7 +25,29 @@ import types
 
 def _fake_pyodbc_module() -> types.ModuleType:
     mod = types.ModuleType("pyodbc")
-    mod.SQL_VARCHAR = -9  # real constant value is -9
+    # Real constant values where the test asserts on them; unique sentinels
+    # for the rest so a wrong-but-set slot can't pass as None.
+    mod.SQL_VARCHAR = -9
+    for name in (
+        "SQL_WVARCHAR",
+        "SQL_DECIMAL",
+        "SQL_BIGINT",
+        "SQL_INTEGER",
+        "SQL_SMALLINT",
+        "SQL_TINYINT",
+        "SQL_BIT",
+        "SQL_FLOAT",
+        "SQL_REAL",
+        "SQL_TYPE_DATE",
+        "SQL_TYPE_TIME",
+        "SQL_TYPE_TIMESTAMP",
+        "SQL_SS_TIMESTAMPOFFSET",
+        "SQL_VARBINARY",
+        "SQL_LONGVARBINARY",
+        "SQL_WLONGVARCHAR",
+        "SQL_LONGVARCHAR",
+    ):
+        setattr(mod, name, name)
     return mod
 
 
@@ -55,11 +77,14 @@ def test_x40_inputsizes_called_with_single_sequence(monkeypatch):
     assert len(cur.calls) == 1, "setinputsizes must be called exactly once"
     (sizes,) = cur.calls[0]
     assert isinstance(sizes, list) and len(sizes) == 4
-    # Only the >28-precision columns declare a varchar size.
-    assert sizes[0] is None
-    assert sizes[1] == (-9, 41)  # SQL_VARCHAR, p+3
+    # X-40 live (HY090): NO slot may be None — msodbcsql 18 maps a None
+    # element to a zero-length parameter and executemany dies with
+    # 'Invalid string or buffer length (0)'. Every column gets a real
+    # descriptor; only the >28-precision ones declare the varchar text
+    # bind that the CAST placeholder converts.
+    assert all(s is not None for s in sizes), sizes
+    assert sizes[1] == (-9, 41)  # SQL_VARCHAR, p+3 — DECIMAL(38,10)
     assert sizes[2] == (-9, 33)  # DECIMAL(30,5) is also >28
-    assert sizes[3] is None
 
 
 def test_x40_driver_quirk_declines_to_row_path(monkeypatch):

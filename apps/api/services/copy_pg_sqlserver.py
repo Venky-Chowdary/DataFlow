@@ -335,20 +335,14 @@ def set_wide_decimal_inputsizes(cur: Any, sqlserver_ddls: list[str]) -> None:
     setter = getattr(inner, "setinputsizes", None)
     if setter is None:
         return
-    sizes: list[Any] = []
-    any_wide = False
-    for ddl in sqlserver_ddls:
-        p, _s = (
-            parse_numeric_precision_scale(ddl or "")
-            if normalize_logical_type(ddl or "") == LOGICAL_DECIMAL
-            else (None, None)
-        )
-        if p is not None and int(p) > 28:
-            sizes.append((pyodbc.SQL_VARCHAR, int(p) + 3))
-            any_wide = True
-        else:
-            sizes.append(None)
-    if any_wide:
+    sizes = [_pyodbc_size_for_ddl(ddl, pyodbc, normalize_logical_type) for ddl in sqlserver_ddls]
+    if any(
+        isinstance(el, tuple)
+        and len(el) >= 2
+        and el[0] == pyodbc.SQL_VARCHAR
+        and _is_wide_decimal_ddl(ddl, normalize_logical_type)
+        for el, ddl in zip(sizes, sqlserver_ddls, strict=True)
+    ):
         try:
             # pyodbc takes ONE argument — the sizes sequence — not N
             # positional args (X-40: 'setinputsizes() takes exactly one
@@ -364,6 +358,96 @@ def set_wide_decimal_inputsizes(cur: Any, sqlserver_ddls: list[str]) -> None:
             raise FastPathUnavailable(
                 f"pyodbc setinputsizes rejected wide-decimal declarations: {exc}"
             ) from exc
+
+
+def _is_wide_decimal_ddl(ddl: str, normalize_logical_type: Any) -> bool:
+    from services.type_system import LOGICAL_DECIMAL, parse_numeric_precision_scale
+
+    if normalize_logical_type(ddl or "") != LOGICAL_DECIMAL:
+        return False
+    p, _s = parse_numeric_precision_scale(ddl or "")
+    return p is not None and int(p) > 28
+
+
+def _pyodbc_size_for_ddl(
+    ddl: str, pyodbc: Any, normalize_logical_type: Any
+) -> Any:
+    """One ``setinputsizes`` element for a dest column — never ``None``.
+
+    X-40 live: msodbcsql 18 maps a ``None`` slot to a zero-length parameter,
+    so ``executemany`` dies with ``HY090 Invalid string or buffer length
+    (0)`` on any mixed-type table that contains a wide decimal. Every
+    position gets a real descriptor derived from the dest DDL instead.
+    Unknown/exotic types fall back to the ``str`` type object (text bind;
+    the server-side column type converts) — still never ``None``.
+    """
+    from services.type_system import (
+        LOGICAL_BINARY,
+        LOGICAL_BOOLEAN,
+        LOGICAL_DATE,
+        LOGICAL_DATETIME,
+        LOGICAL_DECIMAL,
+        LOGICAL_FLOAT,
+        LOGICAL_INTEGER,
+        LOGICAL_TIME,
+        LOGICAL_UUID,
+        parse_numeric_precision_scale,
+    )
+
+    raw = (ddl or "").strip()
+    base = raw.split("(")[0].strip().upper().replace(" ", "")
+    tail = raw[len(raw.split("(")[0]):]
+    arg = ""
+    if tail.startswith("(") and tail.endswith(")"):
+        arg = tail[1:-1].split(",")[0].strip().upper()
+
+    logical = normalize_logical_type(raw)
+    if logical == LOGICAL_DECIMAL:
+        p, s = parse_numeric_precision_scale(raw)
+        if p is not None and int(p) > 28:
+            # Wide decimals bind as text through the CAST placeholder.
+            return (pyodbc.SQL_VARCHAR, int(p) + 3)
+        if p is not None:
+            return (pyodbc.SQL_DECIMAL, int(p), int(s or 0))
+        return pyodbc.SQL_VARCHAR
+    if logical == LOGICAL_INTEGER:
+        if base == "BIGINT":
+            return pyodbc.SQL_BIGINT
+        if base == "SMALLINT":
+            return pyodbc.SQL_SMALLINT
+        if base == "TINYINT":
+            return pyodbc.SQL_TINYINT
+        return pyodbc.SQL_INTEGER
+    if logical == LOGICAL_BOOLEAN or base == "BIT":
+        return pyodbc.SQL_BIT
+    if logical == LOGICAL_FLOAT:
+        return pyodbc.SQL_REAL if base == "REAL" else pyodbc.SQL_FLOAT
+    if logical == LOGICAL_DATE or base == "DATE":
+        return pyodbc.SQL_TYPE_DATE
+    if logical == LOGICAL_TIME or base.startswith("TIME"):
+        return pyodbc.SQL_TYPE_TIME
+    if base == "DATETIMEOFFSET":
+        return getattr(pyodbc, "SQL_SS_TIMESTAMPOFFSET", pyodbc.SQL_WVARCHAR)
+    if logical == LOGICAL_DATETIME or base.startswith(("DATETIME", "SMALLDATETIME")):
+        return pyodbc.SQL_TYPE_TIMESTAMP
+    if logical == LOGICAL_UUID or base == "UNIQUEIDENTIFIER":
+        return (pyodbc.SQL_VARCHAR, 36)
+    if logical == LOGICAL_BINARY or base in {
+        "BINARY", "VARBINARY", "IMAGE", "ROWVERSION", "TIMESTAMP",
+    }:
+        if arg.isdigit():
+            return (pyodbc.SQL_VARBINARY, int(arg))
+        return getattr(pyodbc, "SQL_LONGVARBINARY", pyodbc.SQL_VARBINARY)
+    # Text family — explicit size, MAX, or a long-varchar fallback.
+    if arg == "MAX" or base in {"TEXT", "NTEXT", "XML"}:
+        return getattr(pyodbc, "SQL_WLONGVARCHAR", pyodbc.SQL_WVARCHAR)
+    if arg.isdigit():
+        # Always the wide variant: Python str is UTF-16, and declaring
+        # SQL_VARCHAR would let the driver down-convert non-ASCII text to
+        # '?' — silent loss. The server narrows to varchar codepage per
+        # the column's own contract.
+        return (pyodbc.SQL_WVARCHAR, int(arg))
+    return str
 
 
 class _CopyExecutemanySink:
@@ -439,12 +523,32 @@ class _CopyExecutemanySink:
     def _flush_batch(self) -> None:
         if not self._batch:
             return
-        self._cur.executemany(
+        bulk_executemany(
+            self._cur,
             self._insert_sql,
             [bind_row_for_sqlserver(self._cur, r) for r in self._batch],
         )
         self.rows += len(self._batch)
         self._batch.clear()
+
+
+def bulk_executemany(cur: Any, insert_sql: str, rows: list[Any]) -> None:
+    """``executemany`` that folds driver bind errors into a typed decline.
+
+    X-40 live: a failed bulk bind must never surface a raw ODBC string to
+    the user. Any ``executemany``/``SQLExecute`` crash becomes
+    ``FastPathUnavailable`` so the engine falls back to the row path, where
+    every bind failure is reported as a typed finding naming the column.
+    """
+    inner = getattr(cur, "_cur", cur)
+    try:
+        inner.executemany(insert_sql, rows)
+    except FastPathUnavailable:
+        raise
+    except Exception as exc:
+        raise FastPathUnavailable(
+            f"SQL Server bulk bind failed ({exc.__class__.__name__}): {exc}"
+        ) from exc
 
 
 def _copy_into_sqlserver(
