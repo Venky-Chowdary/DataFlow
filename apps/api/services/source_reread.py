@@ -55,6 +55,14 @@ REREAD_SCAN_SOURCES: Final[frozenset[str]] = frozenset(
         "bigquery",
         "sqlite",
         "generic_sql",
+        # X-127: SNAPSHOT_SCAN_SOURCES members whose re-read was dropped to
+        # the write-pass — MSSQL/Oracle sources could never earn
+        # full_checksum / migration_proven.
+        "sqlserver",
+        "mssql",
+        "azure_sql",
+        "oracle",
+        "oracledb",
         "mongodb",
         "s3",
         "gcs",
