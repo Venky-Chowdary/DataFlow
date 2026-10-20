@@ -63,6 +63,7 @@ from services.value_serializer import (
     json_default,
     json_loads_exact,
     load_http_json,
+    operator_binary_cell_text,
 )
 
 # Fingerprinting runs once per cell on both the write and the read-back pass, so
@@ -5558,8 +5559,14 @@ def sample_compare_rows(
                         "key": str(key) if keyed else "",
                         "source": src_col,
                         "target": tgt_col,
-                        "source_value": operator_cell_text(src_val)[:120],
-                        "target_value": operator_cell_text(tgt_val)[:120],
+                        "source_value": operator_binary_cell_text(
+                            operator_cell_text(src_val),
+                            str((dest_types or {}).get(tgt_col) or ""),
+                        )[:120],
+                        "target_value": operator_binary_cell_text(
+                            operator_cell_text(tgt_val),
+                            str((dest_types or {}).get(tgt_col) or ""),
+                        )[:120],
                     }
                 )
                 if len(mismatches) >= 10:

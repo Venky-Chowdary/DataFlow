@@ -648,6 +648,28 @@ def transform_input_cell(value: Any) -> str | None:
     return cell_to_string(value)
 
 
+def operator_binary_cell_text(text: str | None, ddl_type: str = "") -> str | None:
+    """Operator spelling of a binary wire cell (X-47).
+
+    Binary values ride the wire as base64, which no database tool shows. For a
+    column whose declared type resolves to logical ``binary``, render the
+    payload as ``0x`` hex — the same spelling psql/sqlcmd/Workbench use. Other
+    columns, and payloads that are not valid base64, pass through unchanged.
+    """
+    if text is None:
+        return None
+    from services.type_system import normalize_logical_type
+
+    if normalize_logical_type(ddl_type) != "binary":
+        return text
+    if text == "":
+        return "0x"  # zero-length bytes — real value, distinct from NULL
+    try:
+        return "0x" + base64.b64decode(text, validate=True).hex()
+    except Exception:
+        return text
+
+
 def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     """Convert a typed Python value into a canonical intermediate string.
 
