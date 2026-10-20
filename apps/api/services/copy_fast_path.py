@@ -160,19 +160,23 @@ def occupied_pk_range_action(
 class _CreateScope:
     """Source catalog handed to a fast path, and the certificate it earned."""
 
-    __slots__ = ("catalog", "mappings", "dest_table", "pending", "report")
+    __slots__ = ("catalog", "mappings", "dest_table", "pending", "report", "carry_keys")
 
     def __init__(
         self,
         catalog: Any,
         mappings: list[dict[str, Any]] | None,
         dest_table: str = "",
+        carry_keys: bool = True,
     ) -> None:
         self.catalog = catalog
         self.mappings = list(mappings or [])
         self.dest_table = str(dest_table or "")
         self.pending: FastPathCreate | None = None
         self.report: dict[str, Any] | None = None
+        # X-98 — append history must not re-declare the source key: run 2
+        # re-appends the same PK and a carried PRIMARY KEY/UNIQUE fails it.
+        self.carry_keys = bool(carry_keys)
 
     def owns(self, table: str) -> bool:
         """Whether ``table`` is the destination this scope certifies.
@@ -242,6 +246,7 @@ def begin_fast_path_create_scope(
     source_schema_catalog: Any,
     mappings: list[dict[str, Any]] | None,
     dest_table: str = "",
+    carry_keys: bool = True,
 ) -> tuple[Token, _CreateScope]:
     """Make the source catalog visible to any CREATE a fast path renders.
 
@@ -251,7 +256,7 @@ def begin_fast_path_create_scope(
     carries the catalog in and the settled certificate out, so ``stream``
     stamps it on the summary.
     """
-    scope = _CreateScope(source_schema_catalog, mappings, dest_table)
+    scope = _CreateScope(source_schema_catalog, mappings, dest_table, carry_keys)
     return _CREATE_SCOPE.set(scope), scope
 
 
@@ -298,6 +303,7 @@ def plan_fast_path_create(
         dest_dialect=dest_dialect,
         dest_table=dest_table,
         dest_schema=dest_schema,
+        carry_keys=scope.carry_keys,
     )
     planned_pk = sorted(c.lower() for c in plan.primary_key)
     given_pk = sorted(c.lower() for c in given)

@@ -5156,6 +5156,7 @@ def sample_compare_rows(
     target_columns: list[str] | None = None,
     sample_size: int = 50,
     sort_key: str | None = None,
+    secondary_sort_key: str | None = None,
     dest_db_type: str = "",
     dest_types: dict[str, str] | None = None,
     stratify_by: str | None = None,
@@ -5213,8 +5214,30 @@ def sample_compare_rows(
     target_by_key: dict[str, dict[str, Any]] = {}
     duplicate_alignment_key = ""
     if sort_key:
+        # X-97 — incremental_append repeats the PK across row versions, so the
+        # primary sort key alone cannot align; the caller passes the cursor
+        # column as the secondary key and the composite (pk, cursor) is the
+        # alignment identity. If the composite still repeats, decline honestly.
+        source_secondary_key = secondary_sort_key
+        if secondary_sort_key and mappings:
+            ssk = secondary_sort_key.lower()
+            for m in mappings:
+                if str(m.get("target") or "").lower() == ssk and m.get("source"):
+                    source_secondary_key = str(m["source"])
+                    break
+
+        def _alignment_key(
+            record: dict[str, Any], key1: str, key2: str | None
+        ) -> str:
+            v1 = normalize_cell(record.get(key1))
+            if not v1:
+                return ""
+            if not key2:
+                return v1
+            return v1 + "\x1f" + normalize_cell(record.get(key2))
+
         for d in target_dicts:
-            key = normalize_cell(d.get(sort_key))
+            key = _alignment_key(d, sort_key, secondary_sort_key)
             if not key:
                 continue
             if key in target_by_key:
@@ -5222,7 +5245,11 @@ def sample_compare_rows(
                 # not identify a row and cannot align one. Keeping the first and
                 # comparing every later row against it reports the difference
                 # between two *different rows* as corruption.
-                duplicate_alignment_key = sort_key
+                duplicate_alignment_key = (
+                    f"{sort_key}+{secondary_sort_key}"
+                    if secondary_sort_key
+                    else sort_key
+                )
                 break
             target_by_key[key] = d
         if not duplicate_alignment_key:
@@ -5230,13 +5257,19 @@ def sample_compare_rows(
             for rec in source_records:
                 if not isinstance(rec, dict):
                     continue
-                key = normalize_cell(
-                    rec.get(source_sort_key) if source_sort_key else None
+                key = _alignment_key(
+                    rec,
+                    source_sort_key or sort_key,
+                    source_secondary_key if secondary_sort_key else None,
                 )
                 if not key:
                     continue
                 if key in seen_source_keys:
-                    duplicate_alignment_key = sort_key
+                    duplicate_alignment_key = (
+                        f"{sort_key}+{secondary_sort_key}"
+                        if secondary_sort_key
+                        else sort_key
+                    )
                     break
                 seen_source_keys.add(key)
 
