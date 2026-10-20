@@ -915,6 +915,38 @@ def _batch_iterator_for_type(
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
 
 
+def file_empty_cell_bind(value: Any, carrier: str, *, empty_cell: str = "null") -> Any:
+    """X-87/X-88: one empty-file-cell rule for every engine and column.
+
+    ``''`` is a delimiter artifact, not a value: it lands as SQL NULL on
+    every engine and every column type (a CSV cannot distinguish empty text
+    from absent text). With ``empty_cell='keep'`` a text-family carrier
+    keeps ``''``; a non-text column still lands NULL — '' is not a number.
+    """
+    if value != "":
+        return value
+    if empty_cell == "keep" and _TEXT_FAMILY_DDL_RE.match(str(carrier or "").strip()):
+        return value
+    return None
+
+
+def _apply_empty_cell_rule(
+    batch: list, schema: dict, empty_cell: str, counter: list[int]
+) -> list:
+    """Rewrite a batch in place — callers measure and matrix-ify lists."""
+    for row in batch:
+        if not isinstance(row, dict):
+            continue
+        for name, value in row.items():
+            bound = file_empty_cell_bind(
+                value, str(schema.get(name) or ""), empty_cell=empty_cell
+            )
+            if bound is not value:
+                row[name] = bound
+                counter[0] += 1
+    return batch
+
+
 def iter_source_rows(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -1380,6 +1412,17 @@ def stream_file_to_database(
     batch_iter = _batch_iterator_for_type(
         file_type, content, batch_size, read_options, declared_name=filename
     )
+    # X-87/X-88: one empty-cell rule on every engine — an empty delimited
+    # field is SQL NULL (default), or '' on a text-family carrier when the
+    # stream opts ``empty_cell='keep'``. Applied once at the source edge so
+    # every writer, mapper and Gate-8 sees the same cells.
+    _empty_cell_rule = getattr(read_options, "empty_cell", "null") or "null"
+    _empty_cell_audit: list[int] = [0]
+    if file_type in {"csv", "tsv"}:
+        batch_iter = (
+            _apply_empty_cell_rule(batch, schema, _empty_cell_rule, _empty_cell_audit)
+            for batch in batch_iter
+        )
 
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
     target_cols, logical_types = _resolve_file_stream_target_columns(
@@ -3247,4 +3290,14 @@ def stream_file_to_database(
     # The exact type basis this stream fingerprinted on — Gate-8's dest
     # read-back must hash against it (SQLite TEXT degrade; see stream.py).
     dest_summary.setdefault("gate8_digest_types", dict(fingerprint_dest_types))
+    # X-87/X-88: name the empty-cell rule in the run summary.
+    if file_type in {"csv", "tsv"}:
+        dest_summary["empty_string_as_null_cells"] = int(
+            dest_summary.get("empty_string_as_null_cells") or 0
+        ) + _empty_cell_audit[0]
+        dest_summary["file_empty_cell_rule"] = (
+            "empty field → NULL"
+            if _empty_cell_rule != "keep"
+            else "empty field → '' on text carriers, NULL elsewhere (empty_cell=keep)"
+        )
     return written, ddl_log, dest_summary, columns

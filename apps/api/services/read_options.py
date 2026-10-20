@@ -55,6 +55,10 @@ class ReadOptions:
                     declared ``(name, width)`` pairs for a fixed-width source.
                     Empty means the reader looks for a ``#layout:`` header or
                     a sidecar ``.layout.json``. Guessing widths is forbidden.
+    ``empty_cell``  one rule for an empty delimited field on every engine:
+                    ``'null'`` (default) lands SQL NULL; ``'keep'`` keeps
+                    ``''`` only where the column's carrier is text-family —
+                    a non-text column still lands NULL ('' is not a number).
     """
 
     sheet: str = ""
@@ -65,6 +69,7 @@ class ReadOptions:
     encoding: str = ""
     delimiter: str = ""
     fixed_width_layout: tuple[tuple[str, int], ...] = ()
+    empty_cell: str = "null"
 
     def __post_init__(self) -> None:
         if self.encoding:
@@ -81,6 +86,10 @@ class ReadOptions:
         if self.fixed_width_layout and not isinstance(self.fixed_width_layout, tuple):
             object.__setattr__(
                 self, "fixed_width_layout", _as_fixed_width_layout(self.fixed_width_layout)
+            )
+        if self.empty_cell not in {"null", "keep"}:
+            raise ReadOptionsError(
+                f"empty_cell must be 'null' or 'keep', got {self.empty_cell!r}"
             )
         if self.sheet_index < -1:
             raise ReadOptionsError(

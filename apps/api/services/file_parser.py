@@ -522,8 +522,13 @@ def iter_stored_upload_rows(file_id: str | None):
         return None
 
 
-def get_file_chunks(file_id: str, chunk_size: int = 10000):
-    """Generator to yield chunks of a file for streaming transfers."""
+def get_file_chunks(file_id: str, chunk_size: int = 10000, *, empty_cell: str = "null"):
+    """Generator to yield chunks of a file for streaming transfers.
+
+    ``empty_cell`` is the X-87/X-88 rule: ``'null'`` (default) lands an
+    empty delimited field as SQL NULL on every engine; ``'keep'`` keeps
+    ``''`` only on text-family carriers — never on a numeric column.
+    """
     record = get_file(file_id)
     if not record:
         raise FileNotFoundError(f"File {file_id} not found in registry")
@@ -534,6 +539,17 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
     delimiter = record["delimiter"]
 
     if fmt == "csv":
+        # X-87/X-88: inferred carrier per column decides '' vs NULL.
+        try:
+            from transfer.file_stream import file_empty_cell_bind
+        except ImportError:  # pragma: no cover
+            from src.transfer.file_stream import file_empty_cell_bind
+
+        _carriers = {
+            str(c.get("name") or ""): str(c.get("inferred_type") or "")
+            for c in (record.get("columns") or [])
+            if isinstance(c, dict)
+        }
         import csv
         with open(path, "r", encoding=encoding) as f:
             reader = csv.reader(f, delimiter=delimiter)
@@ -542,6 +558,14 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
             for row in reader:
                 if is_blank_row(row):
                     continue
+                row = [
+                    file_empty_cell_bind(
+                        v, _carriers.get(headers[i], ""), empty_cell=empty_cell
+                    )
+                    if i < len(headers)
+                    else v
+                    for i, v in enumerate(row)
+                ]
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
                     yield headers, chunk
