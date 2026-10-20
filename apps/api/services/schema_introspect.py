@@ -5,6 +5,7 @@ from __future__ import annotations
 import datetime
 import json
 import logging
+import math
 import re
 import sys
 from collections.abc import Sequence
@@ -2951,6 +2952,7 @@ def _mongodb_types_with_notes(
     """``({field: logical type}, {field: type-mix warning})`` from BSON cells."""
     counts: dict[str, dict[str, int]] = {}
     present: dict[str, int] = {}
+    neg_zero: dict[str, int] = {}
     n_docs = 0
     for doc in documents or []:
         if not isinstance(doc, dict):
@@ -2960,6 +2962,12 @@ def _mongodb_types_with_notes(
             present[str(key)] = int(present.get(str(key), 0)) + 1
             if val is None:
                 continue
+            if (
+                isinstance(val, float)
+                and val == 0.0
+                and math.copysign(1.0, val) < 0
+            ):
+                neg_zero[str(key)] = int(neg_zero.get(str(key), 0)) + 1
             observed = _sample_logical_type(val, str(key))
             if not observed:
                 continue
@@ -2980,6 +2988,8 @@ def _mongodb_types_with_notes(
             "missing": max(0, n_docs - int(present.get(key, 0))),
             "resolved": resolved,
         }
+        if neg_zero.get(key):
+            details[key]["neg_zero"] = int(neg_zero[key])
     return types, notes, details
 
 
@@ -3170,6 +3180,8 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                         "docs": int(det.get("present") or 0),
                         "widened": True,
                     }
+                if int(det.get("neg_zero") or 0) > 0:
+                    col["neg_zero_docs"] = int(det["neg_zero"])
             elif not col.get("inferred_type"):
                 col["inferred_type"] = "TEXT"
             miss = int(missing_by_name.get(name) or 0)

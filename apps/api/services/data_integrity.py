@@ -1944,6 +1944,19 @@ def _mongo_sparse_field_findings(
             warnings.append(
                 f"field {name} mixed {fams} in {dcount} docs, widened to TEXT"
             )
+        # X-84: BSON -0.0 folds to 0 on the write/compare path; the fold is
+        # consistent on both sides, so say it instead of staying silent.
+        nz = int(s.get("neg_zero_docs") or 0)
+        if nz > 0:
+            findings.append({
+                "kind": "neg_zero_folded",
+                "field": str(name),
+                "docs": nz,
+                "note": "-0.0 folded to 0",
+            })
+            warnings.append(
+                f"field {name} held -0.0 in {nz} docs — landed 0 (signed zero folded)"
+            )
     return warnings, findings
 
 

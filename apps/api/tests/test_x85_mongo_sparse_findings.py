@@ -69,3 +69,23 @@ def test_findings_payload_has_both_kinds() -> None:
 def test_clean_schema_yields_no_findings() -> None:
     warnings, findings = _mongo_sparse_field_findings([{"name": "ok"}])
     assert warnings == [] and findings == []
+
+
+def test_neg_zero_counted_and_finding_emitted() -> None:
+    # X-84: BSON -0.0 lands 0 on PG/SQLite; the fold is consistent on both
+    # sides so the run stays verified — but must say so, not stay silent.
+    _types, _notes, details = _mongodb_types_with_notes(
+        [{"v": -0.0}, {"v": 1.5}, {"v": -0.0}, {"v": 0.0}]
+    )
+    assert details["v"]["neg_zero"] == 2
+    warnings, findings = _mongo_sparse_field_findings(
+        [{"name": "v", "neg_zero_docs": 2}]
+    )
+    assert findings[0]["kind"] == "neg_zero_folded"
+    assert findings[0]["docs"] == 2
+    assert any("-0.0" in w for w in warnings)
+
+
+def test_neg_zero_not_emitted_for_positive_zero() -> None:
+    _types, _notes, details = _mongodb_types_with_notes([{"v": 0.0}])
+    assert "neg_zero" not in details["v"]
