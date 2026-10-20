@@ -1,0 +1,207 @@
+name: Full Suite
+
+# Runs the ENTIRE apps/api pytest suite plus the web checks against live
+# service containers, so every leg runs for real at least once a day —
+# not only the exact-SHA gate slices. Normal pushes keep ci.yml; this runs
+# nightly and on demand (and should be dispatched before any batch push).
+
+on:
+  schedule:
+    # 03:00 ET / 07:00 UTC nightly
+    - cron: "0 7 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  engine-suite:
+    name: Full pytest suite (live engines)
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    services:
+      postgres:
+        image: postgres:16
+        ports:
+          - 5432:5432
+        env:
+          POSTGRES_USER: dataflow
+          POSTGRES_PASSWORD: dataflow
+          POSTGRES_DB: dataflow
+        # wal_level=logical is required by the native-CDC / x29 legs.
+        options: >-
+          --health-cmd "pg_isready -U dataflow"
+          --health-interval 10s --health-timeout 5s --health-retries 10
+          -c wal_level=logical
+          -c max_replication_slots=8
+          -c max_wal_senders=8
+      mysql:
+        image: mysql:8.0
+        ports:
+          - 3306:3306
+        env:
+          MYSQL_ROOT_PASSWORD: root_ci
+          MYSQL_DATABASE: dataflow
+          MYSQL_USER: dataflow
+          MYSQL_PASSWORD: dataflow
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -udataflow -pdataflow"
+          --health-interval 10s --health-timeout 5s --health-retries 12
+          --binlog-format=ROW --binlog-row-image=FULL
+      mssql:
+        image: mcr.microsoft.com/mssql/server:2022-latest
+        ports:
+          - 1433:1433
+        env:
+          ACCEPT_EULA: "Y"
+          SA_PASSWORD: Dataflow_CI_2026!
+          MSSQL_PID: Developer
+      mongo:
+        image: mongo:7
+        ports:
+          - 27017:27017
+        # A single-node replica set so sessions / change streams / FastPath
+        # work — a standalone mongod makes 21 live tests fail with
+        # FastPathUnavailable.
+        options: --replSet rs0 --bind_ip_all
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+        options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 10
+
+    env:
+      PYTHONPATH: apps/api:packages/preflight/src:apps/api/src:apps/api/tests
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: "1"
+      DATAFLOW_ENGINE_DIGEST: "1"
+      DATAFLOW_EGRESS_ALLOWLIST: "127.0.0.0/8,::1/128"
+      # Postgres (libpq standard — tests/helpers/live_env resolves these first)
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: dataflow
+      PGPASSWORD: dataflow
+      PGDATABASE: dataflow
+      DATAFLOW_PG_HOST: 127.0.0.1
+      # MySQL
+      MYSQL_HOST: 127.0.0.1
+      MYSQL_PORT: "3306"
+      MYSQL_DATABASE: dataflow
+      MYSQL_USER: dataflow
+      MYSQL_PASSWORD: dataflow
+      DATAFLOW_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_MYSQL_PORT: "3306"
+      DATAFLOW_MYSQL_DB: dataflow
+      DATAFLOW_MYSQL_USER: dataflow
+      DATAFLOW_MYSQL_PASSWORD: dataflow
+      DATAFLOW_TEST_MYSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MYSQL_PORT: "3306"
+      DATAFLOW_TEST_MYSQL_DB: dataflow
+      DATAFLOW_TEST_MYSQL_USER: dataflow
+      DATAFLOW_TEST_MYSQL_PASSWORD: dataflow
+      # SQL Server
+      DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
+      DATAFLOW_TEST_MSSQL_PORT: "1433"
+      DATAFLOW_TEST_MSSQL_USER: sa
+      DATAFLOW_TEST_MSSQL_PASSWORD: Dataflow_CI_2026!
+      # Mongo — replica-set URI so sessions/change streams work
+      MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
+      DATAFLOW_TEST_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
+      DATAFLOW_LIVE_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
+      P2_MONGO_URI: mongodb://127.0.0.1:27017/?replicaSet=rs0
+      # Redis
+      REDIS_URL: redis://127.0.0.1:6379
+      DATAFLOW_REDIS_URL: redis://127.0.0.1:6379
+      DATAFLOW_CDC_LEASE_REDIS_URL: redis://127.0.0.1:6379
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API + preflight deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -e packages/preflight
+          # pymssql is optional in requirements but one driver-fallback test
+          # asserts the import works.
+          python -m pip install pymssql
+
+      - name: Initiate Mongo replica set
+        run: |
+          for i in $(seq 1 30); do
+            cid=$(docker ps -qf ancestor=mongo:7) && [ -n "$cid" ] && break
+            sleep 2
+          done
+          docker exec "$cid" mongosh --quiet --eval \
+            'try { rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]}) } catch(e) { print(e) }'
+          for i in $(seq 1 30); do
+            st=$(docker exec "$cid" mongosh --quiet --eval 'rs.status().myState' || true)
+            [ "$st" = "1" ] && echo "mongo rs PRIMARY" && break
+            sleep 2
+          done
+
+      - name: Wait for SQL Server
+        run: |
+          cid=$(docker ps -qf ancestor=mcr.microsoft.com/mssql/server:2022-latest)
+          sqlcmd=""
+          for c in /opt/mssql-tools18/bin/sqlcmd /opt/mssql-tools/bin/sqlcmd; do
+            docker exec "$cid" test -x "$c" && sqlcmd="$c" && break
+          done
+          [ -n "$sqlcmd" ] || { echo "no sqlcmd in image"; exit 1; }
+          for i in $(seq 1 60); do
+            if docker exec "$cid" "$sqlcmd" -S 127.0.0.1 -U sa -P 'Dataflow_CI_2026!' -C -Q 'SELECT 1' >/dev/null 2>&1; then
+              echo "mssql ready"; exit 0
+            fi
+            sleep 2
+          done
+          echo "mssql did not become ready" && exit 1
+
+      - name: Grant MySQL CDC privileges
+        run: |
+          cid=$(docker ps -qf ancestor=mysql:8.0)
+          for i in $(seq 1 30); do
+            docker exec "$cid" mysql -udataflow -pdataflow -e 'SELECT 1' >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec "$cid" mysql -uroot -proot_ci -e \
+            "GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
+
+      - name: Full suite
+        working-directory: apps/api
+        run: |
+          python -m pytest tests -q -rs -p no:cacheprovider
+
+  web:
+    name: Web lint + tests + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint (no browser dialogs)
+        run: npm --workspace apps/web run lint
+
+      - name: Unit tests
+        run: npm run test
+
+      - name: Web tests
+        run: npm run test:web
+
+      - name: Build
+        run: npm run build
