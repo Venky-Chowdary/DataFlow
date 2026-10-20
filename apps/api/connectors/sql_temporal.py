@@ -484,6 +484,14 @@ def coerce_sql_temporal(
                 return raw
             if isinstance(raw, bool):
                 return None
+            if isinstance(raw, timedelta):
+                # pymysql returns TIME as timedelta (X-38): in-domain values
+                # are the same wall clock as a time object; out-of-domain
+                # (negative / >=24h) has no time carrier — leave the cell to
+                # the typed finding rather than inventing digits.
+                if timedelta(0) <= raw < timedelta(days=1):
+                    return (datetime.min + raw).time()
+                return None
             from services.transform_engine import apply_transform
 
             text = str(raw).strip() if raw is not None else ""

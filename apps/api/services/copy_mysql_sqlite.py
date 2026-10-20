@@ -18,7 +18,7 @@ COUNT ≠ source, ``:memory:``.
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -69,6 +69,13 @@ def mysql_value_to_sqlite(value: Any) -> Any:
         return None
     if isinstance(value, bool):
         return int(value)
+    if isinstance(value, timedelta):
+        # pymysql returns TIME as timedelta — sqlite3 cannot bind it (X-38:
+        # 'Error binding parameter 1 - probably unsupported type'). Store the
+        # canonical clock text Gate-8 fingerprints, so read-back digests match.
+        from services.reconciliation import normalize_cell
+
+        return normalize_cell(value, ddl_type="", engine="sqlite")
     if isinstance(value, datetime):
         if value.tzinfo is not None:
             raise FastPathUnavailable(

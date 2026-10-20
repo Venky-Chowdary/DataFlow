@@ -232,6 +232,22 @@ def _cursor_is_pyodbc(cur: Any) -> bool:
     return type(inner).__module__.startswith("pyodbc")
 
 
+def _sqlserver_time_bind(value: Any) -> Any:
+    """MySQL/row-path TIME arrives as ``datetime.timedelta``; neither pyodbc
+    nor pymssql accepts that type (X-38 live: 'Unknown object type
+    datetime.timedelta during describe'). In-range values become a
+    ``datetime.time`` (micros intact — SQL Server ``time`` is 0–24h, and
+    out-of-range MySQL TIME was already declined to the typed row path).
+    """
+    import datetime as _dt
+
+    if isinstance(value, _dt.timedelta):
+        if _dt.timedelta(0) <= value < _dt.timedelta(days=1):
+            return (_dt.datetime.min + value).time()
+        return value  # out-of-domain stays a typed-finding concern, not a bind
+    return value
+
+
 def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
     """Bind one row for the SQL Server driver this cursor uses.
 
@@ -239,13 +255,15 @@ def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
     (``format(d, 'f')`` — never scientific notation), which the server
     converts into the decimal column. pyodbc: only Decimals wider than 28
     digits — beyond its numeric-struct capacity — go as text; ordinary
-    Decimals bind natively.
+    Decimals bind natively. ``timedelta`` (pymysql TIME) becomes
+    ``datetime.time`` on both drivers.
     """
     if _cursor_is_pymssql(cur):
         from decimal import Decimal
 
         return tuple(
-            format(v, "f") if isinstance(v, Decimal) else v for v in row
+            format(v, "f") if isinstance(v, Decimal) else _sqlserver_time_bind(v)
+            for v in row
         )
     if _cursor_is_pyodbc(cur):
         from decimal import Decimal
@@ -253,7 +271,7 @@ def bind_row_for_sqlserver(cur: Any, row: tuple[Any, ...]) -> tuple[Any, ...]:
         return tuple(
             format(v, "f")
             if isinstance(v, Decimal) and len(v.as_tuple().digits) > 28
-            else v
+            else _sqlserver_time_bind(v)
             for v in row
         )
     return row

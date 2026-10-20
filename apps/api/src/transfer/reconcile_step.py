@@ -6826,27 +6826,36 @@ def run_reconciliation(
         _l3_run = recon.get("verification_ladder") or {}
         _l3_layer = (_l3_run.get("layers") or {}).get("L3") or {}
         _l3_details = _l3_layer.get("details") or {}
+        _l3_src = str(_l3_details.get("source_checksum") or "")
+        _l3_dst = str(_l3_details.get("target_checksum") or "")
         if (
-            _l3_run.get("assurance_level") == "full_checksum"
-            and _l3_run.get("population_checksum_proof")
-            and _l3_layer.get("passed")
-            and str(_l3_details.get("source_checksum") or "")
-            and _l3_details.get("source_checksum") == _l3_details.get("target_checksum")
+            _l3_src
+            and _l3_dst
+            and not _l3_details.get("skipped")
+            and str(_l3_details.get("algorithm") or "")
         ):
-            recon["source_checksum"] = str(_l3_details.get("source_checksum") or "")
-            recon["target_checksum"] = str(_l3_details.get("target_checksum") or "")
-            recon["checksum_match"] = True
+            recon["source_checksum"] = _l3_src
+            recon["target_checksum"] = _l3_dst
+            recon["checksum_match"] = _l3_src == _l3_dst
             recon["assurance_level"] = "full_checksum"
             recon["checksum_scope"] = "verify_time_population_digest"
             _msg = str(recon.get("message") or "")
             _cut = _msg.find(" There is no source value digest")
             if _cut >= 0:
-                recon["message"] = (
-                    _msg[:_cut]
-                    + " Both populations were re-read and digested "
-                    "order-independently at verify time; the digests match "
-                    "(full_checksum)."
-                )
+                if recon["checksum_match"]:
+                    recon["message"] = (
+                        _msg[:_cut]
+                        + " Both populations were re-read and digested "
+                        "order-independently at verify time; the digests match "
+                        "(full_checksum)."
+                    )
+                else:
+                    recon["message"] = (
+                        _msg[:_cut]
+                        + " Both populations were re-read and digested "
+                        "order-independently at verify time; the digests "
+                        "mismatch (full_checksum)."
+                    )
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
     # src vs shaped dest here would flag every transformed row.

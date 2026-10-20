@@ -93,7 +93,14 @@ def _decide(
                 "dest_table_existed_before"
             )
         if _existed is False:
-            before = 0
+            # The created-table cleanup owns the drop; a DELETE here would
+            # hit a table the run may never have created (SQL Server logs
+            # 'Invalid object name' 208 against the never-created ref).
+            return (
+                "retained",
+                "The destination did not exist before this run; created-table "
+                "cleanup drops it instead of deleting rows.",
+            )
     if not isinstance(before, int):
         return (
             "retained",

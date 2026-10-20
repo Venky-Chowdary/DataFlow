@@ -383,3 +383,123 @@ def test_x37_engine_digest_flag_pg(monkeypatch):
     assert "Set DATAFLOW_ENGINE_DIGEST" not in blob, blob
     assert str(recon.get("checksum_mode") or recon.get("assurance") or "") != "none", blob
     _pg_drop_table(dest_table)
+
+
+def test_x38_timedelta_binds_as_time_on_sqlserver():
+    """X-38: pymysql returns TIME as timedelta; the SQL Server bind path must
+    hand the driver a datetime.time, not the raw timedelta that crashed
+    pyodbc's describe ('Unknown object type datetime.timedelta')."""
+    from datetime import time, timedelta
+
+    from services.copy_pg_sqlserver import bind_row_for_sqlserver
+
+    class _FakePyodbcCur:
+        pass
+
+    _FakePyodbcCur.__module__ = "pyodbc"
+    cur = _FakePyodbcCur()
+    td = timedelta(hours=1, minutes=23, seconds=45, microseconds=123456)
+    bound = bind_row_for_sqlserver(cur, (1, td, None))
+    assert bound[0] == 1 and bound[2] is None
+    assert bound[1] == time(1, 23, 45, 123456), bound
+
+    class _FakePymssqlCur:
+        pass
+
+    _FakePymssqlCur.__module__ = "pymssql"
+    bound2 = bind_row_for_sqlserver(_FakePymssqlCur(), (td,))
+    assert bound2[0] == time(1, 23, 45, 123456), bound2
+
+
+def test_x38_coerce_temporal_accepts_timedelta_for_time():
+    """timedelta -> TIME carrier on every SQL destination: in-domain values
+    become datetime.time; out-of-domain stays for the typed finding."""
+    from datetime import time, timedelta
+
+    from connectors.sql_temporal import coerce_sql_temporal
+
+    td = timedelta(hours=9, minutes=5)
+    out = coerce_sql_temporal(td, "TIME(6)")
+    assert out == time(9, 5), out
+    # Out-of-domain does not invent a wall clock.
+    for bad in (timedelta(days=1), -timedelta(hours=1)):
+        stayed = coerce_sql_temporal(bad, "TIME")
+        assert stayed is bad or not isinstance(stayed, time), stayed
+
+
+def test_x38_mysql_time_to_sqlite(monkeypatch, tmp_path):
+    """Live MySQL TIME -> SQLite: the timedelta reaches a text/affinity
+    carrier cleanly and native read-back keeps the clock digits."""
+    table = "x38_lite_src"
+    _seed_time(table, [(1, "01:23:45"), (2, "09:05:00"), (3, None)])
+    dst = tmp_path / "x38.duckdb"
+    req = _request(
+        table,
+        {"format": "sqlite", "database": str(dst).replace(".duckdb", ".db")},
+        "out",
+    )
+    res = UniversalTransferEngine().execute_tracked(req, "0" * 24)
+    assert res.success, f"MySQL TIME -> SQLite must not crash: {res.error}"
+    import sqlite3
+
+    con = sqlite3.connect(str(dst).replace(".duckdb", ".db"))
+    try:
+        got = con.execute("SELECT id, t FROM out ORDER BY id").fetchall()
+    finally:
+        con.close()
+    assert [r[0] for r in got] == [1, 2, 3]
+    assert str(got[0][1]).startswith("01:23:45")
+    assert str(got[1][1]).startswith("09:05:00")
+    assert got[2][1] is None
+
+
+def test_x37_residual_tamper_message_names_digest_mismatch(monkeypatch):
+    """X-37 residual: with DATAFLOW_ENGINE_DIGEST=1 on, a dest tamper must
+    say the in-engine digests mismatched — not tell the operator to set the
+    flag they already set."""
+    monkeypatch.setenv("DATAFLOW_ENGINE_DIGEST", "1")
+    import src.transfer.reconcile_step as rs
+
+    dest_table = "x37r_out"
+    _pg_drop_table(dest_table)
+    table = "x37r_pg_src"
+    _seed_time(table, [(1, "01:23:45"), (2, "00:00:00"), (3, "09:05:00")])
+
+    real = rs._run_reconciliation_with_rules
+
+    def tampered(*a, **k):
+        pc = _pg_conn()
+        try:
+            with pc.cursor() as cur:
+                cur.execute(
+                    f'UPDATE public."{dest_table}" SET t = \'01:23:46\' '
+                    "WHERE id = 1"
+                )
+            pc.commit()
+        finally:
+            pc.close()
+        return real(*a, **k)
+
+    monkeypatch.setattr(rs, "_run_reconciliation_with_rules", tampered)
+    res = UniversalTransferEngine().execute_tracked(
+        _request(table, {"format": "postgresql", **PG}, dest_table), "0" * 24
+    )
+    assert not res.success
+    blob = _blob(res)
+    assert "Set DATAFLOW_ENGINE_DIGEST" not in blob, blob
+    assert "mismatch" in blob.lower(), blob
+    _pg_drop_table(dest_table)
+
+
+def test_undo_skips_delete_when_table_never_created():
+    """The undo path must not DELETE a table the run never created —
+    SQL Server logged 'Invalid object name' 208 against the phantom ref."""
+    from services.batch_undo import _decide
+
+    class _Dest:
+        kind = "database"
+        extra = {"dest_table_existed_before": False}
+
+    decision, note = _decide(_Dest(), {"dest_table_existed_before": False}, "")
+    assert decision == "retained"
+    assert "did not exist" in note
