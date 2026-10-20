@@ -433,6 +433,14 @@ def humanize_connection_error(driver: str, raw: Any, auth_mode: str = "") -> str
         text,
     ):
         if re.search(r"certificate verify failed|self.signed|hostname mismatch|CERTIFICATE_VERIFY", text, re.I):
+            if driver in {"mssql", "sqlserver", "sql_server", "azure_sql", "sql_server_mssql"}:
+                # X-49: the raw pyodbc 08001/SSL Provider text must never reach
+                # the user — name the exact connector option that fixes it.
+                return (
+                    "SQL Server's certificate isn't trusted (self-signed). "
+                    "Turn on 'Trust server certificate' for this connector or "
+                    "install a trusted certificate on the server."
+                )
             return (
                 "TLS certificate could not be verified. Check the server certificate, "
                 "its hostname, and the CA chain — do not disable SSL to work around a "

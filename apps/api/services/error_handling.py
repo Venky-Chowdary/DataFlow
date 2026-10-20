@@ -740,6 +740,32 @@ def humanize_transfer_failure(error: Exception | str) -> dict[str, Any]:
     """
     raw = format_exception_message(error)
     text = raw.lower()
+    # X-49: a SQL Server self-signed cert failure can arrive wrapped in any
+    # error type (e.g. FullRefreshDropFailed) — classify it before the
+    # generic branches so the user gets the cert fix, not a lock/grant guess
+    # or raw ODBC text.
+    if re.search(r"certificate verify failed|self.signed certificate", text) and re.search(
+        r"ssl provider|08001|sql server|sqlserver|mssql", text
+    ):
+        return {
+            "code": "tls_certificate_untrusted",
+            "category": "destination",
+            "title": "SQL Server's certificate isn't trusted",
+            "message": (
+                "SQL Server's certificate isn't trusted (self-signed). "
+                "Turn on 'Trust server certificate' for this connector or "
+                "install a trusted certificate on the server."
+            ),
+            "fix": (
+                "Open the connector settings and enable 'Trust server "
+                "certificate' (extra option trust_server_certificate), or "
+                "install a CA-signed certificate on the SQL Server host, "
+                "then re-run."
+            ),
+            "raw": raw,
+            "retriable": False,
+            "confidence": "high",
+        }
     if "expected file not arrived" in text or type(error).__name__ == "FileNotArrived":
         return {
             "code": "expected_file_not_arrived",
