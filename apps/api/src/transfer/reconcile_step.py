@@ -4584,6 +4584,33 @@ def _reread_dest_engine_digest(
     return paired[0], digest.checksum, int(digest.row_count)
 
 
+def _reread_mongo_docs_digest(
+    cfg: dict[str, Any], table_name: str
+) -> tuple[int, str] | None:
+    """Verify-time Mongo re-read folded through the X-60 doc wire.
+
+    Returns ``(collection_count, "mongo_docs_sha256:<hex>")`` — the same
+    multiset digest the copy route stamps at write time — or ``None`` when
+    the collection cannot be re-read (the caller keeps the canonical read).
+    """
+    try:
+        from services.copy_mongo_sink import (
+            MongoCopyDigest,
+            mongo_collection_counts,
+        )
+        from services.copy_pg_mongo import mongo_collection
+
+        _client, coll = mongo_collection(cfg, table_name)
+        counts = mongo_collection_counts(coll)
+        digest = MongoCopyDigest()
+        digest.counts = counts
+        return int(coll.count_documents({})), (
+            f"mongo_docs_sha256:{digest.digest_hex()}"
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _dedupe_ctx_engine(
     cfg_type: Any, endpoint_format: Any, driver_type: str
 ) -> str:
@@ -6829,6 +6856,17 @@ def _run_reconciliation_impl(
             written_ids=None,
             pk_column=None,
         )
+        if db_type == "mongodb" and str(source_checksum).startswith(
+            "mongo_docs_sha256:"
+        ):
+            # X-60 parity: the *→Mongo copy route stamps a doc-wire multiset
+            # digest as the source checksum; the canonical row fold can never
+            # equal it on identical data. Re-read the collection through the
+            # same wire and fold so Gate-8 compares like-for-like — the
+            # verify-time read still catches post-write tampering.
+            mongo_pair = _reread_mongo_docs_digest(cfg, table_name)
+            if mongo_pair is not None:
+                target_rows, target_checksum = mongo_pair
 
     if db_type == "pgvector":
         # Physical embedding COUNT(*) is chunk cardinality, not source-row

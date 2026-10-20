@@ -31,9 +31,14 @@ def test_sql_value_to_bson_null_and_empty_string():
     assert sql_value_to_bson(1) == 1
 
 
-def test_sql_value_to_bson_binary_declines():
-    with pytest.raises(FastPathUnavailable, match="binary"):
-        sql_value_to_bson(b"abc")
+def test_sql_value_to_bson_binary_binds_bson_binary():
+    # X-64: binary lands as BSON Binary subtype 0, byte-exact — never
+    # base64 text (that was a write-only self-verify like X-52).
+    from bson.binary import Binary
+
+    bound = sql_value_to_bson(b"abc")
+    assert isinstance(bound, Binary)
+    assert bytes(bound) == b"abc"
 
 
 def test_sql_value_to_bson_decimal():

@@ -131,7 +131,8 @@ def test_mysql_mongo_copy_safe_types():
     assert mysql_mongo_type_is_copy_safe("VARCHAR(32)") is True
     assert mysql_mongo_type_is_copy_safe("DATE") is True
     assert mysql_mongo_type_is_copy_safe("JSON") is False
-    assert mysql_mongo_type_is_copy_safe("BLOB") is False
+    # X-64: binary binds as BSON Binary subtype 0 — Mongo-safe.
+    assert mysql_mongo_type_is_copy_safe("BLOB") is True
     assert mysql_mongo_type_is_copy_safe("TIMESTAMP") is False
     assert mysql_mongo_type_is_copy_safe("DATETIME") is False
     assert mysql_mongo_type_is_copy_safe("TIME") is False
