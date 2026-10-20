@@ -33,6 +33,7 @@ from __future__ import annotations
 import os
 import socket
 import sys
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -81,7 +82,12 @@ class _FakeMongo:
 
 @pytest.fixture(autouse=True)
 def _patch_mongodb_service(monkeypatch):
-    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: _FakeMongo())
+    fake = _FakeMongo()
+    # execute_tracked demands a registered pending job as its durable resume
+    # point — an unregistered id fails with CheckpointPersistenceError.
+    for job_id in ("0000000000000000000000a1", "0000000000000000000000a2"):
+        fake.update_job_status(job_id, "pending", transfer_request={})
+    monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: fake)
 
 
 def _cfg(prefix: str, default_port: int) -> dict[str, Any] | None:
@@ -314,7 +320,9 @@ def test_x43_sqlite_stores_exact_decimal_text_clean(src_engine, tmp_path):
                 f"row {rid}: DECIMAL must be stored as exact TEXT, got "
                 f"{t_type} value {t_val!r}"
             )
-            assert str(t_val) == expected, (
+            # Compare as Decimal, not raw str: a scale-preserving store of
+            # DECIMAL(p,10) writes '0.0000000000' for source '0' — same value.
+            assert Decimal(str(t_val)) == Decimal(expected), (
                 f"row {rid}: stored {t_val!r} != source {expected!r}"
             )
 
@@ -336,15 +344,19 @@ def test_x43_sqlite_tamper_fails_names_key_drops_table(src_engine, monkeypatch, 
     dest_table = "x43_tampered"
     _seed_source(src_engine, cfg, src_table)
     tampered = {"done": False}
-    orig_recon = engine_mod.run_reconciliation
+    # Hook the innermost impl — route-specific call paths that bypass the
+    # engine-module binding still funnel through it (same fix as X-41).
+    import src.transfer.reconcile_step as _rs_mod
 
-    def _tampering_recon(*args, **kwargs):
+    orig_impl = _rs_mod._run_reconciliation_impl
+
+    def _tampering_impl(*args, **kwargs):
         if not tampered["done"]:
             _tamper_sqlite(str(dest_db), dest_table)
             tampered["done"] = True
-        return orig_recon(*args, **kwargs)
+        return orig_impl(*args, **kwargs)
 
-    monkeypatch.setattr(engine_mod, "run_reconciliation", _tampering_recon)
+    monkeypatch.setattr(_rs_mod, "_run_reconciliation_impl", _tampering_impl)
     try:
         result = UniversalTransferEngine().execute_tracked(
             TransferRequest(

@@ -48,7 +48,10 @@ pytestmark = pytest.mark.skipif(
     reason="live X-41 check: set DATAFLOW_X41_LIVE=1 with reachable engines",
 )
 
-_VALUES = ["1.5", "-0.0000000001", "0", None, "999.25"]
+# _VALUES[0] must differ from the checksum tamper's SET target (t=1.5),
+# else the tamper rewrites the same value and the census correctly reports
+# all values agree — a no-op tamper that tests nothing.
+_VALUES = ["2.5", "-0.0000000001", "0", None, "999.25"]
 
 
 class _FakeMongo:
@@ -367,15 +370,20 @@ def test_x41_engine_copy_created_table_dropped_on_failed_verify(
     else:
         _seed_mysql_source(src_cfg, src_table)
     tampered = {"done": False}
-    orig_recon = engine_mod.run_reconciliation
+    # Hook the innermost impl, not engine_mod.run_reconciliation: engine-copy
+    # routes reach recon through their own call path, and patching the
+    # engine-module binding leaves those legs untampered (silently green).
+    import src.transfer.reconcile_step as _rs_mod
 
-    def _tampering_recon(*args, **kwargs):
+    orig_impl = _rs_mod._run_reconciliation_impl
+
+    def _tampering_impl(*args, **kwargs):
         if not tampered["done"]:
             _tamper_dest(dest_engine, dest_cfg, dest_table, branch)
             tampered["done"] = True
-        return orig_recon(*args, **kwargs)
+        return orig_impl(*args, **kwargs)
 
-    monkeypatch.setattr(engine_mod, "run_reconciliation", _tampering_recon)
+    monkeypatch.setattr(_rs_mod, "_run_reconciliation_impl", _tampering_impl)
     try:
         request = TransferRequest(
             source=_endpoint(src_engine, src_cfg, src_table),
