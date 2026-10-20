@@ -1428,7 +1428,11 @@ def stream_file_to_database(
             resolve_effective_sync_mode,
             resolve_incremental_read_scope,
             resolve_sync_contract,
+            get_watermark_record,
             quarantine_held_watermark,
+            quarantine_hold_identity,
+            row_after_watermark,
+            row_matches_quarantine_hold,
             set_watermark,
         )
     except ImportError:
@@ -1442,7 +1446,11 @@ def stream_file_to_database(
             resolve_effective_sync_mode,
             resolve_incremental_read_scope,
             resolve_sync_contract,
+            get_watermark_record,
             quarantine_held_watermark,
+            quarantine_hold_identity,
+            row_after_watermark,
+            row_matches_quarantine_hold,
             set_watermark,
         )
     contract = resolve_sync_contract(stream_contracts)
@@ -1695,6 +1703,7 @@ def stream_file_to_database(
     watermark: str | None = None
     cursor_pk_source = ""
     running_cursor: str | None = None
+    quarantine_hold_prior: dict = {}
     if incremental and cursor_source_col:
         scope = resolve_incremental_read_scope(
             sync_mode=effective_sync,
@@ -1720,6 +1729,15 @@ def stream_file_to_database(
         from services.sync_cursor import reconcile_cursor_tiebreak
 
         cursor_pk_source = reconcile_cursor_tiebreak(scope, cursor_pk_source)
+        quarantine_hold_prior: dict = {}
+        if cursor_key:
+            try:
+                _wm_rec, _wm_meta = get_watermark_record(cursor_key)
+                _qh = (_wm_meta or {}).get("quarantine_holds")
+                if isinstance(_qh, dict):
+                    quarantine_hold_prior = _qh
+            except Exception:
+                quarantine_hold_prior = {}
         if scope.cursor_column_changed:
             from services.preflight_cursor_gate import cursor_identity_issue
 
@@ -1809,6 +1827,7 @@ def stream_file_to_database(
             cursor_column=cursor_source_col if incremental else "",
             watermark=watermark if incremental else None,
             pk_column=pk_for_copy if incremental else "",
+            quarantine_hold=quarantine_hold_prior or None,
             source_filter=source_filter,
             shape_runner=shape_runner,
             resumed=resumed,
@@ -1886,6 +1905,11 @@ def stream_file_to_database(
                 )
                 wm_value = wm_value or wm
                 if hold:
+                    hold["replay_mode"] = (
+                        "pk_reread"
+                        if (cursor_pk_source or "").strip()
+                        else "hash_reread"
+                    )
                     dest_summary["watermark_held_for_quarantine"] = hold
                 set_watermark(
                     cursor_key,
@@ -1896,6 +1920,27 @@ def stream_file_to_database(
                         "cursor_column": cursor_source_col,
                         # The column a composite watermark is decodable on (QA ACC-02).
                         "tiebreak_column": cursor_pk_source,
+                        "quarantine_holds": (
+                            {
+                                "band_high": str(wm or ""),
+                                "rows": [
+                                    ident
+                                    for ident in (
+                                        quarantine_hold_identity(
+                                            d,
+                                            cursor_column=cursor_source_col,
+                                            primary_key=cursor_pk_source,
+                                        )
+                                        for d in (dest_summary.get("rejected_details") or [])
+                                        if isinstance(d, dict)
+                                    )
+                                    if ident
+                                ],
+                                "mode": "pk_reread" if (cursor_pk_source or "").strip() else "hash_reread",
+                            }
+                            if hold
+                            else None
+                        ),
                     },
                 )
                 dest_summary["watermark"] = wm_value
@@ -1937,6 +1982,7 @@ def stream_file_to_database(
                     cursor_source_col,
                     watermark,
                     primary_key=cursor_pk_source,
+                    quarantine_hold=quarantine_hold_prior or None,
                 )
                 if unbounded:
                     # A row with no cursor value cannot be proven new or already
@@ -3072,6 +3118,9 @@ def stream_file_to_database(
         )
         wm_value = wm_value or running_cursor
         if hold:
+            hold["replay_mode"] = (
+                "pk_reread" if (cursor_pk_source or "").strip() else "hash_reread"
+            )
             dest_summary["watermark_held_for_quarantine"] = hold
         set_watermark(
             cursor_key,
@@ -3084,6 +3133,27 @@ def stream_file_to_database(
                 "cursor_column": cursor_source_col,
                 # The column a composite watermark is decodable on (QA ACC-02).
                 "tiebreak_column": cursor_pk_source,
+                "quarantine_holds": (
+                    {
+                        "band_high": str(running_cursor or ""),
+                        "rows": [
+                            ident
+                            for ident in (
+                                quarantine_hold_identity(
+                                    d,
+                                    cursor_column=cursor_source_col,
+                                    primary_key=cursor_pk_source,
+                                )
+                                for d in (dest_summary.get("rejected_details") or [])
+                                if isinstance(d, dict)
+                            )
+                            if ident
+                        ],
+                        "mode": "pk_reread" if (cursor_pk_source or "").strip() else "hash_reread",
+                    }
+                    if hold
+                    else None
+                ),
             },
         )
         dest_summary["incremental_watermark"] = wm_value

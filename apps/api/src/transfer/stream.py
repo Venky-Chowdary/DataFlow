@@ -616,6 +616,7 @@ def _stream_database_transfer_impl(
         map_source_to_target,
         max_cursor_value,
         quarantine_held_watermark,
+        quarantine_hold_identity,
         requires_incremental,
         requires_upsert,
         resolve_effective_sync_mode,
@@ -3917,6 +3918,11 @@ def _stream_database_transfer_impl(
             )
             wm_value = wm_value or running_cursor
             if hold:
+                hold["replay_mode"] = (
+                    "pk_reread"
+                    if (cursor_pk_source or "").strip()
+                    else "hash_reread"
+                )
                 dest_summary["watermark_held_for_quarantine"] = hold
             try:
                 set_watermark(
@@ -3930,6 +3936,27 @@ def _stream_database_transfer_impl(
                         "cursor_column": cursor_source_col,
                         # The column a composite watermark is decodable on (QA ACC-02).
                         "tiebreak_column": cursor_pk_source,
+                        "quarantine_holds": (
+                        {
+                            "band_high": str(running_cursor or ""),
+                            "rows": [
+                                ident
+                                for ident in (
+                                    quarantine_hold_identity(
+                                        d,
+                                        cursor_column=cursor_source_col,
+                                        primary_key=cursor_pk_source,
+                                    )
+                                    for d in (dest_summary.get("rejected_details") or [])
+                                    if isinstance(d, dict)
+                                )
+                                if ident
+                            ],
+                            "mode": "pk_reread" if (cursor_pk_source or "").strip() else "hash_reread",
+                        }
+                        if hold
+                        else None
+                    ),
                     },
                 )
             except Exception as wm_exc:
@@ -4246,6 +4273,9 @@ def _stream_database_transfer_impl(
         )
         wm_value = wm_value or running_cursor
         if hold:
+            hold["replay_mode"] = (
+                "pk_reread" if (cursor_pk_source or "").strip() else "hash_reread"
+            )
             dest_summary["watermark_held_for_quarantine"] = hold
         set_watermark(
             cursor_key,
@@ -4258,6 +4288,27 @@ def _stream_database_transfer_impl(
                 "cursor_column": cursor_source_col,
                 # The column a composite watermark is decodable on (QA ACC-02).
                 "tiebreak_column": cursor_pk_source,
+                "quarantine_holds": (
+                {
+                    "band_high": str(running_cursor or ""),
+                    "rows": [
+                        ident
+                        for ident in (
+                            quarantine_hold_identity(
+                                d,
+                                cursor_column=cursor_source_col,
+                                primary_key=cursor_pk_source,
+                            )
+                            for d in (dest_summary.get("rejected_details") or [])
+                            if isinstance(d, dict)
+                        )
+                        if ident
+                    ],
+                    "mode": "pk_reread" if (cursor_pk_source or "").strip() else "hash_reread",
+                }
+                if hold
+                else None
+                    ),
             },
         )
 

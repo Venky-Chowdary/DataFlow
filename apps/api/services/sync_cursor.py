@@ -1032,6 +1032,7 @@ def records_after_watermark(
     watermark: str | None,
     *,
     primary_key: str = "",
+    quarantine_hold: dict[str, Any] | None = None,
 ) -> tuple[list[dict[str, Any]], int]:
     """Bound already-parsed records to the delta past ``watermark``.
 
@@ -1061,6 +1062,27 @@ def records_after_watermark(
             continue
         if verdict:
             delta.append(rec)
+    if quarantine_hold:
+        band_high = str(quarantine_hold.get("band_high") or "")
+        held = quarantine_hold.get("rows") or []
+        if band_high and held:
+            # A held band re-read: rows past the run that held the watermark
+            # are new; rows inside the band land only when they match a held
+            # quarantine identity — append-mode routes then never re-append
+            # rows that already landed.
+            delta = [
+                rec
+                for rec in delta
+                if row_after_watermark(
+                    rec, cursor_column, band_high, primary_key=primary_key
+                )
+                or row_matches_quarantine_hold(
+                    rec,
+                    held,
+                    cursor_column=cursor_column,
+                    primary_key=primary_key,
+                )
+            ]
     return delta, unbounded
 
 
@@ -1435,6 +1457,96 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
 
     wm_type = infer_watermark_type([sa, sb])
     return compare_watermarks(sa, sb, wm_type)
+
+
+def quarantine_hold_identity(
+    detail: dict[str, Any],
+    *,
+    cursor_column: str,
+    primary_key: str,
+) -> dict[str, Any] | None:
+    """Stable identity for one quarantined row, for next-run re-read.
+
+    Primary key when the route has one (the user may repair any other field —
+    including the failed cell — and the row still matches). Without a key the
+    identity is the cursor value plus a hash of the source row *excluding the
+    column that failed*: the exact repair re-matches, while a row sharing the
+    cursor that was never quarantined does not.
+    """
+    src_row = detail.get("source_values")
+    if not isinstance(src_row, dict):
+        src_row = detail.get("values")
+    if not isinstance(src_row, dict):
+        return None
+    cur_text = present_cell_text(src_row.get(cursor_column))
+    if cur_text is None:
+        return None
+    ident: dict[str, Any] = {"cursor": cur_text}
+    pk = (primary_key or "").strip()
+    pk_val = present_cell_text(src_row.get(pk)) if pk else None
+    if pk and pk_val is not None:
+        ident["pk"] = pk_val
+        return ident
+    import hashlib
+    import json as _json
+
+    failed = str(detail.get("column") or detail.get("target") or "")
+    base = {
+        str(k): present_cell_text(v)
+        for k, v in src_row.items()
+        if str(k) != failed and str(k) != cursor_column
+    }
+    ident["column"] = failed
+    ident["hash"] = hashlib.sha256(
+        _json.dumps(base, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    return ident
+
+
+def row_matches_quarantine_hold(
+    rec: Any,
+    holds: list[dict[str, Any]],
+    *,
+    cursor_column: str,
+    primary_key: str,
+) -> bool:
+    """True when ``rec`` is one of the held quarantined rows (or its repair)."""
+    if not isinstance(rec, dict) or not holds:
+        return False
+    cur_text = present_cell_text(rec.get(cursor_column))
+    if cur_text is None:
+        return False
+    pk = (primary_key or "").strip()
+    pk_val = present_cell_text(rec.get(pk)) if pk else None
+    for hold in holds:
+        if not isinstance(hold, dict):
+            continue
+        if str(hold.get("cursor") or "") != cur_text:
+            continue
+        if pk and pk_val is not None:
+            if str(hold.get("pk") or "") == pk_val:
+                return True
+            continue
+        want = str(hold.get("hash") or "")
+        if not want:
+            continue
+        import hashlib
+        import json as _json
+
+        failed = str(hold.get("column") or "")
+        base = {
+            str(k): present_cell_text(v)
+            for k, v in rec.items()
+            if str(k) != failed and str(k) != cursor_column
+        }
+        if (
+            hashlib.sha256(
+                _json.dumps(base, sort_keys=True, default=str).encode()
+            ).hexdigest()
+            == want
+        ):
+            return True
+    return False
 
 
 def quarantine_held_watermark(

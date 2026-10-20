@@ -165,3 +165,60 @@ def test_d11_helper_clamps_and_falls_back():
         tiebreak_column="id", entry_watermark="entry-wm", running_cursor="z",
     )
     assert val3 == "entry-wm" and hold3["quarantine_cursor_unknown"]
+
+
+def _append_contracts() -> list[dict]:
+    return [{
+        "selected": True,
+        "sync_mode": "incremental_append",
+        "cursor_field": "updated_at",
+        "cursor_semantics": "modification_timestamp",
+        "primary_key": "id",
+    }]
+
+
+def test_d11_append_mode_re_read_never_re_appends_landed_rows(tmp_path, cursors):
+    """incremental_append: held band re-read must not duplicate landed rows."""
+    rows = [
+        (1, "2024-01-01T00:00:00", 10),
+        (2, "2024-01-02T00:00:00", "not-a-number"),  # quarantines
+        (3, "2024-01-03T00:00:00", 30),
+        (4, "2024-01-04T00:00:00", 40),
+    ]
+    args = (
+        _dest(tmp_path), _mappings(),
+        {"id": "INTEGER", "updated_at": "TEXT", "amt": "INTEGER"},
+    )
+    written, _ddl, summary, _cols = stream_file_to_database(
+        _csv(rows), "t.csv", *args,
+        job_id="d11a" + uuid.uuid4().hex[:15],
+        sync_mode="incremental_append",
+        stream_contracts=_append_contracts(),
+        validation_mode="balanced",
+        skip_preflight=True,
+    )
+    assert written == 3
+    key = sc.list_cursor_keys()[0]
+    stored, meta = sc.get_watermark_record(key)
+    assert "2024-01-02" in stored, stored
+    holds = (meta or {}).get("quarantine_holds") or {}
+    assert holds.get("rows"), holds  # identities persisted for the re-read
+
+    rows[1] = (2, "2024-01-02T00:00:00", 20)  # repair
+    rows.append((5, "2024-01-05T00:00:00", 50))
+    written2, _d2, summary2, _c2 = stream_file_to_database(
+        _csv(rows), "t.csv", *args,
+        job_id="d11a" + uuid.uuid4().hex[:15],
+        sync_mode="incremental_append",
+        stream_contracts=_append_contracts(),
+        validation_mode="balanced",
+        skip_preflight=True,
+    )
+    # Rows 3+4 were re-read (inside the held band) but must NOT re-append.
+    assert _rows(tmp_path / "out.db") == [
+        (1, "2024-01-01T00:00:00", 10),
+        (2, "2024-01-02T00:00:00", 20),
+        (3, "2024-01-03T00:00:00", 30),
+        (4, "2024-01-04T00:00:00", 40),
+        (5, "2024-01-05T00:00:00", 50),
+    ]

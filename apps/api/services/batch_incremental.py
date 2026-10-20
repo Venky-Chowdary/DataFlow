@@ -47,11 +47,21 @@ class BatchIncrementalBound:
         """The rows past the watermark; raises when a row cannot be judged."""
         if not self.active:
             return records
+        hold = None
+        try:
+            from services.sync_cursor import get_watermark_record
+
+            _wm, meta = get_watermark_record(self.scope.cursor_key)
+            _qh = (meta or {}).get("quarantine_holds")
+            hold = _qh if isinstance(_qh, dict) else None
+        except Exception:
+            hold = None
         delta, unbounded = records_after_watermark(
             records,
             self.scope.cursor_column,
             self.scope.watermark,
             primary_key=self.scope.primary_key,
+            quarantine_hold=hold,
         )
         if unbounded:
             # A row with no cursor value can be proven neither new nor already
