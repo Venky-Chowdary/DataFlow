@@ -5881,20 +5881,25 @@ def sample_compare_rows(
                     inserted_keys=inserted_keys,
                 )
             ):
+                def _mismatch_display(raw: Any) -> str | None:
+                    # X-96: display the RAW cell, never the compare
+                    # fingerprint — a collation accent-fold must not hide
+                    # 'xé' behind 'xe' in the operator-facing message.
+                    if raw is None or is_missing_sentinel(raw):
+                        return "null"
+                    return operator_binary_cell_text(
+                        cell_to_string(raw),
+                        str((dest_types or {}).get(tgt_col) or ""),
+                    )
+
                 mismatches.append(
                     {
                         "row": str(idx),
                         "key": str(key) if keyed else "",
                         "source": src_col,
                         "target": tgt_col,
-                        "source_value": operator_binary_cell_text(
-                            operator_cell_text(src_val),
-                            str((dest_types or {}).get(tgt_col) or ""),
-                        )[:120],
-                        "target_value": operator_binary_cell_text(
-                            operator_cell_text(tgt_val),
-                            str((dest_types or {}).get(tgt_col) or ""),
-                        )[:120],
+                        "source_value": _mismatch_display(raw_src)[:120],
+                        "target_value": _mismatch_display(raw_tgt)[:120],
                     }
                 )
                 if len(mismatches) >= 10:
