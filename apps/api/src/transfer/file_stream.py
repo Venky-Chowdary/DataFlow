@@ -1229,6 +1229,13 @@ def _maybe_upgrade_copy_reread(dest_summary: dict[str, Any], **scan_kwargs: Any)
     if not stored_identity or stored_rows <= 0 or not write_pass_value:
         dest_summary["identity_hash_aligned"] = False
         dest_summary["identity_alignment"] = {"reason": "identity_digest_missing"}
+        # X-90: the assurance drop must say why — full_checksum was never
+        # reachable because COPY recorded no identity basis to align to.
+        dest_summary["checksum_note"] = (
+            "CSV COPY write pass stored no identity digest — the file "
+            "re-read has nothing to align to, so the digest stays "
+            "write-pass and full_checksum is not claimable."
+        )
         return
     try:
         reread, _rows = fingerprint_parsed_file(**scan_kwargs)
@@ -1238,6 +1245,10 @@ def _maybe_upgrade_copy_reread(dest_summary: dict[str, Any], **scan_kwargs: Any)
         )
         dest_summary["identity_hash_aligned"] = False
         dest_summary["identity_alignment"] = {"reason": "reread_failed"}
+        dest_summary["checksum_note"] = (
+            f"File re-read for full_checksum failed "
+            f"({type(exc).__name__}: {str(exc)[:300]}) — write-pass digest kept."
+        )
         return
     reread_identity = reread.identity_digest()
     reread_rows = int(reread.total)
