@@ -3587,12 +3587,11 @@ def _name_gate8_culprits_generic(
         if str(c or "").strip()
     ]
     if len(pk_cols) != 1:
-        return
-    pk = pk_cols[0]
-    src_tbl = str(getattr(source_endpoint, "table", "") or "").strip()
-    dst_tbl = str(getattr(endpoint, "table", "") or "").strip()
-    if not src_tbl or not dst_tbl:
-        return
+        pk_cols = [
+            str(c)
+            for c in (summary.get("conflict_columns") or [])
+            if str(c or "").strip()
+        ]
     pairs = [
         (
             str(m.get("source") or ""),
@@ -3601,7 +3600,45 @@ def _name_gate8_culprits_generic(
         for m in (mappings or [])
         if isinstance(m, dict) and str(m.get("source") or "").strip()
     ]
+    if len(pk_cols) != 1 and pairs:
+        # The census needs the key the writer joined on — engine-copy
+        # summaries may not carry ``primary_key_columns`` even when the run's
+        # mappings declare one (X-42: id was a single-column PK yet the
+        # reason text claimed one was required). Recover it the same way the
+        # verify ladder does before giving up.
+        try:
+            from services.primary_key import resolve_identity_key
+
+            _src_pk, _tgt_pk = resolve_identity_key(
+                mappings=list(mappings or []),
+                source_columns=[s for s, _t in pairs],
+                dest_kind=str(getattr(endpoint, "format", "") or ""),
+                purpose="uniqueness",
+            )
+            if _tgt_pk:
+                pk_cols = [str(_tgt_pk)]
+        except Exception:  # noqa: BLE001 — naming is best-effort, never fatal
+            pass
+    if len(pk_cols) != 1:
+        report["culprit_keys_unavailable_reason"] = (
+            "culprit keys could not be named — the run recorded no "
+            "single-column primary key to join the destination key census on"
+        )
+        return
+    pk = pk_cols[0]
+    src_tbl = str(getattr(source_endpoint, "table", "") or "").strip()
+    dst_tbl = str(getattr(endpoint, "table", "") or "").strip()
+    if not src_tbl or not dst_tbl:
+        report["culprit_keys_unavailable_reason"] = (
+            "culprit keys could not be named — source or destination table "
+            "name was not recorded for the census"
+        )
+        return
     if not pairs:
+        report["culprit_keys_unavailable_reason"] = (
+            "culprit keys could not be named — no column mappings were "
+            "recorded for the census"
+        )
         return
     src_pk = next((s for s, t in pairs if t.lower() == pk.lower()), pk)
     src_cols = [s for s, _t in pairs if s.lower() != src_pk.lower()]
@@ -4928,8 +4965,12 @@ def _run_reconciliation_impl(
             and not stamped.get("verification_verdict")
         ):
             # V-1: a fully proven run carries an explicit structured verdict —
-            # only failed / partial / unproven runs may differ.
-            stamped["verification_verdict"] = "verified"
+            # only failed / partial / unproven runs may differ. A count-only
+            # engine copy proves counts, not values: with no real digest it
+            # stamps "partial", never a green "verified" (X-41 honesty ask).
+            stamped["verification_verdict"] = (
+                "verified" if _report_has_value_digest(stamped) else "partial"
+            )
         return stamped
 
     rejected_rows = int(dest_summary.get("rejected_rows", 0) or 0)
@@ -6917,15 +6958,16 @@ def run_reconciliation(
             )
             if not recon.get("culprit_keys"):
                 # Never leave a detected mismatch with empty culprits and no
-                # explanation: name why keys could not be produced (the
-                # census needs a single-column PK and both sides readable
-                # by a census driver), so the verdict degrades honestly.
-                recon["culprit_keys_unavailable_reason"] = (
-                    "culprit keys could not be named — destination key "
-                    "census requires a single-column primary key and both "
-                    "sides readable by a census driver "
-                    "(postgres/mysql/mssql/duckdb/sqlite)"
-                )
+                # explanation: name why keys could not be produced. The
+                # census itself names the gate it hit (no recorded
+                # single-column PK, missing table names, no mappings); this
+                # fallback only covers an unreadable census driver.
+                if not recon.get("culprit_keys_unavailable_reason"):
+                    recon["culprit_keys_unavailable_reason"] = (
+                        "culprit keys could not be named — destination key "
+                        "census requires both sides readable by a census "
+                        "driver (postgres/mysql/mssql/duckdb/sqlite)"
+                    )
                 if recon.get("message"):
                     recon["message"] = (
                         f"{recon['message']} "

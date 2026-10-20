@@ -1384,6 +1384,22 @@ def _job_destination_name(dest_summary: dict[str, Any], destination: Any) -> str
     )
 
 
+def _failed_run_records_transferred(
+    dest_summary: dict[str, Any], rows_written: int
+) -> int:
+    """Rows that actually remain after a failed run's undo.
+
+    ``records_transferred`` must reflect what the destination still holds:
+    when the failed-batch undo cleared the batch (or dropped the run-created
+    table) the write was rolled back and reporting ``rows_written`` would
+    claim committed rows that no longer exist. A retained batch still holds
+    those rows, so the written count stays honest there.
+    """
+    if (dest_summary or {}).get("partial_batch_undo") == "cleared":
+        return 0
+    return int(rows_written or 0)
+
+
 class SdkResumeNotSupportedError(ValueError):
     """SDK source resume is not supported by the engine contract."""
 
@@ -3289,7 +3305,9 @@ class UniversalTransferEngine:
                     error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
-                    records_transferred=rows_written,
+                    records_transferred=_failed_run_records_transferred(
+                        dest_summary, rows_written
+                    ),
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
@@ -4324,7 +4342,9 @@ class UniversalTransferEngine:
                     error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
-                    records_transferred=rows_written,
+                    records_transferred=_failed_run_records_transferred(
+                        dest_summary, rows_written
+                    ),
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )
@@ -4361,7 +4381,9 @@ class UniversalTransferEngine:
                         error=unread,
                         operation=request.operation,
                         job_id=job_id,
-                        records_transferred=rows_written,
+                        records_transferred=_failed_run_records_transferred(
+                        dest_summary, rows_written
+                    ),
                         destination_summary=dest_summary,
                         reconciliation=recon,
                     )
@@ -5233,7 +5255,9 @@ class UniversalTransferEngine:
                     error=fail_message,
                     operation=request.operation,
                     job_id=job_id,
-                    records_transferred=rows_written,
+                    records_transferred=_failed_run_records_transferred(
+                        dest_summary, rows_written
+                    ),
                     destination_summary=dest_summary,
                     reconciliation=recon,
                 )

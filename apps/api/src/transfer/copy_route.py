@@ -674,6 +674,31 @@ def _try_copy_fast_path(
         src_n = "pgvector"
     if (getattr(destination, "format", "") or "").strip().lower() == "pgvector":
         dest_n = "pgvector"
+    # X-41 pre-run snapshot before ANY engine-copy DDL on this pair: every
+    # route below creates the dest table inside its service call, so this is
+    # the last point where "did the table exist before the run?" is still
+    # answerable. A failed run's undo drops a run-created table and says so;
+    # without this stamp it was misread as "was empty before" and left behind.
+    # ``None`` from the probe is never recorded — unknown stays do-not-drop.
+    try:
+        from services.dest_precount import count_dialect, destination_table_exists
+        from services.dialect_profiles import schema_from_cfg
+
+        _probe_dialect = count_dialect(dest_n or dest_type)
+        _dest_existed = destination_table_exists(
+            _probe_dialect,
+            dest_cfg,
+            schema=schema_from_cfg(_probe_dialect, dest_cfg),
+            table_name=dest_table,
+        )
+        if _dest_existed is not None:
+            _dextra = getattr(destination, "extra", None)
+            if isinstance(_dextra, dict):
+                _dextra.setdefault(
+                    "dest_table_existed_before", bool(_dest_existed)
+                )
+    except Exception:
+        logger.debug("engine-copy existence probe skipped", exc_info=True)
     if src_n in {"postgresql", "postgres"} and dest_n in {"mysql", "mariadb"}:
         mysql_fast = _try_pg_mysql_copy_fast_path(
             source=source,
