@@ -1386,8 +1386,9 @@
   height: 18px;
   min-width: 18px;
   max-width: 18px;
-  border-radius: 4px;
-  border: 1px dashed var(--df-border-strong, #d0d6de);
+  /* Spacer only: keeps "Choose destination" aligned with the source label.
+     A bordered empty square read as an unlabeled control. */
+  border: 0;
   background: transparent;
 }
 .df2-route-bar-endpoint {

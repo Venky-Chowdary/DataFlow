@@ -295,6 +295,11 @@ def _proof_source_batches(
     the same population the write consumed without disturbing the engine's
     own source readers.
     """
+    if src_type == "mongodb":
+        yield from _proof_mongo_source_batches(
+            source_endpoint=source_endpoint, src_cfg=src_cfg, read_cols=read_cols
+        )
+        return
     import sqlalchemy as sa
 
     from connectors.sql_identifiers import quote_sql_identifier
@@ -324,6 +329,100 @@ def _proof_source_batches(
                 read_cols,
             ):
                 yield batch
+
+
+_PROOF_OBJECT_STORES = frozenset({"s3", "gcs", "adls", "azure_blob", "minio", "r2"})
+
+
+def _proof_file_dest(endpoint: EndpointConfig, dest_db_type: str) -> bool:
+    return endpoint.kind != "database" or dest_db_type in (
+        _PROOF_OBJECT_STORES | {"sftp"}
+    )
+
+
+def _proof_file_dest_batches(
+    endpoint: EndpointConfig,
+    dest_summary: dict[str, Any],
+    dst_cfg: dict[str, Any],
+    page: int = 5000,
+):
+    """Rows of the final written artifact, through the file reader."""
+    from services.dest_precount import _iter_artifact_records
+
+    from .connector_capabilities import resolve_driver_type
+
+    dest_type = resolve_driver_type(endpoint.format or "")
+    if endpoint.kind != "database":
+        path = str(dest_summary.get("path") or dest_summary.get("export_path") or "")
+        if not path or not os.path.isfile(path):
+            raise FileNotFoundError(f"written file {path or '(no path)'} is not on disk")
+        opened: Any = (open(path, "rb"), None)
+        name, fmt = os.path.basename(path), endpoint.format
+    elif dest_type == "sftp":
+        from connectors.sftp_common import sftp_dest_path
+        from services.object_streaming import open_sftp_binary
+
+        cfg = {**dst_cfg, "table": str(endpoint.table or dst_cfg.get("table") or "")}
+        opened = open_sftp_binary(cfg)
+        name = sftp_dest_path(cfg["table"], cfg.get("file_format"))
+        fmt = cfg.get("file_format") or None
+    else:
+        raise RuntimeError(
+            f"{dest_type} objects are not re-read by the transform proof yet"
+        )
+    if opened is False:
+        raise FileNotFoundError(f"written file {name} is missing from the destination")
+    if opened is None:
+        raise RuntimeError(f"written file {name} could not be opened for read-back")
+    stream, closer = opened
+    try:
+        batch: list[dict[str, Any]] = []
+        for rec in _iter_artifact_records(stream, name=name, fmt=fmt):
+            batch.append(rec)
+            if len(batch) >= page:
+                yield batch
+                batch = []
+        if batch:
+            yield batch
+    finally:
+        try:
+            (closer or stream.close)()
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).debug("artifact close failed: %s", exc)
+
+
+def _proof_mongo_source_batches(
+    *,
+    source_endpoint: EndpointConfig,
+    src_cfg: dict[str, Any],
+    read_cols: list[str],
+    page: int = 5000,
+):
+    """Raw Mongo source pages, projected the way the transfer reader does."""
+    from connectors.mongodb_common import _mongo_client
+    from connectors.mongodb_reader import _connection_string, _page_docs_to_batch
+
+    database = str(src_cfg.get("database") or "")
+    coll = _mongo_client(_connection_string(src_cfg))[database][
+        str(source_endpoint.table or "")
+    ]
+    docs: list[dict[str, Any]] = []
+    for doc in coll.find({}).sort("_id", 1).batch_size(page):
+        docs.append(doc)
+        if len(docs) >= page:
+            yield _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+            docs = []
+    if docs:
+        yield _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+
+
+def _mongo_page_dicts(docs, cfg, read_cols, to_batch) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
+    batch = to_batch(docs, cfg=cfg, columns=list(read_cols), offset=0, total=None)
+    out = []
+    for row in batch.rows:
+        rec = dict(zip(batch.headers, row))
+        out.append({c: rec.get(c) for c in read_cols})
+    return out
 
 
 _TRANSFORM_PROOF_POPULATION_OPS = frozenset(
@@ -1864,7 +1963,17 @@ def _transform_applied_proof(
                         yield row
                     _flush_ms()
 
-            if dest_db_type == "postgresql":
+            if _proof_file_dest(endpoint, dest_db_type):
+                # Files have no SQL dialect: re-open the final artifact itself.
+                actual_checksum = canonical_checksum_from_iter(
+                    _scoped_gen(
+                        _proof_file_dest_batches(endpoint, dest_summary, dst_cfg0)
+                    ),
+                    digest_cols,
+                    dest_db_type=dest_db_type,
+                    dest_types=dest_types,
+                )
+            elif dest_db_type == "postgresql":
                 # G-1i: a pooled connection can carry an older REPEATABLE
                 # READ snapshot that predates the committed write — the
                 # tamper test proved a pooled conn counted 5000 of 5001.
@@ -3338,6 +3447,12 @@ def _schema_state_evidence(
 
     if source_endpoint is None or source_endpoint.kind != "database" or not table:
         return {}
+    if str(db_type or "").lower() in _PROOF_OBJECT_STORES | {"sftp"}:
+        return {
+            "skipped": True,
+            "reason": "file_destination",
+            "note": "A file holds no constraints, indexes or defaults to compare.",
+        }
     src_cfg = resolve_connector_config(source_endpoint)
     src_type = resolve_driver_type(
         str(src_cfg.get("type") or source_endpoint.format or "")
@@ -5930,6 +6045,18 @@ def _run_reconciliation_impl(
                 "unproven (no destination cell read-back). Independent artifact "
                 f"record count is {counted:,}. Writer acknowledgement is diagnostic."
             )
+        cell_compare = _file_export_cell_readback(
+            records, columns, mappings, dest_summary, fmt=endpoint.format
+        )
+        if cell_compare is not None:
+            payload["artifact_cell_compare"] = cell_compare
+            if not cell_compare.get("passed", True):
+                payload["passed"] = False
+                payload["message"] = (
+                    "Read-back verification failed on the written file "
+                    f"{os.path.basename(str(dest_summary.get('path') or ''))!r}: "
+                    + _cell_mismatch_text(cell_compare)
+                )
         return _finalize(payload)
 
     from .connector_capabilities import resolve_driver_type
@@ -6159,7 +6286,10 @@ def _run_reconciliation_impl(
                 _removed_keys: list[tuple] = []
                 deleted = apply_inferred_leftover_deletes(
                     db_type=db_type,
-                    cfg=cfg,
+                    cfg=_leftover_cfg_protecting_run_objects(
+                        db_type, cfg, dest_summary, schema=str(schema or ""),
+                        table_name=str(table_name or ""),
+                    ),
                     schema=str(schema or ""),
                     table_name=str(table_name or ""),
                     key_columns=[str(c) for c in pk_cols],
@@ -7846,6 +7976,121 @@ def _run_reconciliation_impl(
     return _finalize(report.to_dict())
 
 
+
+def _leftover_cfg_protecting_run_objects(
+    db_type: str,
+    cfg: dict[str, Any],
+    dest_summary: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> dict[str, Any]:
+    """Leftover-MERGE config that never rewrites the objects this run wrote.
+
+    A whole-object overwrite leaves no prior rows in its own objects, so a key
+    outside the source found there was added after the write. Rewriting it
+    away would verify a repaired object instead of the one that was written.
+    """
+    from services.dest_precount import _object_store_kind
+
+    if _object_store_kind(db_type) not in {"s3", "gcs", "adls"}:
+        return cfg
+    from connectors.object_store_common import (
+        normalize_object_base_key,
+        object_parts_prefix,
+    )
+    from connectors.object_store_leftover import (
+        LEFTOVER_PROTECTED_OBJECTS,
+        LEFTOVER_PROTECTED_PREFIXES,
+    )
+
+    exact = [str(dest_summary.get("key") or "")]
+    prefixes: list[str] = []
+    try:
+        base = normalize_object_base_key(
+            table_name, schema, str(cfg.get("file_format") or "")
+        )
+        exact.append(base)
+        prefixes.append(object_parts_prefix(base))
+    except ValueError:
+        pass
+    out = dict(cfg)
+    out[LEFTOVER_PROTECTED_OBJECTS] = [k for k in exact if k]
+    out[LEFTOVER_PROTECTED_PREFIXES] = [p for p in prefixes if p]
+    return out
+
+
+def _readback_named_a_row(recon: dict[str, Any]) -> bool:
+    """True when a failed read-back compare already names the differing row."""
+    for name in ("artifact_cell_compare", "sample_compare"):
+        compare = recon.get(name)
+        if not isinstance(compare, dict) or compare.get("passed") is not False:
+            continue
+        for mismatch in compare.get("mismatches") or []:
+            if isinstance(mismatch, dict) and (
+                mismatch.get("key") not in (None, "") or mismatch.get("row") not in (None, "")
+            ):
+                return True
+    return False
+
+
+def _cell_mismatch_text(compare: dict[str, Any]) -> str:
+    first = (compare.get("mismatches") or [None])[0]
+    if not isinstance(first, dict):
+        return str(first or "value mismatch in read-back")
+    where = f"row {first.get('key')}" if first.get("key") else f"row #{first.get('row')}"
+    return (
+        f"{where} column {first.get('source')}→{first.get('target')}: "
+        f"source={first.get('source_value')!r} dest={first.get('target_value')!r}"
+    )
+
+
+def _file_export_cell_readback(
+    records: Any,
+    columns: list[str],
+    mappings: list[dict] | None,
+    dest_summary: dict[str, Any] | None,
+    *,
+    fmt: str | None,
+) -> dict[str, Any] | None:
+    """Every-row cell compare of the final local export against what was sent.
+
+    Re-opens the artifact on disk through the file reader after the last write,
+    so the file the user downloads is the file that is checked.
+    """
+    summary = dest_summary or {}
+    path = str(summary.get("path") or summary.get("export_path") or "")
+    if not path or not os.path.isfile(path) or not isinstance(records, list) or not records:
+        return None
+    from services.dest_precount import UnmeasuredArtifact, _iter_artifact_records
+
+    mapping_dicts = mappings or [{"source": c, "target": c} for c in columns]
+    pk = list(summary.get("primary_key_columns") or summary.get("conflict_columns") or [])
+    from pathlib import Path
+
+    from services.fixed_width_layout import FixedWidthError, iter_fixed_width_dicts
+
+    try:
+        if path.endswith(".fwf") or str(fmt or "").lower() in {"fixed_width", "fwf"}:
+            # The layout lives in a sidecar beside the file, found from its path.
+            rows = list(iter_fixed_width_dicts(Path(path)))
+        else:
+            with open(path, "rb") as fh:
+                rows = list(_iter_artifact_records(fh, name=os.path.basename(path), fmt=fmt))
+    except (UnmeasuredArtifact, FixedWidthError, OSError, ValueError) as exc:
+        return {"passed": False, "mismatches": [f"written file could not be re-read: {exc}"]}
+    targets = [str(m.get("target")) for m in mapping_dicts if m.get("target")]
+    return sample_compare_rows(
+        list(records),
+        rows,
+        mapping_dicts,
+        target_columns=targets or None,
+        sample_size=len(records),
+        sort_key=pk[0] if len(pk) == 1 else None,
+        dest_db_type=str(fmt or ""),
+        dest_types=_dest_types_from_mappings(mapping_dicts),
+    )
+
 def run_reconciliation(
     *,
     endpoint: EndpointConfig,
@@ -7981,6 +8226,14 @@ def run_reconciliation(
                 if recon.get("verification_verdict") in (None, "verified"):
                     recon["verification_verdict"] = "partial"
                 label = "unverifiable" if proof.get("status") == "unverifiable" else "not applicable"
+                cell = recon.get("artifact_cell_compare")
+                if isinstance(cell, dict) and cell.get("passed") is False:
+                    # The re-read file already differs from what was sent, so
+                    # the proof's divergence is that change, not source drift.
+                    proof["reason"] = (
+                        "the written file differs from what was sent (see the "
+                        "read-back failure); recipe application not assessed"
+                    )
                 note = f"transform proof {label} — {proof.get('reason')}"
                 if recon.get("message"):
                     recon["message"] = f"{recon['message']} ({note})"
@@ -8122,7 +8375,7 @@ def run_reconciliation(
                         "census requires both sides readable by a census "
                         "driver (postgres/mysql/mssql/duckdb/sqlite)"
                     )
-                if recon.get("message"):
+                if recon.get("message") and not _readback_named_a_row(recon):
                     recon["message"] = (
                         f"{recon['message']} "
                         f"({recon['culprit_keys_unavailable_reason']})"

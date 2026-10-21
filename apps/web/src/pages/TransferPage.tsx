@@ -6731,14 +6731,16 @@ export function TransferPage({
               >
                 <input
                   type="checkbox"
-                  checked={enableOcr}
+                  checked={enableOcr && ocrStatus?.available !== false}
+                  disabled={ocrStatus?.available === false}
+                  aria-describedby="df2-source-ocr-status"
                   onChange={(e) => setEnableOcr(e.target.checked)}
                 />
                 <span>
                   <strong>OCR scanned PDFs</strong>
-                  <small>
+                  <small id="df2-source-ocr-status">
                     {ocrStatus?.available === false
-                      ? "Not ready on this host — hover for install steps."
+                      ? "Unavailable — the API host needs Tesseract installed."
                       : ocrStatus?.available
                         ? "Tesseract ready — used when a PDF has no text layer."
                         : "Optional · runs Tesseract when a PDF has no text layer."}
@@ -6757,7 +6759,7 @@ export function TransferPage({
               {file && parsed ? (
                 <div className="df2-upload-result df2-upload-result-compact">
                   <div className="df2-upload-result-main">
-                    <span className="df2-badge df2-badge-live"><DtIcon name="check" size={14} /> {file.name}</span>
+                    <span className="df2-badge df2-badge-live df2-badge-filename" title={file.name}><DtIcon name="check" size={14} /> {file.name}</span>
                     <span className="df2-upload-result-meta">
                       {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
                     </span>

@@ -1338,8 +1338,10 @@ def reconcile(
         mismatches = sample_compare.get("mismatches") or []
         first = mismatches[0] if mismatches else None
         if isinstance(first, dict):
+            key = first.get("key")
+            where = f"row {key} " if key not in (None, "") else ""
             detail = (
-                f"column {first.get('source')}→{first.get('target')}: "
+                f"{where}column {first.get('source')}→{first.get('target')}: "
                 f"source={first.get('source_value')!r} dest={first.get('target_value')!r}"
             )
         else:
@@ -2555,6 +2557,7 @@ def verify_s3_object(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    file_format: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of S3 GET streams. Never JSON-fallback empty.
 
@@ -2577,6 +2580,7 @@ def verify_s3_object(
                 "connection_string": connection_string,
                 "ssl": ssl,
                 "database": bucket,
+                "file_format": file_format,
             },
             table_name=key,
             columns=target_columns,
@@ -2599,6 +2603,7 @@ def verify_gcs_blob(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    file_format: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of GCS GET streams. Never JSON-fallback empty."""
     try:
@@ -2611,6 +2616,7 @@ def verify_gcs_blob(
                 "port": port,
                 "connection_string": connection_string,
                 "database": bucket,
+                "file_format": file_format,
             },
             dest_db_type="gcs",
             dest_types=dest_types,
@@ -2636,6 +2642,7 @@ def verify_adls_blob(
     target_columns: list[str] | None = None,
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
+    file_format: str = "",
 ) -> tuple[int, str]:
     """Gate-8 cell checksum of Azure Blob / ADLS GET streams. Never JSON ``[]``."""
     try:
@@ -2651,6 +2658,7 @@ def verify_adls_blob(
                 "connection_string": connection_string,
                 "service_account": service_account,
                 "database": container,
+                "file_format": file_format,
             },
             table_name=key,
             columns=target_columns,
@@ -4152,6 +4160,7 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            file_format=str(dest.get("file_format") or ""),
         )
     elif db_type == "gcs":
         count, chk = verify_gcs_blob(
@@ -4163,6 +4172,7 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            file_format=str(dest.get("file_format") or ""),
         )
     elif db_type in {
         "adls",
@@ -4182,6 +4192,7 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            file_format=str(dest.get("file_format") or ""),
         )
     elif db_type == "sftp":
         from connectors.sftp_common import host_key_settings
