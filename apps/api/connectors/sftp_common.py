@@ -51,6 +51,34 @@ def _default_port(scheme: str) -> int:
     return 22 if scheme in ("sftp", "ssh", "") else 22
 
 
+_DEST_FORMAT_EXT = {
+    "csv": "csv",
+    "tsv": "tsv",
+    "json": "json",
+    "jsonl": "jsonl",
+    "ndjson": "jsonl",
+    "parquet": "parquet",
+    "excel": "xlsx",
+    "xlsx": "xlsx",
+}
+
+
+def sftp_dest_path(path: str, file_format: str | None = "") -> str:
+    """Remote file a destination writes for ``path``.
+
+    An extensionless name gets the extension of the declared ``file_format``
+    (CSV when none is declared). The writer and every destination reader
+    (COUNT, Gate-8, sample, continuity) must resolve the same file, or a
+    written ``name.csv`` reads back as a missing ``name``.
+    """
+    raw = path or ""
+    directory, _, name = raw.rpartition("/")
+    if not name or "." in name:
+        return raw
+    ext = _DEST_FORMAT_EXT.get(str(file_format or "").strip().lower(), "csv")
+    return f"{directory}/{name}.{ext}" if directory or raw.startswith("/") else f"{name}.{ext}"
+
+
 def host_key_settings(source: Mapping[str, Any]) -> dict[str, str]:
     """Host-key trust settings lifted out of a connection config.
 
