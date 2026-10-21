@@ -704,6 +704,10 @@ def _write_batch(
         if dest_type in spool_write_kinds():
             common.update(source_handoff)
         extra = writer_extra_kwargs(dest_type, cfg=cfg, dest=dest, common=common)
+        if dest_type == "sftp":
+            # Without the mode the writer cannot tell append from overwrite and
+            # replaces the remote file with only this run's rows.
+            common["sync_mode"] = sync_mode
         if dest_type == "iceberg":
             # Iceberg full-refresh overwrite must truncate once per job, not per chunk.
             common["sync_mode"] = sync_mode
