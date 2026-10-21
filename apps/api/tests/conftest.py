@@ -329,6 +329,10 @@ def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
     monkeypatch.setattr(
         mcp_invocation_log, "STORE_PATH", tmp_path / "mcp_invocations.jsonl"
     )
+    from services import append_continuity
+
+    monkeypatch.setattr(append_continuity, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(append_continuity, "_collection", lambda: None)
 
     test_name = request.node.path.name
     if test_name.startswith("test_mcp"):

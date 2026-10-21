@@ -796,6 +796,7 @@ def open_sftp_binary(cfg: dict[str, Any]) -> tuple[Any, Any] | bool | None:
         connect_sftp,
         host_key_settings,
         parse_sftp_config,
+        sftp_dest_path,
     )
 
     try:
@@ -811,6 +812,7 @@ def open_sftp_binary(cfg: dict[str, Any]) -> tuple[Any, Any] | bool | None:
         )
         if not parsed.host or not parsed.path:
             return None
+        parsed.path = sftp_dest_path(parsed.path, cfg.get("file_format"))
         transport, sftp = connect_sftp(parsed)
     except Exception as exc:
         _logger.info("SFTP GET stream failed to connect: %s", exc)

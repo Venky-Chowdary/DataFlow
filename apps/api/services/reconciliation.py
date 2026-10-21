@@ -4197,6 +4197,7 @@ def verify_target(
             target_columns=target_columns,
             limit=limit,
             dest_types=dest_types,
+            file_format=str(dest.get("file_format") or ""),
             **host_key_settings(dest),
         )
     elif db_type in {

@@ -4804,7 +4804,12 @@ def _sftp_row_count(cfg: dict[str, Any], *, table_name: str) -> int | None:
     if opened is None:
         return None
     stream, closer = opened
-    name = str(table_name or merged.get("table") or merged.get("path") or "")
+    from connectors.sftp_common import sftp_dest_path
+
+    name = sftp_dest_path(
+        str(table_name or merged.get("table") or merged.get("path") or ""),
+        merged.get("file_format"),
+    )
     try:
         return _count_artifact_stream(stream, name=name)
     except Exception as exc:

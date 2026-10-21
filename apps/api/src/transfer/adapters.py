@@ -1645,8 +1645,10 @@ def _write_destination_database(
         "email",
         "smtp",
     }:
-        common["dest_extra"] = dict(cfg.get("extra") or {})
-
+        dest_extra = dict(cfg.get("extra") or {})
+        if cfg.get("file_format") and not dest_extra.get("file_format"):
+            dest_extra["file_format"] = cfg["file_format"]
+        common["dest_extra"] = dest_extra
     if db_type == "snowflake":
         from connectors.snowflake_writer import write_mapped_rows
 

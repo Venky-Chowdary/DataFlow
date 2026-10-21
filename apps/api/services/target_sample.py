@@ -1543,6 +1543,7 @@ def read_target_sample(
             )
 
         if db_type == "sftp":
+            from connectors.sftp_common import sftp_dest_path
             from services.object_streaming import open_sftp_binary
 
             cfg = dict(dest)
@@ -1562,7 +1563,10 @@ def read_target_sample(
             try:
                 return sample_artifact_records(
                     stream,
-                    name=str(table_name or cfg.get("path") or ""),
+                    name=sftp_dest_path(
+                        str(table_name or cfg.get("path") or ""),
+                        cfg.get("file_format"),
+                    ),
                     limit=limit,
                     sort_key=sort_key or "",
                     keys=keys,

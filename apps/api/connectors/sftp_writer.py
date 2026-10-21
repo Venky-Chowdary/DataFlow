@@ -27,6 +27,7 @@ from connectors.object_store_multipart import resolve_multipart_limits, resolve_
 from connectors.sftp_common import (
     connect_sftp,
     host_key_settings,
+    sftp_dest_path,
     parse_sftp_config,
     split_remote_path,
 )
@@ -178,12 +179,16 @@ def write_mapped_rows(
     sync_mode = str(_kwargs.pop("sync_mode", "") or "")
     protect_landed = bool(_kwargs.pop("protect_landed_object", False))
     conflict_columns = list(_kwargs.pop("conflict_columns", None) or [])
+    extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
     directory, filename = split_remote_path(cfg.path)
+    if filename and "." not in filename:
+        cfg.path = sftp_dest_path(cfg.path, extra.get("file_format"))
+        directory, filename = split_remote_path(cfg.path)
     fmt = resolve_object_store_export_format(filename)
     if fmt is None:
-        if "." not in (filename or ""):
+        if not filename:
             fmt = "csv"
-            filename = f"{filename.rstrip('/')}.csv" if filename else "export.csv"
+            filename = "export.csv"
             cfg.path = f"{directory.rstrip('/')}/{filename}" if directory else f"/{filename}"
         else:
             return WriteResult(
@@ -199,7 +204,6 @@ def write_mapped_rows(
                     ".json, .jsonl, .parquet, or .xlsx."
                 ),
             )
-    extra = _kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {}
     spill_max = resolve_spill_max(extra)
     _, stream_chunk = resolve_multipart_limits(extra)
     if extra.get("sftp_stream_chunk"):
