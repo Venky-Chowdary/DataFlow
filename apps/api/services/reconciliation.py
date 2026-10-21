@@ -1248,8 +1248,10 @@ def reconcile(
         mismatches = sample_compare.get("mismatches") or []
         first = mismatches[0] if mismatches else None
         if isinstance(first, dict):
+            key = first.get("key")
+            where = f"row {key} " if key not in (None, "") else ""
             detail = (
-                f"column {first.get('source')}→{first.get('target')}: "
+                f"{where}column {first.get('source')}→{first.get('target')}: "
                 f"source={first.get('source_value')!r} dest={first.get('target_value')!r}"
             )
         else:

@@ -148,7 +148,7 @@ def _amt_of_row1(data: bytes, fmt: str) -> str:
     raise AssertionError("row id=1 not found")
 
 
-def _run(monkeypatch, source: EndpointConfig, dest: EndpointConfig, artifact, *, tamper: bool):
+def _run(monkeypatch, source: EndpointConfig, dest: EndpointConfig, artifact, *, tamper: bool, recipe: bool = True):
     seen: dict[str, Any] = {}
     real = engine_module.run_reconciliation
 
@@ -165,8 +165,10 @@ def _run(monkeypatch, source: EndpointConfig, dest: EndpointConfig, artifact, *,
         source=source,
         destination=dest,
         sync_mode="full_refresh_overwrite",
-        shape_recipe=RECIPE,
-        approved_shape_recipe_hash=ShapeRecipe.parse(RECIPE, source_columns=COLS).recipe_hash,
+        shape_recipe=RECIPE if recipe else None,
+        approved_shape_recipe_hash=(
+            ShapeRecipe.parse(RECIPE, source_columns=COLS).recipe_hash if recipe else None
+        ),
         validation_mode="strict",
         stream_contracts=[{
             "name": source.table, "selected": True, "primary_key": ["id"],
@@ -281,3 +283,25 @@ def test_sftp_clean_shaped_run_is_verified_without_sql_text(fmt, sftp_server, mo
     dest, artifact = _sftp(server, root, fmt)
     result, seen = _run(monkeypatch, pg_source, dest, artifact, tamper=False)
     _assert_clean(result, seen)
+
+
+CENSUS_CLAUSE = "culprit keys could not be named"
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_local_tamper_message_omits_census_clause_when_row_is_named(fmt, tmp_path, monkeypatch, pg_source, request):
+    dest, artifact = _local(tmp_path, monkeypatch, fmt, request)
+    result, _seen = _run(monkeypatch, pg_source, dest, artifact, tamper=True, recipe=False)
+    err = result.error or ""
+    assert "row 1 column amt" in err and "999.99" in err, err
+    assert CENSUS_CLAUSE not in err, err
+
+
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_sftp_tamper_message_omits_census_clause_when_row_is_named(fmt, sftp_server, monkeypatch, pg_source):
+    server, root = sftp_server
+    dest, artifact = _sftp(server, root, fmt)
+    result, _seen = _run(monkeypatch, pg_source, dest, artifact, tamper=True, recipe=False)
+    err = result.error or ""
+    assert "row 1 column amt" in err and "999.99" in err, err
+    assert CENSUS_CLAUSE not in err, err

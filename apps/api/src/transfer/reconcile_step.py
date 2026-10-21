@@ -7052,6 +7052,20 @@ def _leftover_cfg_protecting_run_objects(
     return out
 
 
+def _readback_named_a_row(recon: dict[str, Any]) -> bool:
+    """True when a failed read-back compare already names the differing row."""
+    for name in ("artifact_cell_compare", "sample_compare"):
+        compare = recon.get(name)
+        if not isinstance(compare, dict) or compare.get("passed") is not False:
+            continue
+        for mismatch in compare.get("mismatches") or []:
+            if isinstance(mismatch, dict) and (
+                mismatch.get("key") not in (None, "") or mismatch.get("row") not in (None, "")
+            ):
+                return True
+    return False
+
+
 def _cell_mismatch_text(compare: dict[str, Any]) -> str:
     first = (compare.get("mismatches") or [None])[0]
     if not isinstance(first, dict):
@@ -7369,7 +7383,7 @@ def run_reconciliation(
                         "census requires both sides readable by a census "
                         "driver (postgres/mysql/mssql/duckdb/sqlite)"
                     )
-                if recon.get("message"):
+                if recon.get("message") and not _readback_named_a_row(recon):
                     recon["message"] = (
                         f"{recon['message']} "
                         f"({recon['culprit_keys_unavailable_reason']})"

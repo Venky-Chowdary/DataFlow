@@ -96,3 +96,39 @@ def test_leftover_merge_skips_objects_this_run_wrote(protected, s3):  # noqa: F8
         assert not deleted and after == body
     else:
         assert deleted == 1 and b"ghost" not in after
+
+
+def test_changed_cell_message_names_row_without_census_clause(s3, tmp_path, monkeypatch):  # noqa: F811
+    client = s3[0]
+    real = engine_module.run_reconciliation
+
+    def patched(*a, **k):
+        lines = client.get_object(Bucket="x5bucket", Key=KEY)["Body"].read().decode().splitlines()
+        head = lines[0].split(",")
+        for i, line in enumerate(lines[1:], start=1):
+            row = line.split(",")
+            if row[head.index("id")] == "3":
+                row[head.index("v")] = "TAMPERED"
+                lines[i] = ",".join(row)
+        client.put_object(Bucket="x5bucket", Key=KEY, Body=("\n".join(lines) + "\n").encode())
+        return real(*a, **k)
+
+    monkeypatch.setattr(engine_module, "run_reconciliation", patched)
+    dest = _s3_dest(s3[1], s3[2], "out")
+    dest.extra = {**(dest.extra or {}), "file_format": "csv"}
+    source = EndpointConfig(
+        kind="database", format="sqlite", database=str(_source(tmp_path, 1, 11)), table="t"
+    )
+    req = TransferRequest(
+        source=source, destination=dest, sync_mode="full_refresh_overwrite",
+        validation_mode="strict",
+        stream_contracts=[{
+            "name": "t", "selected": True, "primary_key": ["id"],
+            "sync_mode": "full_refresh_overwrite",
+        }],
+    )
+    result = UniversalTransferEngine().execute_tracked(req, "xc-" + uuid.uuid4().hex[:8])
+    err = result.error or ""
+    assert not result.success
+    assert "row 3 column v" in err and "TAMPERED" in err, err
+    assert "culprit keys could not be named" not in err, err
