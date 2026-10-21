@@ -55,6 +55,21 @@ def test_every_runtime_state_writer_resolves_inside_the_sandbox(monkeypatch, tmp
     DATAFLOW_DATA_DIR — both are wrong.
     """
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    # Clear every writer-specific override another test may have leaked via a
+    # raw os.environ set — the env name always ends in one of these suffixes
+    # under either brand (DATAFLOW_* / DATAWRAP_*).
+    for key in list(os.environ):
+        if key.endswith(
+            (
+                "_MEMORY_PATH",
+                "_ACK_PATH",
+                "_RESULTS_PATH",
+                "VECTOR_STORE_DIR",
+                "TRAINING_OUTPUT_DIR",
+                "CONTRACTS_PATH",
+            )
+        ):
+            monkeypatch.delenv(key, raising=False)
     root = _API_ROOT / "data"
 
     from services import agentic_repair, cdc_incremental_snapshot, contract_file_store, pair_assurance
