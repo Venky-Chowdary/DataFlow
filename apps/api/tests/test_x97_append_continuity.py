@@ -608,3 +608,55 @@ def test_rebaseline_audit_failure_leaves_baseline_in_force(tmp_path, fake_store,
             ac.rebaseline(dest.endpoint(), actor="ops@x", reason="")
     finally:
         dest.drop()
+
+
+CORRUPTIONS = {
+    "garbage": b"\x00\xffnot json",
+    "truncated": b'{"sqlite|x": {"rows": 10, "checks',
+    "not_a_map": b"[]",
+}
+
+
+@pytest.fixture
+def file_store(monkeypatch, tmp_path):
+    path = tmp_path / "store" / "append_continuity.json"
+    monkeypatch.setattr(ac, "_collection", lambda: None)
+    monkeypatch.setattr(ac, "store_path", lambda: path)
+    return path
+
+
+def test_missing_store_reads_as_no_baselines(file_store):
+    assert not file_store.exists()
+    assert ac.load_baseline("anything") is None
+
+
+@pytest.mark.parametrize("kind", sorted(CORRUPTIONS))
+def test_corrupt_store_is_not_read_as_empty(kind, file_store):
+    file_store.parent.mkdir(parents=True)
+    file_store.write_bytes(CORRUPTIONS[kind])
+    with pytest.raises(ac.ContinuityStoreCorrupt):
+        ac.load_baseline("anything")
+    with pytest.raises(ac.ContinuityStoreCorrupt):
+        ac.save_baseline("anything", {"rows": 1, "checksum": "c"}, "job")
+    assert file_store.read_bytes() == CORRUPTIONS[kind], "a corrupt store must not be overwritten"
+
+
+@pytest.mark.parametrize("kind", sorted(CORRUPTIONS))
+def test_corrupt_store_with_tampered_destination_fails_append_loudly(
+    kind, tmp_path, fake_store, file_store
+):
+    dest = _Dest("sqlite", tmp_path)
+    src = _source(tmp_path, pk=True)
+    run = _runner(fake_store, src, dest, pk=True)
+    assert run().success
+    assert ac.load_baseline(_key(dest)), "run 1 must record a file-store baseline"
+    file_store.write_bytes(CORRUPTIONS[kind])
+    dest.tamper_one("cell")
+    before = dest.snapshot()
+    _add_source_rows(src, 11, 16)
+    r2 = run()
+    assert not r2.success
+    assert r2.error_details.get("mismatch") == "baseline_store_unreadable"
+    assert "baseline store could not be read" in r2.error
+    assert dest.snapshot() == before
+    assert file_store.read_bytes() == CORRUPTIONS[kind]

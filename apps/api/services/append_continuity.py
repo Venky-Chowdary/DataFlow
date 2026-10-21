@@ -76,6 +76,10 @@ class ContinuityTarget:
     path: str = ""
 
 
+class ContinuityStoreCorrupt(RuntimeError):
+    """The baseline store exists but cannot be read as a baseline map."""
+
+
 @dataclass(frozen=True)
 class ContinuityViolation:
     message: str
@@ -245,11 +249,21 @@ def _load_file() -> dict[str, Any]:
     path = store_path()
     if not path.exists():
         return {}
+    # A store that exists but cannot be read is not "no baselines": reading it
+    # as empty would pass every covered append unchecked, and saving over it
+    # would silently drop every other table's baseline.
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except Exception:  # noqa: BLE001
-        return {}
-    return data if isinstance(data, dict) else {}
+    except Exception as exc:  # noqa: BLE001
+        raise ContinuityStoreCorrupt(
+            f"append continuity store {path} is unreadable: {exc}"
+        ) from exc
+    if not isinstance(data, dict):
+        raise ContinuityStoreCorrupt(
+            f"append continuity store {path} is not a baseline map "
+            f"(found {type(data).__name__})"
+        )
+    return data
 
 
 def load_baseline(key: str) -> dict[str, Any] | None:
@@ -473,7 +487,22 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
     target = resolve_target(getattr(request, "destination", None))
     if target is None:
         return None
-    baseline = load_baseline(target.key)
+    try:
+        baseline = load_baseline(target.key)
+    except ContinuityStoreCorrupt as exc:
+        logger.error("append continuity: %s", exc)
+        return ContinuityViolation(
+            f"Verification failed for table '{target.table}': the append "
+            "continuity baseline store could not be read, so there is no way to "
+            "prove the destination is unchanged since the last verified run. "
+            "Nothing was written; the destination is unchanged. To recover: "
+            "restore the baseline store from backup, or repair it; then re-run.",
+            {
+                "table": target.table,
+                "mismatch": "baseline_store_unreadable",
+                "store_error": str(exc),
+            },
+        )
     if not baseline:
         return None
     try:
