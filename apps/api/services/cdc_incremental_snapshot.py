@@ -20,16 +20,30 @@ from typing import Any, Iterator
 _LOCK = threading.RLock()
 _MONGO_COLL = "cdc_incremental_snapshots"
 
-
-def _data_dir() -> str:
-    # Resolved per call so DATAFLOW_DATA_DIR (or a mounted volume) picks the
-    # dir even when set after import — never the module-relative apps/api/data.
+# Kept as module constants so tests can monkeypatch them (the contract the
+# schedule family already relies on). When unpatched they resolve through
+# data_dir() per call, so DATAFLOW_DATA_DIR wins even when set after import.
+def _import_time_dir() -> str:
     from services.platform_config import data_dir
 
     return str(data_dir())
 
 
+_DEFAULT_DATA_DIR = _import_time_dir()
+_DATA_DIR = _DEFAULT_DATA_DIR
+_DEFAULT_PATH = os.path.join(_DEFAULT_DATA_DIR, "cdc_incremental_snapshots.json")
+_PATH = _DEFAULT_PATH
+
+
+def _data_dir() -> str:
+    if _DATA_DIR != _DEFAULT_DATA_DIR:
+        return _DATA_DIR
+    return _import_time_dir()
+
+
 def _snap_path() -> str:
+    if _PATH != _DEFAULT_PATH:
+        return _PATH
     return os.path.join(_data_dir(), "cdc_incremental_snapshots.json")
 
 
