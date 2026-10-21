@@ -57,6 +57,8 @@ CONTINUITY_ENGINES = frozenset(
         "mssql",
         "azure_sql",
         "duckdb",
+        "sftp",
+        "s3",
     }
 )
 
