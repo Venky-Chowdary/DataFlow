@@ -159,6 +159,11 @@ def _parent_schemas_on_destination(
     }
 
 
+_FILE_DIALECTS = frozenset(
+    {"sftp", "s3", "gcs", "adls", "azure_blob", "minio", "r2", "csv", "jsonl", "json", "parquet"}
+)
+
+
 def carry_foreign_keys(
     *,
     dest_dialect: str,
@@ -182,6 +187,22 @@ def carry_foreign_keys(
     catalog_ns = catalog_namespace(dest_dialect, dest_cfg, schema=dest_schema or None)
 
     decisions: list[ForeignKeyDecision] = []
+    if str(dest_dialect or "").lower() in _FILE_DIALECTS:
+        return [
+            {
+                "table": table,
+                **ForeignKeyDecision(
+                    name="*",
+                    status="unknown",
+                    reason=(
+                        f"A {dest_dialect} destination is a file; it cannot hold "
+                        "foreign-key constraints."
+                    ),
+                    dest_table=table,
+                ).__dict__,
+            }
+            for table in source_keys
+        ]
     try:
         engine = _engine(dest_cfg)
     except Exception as exc:  # noqa: BLE001 — surface, do not pretend
