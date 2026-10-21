@@ -45,3 +45,40 @@ def test_patched_store_path_wins_over_the_env_dir(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "env"))
     monkeypatch.setattr(schedule_store, "STORE_PATH", own)
     assert schedule_store._store_path() == own
+
+
+def test_every_runtime_state_writer_resolves_inside_the_sandbox(monkeypatch, tmp_path):
+    """Each module-relative writer must honor DATAFLOW_DATA_DIR.
+
+    A writer that resolves ``parents[n] / "data"`` instead writes into the
+    real apps/api/data in every test run AND in any deployment that sets
+    DATAFLOW_DATA_DIR — both are wrong.
+    """
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    root = _API_ROOT / "data"
+
+    from services import agentic_repair, cdc_incremental_snapshot, contract_file_store, pair_assurance
+    from src.ai.copilot import ack_ledger, result_store, working_memory
+    from src.ai.rag import vector_store
+    from src.ai.training import fine_tuning, training_agent
+
+    resolved = {
+        "cdc_incremental_snapshot": Path(cdc_incremental_snapshot._snap_path()),
+        "agentic_repair.audit": Path(agentic_repair._audit_path()),
+        "agentic_repair.proposals": Path(agentic_repair._proposals_path()),
+        "contract_file_store": Path(contract_file_store._default_path()),
+        "pair_assurance": Path(pair_assurance._default_proof_dir()),
+        "working_memory": Path(working_memory._default_path()),
+        "ack_ledger": Path(ack_ledger._default_path()),
+        "result_store": Path(result_store._default_path()),
+        "vector_store": Path(vector_store._default_persist_dir()),
+        "training_agent": Path(training_agent.DataTransferTrainingAgent._default_output_dir()),
+        "fine_tuning": Path(fine_tuning.DataTransferFineTuningPipeline._default_output_dir()),
+    }
+    for name, path in resolved.items():
+        assert tmp_path in path.resolve().parents or path.resolve() == tmp_path, (
+            f"{name} resolves {path} — outside DATAFLOW_DATA_DIR"
+        )
+        assert root not in path.resolve().parents, (
+            f"{name} resolves inside real apps/api/data: {path}"
+        )

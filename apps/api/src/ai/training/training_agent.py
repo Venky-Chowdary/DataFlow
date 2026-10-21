@@ -43,11 +43,23 @@ class DataTransferTrainingAgent:
     synthesizes conversations, updates RAG, exports OpenAI/Anthropic datasets.
     """
 
-    OUTPUT_DIR = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "data", "training", "copilot"
-    )
+    @staticmethod
+    def _default_output_dir() -> str:
+        """TRAINING_OUTPUT_DIR wins, else DATAFLOW_DATA_DIR/training/copilot —
+        resolved per call so the env may be set after import."""
+        from services.brand_env import getenv_brand
+
+        override = getenv_brand("TRAINING_OUTPUT_DIR", "").strip()
+        if override:
+            return override
+        from services.platform_config import data_dir
+
+        return str(data_dir() / "training" / "copilot")
+
+    OUTPUT_DIR = _default_output_dir()
 
     def __init__(self):
+        self.OUTPUT_DIR = self._default_output_dir()
         self.feeder = UniversalDataFeeder()
         self.conversation_synth = ConversationSynthesizer()
         self.data_synth = DataTransferDataSynthesizer()
