@@ -30,7 +30,7 @@ from typing import Any, Final
 logger = logging.getLogger(__name__)
 
 ALGO: Final[str] = "engine_v1"
-SUPPORTED: Final[frozenset[str]] = frozenset({"postgresql", "mysql", "mariadb", "mongodb", "sqlite"})
+SUPPORTED: Final[frozenset[str]] = frozenset({"postgresql", "mysql", "mariadb", "mongodb", "sqlite", "duckdb"})
 
 PG_SESSION_PINS: Final[tuple[str, ...]] = (
     "SET LOCAL extra_float_digits = 1",
@@ -265,6 +265,37 @@ def _sqlite(path: str, table: str) -> dict[str, Any] | None:
         conn.close()
 
 
+def _duckdb(path: str, schema: str, table: str) -> dict[str, Any] | None:
+    import duckdb
+
+    try:
+        conn = duckdb.connect(path, read_only=True)
+    except duckdb.ConnectionException:
+        # Same-process handle already open with another config: reuse its mode.
+        conn = duckdb.connect(path)
+    try:
+        info = conn.execute(
+            "SELECT column_name, data_type FROM information_schema.columns "
+            "WHERE table_schema = ? AND table_name = ? ORDER BY ordinal_position",
+            [schema or "main", table],
+        ).fetchall()
+        columns = _sorted_columns([(r[0], r[1]) for r in info])
+        if not columns:
+            return None
+        sel = ", ".join('"' + c.replace('"', '""') + '"' for c, _t in columns)
+        ref = '"' + (schema or "main").replace('"', '""') + '"."' + table.replace('"', '""') + '"'
+        cur = conn.execute(f"SELECT {sel} FROM {ref}")  # nosec B608
+
+        def _rows():
+            while batch := cur.fetchmany(10000):
+                yield from batch
+
+        n, a, b = _sum_rows(canonical(row) for row in _rows())
+        return _result(n, a, b, columns)
+    finally:
+        conn.close()
+
+
 def digest(db_type: str, cfg: dict[str, Any], *, schema: str, table: str, path: str = "") -> dict[str, Any] | None:
     """``{rows, checksum, algo, columns}`` or ``None`` when the table is unreadable."""
     if db_type == "postgresql":
@@ -275,4 +306,6 @@ def digest(db_type: str, cfg: dict[str, Any], *, schema: str, table: str, path: 
         return _mongodb(cfg, table)
     if db_type == "sqlite":
         return _sqlite(path, table)
+    if db_type == "duckdb":
+        return _duckdb(path, schema, table)
     return None

@@ -36,6 +36,8 @@ DDL = {
     "mysql": "CREATE TABLE `{t}` (id int, `MixedCase` varchar(64), uni varchar(64) CHARACTER SET utf8mb4, "
     "amt decimal(12,2), ts datetime(6), tz timestamp(6) NULL, note varchar(64) NULL, j json NULL)",
     "sqlite": 'CREATE TABLE "{t}" (id INTEGER, "MixedCase" TEXT, uni TEXT, amt NUMERIC, ts TEXT, note TEXT)',
+    "duckdb": 'CREATE TABLE "{t}" (id INTEGER, "MixedCase" VARCHAR, uni VARCHAR, amt DECIMAL(12,2), '
+    "ts TIMESTAMP, tz TIMESTAMPTZ, note VARCHAR)",
 }
 
 
@@ -44,7 +46,7 @@ def _q(engine: str, name: str) -> str:
 
 
 def _ph(engine: str) -> str:
-    return "?" if engine == "sqlite" else "%s"
+    return "?" if engine in {"sqlite", "duckdb"} else "%s"
 
 
 def _seed(dest: _Dest) -> None:
@@ -61,7 +63,7 @@ def _seed(dest: _Dest) -> None:
     for i, m, u, a, ts, n in ROWS:
         if e == "sqlite":
             dest._sql(f'INSERT INTO "{t}" VALUES ({p},{p},{p},{p},{p},{p})', (i, m, u, a, ts, n))
-        elif e == "postgresql":
+        elif e in {"postgresql", "duckdb"}:
             dest._sql(f'INSERT INTO "{t}" VALUES ({p},{p},{p},{p},{p},{p},{p})', (i, m, u, a, ts, ts + "+00", n))
         else:
             dest._sql(

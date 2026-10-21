@@ -144,13 +144,15 @@ class _Dest:
                 self._mongo = client["x97_continuity"][self.table]
             except Exception as exc:  # noqa: BLE001
                 _unavailable(engine, exc)
+        elif engine == "duckdb":
+            self.path = tmp_path / "dest.duckdb"
         else:
             self.path = tmp_path / "dest.sqlite"
 
     def endpoint(self) -> EndpointConfig:
-        if self.engine == "sqlite":
+        if self.engine in {"sqlite", "duckdb"}:
             return EndpointConfig(
-                kind="database", format="sqlite", database=str(self.path), table=self.table
+                kind="database", format=self.engine, database=str(self.path), table=self.table
             )
         if self.engine == "mongodb":
             from urllib.parse import urlsplit
@@ -168,6 +170,15 @@ class _Dest:
         )
 
     def _sql(self, sql: str, params: tuple = ()) -> list[tuple]:
+        if self.engine == "duckdb":
+            import duckdb
+
+            conn = duckdb.connect(str(self.path))
+            try:
+                conn.execute(sql, list(params))
+                return list(conn.fetchall()) if conn.description else []
+            finally:
+                conn.close()
         if self.engine == "sqlite":
             conn = sqlite3.connect(str(self.path))
         else:
@@ -182,7 +193,7 @@ class _Dest:
             conn.close()
 
     def _ph(self) -> str:
-        return "?" if self.engine == "sqlite" else "%s"
+        return "?" if self.engine in {"sqlite", "duckdb"} else "%s"
 
     def snapshot(self) -> list[tuple]:
         if self.engine == "mongodb":
@@ -207,6 +218,25 @@ class _Dest:
         self._sql(f"UPDATE {t} SET v={p} WHERE id={p}", ("TAMPER", 2))  # nosec B608
         self._sql(f"DELETE FROM {t} WHERE id={p}", (3,))  # nosec B608
         self._sql(f"INSERT INTO {t} (id, seq, v) VALUES ({p},{p},{p})", (999, 999, "stray"))  # nosec B608
+
+    def tamper_one(self, kind: str) -> None:
+        """One mutation only: a cell at the same count, a delete, or an insert."""
+        if self.engine == "mongodb":
+            if kind == "cell":
+                self._mongo.update_one({"id": 2}, {"$set": {"v": "TAMPER"}})
+            elif kind == "delete":
+                self._mongo.delete_one({"id": 3})
+            else:
+                self._mongo.insert_one({"id": 999, "seq": 999, "v": "stray"})
+            return
+        q = '"' if self.engine != "mysql" else "`"
+        t, p = f"{q}{self.table}{q}", self._ph()
+        if kind == "cell":
+            self._sql(f"UPDATE {t} SET v={p} WHERE id={p}", ("TAMPER", 2))  # nosec B608
+        elif kind == "delete":
+            self._sql(f"DELETE FROM {t} WHERE id={p}", (3,))  # nosec B608
+        else:
+            self._sql(f"INSERT INTO {t} (id, seq, v) VALUES ({p},{p},{p})", (999, 999, "stray"))  # nosec B608
 
     def fingerprint(self) -> dict | None:
         target = ac.resolve_target(self.endpoint())
@@ -275,7 +305,61 @@ def _runner(fake, src: Path, dest: _Dest, *, pk: bool) -> Callable[[], Any]:
     return run
 
 
-ENGINES = ["sqlite", "postgresql", "mysql", "mongodb"]
+ENGINES = ["sqlite", "duckdb", "postgresql", "mysql", "mongodb"]
+
+
+@pytest.mark.parametrize("engine", sorted(ac.CONTINUITY_ENGINES))
+def test_every_covered_engine_resolves_a_continuity_target(engine, tmp_path):
+    """A covered engine the resolver drops is silently unchecked (DuckDB fail-open)."""
+    ep = EndpointConfig(
+        kind="database", format=engine, host="h.example", port=1,
+        database=str(tmp_path / "d.db"), schema="s", table="t.csv",
+    )
+    target = ac.resolve_target(ep)
+    assert target is not None, f"{engine} is in CONTINUITY_ENGINES but is not resolved"
+    assert target.db_type == engine or target.db_type in ac.CONTINUITY_ENGINES
+
+
+@pytest.mark.parametrize("kind", ["cell", "delete", "insert"])
+@pytest.mark.parametrize("engine", ENGINES)
+def test_single_tamper_fails_run2_and_is_left_unchanged(engine, kind, tmp_path, fake_store):
+    dest = _Dest(engine, tmp_path)
+    try:
+        src = _source(tmp_path, pk=True)
+        run = _runner(fake_store, src, dest, pk=True)
+        r1 = run()
+        assert r1.success, r1.error
+        base = ac.load_baseline(_key(dest))
+        assert base and not base.get("unreadable"), f"{engine}: no baseline after run 1"
+        dest.tamper_one(kind)
+        before = dest.snapshot()
+        _add_source_rows(src, 11, 16)
+        r2 = run()
+        assert not r2.success, f"{engine}/{kind}: tampered destination accepted"
+        assert r2.error_details.get("reason") == "destination_continuity_mismatch"
+        assert f"'{dest.table}'" in r2.error
+        assert dest.snapshot() == before
+    finally:
+        dest.drop()
+
+
+def test_unfingerprintable_destination_fails_next_append_loudly(tmp_path, fake_store, monkeypatch):
+    dest = _Dest("sqlite", tmp_path)
+    src = _source(tmp_path, pk=True)
+    run = _runner(fake_store, src, dest, pk=True)
+    real = ac.fingerprint
+    monkeypatch.setattr(ac, "fingerprint", lambda *a, **k: None)
+    assert run().success
+    base = ac.load_baseline(_key(dest))
+    assert base and base.get("unreadable"), "an unreadable destination must not drop its baseline"
+    monkeypatch.setattr(ac, "fingerprint", real)
+    before = dest.snapshot()
+    _add_source_rows(src, 11, 16)
+    r2 = run()
+    assert not r2.success
+    assert r2.error_details.get("mismatch") == "no_baseline_fingerprint"
+    assert "could not be fingerprinted" in r2.error
+    assert dest.snapshot() == before
 
 
 @pytest.mark.parametrize("pk", [True, False], ids=["pk", "nopk"])

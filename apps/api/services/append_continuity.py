@@ -15,6 +15,7 @@ the baseline so a later append never compares against a stale state.
 from __future__ import annotations
 
 import logging
+import os
 import threading
 import uuid
 from dataclasses import dataclass, field
@@ -114,9 +115,14 @@ def resolve_target(endpoint: Any) -> ContinuityTarget | None:
     from src.transfer.connector_capabilities import resolve_driver_type
 
     cfg = resolve_connector_config(endpoint)
-    db_type = resolve_driver_type(
-        str(cfg.get("type") or getattr(endpoint, "format", "") or "")
-    ).lower()
+    declared = str(cfg.get("type") or getattr(endpoint, "format", "") or "").lower()
+    # The declared engine wins when covered: the driver resolver folds some
+    # covered engines (duckdb -> generic_sql) into families that are not.
+    db_type = (
+        declared
+        if declared in CONTINUITY_ENGINES
+        else resolve_driver_type(declared).lower()
+    )
     if db_type not in CONTINUITY_ENGINES:
         return None
     schema = str(schema_from_cfg(db_type, cfg) or "")
@@ -129,6 +135,10 @@ def resolve_target(endpoint: Any) -> ContinuityTarget | None:
             str(cfg.get("connection_string") or ""),
             str(cfg.get("host") or ""),
         )
+        if not database or database == ":memory:":
+            return None
+    elif db_type == "duckdb":
+        database = os.path.abspath(os.path.expanduser(database)) if database else ""
         if not database or database == ":memory:":
             return None
     # File engines are identified by their path alone: the engine fills a
@@ -145,7 +155,7 @@ def resolve_target(endpoint: Any) -> ContinuityTarget | None:
         ]
     )
     return ContinuityTarget(
-        db_type, cfg, schema, table, key, database if db_type == "sqlite" else ""
+        db_type, cfg, schema, table, key, database if db_type in _FILE_ENGINES else ""
     )
 
 
@@ -259,6 +269,7 @@ def save_baseline(key: str, fp: dict[str, Any], job_id: str) -> None:
         "checksum": str(fp["checksum"]),
         "algo": str(fp.get("algo") or LEGACY_ALGO),
         "columns": fp.get("columns"),
+        "unreadable": bool(fp.get("unreadable")),
         "job_id": job_id,
         "recorded_at": _now(),
     }
@@ -318,6 +329,16 @@ def compare(
         "baseline_recorded_at": baseline.get("recorded_at"),
         "recovery": RECOVERY_HINT,
     }
+    if baseline.get("unreadable"):
+        details.update(found_rows=None, found_checksum=None, mismatch="no_baseline_fingerprint")
+        return ContinuityViolation(
+            f"Verification failed for table '{table}': the destination could not "
+            "be fingerprinted after the last run "
+            f"({baseline.get('job_id')}), so there is no verified baseline to "
+            "prove it is unchanged. Nothing was written; the destination is "
+            f"unchanged. {RECOVERY_HINT}",
+            details,
+        )
     base_algo = str(baseline.get("algo") or LEGACY_ALGO)
     if current is not None and str(current.get("algo") or LEGACY_ALGO) != base_algo:
         # Digests from different algorithms are never comparable: fail closed.
@@ -484,10 +505,26 @@ def record_after_run(request: Any, job_id: str, result: Any) -> None:
     ):
         clear_baseline(target.key)
         return
-    fp = fingerprint(target)
+    try:
+        fp = fingerprint(target)
+    except Exception:  # noqa: BLE001
+        logger.warning("continuity baseline read failed for %s", target.table, exc_info=True)
+        fp = None
     if fp is None:
-        clear_baseline(target.key)
-        return
+        # Never drop to "no baseline": that would pass the next append unchecked.
+        logger.error(
+            "append continuity: %s table '%s' could not be fingerprinted after "
+            "job %s; the next append will fail until it is re-baselined",
+            target.db_type,
+            target.table,
+            job_id,
+        )
+        fp = {
+            "rows": -1,
+            "checksum": "",
+            "algo": preferred_algo(target.db_type),
+            "unreadable": True,
+        }
     save_baseline(target.key, fp, job_id)
 
 
