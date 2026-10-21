@@ -3385,6 +3385,121 @@ def _keyed_join_proof(dest_summary: dict[str, Any] | None) -> bool:
     return bool(_COUNT_PROOF_TOKEN.match(str(summary.get("checksum") or "").strip()))
 
 
+_FULL_KEYED_COMPARE_MAX_ROWS = 1_000_000
+
+
+def _read_full_source_records(ctx: dict[str, Any], total: int) -> list[dict[str, Any]] | None:
+    source = ctx.get("source_endpoint")
+    if source is None or str(getattr(source, "kind", "") or "") != "database":
+        return None
+    from .connector_capabilities import resolve_driver_type
+
+    src_cfg = resolve_connector_config(source)
+    src_type = resolve_driver_type(str(src_cfg.get("type") or getattr(source, "format", "") or "")).lower()
+    table = str(getattr(source, "table", "") or "").strip()
+    pairs = [
+        (str(m.get("source") or ""), str(m.get("target") or m.get("source") or ""))
+        for m in (ctx.get("mappings") or [])
+        if isinstance(m, dict) and str(m.get("source") or "").strip()
+    ]
+    if not table or not pairs:
+        return None
+    sort_key = str(ctx.get("sort_key") or "")
+    src_sort = next((s for s, t in pairs if t.lower() == sort_key.lower()), None)
+    from services.dialect_profiles import schema_from_cfg
+
+    rows = _read_target_sample_retrying(
+        "full keyed compare (source)",
+        src_type,
+        src_cfg,
+        schema=schema_from_cfg(src_type, src_cfg),
+        table_name=table,
+        columns=[s for s, _t in pairs],
+        limit=total,
+        sort_key=src_sort,
+    )
+    return [r for r in rows if isinstance(r, dict)] if len(rows) == total else None
+
+
+def _name_row_on_checksum_only_failure(
+    report: dict[str, Any], ctx: dict[str, Any]
+) -> dict[str, Any]:
+    """Name the changed row when only the whole-population checksum failed.
+
+    The keyed sample covers at most 50 rows. A file or object destination has
+    no census driver, so a change outside the sample failed Gate-8 with no row
+    named. On that failure path only, re-read every written key through the
+    same reader and compare with the same comparator as the sample.
+    """
+    if report.get("passed") is not False or report.get("checksum_match") is not False:
+        return report
+    if not ctx:
+        return report
+    from services.dest_precount import _object_store_kind
+
+    db_type = str(ctx.get("db_type") or "")
+    if db_type != "sftp" and _object_store_kind(db_type) not in {"s3", "gcs", "adls"}:
+        return report
+    sample = report.get("sample_compare") or {}
+    if not (isinstance(sample, dict) and sample.get("passed") and int(sample.get("compared") or 0) > 0):
+        return report
+    records = list(ctx.get("records") or [])
+    total = max(len(records), int(report.get("source_rows") or 0))
+    if total <= int(sample.get("rows_compared") or 0):
+        return report
+    if total > _FULL_KEYED_COMPARE_MAX_ROWS:
+        return {
+            **report,
+            "full_keyed_compare": {
+                "passed": None,
+                "skipped": f"{total:,} rows exceeds the {_FULL_KEYED_COMPARE_MAX_ROWS:,}-row cap",
+            },
+        }
+    try:
+        if len(records) < total:
+            # Streaming runs keep only a bounded sample in memory: re-read the
+            # source population through the same reader.
+            records = _read_full_source_records(ctx, total)
+            if records is None:
+                return report
+        keys = _source_key_values(
+            records, sort_key=ctx.get("sort_key"), mappings=ctx.get("mappings"), limit=total
+        )
+        rows = _read_target_sample_retrying(
+            "full keyed compare",
+            db_type,
+            ctx.get("cfg") or {},
+            schema=str(ctx.get("schema") or ""),
+            table_name=str(ctx.get("table_name") or ""),
+            columns=ctx.get("target_cols") or None,
+            limit=total,
+            sort_key=ctx.get("sort_key"),
+            key_values=keys or None,
+        )
+        full = sample_compare_rows(
+            records,
+            rows,
+            ctx.get("mappings") or [],
+            target_columns=ctx.get("target_cols"),
+            sample_size=total,
+            sort_key=ctx.get("sort_key"),
+            dest_db_type=db_type,
+            dest_types=ctx.get("dest_types"),
+            duplicate_policy=str(ctx.get("duplicate_policy") or ""),
+        )
+    except Exception as exc:  # noqa: BLE001 — naming never changes the verdict
+        _logger.warning("Gate-8 full keyed compare unavailable: %s", exc)
+        return report
+    full["coverage"] = "full_keyed"
+    out = {**report, "full_keyed_compare": full}
+    if full.get("passed") is False and full.get("mismatches"):
+        out["message"] = (
+            f"{str(report.get('message') or '').rstrip()} A keyed compare of all "
+            f"{total:,} written rows found the change: {_cell_mismatch_text(full)}."
+        )
+    return out
+
+
 def _localize_checksum_mismatch(
     report: dict[str, Any],
     dest_summary: dict[str, Any] | None,
@@ -3404,6 +3519,8 @@ def _localize_checksum_mismatch(
     The verdict itself does not move: a mismatch still fails Gate-8.
     """
     if report.get("checksum_match") is not False:
+        return report
+    if (report.get("full_keyed_compare") or {}).get("passed") is False:
         return report
     summary = dest_summary or {}
     sample = report.get("sample_compare") or {}
@@ -4857,6 +4974,9 @@ def _run_reconciliation_impl(
     # Late-bound with the resolved destination engine and physical types: which
     # columns Gate-8 could only prove at the carrier's granularity.
     carrier_ctx: dict[str, Any] = {}
+    # Late-bound reader arguments for naming the changed row when only the
+    # whole-population checksum disagrees (no census driver on file/object).
+    full_compare_ctx: dict[str, Any] = {}
 
     def _finalize(payload: dict[str, Any]) -> dict[str, Any]:
         if digest_provenance["source"] and "source_checksum_provenance" not in payload:
@@ -5125,6 +5245,7 @@ def _run_reconciliation_impl(
                 "cell fidelity."
             )
             stamped["message"] = f"{str(stamped.get('message') or '').rstrip()}{note}"
+        stamped = _name_row_on_checksum_only_failure(stamped, full_compare_ctx)
         stamped = _localize_checksum_mismatch(stamped, dest_summary)
         stamped = qualify_multi_stream_reconciliation(stamped, dest_summary)
         stamped = _attach_match_summary(stamped, dest_summary)
@@ -6553,6 +6674,13 @@ def _run_reconciliation_impl(
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
                 inserted_keys=dest_summary.get("inserted_keys"),
             )
+            full_compare_ctx.update(
+                db_type=db_type, cfg=cfg, schema=schema, table_name=table_name,
+                target_cols=target_cols, sort_key=sort_key, mappings=mapping_dicts,
+                dest_types=dest_types, records=sample_records,
+                duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
+                source_endpoint=source_endpoint,
+            )
 
     # CDC delete proof: stashed PKs must be absent on destination read-back.
     delete_pks = [
@@ -7054,7 +7182,7 @@ def _leftover_cfg_protecting_run_objects(
 
 def _readback_named_a_row(recon: dict[str, Any]) -> bool:
     """True when a failed read-back compare already names the differing row."""
-    for name in ("artifact_cell_compare", "sample_compare"):
+    for name in ("artifact_cell_compare", "full_keyed_compare", "sample_compare"):
         compare = recon.get(name)
         if not isinstance(compare, dict) or compare.get("passed") is not False:
             continue
