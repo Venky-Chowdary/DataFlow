@@ -177,15 +177,30 @@ def delete_by_primary_keys(
         raise DestinationDeleteError(table_name, RuntimeError("object-store leftover GET unmeasured"))
 
     by_object: dict[str, list[dict[str, Any]]] = {obj: [] for obj in listed}
+    protected = _protected_object_test(cfg)
     deleted = 0
+    kept_in_run_objects: list[str] = []
     for obj_key, rec in records:
         tup = _row_values_for_cols(rec, pk_cols)
         norm = _norm_dest_key(tup) if tup is not None else None
         if norm is not None and norm in leftover_set:
-            deleted += 1
-            continue
+            if protected(obj_key):
+                # This run just wrote that object, so an extra key in it is a
+                # change after the write, not a leftover. Keep it so Gate-8
+                # counts it and the run fails instead of being repaired.
+                kept_in_run_objects.append(str(tup))
+            else:
+                deleted += 1
+                continue
         by_object.setdefault(obj_key, []).append(rec)
 
+    if kept_in_run_objects:
+        logger.warning(
+            "object-store leftover MERGE: %d key(s) not in the source are in "
+            "objects this run wrote (%s); left in place for Gate-8",
+            len(kept_in_run_objects),
+            ", ".join(kept_in_run_objects[:8]),
+        )
     if deleted == 0:
         return 0
     try:
@@ -200,6 +215,16 @@ def delete_by_primary_keys(
     except Exception as exc:
         raise DestinationDeleteError(table_name, exc) from exc
     return deleted
+
+
+LEFTOVER_PROTECTED_OBJECTS = "_leftover_protected_objects"
+LEFTOVER_PROTECTED_PREFIXES = "_leftover_protected_prefixes"
+
+
+def _protected_object_test(cfg: Mapping[str, Any]):
+    exact = {str(k) for k in (cfg.get(LEFTOVER_PROTECTED_OBJECTS) or []) if k}
+    prefixes = tuple(str(p) for p in (cfg.get(LEFTOVER_PROTECTED_PREFIXES) or []) if p)
+    return lambda obj_key: obj_key in exact or (bool(prefixes) and obj_key.startswith(prefixes))
 
 
 def _serialize_kept(obj_key: str, kept: list[dict[str, Any]]) -> tuple[bytes, str]:

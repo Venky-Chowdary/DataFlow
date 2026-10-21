@@ -5513,7 +5513,10 @@ def _run_reconciliation_impl(
                 _removed_keys: list[tuple] = []
                 deleted = apply_inferred_leftover_deletes(
                     db_type=db_type,
-                    cfg=cfg,
+                    cfg=_leftover_cfg_protecting_run_objects(
+                        db_type, cfg, dest_summary, schema=str(schema or ""),
+                        table_name=str(table_name or ""),
+                    ),
                     schema=str(schema or ""),
                     table_name=str(table_name or ""),
                     key_columns=[str(c) for c in pk_cols],
@@ -7004,6 +7007,49 @@ def _run_reconciliation_impl(
     )
     return _finalize(report.to_dict())
 
+
+
+def _leftover_cfg_protecting_run_objects(
+    db_type: str,
+    cfg: dict[str, Any],
+    dest_summary: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+) -> dict[str, Any]:
+    """Leftover-MERGE config that never rewrites the objects this run wrote.
+
+    A whole-object overwrite leaves no prior rows in its own objects, so a key
+    outside the source found there was added after the write. Rewriting it
+    away would verify a repaired object instead of the one that was written.
+    """
+    from services.dest_precount import _object_store_kind
+
+    if _object_store_kind(db_type) not in {"s3", "gcs", "adls"}:
+        return cfg
+    from connectors.object_store_common import (
+        normalize_object_base_key,
+        object_parts_prefix,
+    )
+    from connectors.object_store_leftover import (
+        LEFTOVER_PROTECTED_OBJECTS,
+        LEFTOVER_PROTECTED_PREFIXES,
+    )
+
+    exact = [str(dest_summary.get("key") or "")]
+    prefixes: list[str] = []
+    try:
+        base = normalize_object_base_key(
+            table_name, schema, str(cfg.get("file_format") or "")
+        )
+        exact.append(base)
+        prefixes.append(object_parts_prefix(base))
+    except ValueError:
+        pass
+    out = dict(cfg)
+    out[LEFTOVER_PROTECTED_OBJECTS] = [k for k in exact if k]
+    out[LEFTOVER_PROTECTED_PREFIXES] = [p for p in prefixes if p]
+    return out
 
 
 def _cell_mismatch_text(compare: dict[str, Any]) -> str:
