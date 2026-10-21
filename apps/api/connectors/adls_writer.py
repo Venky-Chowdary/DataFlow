@@ -102,6 +102,7 @@ def write_mapped_rows(
             file_batch_idx=file_batch_idx,
             total_chunks=total_chunks,
             job_id=str(_kwargs.pop("job_id", "") or ""),
+            file_format=str(_kwargs.pop("file_format", "") or ""),
         )
     except ValueError as exc:
         return WriteResult(

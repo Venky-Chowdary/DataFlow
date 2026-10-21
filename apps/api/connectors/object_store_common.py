@@ -35,6 +35,16 @@ __all__ = [
     "_object_version_token",
 ]
 
+_OBJECT_FORMAT_EXT = {
+    "json": "json",
+    "jsonl": "jsonl",
+    "ndjson": "jsonl",
+    "csv": "csv",
+    "tsv": "tsv",
+    "parquet": "parquet",
+    "excel": "xlsx",
+    "xlsx": "xlsx",
+}
 OBJECT_STORE_EXPORT_EXTS = (".json", ".jsonl", ".csv", ".tsv", ".parquet", ".xlsx")
 _PART_NAME_RE = re.compile(r"^part-\d{5}\.(json|jsonl|csv|tsv|parquet|xlsx)$", re.IGNORECASE)
 
@@ -74,7 +84,9 @@ def _reject_object_key_traversal(key: str) -> None:
         )
 
 
-def normalize_object_base_key(table_name: str, schema: str = "") -> str:
+def normalize_object_base_key(
+    table_name: str, schema: str = "", file_format: str = ""
+) -> str:
     """Canonical object key from table plus an optional connector prefix.
 
     ``schema`` is the object-store prefix (``QA_R3``). It is applied in front
@@ -92,7 +104,11 @@ def normalize_object_base_key(table_name: str, schema: str = "") -> str:
         raw = prefix
     key = (raw or "exports/dataflow_export.json").strip()
     if not key.lower().endswith(OBJECT_STORE_EXPORT_EXTS):
-        key = f"{key.rstrip('/')}/export.json"
+        # An extensionless key is a folder; the object in it takes the
+        # declared file_format (JSON when none is declared). The writer and
+        # every reader must pass the same format or they resolve different keys.
+        ext = _OBJECT_FORMAT_EXT.get(str(file_format or "").strip().lower(), "json")
+        key = f"{key.rstrip('/')}/export.{ext}"
     _reject_object_key_traversal(key)
     return key
 
@@ -217,6 +233,7 @@ def resolve_object_write_layout(
     file_batch_idx: int = 0,
     total_chunks: int = 1,
     job_id: str = "",
+    file_format: str = "",
 ) -> ObjectWriteLayout:
     """Single source of truth for S3/GCS/ADLS chunked object layout.
 
@@ -230,7 +247,7 @@ def resolve_object_write_layout(
     """
     from services.sync_cursor import is_overwrite_sync
 
-    base = normalize_object_base_key(table_name, schema)
+    base = normalize_object_base_key(table_name, schema, file_format)
     total = max(1, int(total_chunks or 1))
     overwrite = is_overwrite_sync(sync_mode)
 

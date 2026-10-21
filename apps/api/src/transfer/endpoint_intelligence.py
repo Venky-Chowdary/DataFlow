@@ -89,7 +89,7 @@ def _joined_object_key(endpoint: Any, cfg: dict[str, Any], raw: str) -> str:
     if not key:
         return ""
     schema = str(cfg.get("schema") or getattr(endpoint, "schema", "") or "")
-    return normalize_object_base_key(key, schema)
+    return normalize_object_base_key(key, schema, str(cfg.get("file_format") or ""))
 
 
 def _is_absent_object_error(message: str) -> bool:

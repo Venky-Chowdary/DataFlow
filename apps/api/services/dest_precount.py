@@ -3594,7 +3594,9 @@ def _object_store_list_keys(
     else:
         return None
 
-    base = normalize_object_base_key(key, str(cfg.get("schema") or ""))
+    base = normalize_object_base_key(
+        key, str(cfg.get("schema") or ""), str(cfg.get("file_format") or "")
+    )
     parts_prefix = object_parts_prefix(base)
     try:
         listed = list_objects(cfg, bucket, parts_prefix) if parts_prefix else []
@@ -3628,7 +3630,9 @@ def observed_object_export_keys(
     else:
         return None
 
-    base = normalize_object_base_key(table_name, str(cfg.get("schema") or ""))
+    base = normalize_object_base_key(
+        table_name, str(cfg.get("schema") or ""), str(cfg.get("file_format") or "")
+    )
     parts_prefix = object_parts_prefix(base)
 
     def _listed(prefix: str) -> list[str] | None:

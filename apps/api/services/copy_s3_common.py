@@ -105,7 +105,7 @@ def s3_list_keys(cfg: dict[str, Any], key: str) -> list[str]:
     from connectors.s3_reader import list_objects
 
     bucket = s3_bucket(cfg)
-    base = normalize_object_base_key(key)
+    base = normalize_object_base_key(key, file_format=str(cfg.get("file_format") or ""))
     prefix = object_parts_prefix(base)
     try:
         listed = list_objects(cfg, bucket, prefix) if prefix else []

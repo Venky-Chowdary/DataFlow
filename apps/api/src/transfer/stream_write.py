@@ -556,6 +556,14 @@ def _write_batch(
             kwargs["total_chunks"] = total_chunks
             kwargs["job_id"] = job_id or ""
             kwargs["conflict_columns"] = conflict_columns
+            # An extensionless key resolves to export.<file_format>; readers
+            # derive the same key from the endpoint's file_format.
+            dest_extra = getattr(dest, "extra", None)
+            kwargs["file_format"] = str(
+                cfg.get("file_format")
+                or (dest_extra.get("file_format") if isinstance(dest_extra, dict) else "")
+                or ""
+            )
             kwargs.update(source_handoff)
         if dest_type in ("pgvector", "qdrant", "weaviate", "pinecone", "milvus"):
             kwargs["conflict_columns"] = conflict_columns

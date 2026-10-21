@@ -317,7 +317,7 @@ def _clear_object_store(
 
     bucket = str(cfg.get("database") or "").strip()
     prefix = schema or str(cfg.get("schema") or "")
-    base = normalize_object_base_key(table_name, prefix)
+    base = normalize_object_base_key(table_name, prefix, str(cfg.get("file_format") or ""))
     # Presence is the listing, not the Gate-8 read set. That set invents
     # ``[base]`` when the parts prefix is empty so a GET is attempted, and
     # undo used to report that invented key as a file still in the bucket.
