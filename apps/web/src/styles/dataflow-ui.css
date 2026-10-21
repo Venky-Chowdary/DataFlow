@@ -871,6 +871,8 @@ body {
 }
 
 .df2-badge-live { background: var(--df-success-bg); color: #059669; }
+/* A filename is shown exactly as named: never case-transformed. */
+.df2-badge.df2-badge-filename { text-transform: none; }
 .df2-badge-beta { background: var(--df-brand-muted); color: #0f766e; }
 .df2-badge-muted { background: #f1f5f9; color: #64748b; }
 .df2-badge-error { background: var(--df-danger-bg); color: #dc2626; }

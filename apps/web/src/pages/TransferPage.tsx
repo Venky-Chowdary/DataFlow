@@ -6757,7 +6757,7 @@ export function TransferPage({
               {file && parsed ? (
                 <div className="df2-upload-result df2-upload-result-compact">
                   <div className="df2-upload-result-main">
-                    <span className="df2-badge df2-badge-live"><DtIcon name="check" size={14} /> {file.name}</span>
+                    <span className="df2-badge df2-badge-live df2-badge-filename" title={file.name}><DtIcon name="check" size={14} /> {file.name}</span>
                     <span className="df2-upload-result-meta">
                       {formatFileSize(file.size)} · {parsed.row_count.toLocaleString()} rows · {parsed.columns.length} columns
                     </span>
