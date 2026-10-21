@@ -70,6 +70,7 @@ class ContinuityTarget:
     schema: str
     table: str
     key: str
+    path: str = ""
 
 
 @dataclass(frozen=True)
@@ -141,11 +142,47 @@ def resolve_target(endpoint: Any) -> ContinuityTarget | None:
             table,
         ]
     )
-    return ContinuityTarget(db_type, cfg, schema, table, key)
+    return ContinuityTarget(
+        db_type, cfg, schema, table, key, database if db_type == "sqlite" else ""
+    )
 
 
-def fingerprint(target: ContinuityTarget) -> dict[str, Any] | None:
-    """Full-table (rows, digest) read from the destination engine."""
+LEGACY_ALGO = "gate8_python_v0"
+
+
+def preferred_algo(db_type: str) -> str:
+    from services.continuity_digest import ALGO, SUPPORTED
+
+    return ALGO if db_type in SUPPORTED else LEGACY_ALGO
+
+
+def fingerprint(
+    target: ContinuityTarget, algo: str | None = None
+) -> dict[str, Any] | None:
+    """Full-table ``{rows, checksum, algo[, columns]}`` with the given algorithm."""
+    from services import continuity_digest
+
+    algo = algo or preferred_algo(target.db_type)
+    if algo == continuity_digest.ALGO:
+        if target.db_type not in continuity_digest.SUPPORTED:
+            return None
+        return continuity_digest.digest(
+            target.db_type,
+            target.cfg,
+            schema=target.schema,
+            table=target.table,
+            path=target.path,
+        )
+    if algo != LEGACY_ALGO:
+        return None
+    fp = _legacy_fingerprint(target)
+    if fp is not None:
+        fp["algo"] = LEGACY_ALGO
+    return fp
+
+
+def _legacy_fingerprint(target: ContinuityTarget) -> dict[str, Any] | None:
+    """Gate-8 Python fingerprint (baselines written before ``engine_v1``)."""
     from services.reconciliation import EMPTY_POPULATION_DIGEST, verify_target
 
     rows, checksum = verify_target(
@@ -218,6 +255,8 @@ def save_baseline(key: str, fp: dict[str, Any], job_id: str) -> None:
         "key": key,
         "rows": int(fp["rows"]),
         "checksum": str(fp["checksum"]),
+        "algo": str(fp.get("algo") or LEGACY_ALGO),
+        "columns": fp.get("columns"),
         "job_id": job_id,
         "recorded_at": _now(),
     }
@@ -277,6 +316,14 @@ def compare(
         "baseline_recorded_at": baseline.get("recorded_at"),
         "recovery": RECOVERY_HINT,
     }
+    base_algo = str(baseline.get("algo") or LEGACY_ALGO)
+    if current is not None and str(current.get("algo") or LEGACY_ALGO) != base_algo:
+        # Digests from different algorithms are never comparable: fail closed.
+        current = None
+    if current is not None:
+        schema_violation = _schema_drift(table, baseline, current, details)
+        if schema_violation is not None:
+            return schema_violation
     if current is None:
         details.update(found_rows=None, found_checksum=None, mismatch="unreadable")
         return ContinuityViolation(
@@ -318,6 +365,79 @@ def compare(
     )
 
 
+def _schema_drift(
+    table: str,
+    baseline: dict[str, Any],
+    current: dict[str, Any],
+    details: dict[str, Any],
+) -> ContinuityViolation | None:
+    old, new = baseline.get("columns"), current.get("columns")
+    if old is None or new is None:
+        return None
+    old_t = {str(c[0]): str(c[1]) for c in old}
+    new_t = {str(c[0]): str(c[1]) for c in new}
+    if old_t == new_t:
+        return None
+    added = sorted(set(new_t) - set(old_t))
+    dropped = sorted(set(old_t) - set(new_t))
+    retyped = sorted(c for c in set(old_t) & set(new_t) if old_t[c] != new_t[c])
+    parts = []
+    if added:
+        parts.append(f"added {added}")
+    if dropped:
+        parts.append(f"dropped {dropped}")
+    if retyped:
+        parts.append(
+            "retyped " + ", ".join(f"{c} {old_t[c]} → {new_t[c]}" for c in retyped)
+        )
+    details.update(
+        mismatch="schema",
+        reason="destination_schema_changed",
+        columns_added=added,
+        columns_dropped=dropped,
+        columns_retyped=retyped,
+        found_rows=current.get("rows"),
+    )
+    return ContinuityViolation(
+        f"Verification failed for table '{table}': the destination schema "
+        f"changed since the last verified run ({baseline.get('job_id')}): "
+        f"{'; '.join(parts)} (a rename shows as one dropped and one added "
+        "column). This is a schema change, not a data mismatch; the data was "
+        "not compared. Nothing was written; the destination is unchanged. "
+        f"{RECOVERY_HINT}",
+        details,
+    )
+
+
+def _upgrade_algo(target: ContinuityTarget, baseline: dict[str, Any]) -> None:
+    """After a pass under an older algorithm, re-baseline with the preferred one (audited)."""
+    new_algo = preferred_algo(target.db_type)
+    old_algo = str(baseline.get("algo") or LEGACY_ALGO)
+    if new_algo == old_algo:
+        return
+    fp = fingerprint(target, new_algo)
+    if fp is None:
+        return
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="append_continuity.algo_upgraded",
+        resource=f"table:{target.table}",
+        actor="system",
+        level="info",
+        outcome="success",
+        details={
+            "db_type": target.db_type,
+            "table": target.table,
+            "from_algo": old_algo,
+            "to_algo": new_algo,
+            "verified_rows": baseline.get("rows"),
+            "baseline_job_id": baseline.get("job_id"),
+        },
+    )
+    save_baseline(target.key, fp, str(baseline.get("job_id") or "algo-upgrade"))
+
+
 def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViolation | None:
     """Fail an append whose destination drifted since the last verified run."""
     if resume:
@@ -334,11 +454,17 @@ def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViola
     if not baseline:
         return None
     try:
-        current = fingerprint(target)
+        current = fingerprint(target, str(baseline.get("algo") or LEGACY_ALGO))
     except Exception:  # noqa: BLE001
         logger.warning("continuity re-read failed for %s", target.table, exc_info=True)
         current = None
-    return compare(target.table, baseline, current)
+    violation = compare(target.table, baseline, current)
+    if violation is None:
+        try:
+            _upgrade_algo(target, baseline)
+        except Exception:  # noqa: BLE001
+            logger.warning("continuity algo upgrade skipped for %s", target.table, exc_info=True)
+    return violation
 
 
 def record_after_run(request: Any, job_id: str, result: Any) -> None:
