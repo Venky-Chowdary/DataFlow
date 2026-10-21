@@ -6731,14 +6731,16 @@ export function TransferPage({
               >
                 <input
                   type="checkbox"
-                  checked={enableOcr}
+                  checked={enableOcr && ocrStatus?.available !== false}
+                  disabled={ocrStatus?.available === false}
+                  aria-describedby="df2-source-ocr-status"
                   onChange={(e) => setEnableOcr(e.target.checked)}
                 />
                 <span>
                   <strong>OCR scanned PDFs</strong>
-                  <small>
+                  <small id="df2-source-ocr-status">
                     {ocrStatus?.available === false
-                      ? "Not ready on this host — hover for install steps."
+                      ? "Unavailable — the API host needs Tesseract installed."
                       : ocrStatus?.available
                         ? "Tesseract ready — used when a PDF has no text layer."
                         : "Optional · runs Tesseract when a PDF has no text layer."}
