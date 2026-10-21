@@ -1,0 +1,432 @@
+"""Destination continuity between verified runs (X-97).
+
+Gate-8 proves the rows *this* append wrote, so the rows a prior run already
+proved sit outside its scope. A tampered prior population (changed value,
+deleted row, stray row) therefore passed every append check.
+
+After each successful run we store an engine-side fingerprint of the whole
+destination table (row count + canonical digest). Before the next append
+writes anything, the destination is re-read and must match that fingerprint.
+A mismatch fails the run before any write, so the destination is left in
+exactly its pre-run state. Overwrite/upsert runs re-baseline; other modes drop
+the baseline so a later append never compares against a stale state.
+"""
+
+from __future__ import annotations
+
+import logging
+import threading
+import uuid
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+from urllib.parse import urlsplit
+
+from services.atomic_file import write_json_atomic
+from services.platform_config import data_dir
+
+logger = logging.getLogger(__name__)
+
+STORE_FILENAME = "append_continuity.json"
+REBASELINE_ENDPOINT = "POST /api/v1/transfer/continuity/rebaseline"
+RECOVERY_HINT = (
+    "To recover: investigate the change. If the current destination is "
+    f"correct, accept it as the new baseline with {REBASELINE_ENDPOINT} "
+    "(audited; a reason is required), or re-run with full_refresh_overwrite "
+    "to rebuild it from the source."
+)
+
+
+_FILE_ENGINES = frozenset({"sqlite", "duckdb"})
+
+
+def store_path() -> Path:
+    """Baseline file under the shared ``DATAFLOW_DATA_DIR`` resolver."""
+    return data_dir() / STORE_FILENAME
+COLLECTION = "append_continuity"
+
+CONTINUITY_ENGINES = frozenset(
+    {
+        "sqlite",
+        "postgresql",
+        "mysql",
+        "mariadb",
+        "mongodb",
+        "sqlserver",
+        "mssql",
+        "azure_sql",
+        "duckdb",
+    }
+)
+
+_lock = threading.Lock()
+
+
+@dataclass(frozen=True)
+class ContinuityTarget:
+    db_type: str
+    cfg: dict[str, Any]
+    schema: str
+    table: str
+    key: str
+
+
+@dataclass(frozen=True)
+class ContinuityViolation:
+    message: str
+    details: dict[str, Any] = field(default_factory=dict)
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()
+
+
+def _dsn_identity(connection_string: str) -> str:
+    """Host/port/path of a DSN — never its credentials."""
+    raw = (connection_string or "").strip()
+    if not raw:
+        return ""
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname or ""
+        port = parts.port or ""
+        return f"{parts.scheme}://{host}:{port}{parts.path}"
+    except ValueError:
+        return ""
+
+
+def resolve_target(endpoint: Any) -> ContinuityTarget | None:
+    """Destination identity + read config, or ``None`` when not covered."""
+    if endpoint is None:
+        return None
+    table = str(
+        getattr(endpoint, "table", "") or getattr(endpoint, "collection", "") or ""
+    ).strip()
+    if not table:
+        return None
+    from services.dialect_profiles import schema_from_cfg
+    from services.sync_cursor import route_endpoint_identity
+    from src.transfer.adapters import resolve_connector_config
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    cfg = resolve_connector_config(endpoint)
+    db_type = resolve_driver_type(
+        str(cfg.get("type") or getattr(endpoint, "format", "") or "")
+    ).lower()
+    if db_type not in CONTINUITY_ENGINES:
+        return None
+    schema = str(schema_from_cfg(db_type, cfg) or "")
+    database = str(cfg.get("database") or "")
+    if db_type == "sqlite":
+        from connectors.sqlite_common import sqlite_file_path
+
+        database = sqlite_file_path(
+            database,
+            str(cfg.get("connection_string") or ""),
+            str(cfg.get("host") or ""),
+        )
+        if not database or database == ":memory:":
+            return None
+    # File engines are identified by their path alone: the engine fills a
+    # placeholder host during a run, which must not change the key.
+    ident = "" if db_type in _FILE_ENGINES else route_endpoint_identity(endpoint)
+    key = "|".join(
+        [
+            db_type,
+            ident,
+            _dsn_identity(str(cfg.get("connection_string") or "")),
+            database,
+            schema,
+            table,
+        ]
+    )
+    return ContinuityTarget(db_type, cfg, schema, table, key)
+
+
+def fingerprint(target: ContinuityTarget) -> dict[str, Any] | None:
+    """Full-table (rows, digest) read from the destination engine."""
+    from services.reconciliation import EMPTY_POPULATION_DIGEST, verify_target
+
+    rows, checksum = verify_target(
+        target.db_type,
+        target.cfg,
+        schema=target.schema,
+        table_name=target.table,
+        fallback_rows=-1,
+        fallback_checksum="",
+        target_columns=None,
+        limit=0,
+    )
+    if rows is None or int(rows) < 0:
+        from services.dest_precount import destination_row_count
+
+        counted = destination_row_count(
+            target.db_type, target.cfg, schema=target.schema, table_name=target.table
+        )
+        if counted == 0:
+            return {"rows": 0, "checksum": EMPTY_POPULATION_DIGEST}
+        return None
+    if int(rows) == 0:
+        return {"rows": 0, "checksum": EMPTY_POPULATION_DIGEST}
+    if not checksum:
+        return None
+    return {"rows": int(rows), "checksum": str(checksum)}
+
+
+def _collection():  # type: ignore[no-untyped-def]
+    try:
+        from services.mongodb_service import get_mongodb_service
+
+        mongo = get_mongodb_service()
+        if not mongo or type(mongo).__name__ == "MemoryMongoDBService":
+            return None
+        if getattr(mongo, "client", None):
+            db = mongo.get_database()
+            if db is not None:
+                return db[COLLECTION]
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("append continuity store: Mongo unavailable: %s", exc)
+    return None
+
+
+def _load_file() -> dict[str, Any]:
+    import json
+
+    path = store_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_baseline(key: str) -> dict[str, Any] | None:
+    coll = _collection()
+    if coll is not None:
+        doc = coll.find_one({"key": key}, {"_id": 0})
+        return dict(doc) if doc else None
+    with _lock:
+        entry = _load_file().get(key)
+    return dict(entry) if isinstance(entry, dict) else None
+
+
+def save_baseline(key: str, fp: dict[str, Any], job_id: str) -> None:
+    entry = {
+        "key": key,
+        "rows": int(fp["rows"]),
+        "checksum": str(fp["checksum"]),
+        "job_id": job_id,
+        "recorded_at": _now(),
+    }
+    coll = _collection()
+    if coll is not None:
+        coll.replace_one({"key": key}, entry, upsert=True)
+        return
+    with _lock:
+        data = _load_file()
+        data[key] = entry
+        write_json_atomic(store_path(), data, indent=2)
+
+
+def clear_baseline(key: str) -> None:
+    coll = _collection()
+    if coll is not None:
+        coll.delete_one({"key": key})
+        return
+    with _lock:
+        data = _load_file()
+        if data.pop(key, None) is not None:
+            write_json_atomic(store_path(), data, indent=2)
+
+
+def effective_sync_mode(request: Any) -> str | None:
+    """The route's sync mode, or ``None`` for multi-stream requests."""
+    from services.sync_cursor import (
+        resolve_effective_sync_mode,
+        resolve_selected_sync_contracts,
+    )
+
+    contracts = resolve_selected_sync_contracts(
+        getattr(request, "stream_contracts", None)
+    )
+    if len(contracts) > 1:
+        return None
+    contract = contracts[0] if contracts else None
+    return resolve_effective_sync_mode(
+        getattr(request, "sync_mode", "") or "",
+        contract.sync_mode if contract else None,
+    )
+
+
+def compare(
+    table: str, baseline: dict[str, Any], current: dict[str, Any] | None
+) -> ContinuityViolation | None:
+    """Verifier: ``None`` when ``current`` equals the stored ``baseline``."""
+    exp_rows = int(baseline.get("rows") or 0)
+    exp_chk = str(baseline.get("checksum") or "")
+    details: dict[str, Any] = {
+        "reason": "destination_continuity_mismatch",
+        "verification_status": "failed",
+        "table": table,
+        "expected_rows": exp_rows,
+        "expected_checksum": exp_chk,
+        "baseline_job_id": baseline.get("job_id"),
+        "baseline_recorded_at": baseline.get("recorded_at"),
+        "recovery": RECOVERY_HINT,
+    }
+    if current is None:
+        details.update(found_rows=None, found_checksum=None, mismatch="unreadable")
+        return ContinuityViolation(
+            f"Verification failed for table '{table}': the destination could "
+            "not be re-read to prove it is unchanged since the last verified "
+            f"run ({baseline.get('job_id')}). Nothing was written; the "
+            f"destination is unchanged. {RECOVERY_HINT}",
+            details,
+        )
+    got_rows = int(current["rows"])
+    got_chk = str(current["checksum"])
+    if got_rows == exp_rows and got_chk == exp_chk:
+        return None
+    if got_rows != exp_rows:
+        delta = got_rows - exp_rows
+        mismatch = "row_count"
+        what = (
+            f"row count {exp_rows} → {got_rows} "
+            f"({abs(delta)} row{'s' if abs(delta) != 1 else ''} "
+            f"{'added' if delta > 0 else 'removed'})"
+        )
+        if got_chk != exp_chk:
+            what += " and the value digest differs"
+    else:
+        mismatch = "checksum"
+        what = (
+            f"value digest differs at the same row count ({got_rows}) — rows "
+            "were changed, or deleted and replaced"
+        )
+    details.update(found_rows=got_rows, found_checksum=got_chk, mismatch=mismatch)
+    return ContinuityViolation(
+        f"Verification failed for table '{table}': the destination changed "
+        f"since the last verified run ({baseline.get('job_id')}): {what}. "
+        f"Expected digest {exp_chk[:12]}…, found {got_chk[:12]}…. Rows were "
+        "modified, deleted or added outside this pipeline, so an append "
+        "cannot be proven on top of them. Nothing was written; the "
+        f"destination is unchanged. {RECOVERY_HINT}",
+        details,
+    )
+
+
+def check_before_write(request: Any, *, resume: bool = False) -> ContinuityViolation | None:
+    """Fail an append whose destination drifted since the last verified run."""
+    if resume:
+        return None
+    from services.sync_cursor import is_append_sync
+
+    mode = effective_sync_mode(request)
+    if mode is None or not is_append_sync(mode):
+        return None
+    target = resolve_target(getattr(request, "destination", None))
+    if target is None:
+        return None
+    baseline = load_baseline(target.key)
+    if not baseline:
+        return None
+    try:
+        current = fingerprint(target)
+    except Exception:  # noqa: BLE001
+        logger.warning("continuity re-read failed for %s", target.table, exc_info=True)
+        current = None
+    return compare(target.table, baseline, current)
+
+
+def record_after_run(request: Any, job_id: str, result: Any) -> None:
+    """Re-baseline after a successful run; drop the baseline otherwise unknown."""
+    if not getattr(result, "success", False):
+        return
+    from services.sync_cursor import is_append_sync, is_overwrite_sync, requires_upsert
+
+    target = resolve_target(getattr(request, "destination", None))
+    if target is None:
+        return
+    mode = effective_sync_mode(request)
+    if mode is None or not (
+        is_append_sync(mode) or is_overwrite_sync(mode) or requires_upsert(mode)
+    ):
+        clear_baseline(target.key)
+        return
+    fp = fingerprint(target)
+    if fp is None:
+        clear_baseline(target.key)
+        return
+    save_baseline(target.key, fp, job_id)
+
+
+class RebaselineError(ValueError):
+    """The destination cannot be accepted as a new baseline."""
+
+
+def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
+    """Operator accepts the current destination as the verified baseline.
+
+    Explicit and audited: the audit event is written before the baseline
+    moves, so an audit failure leaves the old baseline in force.
+    """
+    reason = (reason or "").strip()
+    if not reason:
+        raise RebaselineError("A reason is required to accept the current destination.")
+    target = resolve_target(endpoint)
+    if target is None:
+        raise RebaselineError(
+            "This destination is not covered by append continuity verification."
+        )
+    current = fingerprint(target)
+    if current is None:
+        raise RebaselineError(
+            f"Table '{target.table}' could not be re-read; the baseline was not changed."
+        )
+    previous = load_baseline(target.key)
+    rebaseline_id = f"rebaseline-{uuid.uuid4().hex[:12]}"
+    prev_view = (
+        {
+            "rows": previous.get("rows"),
+            "checksum": previous.get("checksum"),
+            "job_id": previous.get("job_id"),
+        }
+        if previous
+        else None
+    )
+    from services.audit_log import append_audit_event
+
+    append_audit_event(
+        action="append_continuity.rebaselined",
+        resource=f"table:{target.table}",
+        actor=actor or "anonymous",
+        level="warn",
+        outcome="success",
+        details={
+            "rebaseline_id": rebaseline_id,
+            "db_type": target.db_type,
+            "table": target.table,
+            "reason": reason,
+            "previous": prev_view,
+            "current": dict(current),
+        },
+    )
+    save_baseline(target.key, current, rebaseline_id)
+    logger.warning(
+        "append continuity re-baselined %s.%s by %s (%s): %s -> %s rows",
+        target.db_type,
+        target.table,
+        actor,
+        rebaseline_id,
+        prev_view and prev_view.get("rows"),
+        current.get("rows"),
+    )
+    return {
+        "rebaseline_id": rebaseline_id,
+        "table": target.table,
+        "previous": prev_view,
+        "current": dict(current),
+    }

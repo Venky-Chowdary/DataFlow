@@ -1418,6 +1418,11 @@ def _sdk_source_descriptor_for_format(source_format: str) -> Any | None:
     return descriptor
 
 
+
+def _job_store() -> Any:
+    """Module-level job store lookup (tests patch ``get_mongodb_service``)."""
+    return get_mongodb_service()
+
 class UniversalTransferEngine:
     """
     Orchestrates universal data movement:
@@ -1514,6 +1519,28 @@ class UniversalTransferEngine:
             from services.transfer_file_staging import hydrate_file_source
 
             hydrate_file_source(request)
+        from services.append_continuity import check_before_write, record_after_run
+
+        violation = check_before_write(request, resume=resume)
+        if violation is not None:
+            try:
+                _job_store().update_job_status(
+                    job_id,
+                    "failed",
+                    phase="verify",
+                    error=violation.message,
+                    message=violation.message,
+                    error_details=violation.details,
+                )
+            except Exception:
+                logger.exception("Could not record continuity failure on %s", job_id)
+            return TransferResult(
+                success=False,
+                job_id=job_id,
+                error=violation.message,
+                error_details=dict(violation.details),
+                operation=request.operation,
+            )
         # Create-new invention needs the source engine to keep Unicode polarity
         # (PostgreSQL VARCHAR → SQL Server NVARCHAR, not code-page VARCHAR).
         started = time.monotonic()
@@ -1526,6 +1553,10 @@ class UniversalTransferEngine:
         except BaseException as exc:
             lifecycle_events.emit_run_exception(logger, fields, started, exc)
             raise
+        try:
+            record_after_run(request, job_id, result)
+        except Exception:
+            logger.warning("Continuity baseline not recorded for %s", job_id, exc_info=True)
         try:
             written = int(
                 getattr(result, "rows_written", 0)

@@ -2115,3 +2115,47 @@ async def download_export(filename: str):
     if not file_path.exists():
         raise HTTPException(status_code=404, detail="Export not found")
     return FileResponse(file_path, filename=filename)
+
+
+class ContinuityRebaselineBody(BaseModel):
+    destination: EndpointDTO
+    reason: str = Field("", max_length=2000)
+
+
+@router.post("/continuity/rebaseline")
+async def rebaseline_append_continuity(
+    body: ContinuityRebaselineBody,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Accept the current destination as the X-97 append baseline (audited).
+
+    Only after an operator has investigated a continuity mismatch. Never
+    automatic: requires a reason, writes an audit event before the baseline
+    moves, and does not touch destination data.
+    """
+    from services.append_continuity import RebaselineError, rebaseline
+
+    from ..transfer.adapters import resolve_endpoint
+    from ..transfer.models import EndpointConfig
+
+    _resolve_write_workspace(request, workspace_id)
+    reason = (body.reason or "").strip()
+    if not reason:
+        raise HTTPException(
+            status_code=422,
+            detail="A reason is required to accept the current destination.",
+        )
+    dst = resolve_endpoint(
+        EndpointConfig.from_dict(
+            body.destination.kind, body.destination.model_dump(by_alias=True)
+        )
+    )
+    try:
+        return await asyncio.to_thread(
+            rebaseline, dst, actor=_actor_email(request), reason=reason
+        )
+    except RebaselineError as exc:
+        raise HTTPException(
+            status_code=409, detail=redact_log_text(str(exc))
+        ) from exc
