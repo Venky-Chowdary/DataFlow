@@ -2270,7 +2270,7 @@ class DataPilotTools:
             # dropped destination table, schema drift, REST pagination gaps
             # or transport faults send operators to a screen that cannot
             # help them. Filter by failure class (C23 / D81 / D82).
-            if _offers_bad_data_fix(job, quarantine, stored_rejected):
+            if self._offers_bad_data_fix(job, quarantine, stored_rejected):
                 remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
             remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
             remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
