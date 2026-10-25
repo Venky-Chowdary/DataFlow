@@ -109,8 +109,8 @@ def request_signup(
             # response (enumeration) and must not confuse the user.
             logger.warning("existing-account notice send failed")
         record_security_event(
-            "signup.requested", outcome="existing",
-            details={"ip": ip},
+            "signup.requested", outcome="succeeded",
+            details={"kind": "existing_account_notice", "ip": ip},
         )
         return {
             "challenge_id": _decoy_challenge(),
@@ -143,10 +143,10 @@ def request_signup(
         ) from exc
 
     record_security_event(
-        "signup.requested", outcome="accepted",
+        "signup.requested", outcome="succeeded",
         details={"ip": ip},
     )
-    record_security_event("otp.sent", outcome="ok", session_id=challenge["id"],
+    record_security_event("otp.sent", outcome="succeeded", session_id=challenge["id"],
                           details={"purpose": "signup"})
     return {
         "challenge_id": challenge["id"],
@@ -204,8 +204,8 @@ def verify_email(
     challenge = signup_store.get_challenge(challenge_id)
     if result != "ok":
         record_security_event(
-            "otp.verify_failed", outcome=result,
-            session_id=challenge_id,
+            "otp.verify_failed", outcome="failed",
+            session_id=challenge_id, reason_code=result,
         )
         if result in ("consumed", "not_found"):
             raise ApiError(410, "code_expired",
@@ -239,11 +239,11 @@ def verify_email(
         absolute_seconds=absolute_seconds,
     )
     record_security_event(
-        "signup.verified", outcome="ok",
+        "signup.verified", outcome="succeeded",
         actor=user["email"], session_id=session["jti"],
         details={"org_id": org["id"], "workspace_id": workspace.id},
     )
-    record_security_event("session.created", outcome="ok",
+    record_security_event("session.created", outcome="succeeded",
                           actor=user["email"], session_id=session["jti"])
     return {
         "user": user,
@@ -316,7 +316,7 @@ def resend_code(*, challenge_id: str) -> dict[str, Any]:
                        "we couldn't send your code right now — try again",
                        retry_after_sec=60) from exc
 
-    record_security_event("otp.resent", outcome="ok", session_id=challenge_id)
+    record_security_event("otp.resent", outcome="succeeded", session_id=challenge_id)
     return {
         "challenge_id": challenge_id,
         "resend_after_sec": RESEND_COOLDOWN_SEC,
@@ -334,3 +334,34 @@ def _challenge_recipient(challenge: dict[str, Any]) -> tuple[str, dict[str, Any]
     if user:
         return user["email"], {"name": user.get("name") or "there"}
     return subject, {"name": "there"}
+
+
+def challenge_for_pending_login(email: str, request: Any | None = None) -> str | None:
+    """Login attempted on a pending (unverified) signup: mail a fresh code on
+    the active challenge (or issue one) and return the challenge id for the
+    403 envelope. Returns None when no pending signup exists — the caller
+    falls back to the neutral 401. Send failures still return the id: the
+    challenge stays resendable via /auth/resend."""
+    canonical = canonical_email(email)
+    row = signup_store.get_pending_signup(canonical=canonical)
+    if row is None or signup_store._expired(row):
+        return None
+    challenge = signup_store.active_challenge(row["id"], "signup")
+    if challenge is None:
+        challenge, code = otp_service.issue(row["id"], "signup")
+    else:
+        challenge, code = otp_service.reissue(challenge["id"])
+    try:
+        _send(
+            "signup_code",
+            row["email"],
+            {"name": row.get("name") or "there",
+             "code": code,
+             "expires_minutes": int(otp_service.OTP_TTL.total_seconds() // 60)},
+            idempotency_key=f"otp:{challenge['id']}:{challenge['sent_count']}",
+        )
+    except EmailSendError:
+        logger.warning("login-code resend failed (challenge=%s)", challenge["id"])
+    record_security_event("otp.resent", outcome="succeeded",
+                          session_id=challenge["id"], request=request)
+    return challenge["id"]

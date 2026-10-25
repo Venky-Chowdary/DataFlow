@@ -17,6 +17,7 @@ from services.brand_env import getenv_brand
 from services.platform_config import is_production, web_url
 from pydantic import BaseModel, Field
 
+from services.signup_config import signup_enabled
 from services.user_store import get_user as get_stored_user
 from services.user_store import normalize_email, set_password
 from services.sso_authorization import require_sso_authorization
@@ -920,7 +921,7 @@ async def login(body: LoginRequest, request: Request):
 
     actor = _login_audit_actor(body.email)
     stored_account = get_stored_user(actor)
-    if stored_account and stored_account.get("status") == "disabled":
+    if stored_account and stored_account.get("status") in ("disabled", "banned"):
         record_login_failure(ip=ip, email=body.email)
         _record_login_audit(
             request,
@@ -944,6 +945,20 @@ async def login(body: LoginRequest, request: Request):
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not user:
+        # Flag-on: a pending (unverified) signup gets a fresh code and a 403 —
+        # never a session. Banned/disabled/unknown all keep the neutral 401.
+        if signup_enabled() and not stored_account:
+            from services.signup_service import challenge_for_pending_login
+
+            challenge_id = challenge_for_pending_login(body.email, request=request)
+            if challenge_id:
+                from services.api_errors import ApiError
+
+                raise ApiError(
+                    403, "email_unverified",
+                    "verify your email first — we sent a new code",
+                    extra={"challenge_id": challenge_id},
+                )
         record_login_failure(ip=ip, email=body.email)
         _record_login_audit(
             request,
