@@ -197,6 +197,32 @@ async function check(vpName, viewport, theme, screen) {
     if (rr < 4.5) { log(`FAIL ${tag}: ${cls} "${label}" pixel contrast ${rr.toFixed(2)}:1`); failures++; }
     else log(`ok   ${tag}: ${cls} "${label}" ${rr.toFixed(2)}:1`);
   }
+  // 4) mobile: the first field + primary CTA must land inside the initial
+  // viewport — the compact brand header is not allowed to push the form
+  // below the fold (regression: brand kept height:100% → ~180px gap).
+  if (vpName === "mobile") {
+    const fold = await page.evaluate(() => {
+      const vh = window.innerHeight;
+      const input = document.querySelector(
+        ".lp-login-auth input, .lp-login-auth [contenteditable]");
+      const cta = document.querySelector(
+        '.lp-login-auth button[type="submit"], ' +
+        '.lp-login-auth .lp-btn--brand, ' +
+        '.lp-login-auth button.df2-btn--primary, ' +
+        '.lp-login-auth button[class*="primary"]');
+      const top = (el) => el ? el.getBoundingClientRect() : null;
+      return { vh, input: top(input), cta: top(cta) };
+    });
+    for (const [what, r] of [["first input", fold.input], ["primary CTA", fold.cta]]) {
+      if (!r || !r.height) { log(`warn ${tag}: ${what} not found — fold check skipped`); continue; }
+      if (r.top >= fold.vh || r.bottom > fold.vh + 1) {
+        log(`FAIL ${tag}: ${what} below the fold (bottom ${r.bottom.toFixed(0)} > ${fold.vh})`);
+        failures++;
+      } else {
+        log(`ok   ${tag}: ${what} above the fold (bottom ${r.bottom.toFixed(0)} <= ${fold.vh})`);
+      }
+    }
+  }
   await ctx.close();
 }
 

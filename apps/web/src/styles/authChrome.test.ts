@@ -115,3 +115,24 @@ describe("accent rule under the brand H1 (review-10 item 8)", () => {
     assert.doesNotMatch(LANDING, /\.lp-login-brand-rail/);
   });
 });
+
+describe("mobile auth header (review-10 item 9)", () => {
+  it("collapses the brand to content height — no 100% fill", () => {
+    // The narrow-viewport block must undo the base height:100% on both the
+    // brand and its inner wrapper, or the compact header still stretches
+    // to the viewport and pushes the form below the fold.
+    // The compact-header ruleset is the one that redefines the brand as
+    // `min-height: auto` — slice from it, then read the same ruleset.
+    const marker = ".lp-login-brand {\n    min-height: auto;";
+    const i = EDITORIAL.indexOf(marker);
+    assert.ok(i !== -1, "no mobile compact-header ruleset");
+    const media = EDITORIAL.slice(i);
+    const brand = ruleBody(media, ".lp-login-brand {");
+    assert.ok(brand, "no mobile .lp-login-brand rule");
+    assert.match(brand, /height:\s*auto/);
+    assert.match(brand, /flex:\s*0 0 auto/);
+    const inner = ruleBody(media, ".lp-login-brand-inner {");
+    assert.ok(inner, "no mobile .lp-login-brand-inner rule");
+    assert.match(inner, /height:\s*auto/);
+  });
+});
