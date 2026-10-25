@@ -54,16 +54,60 @@ def test_feed_disabled_by_default():
     assert disposable_list.feed_state()["synced_at"] is None
 
 
+_SHA = "e4f0910a1a05b6dff2ff9299471a9cddeadbddb8"
+_PINNED_URL = ("https://raw.githubusercontent.com/disposable-email-domains/"
+               f"disposable-email-domains/{_SHA}/"
+               "disposable_email_blocklist.conf")
+
+
+@pytest.mark.parametrize("url", [
+    # branch names
+    "https://raw.githubusercontent.com/o/r/master/list.conf",
+    "https://raw.githubusercontent.com/o/r/main/list.conf",
+    "https://raw.githubusercontent.com/o/r/refs/heads/main/list.conf",
+    # tags
+    "https://raw.githubusercontent.com/o/r/v1.2.3/list.conf",
+    "https://raw.githubusercontent.com/o/r/refs/tags/v1/list.conf",
+    # short SHAs
+    f"https://raw.githubusercontent.com/o/r/{_SHA[:7]}/list.conf",
+    f"https://raw.githubusercontent.com/o/r/{_SHA[:39]}/list.conf",
+    # non-https
+    f"http://raw.githubusercontent.com/o/r/{_SHA}/list.conf",
+    f"ftp://raw.githubusercontent.com/o/r/{_SHA}/list.conf",
+    # other hosts
+    f"https://example.com/o/r/{_SHA}/list.conf",
+    f"https://github.com/o/r/blob/{_SHA}/list.conf",
+    f"https://raw.githubusercontent.com.evil.com/o/r/{_SHA}/list.conf",
+    # malformed
+    "not-a-url",
+    f"https://raw.githubusercontent.com/{_SHA}",
+    f"https://raw.githubusercontent.com/o/r/{_SHA}",
+])
+def test_feed_url_pin_validation_rejects(url):
+    with pytest.raises(ValueError):
+        disposable_list._validate_feed_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    _PINNED_URL,
+    # uppercase hex SHA is still a full commit pin
+    ("https://raw.githubusercontent.com/o/r/"
+     f"{_SHA.upper()}/list.conf"),
+])
+def test_feed_url_pin_validation_accepts(url):
+    disposable_list._validate_feed_url(url)
+
+
 def test_feed_refuses_branch_urls_and_missing_checksum(monkeypatch):
     monkeypatch.setenv("DATAWRAP_DISPOSABLE_FEED_ENABLED", "1")
     state = disposable_list.sync_feed(
         fetch_fn=lambda u: b"x\n" * 20,
-        url="https://example.com/master/list.conf",
+        url="https://raw.githubusercontent.com/o/r/master/list.conf",
         expected_sha256="abc")
-    assert "pinned to a commit" in state["error"]
+    assert "commit" in state["error"]
     state = disposable_list.sync_feed(
         fetch_fn=lambda u: b"x\n" * 20,
-        url="https://example.com/@abc123/list.conf")
+        url=_PINNED_URL)
     assert "checksum pin required" in state["error"]
 
 
@@ -72,7 +116,7 @@ def test_feed_wrong_checksum_keeps_old_set(monkeypatch):
     payload = b"fresh-burner.example\n" + b"".join(
         f"x{i}.example\n".encode() for i in range(12))
     digest = hashlib.sha256(payload).hexdigest()
-    url = "https://example.com/@e4f0910/list.conf"
+    url = _PINNED_URL
     state = disposable_list.sync_feed(
         fetch_fn=lambda u: payload, url=url, expected_sha256=digest)
     assert state["error"] == ""

@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import re
 import threading
+import urllib.parse
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -111,6 +113,38 @@ def feed_enabled() -> bool:
         "1", "true", "yes")
 
 
+# Hosts permitted for the optional live feed. Any new source must be
+# allowlisted here deliberately.
+_FEED_ALLOWED_HOSTS = frozenset({"raw.githubusercontent.com"})
+_COMMIT_SHA_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _validate_feed_url(url: str) -> None:
+    """The feed URL must pin an exact commit on an allowlisted HTTPS host.
+
+    Refuses branches, tags, short SHAs, non-HTTPS schemes, and hosts outside
+    the allowlist — substring heuristics can't tell a pinned ref from a
+    moving one, so the URL is parsed instead.
+    """
+    try:
+        parsed = urllib.parse.urlparse(url)
+    except Exception as exc:
+        raise ValueError(f"unparseable feed URL: {exc}") from exc
+    if parsed.scheme != "https":
+        raise ValueError("feed URL must use https")
+    host = (parsed.hostname or "").lower()
+    if host not in _FEED_ALLOWED_HOSTS:
+        raise ValueError(f"feed host {host!r} not allowlisted")
+    segments = [s for s in parsed.path.split("/") if s]
+    # raw.githubusercontent.com/<owner>/<repo>/<ref>/<path...>
+    if len(segments) < 4:
+        raise ValueError("feed URL path must be /<owner>/<repo>/<sha>/<file>")
+    ref = urllib.parse.unquote(segments[2])
+    if not _COMMIT_SHA_RE.fullmatch(ref):
+        raise ValueError(
+            "feed URL must pin a full 40-hex commit SHA, not a branch/tag/short ref")
+
+
 def sync_feed(*, fetch_fn=None, url: str | None = None,
               expected_sha256: str | None = None) -> dict[str, Any]:
     """Optional live refresh — flag-gated, pinned-URL, pinned-checksum.
@@ -128,8 +162,7 @@ def sync_feed(*, fetch_fn=None, url: str | None = None,
             raise RuntimeError("feed refresh disabled")
         if not url:
             raise ValueError("no feed URL configured")
-        if "/master" in url or "/main" in url or "@" not in url and "refs" not in url:
-            raise ValueError("feed URL must be pinned to a commit, not a branch")
+        _validate_feed_url(url)
         if not expected_sha256:
             raise ValueError("feed checksum pin required")
         if fetch_fn is None:
