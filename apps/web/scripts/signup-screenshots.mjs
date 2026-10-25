@@ -87,13 +87,16 @@ from services.platform_config import data_dir
 from services.metadata_backend import json_doc_transaction
 from services import otp_service
 p = data_dir() / "otp_challenges.json"
+patched = []
 with json_doc_transaction(p, {"otp_challenges": []}) as data:
-    rows = [r for r in data["otp_challenges"]
-            if r.get("purpose") == "signup" and not r.get("consumed_at")]
-    rows.sort(key=lambda r: r.get("created_at", ""))
-    row = rows[-1]
-    row["code_hmac"] = otp_service.code_hmac(row["id"], "signup", "${KNOWN_CODE}")
-    print("patched", row["id"])
+    # Patch every live signup challenge — concurrent runs and resends leave
+    # several unconsumed rows, and the newest-by-created_at is not always the
+    # challenge the UI is holding.
+    for row in data["otp_challenges"]:
+        if row.get("purpose") == "signup" and not row.get("consumed_at"):
+            row["code_hmac"] = otp_service.code_hmac(row["id"], "signup", "${KNOWN_CODE}")
+            patched.append(row["id"])
+    print("patched", len(patched), patched[-1] if patched else "")
 `);
 }
 
@@ -124,7 +127,10 @@ async function run(vpName, viewport, theme) {
 
   // Signup — empty state.
   await page.getByText("Create an account").first().click();
-  await page.waitForTimeout(700);
+  // The form token mints at page mount; submits younger than the 3s
+  // anti-bot floor are blocked with a fake challenge and the whole
+  // verify/login cascade downstream breaks. Wait past the floor.
+  await page.waitForTimeout(4200);
   await shot(page, `${tag}-02-signup-empty`);
 
   // Signup — error state.
@@ -154,12 +160,16 @@ async function run(vpName, viewport, theme) {
   await page.waitForTimeout(1100);
   await shot(page, `${tag}-06-verify-error`);
 
-  // Real code → verify success hand-off.
+  // Real code → verify success hand-off. Gate on the verify form
+  // unmounting (success navigates into the app), NOT df2.session — the
+  // verify path writes token:"" which readSession() deliberately
+  // treats as no-session, so the key can vanish on a good path.
   try {
     plantOtpCode();
     await page.locator("#auth-code").fill(KNOWN_CODE);
     await page.locator('button[type="submit"]').last().click();
-    await page.waitForTimeout(2500);
+    await page.waitForSelector("#auth-code", { state: "detached", timeout: 20000 });
+    await page.waitForTimeout(1500);
     await shot(page, `${tag}-07-verify-success`);
   } catch (e) {
     console.log("verify-success skipped:", e.message.split("\n")[0]);
@@ -174,7 +184,7 @@ async function run(vpName, viewport, theme) {
     await page.locator("#signup-name").fill("Pat Pending");
     await page.locator('input[type="email"]').first().fill(email2);
     await page.locator('input[type="password"]').first().fill("correct-horse-staple-9");
-    await page.waitForTimeout(3200); // form-token min fill age
+    await page.waitForTimeout(4200); // form-token min fill age (3s floor + margin)
     await page.locator('button[type="submit"]').last().click();
     await page.waitForSelector("#auth-code", { timeout: 25000 });
     await gotoLogin(page, theme);
@@ -193,7 +203,7 @@ async function run(vpName, viewport, theme) {
   await page.waitForTimeout(700);
   await shot(page, `${tag}-09-forgot-empty`);
   await page.locator('input[type="email"]').first().fill(email);
-  await page.waitForTimeout(3200); // form-token min fill age
+  await page.waitForTimeout(4200); // form-token min fill age (3s floor + margin)
   await page.locator('button[type="submit"]').last().click();
   await page.waitForTimeout(1400);
   await shot(page, `${tag}-10-forgot-check-email`);
@@ -287,9 +297,17 @@ async function run(vpName, viewport, theme) {
     await page.locator('input[type="email"]').first().fill(email);
     await page.locator('input[type="password"]').first().fill("correct-horse-staple-9");
     await page.locator('button[type="submit"]').last().click();
-    await page.waitForTimeout(2500);
+    // Wait for the app shell to mount, not a fixed sleep — a slow API
+    // under load otherwise leaves the page on the login screen and the
+    // Settings nav click below burns a 30s actionability timeout.
+    await page.waitForSelector(
+      'button[title="Settings"], .df2-mobile-menu',
+      { state: "attached", timeout: 20000 }
+    );
+    await page.waitForTimeout(800);
   } catch (e) {
-    console.log(`  ${tag}: re-login failed —`, e.message.split("\n")[0]);
+    const alert = await page.locator('[role="alert"], .lp-alert').first().textContent().catch(() => "");
+    console.log(`  ${tag}: re-login failed —`, e.message.split("\n")[0], `| hash=${page.url().split("#")[1] || "/"} alert=${(alert || "").trim()}`);
   }
   await page.route("**/api/v1/auth/admin/signup-metrics", (route) =>
     route.fulfill({
