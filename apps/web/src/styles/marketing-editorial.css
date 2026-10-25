@@ -3270,6 +3270,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: clamp(14px, 1.4vw, 16px);
+  /* The brand panel is always dark — the default --df-text-primary (dark
+     navy in light theme) renders dark-on-dark. On-dark variant. */
+  color: #f0fdfa;
 }
 
 .lp-login-brand-logo .dt-logo,

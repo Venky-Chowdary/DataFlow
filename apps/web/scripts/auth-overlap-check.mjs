@@ -136,7 +136,7 @@ async function check(vpName, viewport, theme, screen) {
   // 2) AA contrast on Back control, link-variant buttons, and CTAs —
   // measured on rendered pixels (element screenshot → the two dominant
   // color clusters are the label and its backdrop, gradients included).
-  const handles = await page.$$(".lp-login-back, .lp-btn--link, .lp-btn--brand, .lp-login-forgot");
+  const handles = await page.$$(".lp-login-back, .lp-btn--link, .lp-btn--brand, .lp-login-forgot, .lp-login-brand-logo .dw-wordmark-text");
   for (const h of handles) {
     const label = (await h.textContent())?.trim().slice(0, 24) || "?";
     const cls = (await h.getAttribute("class") || "").split(" ").slice(0, 2).join(".");
