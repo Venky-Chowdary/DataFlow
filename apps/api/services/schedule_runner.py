@@ -1434,6 +1434,7 @@ def _dispatch_transfer(
     *,
     allow_paused: bool = False,
     resync_mode: str = "",
+    triggered_by: str = "",
 ) -> str | None:
     """Build and submit the transfer for a schedule attempt (used for retries too).
 
@@ -1728,6 +1729,7 @@ def _run_schedule(
                     attempt=sched.retry_attempt if sched.retry_at else 0,
                     allow_paused=manual,
                     resync_mode=resync_mode,
+                    triggered_by=triggered_by,
                 )
         except ScheduleStartError:
             raise
