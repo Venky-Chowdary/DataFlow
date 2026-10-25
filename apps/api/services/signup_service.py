@@ -164,6 +164,7 @@ def request_signup(
         # Validation is fine to surface — it reveals nothing about the account.
         raise ApiError(400, "invalid_password",
                        f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
+    _refuse_pwned_password(password)
     role = role_assessment(normalized)
     if role == "blocked":
         record_security_event("signup.blocked", outcome="failed",
@@ -475,6 +476,17 @@ def _forgot_response(challenge_id: str) -> dict[str, Any]:
     }
 
 
+def _refuse_pwned_password(password: str) -> None:
+    """P4-3: flag-gated HIBP check. ``-1`` (unknown / outage) is fail-open
+    by design — a HIBP outage must never block a real signup or reset."""
+    from services import hibp
+
+    if hibp.pwned_count(password) > 0:
+        raise ApiError(400, "pwned_password",
+                       "that password appears in a public breach — "
+                       "choose a different one")
+
+
 def request_password_reset(*, email: str, ip: str = "") -> dict[str, Any]:
     """P4-1 forgot-password: uniform 202 with a challenge handle — a fake
     id when the address has no usable account (enumeration parity)."""
@@ -510,6 +522,7 @@ def confirm_password_reset(*, challenge_id: str, code: str,
     if not (MIN_PASSWORD_LEN <= len(new_password or "") <= MAX_PASSWORD_LEN):
         raise ApiError(400, "invalid_password",
                        f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
+    _refuse_pwned_password(new_password)
     result = otp_service.verify(challenge_id, code)
     if result != "ok":
         record_security_event("otp.verify_failed", outcome="failed",
