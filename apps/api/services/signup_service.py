@@ -34,7 +34,7 @@ from services import form_token as form_token_mod
 from services.brand_env import getenv_brand
 from services.email_policy import role_assessment
 from services import risk_scorer
-from services import email_verifier, email_quota
+from services import email_verifier, email_quota, mail_outbox
 from services.email_quota import consume_send_slot
 from services.email_sender import (
     EmailQuotaExceeded,
@@ -179,6 +179,46 @@ def _check_signup_velocity(*, ip: str, device_id: str, canonical: str) -> int:
         if not allowed:
             return retry_after or window
     return 0
+
+
+def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
+    """Send one persisted outbox row and mark it sent/failed. Every failure
+    leaves a password.reset.send_failed security event — a provider timeout
+    or transport error means the mail never went out, and silent loss is
+    forbidden. The reply never reveals it (enumeration parity); a fresh
+    link can be requested right away (each new issue supersedes the token).
+    """
+    try:
+        consume_send_slot()
+        get_email_sender().send(OutboundEmail(
+            to=row["to"], subject=row["subject"], text=row["text"],
+            html=row.get("html") or "",
+            idempotency_key=row["idempotency_key"]))
+        mail_outbox.mark(row["id"], "sent")
+        record_security_event("password.reset.sent", outcome="succeeded",
+                              actor=row["to"], session_id=row["id"],
+                              details={"ip": actor_ip})
+    except Exception as exc:
+        mail_outbox.mark(row["id"], "failed")
+        if isinstance(exc, EmailSendError):
+            logger.warning("password-reset link send failed")
+        else:
+            logger.error("password-reset link delivery failed", exc_info=True)
+        try:
+            record_security_event("password.reset.send_failed",
+                                  outcome="failed", actor=row["to"],
+                                  session_id=row["id"],
+                                  details={"ip": actor_ip})
+        except Exception:
+            logger.error("password-reset send_failed audit event failed",
+                         exc_info=True)
+
+
+def recover_mail_outbox() -> int:
+    """Startup hook: re-queue persisted 'queued' rows so a restart cannot
+    silently drop mail. Returns how many rows were re-queued."""
+    return mail_outbox.drain_queued(
+        lambda row: _deliver_later(lambda: _deliver_outbox_row(row)))
 
 
 def _send(template: str, to: str, context: dict[str, Any], *, idempotency_key: str) -> None:
@@ -617,35 +657,19 @@ def request_password_reset(*, email: str, ip: str = "",
     # reach a server, CDN or proxy access log or a Referer header.
     reset_url = f"{base}/reset-password#token={token}"
 
-    def _deliver() -> None:
-        try:
-            _send("reset_link", account_email,
-                  {"name": user.get("name") or "there",
-                   "reset_url": reset_url,
-                   "expires_minutes": int(password_reset_store.TOKEN_TTL.total_seconds() // 60)},
-                  idempotency_key=f"reset-link:{stored['id']}")
-            record_security_event("password.reset.sent", outcome="succeeded",
-                                  actor=account_email, session_id=stored["id"],
-                                  details={"ip": ip})
-        except Exception as exc:
-            # Every delivery failure must leave a security event — a
-            # provider timeout or transport error means the mail never
-            # went out, and silent loss is forbidden. The reply never
-            # reveals it (enumeration parity); a fresh link can be
-            # requested right away (each new issue supersedes this token).
-            if isinstance(exc, EmailSendError):
-                logger.warning("password-reset link send failed")
-            else:
-                logger.error("password-reset link delivery failed", exc_info=True)
-            try:
-                record_security_event("password.reset.send_failed",
-                                      outcome="failed", actor=account_email,
-                                      session_id=stored["id"],
-                                      details={"ip": ip})
-            except Exception:
-                logger.error("password-reset send_failed audit event failed", exc_info=True)
-
-    _deliver_later(_deliver)
+    # Persist the mail BEFORE the lane sees it: a deploy/restart can no
+    # longer silently drop a queued reset link — drain_queued() re-submits
+    # it on the next boot and the idempotency key dedupes at the provider.
+    mail = render_email(
+        "reset_link",
+        {"name": user.get("name") or "there",
+         "reset_url": reset_url,
+         "expires_minutes": int(password_reset_store.TOKEN_TTL.total_seconds() // 60)})
+    row = mail_outbox.enqueue(
+        to=account_email, subject=mail.subject, text=mail.text,
+        html=mail.html, idempotency_key=f"reset-link:{stored['id']}",
+        purpose="password.reset")
+    _deliver_later(lambda: _deliver_outbox_row(row, actor_ip=ip))
     record_security_event("password.reset.requested", outcome="succeeded",
                           actor=account_email, session_id=stored["id"],
                           details={"ip": ip, "requested_as": normalized})
@@ -946,4 +970,7 @@ def signup_metrics() -> dict[str, Any]:
         "pending_signups": signup_store.pending_count(),
         "active_challenges": signup_store.active_challenge_count(),
         "email_quota": email_quota.quota_status(),
+        # queued > 0 for more than a moment means mail is stuck — the
+        # persisted outbox makes 'queued but never sent' visible here.
+        "mail_outbox": mail_outbox.counts(),
     }

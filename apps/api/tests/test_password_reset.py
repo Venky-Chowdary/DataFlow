@@ -389,18 +389,19 @@ def test_delivery_exception_is_audited_and_rerequest_works(monkeypatch):
     monkeypatch.setattr(signup_service, "record_security_event",
                         lambda event, **kw: events.append((event, kw)))
     calls = {"n": 0}
-    real_send = signup_service._send
+    real_sender = signup_service.get_email_sender
 
-    def flaky_send(kind, *a, **kw):
-        if kind == "reset_link":
+    class _FlakySender:
+        def send(self, mail):
             calls["n"] += 1
             if calls["n"] == 1:
                 raise RuntimeError("provider exploded")
-        return real_send(kind, *a, **kw)
+            return real_sender().send(mail)
 
     c = _client()
     _verified_user(c)
-    monkeypatch.setattr(signup_service, "_send", flaky_send)
+    monkeypatch.setattr(signup_service, "get_email_sender",
+                        lambda: _FlakySender())
     r1 = _forgot(c)
     assert r1.status_code == 202  # the reply never reveals the failure
     assert any(e == "password.reset.send_failed" for e, _ in events), events
@@ -525,19 +526,19 @@ def test_provider_timeout_is_bounded_and_send_failed_audited(monkeypatch):
 
     sends: list[str] = []
 
-    def stalled_then_ok(kind, to, ctx, *, idempotency_key):
-        if kind != "reset_link":
-            return None
-        sends.append(to)
-        if len(sends) == 1:
-            # Simulates urllib's timeout firing on a hung provider socket.
-            time.sleep(0.2)
-            raise EmailProviderError("resend timeout", retryable=True)
+    class _StallOnce:
+        def send(self, mail):
+            sends.append(mail.to)
+            if len(sends) == 1:
+                # Simulates urllib's timeout firing on a hung provider socket.
+                time.sleep(0.2)
+                raise EmailProviderError("resend timeout", retryable=True)
 
     c = _client()
     _verified_user(c, "one@example.com")
     _verified_user(c, "two@example.com")
-    monkeypatch.setattr(signup_service, "_send", stalled_then_ok)
+    monkeypatch.setattr(signup_service, "get_email_sender",
+                        lambda: _StallOnce())
     r1 = _forgot(c, "one@example.com")
     r2 = _forgot(c, "two@example.com")
     assert r1.status_code == 202 and r2.status_code == 202
@@ -548,3 +549,59 @@ def test_provider_timeout_is_bounded_and_send_failed_audited(monkeypatch):
     kinds = [e for e, _ in events]
     assert kinds.count("password.reset.send_failed") == 1, events
     assert kinds.count("password.reset.sent") == 1, events
+
+
+def test_outbox_survives_restart_and_drains(monkeypatch):
+    """Mail lost on restart is no longer silent: the row is persisted BEFORE
+    the lane sees it, so a crash leaves status 'queued' and the startup drain
+    re-sends it (idempotency key dedupes at the provider)."""
+    from services import mail_outbox
+
+    c = _client()
+    _verified_user(c)
+
+    # Simulate a process dying between enqueue and send: hold the lane.
+    real_deliver = signup_service._deliver_later
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
+    r = _forgot(c)
+    assert r.status_code == 202
+    rows = mail_outbox.queued()
+    assert len(rows) == 1 and rows[0]["purpose"] == "password.reset", rows
+    assert rows[0]["status"] == "queued"
+
+    # "Restart": the drain re-submits queued rows through the lane; the
+    # _isolate fixture's inline runner completes the send synchronously.
+    monkeypatch.setattr(signup_service, "_deliver_later", real_deliver)
+    before = len(ConsoleEmailSender.OUTBOX)
+    assert signup_service.recover_mail_outbox() == 1
+    assert len(ConsoleEmailSender.OUTBOX) == before + 1
+    cts = mail_outbox.counts()
+    assert cts["queued"] == 0 and cts["sent"] == 1, cts
+    # 'queued but never sent' is visible in admin metrics.
+    assert signup_service.signup_metrics()["mail_outbox"] == cts
+
+
+def test_outbox_row_marked_failed_on_send_error(monkeypatch):
+    """A send failure marks the persisted row failed (not queued) and
+    audits send_failed — the admin surface can tell the difference."""
+    from services import mail_outbox
+
+    events = []
+    monkeypatch.setattr(signup_service, "record_security_event",
+                        lambda event, **kw: events.append((event, kw)))
+
+    class _AlwaysBroke:
+        def send(self, mail):
+            raise EmailProviderError("down", retryable=True)
+
+    from services.email_sender import EmailProviderError
+
+    c = _client()
+    _verified_user(c)
+    monkeypatch.setattr(signup_service, "get_email_sender",
+                        lambda: _AlwaysBroke())
+    r = _forgot(c)
+    assert r.status_code == 202
+    cts = mail_outbox.counts()
+    assert cts["queued"] == 0 and cts["failed"] == 1, cts
+    assert any(e == "password.reset.send_failed" for e, _ in events)
