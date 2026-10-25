@@ -348,9 +348,9 @@ body {
 }
 
 .df2-command-search:focus-within {
-  background: var(--df-surface, #fff);
-  border-color: var(--df-brand, #0d9488);
-  outline: 2px solid var(--df-focus-ring, #0d9488);
+  background: var(--df-surface);
+  border-color: var(--df-brand);
+  outline: 2px solid var(--df-focus-ring);
   outline-offset: 2px;
 }
 
@@ -568,14 +568,14 @@ body {
   font-family: var(--df-font-sans);
   font-size: var(--df-fs-title, 15px);
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-card-sub {
   margin: 4px 0 0;
   font-family: var(--df-font-sans);
   font-size: var(--df-fs-sm, 12.5px);
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 .df2-card-body { padding: 20px; }
@@ -784,7 +784,7 @@ body {
   overflow: auto;
   border-radius: var(--df-radius-panel, 12px);
   border: 1px solid var(--df-table-border, var(--df-border));
-  background: var(--df-surface, #fff);
+  background: var(--df-surface);
   scrollbar-gutter: stable;
   -webkit-overflow-scrolling: touch;
 }
@@ -1011,9 +1011,9 @@ body {
   align-items: flex-start;
   gap: 10px;
   padding: 16px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md, 8px);
-  background: var(--df-surface, #fff);
+  background: var(--df-surface);
   cursor: pointer;
   text-align: left;
   transition: border-color 0.15s, box-shadow 0.15s;
@@ -3229,7 +3229,7 @@ body {
   min-height: 44px;
   /* --df-text-primary so the dark theme remaps the ink (was pinned #0f172a
      = 1.06:1 on the dark surface). */
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   cursor: pointer;
 }
 
@@ -3244,9 +3244,9 @@ body {
   flex: none;
   display: inline-grid;
   place-content: center;
-  border: 1.5px solid var(--df-border-strong, #d0d6de);
+  border: 1.5px solid var(--df-border-strong);
   border-radius: 4px;
-  background: var(--df-surface, #ffffff);
+  background: var(--df-surface);
   cursor: pointer;
   margin: 0;
 }
@@ -3262,8 +3262,8 @@ body {
 }
 
 .df2-policy-toggle input:checked {
-  background: var(--df-brand, #0d9488);
-  border-color: var(--df-brand, #0d9488);
+  background: var(--df-brand);
+  border-color: var(--df-brand);
 }
 
 .df2-policy-toggle input:checked::before {
@@ -3272,8 +3272,8 @@ body {
 
 .df2-policy-toggle input:disabled {
   border-style: dashed;
-  border-color: var(--df-text-tertiary, #64748b);
-  background: var(--df-surface-sunken, #f8fafc);
+  border-color: var(--df-text-tertiary);
+  background: var(--df-surface-sunken);
   cursor: not-allowed;
 }
 
@@ -3283,7 +3283,7 @@ body {
   height: 2px;
   clip-path: none;
   border-radius: 1px;
-  background: var(--df-text-tertiary, #64748b);
+  background: var(--df-text-tertiary);
   rotate: -45deg;
 }
 
@@ -3293,7 +3293,7 @@ body {
 
 .df2-policy-toggle:has(input:disabled) strong,
 .df2-policy-toggle:has(input:disabled) small {
-  color: var(--df-text-tertiary, #64748b);
+  color: var(--df-text-tertiary);
 }
 
 .df2-policy-toggle strong,
@@ -3308,7 +3308,7 @@ body {
 .df2-policy-toggle small {
   margin-top: 2px;
   font-size: 12px;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 .df2-stream-contract {
@@ -4893,7 +4893,7 @@ body {
   box-shadow: none !important;
   filter: none !important;
   background: var(--df-surface) !important;
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
 }
 
 .df2-app .df2-policy-option.active {
@@ -6039,7 +6039,7 @@ html,
 }
 
 .df2-table tbody tr:hover .df2-cell-title {
-  color: var(--df-brand-hover, #0f766e);
+  color: var(--df-brand-hover);
 }
 
 .df2-table .df2-cell-mono,

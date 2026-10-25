@@ -9,7 +9,7 @@
   justify-content: space-between;
   gap: 16px;
   padding: 20px 22px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: var(--df-radius-card, 12px);
   background: linear-gradient(135deg, var(--df-brand-muted) 0%, var(--df-surface) 55%);
 }
@@ -36,7 +36,7 @@
   padding: 10px 14px;
   border-radius: 10px;
   background: var(--df-surface);
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
 }
 
 .df2-mcp-hero-status strong {
@@ -51,7 +51,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 14px 16px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: var(--df-radius-card, 12px);
   background: var(--df-surface);
 }
@@ -64,7 +64,7 @@
 }
 
 .df2-mcp-panel {
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: var(--df-radius-card, 12px);
   background: var(--df-surface);
   overflow: visible;
@@ -101,7 +101,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 12px 14px;
-  border-bottom: 1px solid var(--df-line, #e2e8f0);
+  border-bottom: 1px solid var(--df-line);
 }
 
 .df2-mcp-panel-head h2 {
@@ -127,7 +127,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: 8px;
   background: var(--df-surface);
 }
@@ -171,7 +171,7 @@
 
 .df2-mcp-tile {
   padding: 10px 12px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: 8px;
   background: var(--df-surface);
   min-height: 0;
@@ -255,5 +255,5 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 11px;
-  color: var(--df-text-muted, #6b7280);
+  color: var(--df-text-muted);
 }

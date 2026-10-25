@@ -5,18 +5,18 @@
 
 /* ─── Sidebar: readable status on light background ─── */
 .df2-sidebar-env {
-  border: 1px solid var(--df-border, #e2e8f0) !important;
-  background: var(--df-surface-muted, #f8fafc) !important;
-  color: var(--df-text-secondary, #475569) !important;
+  border: 1px solid var(--df-border) !important;
+  background: var(--df-surface-muted) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-sidebar-env strong {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   font-weight: 600;
 }
 
 .df2-sidebar-env small {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-sidebar-env.offline {
@@ -29,7 +29,7 @@
 }
 
 .df2-brand-name {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   -webkit-text-fill-color: unset !important;
   background: none !important;
 }
@@ -182,17 +182,17 @@
   justify-content: center;
   width: 36px;
   height: 36px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 9px;
   background: var(--df-surface);
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
   cursor: pointer;
   flex-shrink: 0;
 }
 
 .df2-sidebar-expand-topbar:hover {
-  background: var(--df-surface-muted, #f1f5f9);
-  color: var(--df-text-primary, #0f172a);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
   border-color: #99f6e4;
 }
 
@@ -229,10 +229,10 @@
   justify-content: center;
   width: 32px;
   height: 32px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 8px;
   background: var(--df-surface);
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
   cursor: pointer;
   flex-shrink: 0;
 }
@@ -244,15 +244,15 @@
 }
 
 .df2-sidebar-collapse-btn:hover {
-  background: var(--df-surface-muted, #f1f5f9);
-  color: var(--df-text-primary, #0f172a);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
 }
 
 /* Active when left nav is expanded — same language as IDE layout toggles. */
 .df2-app:not(.df2-sidebar-nav-compact) .df2-sidebar-collapse-btn[aria-pressed="true"] {
-  color: var(--df-brand, #0d9488);
-  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 35%, #e2e8f0);
-  background: var(--df-brand-muted, #f0fdfa);
+  color: var(--df-brand);
+  border-color: color-mix(in srgb, var(--df-brand) 35%, #e2e8f0);
+  background: var(--df-brand-muted);
 }
 
 /* ─── User footer (Cursor-style) ─── */
@@ -280,8 +280,8 @@
 }
 
 .df2-user-row:hover {
-  background: var(--df-surface-muted, #f1f5f9);
-  border-color: var(--df-border, #e2e8f0);
+  background: var(--df-surface-muted);
+  border-color: var(--df-border);
 }
 
 .df2-user-avatar {
@@ -307,7 +307,7 @@
   display: block;
   font-size: 13px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -316,7 +316,7 @@
 .df2-user-meta small {
   display: block;
   font-size: 11px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   min-width: 0;
   max-width: 100%;
   overflow: hidden;
@@ -336,18 +336,18 @@
   justify-content: center;
   gap: 6px;
   padding: 7px 8px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 8px;
   background: var(--df-surface);
   font-size: 11px;
   font-weight: 600;
-  color: var(--df-text-secondary, #475569);
+  color: var(--df-text-secondary);
   cursor: pointer;
 }
 
 .df2-user-actions button:hover {
-  background: var(--df-surface-muted, #f8fafc);
-  color: var(--df-text-primary, #0f172a);
+  background: var(--df-surface-muted);
+  color: var(--df-text-primary);
 }
 
 /* ─── Overview: at-a-glance density ─── */
@@ -369,7 +369,7 @@
   flex-direction: column;
   gap: 6px;
   padding: 16px 18px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 14px;
   background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
   box-shadow: none;
@@ -391,7 +391,7 @@
   gap: 8px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
@@ -400,14 +400,14 @@
   font-size: 26px;
   font-weight: 700;
   line-height: 1.1;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   font-variant-numeric: tabular-nums;
 }
 
 .df2-glance-tile p {
   margin: 0;
   font-size: 12px;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 .df2-overview-footer-link {
@@ -440,7 +440,7 @@
   align-items: center;
   gap: 8px;
   padding: 8px 10px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 10px;
   background: var(--df-surface);
   min-width: 0;
@@ -449,7 +449,7 @@
 .df2-connector-chip-name {
   font-size: 12px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -459,7 +459,7 @@
 .df2-transfer-hero {
   margin-bottom: 20px;
   padding: 20px 22px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 16px;
   background: linear-gradient(135deg, rgba(13, 148, 136, 0.06) 0%, rgba(99, 102, 241, 0.05) 100%);
 }
@@ -468,13 +468,13 @@
   margin: 0 0 4px;
   font-size: 18px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-transfer-hero p {
   margin: 0 0 16px;
   font-size: 13px;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 /* Default wizard only — studio/compact own their own active glow */
@@ -508,9 +508,9 @@
   border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .df2-job-phase-pill.done {
@@ -592,7 +592,7 @@
   flex-direction: column;
   gap: 4px;
   padding: 12px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 14px;
   background: var(--df-surface);
 }
@@ -607,7 +607,7 @@
   background: transparent;
   font-size: 13px;
   font-weight: 600;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
   cursor: pointer;
   text-align: left;
 }
@@ -646,7 +646,7 @@ select.df2-select {
   background-repeat: no-repeat;
   background-position: right 12px center;
   padding-right: 36px !important;
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   background-color: var(--df-surface) !important;
 }
 
@@ -655,13 +655,13 @@ select.df2-select {
 .df2-card-sub,
 .df2-empty-desc,
 .df2-label-hint {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-cell-title,
 .df2-card-title,
 .df2-page-title {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 /* ─── Topology animation ─── */
@@ -727,7 +727,7 @@ select.df2-select {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .dt-flow-col-label:last-child {
@@ -755,7 +755,7 @@ select.df2-select {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
 }
 
 .dt-connection-hub-path-flow {
@@ -777,7 +777,7 @@ select.df2-select {
 }
 
 .dt-connection-hub-empty {
-  fill: var(--df-text-muted, #64748b);
+  fill: var(--df-text-muted);
   font-size: 13px;
 }
 
@@ -798,7 +798,7 @@ select.df2-select {
 .df2-pilot-muted {
   margin: 0;
   font-size: 11px;
-  color: var(--df-text-muted, #94a3b8) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-pilot-offline {
@@ -824,7 +824,7 @@ select.df2-select {
   gap: 8px;
   min-height: 96px;
   padding: 14px 16px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
 }
@@ -844,20 +844,20 @@ select.df2-select {
 
 /* ─── Sidebar nav text (dark block override) ─── */
 .df2-nav-group-label {
-  color: var(--df-text-muted, #94a3b8) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-nav-item {
-  color: var(--df-text-secondary, #475569) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-nav-item .dt-nav-icon,
 .df2-nav-item .dt-nav-icon svg {
-  color: var(--df-text-secondary, #64748b) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-nav-item:hover {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-nav-item.active {
@@ -870,9 +870,9 @@ select.df2-select {
 }
 
 .df2-system-pill {
-  color: var(--df-text-secondary, #475569) !important;
+  color: var(--df-text-secondary) !important;
   background: var(--df-surface) !important;
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
 }
 
 .df2-system-pill.degraded {
@@ -882,7 +882,7 @@ select.df2-select {
 }
 
 .df2-command-search input {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   background: transparent !important;
   border: none !important;
   box-shadow: none !important;
@@ -897,8 +897,8 @@ select.df2-select {
 }
 
 .df2-command-search kbd {
-  color: var(--df-text-muted, #94a3b8) !important;
-  background: var(--df-surface-muted, #f1f5f9) !important;
+  color: var(--df-text-muted) !important;
+  background: var(--df-surface-muted) !important;
 }
 
 /* ─── Transfer Studio tiles & cards ─── */
@@ -920,7 +920,7 @@ select.df2-select {
   align-items: flex-start;
   gap: 8px;
   padding: 18px 20px;
-  border: 2px solid var(--df-border, #e2e8f0);
+  border: 2px solid var(--df-border);
   border-radius: 14px;
   background: var(--df-surface);
   cursor: pointer;
@@ -942,7 +942,7 @@ select.df2-select {
 }
 
 .df2-source-kind-tile.active {
-  border-color: var(--df-brand, #0f766e);
+  border-color: var(--df-brand);
   background: var(--df-brand-muted);
   box-shadow: 0 0 0 3px var(--df-brand-ring);
 }
@@ -955,18 +955,18 @@ select.df2-select {
   height: 44px;
   border-radius: 12px;
   background: var(--df-brand-muted);
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
 }
 
 .df2-source-kind-tile strong {
   font-size: 14px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-source-kind-desc {
   font-size: 12px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   line-height: 1.4;
 }
 
@@ -982,13 +982,13 @@ select.df2-select {
   align-items: center;
   gap: 8px;
   padding: 14px 10px;
-  border: 2px solid var(--df-border, #e2e8f0);
+  border: 2px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
   cursor: pointer;
   font-size: 12px;
   font-weight: 600;
-  color: var(--df-text-secondary, #475569);
+  color: var(--df-text-secondary);
   transition: border-color 0.18s ease, transform 0.18s ease, box-shadow 0.18s ease;
 }
 
@@ -999,9 +999,9 @@ select.df2-select {
 }
 
 .df2-dest-type-tile.active {
-  border-color: var(--df-brand, #0f766e);
+  border-color: var(--df-brand);
   background: var(--df-brand-muted);
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
   box-shadow: 0 0 0 3px var(--df-brand-ring);
 }
 
@@ -1022,7 +1022,7 @@ select.df2-select {
   min-width: var(--df-control-height, 36px);
   min-height: var(--df-control-height, 36px);
   flex: 0 0 var(--df-control-height, 36px);
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: var(--df-radius-md, 8px);
   background: var(--df-surface);
 }
@@ -1031,7 +1031,7 @@ select.df2-select {
   width: 18px;
   height: 18px;
   border-radius: 4px;
-  background: var(--df-surface-muted, #e2e8f0);
+  background: var(--df-surface-muted);
 }
 
 .df2-connector-select {
@@ -1055,7 +1055,7 @@ select.df2-select {
 }
 
 .df2-transfer-panel.df2-card-elevated {
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
 }
 
@@ -1065,18 +1065,18 @@ select.df2-select {
 }
 
 .df2-upload-studio.drag-over {
-  border-color: var(--df-brand, #0f766e);
+  border-color: var(--df-brand);
   box-shadow: 0 0 0 4px rgba(15, 118, 110, 0.12);
 }
 
 /* ─── Loaders ─── */
 .dt-spinner {
   border-color: rgba(15, 118, 110, 0.15) !important;
-  border-top-color: var(--df-brand, #0f766e) !important;
+  border-top-color: var(--df-brand) !important;
 }
 
 .df2-loader-bars i {
-  background: var(--df-brand, #0f766e) !important;
+  background: var(--df-brand) !important;
 }
 
 .df-app-boot-overlay {
@@ -1084,13 +1084,13 @@ select.df2-select {
 }
 
 .df-app-boot-panel {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 /* ─── Inputs universal readability ─── */
 .df2-input,
 .df2-textarea {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   background: var(--df-surface) !important;
 }
 
@@ -1105,7 +1105,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-input::placeholder {
-  color: var(--df-text-muted, #94a3b8) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-label-hint {
@@ -1145,31 +1145,31 @@ textarea.df2-pilot-composer textarea {
   gap: 20px;
   flex-wrap: wrap;
   padding: 20px 22px;
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: 14px;
   background: linear-gradient(135deg, rgba(13, 148, 136, 0.08) 0%, rgba(99, 102, 241, 0.06) 100%) !important;
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06) !important;
 }
 
 .df2-model-ops h2 {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   font-size: 22px;
 }
 
 .df2-model-ops p {
-  color: var(--df-text-secondary, #64748b) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-model-route i {
-  background: var(--df-border, #cbd5e1) !important;
+  background: var(--df-border) !important;
 }
 
 .df2-model-route strong {
   padding: 5px 10px;
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: 999px;
-  color: var(--df-brand, #0f766e) !important;
+  color: var(--df-brand) !important;
   background: var(--df-surface) !important;
   font-size: 11px;
   font-weight: 600;
@@ -1187,7 +1187,7 @@ textarea.df2-pilot-composer textarea {
   gap: 10px;
   min-height: 200px;
   padding: 16px 18px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface) !important;
   transition: transform 0.18s ease, box-shadow 0.18s ease;
@@ -1203,15 +1203,15 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-model-card h3 {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-model-card-head p {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-model-best {
-  color: var(--df-text-secondary, #475569) !important;
+  color: var(--df-text-secondary) !important;
   font-size: 13px;
   line-height: 1.45;
   flex: 1;
@@ -1223,7 +1223,7 @@ textarea.df2-pilot-composer textarea {
   justify-content: space-between;
   gap: 16px;
   padding: 14px 16px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
 }
@@ -1250,7 +1250,7 @@ textarea.df2-pilot-composer textarea {
   max-width: 220px;
   font-size: 13px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   line-height: 1.3;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1269,7 +1269,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-workspace-switcher-select:focus {
-  outline: 2px solid var(--df-brand-ring, #5eead4);
+  outline: 2px solid var(--df-brand-ring);
   outline-offset: 2px;
   border-radius: 4px;
 }
@@ -1293,7 +1293,7 @@ textarea.df2-pilot-composer textarea {
   min-height: 0;
   min-width: 0;
   padding: 16px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
   cursor: pointer;
@@ -1307,7 +1307,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-connector-card.selected {
-  border-color: var(--df-brand, #0f766e);
+  border-color: var(--df-brand);
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
   background: linear-gradient(180deg, var(--df-brand-muted) 0%, var(--df-surface) 100%);
 }
@@ -1331,7 +1331,7 @@ textarea.df2-pilot-composer textarea {
   width: 48px;
   height: 48px;
   border-radius: 12px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
 }
 
@@ -1346,7 +1346,7 @@ textarea.df2-pilot-composer textarea {
   margin: 0;
   font-size: 15px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1356,7 +1356,7 @@ textarea.df2-pilot-composer textarea {
 .df2-connector-card-endpoint {
   margin: 0;
   font-size: 12px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .df2-connector-card-actions {
@@ -1364,7 +1364,7 @@ textarea.df2-pilot-composer textarea {
   gap: 6px;
   margin-top: auto;
   padding-top: 8px;
-  border-top: 1px solid var(--df-border, #e2e8f0);
+  border-top: 1px solid var(--df-border);
 }
 
 .df2-inline-spinner {
@@ -1373,7 +1373,7 @@ textarea.df2-pilot-composer textarea {
   height: 12px;
   margin-right: 4px;
   border: 2px solid rgba(15, 118, 110, 0.2);
-  border-top-color: var(--df-brand, #0f766e);
+  border-top-color: var(--df-brand);
   border-radius: 50%;
   animation: df2-spin 0.7s linear infinite;
   vertical-align: -2px;
@@ -1445,7 +1445,7 @@ textarea.df2-pilot-composer textarea {
 /* Neutralize dark graphite sidebar block (loads after dataflow-ui.css) */
 .df2-app .df2-sidebar {
   background: linear-gradient(180deg, #ffffff 0%, #f8fafb 100%) !important;
-  border-right: 1px solid var(--df-border, #e2e8f0) !important;
+  border-right: 1px solid var(--df-border) !important;
   box-shadow: none !important;
   width: var(--df-sidebar-width, 260px) !important;
 }
@@ -1464,12 +1464,12 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-app .df2-sidebar-brand {
-  border-bottom: 1px solid var(--df-border, #e2e8f0) !important;
+  border-bottom: 1px solid var(--df-border) !important;
   height: auto !important;
 }
 
 .df2-app .df2-sidebar-foot {
-  border-top: 1px solid var(--df-border, #e2e8f0);
+  border-top: 1px solid var(--df-border);
 }
 
 /* ─── Workspace search dropdown ─── */
@@ -1491,7 +1491,7 @@ textarea.df2-pilot-composer textarea {
   right: 0;
   z-index: var(--df-z-overlay);
   padding: 6px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
   box-shadow: 0 16px 48px rgba(15, 23, 42, 0.14);
@@ -1502,7 +1502,7 @@ textarea.df2-pilot-composer textarea {
 .df2-search-empty {
   padding: 14px 12px;
   font-size: 13px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .df2-search-result {
@@ -1543,7 +1543,7 @@ textarea.df2-pilot-composer textarea {
   display: block;
   font-size: 13px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1552,7 +1552,7 @@ textarea.df2-pilot-composer textarea {
 .df2-search-result-body small {
   display: block;
   font-size: 11px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1563,7 +1563,7 @@ textarea.df2-pilot-composer textarea {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
 }
 
 /* ─── Responsive topbar ─── */
@@ -1644,7 +1644,7 @@ textarea.df2-pilot-composer textarea {
   align-items: flex-start;
   gap: 4px;
   padding: 14px 16px;
-  border: 2px solid var(--df-border, #e2e8f0);
+  border: 2px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
   cursor: pointer;
@@ -1668,16 +1668,16 @@ textarea.df2-pilot-composer textarea {
 .df2-cadence-tile strong {
   font-size: 14px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-cadence-tile span:last-child {
   font-size: 12px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .df2-cadence-tile .dt-nav-icon {
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
 }
 
 .df2-pipeline-grid {
@@ -1710,7 +1710,7 @@ textarea.df2-pilot-composer textarea {
   gap: 14px;
   min-height: 220px;
   padding: 18px 20px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 14px;
   background: var(--df-surface);
   box-shadow: none;
@@ -1744,13 +1744,13 @@ textarea.df2-pilot-composer textarea {
   margin: 0;
   font-size: 15px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-pipeline-card-sub {
   margin: 4px 0 0;
   font-size: 12px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .df2-pipeline-card-route {
@@ -1760,7 +1760,7 @@ textarea.df2-pilot-composer textarea {
   align-items: center;
   padding: 12px;
   border-radius: 12px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
 }
 
@@ -1776,7 +1776,7 @@ textarea.df2-pilot-composer textarea {
 .df2-pipeline-card-node span {
   font-size: 12px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1785,7 +1785,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-pipeline-card-node small {
   font-size: 11px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   font-family: ui-monospace, monospace;
 }
 
@@ -1807,7 +1807,7 @@ textarea.df2-pilot-composer textarea {
   gap: 8px 14px;
   font-size: 11px;
   font-weight: 600;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .df2-pipeline-card-meta span {
@@ -1821,7 +1821,7 @@ textarea.df2-pilot-composer textarea {
   gap: 8px;
   margin-top: auto;
   padding-top: 12px;
-  border-top: 1px solid var(--df-border, #e2e8f0);
+  border-top: 1px solid var(--df-border);
 }
 
 /* ─── Job Theater: light command center ─── */
@@ -1831,7 +1831,7 @@ textarea.df2-pilot-composer textarea {
   gap: 14px;
   margin-bottom: 20px;
   padding: 20px 22px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 16px;
   background: linear-gradient(135deg, rgba(13, 148, 136, 0.05) 0%, rgba(99, 102, 241, 0.04) 100%);
 }
@@ -1846,14 +1846,14 @@ textarea.df2-pilot-composer textarea {
   margin: 6px 0 8px;
   font-size: 20px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-jobs-command-main p {
   margin: 0;
   font-size: 13px;
   line-height: 1.55;
-  color: var(--df-text-secondary, #64748b) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-jobs-now {
@@ -1862,7 +1862,7 @@ textarea.df2-pilot-composer textarea {
   gap: 8px;
   padding: 16px 18px;
   min-height: 128px;
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: 14px !important;
   background: var(--df-surface) !important;
   color: var(--df-text-primary) !important;
@@ -1874,19 +1874,19 @@ textarea.df2-pilot-composer textarea {
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-jobs-now strong {
   font-size: 15px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   line-height: 1.35;
 }
 
 .df2-jobs-now small {
   font-size: 12px;
-  color: var(--df-text-secondary, #64748b) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-jobs-now-bar {
@@ -1931,7 +1931,7 @@ textarea.df2-pilot-composer textarea {
 
 /* ─── Live theater: consistent light shell ─── */
 .df2-theater {
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: 14px !important;
   background: var(--df-surface) !important;
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
@@ -1943,31 +1943,31 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-theater-title {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-theater-sub {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-theater-log {
   background: var(--df-surface-muted) !important;
-  border: 1px solid var(--df-border, #e2e8f0);
-  color: var(--df-text-secondary, #475569) !important;
+  border: 1px solid var(--df-border);
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-theater-log-line {
-  color: var(--df-text-secondary, #64748b) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-theater-loading p {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-job-log {
   background: var(--df-surface-muted) !important;
-  border: 1px solid var(--df-border, #e2e8f0);
-  color: var(--df-text-secondary, #475569) !important;
+  border: 1px solid var(--df-border);
+  color: var(--df-text-secondary) !important;
 }
 
 /* ─── Transfer Studio: preflight + execute panels ─── */
@@ -1979,13 +1979,13 @@ textarea.df2-pilot-composer textarea {
   gap: 12px;
   margin-top: 16px;
   padding-top: 16px;
-  border-top: 1px solid var(--df-border, #e2e8f0);
+  border-top: 1px solid var(--df-border);
 }
 
 .df2-result-banner {
   padding: 20px 22px;
   border-radius: 14px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   animation: df2-panel-in 0.35s cubic-bezier(0.22, 1, 0.36, 1);
 }
 
@@ -2024,7 +2024,7 @@ textarea.df2-pilot-composer textarea {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--df-brand, #0f766e) !important;
+  color: var(--df-brand) !important;
 }
 
 .df2-stats {
@@ -2078,7 +2078,7 @@ textarea.df2-pilot-composer textarea {
 
 /* ─── Preflight timeline polish ─── */
 .df2-preflight {
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: 14px !important;
   background: var(--df-surface) !important;
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
@@ -2096,18 +2096,18 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-preflight-title {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-preflight-sub {
   margin: 0;
   font-size: 13px;
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-preflight-score-val span,
 .df2-preflight-score-val small {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-preflight-gate {
@@ -2148,7 +2148,7 @@ textarea.df2-pilot-composer textarea {
   min-width: 20px;
   margin: 0 10px;
   border-radius: 2px;
-  background: var(--df-border, #e2e8f0);
+  background: var(--df-border);
   transition: background 0.25s ease;
 }
 
@@ -2166,11 +2166,11 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-wizard-label {
-  color: var(--df-text-secondary, #64748b) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-wizard-step.active .df2-wizard-label {
-  color: var(--df-brand, #0f766e) !important;
+  color: var(--df-brand) !important;
   font-weight: 600;
 }
 
@@ -2205,7 +2205,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-chunk-more {
   font-size: var(--df-fs-xs);
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
   align-self: center;
   margin-left: 4px;
 }
@@ -2216,7 +2216,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-theater-rows {
-  color: var(--df-text-secondary, #64748b) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 /* ─── Permission refusal strip — read-only by design, not a failure ─── */
@@ -2231,7 +2231,7 @@ textarea.df2-pilot-composer textarea {
   background: var(--df-warning-bg);
   font-size: 13px;
   line-height: 1.45;
-  color: var(--df-text-secondary, #475569);
+  color: var(--df-text-secondary);
 }
 
 .df2-permission-notice svg {
@@ -2245,7 +2245,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-permission-notice strong {
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 /* ─── Connectors callout + workbench ─── */
@@ -2255,24 +2255,24 @@ textarea.df2-pilot-composer textarea {
   border: 1px solid var(--df-info-border);
   background: var(--df-info-bg);
   font-size: 13px;
-  color: var(--df-text-secondary, #475569);
+  color: var(--df-text-secondary);
 }
 
 .df2-callout-info strong {
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-connection-workbench-head h2 {
   margin: 6px 0 8px;
   font-size: 18px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-connection-workbench-head p {
   margin: 0;
   font-size: 13px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   max-width: 56ch;
 }
 
@@ -2306,7 +2306,7 @@ textarea.df2-pilot-composer textarea {
   min-width: 200px;
   max-width: 360px;
   padding: 8px 12px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 10px;
   background: var(--df-surface);
 }
@@ -2317,23 +2317,23 @@ textarea.df2-pilot-composer textarea {
   border: none;
   outline: none;
   font-size: 13px;
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   background: transparent !important;
 }
 
 .df2-table-search input::placeholder {
-  color: var(--df-text-muted, #94a3b8) !important;
+  color: var(--df-text-muted) !important;
 }
 
 /* ─── Login page readability ─── */
 .df2-login-card {
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   box-shadow: 0 16px 48px rgba(15, 23, 42, 0.08);
 }
 
 .df2-login-card .df2-label,
 .df2-login-card .df2-input {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 /* ─── Transfer Studio intelligence rail ─── */
@@ -2514,7 +2514,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-rail-panel {
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
   border-radius: 14px !important;
   background: var(--df-surface) !important;
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
@@ -2523,15 +2523,15 @@ textarea.df2-pilot-composer textarea {
 
 .df2-rail-head h3,
 .df2-rail-kicker {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-rail-head p {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-rail-stage {
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 10px;
   background: var(--df-surface-muted);
   transition: border-color 0.18s ease, background 0.18s ease;
@@ -2554,19 +2554,19 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-rail-stage span {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-rail-stage strong {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-rail-split span {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-rail-split strong {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-rail-split.is-warn strong {
@@ -2579,17 +2579,17 @@ textarea.df2-pilot-composer textarea {
 
 .df2-algorithm-list div {
   padding: 10px 12px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 10px;
   background: var(--df-surface-muted);
 }
 
 .df2-algorithm-list strong {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-algorithm-list span {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-rail-alert {
@@ -2618,12 +2618,12 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-pilot-aside {
-  border-right: 1px solid var(--df-border, #e2e8f0) !important;
+  border-right: 1px solid var(--df-border) !important;
   background: var(--df-surface-muted) !important;
 }
 
 .df2-pilot-session {
-  color: var(--df-text-secondary, #475569) !important;
+  color: var(--df-text-secondary) !important;
   border: 1px solid transparent;
   border-radius: 10px;
   transition: background 0.15s ease, border-color 0.15s ease;
@@ -2637,19 +2637,19 @@ textarea.df2-pilot-composer textarea {
 
 .df2-pilot-console-strip,
 .df2-model-mini-strip {
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
 }
 
 .df2-pilot-console-strip span,
 .df2-model-mini-strip span {
-  color: var(--df-text-muted, #64748b) !important;
+  color: var(--df-text-muted) !important;
 }
 
 .df2-pilot-console-strip strong,
 .df2-model-mini-strip strong {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-pilot-hero {
@@ -2658,16 +2658,16 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-pilot-title {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
 }
 
 .df2-pilot-subtitle {
-  color: var(--df-text-secondary, #64748b) !important;
+  color: var(--df-text-secondary) !important;
 }
 
 .df2-pilot-composer,
 .df2-pilot-composer-sticky {
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 14px;
   background: var(--df-surface);
   box-shadow: 0 4px 20px rgba(15, 23, 42, 0.06);
@@ -2675,18 +2675,18 @@ textarea.df2-pilot-composer textarea {
 
 .df2-pilot-composer textarea,
 .df2-pilot-composer-sticky textarea {
-  color: var(--df-text-primary, #0f172a) !important;
+  color: var(--df-text-primary) !important;
   background: transparent !important;
 }
 
 .df2-pilot-msg.assistant {
   background: var(--df-surface-muted) !important;
   color: var(--df-text-primary) !important;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
 }
 
 .df2-pilot-tool-log {
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 8px;
   background: var(--df-surface);
 }
@@ -2737,7 +2737,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-transfer-main .df2-card,
 .df2-transfer-panel.df2-card {
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 14px;
   background: var(--df-surface);
   box-shadow: 0 2px 12px rgba(15, 23, 42, 0.04);
@@ -2764,7 +2764,7 @@ textarea.df2-pilot-composer textarea {
 .df2-next-action-card,
 .df2-readiness-card,
 .df2-transfer-control-plane {
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 14px;
   background: linear-gradient(180deg, #fff 0%, #f8fafc 100%);
   padding: 16px 18px;
@@ -2773,7 +2773,7 @@ textarea.df2-pilot-composer textarea {
 .df2-control-metric {
   padding: 12px 14px;
   border-radius: 12px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
 }
 
@@ -2783,14 +2783,14 @@ textarea.df2-pilot-composer textarea {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .df2-control-metric strong {
   display: block;
   margin-top: 4px;
   font-size: 14px;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-card-footer.df2-wizard-footer {
@@ -2800,7 +2800,7 @@ textarea.df2-pilot-composer textarea {
   justify-content: space-between;
   gap: 12px;
   padding: 16px 20px;
-  border-top: 1px solid var(--df-border, #e2e8f0);
+  border-top: 1px solid var(--df-border);
   background: var(--df-surface-muted);
   border-radius: 0 0 14px 14px;
 }
@@ -2825,7 +2825,7 @@ textarea.df2-pilot-composer textarea {
   margin-bottom: 10px;
   font-size: 12px;
   font-weight: 600;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 .dt-topology-live {
@@ -2833,13 +2833,13 @@ textarea.df2-pilot-composer textarea {
 }
 
 .dt-topology-muted {
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
 }
 
 .dt-topology-footnote {
   margin: 10px 0 0;
   font-size: 12px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   text-align: center;
 }
 
@@ -2852,7 +2852,7 @@ textarea.df2-pilot-composer textarea {
   min-height: 220px;
   padding: 24px;
   text-align: center;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   font-size: 13px;
 }
 
@@ -2864,7 +2864,7 @@ textarea.df2-pilot-composer textarea {
   height: 52px;
   border-radius: 14px;
   background: #f8fafc;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   color: #64748b;
 }
 
@@ -2985,7 +2985,7 @@ textarea.df2-pilot-composer textarea {
   margin-top: 16px;
   padding: 16px;
   border-radius: 14px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface-muted);
 }
 
@@ -3041,7 +3041,7 @@ textarea.df2-pilot-composer textarea {
   gap: 2px;
   padding: 3px;
   border-radius: 999px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: #eef2f6;
 }
 
@@ -3085,7 +3085,7 @@ textarea.df2-pilot-composer textarea {
   margin: 0;
   padding: 12px 14px;
   border-radius: 10px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
   overflow-x: auto;
 }
@@ -3353,7 +3353,7 @@ textarea.df2-pilot-composer textarea {
   align-items: center;
   justify-content: center;
   background: linear-gradient(180deg, #f1f5f9 0%, #e2e8f0 100%);
-  border: 1px dashed var(--df-border, #cbd5e1);
+  border: 1px dashed var(--df-border);
   color: #475569;
 }
 
@@ -3546,7 +3546,7 @@ textarea.df2-pilot-composer textarea {
   display: flex;
   flex-direction: column;
   background: var(--df-surface);
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 16px;
   box-shadow: 0 32px 64px rgba(15, 23, 42, 0.28);
   overflow: hidden;
@@ -3576,7 +3576,7 @@ textarea.df2-pilot-composer textarea {
   justify-content: space-between;
   gap: 16px;
   padding: 20px 24px;
-  border-bottom: 1px solid var(--df-border, #eef2f6);
+  border-bottom: 1px solid var(--df-border);
   background: var(--df-surface);
 }
 
@@ -3607,7 +3607,7 @@ textarea.df2-pilot-composer textarea {
   align-items: center;
   justify-content: center;
   border-radius: 9px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
   color: var(--df-text-secondary);
 }
@@ -3654,7 +3654,7 @@ textarea.df2-pilot-composer textarea {
   justify-content: flex-end;
   gap: 10px;
   padding: 16px 24px;
-  border-top: 1px solid var(--df-border, #eef2f6);
+  border-top: 1px solid var(--df-border);
   background: var(--df-surface-muted);
 }
 
@@ -3686,7 +3686,7 @@ textarea.df2-pilot-composer textarea {
 .dt-modal-body .df2-input {
   width: 100%;
   padding: 9px 12px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 9px;
   font-size: 14px;
   color: var(--df-text-primary);
@@ -3741,7 +3741,7 @@ textarea.df2-pilot-composer textarea {
   inset: -4px;
   border-radius: 14px;
   border: 2px solid transparent;
-  border-top-color: var(--df-brand, #0f766e);
+  border-top-color: var(--df-brand);
   border-right-color: rgba(15, 118, 110, 0.35);
   animation: df-brand-loader-spin 1.1s cubic-bezier(0.45, 0.05, 0.55, 0.95) infinite;
 }
@@ -3776,8 +3776,8 @@ textarea.df2-pilot-composer textarea {
 /* ─── Search bar polish (no inner white line) ─── */
 .df2-command-search,
 .df2-workspace-search {
-  border: 1px solid var(--df-border, #e2e8f0) !important;
-  background: var(--df-surface-muted, #f8fafc) !important;
+  border: 1px solid var(--df-border) !important;
+  background: var(--df-surface-muted) !important;
   box-shadow: none !important;
   transition: border-color 0.15s, background 0.15s, box-shadow 0.15s;
 }
@@ -3785,15 +3785,15 @@ textarea.df2-pilot-composer textarea {
 .df2-command-search:focus-within,
 .df2-workspace-search:focus-within {
   background: var(--df-surface) !important;
-  border-color: var(--df-brand, #0d9488) !important;
-  outline: 2px solid var(--df-focus-ring, #0d9488) !important;
+  border-color: var(--df-brand) !important;
+  outline: 2px solid var(--df-focus-ring) !important;
   outline-offset: 2px;
 }
 
 .df2-workspace-search .dt-nav-icon,
 .df2-command-search .dt-nav-icon {
   flex-shrink: 0;
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
 }
 
 .df2-workspace-search-wrap {
@@ -3809,7 +3809,7 @@ textarea.df2-pilot-composer textarea {
   overflow: hidden;
   border-radius: 12px;
   background: linear-gradient(180deg, #f8fafc 0%, #fff 100%);
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
 }
 
 .dt-connection-hub-bounded .dt-connection-hub-canvas-aligned {
@@ -3914,14 +3914,14 @@ textarea.df2-pilot-composer textarea {
   justify-content: space-between;
   gap: 12px;
   padding: 10px 14px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 10px;
   background: var(--df-surface);
 }
 
 .df2-stream-row strong {
   font-size: 13px;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-stats-hero {
@@ -4005,14 +4005,14 @@ textarea.df2-pilot-composer textarea {
   font-size: clamp(1.25rem, 2.2vw, 1.5rem);
   font-weight: 700;
   line-height: 1.25;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-overview-hero-desc {
   margin: 0 0 16px;
   font-size: 14px;
   line-height: 1.55;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
   max-width: 52ch;
 }
 
@@ -4083,7 +4083,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-overview-kpis .df2-stat {
   border-radius: 14px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
   box-shadow: none;
   min-height: 96px;
@@ -4204,7 +4204,7 @@ textarea.df2-pilot-composer textarea {
   gap: 8px;
   padding: 8px 10px;
   border-radius: 10px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: #f8fafc;
   min-width: 0;
 }
@@ -4212,7 +4212,7 @@ textarea.df2-pilot-composer textarea {
 .df2-overview-conn-name {
   font-size: 13px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4228,7 +4228,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-overview-conn-meta {
   font-size: 11px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -4241,7 +4241,7 @@ textarea.df2-pilot-composer textarea {
   padding: 2px 2px 0 !important;
   font-size: 12px;
   font-weight: 600;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
 }
 
 .df2-overview-conn-type {
@@ -4280,7 +4280,7 @@ textarea.df2-pilot-composer textarea {
 .df2-overview-rail-meta {
   margin: 0;
   font-size: 12px;
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
   line-height: 1.5;
 }
 
@@ -4297,7 +4297,7 @@ textarea.df2-pilot-composer textarea {
   gap: 12px;
   width: 100%;
   padding: 12px 14px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   border-radius: 12px;
   background: var(--df-surface);
   text-align: left;
@@ -4322,12 +4322,12 @@ textarea.df2-pilot-composer textarea {
 .df2-overview-action strong {
   font-size: 13px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-overview-action small {
   font-size: 11px;
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
 }
 
 .df2-overview-action .dt-nav-icon {
@@ -4388,8 +4388,8 @@ textarea.df2-pilot-composer textarea {
    ═══════════════════════════════════════════════════════════ */
 .df2-card {
   border-radius: var(--df-radius-card, 12px) !important;
-  border: 1px solid var(--df-border, #e2e8f0);
-  background: var(--df-surface, #fff);
+  border: 1px solid var(--df-border);
+  background: var(--df-surface);
   box-shadow: var(--df-shadow-xs, 0 1px 2px rgba(15, 23, 42, 0.04));
   overflow: visible;
 }
@@ -4406,7 +4406,7 @@ textarea.df2-pilot-composer textarea {
   justify-content: space-between !important;
   gap: var(--df-space-3, 12px);
   padding: var(--df-card-head-pad, 16px 20px) !important;
-  border-bottom: 1px solid var(--df-border, #e2e8f0);
+  border-bottom: 1px solid var(--df-border);
   min-height: 0;
 }
 
@@ -4426,14 +4426,14 @@ textarea.df2-pilot-composer textarea {
   margin: 0;
   font-size: 15px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   line-height: 1.3;
 }
 
 .df2-card-sub {
   margin: 4px 0 0;
   font-size: 13px;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
   line-height: 1.45;
 }
 
@@ -4444,7 +4444,7 @@ textarea.df2-pilot-composer textarea {
 .df2-card-footer,
 .df2-wizard-footer {
   padding: var(--df-card-footer-pad, 16px 20px) !important;
-  border-top: 1px solid var(--df-border, #e2e8f0);
+  border-top: 1px solid var(--df-border);
   background: var(--df-surface-muted);
 }
 
@@ -4473,7 +4473,7 @@ textarea.df2-pilot-composer textarea {
 .df2-stats .df2-stat,
 .df2-overview-kpis .df2-stat {
   border-radius: var(--df-radius-card, 12px);
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
   padding: 16px 18px;
   min-height: 92px;
@@ -4486,14 +4486,14 @@ textarea.df2-pilot-composer textarea {
   width: 32px;
   height: 32px;
   border-radius: 8px;
-  background: var(--df-brand-muted, #f0fdfa);
-  color: var(--df-brand, #0f766e);
+  background: var(--df-brand-muted);
+  color: var(--df-brand);
   margin-bottom: 10px;
 }
 
 .df2-stat-value.blue,
 .df2-stat-value.teal {
-  color: var(--df-brand, #0f766e) !important;
+  color: var(--df-brand) !important;
 }
 
 .df2-grid-2,
@@ -4518,7 +4518,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-rail-panel {
   border-radius: var(--df-radius-card, 12px) !important;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: var(--df-surface);
   padding: 16px 18px !important;
 }
@@ -4551,17 +4551,17 @@ textarea.df2-pilot-composer textarea {
   display: block;
   font-size: 12px;
   font-weight: 600;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   margin-bottom: 2px;
 }
 
 .df2-advantage-list span {
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 .df2-advantage-list .dt-nav-icon {
   flex-shrink: 0;
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
   margin-top: 2px;
 }
 
@@ -4592,7 +4592,7 @@ textarea.df2-pilot-composer textarea {
 .df2-nested-field-list small {
   display: block;
   margin-top: 4px;
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
 }
 
 .df2-intelligence-stats {
@@ -4618,7 +4618,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-text-muted {
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
   font-size: 13px;
 }
 
@@ -4679,7 +4679,7 @@ textarea.df2-pilot-composer textarea {
   min-width: 0;
   font-size: 13px;
   font-weight: 500;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
   line-height: 1.5;
   overflow-wrap: anywhere;
   word-break: break-word;
@@ -4691,7 +4691,7 @@ textarea.df2-pilot-composer textarea {
   padding: 0;
   font-size: 13px;
   font-weight: 600;
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
   cursor: pointer;
   white-space: nowrap;
 }
@@ -4714,8 +4714,8 @@ textarea.df2-pilot-composer textarea {
   gap: 10px;
   padding: 14px 16px 16px;
   border-radius: var(--df-radius-panel, 12px);
-  background: var(--df-surface, #fff);
-  border: 1px solid var(--df-border, #e2e8f0);
+  background: var(--df-surface);
+  border: 1px solid var(--df-border);
   box-shadow: 0 1px 2px rgba(15, 23, 42, 0.03);
   overflow: hidden;
   min-height: 108px;
@@ -4726,16 +4726,16 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-metric-glass-teal {
-  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 18%, var(--df-border, #e2e8f0));
-  background: linear-gradient(180deg, var(--df-brand-muted, #f0fdfa) 0%, #fff 72%);
+  border-color: color-mix(in srgb, var(--df-brand) 18%, var(--df-border));
+  background: linear-gradient(180deg, var(--df-brand-muted) 0%, #fff 72%);
 }
 
 .df2-metric-glass-green .df2-metric-glass-value {
-  color: var(--df-success, #059669);
+  color: var(--df-success);
 }
 
 .df2-metric-glass-amber {
-  border-color: color-mix(in srgb, var(--df-warning, #d97706) 18%, var(--df-border, #e2e8f0));
+  border-color: color-mix(in srgb, var(--df-warning) 18%, var(--df-border));
 }
 
 .df2-metric-glass-head {
@@ -4754,8 +4754,8 @@ textarea.df2-pilot-composer textarea {
   height: 32px;
   flex-shrink: 0;
   border-radius: var(--df-radius-md, 8px);
-  background: var(--df-brand-muted, #f0fdfa);
-  color: var(--df-brand-hover, #0f766e);
+  background: var(--df-brand-muted);
+  color: var(--df-brand-hover);
 }
 
 .df2-metric-glass-body {
@@ -4781,13 +4781,13 @@ textarea.df2-pilot-composer textarea {
   font-weight: var(--df-fw-bold);
   line-height: 1.1;
   letter-spacing: -0.03em;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   font-variant-numeric: tabular-nums;
 }
 
 .df2-metric-glass-sub {
   font-size: 12px;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -4800,7 +4800,7 @@ textarea.df2-pilot-composer textarea {
   width: 64px;
   height: 22px;
   opacity: 0.5;
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
   pointer-events: none;
 }
 
@@ -5274,7 +5274,7 @@ textarea.df2-pilot-composer textarea {
 .df2-app .df2-glass-panel-deep {
   background: var(--df-surface) !important;
   box-shadow: none !important;
-  border: 1px solid var(--df-border, #e2e8f0) !important;
+  border: 1px solid var(--df-border) !important;
 }
 
 .df2-page-overview-enterprise .df2-glass-panel {
@@ -5303,13 +5303,13 @@ textarea.df2-pilot-composer textarea {
   margin: 0;
   font-size: 14px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-glass-sub {
   margin: 4px 0 0;
   font-size: 12px;
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
 }
 
 .df2-glass-badge {
@@ -5331,7 +5331,7 @@ textarea.df2-pilot-composer textarea {
 .df2-glass-empty {
   margin: 0;
   font-size: 13px;
-  color: var(--df-text-muted, #94a3b8);
+  color: var(--df-text-muted);
 }
 
 .df2-glass-empty-center {
@@ -5341,7 +5341,7 @@ textarea.df2-pilot-composer textarea {
   gap: 10px;
   padding: 28px 20px;
   text-align: center;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 /* Charts */
@@ -5416,7 +5416,7 @@ textarea.df2-pilot-composer textarea {
   flex-direction: column;
   gap: 8px;
   font-size: 12px;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 .df2-chart-legend li {
@@ -5427,7 +5427,7 @@ textarea.df2-pilot-composer textarea {
 
 .df2-chart-legend strong {
   margin-left: auto;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-legend-swatch {
@@ -5952,9 +5952,9 @@ textarea.df2-pilot-composer textarea {
 .dt-loading-block--card {
   min-height: 220px;
   padding: 28px;
-  border: 1px dashed var(--df-line, #e2e8f0);
+  border: 1px dashed var(--df-line);
   border-radius: 12px;
-  background: var(--df-surface-panel, #fff);
+  background: var(--df-surface-panel);
 }
 
 .dt-loading-block-visual {
@@ -5994,14 +5994,14 @@ textarea.df2-pilot-composer textarea {
   margin: 4px 0 0;
   font-size: 15px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   letter-spacing: -0.01em;
 }
 
 .dt-loading-block-hint {
   margin: 0;
   font-size: 13px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   line-height: 1.45;
 }
 
@@ -6047,7 +6047,7 @@ textarea.df2-pilot-composer textarea {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--df-brand-bright, #14b8a6);
+  background: var(--df-brand-bright);
   box-shadow: 0 0 10px rgba(20, 184, 166, 0.8);
   top: 50%;
   left: 50%;
@@ -6110,14 +6110,14 @@ textarea.df2-pilot-composer textarea {
   margin: 0;
   font-size: 17px;
   font-weight: 700;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
   letter-spacing: -0.02em;
 }
 
 .df-app-boot-glass .df-app-boot-hint {
   margin: 0;
   font-size: 13px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   line-height: 1.5;
   max-width: 32ch;
 }
@@ -6196,7 +6196,7 @@ textarea.df2-pilot-composer textarea {
   margin: 0;
   flex-shrink: 0;
   font-size: 13px;
-  color: var(--df-text-muted, #64748b);
+  color: var(--df-text-muted);
   line-height: 1.45;
 }
 

@@ -269,7 +269,7 @@
 }
 
 .df2-map-proof-pair {
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: 10px;
   padding: 12px;
   background: var(--df-surface);
@@ -1204,7 +1204,7 @@
   gap: 2px;
   padding: 8px 10px;
   border-radius: 10px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   background: var(--df-surface);
   min-width: 0;
 }
@@ -1390,7 +1390,7 @@
 .df2-column-review-empty-row {
   text-align: center;
   padding: 28px 20px !important;
-  color: var(--df-text-secondary, #64748b);
+  color: var(--df-text-secondary);
 }
 
 .df2-column-review-folded {
@@ -1406,7 +1406,7 @@
   margin: 0;
   font-size: 13px;
   line-height: 1.5;
-  color: var(--df-text-primary, #0f172a);
+  color: var(--df-text-primary);
 }
 
 .df2-column-row.is-focused td {
@@ -1454,7 +1454,7 @@
   gap: 6px;
   margin-top: 4px;
   font-size: 12px;
-  color: var(--df-text-secondary, #475569);
+  color: var(--df-text-secondary);
   white-space: nowrap;
 }
 
@@ -1471,7 +1471,7 @@
   padding: 2px 8px;
   font-size: 11px;
   line-height: 1.6;
-  color: var(--df-text-secondary, #475569);
+  color: var(--df-text-secondary);
   white-space: nowrap;
 }
 
@@ -1499,7 +1499,7 @@
   align-items: stretch;
   padding: 12px;
   border-radius: 12px;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   background: var(--df-surface);
 }
 
@@ -1587,7 +1587,7 @@
   padding: 0;
   max-height: min(320px, 40vh);
   overflow: auto;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: 10px;
   background: var(--df-surface);
 }

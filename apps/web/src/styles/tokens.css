@@ -105,7 +105,7 @@
      wizard captions), so it must meet AA, not act as a decorative ink. */
   --df-text-tertiary: #5e6e85;
   --df-text-muted: #5e6e85;
-  /* Alias used by leftover sheets (`var(--df-text, #0f172a)`). Must track primary so dark remaps. */
+  /* Alias used by leftover sheets (`var(--df-text)`). Must track primary so dark remaps. */
   --df-text: var(--df-text-primary);
   --df-surface-2: var(--df-surface-muted);
   /* Leftover sheets still read these undeclared names and fall back to paper. */

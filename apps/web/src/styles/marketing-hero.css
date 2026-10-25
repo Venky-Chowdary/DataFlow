@@ -177,7 +177,7 @@
 /* Caption sits on whatever field the hero uses — dark heroes override below. */
 .dw-hero-art-caption {
   margin: 14px 2px 0;
-  color: var(--lp-muted, #475569);
+  color: var(--lp-muted);
   font-size: 13.5px;
   line-height: 1.5;
   letter-spacing: 0.01em;
