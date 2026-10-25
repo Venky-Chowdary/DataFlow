@@ -117,24 +117,39 @@ def _is_public_mcp_path(path: str, method: str) -> bool:
     return False
 
 
+def _heal_rekey_if_pending(stored: dict | None, email: str) -> None:
+    """Finish a half-moved email rekey on the next authenticated request.
+
+    The flag comes from the already-loaded user doc (no second store read);
+    finish_pending_rekeys claims it single-flight, so parallel requests
+    cannot double-move memberships, and a failed retry frees the lease,
+    keeps the flag, and surfaces a security event."""
+    if not stored or not stored.get("rekey_pending"):
+        return
+    try:
+        from services.signup_service import finish_pending_rekeys
+        finish_pending_rekeys(email=email)
+    except Exception:
+        logger.error("rekey_pending retry failed", exc_info=True)
+        try:
+            from services.audit_coverage import record_security_event
+            record_security_event(
+                "email_change.rekey_flag_failed",
+                outcome="failed", reason_code="heal_retry_failed",
+            )
+        except Exception:
+            logger.error("rekey heal audit event failed", exc_info=True)
+
+
 def _attach_user_reason(request: Request, token: str) -> str | None:
     email = verify_token(token)
     if email:
-        from services.user_store import get_user as get_stored_user
+        from services.user_store import get_user_record as get_stored_user
 
         stored = get_stored_user(email)
         if stored and stored.get("status") == "disabled":
             return "disabled_user"
-        # Same self-heal as the cookie path: a flagged half-finished email
-        # rekey completes on the next authenticated request.
-        if stored:
-            from services.user_store import rekey_pending
-            if rekey_pending(email):
-                try:
-                    from services.signup_service import finish_pending_rekeys
-                    finish_pending_rekeys(email=email)
-                except Exception:
-                    logger.error("rekey_pending retry failed", exc_info=True)
+        _heal_rekey_if_pending(stored, email)
         request.state.user_email = email
         user = lookup_user(email)
         if user:
@@ -221,7 +236,7 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
         expected = doc.get("csrf") or ""
         if not supplied or not expected or not hmac.compare_digest(supplied, expected):
             return "csrf_failed"
-    from services.user_store import get_user as get_stored_user
+    from services.user_store import get_user_record as get_stored_user
 
     email = doc.get("user_id") or ""
     stored = get_stored_user(email)
@@ -230,14 +245,7 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     # A flagged half-finished email rekey heals on the next authenticated
     # request: retry the membership/org move; the flag stays set if the
     # retry fails again, so this never swallows the failure.
-    if stored:
-        from services.user_store import rekey_pending
-        if rekey_pending(email):
-            try:
-                from services.signup_service import finish_pending_rekeys
-                finish_pending_rekeys(email=email)
-            except Exception:
-                logger.error("rekey_pending retry failed", exc_info=True)
+    _heal_rekey_if_pending(stored, email)
     request.state.user_email = email
     user = lookup_user(email)
     request.state.user = user if user else {"email": email, "role": "viewer"}

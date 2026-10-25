@@ -17,7 +17,7 @@ from __future__ import annotations
 import logging
 import re
 import secrets
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -219,6 +219,13 @@ def list_users() -> list[dict[str, Any]]:
 def get_user(email: str) -> dict[str, Any] | None:
     doc = _read_one(normalize_email(email))
     return public_user(doc) if doc else None
+
+
+def get_user_record(email: str) -> dict[str, Any] | None:
+    """The raw stored doc — internal fields (rekey_pending, rekey_lease,
+    canonical_email) included. For store-adjacent consumers like the auth
+    middleware; never return it over HTTP."""
+    return _read_one(normalize_email(email))
 
 
 def credentials_for_auth() -> list[dict[str, Any]]:
@@ -487,12 +494,79 @@ def rekey_pending(email: str) -> str | None:
     return doc.get("rekey_pending") if doc else None
 
 
+REKEY_LEASE_SECONDS = 60
+
+
+def claim_rekey_pending(email: str, *, lease_seconds: int = REKEY_LEASE_SECONDS) -> str | None:
+    """Single-flight claim on the rekey flag.
+
+    Returns the pre-rekey address for exactly one caller; others see None
+    until the lease lapses or release_rekey_claim frees it. The flag itself
+    stays set until the heal succeeds and clear_rekey_pending removes it,
+    so two parallel requests can never double-move memberships.
+    """
+    normalized = normalize_email(email)
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.isoformat()
+    lease_until = (now_dt + timedelta(seconds=lease_seconds)).isoformat()
+    db = mongo_database()
+    if db is not None:
+        from pymongo import ReturnDocument
+        row = db[COLLECTION].find_one_and_update(
+            {"_id": normalized,
+             "rekey_pending": {"$exists": True, "$nin": [None, ""]},
+             "$or": [{"rekey_lease": {"$exists": False}},
+                     {"rekey_lease": None},
+                     {"rekey_lease": {"$lte": now.isoformat()}}]},
+            {"$set": {"rekey_lease": lease_until,
+                      "updated_at": now}},
+            return_document=ReturnDocument.AFTER,
+            projection={"_id": False},
+        )
+        return (row or {}).get("rekey_pending") or None
+    claimed: list[str] = []
+    with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
+        for u in data.get("users", []):
+            if not (isinstance(u, dict)
+                    and normalize_email(u.get("email", "")) == normalized):
+                continue
+            old = u.get("rekey_pending")
+            if not old:
+                break
+            lease = u.get("rekey_lease")
+            if lease and str(lease) > now:
+                break
+            u["rekey_lease"] = lease_until
+            u["updated_at"] = now
+            claimed.append(old)
+            break
+    return claimed[0] if claimed else None
+
+
+def release_rekey_claim(email: str) -> None:
+    """Free the claim lease after a failed heal so the next request retries."""
+    normalized = normalize_email(email)
+    db = mongo_database()
+    if db is not None:
+        db[COLLECTION].update_one(
+            {"_id": normalized}, {"$unset": {"rekey_lease": ""}})
+        return
+    with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
+        for u in data.get("users", []):
+            if isinstance(u, dict) and normalize_email(u.get("email", "")) == normalized:
+                u.pop("rekey_lease", None)
+                break
+
+
 def clear_rekey_pending(*, email: str) -> None:
     normalized = normalize_email(email)
     doc = _read_one(normalized)
-    if doc is not None and doc.pop("rekey_pending", None) is not None:
-        doc["updated_at"] = _now()
-        _write_one(doc)
+    if doc is not None:
+        removed = doc.pop("rekey_pending", None) is not None
+        doc.pop("rekey_lease", None)
+        if removed:
+            doc["updated_at"] = _now()
+            _write_one(doc)
 
 
 def mark_onboarded(email: str) -> dict[str, Any]:

@@ -995,6 +995,14 @@ async def login(body: LoginRequest, request: Request):
         finish_pending_rekeys(email=user["email"])
     except Exception:
         logger.error("rekey_pending retry failed", exc_info=True)
+        try:
+            record_security_event(
+                "email_change.rekey_flag_failed",
+                outcome="failed", actor=user["email"],
+                reason_code="heal_retry_failed",
+            )
+        except Exception:
+            logger.error("rekey heal audit event failed", exc_info=True)
     try:
         token, expires_at = create_token(user["email"])
     except RuntimeError as exc:

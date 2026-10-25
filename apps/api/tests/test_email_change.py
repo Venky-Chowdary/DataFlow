@@ -586,3 +586,134 @@ def test_backfill_skips_empty_canonical_keys(tmp_path, monkeypatch):
     monkeypatch.setattr(user_store, "_CANONICAL_DUPLICATES", [])
     user_store.backfill_signup_fields()
     assert user_store.canonical_email_duplicates() == []
+
+
+def test_rekey_heal_is_single_flight():
+    """Two parallel authenticated requests on a flagged account must not
+    double-move memberships — the lease hands the heal to exactly one."""
+    import threading
+
+    c = _client()
+    _verified_user(c)
+    resp = _request_change(c, "ada2@example.com")
+    cid = resp.json()["challenge_id"]
+    code = re.search(r"\b(\d{6})\b",
+                     ConsoleEmailSender.OUTBOX[-1].text).group(1)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("membership store unavailable")
+
+    real = team_store.rekey_memberships
+    signup_service.team_store.rekey_memberships = _boom
+    try:
+        ok = c.post("/api/v1/auth/email/change/confirm",
+                    json={"challenge_id": cid, "code": code},
+                    headers={"x-csrf-token": c.cookies["dw_csrf"]})
+    finally:
+        signup_service.team_store.rekey_memberships = real
+    assert ok.status_code == 200
+    assert user_store.rekey_pending("ada2@example.com") == "ada@example.com"
+
+    session = auth_state.get_auth_state().create_session(
+        user_id="ada2@example.com", device_id="d2", ip="", ua="",
+        csrf_token="tok")
+
+    calls = {"rekey": 0}
+    count_lock = threading.Lock()
+    real_rekey = team_store.rekey_memberships
+
+    def _counted(*a, **k):
+        with count_lock:
+            calls["rekey"] += 1
+        return real_rekey(*a, **k)
+
+    signup_service.team_store.rekey_memberships = _counted
+    try:
+        barrier = threading.Barrier(3)
+
+        def hit():
+            barrier.wait()
+            c2 = _client()
+            c2.cookies.set("__Host-dw_session", session["jti"])
+            c2.cookies.set("dw_csrf", "tok")
+            c2.post("/api/v1/auth/email/change",
+                    json={"new_email": "irrelevant@example.com"},
+                    headers={"x-csrf-token": "tok"})
+
+        threads = [threading.Thread(target=hit) for _ in range(2)]
+        for t in threads:
+            t.start()
+        barrier.wait()
+        for t in threads:
+            t.join()
+    finally:
+        signup_service.team_store.rekey_memberships = real_rekey
+
+    assert calls["rekey"] == 1  # one healer moved memberships, never two
+    assert user_store.rekey_pending("ada2@example.com") is None
+    assert team_store._read_memberships(email="ada@example.com") == []
+    assert team_store._read_memberships(email="ada2@example.com")
+
+
+def test_rekey_heal_failure_keeps_flag_and_emits_event(monkeypatch):
+    """A failed heal frees the lease (the next request retries), keeps the
+    flag, and emits the same security event as the flag-write failure."""
+    from services import audit_coverage
+
+    c = _client()
+    _verified_user(c)
+    resp = _request_change(c, "ada2@example.com")
+    cid = resp.json()["challenge_id"]
+    code = re.search(r"\b(\d{6})\b",
+                     ConsoleEmailSender.OUTBOX[-1].text).group(1)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("membership store unavailable")
+
+    real = team_store.rekey_memberships
+    signup_service.team_store.rekey_memberships = _boom
+    try:
+        ok = c.post("/api/v1/auth/email/change/confirm",
+                    json={"challenge_id": cid, "code": code},
+                    headers={"x-csrf-token": c.cookies["dw_csrf"]})
+    finally:
+        signup_service.team_store.rekey_memberships = real
+    assert ok.status_code == 200
+    assert user_store.rekey_pending("ada2@example.com") == "ada@example.com"
+
+    session = auth_state.get_auth_state().create_session(
+        user_id="ada2@example.com", device_id="d2", ip="", ua="",
+        csrf_token="tok")
+    events: list[tuple[tuple, dict]] = []
+    monkeypatch.setattr(
+        audit_coverage, "record_security_event",
+        lambda *a, **k: events.append((a, k)))
+
+    def _still_down(*_a, **_k):
+        raise RuntimeError("still down")
+
+    signup_service.team_store.rekey_memberships = _still_down
+    try:
+        c2 = _client()
+        c2.cookies.set("__Host-dw_session", session["jti"])
+        c2.cookies.set("dw_csrf", "tok")
+        c2.post("/api/v1/auth/email/change",
+                json={"new_email": "irrelevant@example.com"},
+                headers={"x-csrf-token": "tok"})
+    finally:
+        signup_service.team_store.rekey_memberships = real
+
+    # Flag survived the failed heal; the event was emitted; and because the
+    # lease was released, the next authenticated request heals successfully.
+    assert user_store.rekey_pending("ada2@example.com") == "ada@example.com"
+    assert any(args and args[0] == "email_change.rekey_flag_failed"
+               for args, _k in events)
+
+    c3 = _client()
+    c3.cookies.set("__Host-dw_session", session["jti"])
+    c3.cookies.set("dw_csrf", "tok")
+    c3.post("/api/v1/auth/email/change",
+            json={"new_email": "irrelevant@example.com"},
+            headers={"x-csrf-token": "tok"})
+    assert user_store.rekey_pending("ada2@example.com") is None
+    assert team_store._read_memberships(email="ada2@example.com")

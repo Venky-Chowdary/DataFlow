@@ -763,14 +763,19 @@ def finish_pending_rekeys(*, email: str) -> bool:
 
     Memberships and org-creator rows move by email; when a partial failure
     flagged the account, re-running these completes the move and clears the
-    flag. Safe to call repeatedly — the store functions are rewrites, not
-    increments.
+    flag. Safe to call repeatedly and concurrently — the claim is
+    single-flight (a lease inside the store), the rekeys are rewrites not
+    increments, and a failed run frees the lease while keeping the flag.
     """
-    old_email = user_store.rekey_pending(email)
+    old_email = user_store.claim_rekey_pending(email)
     if not old_email:
         return False
-    team_store.rekey_memberships(old_email, email)
-    org_store.rekey_creator(old_email, email)
+    try:
+        team_store.rekey_memberships(old_email, email)
+        org_store.rekey_creator(old_email, email)
+    except Exception:
+        user_store.release_rekey_claim(email)
+        raise
     user_store.clear_rekey_pending(email=email)
     return True
 
