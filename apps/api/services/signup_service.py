@@ -25,6 +25,7 @@ from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.auth_state import get_auth_state
 from services.email_canonical import canonical_email
+from services import denylist_store, disposable_list
 from services.email_policy import role_assessment
 from services.email_quota import consume_send_slot
 from services.email_sender import (
@@ -85,6 +86,14 @@ def request_signup(
     if role == "blocked":
         record_security_event("signup.blocked", outcome="failed",
                               reason_code="role_address",
+                              details={"ip": ip})
+        raise ApiError(400, "blocked_address",
+                       "this address can't be used for signup")
+    domain = normalized.split("@", 1)[-1]
+    if denylist_store.is_denied(canonical_email(normalized), kind="email") or \
+            disposable_list.is_disposable(normalized):
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code="denied_domain" if domain else "denied",
                               details={"ip": ip})
         raise ApiError(400, "blocked_address",
                        "this address can't be used for signup")
