@@ -111,8 +111,16 @@ def _is_decimal_literal(text: str) -> bool:
 
 
 def luhn_valid(digits: str) -> bool:
-    """Luhn check on a bare digit string (13-19 digits = PCI PAN range)."""
-    d = re.sub(r"\D", "", digits or "")
+    """Luhn check on a card-number-shaped string (13-19 digits = PCI PAN range).
+
+    The input must be *only* digits plus the space/dash separators a printed
+    card number uses. Hex/UUID/ObjectId-looking values also contain 13-19
+    extractable digits — without this check a Mongo ``_id`` or a hex key can
+    Luhn-validate by chance and read as a PAN (X-MG1)."""
+    raw = (digits or "").strip()
+    if not raw or re.search(r"[^\d -]", raw):
+        return False
+    d = re.sub(r"\D", "", raw)
     if not (13 <= len(d) <= 19) or not d.isdigit():
         return False
     total = 0

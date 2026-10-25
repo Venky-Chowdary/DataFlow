@@ -110,3 +110,30 @@ def test_score_tags_pci_dss_on_pan() -> None:
     report = score_compliance_risk(["charge_ref"], [{"charge_ref": VISA}])
     assert "PCI-DSS" in report["compliance_tags"]
     assert report["risk_level"] == "high"
+
+
+def test_luhn_valid_rejects_non_card_charset() -> None:
+    """X-MG1: hex/UUID/ObjectId values contain 13-19 extractable digits but are
+    not card numbers — PAN detection must require the digit+separator shape."""
+    from services.pii_guard import luhn_valid
+
+    assert not luhn_valid("68f1c2a4b3d5e6f7a8b9c0d1")   # ObjectId-shaped hex
+    assert not luhn_valid("507f1f77bcf86cd799439011")   # ObjectId-shaped hex
+    assert not luhn_valid("550e8400-e29b-41d4-a716-446655440000")  # UUID
+    assert not luhn_valid("deadbeefcafe411111111111")   # hex with digits
+    assert luhn_valid(VISA)                              # real card still flags
+    assert luhn_valid(VISA.replace(" ", "-"))            # dash separators ok
+    assert not luhn_valid("") and not luhn_valid(None)
+
+
+def test_objectid_values_do_not_flag_pii() -> None:
+    report = detect_pii_fields(
+        ["_id"],
+        [{"_id": v} for v in [
+            "68f1c2a4b3d5e6f7a8b9c0d1",
+            "6523ab91cd82ef04bb23aa77",
+            "507f1f77bcf86cd799439011",
+        ]],
+    )
+    assert "pci_pan" not in report["field_risk"].get("_id", [])
+    assert "_id" not in report["high_risk_fields"]
