@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import logging
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -11,6 +13,8 @@ from services.tenant_bind import principal_allowed_for_tenant
 
 from ..services import auth_service as _auth_service
 from ..services.auth_service import lookup_user, verify_token
+
+logger = logging.getLogger(__name__)
 
 _PUBLIC_PREFIXES = (
     "/health",
@@ -121,6 +125,16 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         stored = get_stored_user(email)
         if stored and stored.get("status") == "disabled":
             return "disabled_user"
+        # Same self-heal as the cookie path: a flagged half-finished email
+        # rekey completes on the next authenticated request.
+        if stored:
+            from services.user_store import rekey_pending
+            if rekey_pending(email):
+                try:
+                    from services.signup_service import finish_pending_rekeys
+                    finish_pending_rekeys(email=email)
+                except Exception:
+                    logger.error("rekey_pending retry failed", exc_info=True)
         request.state.user_email = email
         user = lookup_user(email)
         if user:
@@ -213,6 +227,17 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     stored = get_stored_user(email)
     if stored and stored.get("status") in ("disabled", "banned"):
         return "disabled_user"
+    # A flagged half-finished email rekey heals on the next authenticated
+    # request: retry the membership/org move; the flag stays set if the
+    # retry fails again, so this never swallows the failure.
+    if stored:
+        from services.user_store import rekey_pending
+        if rekey_pending(email):
+            try:
+                from services.signup_service import finish_pending_rekeys
+                finish_pending_rekeys(email=email)
+            except Exception:
+                logger.error("rekey_pending retry failed", exc_info=True)
     request.state.user_email = email
     user = lookup_user(email)
     request.state.user = user if user else {"email": email, "role": "viewer"}

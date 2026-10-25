@@ -974,6 +974,14 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     record_login_success(ip=ip, email=body.email)
     try:
+        # Heal a flagged half-finished email rekey on successful sign-in;
+        # a failed retry keeps the flag for the next attempt.
+        from services.signup_service import finish_pending_rekeys
+
+        finish_pending_rekeys(email=user["email"])
+    except Exception:
+        logger.error("rekey_pending retry failed", exc_info=True)
+    try:
         token, expires_at = create_token(user["email"])
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
