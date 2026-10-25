@@ -109,6 +109,8 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "delete_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
     "update_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
     "prepare_cdc_source": (Permission.JOB_RUN, MUTATE),
+    "clear_cursor_resnapshot": (Permission.JOB_MANAGE, MUTATE),
+    "rebaseline_transfer": (Permission.JOB_MANAGE, MUTATE),
 }
 
 
@@ -134,6 +136,8 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "update_schedule": Permission.SCHEDULE_MANAGE,
     "prepare_cdc_source": Permission.JOB_RUN,
     "studio_remediation": Permission.JOB_RUN,
+    "clear_cursor_resnapshot": Permission.JOB_MANAGE,
+    "rebaseline_transfer": Permission.JOB_MANAGE,
 }
 
 

@@ -1592,6 +1592,8 @@ class DataPilotTools:
             "resume_job": self._resume_job,
             "replay_quarantine": self._replay_quarantine,
             "repair_cdc_drift": self._repair_cdc_drift,
+            "clear_cursor_resnapshot": self._clear_cursor_resnapshot,
+            "rebaseline_transfer": self._rebaseline_transfer,
             "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
             "delete_connector": self._delete_connector,
@@ -3626,6 +3628,24 @@ class DataPilotTools:
             selector,
             key_ids=key_ids or [],
         )
+
+    def _clear_cursor_resnapshot(
+        self, cursor_key: str = "", reason: str = ""
+    ) -> ToolResult:
+        from .lifecycle_tools import stage_clear_cursor_resnapshot
+
+        return stage_clear_cursor_resnapshot(cursor_key, reason)
+
+    def _rebaseline_transfer(
+        self,
+        connector_id: str = "",
+        name: str = "",
+        table: str = "",
+        reason: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import stage_rebaseline_transfer
+
+        return stage_rebaseline_transfer(connector_id, name, table, reason)
 
     def _prepare_cdc_source(
         self,

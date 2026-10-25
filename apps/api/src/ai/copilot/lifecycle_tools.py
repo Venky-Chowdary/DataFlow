@@ -164,6 +164,42 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
         },
     },
     {
+        "name": "clear_cursor_resnapshot",
+        "description": (
+            "Clear an incremental/CDC watermark so the next run re-snapshots "
+            "from scratch. The recovery action a fail-closed 'destination reset' "
+            "refusal names. Pending action until Confirm; clearing does not "
+            "rewind the destination — at-least-once upsert may re-apply rows."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "cursor_key": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["cursor_key"],
+        },
+    },
+    {
+        "name": "rebaseline_transfer",
+        "description": (
+            "Accept the current destination as the append-continuity baseline for "
+            "a saved destination connector + table (audited, requires a reason). "
+            "The recovery action a continuity mismatch names. Pending action "
+            "until Confirm; never touches destination data."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "connector_id": {"type": "string"},
+                "name": {"type": "string"},
+                "table": {"type": "string"},
+                "reason": {"type": "string"},
+            },
+            "required": ["reason"],
+        },
+    },
+    {
         "name": "test_connector",
         "description": (
             "Probe a saved connector's connectivity now (same as the Test button) and "
@@ -389,6 +425,8 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
     "delete_schedule": "delete_schedule",
     "update_schedule": "update_schedule",
     "prepare_cdc_source": "prepare_cdc_source",
+    "clear_cursor_resnapshot": "clear_cursor_resnapshot",
+    "rebaseline_transfer": "rebaseline_transfer",
 }
 
 
@@ -1625,3 +1663,73 @@ def plan_lifecycle_operation(message: str) -> list[tuple[str, dict[str, Any]]] |
             args["enabled"] = enabled
         return [(tool, args)]
     return None
+
+
+def stage_clear_cursor_resnapshot(cursor_key: str, reason: str = "") -> ToolResult:
+    """Stage the watermark clear; Confirm runs it."""
+    key = str(cursor_key or "").strip()
+    if not key:
+        return _tool_result(
+            "clear_cursor_resnapshot",
+            success=False,
+            output=None,
+            error="cursor_key is required — copy it from the refusal message.",
+        )
+    return _stage(
+        "clear_cursor_resnapshot",
+        payload={"cursor_key": key, "reason": str(reason or "")},
+        preview={
+            "cursor_key": key,
+            "effect": (
+                "The next incremental/CDC run re-snapshots instead of "
+                "resuming from this watermark."
+            ),
+        },
+        label=f"Clear cursor {key} and re-snapshot",
+        destructive=False,
+    )
+
+
+def stage_rebaseline_transfer(
+    connector_id: str = "",
+    name: str = "",
+    table: str = "",
+    reason: str = "",
+) -> ToolResult:
+    """Stage the continuity rebaseline; Confirm runs it."""
+    if not str(reason or "").strip():
+        return _tool_result(
+            "rebaseline_transfer",
+            success=False,
+            output=None,
+            error="A reason is required to accept the current destination.",
+        )
+    if not (connector_id or name):
+        return _tool_result(
+            "rebaseline_transfer",
+            success=False,
+            output=None,
+            error="Name the destination connector (id or name).",
+        )
+    return _stage(
+        "rebaseline_transfer",
+        payload={
+            "connector_id": str(connector_id or "").strip(),
+            "name": str(name or "").strip(),
+            "table": str(table or "").strip(),
+            "reason": str(reason or "").strip(),
+        },
+        preview={
+            "connector": connector_id or name,
+            "table": table or "(saved target)",
+            "effect": (
+                "The current destination contents become the append "
+                "continuity baseline — audited, no destination data touched."
+            ),
+        },
+        label=(
+            f"Rebaseline continuity for {name or connector_id}"
+            + (f".{table}" if table else "")
+        ),
+        destructive=False,
+    )

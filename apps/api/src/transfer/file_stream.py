@@ -1793,10 +1793,15 @@ def stream_file_to_database(
 
             raise ValueError(cursor_identity_issue(scope))
         if scope.bounded:
-            from services.preflight_cursor_gate import cursor_destination_reset_issue
+            from services.preflight_cursor_gate import (
+            cursor_destination_reset_issue,
+            dest_object_missing,
+        )
 
             reset_issue = cursor_destination_reset_issue(
-                scope, precount_table(dest_type, dest_cfg, dest_table)
+                scope,
+                precount_table(dest_type, dest_cfg, dest_table),
+                dest_missing=dest_object_missing(dest_type, dest_cfg, dest_table),
             )
             if reset_issue:
                 raise ValueError(reset_issue)

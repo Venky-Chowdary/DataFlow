@@ -290,9 +290,41 @@ def cursor_identity_issue(scope: IncrementalReadScope | None) -> str:
     )
 
 
+def dest_object_missing(
+    dest_type: str, dest_cfg: dict[str, Any], dest_table: str
+) -> bool | None:
+    """Whether the destination object is absent from its catalog — or ``None``.
+
+    "The table is gone" and "the table has zero rows" are different states
+    with different recovery advice; a count of 0 conflates them (D100).
+    ``None`` means the probe could not decide — never a guess either way.
+    """
+    try:
+        from connectors.generic_sql import _engine
+        from connectors.sql_identifiers import split_qualified_table
+        from services.sql_object_identity import resolve_object_identity
+
+        engine = _engine(dest_cfg)
+        schema, table = split_qualified_table(
+            dest_table, (dest_cfg.get("schema") or "").strip() or None
+        )
+        ident = resolve_object_identity(engine, table, schema)
+        return not ident.exists
+    except Exception:  # noqa: BLE001 — unknown stays unknown
+        return None
+
+
+def _dest_state_text(dest_missing: bool | None) -> str:
+    if dest_missing is True:
+        return "the destination table is missing"
+    return "the destination is empty"
+
+
 def cursor_destination_reset_issue(
     scope: IncrementalReadScope | None,
     dest_rows: int | None,
+    *,
+    dest_missing: bool | None = None,
 ) -> str:
     """Refusal text when the watermark outlived the destination it delivered to.
 
@@ -312,10 +344,12 @@ def cursor_destination_reset_issue(
     return (
         f"Destination reset since the last incremental run: the stored watermark "
         f"'{scope.watermark}' on '{scope.cursor_column}' claims those rows are "
-        f"already at rest, but the destination is empty — resuming would skip "
+        f"already at rest, but {_dest_state_text(dest_missing)} — resuming would skip "
         f"the whole history and report success. Clear the cursor (POST "
         f"/api/v1/ops/cdc-cursors/clear with cursor_key '{scope.cursor_key}') to "
-        f"re-snapshot, or point the run at the destination that holds the history."
+        f"re-snapshot, or rebaseline the route (POST "
+        f"/api/v1/transfer/continuity/rebaseline), or point the run at the "
+        f"destination that holds the history."
     )
 
 
@@ -570,7 +604,9 @@ def refuse_unusable_cursor_state(
     if not scope.bounded:
         return
     issue = cursor_destination_reset_issue(
-        scope, countable_dest_rows(dest_type, dest_cfg, dest_table)
+        scope,
+        countable_dest_rows(dest_type, dest_cfg, dest_table),
+        dest_missing=dest_object_missing(dest_type, dest_cfg, dest_table),
     )
     if issue:
         raise ValueError(issue)
