@@ -1623,9 +1623,19 @@ def run_file_preflight(
     # duplicates. Inspect, count duplicates, disclose the DDL, require approval.
     upsert_ddl_gate: dict[str, Any] | None = None
     try:
-        from services.sync_cursor import requires_upsert as _requires_upsert
+        from services.sync_cursor import (
+            normalize_sync_mode as _nsm,
+            requires_upsert as _requires_upsert,
+        )
 
-        if _requires_upsert(sync_mode) and destination_table_exists is True:
+        # scd2 is excluded: a type-2 history table holds many rows per business
+        # key by design — a unique constraint on the key would be wrong, and the
+        # writer keys current-row lookup on (key, is_current), never needing the
+        # index this gate exists to disclose.
+        _upsert_constraint_mode = _requires_upsert(sync_mode) and _nsm(
+            sync_mode, default=""
+        ) != "scd2"
+        if _upsert_constraint_mode and destination_table_exists is True:
             from services.destination_key_collision_probe import _identity_pairs
             from services.upsert_ddl_gate import (
                 count_dest_duplicate_keys,
