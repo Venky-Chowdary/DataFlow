@@ -297,7 +297,12 @@ async function run(vpName, viewport, theme) {
       }),
     }));
   try {
-    await page.locator('button[title="Settings"]').first().click();
+    // The icon-only Settings button is hidden on narrow layouts; the
+    // account button (title/aria-label = email) opens the same screen.
+    const gear = page.locator('button[title="Settings"]');
+    const acct = page.locator('button[aria-label*="@"]');
+    if (await gear.count()) await gear.first().click();
+    else await acct.first().click();
     await page.waitForTimeout(1500);
     await page.getByRole("tab", { name: /Security/ }).first().click();
     await page.waitForTimeout(1200);
