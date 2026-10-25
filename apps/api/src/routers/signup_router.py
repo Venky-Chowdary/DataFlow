@@ -8,6 +8,8 @@ matching ``auth_router``).
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
@@ -70,7 +72,10 @@ class PasswordForgotRequest(BaseModel):
 async def password_forgot(body: PasswordForgotRequest,
                           request: Request) -> dict[str, Any]:
     from services import signup_service
-    return signup_service.request_password_reset(
+    # The uniform pacing floor sleeps in request_password_reset — run it on a
+    # worker thread so it never blocks the event loop. Per-IP velocity inside
+    # the service caps how many workers one address can pin at once.
+    return await asyncio.to_thread(signup_service.request_password_reset,
         email=body.email, ip=_client_ip(request),
         device_id=body.device_id,
         ua=request.headers.get("user-agent", "")[:512],

@@ -75,9 +75,14 @@ def _deliver_later(fn) -> None:
 def _forgot_reply(body: dict[str, Any], started: float) -> dict[str, Any]:
     """Uniform pacing: fake and real branches pad to the same floor, so
     neither elapsed time nor body shape reveals whether an account exists."""
-    pad = FORGOT_FLOOR_SEC - (time.monotonic() - started)
+    elapsed = time.monotonic() - started
+    pad = FORGOT_FLOOR_SEC - elapsed
     if pad > 0:
         time.sleep(pad)
+    else:
+        # A real branch that overruns the floor makes the fake branch a
+        # timing oracle again — surface it instead of silently leaking.
+        logger.warning("password-reset floor overrun: %.3fs > %.3fs", elapsed, FORGOT_FLOOR_SEC)
     return body
 
 

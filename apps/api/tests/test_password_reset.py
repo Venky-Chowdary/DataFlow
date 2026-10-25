@@ -432,3 +432,20 @@ def test_forgot_fake_and_real_replies_share_one_shape():
     assert fake["challenge_id"] != real["challenge_id"]
 
 
+def test_real_branch_stays_under_the_floor(monkeypatch):
+    """The fake branch can only be padded DOWN to the floor if the real
+    branch finishes its work (issue + store write, mail mocked) under it;
+    measure the real path with padding disabled."""
+    monkeypatch.setattr(signup_service, "FORGOT_FLOOR_SEC", 0.0)
+    real_send = signup_service._send
+    monkeypatch.setattr(signup_service, "_send",
+                        lambda kind, *a, **kw: None if kind == "reset_link"
+                        else real_send(kind, *a, **kw))  # mail already off-path
+    c = _client()
+    _verified_user(c)
+    started = time.monotonic()
+    r = _forgot(c)
+    elapsed = time.monotonic() - started
+    assert r.status_code == 202
+    # Generous headroom vs the 0.25s production floor.
+    assert elapsed < 0.2, f"real branch took {elapsed:.3f}s"
