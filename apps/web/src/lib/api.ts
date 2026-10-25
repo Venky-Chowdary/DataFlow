@@ -112,13 +112,19 @@ export class ApiError extends Error {
   readonly status: number;
   readonly requiredPermission: string;
   readonly effectiveRole: string;
+  /** Machine code + pending-challenge handle from the {error:{code}} envelope,
+   * when the route emits one (e.g. 403 email_unverified carries challenge_id). */
+  readonly code: string;
+  readonly challengeId: string;
 
-  constructor(message: string, status: number, requiredPermission = "", effectiveRole = "") {
+  constructor(message: string, status: number, requiredPermission = "", effectiveRole = "", code = "", challengeId = "") {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.requiredPermission = requiredPermission;
     this.effectiveRole = effectiveRole;
+    this.code = code;
+    this.challengeId = challengeId;
   }
 
   get forbidden(): boolean {
@@ -196,6 +202,13 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   const workspaceId = getActiveWorkspaceId();
   if (workspaceId && !headers.has("X-Workspace-Id")) {
     headers.set("X-Workspace-Id", workspaceId);
+  }
+  // Cookie session (P3): mutating requests echo the readable dw_csrf cookie so
+  // the middleware's double-submit check can bind the call to this browser.
+  const method = (requestInit.method ?? "GET").toUpperCase();
+  if (method !== "GET" && method !== "HEAD" && !headers.has("x-csrf-token")) {
+    const csrf = (document.cookie.match(/(?:^|;\s*)dw_csrf=([^;]+)/) ?? [])[1];
+    if (csrf) headers.set("x-csrf-token", decodeURIComponent(csrf));
   }
   // A JSON body the caller forgot to label is still a JSON body. Without this
   // the request reaches FastAPI as an unparsed string and every field of the
@@ -4051,8 +4064,23 @@ export async function loginWorkspace(email: string, password: string): Promise<{
   if (!res.ok) {
     // Carry the status: a refused password (401) and an unreachable control
     // plane are different facts, and the sign-in screen cannot tell them apart
-    // from message text alone.
-    throw new ApiError(await parseApiError(res, "Sign-in failed"), res.status);
+    // from message text alone. When the route uses the {error:{code}} envelope
+    // (flag-on signup surface), surface the code + challenge_id so the UI can
+    // route a 403 email_unverified straight into code entry.
+    const body = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+    const env = (body?.error ?? {}) as Record<string, unknown>;
+    const message =
+      (typeof env.message === "string" && env.message) ||
+      (typeof body?.detail === "string" && body.detail) ||
+      "Sign-in failed";
+    throw new ApiError(
+      message,
+      res.status,
+      "",
+      "",
+      typeof env.code === "string" ? env.code : "",
+      typeof body?.challenge_id === "string" ? body.challenge_id : "",
+    );
   }
   return res.json();
 }

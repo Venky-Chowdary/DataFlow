@@ -1,0 +1,141 @@
+/**
+ * Self-serve signup API client (flag-gated DATAWRAP_SIGNUP_ENABLED).
+ *
+ * The new auth surface answers the {error:{code,message,retry_after_sec}}
+ * envelope rather than {detail}; errors surface as SignupApiError carrying
+ * the machine code so the UI can react without sniffing message text.
+ */
+import { API_BASE } from "./types";
+
+export class SignupApiError extends Error {
+  readonly status: number;
+  readonly code: string;
+  readonly retryAfterSec: number;
+  readonly challengeId: string;
+
+  constructor(status: number, code: string, message: string, retryAfterSec = 0, challengeId = "") {
+    super(message);
+    this.name = "SignupApiError";
+    this.status = status;
+    this.code = code;
+    this.retryAfterSec = retryAfterSec;
+    this.challengeId = challengeId;
+  }
+}
+
+async function call(path: string, body?: unknown): Promise<Record<string, unknown>> {
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: body === undefined ? "GET" : "POST",
+    headers: body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    credentials: "include",
+  });
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    const err = (data.error ?? {}) as Record<string, unknown>;
+    throw new SignupApiError(
+      res.status,
+      String(err.code ?? "request_failed"),
+      String(err.message ?? data.detail ?? "Request failed."),
+      Number(err.retry_after_sec ?? 0),
+      String(data.challenge_id ?? ""),
+    );
+  }
+  return data;
+}
+
+export interface ChallengeResponse {
+  ok: boolean;
+  challengeId: string;
+  resendAfterSec: number;
+  expiresInSec: number;
+}
+
+function challenge(data: Record<string, unknown>): ChallengeResponse {
+  return {
+    ok: Boolean(data.ok ?? true),
+    challengeId: String(data.challenge_id ?? ""),
+    resendAfterSec: Number(data.resend_after_sec ?? 60),
+    expiresInSec: Number(data.expires_in_sec ?? 600),
+  };
+}
+
+/** Null when self-serve signup is disabled on this deployment (route 404s). */
+export async function fetchFormToken(purpose: string): Promise<string | null> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/form-token?purpose=${encodeURIComponent(purpose)}`);
+    if (!res.ok) return null;
+    const data = (await res.json()) as Record<string, unknown>;
+    return typeof data.form_token === "string" ? data.form_token : null;
+  } catch {
+    return null;
+  }
+}
+
+export async function signupRequest(input: {
+  email: string;
+  name: string;
+  password: string;
+  formToken?: string;
+}): Promise<ChallengeResponse> {
+  const data = await call("/auth/signup", {
+    email: input.email,
+    name: input.name,
+    password: input.password,
+    form_token: input.formToken || undefined,
+    honeypot: "",
+  });
+  return challenge(data);
+}
+
+export async function verifyEmail(input: {
+  challengeId: string;
+  code: string;
+}): Promise<{ user: { email: string; name?: string; role?: string }; next?: string }> {
+  const data = await call("/auth/verify-email", {
+    challenge_id: input.challengeId,
+    code: input.code,
+  });
+  return data as { user: { email: string; name?: string; role?: string }; next?: string };
+}
+
+export async function resendCode(challengeId: string): Promise<ChallengeResponse> {
+  const data = await call("/auth/resend", { challenge_id: challengeId });
+  return challenge(data);
+}
+
+export async function forgotPassword(email: string, formToken?: string): Promise<ChallengeResponse> {
+  const data = await call("/auth/password/forgot", {
+    email,
+    form_token: formToken || undefined,
+    honeypot: "",
+  });
+  return challenge(data);
+}
+
+export async function resetPassword(input: {
+  challengeId: string;
+  code: string;
+  newPassword: string;
+}): Promise<{ ok: boolean }> {
+  const data = await call("/auth/password/reset", {
+    challenge_id: input.challengeId,
+    code: input.code,
+    new_password: input.newPassword,
+  });
+  return { ok: Boolean(data.ok) };
+}
+
+export interface SsoRoute {
+  sso: string | null;
+  start_url?: string;
+}
+
+export async function routeSsoForEmail(email: string): Promise<SsoRoute> {
+  try {
+    const data = await call("/auth/sso/route", { email });
+    return { sso: (data.sso as string | null) ?? null, start_url: data.start_url as string | undefined };
+  } catch {
+    return { sso: null };
+  }
+}

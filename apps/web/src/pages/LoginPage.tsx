@@ -2,7 +2,8 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { BrandWordmark } from "../components/BrandWordmark";
 import { DtIcon } from "../components/DtIcon";
 import { useToast } from "../components/Toast";
-import { fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
+import { ApiError, fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
+import { fetchFormToken } from "../lib/signupApi";
 import { classifySignInFailure, SignInFailure } from "../lib/signInFailure";
 import { UI_PREVIEW_TOKEN, writeSession } from "../lib/session";
 import { Screen } from "../lib/types";
@@ -13,6 +14,12 @@ interface LoginPageProps {
   onAuthenticated: (email: string) => void;
   onBack: () => void;
   onLegal?: (route: Extract<PublicRoute, "privacy" | "terms">) => void;
+  /** Self-serve signup (flag-gated server-side; links render only when the
+   *  deployment answers the form-token route). */
+  onSignup?: () => void;
+  onForgotPassword?: () => void;
+  /** 403 email_unverified: the API minted a fresh code — jump into code entry. */
+  onVerifyPending?: (challengeId: string, email: string) => void;
 }
 
 function isValidEmail(value: string) {
@@ -34,7 +41,7 @@ const TRUST_METRICS = [
   { value: "Σ", label: "Checksum proof" },
 ];
 
-export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPageProps) {
+export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, onForgotPassword, onVerifyPending }: LoginPageProps) {
   const { toast } = useToast();
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -51,9 +58,14 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
   const [failure, setFailure] = useState<SignInFailure>("auth");
   const [capsLock, setCapsLock] = useState(false);
   const [ssoProviders, setSsoProviders] = useState<Array<{ type: SsoType; label: string; login_path: string }>>([]);
+  const [signupEnabled, setSignupEnabled] = useState(false);
+  const [pendingVerify, setPendingVerify] = useState<{ challengeId: string; email: string } | null>(null);
 
   useEffect(() => {
     fetchSsoProviders().then(setSsoProviders).catch(() => setSsoProviders([]));
+    // The signup router is only mounted when DATAWRAP_SIGNUP_ENABLED=1 — the
+    // form-token route 404s otherwise, which is also the feature check.
+    fetchFormToken("signup").then((t) => setSignupEnabled(Boolean(t)));
   }, []);
 
   const emailTrimmed = email.trim();
@@ -114,7 +126,10 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
       const msg = err instanceof Error ? err.message : "";
       const kind = classifySignInFailure(err);
       setFailure(kind);
-      if (kind === "api") {
+      if (err instanceof ApiError && err.code === "email_unverified" && err.challengeId) {
+        setPendingVerify({ challengeId: err.challengeId, email: emailTrimmed });
+        setCredentialError("Your email isn't verified yet — we sent a fresh code.");
+      } else if (kind === "api") {
         setCredentialError("Cannot reach the API. Confirm the control plane URL and that the API service is online.");
         toast({
           title: "API offline",
@@ -261,6 +276,26 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
               </div>
             )}
 
+            {pendingVerify && (
+              <div className="lp-login-alert lp-login-alert--warn" role="alert">
+                <DtIcon name="alert" size={18} />
+                <div>
+                  <strong>Verify your email</strong>
+                  <p>
+                    {credentialError}{" "}
+                    {onVerifyPending && (
+                      <button
+                        type="button"
+                        onClick={() => onVerifyPending(pendingVerify.challengeId, pendingVerify.email)}
+                      >
+                        Enter verification code
+                      </button>
+                    )}
+                  </p>
+                </div>
+              </div>
+            )}
+
             <form className="lp-login-form" onSubmit={submit} noValidate>
               <div className={`lp-field ${emailError ? "is-error" : emailOk && emailTrimmed ? "is-ok" : ""}`}>
                 <div className="lp-label-row">
@@ -330,6 +365,11 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
                   <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
                   <span>Keep me signed in on this device</span>
                 </label>
+                {signupEnabled && onForgotPassword && (
+                  <button type="button" className="lp-login-forgot" onClick={onForgotPassword}>
+                    Forgot password?
+                  </button>
+                )}
               </div>
 
               <button
@@ -341,6 +381,12 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal }: LoginPag
                 {!checking && <DtIcon name="arrow-right" size={16} />}
               </button>
             </form>
+
+            {signupEnabled && onSignup && (
+              <p className="lp-login-legal">
+                New to Datawrap? <button type="button" onClick={onSignup}>Create an account</button>
+              </p>
+            )}
 
             {ssoProviders.length > 0 && (
               <>
