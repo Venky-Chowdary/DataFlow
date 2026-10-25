@@ -232,13 +232,13 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
                   <p>
                     {credentialError}{" "}
                     {onVerifyPending && (
-                      <button
-                        type="button"
-                        className="lp-login-alert-link"
+                      <AuthButton
+                        variant="link"
+                        size="sm"
                         onClick={() => onVerifyPending(pendingVerify.challengeId, pendingVerify.email)}
                       >
                         Enter verification code
-                      </button>
+                      </AuthButton>
                     )}
                   </p>
                 </div>
