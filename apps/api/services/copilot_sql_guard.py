@@ -11,7 +11,8 @@ from typing import Any
 
 _IDENT = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\b")
 # Engine catalogs are not columns of the table being read. Refusing them
-# blocked ``SELECT * FROM sqlite_master`` (QA R2-090).
+# blocked ``SELECT * FROM sqlite_master`` (QA R2-090) and the information_schema
+# reads every query console legitimately runs (D17/M23).
 _CATALOG_RELATIONS = frozenset({
     "sqlite_master",
     "sqlite_schema",
@@ -19,6 +20,51 @@ _CATALOG_RELATIONS = frozenset({
     "sqlite_temp_schema",
     "information_schema",
     "pg_catalog",
+    "mysql",
+    "sys",
+    "performance_schema",
+})
+#: Read-only catalog objects reachable inside a catalog schema — a SELECT may
+#: reference them without their names existing in the introspected schema.
+_CATALOG_OBJECTS = frozenset({
+    # information_schema.*
+    "columns", "tables", "schemata", "views", "statistics",
+    "key_column_usage", "table_constraints", "referential_constraints",
+    "routines", "parameters", "triggers", "events", "check_constraints",
+    "constraint_column_usage", "sequences",
+    # pg_catalog.*
+    "pg_class", "pg_namespace", "pg_attribute", "pg_type", "pg_index",
+    "pg_constraint", "pg_am", "pg_proc", "pg_tables", "pg_views",
+    "pg_indexes", "pg_matviews", "pg_enum", "pg_range", "pg_attrdef",
+    "pg_stat_user_tables", "pg_sequences", "pg_roles", "pg_settings",
+    # sqlite PRAGMA-table functions
+    "pragma_table_info", "pragma_table_xinfo", "pragma_index_list",
+    "pragma_index_info", "pragma_foreign_key_list",
+    # duckdb / generic
+    "duckdb_columns", "duckdb_tables", "duckdb_schemas",
+    "current_schemas", "current_schema", "current_database",
+    "session_user", "current_user",
+    # catalog column vocabulary — column_name/table_name inside an
+    # information_schema/pg_catalog read are catalog fields, not user columns
+    "column_name", "table_name", "table_schema", "table_catalog",
+    "ordinal_position", "data_type", "is_nullable", "column_default",
+    "character_maximum_length", "numeric_precision", "numeric_scale",
+    "udt_name", "constraint_name", "constraint_type", "routine_name",
+    "specific_name", "trigger_name", "event_object_table",
+    "relname", "attname", "nspname", "typname", "indexdef",
+    "schemaname", "tablename", "viewname", "indexname", "seqrelid",
+    "attnum", "attnotnull", "atttypid", "conname", "conrelid",
+    "indisunique", "indisprimary", "relkind", "relnamespace",
+    "oid", "name", "type", "sql", "tbl_name", "rootpage",
+})
+#: Date/time field names and unit literals that are arguments to functions
+#: (extract/datediff/date_part), never schema identifiers (D17).
+_SQL_NON_IDENT_TOKENS = frozenset({
+    "epoch", "epoch_microsecond", "epoch_millisecond", "microsecond",
+    "millisecond", "second", "minute", "hour", "day", "dow", "isodow", "doy",
+    "week", "month", "quarter", "year", "decade", "century", "millennium",
+    "timezone", "zone", "utc", "localtime", "localtimestamp",
+    "true", "false", "null", "default", "collate",
 })
 _SQL_KEYWORDS = frozenset(
     {
@@ -123,7 +169,67 @@ def _normalize_ident(name: str) -> str:
     return str(name or "").strip().strip('"').strip("`").strip("[]").lower()
 
 
-def extract_sql_identifiers(sql: str) -> set[str]:
+def _sqlglot_identifiers(sql: str, dialect: str = "") -> set[str] | None:
+    """Real referenced names via sqlglot — or ``None`` when it cannot parse.
+
+    Tables yield their last part; columns yield their unqualified name; CTE
+    names and aliases are query-defined, not schema identifiers (D17/M23).
+    """
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except ImportError:
+        return None
+    # E'...' / N'...' / B'...' / X'...' prefixed literals are literals, not
+    # identifiers — sqlglot reads the bare prefix letter as a column (D17).
+    sql = re.sub(r"\b[ENBX]'(?:''|[^'])*'", " ", sql or "")
+    dialect_arg = dialect or None
+    try:
+        tree = sqlglot.parse_one(sql, read=dialect_arg)
+    except Exception:
+        try:
+            tree = sqlglot.parse_one(sql)
+        except Exception:
+            return None
+    if tree is None:
+        return None
+    query_defined = {
+        str(cte.alias).lower()
+        for cte in tree.find_all(exp.CTE)
+        if getattr(cte, "alias", None)
+    }
+    query_defined.update(
+        str(a.alias).lower()
+        for a in tree.find_all(exp.Alias)
+        if getattr(a, "alias", None)
+    )
+    query_defined.update(
+        str(t.alias).lower()
+        for t in tree.find_all(exp.Table)
+        if getattr(t, "alias", None)
+    )
+    found: set[str] = set()
+    for table in tree.find_all(exp.Table):
+        # information_schema.columns / pg_catalog.pg_class are catalogs, not
+        # user tables — the read-only allowlist owns them.
+        if (table.catalog or table.db or "").lower() in _CATALOG_RELATIONS:
+            continue
+        name = str(table.name or "").strip().lower()
+        if name and name not in query_defined:
+            found.add(name)
+    for col in tree.find_all(exp.Column):
+        name = str(col.name or "").strip().lower()
+        if not name or name == "*":
+            continue
+        if name in query_defined:
+            continue
+        if col.table and str(col.table).lower() in _CATALOG_RELATIONS:
+            continue
+        found.add(name)
+    return found
+
+
+def extract_sql_identifiers(sql: str, dialect: str = "") -> set[str]:
     """Best-effort identifier tokens from SQL (excluding string literals).
 
     Result aliases (``COUNT(*) AS n``) and table aliases (``FROM orders AS o``)
@@ -192,7 +298,7 @@ def extract_sql_identifiers(sql: str) -> set[str]:
     for match in _IDENT.finditer(scrubbed):
         tok = match.group(1)
         low = tok.lower()
-        if low in _SQL_KEYWORDS or low in aliases or low in function_calls or low in cast_types:
+        if low in _SQL_KEYWORDS or low in _SQL_NON_IDENT_TOKENS or low in aliases or low in function_calls or low in cast_types:
             continue
         if tok.isdigit():
             continue
@@ -228,6 +334,7 @@ def assert_identifiers_allowed(
     sql: str,
     *,
     allowed: set[str],
+    dialect: str = "",
 ) -> None:
     """Raise ValueError when SQL references identifiers outside ``allowed``.
 
@@ -237,7 +344,15 @@ def assert_identifiers_allowed(
         raise ValueError(
             "Schema allow-list unavailable — refuse Pilot SQL until introspection succeeds."
         )
-    unknown = sorted(extract_sql_identifiers(sql) - allowed - _CATALOG_RELATIONS)
+    parsed = _sqlglot_identifiers(sql, dialect)
+    if parsed is None:
+        # The parser could not read the SQL — fall back to the regex pass
+        # rather than fail open or refuse valid syntax outright.
+        parsed = extract_sql_identifiers(sql, dialect)
+    unknown = sorted(
+        parsed - allowed - _CATALOG_RELATIONS - _CATALOG_OBJECTS
+        - _SQL_NON_IDENT_TOKENS
+    )
     if unknown:
         preview = ", ".join(unknown[:12])
         more = f" (+{len(unknown) - 12} more)" if len(unknown) > 12 else ""

@@ -343,7 +343,8 @@ def test_execute_flags_truncation_at_limit(test_client, tmp_path, monkeypatch):
 
 
 def test_execute_empty_result_reports_unknown_types(test_client, tmp_path, monkeypatch):
-    """No rows means no evidence — report unknown rather than guessing."""
+    """No rows on a base-table read still knows the declared types — only an
+    expression column with no catalog source stays 'unknown' (M20)."""
     _isolated_store(monkeypatch, tmp_path)
     conn = _sqlite_connector("Empty SQLite", _sqlite_db(tmp_path))
 
@@ -355,6 +356,14 @@ def test_execute_empty_result_reports_unknown_types(test_client, tmp_path, monke
     data = response.json()
     assert data["row_count"] == 0
     assert data["truncated"] is False
+    assert data["column_schema"] == {"id": "INTEGER", "name": "TEXT"}
+
+    response = test_client.post("/api/v1/query/execute", json={
+        "connector_id": conn.id,
+        "query": "SELECT id + 1 AS derived FROM users WHERE id < 0",
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
     assert set(data["column_schema"].values()) <= {"unknown"}
 
 
