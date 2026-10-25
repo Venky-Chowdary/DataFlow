@@ -1026,6 +1026,35 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 ).strip(" ·")
             # Empty collections still exist — never treat "no sample docs" as create-new.
             out["table_exists"] = True
+            # Unique-index catalog — every Mongo collection carries the unique
+            # `_id_` index, and DataFlow-created upsert targets get a unique
+            # index on the conflict key. The D101 upsert-DDL gate reads these;
+            # without it the gate saw Mongo destinations as keyless heaps and
+            # blocked second-run upserts with a SQL-shaped remediation.
+            try:
+                unique_keys: list[dict[str, Any]] = []
+                pk_cols: list[str] = []
+                for idx_name, idx in (coll.index_information() or {}).items():
+                    if not isinstance(idx, dict) or not idx.get("unique"):
+                        continue
+                    key_spec = idx.get("key")
+                    idx_cols = (
+                        [str(k) for k in key_spec.keys()]
+                        if hasattr(key_spec, "keys")
+                        else [str(k) for k, _dir in (key_spec or [])]
+                    )
+                    unique_keys.append(
+                        {"name": str(idx_name), "columns": idx_cols, "unique": True}
+                    )
+                    if idx_name == "_id_":
+                        pk_cols = idx_cols
+                out["unique_keys"] = unique_keys
+                if pk_cols:
+                    out["primary_key_columns"] = pk_cols
+            except PyMongoError as exc:
+                logger.debug(
+                    "mongodb index_information failed for %s: %s", coll_name, exc
+                )
             if not columns:
                 out["message"] = (
                     f"{out.get('message', '')} · collection `{coll_name}` exists "

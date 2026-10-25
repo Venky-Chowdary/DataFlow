@@ -1885,6 +1885,11 @@ def write_mapped_rows(
             )
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="postgresql", schema=schema)
+        # None = existence never established; only a proven False allows the
+        # orphan-rollback registration below to drop the object. Declared at
+        # write scope: the upsert unique-key check below reads it on the
+        # create_table=False path too (operator's existing table).
+        pg_table_existed: bool | None = None
         if create_table:
             if engine not in {"redshift", "amazon_redshift", "redshift_serverless"}:
                 from services.type_system import collect_pg_enum_prerequisites
@@ -1892,9 +1897,6 @@ def write_mapped_rows(
                 for stmt in collect_pg_enum_prerequisites(logical_types):
                     cursor.execute(stmt)
             fidelity_plan = None
-            # None = existence never established; only a proven False allows the
-            # orphan-rollback registration below to drop the object.
-            pg_table_existed: bool | None = None
             from services.schema_fidelity import (
                 empty_unsupported_report,
                 render_create_column_defs,
@@ -2071,6 +2073,21 @@ def write_mapped_rows(
             # table, and registering that made a failed write (a NOT NULL
             # violation on row 1) drop a populated destination.
             if pg_table_existed is False:
+                # Durable ownership marker: a table this run created is ours —
+                # later upserts/replays may add the unique index without the
+                # operator-table disclosed-DDL gate (D101). Operator tables
+                # never carry this comment, so the gate stays fail-closed.
+                try:
+                    cursor.execute(
+                        sql.SQL(
+                            "COMMENT ON TABLE {}.{} IS 'dataflow:managed'"
+                        ).format(
+                            sql.Identifier(schema),
+                            sql.Identifier(table_name),
+                        )
+                    )
+                except Exception:
+                    logger.debug("managed-table comment skipped", exc_info=True)
                 try:
                     from services.auto_create_lifecycle import register_auto_create
 
@@ -2205,7 +2222,34 @@ def write_mapped_rows(
                 index_name = sanitize_identifier(
                     f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                 )
+                if pg_table_existed is None:
+                    # create_table=False path never probed — establish whether
+                    # this is an operator's existing table honestly before the
+                    # disclosed-DDL gate below decides on it.
+                    cursor.execute(
+                        """
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (schema, table_name),
+                    )
+                    pg_table_existed = cursor.fetchone() is not None
+                pg_table_managed = False
                 if pg_table_existed:
+                    # A table a prior DataFlow run created carries the
+                    # 'dataflow:managed' comment — index DDL on it is ours to
+                    # make; only unmarked (operator-owned) tables gate.
+                    try:
+                        cursor.execute(
+                            "SELECT obj_description(to_regclass(%s), 'pg_class')",
+                            (f'"{schema}"."{table_name}"',),
+                        )
+                        _row = cursor.fetchone()
+                        pg_table_managed = bool(_row and _row[0] == "dataflow:managed")
+                    except Exception:
+                        logger.debug("managed-table probe skipped", exc_info=True)
+                if pg_table_existed and not pg_table_managed:
                     # D101: DDL on an operator's existing table is disclosed
                     # and approved at Validate — never created silently.
                     cursor.execute(
@@ -2214,7 +2258,7 @@ def write_mapped_rows(
                         "JOIN pg_namespace n ON n.oid = t.relnamespace "
                         "WHERE i.indisunique AND t.relname = %s "
                         "AND n.nspname = %s "
-                        "AND (SELECT array_agg(a.attname ORDER BY a.attname) "
+                        "AND (SELECT array_agg(a.attname ORDER BY a.attname)::text[] "
                         "     FROM pg_attribute a "
                         "     WHERE a.attrelid = t.oid "
                         "       AND a.attnum = ANY(i.indkey)) "

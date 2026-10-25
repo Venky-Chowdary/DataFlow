@@ -1205,12 +1205,20 @@ def write_mapped_rows(
                     # each one is a collection scan, so throughput decays as the
                     # collection grows (measured: 598 rows/s at 3K down to ~31
                     # rows/s at 60K). Creating it is idempotent server-side.
-                    # The index is a throughput optimization, never a
-                    # correctness requirement, so a collection handle that
+                    # On a collection this run creates, the index is made UNIQUE:
+                    # the upsert merge is then server-enforced unique on the key,
+                    # which is what the D101 destination-key gate verifies on the
+                    # next run. On an operator's existing collection it stays a
+                    # non-unique throughput index — declaring uniqueness there is
+                    # undisclosed DDL that must be approved at Validate, and can
+                    # fail on existing duplicates. A collection handle that
                     # cannot create one (a restricted role, or a driver stand-in
                     # without the method) must not fail the write.
                     try:
-                        coll.create_index([(c, pymongo.ASCENDING) for c in pk_cols])
+                        coll.create_index(
+                            [(c, pymongo.ASCENDING) for c in pk_cols],
+                            unique=not collection_existed,
+                        )
                     except (PyMongoError, AttributeError) as exc:
                         logger.warning(
                             "could not index Mongo conflict key %s on %s: %s",
