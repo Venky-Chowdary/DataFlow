@@ -14,6 +14,7 @@ belongs to ``services.team_store``.
 
 from __future__ import annotations
 
+import logging
 import re
 import secrets
 from datetime import datetime, timezone
@@ -25,6 +26,8 @@ from pymongo.errors import DuplicateKeyError
 from services.metadata_backend import json_doc_transaction, load_json_doc, mongo_database
 from services.password_hash import hash_password
 from services.platform_config import data_dir
+
+logger = logging.getLogger(__name__)
 
 COLLECTION = "platform_users"
 
@@ -361,28 +364,54 @@ def update_user(
     return public_user(doc)
 
 
+_CANONICAL_INDEXED: set[str] = set()
+
+
+def _canonical_indexed_db():
+    """Mongo with the sparse unique canonical_email index ensured (once).
+
+    Sparse because rows written before the backfill lack the field; unique so
+    the canonical-claim below is decided by the database, not by a
+    check-then-write race."""
+    db = mongo_database()
+    if db is not None and db.name not in _CANONICAL_INDEXED:
+        try:
+            db[COLLECTION].create_index(
+                [("canonical_email", 1)], unique=True, sparse=True,
+                name="canonical_email_unique")
+        except Exception:
+            logger.debug("canonical_email index ensure failed", exc_info=True)
+        _CANONICAL_INDEXED.add(db.name)
+    return db
+
+
 def change_email(*, email: str, new_email: str,
                  canonical: str | None = None) -> dict[str, Any]:
     """Rekey an account to a new address (email-change flow after the new
     address is verified). The account's storage key IS the email, so this
     deletes the old row and inserts the updated one — callers move
-    memberships, orgs and sessions in the same step."""
+    memberships, orgs and sessions in the same step. The canonical claim is
+    atomic: the unique index (Mongo) or the file lock decides it, so two
+    racing rekeys cannot both land the same canonical address."""
     normalized = normalize_email(email)
     new_normalized = normalize_email(validate_email(new_email))
+    canonical = canonical or new_normalized
     doc = _read_one(normalized)
     if doc is None:
         raise UserStoreError(f"{normalized} has no account")
     if _read_one(new_normalized) is not None:
         raise UserStoreError(f"{new_normalized} already has an account")
     doc["email"] = new_normalized
-    doc["canonical_email"] = canonical or new_normalized
+    doc["canonical_email"] = canonical
     doc["updated_at"] = _now()
-    db = mongo_database()
+    db = _canonical_indexed_db()
     if db is not None:
         db[COLLECTION].delete_one({"_id": normalized})
-        db[COLLECTION].replace_one(
-            {"_id": new_normalized}, {"_id": new_normalized, **doc},
-            upsert=True)
+        try:
+            db[COLLECTION].insert_one({"_id": new_normalized, **doc})
+        except DuplicateKeyError as e:
+            raise UserStoreError(
+                f"{canonical} already belongs to an account") from e
     else:
         with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
             users = [
@@ -390,6 +419,9 @@ def change_email(*, email: str, new_email: str,
                 if isinstance(u, dict)
                 and normalize_email(u.get("email", "")) != normalized
             ]
+            if any(u.get("canonical_email") == canonical for u in users):
+                raise UserStoreError(
+                    f"{canonical} already belongs to an account")
             data["users"] = [*users, doc]
     return public_user(doc)
 

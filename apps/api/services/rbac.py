@@ -233,7 +233,6 @@ _PUBLIC_PATHS = {
     "/api/v1/auth/signup/config",
     "/api/v1/auth/password/forgot",
     "/api/v1/auth/password/reset",
-    "/api/v1/auth/email/change/confirm",
     "/api/v1/auth/sso/route",
     "/auth/signup",
     "/auth/verify-email",
@@ -243,7 +242,6 @@ _PUBLIC_PATHS = {
     "/auth/signup/config",
     "/auth/password/forgot",
     "/auth/password/reset",
-    "/auth/email/change/confirm",
     "/auth/sso/route",
     "/api/v1/catalog",
     "/.well-known/oauth-protected-resource",
@@ -262,10 +260,12 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # Listing/revoking your own sessions is likewise account-self.
     ("*", "/api/v1/auth/sessions", Permission.ACCOUNT_SELF),
     ("*", "/auth/sessions", Permission.ACCOUNT_SELF),
-    # Changing your own sign-in email: the request step needs your session;
-    # the confirm step is public — the mailed OTP is the proof of ownership.
+    # Changing your own sign-in email: both steps need your session — the
+    # mailed OTP proves the new address, the session binds it to this account.
     ("POST", "/api/v1/auth/email/change", Permission.ACCOUNT_SELF),
+    ("POST", "/api/v1/auth/email/change/confirm", Permission.ACCOUNT_SELF),
     ("POST", "/auth/email/change", Permission.ACCOUNT_SELF),
+    ("POST", "/auth/email/change/confirm", Permission.ACCOUNT_SELF),
     # Onboarding answers belong to the caller's own account/org.
     ("POST", "/api/v1/auth/onboarding", Permission.ACCOUNT_SELF),
     ("POST", "/auth/onboarding", Permission.ACCOUNT_SELF),

@@ -120,7 +120,7 @@ def test_request_refuses_disposable_domain():
     _verified_user(c)
     resp = _request_change(c, "ada@mailinator.com")
     assert resp.status_code == 400
-    assert resp.json()["error"]["code"] == "disposable_domain"
+    assert resp.json()["error"]["code"] == "blocked_address"
 
 
 def test_confirm_rekeys_account_memberships_orgs_and_revokes_sessions():
@@ -133,7 +133,8 @@ def test_confirm_rekeys_account_memberships_orgs_and_revokes_sessions():
     code = re.search(r"\b(\d{6})\b",
                      ConsoleEmailSender.OUTBOX[-1].text).group(1)
     ok = c.post("/api/v1/auth/email/change/confirm",
-                json={"challenge_id": cid, "code": code})
+                json={"challenge_id": cid, "code": code},
+                headers={"x-csrf-token": c.cookies["dw_csrf"]})
     assert ok.status_code == 200
     assert ok.json()["email"] == "ada2@example.com"
     assert user_store.get_user("ada@example.com") is None
@@ -157,12 +158,82 @@ def test_confirm_wrong_code_400_and_single_use():
     resp = _request_change(c, "ada2@example.com")
     cid = resp.json()["challenge_id"]
     bad = c.post("/api/v1/auth/email/change/confirm",
-                 json={"challenge_id": cid, "code": "000000"})
+                 json={"challenge_id": cid, "code": "000000"},
+                 headers={"x-csrf-token": c.cookies["dw_csrf"]})
     assert bad.status_code == 400
     code = re.search(r"\b(\d{6})\b",
                      ConsoleEmailSender.OUTBOX[-1].text).group(1)
     assert c.post("/api/v1/auth/email/change/confirm",
-                  json={"challenge_id": cid, "code": code}).status_code == 200
+                  json={"challenge_id": cid, "code": code},
+                  headers={"x-csrf-token": c.cookies["dw_csrf"]}).status_code == 200
     again = c.post("/api/v1/auth/email/change/confirm",
-                   json={"challenge_id": cid, "code": code})
-    assert again.status_code == 410
+                   json={"challenge_id": cid, "code": code},
+                   headers={"x-csrf-token": c.cookies["dw_csrf"]})
+    # the successful rekey revoked every session, so the replay is refused
+    # by the middleware before the single-use check can answer 410
+    assert again.status_code in (401, 410)
+
+
+def test_confirm_requires_auth():
+    c = _client()
+    _verified_user(c)
+    resp = _request_change(c, "ada2@example.com")
+    cid = resp.json()["challenge_id"]
+    code = re.search(r"\b(\d{6})\b",
+                     ConsoleEmailSender.OUTBOX[-1].text).group(1)
+    anon = _client()
+    r = anon.post("/api/v1/auth/email/change/confirm",
+                  json={"challenge_id": cid, "code": code})
+    assert r.status_code == 401
+    assert user_store.get_user("ada@example.com") is not None
+
+
+def test_confirm_other_account_forbidden():
+    c = _client()
+    _verified_user(c)
+    resp = _request_change(c, "ada2@example.com")
+    cid = resp.json()["challenge_id"]
+    code = re.search(r"\b(\d{6})\b",
+                     ConsoleEmailSender.OUTBOX[-1].text).group(1)
+    other = _client()
+    _verified_user(other, email="bob@example.com")
+    r = other.post("/api/v1/auth/email/change/confirm",
+                   json={"challenge_id": cid, "code": code},
+                   headers={"x-csrf-token": other.cookies["dw_csrf"]})
+    assert r.status_code == 403
+    assert user_store.get_user("ada@example.com") is not None
+
+
+def test_concurrent_same_target_only_one_wins():
+    """Two accounts racing to claim the same canonical address: exactly one
+    rekey lands; the loser gets email_taken instead of a clobbered account."""
+    import threading
+
+    c1, c2 = _client(), _client()
+    _verified_user(c1)
+    _verified_user(c2, email="bob@example.com")
+    target = "shared@example.com"
+    results: list[int] = []
+
+    def claim(client: TestClient) -> None:
+        resp = client.post("/api/v1/auth/email/change",
+                           json={"new_email": target},
+                           headers={"x-csrf-token": client.cookies["dw_csrf"]})
+        if resp.status_code != 202:
+            results.append(resp.status_code)
+            return
+        cid = resp.json()["challenge_id"]
+        code = re.search(r"\b(\d{6})\b",
+                         ConsoleEmailSender.OUTBOX[-1].text).group(1)
+        r = client.post("/api/v1/auth/email/change/confirm",
+                        json={"challenge_id": cid, "code": code},
+                        headers={"x-csrf-token": client.cookies["dw_csrf"]})
+        results.append(r.status_code)
+
+    t1 = threading.Thread(target=claim, args=(c1,))
+    t2 = threading.Thread(target=claim, args=(c2,))
+    t1.start(); t2.start(); t1.join(); t2.join()
+    assert sorted(results) == [200, 400]
+    owners = [e for e in ("ada@example.com", "bob@example.com")
+              if user_store.get_user(e) is None]
+    assert len(owners) == 1  # exactly one account rekeyed to shared@
