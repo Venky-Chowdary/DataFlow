@@ -26,6 +26,7 @@ from pydantic import BaseModel, Field
 
 from services.contact_leads import persist_lead
 from services.mcp_rate_limit import TokenBucketStore
+from services.notification_service import _send_resend
 from services.smtp_mailer import send_mail, smtp_configured
 
 LOG = logging.getLogger(__name__)
@@ -88,6 +89,50 @@ def _clean_list(values: list[str]) -> list[str]:
     return [str(v).strip()[:_MAX_ITEM_LEN] for v in values if str(v).strip()][
         :_MAX_LIST
     ]
+
+
+def _send_lead_mail(lead: dict[str, Any]) -> dict[str, Any]:
+    """Deliver the lead email: Resend first (DATAWRAP_RESEND_API_KEY, the
+    provider Datawrap uses in prod), Zoho SMTP as a dev fallback, or a
+    recorded "not configured" outcome. Never raises."""
+    from services.brand_env import getenv_brand
+
+    api_key = str(getenv_brand("RESEND_API_KEY", "") or "").strip()
+    subject = _safe_subject(
+        f"Datawrap pilot request — {lead.get('company') or '-'} ({lead.get('name') or '-'})"
+    )
+    if api_key:
+        from_addr = (
+            str(getenv_brand("EMAIL_FROM", "") or "").strip() or "noreply@datawrap.io"
+        )
+        res = _send_resend(
+            [_SALES_ADDRESS],
+            subject,
+            _lead_text(lead),
+            from_addr,
+            api_key,
+            reply_to=str(lead.get("email") or "").strip(),
+        )
+        # notification_service._send_resend reports {"ok": ...}; normalize to
+        # the {"sent": ...} contract this router uses.
+        return {
+            "sent": bool(res.get("ok")),
+            "error": str(res.get("error") or "") if not res.get("ok") else "",
+        }
+    if smtp_configured():
+        return send_mail(
+            to=_SALES_ADDRESS,
+            subject=subject,
+            text_body=_lead_text(lead),
+            reply_to=str(lead.get("email") or "").strip(),
+        )
+    return {"sent": False, "error": "mail_not_configured"}
+
+
+def _safe_subject(text: str) -> str:
+    # Header-injection guard: a lead field must never carry CR/LF into the
+    # Subject header.
+    return " ".join(str(text or "").split())[:200]
 
 
 def _lead_text(lead: dict[str, Any]) -> str:
@@ -170,14 +215,7 @@ async def contact_sales(body: ContactSalesIn, request: Request):
     }
     stored = persist_lead(lead)
 
-    mail_result: dict[str, Any] = {"sent": False, "error": "smtp_not_configured"}
-    if smtp_configured():
-        mail_result = send_mail(
-            to=_SALES_ADDRESS,
-            subject=f"Datawrap pilot request — {company} ({stored['name']})",
-            text_body=_lead_text(stored),
-            reply_to=email,
-        )
+    mail_result = _send_lead_mail(stored)
     if mail_result.get("sent"):
         stored["mail_sent"] = True
     else:

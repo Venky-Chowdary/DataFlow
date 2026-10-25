@@ -148,3 +148,98 @@ def test_rate_limit_per_ip(client, monkeypatch):
         assert r.status_code == 200, r.text
     res = client.post("/api/v1/contact-sales", json=_payload(email="another@example.com"))
     assert res.status_code == 429
+
+
+def test_resend_provider_sends_with_reply_to(client, monkeypatch):
+    """Resend is the prod provider — DATAWRAP_RESEND_API_KEY is set in Railway."""
+    persisted = []
+    sent = []
+    monkeypatch.setattr(
+        "src.routers.contact_router.persist_lead",
+        lambda l: persisted.append({**l, "lead_id": "r1", "created_at": "t"})
+        or {**l, "lead_id": "r1", "created_at": "t"},
+    )
+    monkeypatch.setenv("DATAWRAP_RESEND_API_KEY", "re_test_key")
+    monkeypatch.setattr(
+        "src.routers.contact_router._send_resend",
+        lambda to, subject, body, from_addr, api_key, reply_to="": sent.append(
+            {
+                "to": to,
+                "subject": subject,
+                "from": from_addr,
+                "api_key": api_key,
+                "reply_to": reply_to,
+            }
+        )
+        or {"ok": True},
+    )
+    monkeypatch.setattr("src.routers.contact_router.smtp_configured", lambda: False)
+
+    res = client.post("/api/v1/contact-sales", json=_payload())
+    assert res.status_code == 200, res.text
+    assert res.json()["delivered"] is True
+    assert sent and sent[0]["to"] == ["sales@datawrap.io"]
+    assert sent[0]["reply_to"] == "ada@example.com"
+    assert sent[0]["api_key"] == "re_test_key"
+    assert sent[0]["from"] == "noreply@datawrap.io"
+
+
+def test_no_provider_configured_still_persists(client, monkeypatch):
+    """No Resend key and no SMTP: lead persists, delivered=False, 2xx stands."""
+    persisted = []
+    monkeypatch.delenv("DATAWRAP_RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("DATAFLOW_RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    def _persist(lead):
+        rec = {**lead, "lead_id": "n1", "created_at": "t"}
+        persisted.append(rec)
+        return rec
+
+    monkeypatch.setattr("src.routers.contact_router.persist_lead", _persist)
+    monkeypatch.setattr("src.routers.contact_router.smtp_configured", lambda: False)
+
+    res = client.post("/api/v1/contact-sales", json=_payload())
+    assert res.status_code == 200
+    assert res.json()["delivered"] is False
+    assert persisted[0]["mail_error"] == "mail_not_configured"
+
+
+def test_smtp_fallback_when_no_resend_key(client, monkeypatch):
+    """SMTP stays a dev fallback only — used when no Resend key exists."""
+    mailed = []
+    monkeypatch.delenv("DATAWRAP_RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("DATAFLOW_RESEND_API_KEY", raising=False)
+    monkeypatch.delenv("RESEND_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "src.routers.contact_router.persist_lead",
+        lambda l: {**l, "lead_id": "s1", "created_at": "t"},
+    )
+    monkeypatch.setattr("src.routers.contact_router.smtp_configured", lambda: True)
+    monkeypatch.setattr(
+        "src.routers.contact_router.send_mail",
+        lambda **kw: mailed.append(kw) or {"sent": True},
+    )
+    res = client.post("/api/v1/contact-sales", json=_payload())
+    assert res.status_code == 200 and res.json()["delivered"] is True
+    assert mailed and mailed[0]["to"] == "sales@datawrap.io"
+    assert mailed[0]["reply_to"] == "ada@example.com"
+
+
+def test_subject_strips_crlf(client, monkeypatch):
+    sent = []
+    monkeypatch.setattr(
+        "src.routers.contact_router.persist_lead",
+        lambda l: {**l, "lead_id": "h1", "created_at": "t"},
+    )
+    monkeypatch.setenv("DATAWRAP_RESEND_API_KEY", "re_test_key")
+    monkeypatch.setattr(
+        "src.routers.contact_router._send_resend",
+        lambda to, subject, body, from_addr, api_key, reply_to="": sent.append(subject)
+        or {"ok": True},
+    )
+    res = client.post(
+        "/api/v1/contact-sales",
+        json=_payload(company="Acme\r\nBcc: attacker@evil.example"),
+    )
+    assert res.status_code == 200
+    assert sent and "\r" not in sent[0] and "\n" not in sent[0]

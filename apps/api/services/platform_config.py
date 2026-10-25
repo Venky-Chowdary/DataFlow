@@ -289,7 +289,7 @@ def email_provider_config() -> dict[str, Any]:
         cfg["api_key"] = os.getenv("SENDGRID_API_KEY", "")
         cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
     elif provider == "resend":
-        cfg["api_key"] = os.getenv("RESEND_API_KEY", "")
+        cfg["api_key"] = getenv_brand("RESEND_API_KEY", os.getenv("RESEND_API_KEY", ""))
         cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
     elif provider == "mailgun":
         cfg["api_key"] = os.getenv("MAILGUN_API_KEY", "")
