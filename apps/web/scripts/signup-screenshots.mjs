@@ -297,7 +297,7 @@ async function run(vpName, viewport, theme) {
       }),
     }));
   try {
-    await page.goto(`${BASE}/#/settings`, { waitUntil: "networkidle" });
+    await page.locator('button[title="Settings"]').first().click();
     await page.waitForTimeout(1800);
     const metrics = page.locator('[data-testid="signup-metrics-card"]');
     if (await metrics.count()) {
