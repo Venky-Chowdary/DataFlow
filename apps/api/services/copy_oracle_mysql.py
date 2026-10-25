@@ -110,9 +110,22 @@ def copy_oracle_to_mysql(
 
         exists = _mysql_table_exists(dst_cur, dest_table)
         dest_occupied = False
+        swap_at_end = False
+        swap_dest_q = dest_q
         if replace_destination and exists:
-            dst_cur.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
-            dest_conn.commit()
+            # C03/X-OW2 — stage the overwrite, one atomic RENAME swap at the
+            # commit boundary; a DROP-first left the destination absent for
+            # the whole run (MySQL auto-commits DDL) and unrecoverable.
+            from services.mysql_dest_swap import (
+                mysql_overwrite_trash_name,
+                mysql_staged_overwrite_name,
+            )
+
+            stage_table = mysql_staged_overwrite_name(dest_table)
+            swap_trash_table = mysql_overwrite_trash_name(dest_table)
+            dest_q = _mysql_ident(stage_table)
+            dest_table = stage_table
+            swap_at_end = True
             exists = False
         if exists:
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
@@ -211,6 +224,15 @@ def copy_oracle_to_mysql(
                         f"{dest_part} != source {part['source_count']} "
                         f"(lo={part['lo']!r} hi={part['hi']!r})"
                     )
+        if swap_at_end:
+            from services.mysql_dest_swap import mysql_swap_staged_dest
+
+            mysql_swap_staged_dest(
+                dst_cur,
+                dest_q=swap_dest_q,
+                staging_q=dest_q,
+                trash_q=_mysql_ident(swap_trash_table),
+            )
         dest_conn.commit()
         try:
             source_conn.commit()

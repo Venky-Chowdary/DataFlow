@@ -211,9 +211,22 @@ def copy_sqlite_to_mysql(
                 "append into occupied MySQL dest stays on the row path "
                 "(identity COPY would duplicate)"
             )
+        swap_at_end = False
+        swap_dest_q = dest_q
         if replace_destination and exists:
-            dst_cur.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
-            dest_conn.commit()
+            # C03/X-OW2 — stage the overwrite and swap atomically at the
+            # commit boundary; MySQL auto-commits DDL, so a DROP-first left
+            # the destination absent for the whole run and unrecoverable.
+            from services.mysql_dest_swap import (
+                mysql_overwrite_trash_name,
+                mysql_staged_overwrite_name,
+            )
+
+            stage_table = mysql_staged_overwrite_name(dest_table)
+            swap_trash_table = mysql_overwrite_trash_name(dest_table)
+            dest_q = _mysql_ident(stage_table)
+            dest_table = stage_table
+            swap_at_end = True
             exists = False
         if not exists:
             dst_cur.execute(_mysql_create_sql(dest_table, pairs, mysql_ddls, []))
@@ -261,6 +274,15 @@ def copy_sqlite_to_mysql(
             raise ValueError(
                 "SQLite→MySQL COPY refused: dest COUNT(*) "
                 f"{dest_count} != source COUNT {source_count}"
+            )
+        if swap_at_end:
+            from services.mysql_dest_swap import mysql_swap_staged_dest
+
+            mysql_swap_staged_dest(
+                dst_cur,
+                dest_q=swap_dest_q,
+                staging_q=dest_q,
+                trash_q=_mysql_ident(swap_trash_table),
             )
         dest_conn.commit()
         try:

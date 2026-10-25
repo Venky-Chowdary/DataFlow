@@ -681,8 +681,22 @@ def copy_postgres_to_mysql(
             exists = dst_cur.fetchone() is not None
             existed_before = bool(exists)
             dest_occupied = False
+            swap_at_end = False
+            swap_dest_q = table_q
             if replace_destination and exists:
-                dst_cur.execute(f"DROP TABLE IF EXISTS {table_q}")  # nosec B608
+                # C03/X-OW2 — stage the overwrite, one atomic RENAME swap at
+                # the commit boundary; a DROP-first left the destination
+                # absent for the whole run (MySQL auto-commits DDL).
+                from services.mysql_dest_swap import (
+                mysql_overwrite_trash_name,
+                mysql_staged_overwrite_name,
+            )
+
+                stage_table = mysql_staged_overwrite_name(dest_table)
+                swap_trash_table = mysql_overwrite_trash_name(dest_table)
+                table_q = _mysql_ident(stage_table)
+                dest_table = stage_table
+                swap_at_end = True
                 exists = False
             if exists:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
@@ -889,6 +903,15 @@ def copy_postgres_to_mysql(
                             f"{dest_part} != source {part['source_count']} "
                             f"(lo={part['lo']!r} hi={part['hi']!r})"
                         )
+            if swap_at_end:
+                from services.mysql_dest_swap import mysql_swap_staged_dest
+
+                mysql_swap_staged_dest(
+                    dst_cur,
+                    dest_q=swap_dest_q,
+                    staging_q=table_q,
+                    trash_q=_mysql_ident(swap_trash_table),
+                )
             dest_conn.commit()
             source_conn.commit()
             proof = f"dest_count:{dest_count}"
