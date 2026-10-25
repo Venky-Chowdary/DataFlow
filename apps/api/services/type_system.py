@@ -1321,12 +1321,15 @@ def bare_decimal_is_unbounded(*, dest_db: str = "") -> bool:
 
     PostgreSQL: ``NUMERIC`` / ``DECIMAL`` without (p,s) stores arbitrary precision
     (implementation limits). Oracle bare ``NUMBER`` is likewise unconstrained.
+    Kafka's ``decimal`` is not a DDL type at all — it is the JSON carrier
+    ``to_json_value`` binds, keeping exact precision (JSON number when exactly
+    representable, declared string otherwise), so no (p,s) comparison applies.
     MySQL bare DECIMAL invents ``DECIMAL(10,0)``; Snowflake bare NUMBER invents
     ``NUMBER(38,0)``; SQL Server bare DECIMAL invents ``DECIMAL(18,0)``.
     Unknown dest stays conservative (not unbounded).
     """
     db = _normalize_dest_db(dest_db) if dest_db else ""
-    return db in {"postgresql", "oracle", "oracledb"}
+    return db in {"postgresql", "oracle", "oracledb", "kafka"}
 
 
 #: IEEE 754-2008 decimal128 carries 34 significant decimal digits (exponent
