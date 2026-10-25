@@ -3173,10 +3173,45 @@ def _stream_database_transfer_impl(
     def _fk_held_out(batch: Any) -> list[dict[str, Any]]:
         return list(getattr(batch, "fk_orphan_details", None) or [])
 
+    def _kafka_meta_rows(batch: Any) -> tuple[list[dict[str, Any]], int]:
+        """Broker-side rejects (poison messages) and tombstone count the Kafka
+        reader carried on ``batch.meta`` — folded into this page's rejected
+        ledger so poison lands in the DLQ, never as an all-NULL row."""
+        meta = getattr(batch, "meta", None)
+        if not isinstance(meta, dict):
+            return [], 0
+        return (
+            list(meta.get("rejected_rows") or []),
+            int(meta.get("kafka_tombstones_seen") or 0),
+        )
+
     def _process_db_chunk_inner(idx: int, batch: Any) -> dict[str, Any]:
+        nonlocal rejected_total
         batch_sdk_state = None
         if sdk_source and isinstance(getattr(batch, "meta", None), dict):
             batch_sdk_state = batch.meta.get("sdk_state", "")
+        kafka_rejects, kafka_tombstones = _kafka_meta_rows(batch)
+        if kafka_rejects or kafka_tombstones:
+            dest_summary["rejected_details"] = list(
+                dest_summary.get("rejected_details") or []
+            ) + kafka_rejects
+            dest_summary["rejected_rows"] = int(
+                dest_summary.get("rejected_rows") or 0
+            ) + len(kafka_rejects)
+            dest_summary["kafka_tombstones_seen"] = int(
+                dest_summary.get("kafka_tombstones_seen") or 0
+            ) + kafka_tombstones
+            rejected_total += len(kafka_rejects)
+            if kafka_rejects and job_id:
+                from services.quarantine_dlq import persist_rejected_rows
+
+                persist_rejected_rows(
+                    job_id=job_id,
+                    rejected_details=kafka_rejects,
+                    workspace_id=workspace_id,
+                    source="transfer",
+                    connector=src_type,
+                )
         if not batch or not getattr(batch, "rows", None):
             # A page a filter or a recipe emptied still consumed source rows, so
             # the offset, the watermark and the keyset bookmark advance past it.

@@ -233,7 +233,25 @@ def read_topic_batch(
             if got == 0:
                 break
 
-        batch = _records_to_batch(records, columns, known_total_rows)
+        # Poison (undecodable) messages go to the rejected-rows channel with
+        # their broker coordinates — never land as all-NULL destination rows.
+        data_records = [r for r in records if not r.get("_kafka_poison")]
+        rejected = [
+            {
+                "row": {k: str(v) for k, v in r.items()},
+                "reason": f"kafka poison message: {r['_kafka_poison']}",
+            }
+            for r in records
+            if r.get("_kafka_poison")
+        ]
+        tombstones = int(getattr(consumer, "tombstones_seen", 0) or 0)
+        batch = _records_to_batch(data_records, columns, known_total_rows)
+        if rejected or tombstones:
+            batch.meta = dict(batch.meta or {})
+            if rejected:
+                batch.meta["rejected_rows"] = rejected
+            if tombstones:
+                batch.meta["kafka_tombstones_seen"] = tombstones
         pending = consumer.pending_offsets()
         # Emit a continuation cursor whenever offsets were consumed — including
         # tombstone / decode-skip batches that produce no output rows. Without

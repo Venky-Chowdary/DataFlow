@@ -67,7 +67,12 @@ def parse_debezium_envelope(payload: dict[str, Any] | str) -> DebeziumChange | N
     )
 
 
-def kafka_value_to_row(val: Any, *, registry_url: str = "") -> dict[str, Any] | None:
+def kafka_value_to_row(
+    val: Any,
+    *,
+    registry_url: str = "",
+    meta: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     """One Kafka value as a row. A tombstone (empty value) is ``None``.
 
     Debezium envelopes and plain JSON objects share this decoder. The
@@ -88,18 +93,46 @@ def kafka_value_to_row(val: Any, *, registry_url: str = "") -> dict[str, Any] | 
         parsed = val
     change = parse_debezium_envelope(parsed if isinstance(parsed, (dict, str)) else None)
     if change is not None:
-        return debezium_to_row(change)
+        return _kafka_row(debezium_to_row(change), meta=meta)
     if isinstance(parsed, dict):
-        return parsed
+        return _kafka_row(parsed, meta=meta)
     if isinstance(parsed, str):
         try:
             obj = json_loads_exact(parsed)
         except json.JSONDecodeError:
-            return {"_kafka_value": parsed}
+            return _kafka_row({"_kafka_value": parsed}, meta=meta, poison="non-JSON Kafka message")
         if isinstance(obj, dict):
-            return obj
-        return {"_kafka_value": str(obj)}
-    return {"_kafka_value": str(parsed)}
+            return _kafka_row(obj, meta=meta)
+        return _kafka_row({"_kafka_value": str(obj)}, meta=meta, poison="non-object JSON Kafka message")
+    return _kafka_row({"_kafka_value": str(parsed)}, meta=meta, poison="non-JSON Kafka message")
+
+
+_KAFKA_META_COLS = ("_kafka_topic", "_kafka_partition", "_kafka_offset", "_kafka_key")
+
+
+def _kafka_row(
+    row: dict[str, Any],
+    *,
+    meta: dict[str, Any] | None,
+    poison: str | None = None,
+) -> dict[str, Any]:
+    """Attach broker provenance (topic/partition/offset/key) so a quarantined
+    or landed row can be traced back to the exact broker record. ``poison``
+    marks a value that could not be decoded into columns — the reader routes
+    it to the rejected-rows channel instead of writing an all-NULL row.
+    """
+    meta = meta or {}
+    for _k, _col in (
+        ("topic", "_kafka_topic"),
+        ("partition", "_kafka_partition"),
+        ("offset", "_kafka_offset"),
+        ("key", "_kafka_key"),
+    ):
+        if meta.get(_k) is not None:
+            row[_col] = meta[_k]
+    if poison:
+        row["_kafka_poison"] = poison
+    return row
 
 
 def debezium_to_row(change: DebeziumChange) -> dict[str, Any] | None:
@@ -134,6 +167,7 @@ class KafkaDebeziumConsumer:
         self.config = config
         self._consumer = None
         self._pending_offsets: dict[tuple[str, int], int] = {}
+        self.tombstones_seen: int = 0
 
     def connect(self) -> None:
         try:
@@ -211,7 +245,22 @@ class KafkaDebeziumConsumer:
                 prev = self._pending_offsets.get(key)
                 if prev is None or nxt > prev:
                     self._pending_offsets[key] = nxt
-                row = kafka_value_to_row(msg.value, registry_url=registry_url)
+                if not msg.value:
+                    self.tombstones_seen += 1
+                row = kafka_value_to_row(
+                    msg.value,
+                    registry_url=registry_url,
+                    meta={
+                        "topic": msg.topic,
+                        "partition": int(msg.partition),
+                        "offset": int(msg.offset),
+                        "key": (
+                            msg.key.decode("utf-8", "replace")
+                            if isinstance(msg.key, (bytes, bytearray))
+                            else msg.key
+                        ),
+                    },
+                )
                 if row:
                     yield row
 
