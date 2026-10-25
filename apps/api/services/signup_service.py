@@ -42,6 +42,7 @@ from services.email_sender import (
 )
 from services.email_templates import render_email
 from services.org_store import create_organization
+from services import org_store
 from services.password_hash import hash_password_argon2
 
 logger = logging.getLogger(__name__)
@@ -531,6 +532,82 @@ def confirm_password_reset(*, challenge_id: str, code: str,
     record_security_event("password.reset.completed", outcome="succeeded",
                           actor=user["email"], details={"ip": ip})
     return {"ok": True}
+
+
+def request_email_change(*, user_email: str, new_email: str,
+                         ip: str = "") -> dict[str, Any]:
+    """P4-2: send an OTP to the NEW address — proving ownership — plus a
+    notice to the current address."""
+    user = user_store.get_user(user_email)
+    if user is None:
+        raise ApiError(401, "unauthorized", "sign in to change your email")
+    normalized = user_store.validate_email(new_email)
+    if disposable_list.is_disposable(normalized):
+        raise ApiError(400, "disposable_domain",
+                       "that email domain can't be used for an account")
+    canonical_new = canonical_email(normalized)
+    if user_store.find_by_canonical(canonical_new) is not None:
+        raise ApiError(400, "email_taken",
+                       "that address already belongs to an account")
+    subject = f"{user_email}|{normalized}"
+    challenge, code = otp_service.issue(subject, "email_change")
+    try:
+        _send("email_change_code", normalized,
+              {"name": user.get("name") or "there", "code": code,
+               "expires_minutes": int(otp_service.OTP_TTL.total_seconds() // 60)},
+              idempotency_key=f"otp:{challenge['id']}:{challenge['sent_count']}")
+    except (EmailSendError, EmailQuotaExceeded):
+        logger.warning("email-change code send failed")
+    record_security_event("email_change.requested", outcome="succeeded",
+                          actor=user_email, session_id=challenge["id"],
+                          details={"ip": ip})
+    return {
+        "ok": True,
+        "challenge_id": challenge["id"],
+        "resend_after_sec": RESEND_COOLDOWN_SEC,
+        "expires_in_sec": int(otp_service.OTP_TTL.total_seconds()),
+    }
+
+
+def confirm_email_change(*, challenge_id: str, code: str,
+                         ip: str = "") -> dict[str, Any]:
+    """P4-2: verify the new-address code, rekey the account, memberships
+    and orgs, revoke every session, notify the old address."""
+    result = otp_service.verify(challenge_id, code)
+    if result != "ok":
+        record_security_event("otp.verify_failed", outcome="failed",
+                              session_id=challenge_id, reason_code=result)
+        if result in ("consumed", "not_found"):
+            raise ApiError(410, "code_expired",
+                           "this code is no longer valid — request a new one")
+        raise ApiError(400, "invalid_code", "that code doesn't match — try again")
+    challenge = signup_store.get_challenge(challenge_id)
+    if challenge is None or challenge.get("purpose") != "email_change":
+        raise ApiError(410, "code_expired",
+                       "this code is no longer valid — request a new one")
+    old_email, _, new_email = str(challenge["subject_id"]).partition("|")
+    if not old_email or not new_email:
+        raise ApiError(410, "code_expired",
+                       "this code is no longer valid — request a new one")
+    canonical_new = canonical_email(new_email)
+    if user_store.find_by_canonical(canonical_new) is not None:
+        raise ApiError(400, "email_taken",
+                       "that address already belongs to an account")
+    user_store.change_email(
+        email=old_email, new_email=new_email, canonical=canonical_new)
+    team_store.rekey_memberships(old_email, new_email)
+    org_store.rekey_creator(old_email, new_email)
+    get_auth_state().revoke_all_for_user(old_email)
+    try:
+        _send("email_change_old_notice", old_email,
+              {"new_email": new_email},
+              idempotency_key=f"email-change-notice:{challenge_id}")
+    except (EmailSendError, EmailQuotaExceeded):
+        logger.warning("email-change old-address notice failed")
+    record_security_event("email_change.completed", outcome="succeeded",
+                          actor=new_email, session_id=challenge_id,
+                          details={"ip": ip})
+    return {"ok": True, "email": new_email}
 
 
 def _challenge_recipient(challenge: dict[str, Any]) -> tuple[str, dict[str, Any]]:

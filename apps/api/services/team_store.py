@@ -387,6 +387,19 @@ def _write_membership(m: Membership) -> None:
         ] + [m.to_dict()]
 
 
+def rekey_memberships(old_email: str, new_email: str) -> int:
+    """Move every membership row from one account email to another
+    (email-change flow). Memberships are keyed ``ws:email`` so each row is
+    deleted and rewritten under the new key."""
+    moved = 0
+    for m in _read_memberships(email=old_email):
+        _delete_membership(m.workspace_id, m.email)
+        m.email = normalize_email(new_email)
+        _write_membership(m)
+        moved += 1
+    return moved
+
+
 def _delete_membership(workspace_id: str, email: str) -> bool:
     db = _database()
     if db is not None:

@@ -361,6 +361,39 @@ def update_user(
     return public_user(doc)
 
 
+def change_email(*, email: str, new_email: str,
+                 canonical: str | None = None) -> dict[str, Any]:
+    """Rekey an account to a new address (email-change flow after the new
+    address is verified). The account's storage key IS the email, so this
+    deletes the old row and inserts the updated one — callers move
+    memberships, orgs and sessions in the same step."""
+    normalized = normalize_email(email)
+    new_normalized = normalize_email(validate_email(new_email))
+    doc = _read_one(normalized)
+    if doc is None:
+        raise UserStoreError(f"{normalized} has no account")
+    if _read_one(new_normalized) is not None:
+        raise UserStoreError(f"{new_normalized} already has an account")
+    doc["email"] = new_normalized
+    doc["canonical_email"] = canonical or new_normalized
+    doc["updated_at"] = _now()
+    db = mongo_database()
+    if db is not None:
+        db[COLLECTION].delete_one({"_id": normalized})
+        db[COLLECTION].replace_one(
+            {"_id": new_normalized}, {"_id": new_normalized, **doc},
+            upsert=True)
+    else:
+        with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
+            users = [
+                u for u in data.get("users", [])
+                if isinstance(u, dict)
+                and normalize_email(u.get("email", "")) != normalized
+            ]
+            data["users"] = [*users, doc]
+    return public_user(doc)
+
+
 def set_password(*, email: str, password: str, algo: str = "bcrypt") -> dict[str, Any]:
     normalized = normalize_email(email)
     doc = _read_one(normalized)

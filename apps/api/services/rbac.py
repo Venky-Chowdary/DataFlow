@@ -233,6 +233,7 @@ _PUBLIC_PATHS = {
     "/api/v1/auth/signup/config",
     "/api/v1/auth/password/forgot",
     "/api/v1/auth/password/reset",
+    "/api/v1/auth/email/change/confirm",
     "/auth/signup",
     "/auth/verify-email",
     "/auth/resend",
@@ -241,6 +242,7 @@ _PUBLIC_PATHS = {
     "/auth/signup/config",
     "/auth/password/forgot",
     "/auth/password/reset",
+    "/auth/email/change/confirm",
     "/api/v1/catalog",
     "/.well-known/oauth-protected-resource",
     "/.well-known/oauth-protected-resource/api/v1/mcp",
@@ -258,6 +260,10 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # Listing/revoking your own sessions is likewise account-self.
     ("*", "/api/v1/auth/sessions", Permission.ACCOUNT_SELF),
     ("*", "/auth/sessions", Permission.ACCOUNT_SELF),
+    # Changing your own sign-in email: the request step needs your session;
+    # the confirm step is public — the mailed OTP is the proof of ownership.
+    ("POST", "/api/v1/auth/email/change", Permission.ACCOUNT_SELF),
+    ("POST", "/auth/email/change", Permission.ACCOUNT_SELF),
     # Accounts are deployment-level administration. Membership changes inside a
     # workspace are authorized by the *workspace* role in ``services.team_store``
     # (a workspace admin need not be a platform admin), so the middleware only

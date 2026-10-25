@@ -85,6 +85,39 @@ async def password_reset(body: PasswordResetRequest,
         new_password=body.new_password, ip=_client_ip(request))
 
 
+class EmailChangeRequest(BaseModel):
+    new_email: str = Field(min_length=3, max_length=320)
+
+
+@router.post("/email/change", status_code=202)
+async def email_change_request(body: EmailChangeRequest,
+                               request: Request) -> dict[str, Any]:
+    from services import signup_service
+    user_email = getattr(request.state, "user_email", None)
+    if not user_email:
+        user = getattr(request.state, "user", None) or {}
+        user_email = user.get("email")
+    if not user_email:
+        raise ApiError(401, "unauthorized", "sign in to change your email")
+    return signup_service.request_email_change(
+        user_email=user_email, new_email=body.new_email,
+        ip=_client_ip(request))
+
+
+class EmailChangeConfirm(BaseModel):
+    challenge_id: str = Field(min_length=1, max_length=128)
+    code: str = Field(min_length=1, max_length=16)
+
+
+@router.post("/email/change/confirm")
+async def email_change_confirm(body: EmailChangeConfirm,
+                               request: Request) -> dict[str, Any]:
+    from services import signup_service
+    return signup_service.confirm_email_change(
+        challenge_id=body.challenge_id, code=body.code,
+        ip=_client_ip(request))
+
+
 @router.get("/signup/config")
 async def signup_config():
     """Public client config for the signup flow (no secrets)."""

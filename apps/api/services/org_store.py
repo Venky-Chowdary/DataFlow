@@ -135,6 +135,19 @@ def organizations_for_user(email: str) -> list[dict[str, Any]]:
     return [o for o in _read_orgs() if o.get("created_by") == email_n]
 
 
+def rekey_creator(old_email: str, new_email: str) -> int:
+    """Repoint ``created_by`` on every org the account owns (email change)."""
+    old_n = normalize_email(old_email)
+    new_n = normalize_email(new_email)
+    moved = 0
+    for o in _read_orgs():
+        if o.get("created_by") == old_n:
+            o["created_by"] = new_n
+            _write_org(o)
+            moved += 1
+    return moved
+
+
 def update_organization(org_id: str, **fields: Any) -> dict[str, Any] | None:
     """Patch allowed fields (name, plan_tier, billing_customer_id, status)."""
     allowed = {"name", "plan_tier", "billing_customer_id", "status"}
