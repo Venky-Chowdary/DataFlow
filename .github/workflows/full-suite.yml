@@ -35,9 +35,9 @@ jobs:
         options: >-
           --health-cmd "pg_isready -U dataflow"
           --health-interval 10s --health-timeout 5s --health-retries 10
-          -c wal_level=logical
-          -c max_replication_slots=8
-          -c max_wal_senders=8
+        # wal_level=logical lands via ALTER SYSTEM + restart below — service
+        # 'options' are docker-create flags; '-c wal_level' would be parsed
+        # as docker --cpu-shares and kills container init.
       mysql:
         image: mysql:8.0
         ports:
@@ -150,6 +150,18 @@ jobs:
           python -m pip install pymssql
           # CI-3: nightly order shuffling so order-dependent tests surface.
           python -m pip install pytest-randomly
+
+      - name: Enable PG logical replication (wal_level=logical needs restart)
+        run: |
+          cid=$(docker ps -qf ancestor=postgres:16)
+          docker exec "$cid" psql -U dataflow -d dataflow -c \
+            "ALTER SYSTEM SET wal_level=logical; ALTER SYSTEM SET max_replication_slots=8; ALTER SYSTEM SET max_wal_senders=8;"
+          docker restart "$cid"
+          for i in $(seq 1 30); do
+            pg_isready -h 127.0.0.1 -p 5432 -U dataflow >/dev/null 2>&1 && break
+            sleep 2
+          done
+          docker exec "$cid" psql -U dataflow -d dataflow -tAc 'SHOW wal_level' | grep -qx logical
 
       - name: Initiate Mongo replica set
         run: |
