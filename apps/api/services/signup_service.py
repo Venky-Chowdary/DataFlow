@@ -625,58 +625,6 @@ def confirm_email_change(*, challenge_id: str, code: str,
     return {"ok": True, "email": new_email}
 
 
-def submit_sales_lead(*, fields: dict[str, Any], ip: str = "",
-                      ua: str = "", form_token: str = "",
-                      honeypot: str = "") -> dict[str, Any]:
-    """P4-5: form-token wall first (bots get the same 202 body, nothing
-    stored/mailed), then store + internal lead mail + acknowledgement."""
-    check = form_token_mod.check(form_token, purpose="sales",
-                                 honeypot=honeypot)
-    if not check["ok"]:
-        record_security_event("signup.blocked", outcome="failed",
-                              reason_code=f"sales_form:{check['reason']}",
-                              details={"ip": ip})
-        return form_token_mod.fake_accept_body()
-    from services import sales_leads
-
-    lead = sales_leads.create_lead(fields, ip=ip, user_agent=ua)
-    inbox = getenv_brand("SALES_INBOX", "sales@datawrap.io")
-    ctx = {k: v for k, v in {
-        "First name": fields.get("first_name"),
-        "Last name": fields.get("last_name"),
-        "Email": fields.get("email"),
-        "Company": fields.get("company"),
-        "Role": fields.get("role"),
-        "Volume": fields.get("volume"),
-        "Region": fields.get("region"),
-        "Timeframe": fields.get("timeframe"),
-        "Phone": fields.get("phone"),
-        "Sources": ", ".join(fields.get("sources") or []) or None,
-        "Destinations": ", ".join(fields.get("destinations") or []) or None,
-        "Message": fields.get("message"),
-    }.items() if v}
-    for template, to, key in (
-        ("sales_lead_internal", inbox, f"sales-lead:{lead['created_at']}:{fields.get('email')}"),
-        ("sales_acknowledgement", fields.get("email") or "",
-         f"sales-ack:{lead['created_at']}:{fields.get('email')}"),
-    ):
-        if not to:
-            continue
-        try:
-            consume_send_slot()
-            _send(template, to, {**ctx, "name": fields.get("first_name")},
-                  idempotency_key=key)
-        except (EmailSendError, EmailQuotaExceeded):
-            # A lead is durable the moment it is stored — mail failures are
-            # logged, never surfaced to the submitter.
-            logger.warning("sales-lead mail (%s) failed", template)
-    record_security_event("sales.lead.created", outcome="succeeded",
-                          details={"ip": ip,
-                                   "domain": str(fields.get("email") or "")
-                                   .split("@")[-1]})
-    return {"ok": True}
-
-
 def complete_onboarding(*, user_email: str, org_name: str = "",
                         profile: dict[str, Any] | None = None,
                         ip: str = "") -> dict[str, Any]:
