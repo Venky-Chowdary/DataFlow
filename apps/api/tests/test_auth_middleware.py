@@ -139,7 +139,7 @@ def test_disabled_stored_account_session_is_not_attached(auth_env, monkeypatch, 
     monkeypatch.setattr(auth_sessions, "_path", lambda: tmp_path / "sessions.json")
     monkeypatch.setattr(
         user_store,
-        "get_user",
+        "get_user_record",
         lambda email: {"email": email, "status": "disabled"},
     )
     token = _token()
