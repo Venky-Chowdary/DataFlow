@@ -4051,6 +4051,19 @@ export async function deletePlatformUser(email: string): Promise<void> {
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to delete account"));
 }
 
+export interface SignupMetrics {
+  pending_signups: number;
+  active_challenges: number;
+  email_quota: { backend: string; day_used: number; day_limit: number; month_used?: number; month_limit?: number };
+}
+
+/** Admin-only signup-surface metrics; absent entirely when the flag is off. */
+export async function fetchSignupMetrics(): Promise<SignupMetrics | null> {
+  const res = await apiFetch(`${API_BASE}/auth/admin/signup-metrics`, { timeoutMs: 8000 });
+  if (!res.ok) return null;
+  return (await res.json()) as SignupMetrics;
+}
+
 export async function loginWorkspace(email: string, password: string): Promise<{
   token: string;
   expires_at: number;

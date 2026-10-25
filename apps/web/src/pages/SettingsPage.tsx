@@ -9,7 +9,10 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole } from "../lib/api";
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
+  fetchSignupMetrics,
+  type SignupMetrics,
+} from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { NotificationSettings } from "./settings/NotificationSettings";
@@ -101,6 +104,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [newKeyLifetime, setNewKeyLifetime] = useState<WorkspaceApiKeyLifetime>("90d");
   const [revealedKey, setRevealedKey] = useState<string | null>(null);
   const [posture, setPosture] = useState<SecurityPosture | null>(null);
+  const [signupMetrics, setSignupMetrics] = useState<SignupMetrics | null>(null);
   const [postureLoading, setPostureLoading] = useState(false);
   /** undefined = not read yet; null = this workspace has no tenant. */
   const [egressTenant, setEgressTenant] = useState<{ workspace_id?: string; egress_allowlist?: string[] } | null | undefined>(undefined);
@@ -251,7 +255,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   }, [activeWorkspace, loadGeneral, loadModelsAndSso]);
 
   useEffect(() => {
-    if (tab === "security") loadPosture();
+    if (tab === "security") { loadPosture(); fetchSignupMetrics().then(setSignupMetrics).catch(() => setSignupMetrics(null)); }
   }, [tab, activeWorkspace, loadPosture]);
 
   useEffect(() => {
@@ -896,6 +900,27 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           </div>
                         ))}
                       </div>
+
+                      {signupMetrics && (
+                        <>
+                          <h3 className="df2-settings-subhead df2-settings-subhead--spaced">Signup & recovery</h3>
+                          <div className="df2-settings-policy" data-testid="signup-metrics-card">
+                            {[
+                              { title: "Pending signups", value: String(signupMetrics.pending_signups), desc: "Verified-pending accounts awaiting a code" },
+                              { title: "Live OTP challenges", value: String(signupMetrics.active_challenges), desc: "Unexpired, unconsumed codes" },
+                              { title: "Email sent today", value: `${signupMetrics.email_quota.day_used} / ${signupMetrics.email_quota.day_limit}`, desc: `Send-quota backend: ${signupMetrics.email_quota.backend}` },
+                            ].map((row) => (
+                              <div key={row.title} className="df2-settings-policy-row">
+                                <div>
+                                  <h3>{row.title}</h3>
+                                  <p>{row.desc}</p>
+                                </div>
+                                <span className="df2-badge df2-badge-live">{row.value}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </>
+                      )}
 
                       <h3 className="df2-settings-subhead df2-settings-subhead--spaced">Compliance roadmap</h3>
                       <div className="df2-settings-policy-grid" style={{ marginBottom: 24 }}>
