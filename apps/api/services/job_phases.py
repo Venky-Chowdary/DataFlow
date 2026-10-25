@@ -101,6 +101,14 @@ def complete_phases(
 def phase_from_engine_label(label: str) -> str:
     mapping = {
         "preflight": "preflight",
+        # Pre-write verification work (mapping/schema validate, continuity
+        # verify, quality gate, resume re-check) used to collapse into
+        # "extract" — a 3-minute Validate stall was billed to reading and
+        # the operator could not see where the job was slow (M10).
+        "validate": "preflight",
+        "verify": "preflight",
+        "quality_check": "preflight",
+        "resuming": "preflight",
         "reading": "extract",
         "writing": "load",
         "reconcile": "reconcile",
