@@ -292,20 +292,10 @@ def save_baseline(key: str, fp: dict[str, Any], job_id: str) -> None:
         coll.replace_one({"key": key}, entry, upsert=True)
         return
     with _lock:
-        try:
-            data = _load_file()
-        except ContinuityStoreCorrupt as exc:
-            # The store cannot be read, so there are no baselines to preserve —
-            # the write side must not crash too, or rebaseline can never
-            # recover the store. Start a fresh map; the corrupt file is
-            # replaced atomically and the event is logged loudly.
-            logger.error(
-                "append continuity store unreadable (%s); saving '%s' replaces "
-                "the corrupt store — other baselines were already unreadable",
-                exc,
-                key,
-            )
-            data = {}
+        # A corrupt store must never be silently overwritten — the only
+        # sanctioned recovery is the audited rebaseline() path, which
+        # removes the file explicitly after its audit event is durable.
+        data = _load_file()
         data[key] = entry
         write_json_atomic(store_path(), data, indent=2)
 
@@ -631,6 +621,16 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
             "current": dict(current),
         },
     )
+    if store_error:
+        # The audit event above is durable, so the corrupt store may now be
+        # reset explicitly. A blind save_baseline() still refuses to
+        # overwrite a corrupt store — only this audited path may reset it.
+        try:
+            store_path().unlink(missing_ok=True)
+        except OSError as exc:
+            raise RebaselineError(
+                f"Continuity store could not be reset after audit: {exc}"
+            ) from exc
     save_baseline(target.key, current, rebaseline_id)
     logger.warning(
         "append continuity re-baselined %s.%s by %s (%s): %s -> %s rows",
