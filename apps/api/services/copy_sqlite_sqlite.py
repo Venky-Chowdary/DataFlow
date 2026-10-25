@@ -204,6 +204,11 @@ def copy_sqlite_to_sqlite(
             settle_fast_path_create_on(conn, dest_dialect="sqlite", dest_table=dest_table)
 
         sqlite_write = "overwrite" if replace_destination and dest_occupied else "insert"
+        # D102: a cancel must stop this whole-table INSERT SELECT before it
+        # starts — it is a single statement and cannot abort mid-run.
+        from services.cancel_check import cancel_checkpoint
+
+        cancel_checkpoint()
         conn.execute(
             f"INSERT INTO {dest_ref} ({dest_col_sql}) "  # nosec B608
             f"SELECT {src_col_sql} FROM {src_ref}{where_sql}"

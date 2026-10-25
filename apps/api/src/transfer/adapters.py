@@ -1511,6 +1511,7 @@ def _write_destination_database(
     schema: dict[str, str],
     mappings: list[dict],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
+    cancel_check: Callable[[int | None], None] | None = None,
     validation_mode: str = "strict",
     backfill_new_fields: bool = False,
     write_mode: str = "insert",
@@ -1598,6 +1599,9 @@ def _write_destination_database(
         "mappings": mappings,
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,
+        # D102: writers call this BEFORE each batch commit so a cancel stops
+        # the next write instead of landing it and being noticed afterwards.
+        "cancel_check": cancel_check,
         "error_policy": error_policy,
         "backfill_new_fields": backfill_new_fields,
         "job_id": job_id,

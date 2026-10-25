@@ -876,6 +876,10 @@ def _apply_staging_to_sqlite(
             sync_mode=mode,
             proof_scope=UPSERT_PROOF_SCOPE,
         )
+    # D102: refuse to start the merge statement after a cancel.
+    from services.cancel_check import cancel_checkpoint
+
+    cancel_checkpoint()
     dst_cur.execute(
         boundary_append_insert_sql(
             dest_q,

@@ -159,6 +159,11 @@ def batch_write_message(
     multi = len(selected_contract_names(stream_contracts)) >= 2 and bool(stream)
     if is_cdc:
         base = f"CDC applied {int(rows):,} change(s)"
+    elif int(chunk) > int(chunks):
+        # D102: the pre-loop chunk estimate bottoms out at 1 when the source
+        # cannot report a row count — printing "batch 7/1" claims a total we
+        # never knew. Name the batch without inventing a denominator.
+        base = f"Writing batch {int(chunk)} ({int(rows):,} rows)"
     else:
         base = f"Writing batch {int(chunk)}/{int(chunks)} ({int(rows):,} rows)"
     if multi:

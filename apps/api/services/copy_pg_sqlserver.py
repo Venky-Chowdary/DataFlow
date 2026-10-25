@@ -527,6 +527,11 @@ class _CopyExecutemanySink:
     def _flush_batch(self) -> None:
         if not self._batch:
             return
+        # D102: a cancel stops the next batch — without this probe the whole
+        # COPY ran to completion before the engine's checkpoint noticed it.
+        from services.cancel_check import cancel_checkpoint
+
+        cancel_checkpoint(self.rows)
         bulk_executemany(
             self._cur,
             self._insert_sql,

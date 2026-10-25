@@ -1014,17 +1014,9 @@ def _raise_if_job_cancelled(
     is whatever this chunk already committed, so the cancelled job does not
     report 0 rows for a table that now holds them.
     """
-    if mongo is None or not job_id:
-        return
-    try:
-        job = mongo.get_job(job_id)
-    except Exception as exc:  # noqa: BLE001 - a failed read must not hide the transfer
-        logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
-        return
-    if job and (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
-        raise TransferCancelled(
-            "Transfer cancelled by user", rows_written=rows_written
-        )
+    from services.cancel_check import raise_if_job_cancelled
+
+    raise_if_job_cancelled(mongo, job_id, rows_written=rows_written)
 
 
 def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
@@ -1580,6 +1572,19 @@ class UniversalTransferEngine:
         # (PostgreSQL VARCHAR → SQL Server NVARCHAR, not code-page VARCHAR).
         started = time.monotonic()
         fields = lifecycle_events.emit_run_started(logger, request, job_id, resume)
+        # D102: publish this job's cancel probe so every batch boundary —
+        # row writers and the COPY fast paths alike — stops on cancel even
+        # where no on_checkpoint plumbing reaches.
+        from services.cancel_check import cancel_check_for, set_cancel_probe
+
+        try:
+            # _job_store() resolves get_mongodb_service at module level — a
+            # local `from ... import` in this function would bypass the
+            # test seam every other engine lookup goes through.
+            _probe_mongo = _job_store()
+        except Exception:  # noqa: BLE001 - a store miss must not hide the transfer
+            _probe_mongo = None
+        set_cancel_probe(cancel_check_for(_probe_mongo, job_id))
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
@@ -1588,6 +1593,8 @@ class UniversalTransferEngine:
         except BaseException as exc:
             lifecycle_events.emit_run_exception(logger, fields, started, exc)
             raise
+        finally:
+            set_cancel_probe(None)
         try:
             record_after_run(request, job_id, result)
         except Exception:
@@ -1602,7 +1609,26 @@ class UniversalTransferEngine:
                 mark_auto_create_committed(job_id)
                 clear_auto_create_job(job_id)
             elif not getattr(result, "success", False) and written == 0:
-                dropped = rollback_uncommitted_auto_creates(job_id)
+                # D102/D42: a cancelled run whose chunks already committed to
+                # the auto-created table must keep it — dropping it deletes
+                # the committed prefix while the job report says the rows
+                # landed, and the write ledger would skip them on resume
+                # (silent data loss).
+                _cancelled_with_rows = False
+                try:
+                    _job = _job_store().get_job(job_id) or {}
+                    _cancelled_with_rows = (
+                        _job.get("cancel_requested")
+                        or str(_job.get("status") or "") == "cancelled"
+                    ) and int(_job.get("records_processed") or 0) > 0
+                except Exception:  # noqa: BLE001 - a store miss keeps the safe rollback
+                    _cancelled_with_rows = False
+                if _cancelled_with_rows:
+                    mark_auto_create_committed(job_id)
+                    clear_auto_create_job(job_id)
+                    dropped = []
+                else:
+                    dropped = rollback_uncommitted_auto_creates(job_id)
                 if dropped:
                     details = dict(getattr(result, "error_details", None) or {})
                     details["auto_create_rolled_back"] = dropped
@@ -2768,7 +2794,15 @@ class UniversalTransferEngine:
                     _promote_cdc_job_fields(checkpoint, update)
                 _progress_write_or_cancel(mongo, job_id, **update)
 
-            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+            _throttled_progress = ThrottledCheckpoint(on_checkpoint)
+
+            def throttled_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
+                # D102: check cancel on EVERY batch boundary; the throttled
+                # progress write below may drop intermediate calls.
+                _check_cancelled(rows)
+                _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
@@ -4117,7 +4151,15 @@ class UniversalTransferEngine:
                     _promote_cdc_job_fields(checkpoint, update)
                 _progress_write_or_cancel(mongo, job_id, **update)
 
-            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+            _throttled_progress = ThrottledCheckpoint(on_checkpoint)
+
+            def throttled_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
+                # D102: check cancel on EVERY batch boundary; the throttled
+                # progress write below may drop intermediate calls.
+                _check_cancelled(rows)
+                _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
@@ -5170,7 +5212,15 @@ class UniversalTransferEngine:
                     _promote_cdc_job_fields(checkpoint, update)
                 _progress_write_or_cancel(mongo, job_id, **update)
 
-            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+            _throttled_progress = ThrottledCheckpoint(on_checkpoint)
+
+            def throttled_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
+                # D102: check cancel on EVERY batch boundary; the throttled
+                # progress write below may drop intermediate calls.
+                _check_cancelled(rows)
+                _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,

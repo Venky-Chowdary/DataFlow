@@ -111,6 +111,10 @@ class _SqliteCopyReader:
         join = "\t".join
         ddls = self._ddls
         while not self._done and len(self._buf) < want:
+            # D102: stop mid-COPY when the job was cancelled.
+            from services.cancel_check import cancel_checkpoint
+
+            cancel_checkpoint()
             batch = self._cursor.fetchmany(_FETCH_BATCH)
             if not batch:
                 self._done = True

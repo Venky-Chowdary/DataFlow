@@ -2915,22 +2915,29 @@ def stream_file_to_database(
                 dest_summary["source_row_count_source"] = "file_manifest"
     except BaseException as _write_exc:
         # X-9: undo ran only on reconcile-verification failures, so a transform
-        # refusal / writer reject / cancel mid-run left committed batches in
-        # the destination. Run the same undo here (empty-dest cleanup, table
-        # drop on create-new) and carry the note on the exception so the
-        # engine's failure message reports it.
-        try:
-            from services.batch_undo import undo_failed_batch_if_dest_was_empty
+        # refusal / writer reject left committed batches in the destination.
+        # Run the same undo here (empty-dest cleanup, table drop on create-new)
+        # and carry the note on the exception so the engine's failure message
+        # reports it.
+        # D102: a user cancel is NOT a failed batch — the committed prefix
+        # stays in the destination and cancel_outcome reports it verbatim.
+        from services.error_handling import TransferCancelled
 
-            _undo_note = undo_failed_batch_if_dest_was_empty(
-                destination=destination,
-                dest_summary=dest_summary,
-                sync_mode=effective_sync,
-            )
-            if _undo_note:
-                setattr(_write_exc, "failed_batch_undo_note", _undo_note)
-        except Exception:  # noqa: BLE001 - undo must not hide the write failure
-            pass
+        if not isinstance(_write_exc, TransferCancelled):
+            try:
+                from services.batch_undo import (
+                    undo_failed_batch_if_dest_was_empty,
+                )
+
+                _undo_note = undo_failed_batch_if_dest_was_empty(
+                    destination=destination,
+                    dest_summary=dest_summary,
+                    sync_mode=effective_sync,
+                )
+                if _undo_note:
+                    setattr(_write_exc, "failed_batch_undo_note", _undo_note)
+            except Exception:  # noqa: BLE001 - undo must not hide the write failure
+                pass
         raise
     finally:
         if snowflake_stage:

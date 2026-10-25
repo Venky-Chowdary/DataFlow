@@ -147,6 +147,10 @@ def _fifo_mysql_into_mysql(
             stream.execute(select_sql)
             with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
                 while True:
+                    # D102: stop mid-COPY when the job was cancelled.
+                    from services.cancel_check import cancel_checkpoint
+
+                    cancel_checkpoint()
                     batch = stream.fetchmany(_FETCH_BATCH)
                     if not batch:
                         break

@@ -1178,9 +1178,23 @@ def _stream_copy(
 
     pump = threading.Thread(target=_pump, name="copy-fast-path", daemon=True)
     pump.start()
+    class _CancelAwareReader:
+        """D102: poll the job's cancel probe on every COPY read block."""
+
+        __slots__ = ("_reader",)
+
+        def __init__(self, reader: Any) -> None:
+            self._reader = reader
+
+        def read(self, size: int = -1) -> bytes:
+            from services.cancel_check import cancel_checkpoint
+
+            cancel_checkpoint()
+            return self._reader.read(size)
+
     try:
         with os.fdopen(read_fd, "rb", _PIPE_CHUNK) as reader:
-            dest_cur.copy_expert(dest_sql, reader)
+            dest_cur.copy_expert(dest_sql, _CancelAwareReader(reader))
     except BaseException:
         # Drain so the writer's blocked write() returns and the thread can exit
         # instead of holding the source transaction open.

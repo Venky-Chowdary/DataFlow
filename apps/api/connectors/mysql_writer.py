@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from services import reflection_cache
+from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
 
 from connectors.mysql_conn import get_connection
@@ -1488,6 +1489,10 @@ def write_mapped_rows(
                 nonlocal load_data_chunks, load_data_fallbacks
                 if not batch:
                     return 0
+                # D102: stop the NEXT chunk when the job was cancelled.
+                from services.cancel_check import cancel_checkpoint
+
+                cancel_checkpoint(written)
                 start = int(row_numbers[0]) if row_numbers else 1
                 attempt = 0
                 chunk_started = time.monotonic()
@@ -1857,6 +1862,9 @@ def write_mapped_rows(
                 source_row_count,
             ),
         )
+    except TransferCancelled:
+        # D102: cancel is control flow, not a write failure.
+        raise
     except Exception as exc:
         close_quietly(conn)
         return WriteResult(

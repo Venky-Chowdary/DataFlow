@@ -11,6 +11,7 @@ from datetime import date, datetime, time, timezone
 from decimal import Decimal
 from typing import Any, Callable
 
+from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
 from services.value_serializer import json_default
 
@@ -1625,6 +1626,12 @@ def write_mapped_rows(
                         batch = dense[offset : offset + CHUNK_SIZE]
                         start = row_offset + offset
                         with conn:
+                            # D102: stop the NEXT chunk when the job was
+                            # cancelled — post-commit on_checkpoint alone lets
+                            # one in-flight batch land.
+                            from services.cancel_check import cancel_checkpoint
+
+                            cancel_checkpoint(written)
                             cur = conn.cursor()
                             already = (
                                 raw_chunk_rows_written(
@@ -1764,6 +1771,12 @@ def write_mapped_rows(
         finally:
             conn.close()
             _cleanup_spool()
+    except TransferCancelled:
+        # D102: cancel is control flow, not a write failure — the engine
+        # needs the typed exception to mark the job cancelled and report
+        # the committed prefix. A generic WriteResult(ok=False) would hide
+        # it as a failure.
+        raise
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")
         if callable(cleanup):

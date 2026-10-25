@@ -122,6 +122,10 @@ def _load_tsv_into_mysql(
         columns=columns,
         infile_sql=quote_load_data_path(path),
     )
+    # D102: refuse to start the one-statement LOAD after a cancel.
+    from services.cancel_check import cancel_checkpoint
+
+    cancel_checkpoint()
     dst_cur.execute(load_sql)
     dst_cur.execute("SHOW WARNINGS")
     blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
@@ -242,6 +246,10 @@ def copy_sqlite_to_mysql(
         join = "\t".join
         with open(tmp_path, "wb", buffering=1 << 20) as writer:
             while True:
+                # D102: stop mid-extract when the job was cancelled.
+                from services.cancel_check import cancel_checkpoint
+
+                cancel_checkpoint(written)
                 rows = src_cur.fetchmany(_FETCH_BATCH)
                 if not rows:
                     break

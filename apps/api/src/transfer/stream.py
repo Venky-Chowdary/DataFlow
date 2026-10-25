@@ -4105,20 +4105,28 @@ def _stream_database_transfer_impl(
         row_path_ok = True
     except BaseException as _row_exc:
         # X-9: same undo as the file path — a transform refusal / writer
-        # reject / cancel mid-run must not leave committed batches. The
-        # note rides the exception into the engine's failure message.
-        try:
-            from services.batch_undo import undo_failed_batch_if_dest_was_empty
+        # reject must not leave committed batches.
+        # D102: a user cancel is NOT a failed batch — the committed prefix
+        # stays in the destination and cancel_outcome reports it verbatim.
+        # Undoing it here deleted committed rows while the job still claimed
+        # them (D42: "committed rows into a table that doesn't exist").
+        from services.error_handling import TransferCancelled
 
-            _undo_note = undo_failed_batch_if_dest_was_empty(
-                destination=destination,
-                dest_summary=dest_summary,
-                sync_mode=effective_sync,
-            )
-            if _undo_note:
-                setattr(_row_exc, "failed_batch_undo_note", _undo_note)
-        except Exception:  # noqa: BLE001 - undo must not hide the write failure
-            pass
+        if not isinstance(_row_exc, TransferCancelled):
+            try:
+                from services.batch_undo import (
+                    undo_failed_batch_if_dest_was_empty,
+                )
+
+                _undo_note = undo_failed_batch_if_dest_was_empty(
+                    destination=destination,
+                    dest_summary=dest_summary,
+                    sync_mode=effective_sync,
+                )
+                if _undo_note:
+                    setattr(_row_exc, "failed_batch_undo_note", _undo_note)
+            except Exception:  # noqa: BLE001 - undo must not hide the write failure
+                pass
         _kafka_failure_offset_note(src_type, dest_summary, _row_exc)
         raise
     finally:

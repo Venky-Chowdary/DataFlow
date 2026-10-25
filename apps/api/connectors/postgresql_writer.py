@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from services.error_handling import TransferCancelled  # noqa: E402
 from services.schema_inference import infer_type
 from services.decision_kernel import materialize_dest_ddl
 from services.value_serializer import json_default
@@ -2613,6 +2614,11 @@ def write_mapped_rows(
                 nonlocal written, rows_skipped, insert, rejected_details, transform_errors
                 if not batch:
                     return 0
+                # D102: stop the NEXT chunk when the job was cancelled — the
+                # post-commit on_checkpoint alone lets one in-flight batch land.
+                from services.cancel_check import cancel_checkpoint
+
+                cancel_checkpoint(written)
                 start = int(row_numbers[0]) if row_numbers else 1
                 attempt = 0
                 chunk_started = time.monotonic()
@@ -3128,6 +3134,9 @@ def write_mapped_rows(
             load_method=load_method,
             meta=meta_out,
         )
+    except TransferCancelled:
+        # D102: cancel is control flow, not a write failure.
+        raise
     except Exception as exc:
         if _held_overwrite() and _held_overwrite().active:
             from connectors.write_resilience import finish_held_overwrite

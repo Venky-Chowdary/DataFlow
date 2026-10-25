@@ -435,8 +435,22 @@ def _fifo_copy_into_mysql(
     )
 
     def _produce(path: str) -> None:
+        class _CancelAwareWriter:
+            """D102: poll the job's cancel probe on every COPY write block."""
+
+            __slots__ = ("_writer",)
+
+            def __init__(self, writer):
+                self._writer = writer
+
+            def write(self, data):
+                from services.cancel_check import cancel_checkpoint
+
+                cancel_checkpoint()
+                return self._writer.write(data)
+
         with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
-            src_cur.copy_expert(copy_sql, writer)
+            src_cur.copy_expert(copy_sql, _CancelAwareWriter(writer))
 
     def _consume(path: str) -> None:
         load_sql = build_load_data_sql(
@@ -446,6 +460,10 @@ def _fifo_copy_into_mysql(
         )
         apply_mysql_bulk_load_session(dst_cur)
         try:
+            # D102: refuse to start the one-statement LOAD after a cancel.
+            from services.cancel_check import cancel_checkpoint
+
+            cancel_checkpoint()
             dst_cur.execute(load_sql)
             dst_cur.execute("SHOW WARNINGS")
         finally:
