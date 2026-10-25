@@ -14,6 +14,7 @@ tracked separately in PRODUCTION_SKU / execute_tracked matrices.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from dataclasses import dataclass
@@ -31,7 +32,7 @@ from services.quarantine_from_preflight import quarantine_rows_from_preflight
 from services.transform_engine import apply_transform, preview_quarantine_cells
 
 _API_ROOT = Path(__file__).resolve().parents[1]
-_PROOF = _API_ROOT / "data" / "proofs" / "data_rule_scenario_matrix.json"
+_PROOF = data_dir() / "proofs" / "data_rule_scenario_matrix.json"
 
 DestFamily = Literal["sql", "schemaless", "warehouse"]
 Mode = Literal["maximum", "strict", "balanced"]

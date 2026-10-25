@@ -7,6 +7,7 @@ Skips when Postgres (or MySQL binlog) is unreachable — never green by absence.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 import socket
@@ -37,7 +38,7 @@ from services.cdc_named_eos import (
 )
 
 ARTIFACT = (
-    _API_ROOT / "data" / "proofs" / "mysql_cdc_postgres_eos_crash_replay.json"
+    data_dir() / "proofs" / "mysql_cdc_postgres_eos_crash_replay.json"
 )
 
 PG = dict(

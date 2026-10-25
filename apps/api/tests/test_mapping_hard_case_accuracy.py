@@ -6,13 +6,14 @@ true synonym, hold Map on false-friends, never invent CREATE when dest exists.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden_hard_cases.json"
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 ACCURACY_FLOOR = 1.0
 
 

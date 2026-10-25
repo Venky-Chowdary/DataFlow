@@ -5,6 +5,7 @@ stamps a stable kind so Approve eligible cannot clear qty≠amt / user≠custome
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
@@ -16,7 +17,7 @@ from services.semantic_mapper import (
 )
 
 
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 
 def test_classify_review_kind_priority() -> None:

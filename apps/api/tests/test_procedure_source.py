@@ -1,6 +1,7 @@
 """Stored-procedure / custom-SQL extract — named fixture, not marketing."""
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
@@ -21,7 +22,7 @@ from services.procedure_source import (
 
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "procedure_source_matrix.json"
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 
 def _load() -> dict:

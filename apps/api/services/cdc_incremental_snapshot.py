@@ -18,8 +18,18 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator
 
 _LOCK = threading.RLock()
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
-_PATH = os.path.join(_DATA_DIR, "cdc_incremental_snapshots.json")
+
+
+def _data_dir() -> str:
+    # Resolve per call — an import-time snapshot would pin the dev data dir
+    # before test isolation or a reconfigured volume can take effect.
+    from services.platform_config import data_dir
+
+    return str(data_dir())
+
+
+def _path() -> str:
+    return os.path.join(_data_dir(), "cdc_incremental_snapshots.json")
 _MONGO_COLL = "cdc_incremental_snapshots"
 
 
@@ -170,10 +180,10 @@ def _load() -> list[dict[str, Any]]:
             return out
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-    if not os.path.isfile(_PATH):
+    if not os.path.isfile(_path()):
         return []
     try:
-        with open(_PATH, encoding="utf-8") as f:
+        with open(_path(), encoding="utf-8") as f:
             data = json.load(f)
         return list(data.get("signals") or [])
     except Exception:
@@ -195,7 +205,7 @@ def _save(signals: list[dict[str, Any]]) -> None:
 
     from services.atomic_file import write_json_atomic
 
-    write_json_atomic(Path(_PATH), {"signals": signals})
+    write_json_atomic(Path(_path()), {"signals": signals})
 
 
 def _upsert_signal(sig: SnapshotSignal | dict[str, Any]) -> SnapshotSignal:
@@ -224,8 +234,8 @@ def _upsert_signal(sig: SnapshotSignal | dict[str, Any]) -> SnapshotSignal:
 @contextmanager
 def _signal_store_lock() -> Iterator[None]:
     """Process + cross-process lock so concurrent CDC jobs cannot tear the store."""
-    os.makedirs(_DATA_DIR, exist_ok=True)
-    lock_path = _PATH + ".lock"
+    os.makedirs(_data_dir(), exist_ok=True)
+    lock_path = _path() + ".lock"
     lock_f = open(lock_path, "a+", encoding="utf-8")
     locked = False
     try:

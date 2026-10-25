@@ -15,6 +15,7 @@ Honesty
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from datetime import datetime, timezone
@@ -404,7 +405,7 @@ def run_desktop_lab_dimensions(*, persist: bool = True) -> dict[str, Any]:
     }
     if persist:
         text = json.dumps(payload, indent=2) + "\n"
-        proofs = Path(__file__).resolve().parents[1] / "data" / "proofs"
+        proofs = data_dir() / "proofs"
         proofs.mkdir(parents=True, exist_ok=True)
         (proofs / "desktop_lab_dimensions.json").write_text(text)
         artifacts = Path("/opt/cursor/artifacts")

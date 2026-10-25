@@ -293,6 +293,44 @@ def _isolate_cdc_leases(monkeypatch):
     configure_store(backend="memory")
 
 
+_SUITE_DATA_DIR = Path(os.environ["DATAFLOW_DATA_DIR"]).resolve()
+_DEV_DATA_DIR = (_api_root / "data").resolve()
+_PATH_ATTR_HINTS = ("PATH", "DIR", "STORE", "FILE", "LEDGER", "REGISTRY", "DB")
+
+
+def _rebind_import_time_store_paths(monkeypatch, per_test_dir: Path) -> None:
+    """Rebind module-level ``Path`` constants captured under a data dir.
+
+    A dozen-plus stores do ``STORE_PATH = data_dir() / "x.json"`` at import —
+    before any fixture can run — so they all share the session data dir and
+    leak state across tests (the suite-order pollution class). Point every
+    such constant at the per-test dir instead. Only attributes in
+    services.*/src.*/connectors.* modules whose Path value already lives
+    under a known data dir are touched — config paths outside data dirs
+    (fixtures, package data) are left alone.
+    """
+    for mod in list(sys.modules.values()):
+        mod_name = getattr(mod, "__name__", "") or ""
+        if not mod_name.startswith(("services", "src", "connectors")):
+            continue
+        for attr, val in list(vars(mod).items()):
+            if not isinstance(val, Path) or attr.startswith("__"):
+                continue
+            if not any(h in attr.upper() for h in _PATH_ATTR_HINTS):
+                continue
+            try:
+                resolved = val.resolve()
+            except OSError:
+                continue
+            for root in (_SUITE_DATA_DIR, _DEV_DATA_DIR):
+                try:
+                    rel = resolved.relative_to(root)
+                except ValueError:
+                    continue
+                monkeypatch.setattr(mod, attr, per_test_dir / rel)
+                break
+
+
 @pytest.fixture(autouse=True)
 def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
     """Keep test persistence out of the developer's default data directory."""
@@ -304,6 +342,7 @@ def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
     # variable to point at its own directory is never shadowed by this one.
     monkeypatch.delenv("DATAWRAP_DATA_DIR", raising=False)
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "dw-data"))
+    _rebind_import_time_store_paths(monkeypatch, tmp_path / "dw-data")
     from services import audit_log, auth_sessions, mcp_invocation_log
 
     monkeypatch.setattr(

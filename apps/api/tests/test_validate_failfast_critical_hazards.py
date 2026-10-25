@@ -1,6 +1,7 @@
 """Validate-stage fail-fast: critical hazards must block before Run."""
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
@@ -13,7 +14,7 @@ from services.preflight_rules import explain_issue
 from services.type_coercion_validator import validate_mapping_coercions
 
 _API_ROOT = Path(__file__).resolve().parents[1]
-_PROOF = _API_ROOT / "data" / "proofs" / "validate_failfast_critical_hazards.json"
+_PROOF = data_dir() / "proofs" / "validate_failfast_critical_hazards.json"
 
 
 def test_unknown_dest_schema_blocks_when_table_exists():
