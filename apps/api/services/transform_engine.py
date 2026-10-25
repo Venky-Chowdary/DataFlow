@@ -1682,6 +1682,11 @@ _ENGINE_ALIASES = {
     "strip_whitespace": "trim",
     "trim_whitespace": "trim",
     "remove_whitespace": "trim",
+    # Spellings the docs have advertised — the engine must not refuse a name
+    # an operator read in the product's own docs (C05 minor).
+    "normalize_email": "email",
+    "date_to_iso": "date",
+    "iso_date": "date",
 }
 
 _PARAMETERIZED_PREFIXES = (
@@ -1717,8 +1722,20 @@ def normalize_engine_transform(raw: str | None) -> str | None:
         # "needs a zone" — plan must not relabel it Unknown transform.
         if prefix == "assume_timezone:":
             return prefix + arg
-        if prefix == "replace:" and ":" not in arg:
-            return None
+        if prefix == "replace:":
+            if ":" not in arg:
+                return None
+            # Ambiguous argument strings refuse rather than silently chain:
+            # ``replace:-:_,upper`` was accepted as the literal replacement
+            # ``_,upper`` — the operator meant old='-' new='_' then upper
+            # (D14). When the new text ends in ``,<known transform>`` it is
+            # indistinguishable from a chained op, so it is refused.
+            search, _, repl = arg.partition(":")
+            if "," in repl:
+                tail = repl.rsplit(",", 1)[-1].strip().lower()
+                if tail in KNOWN_TRANSFORMS or tail in _ENGINE_ALIASES:
+                    return None
+            return prefix + arg
         if arg == "":
             return None
         return prefix + arg
@@ -1772,6 +1789,66 @@ def transform_override_refusal(
 _IDENTITY_TRANSFORMS = frozenset({
     "none", "identity", "passthrough", "string", "varchar", "text",
 })
+
+
+#: The transform contract an operator sees (C05): exact semantics, determinism
+#: and lossiness per engine id. The plan, the ``describe_connector_transforms``
+#: tool, and the transform proof read this one table — an op is either declared
+#: here or it is not a transform the product describes.
+TRANSFORM_SEMANTICS: dict[str, dict[str, Any]] = {
+    "none": {"semantics": "value carried verbatim", "deterministic": True, "lossy": False},
+    "identity": {"semantics": "value carried verbatim", "deterministic": True, "lossy": False},
+    "passthrough": {"semantics": "value carried verbatim", "deterministic": True, "lossy": False},
+    "string": {"semantics": "value carried verbatim", "deterministic": True, "lossy": False},
+    "varchar": {"semantics": "value carried verbatim", "deterministic": True, "lossy": False},
+    "text": {"semantics": "value carried verbatim", "deterministic": True, "lossy": False},
+    "decimal": {"semantics": "parse to fixed-point decimal", "deterministic": True, "lossy": True},
+    "integer": {"semantics": "parse to integer (strips leading zeros)", "deterministic": True, "lossy": True},
+    "boolean": {"semantics": "parse strict boolean tokens", "deterministic": True, "lossy": True},
+    "date": {"semantics": "parse to ISO date", "deterministic": True, "lossy": True},
+    "datetime": {"semantics": "parse to ISO timestamp", "deterministic": True, "lossy": True},
+    "time": {"semantics": "parse to time", "deterministic": True, "lossy": True},
+    "json": {"semantics": "parse to JSON document", "deterministic": True, "lossy": True},
+    "binary": {"semantics": "parse to bytes (base64/hex)", "deterministic": True, "lossy": True},
+    "vector": {"semantics": "parse to numeric vector", "deterministic": True, "lossy": True},
+    "uuid": {"semantics": "parse to canonical UUID", "deterministic": True, "lossy": True},
+    "trim": {"semantics": "strip leading/trailing whitespace", "deterministic": True, "lossy": True},
+    "trim_id": {"semantics": "strip identifier whitespace", "deterministic": True, "lossy": True},
+    "upper": {"semantics": "uppercase per SQL UPPER (no trim)", "deterministic": True, "lossy": False},
+    "lower": {"semantics": "lowercase per SQL LOWER (no trim)", "deterministic": True, "lossy": False},
+    "hash_pii": {"semantics": "one-way HMAC-SHA256 hash (requires key)", "deterministic": True, "lossy": True},
+    "mask_pii": {"semantics": "one-way PII mask", "deterministic": True, "lossy": True},
+    "redact": {"semantics": "one-way constant redaction token", "deterministic": True, "lossy": True},
+    "omit": {"semantics": "column not written", "deterministic": True, "lossy": True},
+    "phone": {"semantics": "normalize phone number", "deterministic": True, "lossy": True},
+    "email": {"semantics": "normalize email address", "deterministic": True, "lossy": True},
+    "url": {"semantics": "normalize URL", "deterministic": True, "lossy": True},
+    "iban": {"semantics": "normalize IBAN", "deterministic": True, "lossy": True},
+    "currency": {"semantics": "parse currency to number", "deterministic": True, "lossy": True},
+    "percentage": {"semantics": "parse percentage to number", "deterministic": True, "lossy": True},
+    "postal": {"semantics": "normalize postal code", "deterministic": True, "lossy": True},
+    "base64": {"semantics": "normalize base64 payload", "deterministic": True, "lossy": True},
+    "strip_controls": {"semantics": "remove control characters", "deterministic": True, "lossy": True},
+    "normalize_unicode": {"semantics": "NFKC normalize + collapse whitespace", "deterministic": True, "lossy": True},
+    "replace:": {"semantics": "replace OLD with NEW (replace:OLD:NEW)", "deterministic": True, "lossy": True},
+    "concat:": {"semantics": "append literal suffix (concat:TEXT)", "deterministic": True, "lossy": True},
+    "default:": {"semantics": "use literal when cell is empty (default:TEXT)", "deterministic": True, "lossy": True},
+    "assume_timezone:": {"semantics": "attach timezone to naive instants", "deterministic": True, "lossy": False},
+}
+
+
+def describe_transforms() -> list[dict[str, Any]]:
+    """Operator-facing transform catalog for ``describe_connector_transforms``.
+
+    Every entry is one engine id (or a parameterized family) with its exact
+    semantics, a deterministic flag, and a lossy flag — the contract the plan
+    shows. Aliases resolve through ``normalize_engine_transform``.
+    """
+    out: list[dict[str, Any]] = []
+    for name in sorted(TRANSFORM_SEMANTICS):
+        meta = TRANSFORM_SEMANTICS[name]
+        out.append({"transform": name, **meta})
+    return out
 
 
 def _strip_format_controls(text: str) -> str:
@@ -2451,10 +2528,12 @@ def apply_transform(
         return parsed, None
 
     if transform == "upper":
-        return text.upper(), None
+        # SQL UPPER does not trim — per-character casing only (D13).
+        return raw_s.upper(), None
 
     if transform == "lower":
-        return text.lower(), None
+        # SQL LOWER does not trim — per-character casing only (D13).
+        return raw_s.lower(), None
 
     if transform == "hash_pii":
         try:

@@ -68,6 +68,17 @@ DELIVERY_SEMANTICS = (
 def transform_fidelity(transform: str | None) -> str:
     """Classify transform risk: preserve | mutate | lossy_cast."""
     t = (transform or "none").strip().lower()
+    # Aliases grade as their engine id — ``cast_integer``/``to_int`` land in
+    # _LOSSY_CAST_TRANSFORMS via ``integer`` instead of silently grading
+    # "mutate"/"preserve" next to an identical column (D40).
+    try:
+        from services.transform_engine import normalize_engine_transform
+
+        resolved = normalize_engine_transform(t)
+        if resolved:
+            t = str(resolved).lower()
+    except Exception:
+        pass
     if t in _PRESERVE_TRANSFORMS:
         return "preserve"
     if t in _LOSSY_CAST_TRANSFORMS:

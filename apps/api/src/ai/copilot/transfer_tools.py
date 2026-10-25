@@ -566,26 +566,62 @@ def _sign_required_risk_contracts(
 def _apply_column_transforms(
     mappings: list[dict[str, Any]],
     column_transforms: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
+) -> tuple[list[dict[str, Any]], str]:
     """Stamp operator transforms onto the mapping the writer will run.
 
-    Replay was the only tool that accepted a transform (QA R2-060).
+    Returns ``(mappings, refusal)`` — refusal is ``""`` when every key matched
+    a mapped column and every spec resolved to a transform the engine applies.
+    An unmatched key or an unknown/ambiguous spec is refused at staging
+    (D9): a typo like ``{"emial": "hash_pii"}`` must never ship raw PII while
+    the plan reads safe_to_start.
     """
     if not isinstance(column_transforms, dict) or not column_transforms:
-        return list(mappings or [])
+        return list(mappings or []), ""
+    from services.transform_engine import (
+        KNOWN_TRANSFORMS,
+        normalize_engine_transform,
+    )
+
+    named = {
+        str(row.get(k) or "").strip()
+        for row in (mappings or [])
+        for k in ("source", "target")
+        if str(row.get(k) or "").strip()
+    }
+    named_lower = {n.lower() for n in named}
+    for key, spec in column_transforms.items():
+        key_s = str(key or "").strip()
+        if key_s.lower() not in named_lower:
+            return [], (
+                f"column_transforms key {key_s!r} matches no source/target "
+                f"column (mapped: {', '.join(sorted(named)[:20])}). The "
+                "transform would be silently ignored — fix the key or drop it."
+            )
+        spec_s = str(spec or "").strip()
+        if normalize_engine_transform(spec_s) is None:
+            return [], (
+                f"column_transforms[{key_s!r}] = {spec_s!r} is not a transform "
+                f"the engine applies. Use one of: "
+                f"{', '.join(sorted(KNOWN_TRANSFORMS))} or "
+                "replace:/concat:/default:/assume_timezone:. The transform "
+                "would be silently ignored."
+            )
+    # Case-insensitive key lookup so a validated key actually stamps — an
+    # exact-case get() would validate and then still silently skip.
+    spec_by_lower = {str(k or "").strip().lower(): v for k, v in column_transforms.items()}
     out: list[dict[str, Any]] = []
     for raw in mappings or []:
         row = dict(raw)
         source = str(row.get("source") or "")
         target = str(row.get("target") or "")
-        spec = column_transforms.get(source)
+        spec = spec_by_lower.get(source.lower())
         if spec is None:
-            spec = column_transforms.get(target)
+            spec = spec_by_lower.get(target.lower())
         if spec is not None and str(spec).strip():
             row["transform"] = str(spec).strip()
             row["transform_override"] = True
         out.append(row)
-    return out
+    return out, ""
 
 
 def _fidelity_columns_from_preflight(preflight: dict[str, Any], mappings: list[dict[str, Any]]) -> set[str]:
@@ -881,7 +917,9 @@ def plan_transfer(
         use_llm=False,
     )
     mappings = list(mapping.get("mappings") or [])
-    mappings = _apply_column_transforms(mappings, column_transforms)
+    mappings, transform_refusal = _apply_column_transforms(mappings, column_transforms)
+    if transform_refusal:
+        return _tool_result(tool, success=False, error=transform_refusal)
     if zone_columns:
         mappings = stamp_zone_transform(mappings, source_timezone, zone_columns)
 

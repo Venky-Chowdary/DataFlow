@@ -1819,8 +1819,11 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
             scale=options.get("scale"),
             timezone=options.get("timezone"),
         )
-    if op in ("hash_pii", "mask_pii"):
-        if is_blank(value):
+    if op in ("hash_pii", "mask_pii", "redact"):
+        # All three governance ops are deterministic — the proof re-applies
+        # them so a dropped step or a wrong token becomes a provable defect
+        # (D15), not a silently skipped fingerprint.
+        if op in ("hash_pii", "mask_pii") and is_blank(value):
             return None
         if op == "mask_pii" and options.get("pattern"):
             return _mask_pattern(str(value), str(options["pattern"]))

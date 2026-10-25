@@ -42,9 +42,17 @@ def test_parquet_keeps_explicit_empty_string():
 
 
 def test_delimited_blank_field_stays_empty_text():
-    raw = b"id,note\n1,\n"
+    # C04: a QUOTED empty cell is a real '' — an unquoted blank is NULL.
+    raw = b'id,note\n1,""\n'
     rows = next(iter(_iter_csv_batches(raw, 10)))
     assert rows[0]["note"] == ""
+
+
+def test_delimited_unquoted_blank_field_is_null():
+    # C04: the unquoted empty cell is SQL NULL on every engine.
+    raw = b"id,note\n1,\n"
+    rows = next(iter(_iter_csv_batches(raw, 10)))
+    assert rows[0]["note"] is None
 
 
 @pytest.mark.parametrize(

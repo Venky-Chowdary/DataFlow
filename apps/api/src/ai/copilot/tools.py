@@ -777,6 +777,15 @@ TOOL_DEFINITIONS: list[dict] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
+        "name": "describe_connector_transforms",
+        "description": (
+            "List every column transform the engine applies — exact semantics, "
+            "deterministic flag, and lossy flag per op, plus accepted aliases and "
+            "parameterized forms (replace:/concat:/default:/assume_timezone:)."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
         "name": "explain_product",
         "description": (
             "Answer product how-to questions about Datawrap (transfer, mapping, preflight, "
@@ -1324,6 +1333,7 @@ TOOL_FAMILIES: list[dict] = [
             "search_connectors",
             "search_knowledge",
             "describe_pilot",
+            "describe_connector_transforms",
             "brief_workspace",
         ],
     },
@@ -1546,6 +1556,7 @@ class DataPilotTools:
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
             "describe_pilot": self._describe_pilot,
+            "describe_connector_transforms": self._describe_connector_transforms,
             "explain_product": self._explain_product,
             "plan_transfer_route": self._plan_transfer_route,
             "plan_transfer": self._plan_transfer,
@@ -2465,6 +2476,33 @@ class DataPilotTools:
         from ...services.catalog_service import search_catalog
         result = search_catalog(query, role, limit=20)
         return ToolResult(name="search_connectors", success=True, output=result)
+
+    def _describe_connector_transforms(self) -> ToolResult:
+        """One canonical catalog — the engine's own contract table (D14)."""
+        from services.transform_engine import (
+            TRANSFORM_SEMANTICS,
+            describe_transforms,
+        )
+
+        return ToolResult(
+            name="describe_connector_transforms",
+            success=True,
+            output={
+                "transforms": describe_transforms(),
+                "parameterized": [
+                    "replace:OLD:NEW — replace literal text",
+                    "concat:TEXT — append literal suffix",
+                    "default:TEXT — use literal when the cell is empty",
+                    "assume_timezone:ZONE — attach a timezone to naive instants",
+                ],
+                "alias_note": (
+                    "Common spellings resolve automatically (cast_integer, "
+                    "to_date, uppercase, strip, hash, normalize_email, "
+                    "date_to_iso, ...). Ambiguous argument strings are refused."
+                ),
+                "count": len(TRANSFORM_SEMANTICS),
+            },
+        )
 
     def _describe_pilot(self) -> ToolResult:
         """Local capability card — never dump raw semantic-type training shards."""
@@ -5437,6 +5475,7 @@ _TOOL_PRIORITY: dict[str, int] = {
     "analyze_dataset": 20,
     "search_data": 15,
     "describe_pilot": 5,
+    "describe_connector_transforms": 5,
     "explain_product": 6,
 }
 
@@ -5471,6 +5510,7 @@ _KNOWLEDGE_TOOLS = frozenset({
     "explain_product",
     "search_knowledge",
     "describe_pilot",
+    "describe_connector_transforms",
     "explain_mapping_assurance",
 })
 
