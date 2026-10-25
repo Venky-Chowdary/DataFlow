@@ -3424,6 +3424,28 @@ def _keyed_join_proof(dest_summary: dict[str, Any] | None) -> bool:
     return bool(_COUNT_PROOF_TOKEN.match(str(summary.get("checksum") or "").strip()))
 
 
+def _is_append_first_load(
+    sync_mode: str,
+    rows_before: int | None,
+    target_rows: int,
+    expected_rows: int,
+    dest_summary: dict[str, Any] | None,
+) -> bool:
+    """True when an append run's destination equals the staged population.
+
+    An append into a table this run created (or that was empty) has no
+    pre-existing rows — ``dest == staged`` exactly, so the key census is a
+    valid value compare. Only a later append run into an occupied table is
+    genuinely incomparable (dest = before + delta). X-134.
+    """
+    return (
+        sync_mode_appends_without_key_resolution(sync_mode)
+        and rows_before == 0
+        and target_rows == expected_rows
+        and (dest_summary or {}).get("dest_table_existed_before") is not True
+    )
+
+
 _FULL_KEYED_COMPARE_MAX_ROWS = 1_000_000
 
 
@@ -6538,6 +6560,14 @@ def _run_reconciliation_impl(
                 "dest_pk_join_equals_staging",
             )
         )
+        # X-134: an append first load into a table this run created (or an
+        # empty one) has no pre-existing rows to excuse it — dest == staged
+        # population exactly, so the key census is a valid value compare.
+        # Only a later append run is incomparable (dest = before + delta).
+        if _is_append_first_load(
+            sync_mode_early, rows_before, target_rows, expected_rows, dest_summary
+        ):
+            _populations_comparable = True
         # X-68: a count-only engine copy proves counts, not values. When the
         # two populations are comparable and both sides are census engines,
         # run the (pk, row-hash) key census as the value compare — a
