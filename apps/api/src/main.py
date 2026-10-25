@@ -34,6 +34,8 @@ from services.platform_config import (
     vector_store_dir,
 )
 
+from services.api_errors import ApiError, api_error_handler
+
 from .middleware.auth_middleware import AuthMiddleware
 from .middleware.production_config_middleware import ProductionConfigMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
@@ -774,6 +776,11 @@ async def api_info():
         "deprecation": None,
         "honesty": "Public control-plane API is /api/v1 only until a documented /api/v2 exists.",
     }
+
+
+@app.exception_handler(ApiError)
+async def api_error_envelope(request: Request, exc: ApiError):
+    return await api_error_handler(request, exc)
 
 
 @app.exception_handler(DuplicateTransferSubmission)
