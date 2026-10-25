@@ -10,11 +10,12 @@ now copies into a run-scoped staging table and finishes with one atomic
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from services.mysql_dest_swap import (
+from services.dest_overwrite_swap import (
     mysql_overwrite_trash_name,
     mysql_staged_overwrite_name,
     mysql_swap_staged_dest,
@@ -136,3 +137,102 @@ def test_failed_copy_leaves_dest_table_untouched(tmp_path, monkeypatch):
     assert "RENAME TABLE" not in sql
     # The only cleanup drop targets the staging table.
     assert "DROP TABLE IF EXISTS `df_ow_orders_" in sql
+
+
+def test_pg_swap_renames_inside_transaction():
+    from services.dest_overwrite_swap import pg_swap_staged_dest
+
+    cur = _RecCur([])
+    pg_swap_staged_dest(
+        cur,
+        schema="public",
+        dest_table="orders",
+        staging_table="df_ow_orders_x",
+        trash_table="df_trash_orders_y",
+        quote=lambda n: f'"{n}"',
+    )
+    assert cur.sink == [
+        'ALTER TABLE "public"."orders" RENAME TO "df_trash_orders_y"',
+        'ALTER TABLE "public"."df_ow_orders_x" RENAME TO "orders"',
+        'DROP TABLE "public"."df_trash_orders_y"',
+    ]
+
+
+def test_sqlserver_swap_uses_sp_rename_in_transaction():
+    from services.dest_overwrite_swap import sqlserver_swap_staged_dest
+
+    cur = _RecCur([])
+    sqlserver_swap_staged_dest(
+        cur,
+        schema="dbo",
+        dest_table="orders",
+        staging_table="df_ow_orders_x",
+        trash_table="df_trash_orders_y",
+        quote=lambda n: f"[{n}]",
+    )
+    assert cur.sink == [
+        "EXEC sp_rename 'dbo.orders', 'df_trash_orders_y'",
+        "EXEC sp_rename 'dbo.df_ow_orders_x', 'orders'",
+        "DROP TABLE [dbo].[df_trash_orders_y]",
+    ]
+
+
+def test_snowflake_swap_with_is_atomic_exchange():
+    from services.dest_overwrite_swap import snowflake_swap_staged_dest
+
+    cur = _RecCur([])
+    snowflake_swap_staged_dest(
+        cur, dest_ref='"DB"."PUBLIC"."ORDERS"', staging_ref='"DB"."PUBLIC"."DF_OW_X"'
+    )
+    assert cur.sink == [
+        'ALTER TABLE "DB"."PUBLIC"."ORDERS" SWAP WITH "DB"."PUBLIC"."DF_OW_X"',
+        'DROP TABLE IF EXISTS "DB"."PUBLIC"."DF_OW_X"',
+    ]
+
+
+def test_oracle_swap_rename_pair_then_purge():
+    from services.dest_overwrite_swap import oracle_swap_staged_dest
+
+    cur = _RecCur([])
+    oracle_swap_staged_dest(
+        cur,
+        dest_ref='"HR"."ORDERS"',
+        staging_ref='"HR"."DF_OW_ORDERS_X"',
+        dest_table="ORDERS",
+        trash_table="DF_TRASH_ORDERS_Y",
+    )
+    assert cur.sink == [
+        'ALTER TABLE "HR"."ORDERS" RENAME TO DF_TRASH_ORDERS_Y',
+        'ALTER TABLE "HR"."DF_OW_ORDERS_X" RENAME TO ORDERS',
+        'DROP TABLE "HR".DF_TRASH_ORDERS_Y PURGE',
+    ]
+
+
+def test_no_copy_path_drops_and_commits_dest_before_copy():
+    """C03: no overwrite path may commit the drop before the copy finishes.
+
+    Transactional-DDL engines (PG, SQL Server, SQLite, DuckDB) may keep the
+    DROP inside the run's transaction — it rolls back with the run. The
+    forbidden shape is DROP + early COMMIT (dest absent for the whole run),
+    and every overwrite on MySQL/Oracle/Snowflake/BigQuery must stage + swap.
+    """
+    import re
+
+    api = Path(__file__).resolve().parents[1]
+    offenders = []
+    for src in (api / "services").glob("copy_*_*.py"):
+        text = src.read_text()
+        for m in re.finditer(r"if replace_destination and exists:", text):
+            tail = text[m.end():m.end() + 700]
+            head = tail.split("exists = False")[0]
+            if ".commit()" in head:
+                offenders.append(f"{src.name}@{m.start()} early-commit")
+            # MySQL/Oracle DDL always auto-commits — an unstaged DROP on a
+            # *destination* of those engines is the same defect even without
+            # an explicit commit().
+            auto_commit_ddl = src.stem.rsplit("_", 1)[-1] in {"mysql", "oracle"}
+            if auto_commit_ddl and "DROP TABLE" in head \
+                    and "staged_overwrite_name" not in tail \
+                    and "mysql_staged_overwrite_name" not in tail:
+                offenders.append(f"{src.name}@{m.start()} unstaged-drop")
+    assert offenders == []

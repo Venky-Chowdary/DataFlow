@@ -116,7 +116,7 @@ def copy_oracle_to_mysql(
             # C03/X-OW2 — stage the overwrite, one atomic RENAME swap at the
             # commit boundary; a DROP-first left the destination absent for
             # the whole run (MySQL auto-commits DDL) and unrecoverable.
-            from services.mysql_dest_swap import (
+            from services.dest_overwrite_swap import (
                 mysql_overwrite_trash_name,
                 mysql_staged_overwrite_name,
             )
@@ -225,7 +225,7 @@ def copy_oracle_to_mysql(
                         f"(lo={part['lo']!r} hi={part['hi']!r})"
                     )
         if swap_at_end:
-            from services.mysql_dest_swap import mysql_swap_staged_dest
+            from services.dest_overwrite_swap import mysql_swap_staged_dest
 
             mysql_swap_staged_dest(
                 dst_cur,

@@ -217,7 +217,7 @@ def copy_sqlite_to_mysql(
             # C03/X-OW2 — stage the overwrite and swap atomically at the
             # commit boundary; MySQL auto-commits DDL, so a DROP-first left
             # the destination absent for the whole run and unrecoverable.
-            from services.mysql_dest_swap import (
+            from services.dest_overwrite_swap import (
                 mysql_overwrite_trash_name,
                 mysql_staged_overwrite_name,
             )
@@ -276,7 +276,7 @@ def copy_sqlite_to_mysql(
                 f"{dest_count} != source COUNT {source_count}"
             )
         if swap_at_end:
-            from services.mysql_dest_swap import mysql_swap_staged_dest
+            from services.dest_overwrite_swap import mysql_swap_staged_dest
 
             mysql_swap_staged_dest(
                 dst_cur,

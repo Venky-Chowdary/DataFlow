@@ -107,9 +107,15 @@ def copy_bigquery_to_bigquery(
     try:
         exists = bigquery_table_exists(client, dest_project, dest_dataset, dest_table)
         if replace_destination and exists:
-            bigquery_run_sql(client, f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
-            exists = False
-        if not exists:
+            # C03/X-OW2 — CREATE OR REPLACE ... AS SELECT is one atomic DDL
+            # statement on BigQuery: the old table never leaves the namespace.
+            # created_here stays False — a failed statement leaves the original
+            # table intact and cleanup must not drop it.
+            bigquery_run_sql(
+                client,
+                f"CREATE OR REPLACE TABLE {dest_ref} AS SELECT {col_sql} FROM {src_ref}",  # nosec B608
+            )
+        elif not exists:
             created_here = True
             bigquery_run_sql(
                 client,

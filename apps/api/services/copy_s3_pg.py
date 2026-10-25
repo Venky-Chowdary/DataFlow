@@ -99,9 +99,24 @@ def copy_s3_to_postgres(
         )
         exists = dst_cur.fetchone() is not None
         dest_occupied = False
+        swap_at_end = False
+        swap_schema = dest_schema_n
+        swap_dest_ref = dest_ref
+        swap_dest_table = dest_table
         if replace_destination and exists:
-            dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
-            dest_conn.commit()
+            # C03/X-OW2 — stage the overwrite, rename-swap inside the run
+            # transaction: the old dest stays visible until COMMIT and a
+            # failed copy rolls back to it instead of leaving nothing.
+            from services.dest_overwrite_swap import (
+                overwrite_trash_name,
+                staged_overwrite_name,
+            )
+
+            stage_table = staged_overwrite_name(dest_table)
+            swap_trash_table = overwrite_trash_name(dest_table)
+            dest_ref = _pg_table_ref(swap_schema, stage_table)
+            dest_table = stage_table
+            swap_at_end = True
             exists = False
         if exists:
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
@@ -143,6 +158,19 @@ def copy_s3_to_postgres(
                 "S3→PG COPY refused: dest COUNT(*) "
                 f"{dest_count} != source COUNT {source_count}"
             )
+        if swap_at_end:
+            from services.dest_overwrite_swap import pg_swap_staged_dest
+
+            pg_swap_staged_dest(
+                dst_cur,
+                schema=swap_schema,
+                dest_table=swap_dest_table,
+                staging_table=dest_table,
+                trash_table=swap_trash_table,
+                quote=_pg_ident,
+            )
+            dest_ref = swap_dest_ref
+            dest_table = swap_dest_table
         dest_conn.commit()
         proof = f"dest_count:{dest_count}"
         return FastPathResult(

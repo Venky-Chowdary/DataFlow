@@ -119,9 +119,23 @@ def copy_mongo_to_oracle(
 
         exists = _ora_table_exists(dst_cur, dst_schema, dest_table)
         dest_occupied = False
+        swap_at_end = False
+        swap_schema = dst_schema
+        swap_dest_ref = dest_ref
+        swap_dest_table = dest_table
         if replace_destination and exists:
-            dst_cur.execute(_ora_drop_sql(dest_ref))
-            dest_conn.commit()
+            # C03/X-OW2 — stage the overwrite, rename-pair swap at the end:
+            # the old dest stays in the namespace for the whole copy.
+            from services.dest_overwrite_swap import (
+                overwrite_trash_name,
+                staged_overwrite_name,
+            )
+
+            stage_table = staged_overwrite_name(dest_table)
+            swap_trash_table = overwrite_trash_name(dest_table)
+            dest_ref = _ora_table_ref(swap_schema, stage_table)
+            dest_table = stage_table
+            swap_at_end = True
             exists = False
         if exists:
             dest_count_before = _ora_count(dst_cur, dest_ref)
@@ -163,6 +177,18 @@ def copy_mongo_to_oracle(
         if batch:
             dst_cur.executemany(insert_sql, batch)
             copied += len(batch)
+        if swap_at_end:
+            from services.dest_overwrite_swap import oracle_swap_staged_dest
+
+            oracle_swap_staged_dest(
+                dst_cur,
+                dest_ref=swap_dest_ref,
+                staging_ref=dest_ref,
+                dest_table=swap_dest_table,
+                trash_table=swap_trash_table,
+            )
+        dest_ref = swap_dest_ref
+        dest_table = swap_dest_table
         dest_conn.commit()
         if copied != source_count:
             raise ValueError(

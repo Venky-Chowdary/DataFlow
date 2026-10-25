@@ -193,6 +193,22 @@ def copy_sqlite_to_sqlserver(
                 except Exception:
                     logger.debug("SQLite source commit skipped", exc_info=True)
                 try:
+                    if swap_at_end:
+                        from services.dest_overwrite_swap import sqlserver_swap_staged_dest
+
+                        sqlserver_swap_staged_dest(
+                            dst_cur,
+                            schema=swap_schema,
+                            dest_table=swap_dest_table,
+                            staging_table=dest_table,
+                            trash_table=swap_trash_table,
+                            quote=_ss_ident,
+                        )
+
+                    dest_ref = swap_dest_ref
+
+                    dest_table = swap_dest_table
+
                     dest_conn.commit()
                 except Exception:
                     logger.debug("SQL Server dest commit skipped", exc_info=True)
@@ -219,9 +235,23 @@ def copy_sqlite_to_sqlserver(
                 "append into occupied SQL Server dest stays on the row path "
                 "(identity COPY would duplicate)"
             )
+        swap_at_end = False
+        swap_schema = dst_schema
+        swap_dest_ref = dest_ref
+        swap_dest_table = dest_table
         if replace_destination and exists:
-            dst_cur.execute(_ss_drop_sql(dest_ref))
-            dest_conn.commit()
+            # C03/X-OW2 — stage the overwrite, sp_rename swap inside the run
+            # transaction: the old dest stays visible until COMMIT.
+            from services.dest_overwrite_swap import (
+                overwrite_trash_name,
+                staged_overwrite_name,
+            )
+
+            stage_table = staged_overwrite_name(dest_table)
+            swap_trash_table = overwrite_trash_name(dest_table)
+            dest_ref = _ss_table_ref(swap_schema, stage_table)
+            dest_table = stage_table
+            swap_at_end = True
             exists = False
         if not exists:
             dst_cur.execute(

@@ -256,7 +256,7 @@ def copy_mysql_to_mysql(
                 # C03/X-OW2 — stage the overwrite, one atomic RENAME swap at
                 # the commit boundary; a DROP-first left the destination
                 # absent for the whole run (MySQL auto-commits DDL).
-                from services.mysql_dest_swap import (
+                from services.dest_overwrite_swap import (
                 mysql_overwrite_trash_name,
                 mysql_staged_overwrite_name,
             )
@@ -411,7 +411,7 @@ def copy_mysql_to_mysql(
                                 f"(lo={part['lo']!r} hi={part['hi']!r})"
                             )
             if swap_at_end:
-                from services.mysql_dest_swap import mysql_swap_staged_dest
+                from services.dest_overwrite_swap import mysql_swap_staged_dest
 
                 with dest_conn.cursor() as swap_cur:
                     mysql_swap_staged_dest(

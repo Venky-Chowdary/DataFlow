@@ -115,11 +115,22 @@ def copy_snowflake_to_snowflake(
             src_ref = snowflake_qualified_table(src_schema, src_resolved)
             dest_resolved = resolve_snowflake_table_name(cur, dest_schema, dest_table)
             exists = dest_resolved is not None
+            swap_at_end = False
+            swap_dest_ref = None
+            swap_stage_ref = None
             if replace_destination and exists:
-                drop_ref = snowflake_qualified_table(
+                # C03/X-OW2 — CTAS into a staging table, then ALTER TABLE ...
+                # SWAP WITH: a metadata-only atomic exchange on Snowflake.
+                # The old dest never leaves the namespace during the copy.
+                from services.dest_overwrite_swap import staged_overwrite_name
+
+                stage_table = staged_overwrite_name(dest_table)
+                swap_dest_ref = snowflake_qualified_table(
                     dest_schema, dest_resolved or require_safe_table(dest_table)
                 )
-                snowflake_execute(cur, f"DROP TABLE IF EXISTS {drop_ref}")  # nosec B608
+                dest_ref = snowflake_table_ref(dest_schema, stage_table)
+                swap_stage_ref = snowflake_qualified_table(dest_schema, stage_table)
+                swap_at_end = True
                 exists = False
             if not exists:
                 created_here = True
@@ -135,6 +146,12 @@ def copy_snowflake_to_snowflake(
                         f"INSERT INTO {insert_ref} ({dest_col_sql}) "  # nosec B608
                         f"SELECT {col_sql} FROM {src_ref}"
                     ),
+                )
+            if swap_at_end:
+                from services.dest_overwrite_swap import snowflake_swap_staged_dest
+
+                snowflake_swap_staged_dest(
+                    cur, dest_ref=swap_dest_ref, staging_ref=swap_stage_ref
                 )
         try:
             conn.commit()
