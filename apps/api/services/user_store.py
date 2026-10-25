@@ -432,7 +432,7 @@ def change_email(*, email: str, new_email: str,
     if doc is None:
         raise UserStoreError(f"{normalized} has no account")
     if _read_one(new_normalized) is not None:
-        raise UserStoreError(f"{new_normalized} already has an account")
+        raise EmailTakenError(f"{new_normalized} already has an account")
     if canonical == doc.get("canonical_email"):
         # A same-canonical "change" (case-only, or a variant folding to the
         # account's own key) has nothing to claim — refuse it up front.
