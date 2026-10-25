@@ -280,6 +280,71 @@ def local_sftp():
 
 
 @pytest.fixture(autouse=True)
+def _isolate_process_env(request):
+    """Undo ``os.environ`` mutations a test makes outside monkeypatch.
+
+    ``apply_railway_defaults()`` writes production defaults straight into
+    ``os.environ`` during a ``with TestClient(app)`` startup; monkeypatch
+    never recorded them, so they leak into every later test (production
+    config 503s, secret-vault ``SecretVaultError``s). Snapshot the whole
+    environment and restore it exactly so a test can only affect the
+    process env through monkeypatch.
+    """
+    snapshot = dict(os.environ)
+    yield
+    added = sorted(
+        k for k in os.environ
+        if k not in snapshot and k != "PYTEST_CURRENT_TEST"
+    )
+    changed = sorted(
+        k for k in snapshot
+        if os.environ.get(k) != snapshot[k] and k != "PYTEST_CURRENT_TEST"
+    )
+    for key in added:
+        os.environ.pop(key, None)
+    for key in changed:
+        os.environ[key] = snapshot[key]
+    if (added or changed) and os.environ.get("DATAFLOW_REPORT_ENV_LEAKS"):
+        report = os.environ["DATAFLOW_REPORT_ENV_LEAKS"]
+        if report != "1":
+            with open(report, "a") as fh:
+                fh.write(
+                    f"{request.node.nodeid} added={added} changed={changed}\n"
+                )
+        else:
+            print(
+                f"\n[env-leak] {request.node.nodeid} "
+                f"added={added} changed={changed}"
+            )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_app_state():
+    """Restore FastAPI ``app.state`` fields written by a test's startup.
+
+    ``with TestClient(app)`` runs the lifespan block, which sets
+    ``app.state.config_errors``. Under a leaked production env that leaves
+    a non-empty list on the shared app object and
+    ``ProductionConfigMiddleware`` 503s every later request in the suite.
+    Snapshot the state dict and restore it per test.
+    """
+    try:
+        from src.main import app
+    except Exception:
+        yield
+        return
+    state = app.state._state
+    snapshot = dict(state)
+    yield
+    for key in list(state):
+        if key not in snapshot:
+            del state[key]
+    for key, val in snapshot.items():
+        if state.get(key) is not val:
+            state[key] = val
+
+
+@pytest.fixture(autouse=True)
 def _isolate_cdc_leases(monkeypatch):
     """Isolate CDC leases per test (memory backend — no shared file/Redis bleed).
 
@@ -296,6 +361,31 @@ def _isolate_cdc_leases(monkeypatch):
 _SUITE_DATA_DIR = Path(os.environ["DATAFLOW_DATA_DIR"]).resolve()
 _DEV_DATA_DIR = (_api_root / "data").resolve()
 _PATH_ATTR_HINTS = ("PATH", "DIR", "STORE", "FILE", "LEDGER", "REGISTRY", "DB")
+_TRACKED_ASSETS: set[Path] | None = None
+
+
+def _tracked_data_assets() -> set[Path]:
+    """Files under ``apps/api/data`` tracked in git — read-only assets like
+    ``connector_form_schema.json`` that must never be rebound to a tmp dir."""
+    global _TRACKED_ASSETS
+    if _TRACKED_ASSETS is None:
+        import subprocess
+
+        try:
+            out = subprocess.run(
+                ["git", "ls-files", "-z", "data"],
+                cwd=_api_root,
+                capture_output=True,
+                check=True,
+            ).stdout
+            _TRACKED_ASSETS = {
+                (_api_root / p.decode()).resolve()
+                for p in out.split(b"\0")
+                if p
+            }
+        except Exception:  # noqa: BLE001 — no git means nothing is tracked
+            _TRACKED_ASSETS = set()
+    return _TRACKED_ASSETS
 
 
 def _rebind_import_time_store_paths(monkeypatch, per_test_dir: Path) -> None:
@@ -321,6 +411,8 @@ def _rebind_import_time_store_paths(monkeypatch, per_test_dir: Path) -> None:
             try:
                 resolved = val.resolve()
             except OSError:
+                continue
+            if resolved in _tracked_data_assets():
                 continue
             for root in (_SUITE_DATA_DIR, _DEV_DATA_DIR):
                 try:
