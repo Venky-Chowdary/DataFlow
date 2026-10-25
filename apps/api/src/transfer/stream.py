@@ -656,7 +656,6 @@ def _stream_database_transfer_impl(
             # A Kafka key is partitioning/compaction identity, not a merge
             # constraint — any declared identity (primary_key, upsert_key,
             # dedupe_key, merge_key) is the right produce key (D88).
-            from types import SimpleNamespace
             from services.sync_cursor import declared_identity_columns
             pk_source_cols = declared_identity_columns(
                 SimpleNamespace(
