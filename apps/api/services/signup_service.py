@@ -16,6 +16,7 @@ Enumeration rules baked in here, not at the route:
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import uuid
 from typing import Any
@@ -27,6 +28,7 @@ from services.auth_state import get_auth_state
 from services.email_canonical import canonical_email
 from services import denylist_store, disposable_list, mx_check, turnstile
 from services import form_token as form_token_mod
+from services.brand_env import getenv_brand
 from services.email_policy import role_assessment
 from services.email_quota import consume_send_slot
 from services.email_sender import (
@@ -46,6 +48,48 @@ RESEND_HOURLY_CAP = 5
 RESEND_DAILY_CAP = 10
 MIN_PASSWORD_LEN = 12
 MAX_PASSWORD_LEN = 128
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(getenv_brand(name, str(default)))
+    except (TypeError, ValueError):
+        return default
+
+
+def _subnet_key(ip: str) -> str:
+    """/24 for IPv4, /48 for IPv6; 'unknown' when unparseable."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return "unknown"
+    if addr.version == 4:
+        net = ipaddress.ip_network(f"{ip}/24", strict=False)
+    else:
+        net = ipaddress.ip_network(f"{ip}/48", strict=False)
+    return str(net.network_address)
+
+
+def _check_signup_velocity(*, ip: str, device_id: str, canonical: str) -> int:
+    """Per-IP, per-subnet, per-device and per-address caps (P2-6).
+
+    Returns the retry_after seconds when a bucket is exhausted, else 0.
+    Limits configurable: DATAWRAP_SIGNUP_IP_HOURLY (10),
+    DATAWRAP_SIGNUP_SUBNET_HOURLY (50), DATAWRAP_SIGNUP_DEVICE_DAILY (10),
+    DATAWRAP_SIGNUP_EMAIL_DAILY (5).
+    """
+    buckets = (
+        (f"signup:ip:{ip or 'unknown'}", _env_int("SIGNUP_IP_HOURLY", 10), 3600),
+        (f"signup:net:{_subnet_key(ip)}", _env_int("SIGNUP_SUBNET_HOURLY", 50), 3600),
+        (f"signup:dev:{device_id or 'unknown'}", _env_int("SIGNUP_DEVICE_DAILY", 10), 86400),
+        (f"signup:em:{canonical}", _env_int("SIGNUP_EMAIL_DAILY", 5), 86400),
+    )
+    for key, limit, window in buckets:
+        allowed, retry_after = get_auth_state().rate_limit_hit(
+            key, limit=limit, window_sec=window)
+        if not allowed:
+            return retry_after or window
+    return 0
 
 
 def _send(template: str, to: str, context: dict[str, Any], *, idempotency_key: str) -> None:
@@ -103,6 +147,15 @@ def request_signup(
             raise ApiError(400, "turnstile_required",
                            "couldn't verify you're human — try again")
     normalized = user_store.validate_email(email)
+    retry = _check_signup_velocity(
+        ip=ip, device_id=device_id, canonical=canonical_email(normalized))
+    if retry:
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code="rate_limited",
+                              details={"ip": ip, "retry_after_sec": retry})
+        raise ApiError(429, "signup_rate_limited",
+                       "too many attempts — try again shortly",
+                       retry_after_sec=retry)
     if not (MIN_PASSWORD_LEN <= len(password or "") <= MAX_PASSWORD_LEN):
         # Validation is fine to surface — it reveals nothing about the account.
         raise ApiError(400, "invalid_password",

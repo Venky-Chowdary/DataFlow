@@ -23,7 +23,7 @@ def _require_signup_enabled() -> None:
 
 def _client_ip(request: Request) -> str:
     try:
-        from services.auth_rate_limit import client_ip_from_request
+        from services.client_ip import client_ip_from_request
 
         return client_ip_from_request(request)
     except Exception:  # noqa: BLE001
