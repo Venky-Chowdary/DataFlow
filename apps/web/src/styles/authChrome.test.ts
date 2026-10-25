@@ -63,3 +63,19 @@ describe("mobile brand header edge", () => {
     assert.match(EDITORIAL, /\.lp-login-brand\s*\{[^}]*border-radius:\s*0 0 26px 26px/);
   });
 });
+
+describe("disabled brand CTA", () => {
+  it("keeps a readable label and a >=3:1 boundary instead of a faded tint", () => {
+    const rule = ruleBody(LANDING, ".lp-btn--brand:disabled");
+    assert.ok(rule, "no dedicated disabled style for the brand CTA");
+    const fill = rule.match(/background:\s*(#[0-9a-fA-F]{6})/);
+    const label = rule.match(/color:\s*(#[0-9a-fA-F]{6})/);
+    const edge = rule.match(/border-color:\s*(#[0-9a-fA-F]{6})/);
+    assert.ok(fill && label && edge, "disabled CTA needs fill/label/border");
+    assert.ok(contrastRatio(hex(label[1]), hex(fill[1])) >= 4.5,
+              "disabled label must stay readable on its fill");
+    assert.ok(contrastRatio(hex(edge[1]), [255, 255, 255]) >= 3,
+              "disabled boundary must reach 3:1 against a white card");
+    assert.doesNotMatch(rule, /opacity:\s*0\./, "an opacity fade is not a style");
+  });
+});

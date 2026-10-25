@@ -420,6 +420,19 @@ html:has(.lp) {
   filter: saturate(0.7);
 }
 
+/* Disabled brand CTA: washed-out teal-on-white fails readability. A solid
+   muted fill + dark slate label keeps the label ~8:1 and the bordered edge
+   ~4.8:1 against the card — clearly disabled, still legible. */
+.lp-btn--brand:disabled,
+.lp-btn--brand[aria-disabled="true"] {
+  background: #e2e8f0;
+  color: #475569;
+  border-color: #64748b;
+  opacity: 1;
+  filter: none;
+  box-shadow: none;
+}
+
 .lp-btn--link:disabled,
 .lp-btn--link[aria-disabled="true"] {
   color: var(--lp-muted);
