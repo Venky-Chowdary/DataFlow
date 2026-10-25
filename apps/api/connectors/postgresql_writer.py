@@ -2276,7 +2276,12 @@ def write_mapped_rows(
                             "destination DDL must be disclosed and approved "
                             "at Validate (ddl_changes_acknowledged); "
                             "DataFlow does not silently alter a table it "
-                            "did not create."
+                            "did not create. To proceed: re-run Validate and "
+                            "acknowledge the planned DDL change, or create "
+                            "the index yourself — "
+                            f"CREATE UNIQUE INDEX {index_name} "
+                            f"ON {schema}.{table_name} "
+                            f"({', '.join(conflict_cols)});"
                         )
                 cursor.execute(
                     sql.SQL(

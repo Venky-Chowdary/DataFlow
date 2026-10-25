@@ -37,6 +37,7 @@ class _FakePgCursor:
     def __init__(self):
         self.queries: list[str] = []
         self.managed_comment = None
+        self.covering_index_present = True
         self.rowcount = 1
 
     def execute(self, query, params=None):
@@ -53,6 +54,8 @@ class _FakePgCursor:
         last = self.queries[-1] if self.queries else ""
         if "obj_description" in last:
             return (self.managed_comment,)
+        if "pg_index" in last:
+            return (1,) if self.covering_index_present else None
         return (1,)
 
     def fetchall(self):
@@ -151,6 +154,38 @@ def test_upsert_covering_index_probe_casts_attname_array_to_text():
     assert probe_sql, "covering-index probe never ran"
     assert any("::text[]" in q for q in probe_sql), (
         "pg_index probe must cast array_agg(attname) — name[] never equals text[]"
+    )
+
+
+def test_unmarked_table_with_covering_index_upserts_without_refusal():
+    """Pre-marker table, no DDL needed: run 2 of an existing upsert job.
+
+    An unmarked destination that ALREADY has the unique index (every table
+    that upserted before, since the index was always created) must keep
+    working — the gate only fires when it would actually alter the table.
+    """
+    pytest.importorskip("psycopg2")
+    from connectors.postgresql_writer import write_mapped_rows
+
+    conn = _FakePgConn()  # unmarked (managed_comment=None), index covered
+    result = write_mapped_rows(connection=conn, **_pg_kwargs())
+    assert "did not create" not in (result.error or ""), result.error
+    assert "pg_table_existed" not in (result.error or ""), result.error
+
+
+def test_unmarked_table_missing_index_error_says_how_to_proceed():
+    """When DDL IS needed on an unmarked table, the refusal names the fix."""
+    pytest.importorskip("psycopg2")
+    from connectors.postgresql_writer import write_mapped_rows
+
+    conn = _FakePgConn()
+    conn.cur.covering_index_present = False
+    result = write_mapped_rows(connection=conn, **_pg_kwargs())
+    err = result.error or ""
+    assert "did not create" in err, err
+    assert "ddl_changes_acknowledged" in err, err
+    assert "CREATE UNIQUE INDEX" in err and "uidx_" in err, (
+        "refusal must include the exact manual DDL"
     )
 
 

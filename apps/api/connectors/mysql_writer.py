@@ -1060,7 +1060,13 @@ def write_mapped_rows(
                             f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
                         )
                 if not table_existed:
-                    cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})")
+                    # 'dataflow:managed' marks a table this run created so the
+                    # D101 gate below can tell it from an operator's table on
+                    # later upserts/replays.
+                    cursor.execute(
+                        f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs}) "
+                        "COMMENT='dataflow:managed'"
+                    )
                 _kwargs.setdefault(
                     "_schema_fidelity_report",
                     empty_unsupported_report(
@@ -1099,14 +1105,32 @@ def write_mapped_rows(
                     f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                 )
                 if not covered:
-                    if not bool(_kwargs.get("upsert_ddl_approved")):
+                    # A table a prior DataFlow run created carries the
+                    # 'dataflow:managed' comment — index DDL on it is ours to
+                    # make; only unmarked (operator-owned) tables gate.
+                    managed = False
+                    try:
+                        cursor.execute(
+                            "SELECT TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES "
+                            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+                            (table_name,),
+                        )
+                        _mrow = cursor.fetchone()
+                        managed = bool(_mrow and _mrow[0] == "dataflow:managed")
+                    except Exception:
+                        managed = False
+                    if not managed and not bool(_kwargs.get("upsert_ddl_approved")):
                         raise ValueError(
                             f"Upsert into existing table '{table_name}' needs "
                             f"unique index {index_name} on "
                             f"({', '.join(conflict_cols)}) — destination DDL "
                             "must be disclosed and approved at Validate "
                             "(ddl_changes_acknowledged); DataFlow does not "
-                            "silently alter a table it did not create."
+                            "silently alter a table it did not create. To "
+                            "proceed: re-run Validate and acknowledge the "
+                            "planned DDL change, or create the index "
+                            f"yourself — CREATE UNIQUE INDEX {index_name} "
+                            f"ON {table_name} ({', '.join(conflict_cols)});"
                         )
                     cols = ", ".join(
                         quote_sql_identifier(c, "`") for c in conflict_cols
