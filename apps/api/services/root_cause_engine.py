@@ -409,6 +409,13 @@ def _is_fidelity_signal(
         return False
     if _is_uniqueness_probe_signal(message, details, gate_id):
         return False
+    if _is_expectation_signal(message, details, gate_id):
+        # expect_column_not_null:order_id & friends are data-quality
+        # expectation findings on sampled values. The g9 summary still says
+        # "integrity failed", which used to absorb them into "Lossy /
+        # fidelity collapse" — pointing operators at a type-path remap when
+        # the failing gate is the expectation suite (M16).
+        return False
     if _FIDELITY_RE.search(blob):
         return True
     if _TYPE_ARROW_RE.search(blob) and gate_id in _FIDELITY_GATE_IDS:
@@ -447,6 +454,33 @@ def _is_uniqueness_probe_signal(
     if status == "error" and "probe" in blob:
         return True
     return False
+
+
+_EXPECTATION_ISSUE_RE = re.compile(r"^expect_[a-z0-9_]+", re.I)
+
+
+def _is_expectation_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True when G9 blocked on expectation-suite findings only.
+
+    Issues read ``expect_column_not_null:order_id: 3 failures`` — sampled
+    data-quality findings, not a declared type-path collapse. Any real
+    fidelity stamp or a non-expectation issue keeps the gate a fidelity
+    signal.
+    """
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    if str(gate_id or "") != "g9_data_integrity":
+        return False
+    issues = details.get("issue_texts") or details.get("issues") or []
+    texts = [str(i) for i in issues[:20] if str(i).strip()]
+    return bool(texts) and all(
+        bool(_EXPECTATION_ISSUE_RE.match(t.lstrip())) for t in texts
+    )
 
 
 def _is_encoding_signal(
