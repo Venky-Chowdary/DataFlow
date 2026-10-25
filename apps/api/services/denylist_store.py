@@ -16,8 +16,11 @@ from services.platform_config import data_dir
 
 DENYLIST_COLLECTION = "email_denylist"
 
-_ENTRY_KINDS = ("domain", "mx_host", "email")
+_ENTRY_KINDS = ("domain", "mx_host", "email", "allow_domain")
 _SOURCES = ("feed", "team", "bounce")
+
+#: allow entries are team-only — a feed-sourced row can never widen access.
+_TEAM_ONLY_KINDS = ("allow_domain",)
 
 
 def _path():
@@ -47,6 +50,8 @@ def add_entry(*, value: str, kind: str, source: str = "team",
         raise ValueError(f"kind must be one of {_ENTRY_KINDS}")
     if source not in _SOURCES:
         raise ValueError(f"source must be one of {_SOURCES}")
+    if kind in _TEAM_ONLY_KINDS and source != "team":
+        raise ValueError(f"{kind} entries are team-managed only")
     value = value.strip().lower()
     entry = {
         "id": f"den_{uuid.uuid4().hex}",
@@ -61,12 +66,14 @@ def add_entry(*, value: str, kind: str, source: str = "team",
     if coll is not None:
         coll.update_one(
             {"kind": kind, "value": value}, {"$set": entry}, upsert=True)
+        _audit("denylist.add", added_by, entry)
         return entry
     with json_doc_transaction(_path(), {"entries": []}) as doc:
         doc["entries"] = [
             e for e in doc.get("entries", [])
             if not (e.get("kind") == kind and e.get("value") == value)]
         doc["entries"].append(entry)
+    _audit("denylist.add", added_by, entry)
     return entry
 
 
@@ -74,7 +81,11 @@ def remove_entry(*, value: str, kind: str) -> bool:
     value = value.strip().lower()
     coll = _collection()
     if coll is not None:
-        return coll.delete_one({"kind": kind, "value": value}).deleted_count > 0
+        deleted = coll.delete_one(
+            {"kind": kind, "value": value}).deleted_count > 0
+        if deleted:
+            _audit("denylist.remove", "", {"kind": kind, "value": value})
+        return deleted
     removed = False
     with json_doc_transaction(_path(), {"entries": []}) as doc:
         before = len(doc.get("entries", []))
@@ -82,6 +93,8 @@ def remove_entry(*, value: str, kind: str) -> bool:
             e for e in doc["entries"]
             if not (e.get("kind") == kind and e.get("value") == value)]
         removed = len(doc["entries"]) != before
+    if removed:
+        _audit("denylist.remove", "", {"kind": kind, "value": value})
     return removed
 
 
@@ -95,6 +108,15 @@ def is_denied(value: str, *, kind: str) -> bool:
             {"kind": kind, "value": value}, limit=1) > 0
     return any(e.get("kind") == kind and e.get("value") == value
                for e in list_entries())
+
+
+def _audit(event: str, actor: str, entry: dict[str, Any]) -> None:
+    from services.audit_coverage import record_security_event
+
+    record_security_event(
+        event, outcome="succeeded", actor=actor or "system",
+        details={"kind": entry.get("kind"), "value": entry.get("value"),
+                 "source": entry.get("source"), "reason": entry.get("reason")})
 
 
 def deny_email_and_domain(email: str, *, source: str, reason: str,

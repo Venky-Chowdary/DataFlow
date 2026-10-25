@@ -1,14 +1,21 @@
-"""Disposable-domain list (P2-2).
+"""Disposable-domain list (P2-2) — vendored snapshot, no runtime fetch.
 
-Three sources, checked in order: the team allowlist wins, then the team
-denylist, then the disposable set — a bundled seed of well-known burner
-domains plus the synced public feed cache.
+The domain set is the union of:
 
-Feed sync (``sync_feed``): fetches the domain list URL, verifies the
-SHA-256 checksum pinned via ``DATAWRAP_DISPOSABLE_FEED_SHA256``, and
-replaces the cache atomically. Any failure keeps the last good set —
-the caller surfaces "refuse" per the spec. Runs daily via the scheduled
-sync entry point; tests inject ``fetch_fn`` so no network is needed.
+- the vendored blocklist (``services/_vendored/disposable_email_blocklist.txt``,
+  a dated snapshot of the public disposable-email-domains list with its
+  source commit and SHA-256 in the file header — loaded at import),
+- a small bundled seed (defence in depth — always refused),
+- the team denylist (``email_denylist`` kind ``domain``).
+
+The team allowlist (``email_denylist`` kind ``allow_domain``) wins over
+every deny source.
+
+Optional live refresh (``sync_feed``): OFF by default — it only runs when
+``DATAWRAP_DISPOSABLE_FEED_ENABLED=1``, requires the URL pinned to a
+specific commit (``master``/``main`` refs are refused) and a pinned
+SHA-256 (``DATAWRAP_DISPOSABLE_FEED_SHA256``). A failed or absent refresh
+never removes protection: the vendored snapshot always applies.
 """
 
 from __future__ import annotations
@@ -17,6 +24,7 @@ import hashlib
 import logging
 import threading
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from services.brand_env import getenv_brand
@@ -24,22 +32,51 @@ from services import denylist_store
 
 logger = logging.getLogger(__name__)
 
-#: Bundled floor — always refused even before the first feed sync.
+_VENDORED_PATH = Path(__file__).resolve().parent / "_vendored" / "disposable_email_blocklist.txt"
+
+#: Defence-in-depth floor on top of the vendored file.
 _SEED_DOMAINS = frozenset(
-    "mailinator.com mailinator.net mailinator2.com guerrillamail.com "
-    "guerrillamail.net guerrillamail.org guerrillamailblock.com "
-    "tempmail.com temp-mail.org temp-mail.io tempmailo.com "
-    "10minutemail.com 10minutemail.net 10minutemail.org "
-    "yopmail.com yopmail.fr trashmail.com trashmail.net trashmail.org "
-    "getnada.com maildrop.cc sharklasers.com grr.la "
-    "dispostable.com mailnesia.com mailcatch.com mailsac.com "
-    "tempinbox.com throwawaymail.com fakemailgenerator.com "
-    "emailondeck.com mintemail.com spamgourmet.com spam4.me "
-    "burnermail.io inboxbear.com mail-temp.com mohmal.com "
-    "temp-mail.ru tempmail.de tmpmail.org tmpmail.net".split()
+    "mailinator.com guerrillamail.com tempmail.com yopmail.com "
+    "10minutemail.com maildrop.cc sharklasers.com grr.la "
+    "dispostable.com mailsac.com temp-mail.org".split()
 )
 
-_FEED_URL = "https://raw.githubusercontent.com/disposable-email-domains/disposable-email-domains/master/disposable_email_blocklist.conf"
+
+def _load_vendored() -> tuple[frozenset[str], dict[str, str]]:
+    header: dict[str, str] = {}
+    domains: list[str] = []
+    try:
+        lines = _VENDORED_PATH.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        logger.error("vendored disposable list missing: %s", _VENDORED_PATH)
+        return frozenset(), header
+    for line in lines:
+        line = line.strip()
+        if line.startswith("#"):
+            key, _, value = line.lstrip("# ").partition(":")
+            header[key.strip()] = value.strip()
+        elif line:
+            domains.append(line.lower())
+    return frozenset(domains), header
+
+
+_VENDORED_DOMAINS, VENDORED_HEADER = _load_vendored()
+
+
+def vendored_domains() -> frozenset[str]:
+    return _VENDORED_DOMAINS
+
+
+def vendored_sha256() -> str:
+    """Checksum recorded in the vendored file header (of the domain payload)."""
+    return VENDORED_HEADER.get("domains_sha256", "")
+
+
+def vendored_payload_sha256() -> str:
+    """Recomputed checksum over the non-comment payload lines."""
+    payload = "\n".join(sorted(_VENDORED_DOMAINS)) + "\n"
+    return hashlib.sha256(payload.encode()).hexdigest()
+
 
 _lock = threading.Lock()
 _feed_domains: frozenset[str] = frozenset()
@@ -50,45 +87,51 @@ def _domain_of(email: str) -> str:
     return (email or "").strip().lower().split("@", 1)[-1]
 
 
-def allowlist_domains() -> set[str]:
-    """Team allowlist entries live as negative-reasoned domain rows."""
-    return {
-        e["value"] for e in denylist_store.list_entries()
-        if e.get("kind") == "domain" and e.get("source") == "feed"
-        and e.get("reason") == "allow"
-    }
-
-
 def is_allowed(email: str) -> bool:
-    return _domain_of(email) in allowlist_domains()
+    return denylist_store.is_denied(_domain_of(email), kind="allow_domain")
 
 
 def is_disposable(email: str) -> bool:
     """Allowlist beats every deny source."""
     domain = _domain_of(email)
-    if domain in allowlist_domains():
+    if is_allowed(email):
         return False
     if denylist_store.is_denied(domain, kind="domain"):
         return True
-    return domain in _SEED_DOMAINS or domain in _feed_domains
+    return domain in _SEED_DOMAINS or domain in _VENDORED_DOMAINS \
+        or domain in _feed_domains
 
 
 def feed_state() -> dict[str, Any]:
     return dict(_feed_state)
 
 
+def feed_enabled() -> bool:
+    return getenv_brand("DISPOSABLE_FEED_ENABLED", "0").lower() in (
+        "1", "true", "yes")
+
+
 def sync_feed(*, fetch_fn=None, url: str | None = None,
               expected_sha256: str | None = None) -> dict[str, Any]:
-    """Fetch the feed, verify its checksum, swap the cache atomically.
+    """Optional live refresh — flag-gated, pinned-URL, pinned-checksum.
 
-    On any failure the previous set is kept and ``feed_state()["error"]``
-    names what went wrong — the caller treats "feed stale" as refuse.
+    Refuses to run when the flag is off, the URL isn't commit-pinned, or
+    no checksum is configured. On any failure the previous set is kept;
+    the vendored snapshot protects users regardless.
     """
     global _feed_domains
-    url = url or getenv_brand("DISPOSABLE_FEED_URL", _FEED_URL)
+    url = url or getenv_brand("DISPOSABLE_FEED_URL", "")
     expected_sha256 = expected_sha256 or getenv_brand(
         "DISPOSABLE_FEED_SHA256", "")
     try:
+        if not feed_enabled():
+            raise RuntimeError("feed refresh disabled")
+        if not url:
+            raise ValueError("no feed URL configured")
+        if "/master" in url or "/main" in url or "@" not in url and "refs" not in url:
+            raise ValueError("feed URL must be pinned to a commit, not a branch")
+        if not expected_sha256:
+            raise ValueError("feed checksum pin required")
         if fetch_fn is None:
             import urllib.request
 
@@ -97,13 +140,13 @@ def sync_feed(*, fetch_fn=None, url: str | None = None,
         else:
             raw = fetch_fn(url)
         digest = hashlib.sha256(raw).hexdigest()
-        if expected_sha256 and digest != expected_sha256:
+        if digest != expected_sha256:
             raise ValueError("feed checksum mismatch")
         domains = frozenset(
             line.decode("utf-8", "replace").strip().lower()
             for line in raw.splitlines()
             if line.strip() and not line.startswith(b"#"))
-        if len(domains) < 10:  # sanity floor — refuse a broken feed
+        if len(domains) < 10:
             raise ValueError("feed too small to be valid")
         with _lock:
             _feed_domains = domains
@@ -112,7 +155,8 @@ def sync_feed(*, fetch_fn=None, url: str | None = None,
                 sha256=digest, error="")
     except Exception as exc:
         _feed_state["error"] = f"{type(exc).__name__}: {exc}"
-        logger.warning("disposable feed sync failed: %s", _feed_state["error"])
+        logger.warning("disposable feed sync refused/failed: %s",
+                       _feed_state["error"])
     return feed_state()
 
 
