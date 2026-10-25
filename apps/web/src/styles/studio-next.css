@@ -445,8 +445,8 @@ button.df2-canvas-badge {
 
 .df2-canvas-op-tip {
   position: fixed;
-  left: var(--df-tip-x);
-  top: var(--df-tip-y);
+  left: var(--df-tip-x, 0px);
+  top: var(--df-tip-y, 0px);
   z-index: var(--df-z-popover);
   width: max-content;
   max-width: 220px;

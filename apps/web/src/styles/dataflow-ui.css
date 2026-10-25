@@ -4618,35 +4618,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-.df2-route-line {
-  position: relative;
-  height: 10px;
-  border-radius: 999px;
-  background: #e4ebe5;
-  overflow: hidden;
-}
-
-.df2-route-line span {
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: var(--route-progress);
-  border-radius: inherit;
-  background: linear-gradient(90deg, #0f766e, var(--df-brand));
-  transition: width 0.25s ease;
-}
-
-.df2-route-line i {
-  position: absolute;
-  top: 50%;
-  left: 0;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: #fff;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.2);
-  animation: df2-route-packet 2.2s ease-in-out infinite;
-}
-
 @keyframes df2-route-packet {
   from { transform: translate(0, -50%); }
   to { transform: translate(260px, -50%); }
@@ -5705,19 +5676,6 @@ body {
   }
   .df2-route-visual {
     grid-template-columns: minmax(0, 1fr);
-  }
-  .df2-route-line {
-    min-height: 64px;
-    width: 10px;
-    justify-self: center;
-  }
-  .df2-route-line span {
-    inset: 0 0 auto 0;
-    width: 100% !important;
-    height: var(--route-progress);
-  }
-  .df2-route-line i {
-    display: none;
   }
   .df2-login-page {
     grid-template-columns: 1fr;
