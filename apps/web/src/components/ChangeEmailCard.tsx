@@ -19,10 +19,14 @@ function isValidEmail(value: string) {
  * step 2 verifies it. Only renders when the deployment runs the
  * self-serve signup surface (the email-change endpoints live there).
  */
-export function ChangeEmailCard({ enabled: enabledProp }: { enabled?: boolean | null } = {}) {
+export function ChangeEmailCard({ enabled: enabledProp, initialStep }: {
+  enabled?: boolean | null;
+  /** Test/a11y hook: render a later step in static markup. */
+  initialStep?: "idle" | "request" | "code" | "done";
+} = {}) {
   const { toast } = useToast();
   const [enabled, setEnabled] = useState<boolean | null>(enabledProp ?? null);
-  const [step, setStep] = useState<"idle" | "request" | "code" | "done">("idle");
+  const [step, setStep] = useState<"idle" | "request" | "code" | "done">(initialStep ?? "idle");
   const [newEmail, setNewEmail] = useState("");
   const [code, setCode] = useState("");
   const [challengeId, setChallengeId] = useState("");
@@ -105,10 +109,11 @@ export function ChangeEmailCard({ enabled: enabledProp }: { enabled?: boolean | 
         {step === "request" && (
           <form className="df2-settings-policy-row" onSubmit={request} noValidate>
             <div>
-              <h3>New sign-in email</h3>
+              <h3 id="change-email-input-label">New sign-in email</h3>
               <p>A 6-digit code goes to this address. Your sessions keep working until you confirm.</p>
               <input
                 id="change-email-input"
+                aria-labelledby="change-email-input-label"
                 className="df2-input"
                 type="email"
                 inputMode="email"
@@ -137,10 +142,11 @@ export function ChangeEmailCard({ enabled: enabledProp }: { enabled?: boolean | 
         {step === "code" && (
           <form className="df2-settings-policy-row" onSubmit={confirm} noValidate>
             <div>
-              <h3>Enter the 6-digit code</h3>
+              <h3 id="change-email-code-label">Enter the 6-digit code</h3>
               <p>We sent it to <strong>{newEmail.trim()}</strong> — it expires in 10 minutes.</p>
               <input
                 id="change-email-code"
+                aria-labelledby="change-email-code-label"
                 className="df2-input"
                 inputMode="numeric"
                 autoComplete="one-time-code"

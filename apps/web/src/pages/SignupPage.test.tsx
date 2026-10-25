@@ -63,6 +63,20 @@ describe("ChangeEmailCard", () => {
     assert.match(markup, /New sign-in email|new-email|email/i);
     assert.match(markup, /df2-btn/);
   });
+
+  it("names every input programmatically (aria-labelledby resolves)", () => {
+    const requestMarkup = renderToStaticMarkup(
+      createElement(ChangeEmailCard, { enabled: true, initialStep: "request" }),
+    );
+    // The input is labelled by the visible heading — no label-less field.
+    assert.match(requestMarkup, /id="change-email-input-label"/);
+    assert.match(requestMarkup, /aria-labelledby="change-email-input-label"/);
+    const codeMarkup = renderToStaticMarkup(
+      createElement(ChangeEmailCard, { enabled: true, initialStep: "code" }),
+    );
+    assert.match(codeMarkup, /id="change-email-code-label"/);
+    assert.match(codeMarkup, /aria-labelledby="change-email-code-label"/);
+  });
 });
 
 describe("ForgotPasswordPage (reset link)", () => {
