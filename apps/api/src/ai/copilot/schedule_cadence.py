@@ -195,7 +195,7 @@ def _daily(hour: int | None, minute: int, tz: str, assumed: bool) -> CadenceSpec
         interval="daily",
         cron=f"{minute} {hour} * * *",
         timezone=tz,
-        description=f"every day at {_clock(hour, minute)} {tz}",
+        description=f"every day at {_clock(hour, minute)}{_zone_txt(tz, assumed)}",
         timezone_assumed=assumed,
     )
 
@@ -219,12 +219,21 @@ def _weekly(
         interval="weekly",
         cron=f"{minute} {anchored} * * {dow}",
         timezone=tz,
-        description=f"every {day} at {_clock(anchored, minute)} {tz}",
+        description=f"every {day} at {_clock(anchored, minute)}{_zone_txt(tz, assumed)}",
         timezone_assumed=assumed,
     )
 
 
-def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
+def _every_n(
+    unit: str,
+    count: int,
+    tz: str,
+    assumed: bool,
+    *,
+    text: str = "",
+    times: list[tuple[int, int]] | None = None,
+    dows: list[int] | None = None,
+) -> CadenceSpec:
     if unit.startswith("min"):
         if count < 1:
             return _ask(
@@ -262,6 +271,52 @@ def _every_n(unit: str, count: int, tz: str, assumed: bool) -> CadenceSpec:
                 "An hourly step has to divide a day, so I can take every 1–23 hours. "
                 "For a daily run, say daily and the time."
             )
+        times = times or []
+        dows = dows or []
+        dow_f = _dow_field(dows)
+        if _BETWEEN_RE.search(text) and len(times) >= 2:
+            # "every 2 hours on weekdays between 9am and 5pm" — the window and
+            # the day set are part of the cadence, not decoration (D29).
+            lo, hi = sorted(times)[:2]
+            cron = f"{lo[1]} {lo[0]}-{hi[0]}/{count} * * {dow_f}"
+            day_txt = f" ({_dow_field(dows)})" if dows else ""
+            return CadenceSpec(
+                interval="cron",
+                cron=cron,
+                timezone=tz,
+                description=(
+                    f"every {count} hours between {_clock(lo[0], lo[1])} and "
+                    f"{_clock(hi[0], hi[1])}{day_txt}{_zone_txt(tz, assumed)}"
+                ),
+                timezone_assumed=assumed,
+            )
+        if _ANCHOR_RE.search(text) and times:
+            # "every 3 hours starting at 1am" — the anchor is part of the
+            # cadence: 1,4,7,… not 0,3,6,… (D44).
+            ah, am = times[0]
+            cron = f"{am} {ah}-23/{count} * * {dow_f}"
+            return CadenceSpec(
+                interval="cron",
+                cron=cron,
+                timezone=tz,
+                description=(
+                    f"every {count} hours from {_clock(ah, am)}"
+                    f"{_zone_txt(tz, assumed)}"
+                ),
+                timezone_assumed=assumed,
+            )
+        if dows:
+            cron = f"0 */{count} * * {dow_f}"
+            return CadenceSpec(
+                interval="cron",
+                cron=cron,
+                timezone=tz,
+                description=(
+                    f"every {count} hours on {_dow_field(dows)}"
+                    f"{_zone_txt(tz, assumed)}"
+                ),
+                timezone_assumed=assumed,
+            )
         return CadenceSpec(
             interval="cron",
             cron=f"0 */{count} * * *",
@@ -293,15 +348,165 @@ _BARE_CRON_RE = re.compile(
     r"^(?:[^\s]+\s+){4}[^\s]+$"
 )
 
+#: "every other Friday" / "every 2nd week" / "biweekly" — a multi-week cadence
+#: has no honest 5-field cron form and the schedule model stores a single cron,
+#: so it is refused by name instead of silently becoming weekly (D44).
+_BIWEEKLY_RE = re.compile(
+    r"\b(?:every\s+(?:other|second|2nd|alternate)\s+|bi-?week|fortnight)", re.I
+)
+#: "between 9am and 5pm" — the two times bound the firing window (D29).
+_BETWEEN_RE = re.compile(r"\bbetween\b", re.I)
+#: "starting at 1am" / "from 3pm" — an every-N anchor (D44).
+_ANCHOR_RE = re.compile(r"\b(?:starting\s+(?:at|from)|from|beginning\s+at)\b", re.I)
+#: ":15 past the hour" / "at :15" — an hourly minute anchor (D44).
+_PAST_HOUR_RE = re.compile(r"(?<!\d):([0-5]?\d)\b")
+#: "weekend" — Saturday and Sunday (D41).
+_WEEKEND_RE = re.compile(r"\bweekends?\b", re.I)
+#: "twice/three times a day" — a multi-time daily cadence (D41).
+_MULTI_A_DAY_RE = re.compile(r"\b(?:twice|three\s+times|\d+\s+times)\s+a\s+(?:day|week|month)\b", re.I)
+
+
+def _all_times(raw: str) -> list[tuple[int, int]]:
+    """Every time-of-day named in the text, in order, deduplicated."""
+    out: list[tuple[int, int]] = []
+    for m in _TIME_RE.finditer(raw or ""):
+        word = (m.group("word") or "").lower()
+        if word == "midnight":
+            t = (0, 0)
+        elif word in {"noon", "midday"}:
+            t = (12, 0)
+        elif m.group("h24") is not None:
+            t = (int(m.group("h24")), int(m.group("m24")))
+        else:
+            h = int(m.group("h"))
+            minute = int(m.group("m") or 0)
+            if (m.group("ap") or "").lower() == "pm" and h != 12:
+                h += 12
+            if (m.group("ap") or "").lower() == "am" and h == 12:
+                h = 0
+            t = (h, minute)
+        if t not in out:
+            out.append(t)
+    return out
+
+
+def _dow_list(lower: str) -> list[int]:
+    """Ordered day-of-week set from the phrasing: named days, weekend, weekdays."""
+    dows: list[int] = []
+    for m in _WEEKDAY_RE.finditer(lower):
+        dow = _WEEKDAYS[m.group(1).lower()]
+        if dow not in dows:
+            dows.append(dow)
+    if _WEEKEND_RE.search(lower):
+        for dow in (6, 0):
+            if dow not in dows:
+                dows.append(dow)
+    if re.search(r"\bweekdays?\b", lower):
+        for dow in (1, 2, 3, 4, 5):
+            if dow not in dows:
+                dows.append(dow)
+    return dows
+
+
+def _times_cron(times: list[tuple[int, int]]) -> str | None:
+    """Cron hour/minute fields for a set of times of day.
+
+    Cron fires the cartesian product of the two fields, so times that share a
+    minute (``8am and 8pm``) or an hour fold exactly; a pair like ``8:15 and
+    20:30`` would silently double the fires and is refused instead (D41).
+    """
+    if len(times) == 1:
+        h, m = times[0]
+        return f"{m} {h}"
+    minutes = {m for _, m in times}
+    hours = {h for h, _ in times}
+    if len(minutes) == 1:
+        return f"{minutes.pop()} {','.join(str(h) for h in sorted(hours))}"
+    if len(hours) == 1:
+        return f"{','.join(str(m) for m in sorted(minutes))} {hours.pop()}"
+    return None
+
+
+def _dow_names(dows: list[int]) -> str:
+    """Human day names for a dow set: ``1-5`` -> ``weekdays``."""
+    ordered = sorted(dows)
+    if ordered == [1, 2, 3, 4, 5]:
+        return "weekdays"
+    if ordered == [0, 6]:
+        return "weekend"
+    by_num: dict[int, str] = {}
+    for n, i in _WEEKDAYS.items():
+        if len(n) > 3:
+            by_num[i] = n
+    return ", ".join(by_num[d].capitalize() for d in ordered)
+
+
+def _dow_field(dows: list[int]) -> str:
+    if not dows:
+        return "*"
+    ordered = sorted(dows)
+    if ordered == [0, 1, 2, 3, 4, 5, 6]:
+        return "*"
+    if ordered == [1, 2, 3, 4, 5]:
+        return "1-5"
+    return ",".join(str(d) for d in ordered)
+
+
+_DAYS_IN_MONTH = {1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31,
+                  8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
+
+
+def _never_fires_reason(expr: str) -> str | None:
+    """A cron that can never fire (``0 0 30 2 *`` — February 30th) is refused.
+
+    Only the day-of-month × month cross-product can deadlock: dom values below
+    the month's smallest maximum always find a day in at least one month.
+    """
+    fields = expr.split()
+    if len(fields) != 5:
+        return None
+    try:
+        from services.cron_schedule import _parse_field
+
+        dom = _parse_field(fields[2], 2)
+        months = _parse_field(fields[3], 3)
+    except Exception:
+        return None
+    if not dom or not months:
+        return None
+    if min(dom) > max(_DAYS_IN_MONTH[m] for m in months):
+        named = min(dom)
+        return (
+            f"day {named} never occurs in the named month(s) — "
+            "the schedule would never fire"
+        )
+    return None
+
+
+def _zone_txt(tz: str, assumed: bool) -> str:
+    """The zone the cadence text may claim. An assumed zone is not the
+    operator's — the preview names the kept zone separately instead of the
+    description claiming "(UTC)" over a New York schedule (D22)."""
+    return "" if assumed else f" {tz}"
+
 
 def _bare_cron(raw: str, tz: str, assumed: bool) -> CadenceSpec | None:
     """Accept a 5-field cron that was not prefixed with the word cron.
 
     ``*/5 * * * *`` is a schedule. Requiring the word "cron" made
     create_schedule answer with the failure question instead of the
-    expression the runner already knows how to evaluate.
+    expression the runner already knows how to evaluate. A trailing zone
+    (``30 2 * * 0 America/New_York`` or ``… in Asia/Kolkata``) is stripped
+    before matching — the zone was already read by ``parse_timezone`` (D22).
     """
     text = " ".join((raw or "").split())
+    # Cut any zone clause out of the token stream before the 5-field check.
+    for pattern in (_ZONE_WORD_RE, _IANA_RE):
+        m = pattern.search(text)
+        if m:
+            text = (text[: m.start()] + " " + text[m.end() :]).strip()
+            text = " ".join(text.split())
+            break
     if not _BARE_CRON_RE.match(text):
         return None
     from services.cron_schedule import CronError, validate_cron
@@ -310,11 +515,14 @@ def _bare_cron(raw: str, tz: str, assumed: bool) -> CadenceSpec | None:
         validate_cron(text)
     except CronError:
         return None
+    never = _never_fires_reason(text)
+    if never:
+        return _ask(f"cron “{text}” can never fire: {never}.")
     return CadenceSpec(
         interval="cron",
         cron=text,
         timezone=tz,
-        description=f"cron “{text}” ({tz})",
+        description=f"cron “{text}”{_zone_txt(tz, assumed) or ' (UTC)'}",
         timezone_assumed=assumed,
     )
 
@@ -356,20 +564,43 @@ def parse_cadence(text: str) -> CadenceSpec:
             validate_cron(expr)
         except CronError as exc:
             return _ask(f"I cannot schedule cron “{expr}”: {exc}")
+        never = _never_fires_reason(expr)
+        if never:
+            return _ask(f"cron “{expr}” can never fire: {never}.")
         return CadenceSpec(
             interval="cron",
             cron=expr,
             timezone=tz,
-            description=f"cron “{expr}” ({tz})",
+            description=f"cron “{expr}”{_zone_txt(tz, assumed) or ' (UTC)'}",
             timezone_assumed=assumed,
         )
 
     clock = parse_time_of_day(raw)
     hour, minute = clock if clock else (None, 0)
+    times = _all_times(raw)
+    dows = _dow_list(lower)
+
+    # A multi-week cadence has no single-cron form — refuse by name rather
+    # than keep "every Friday" for "every other Friday" (D44).
+    if _BIWEEKLY_RE.search(lower):
+        frag = _BIWEEKLY_RE.search(lower).group(0).strip()
+        return _ask(
+            f"“{frag}” is a multi-week cadence, which a 5-field cron cannot "
+            "express evenly — I will not quietly turn it into a weekly run. "
+            "Pick a weekday for weekly, or a day of the month for monthly."
+        )
 
     every = _EVERY_N_RE.search(lower)
     if every:
-        return _every_n(every.group(2).lower(), int(every.group(1)), tz, assumed)
+        return _every_n(
+            every.group(2).lower(),
+            int(every.group(1)),
+            tz,
+            assumed,
+            text=lower,
+            times=times,
+            dows=dows,
+        )
 
     weekday = _WEEKDAY_RE.search(lower)
     if "month" in lower:
@@ -390,12 +621,24 @@ def parse_cadence(text: str) -> CadenceSpec:
             interval="cron",
             cron=f"{minute} {hour} {dom} * *",
             timezone=tz,
-            description=f"on day {dom} of every month at {_clock(hour, minute)} {tz}",
+            description=f"on day {dom} of every month at {_clock(hour, minute)}{_zone_txt(tz, assumed)}",
             timezone_assumed=assumed,
         )
 
     if any(w in lower for w in ("hourly", "every hour", "each hour")):
         minute_at = re.search(r"\bminute\s+(\d{1,2})\b", lower)
+        past = _PAST_HOUR_RE.search(lower)
+        if past and not clock and not minute_at:
+            # "hourly at :15 (past the hour)" — the minute is the anchor, the
+            # hour field stays * (D44).
+            anchored = int(past.group(1))
+            return CadenceSpec(
+                interval="hourly",
+                cron=f"{anchored} * * * *",
+                timezone=tz,
+                description=f"every hour at :{anchored:02d}{_zone_txt(tz, assumed)}",
+                timezone_assumed=assumed,
+            )
         if minute_at and not clock:
             anchored = int(minute_at.group(1))
             if not 0 <= anchored <= 59:
@@ -407,7 +650,7 @@ def parse_cadence(text: str) -> CadenceSpec:
                 interval="hourly",
                 cron=f"{anchored} * * * *",
                 timezone=tz,
-                description=f"every hour at :{anchored:02d} {tz}",
+                description=f"every hour at :{anchored:02d}{_zone_txt(tz, assumed)}",
                 timezone_assumed=assumed,
             )
         if hour is not None and clock:
@@ -416,7 +659,7 @@ def parse_cadence(text: str) -> CadenceSpec:
                 interval="hourly",
                 cron=f"{minute} * * * *",
                 timezone=tz,
-                description=f"every hour at :{minute:02d}",
+                description=f"every hour at :{minute:02d}{_zone_txt(tz, assumed)}",
                 timezone_assumed=assumed,
             )
         return CadenceSpec(
@@ -426,23 +669,60 @@ def parse_cadence(text: str) -> CadenceSpec:
             timezone_assumed=assumed,
         )
 
-    if re.search(r"\bweekdays?\b", lower):
-        if hour is None:
-            return _ask(
-                "Weekdays needs a time of day. Say e.g. “weekdays at 21:40 UTC”. "
-                "Without a time this would be stored as every 7 days."
+    # Multi-day and multi-time cadences: every named day and every named time
+    # belongs in the cron — never just the first match (D41).
+    if dows or "week" in lower or _MULTI_A_DAY_RE.search(lower):
+        if times and len(times) > 1:
+            mm = _times_cron(times)
+            if mm is None:
+                frag = " and ".join(_clock(h, m) for h, m in times)
+                return _ask(
+                    f"“{frag}” is not one cron — the fields would cross and fire "
+                    f"{len(times) * 2 - len(times)} extra times. Give me one daily "
+                    "time, or make these separate schedules."
+                )
+            cron = f"{mm} * * {_dow_field(dows)}"
+            day_names = _dow_names(dows)
+            return CadenceSpec(
+                interval="cron",
+                cron=cron,
+                timezone=tz,
+                description=(
+                    f"{'every ' + day_names if day_names else 'every day'} at "
+                    + ", ".join(_clock(h, m) for h, m in times)
+                    + _zone_txt(tz, assumed)
+                ),
+                timezone_assumed=assumed,
             )
-        return CadenceSpec(
-            interval="cron",
-            cron=f"{minute} {hour} * * 1-5",
-            timezone=tz,
-            description=f"weekdays at {_clock(hour, minute)} {tz}",
-            timezone_assumed=assumed,
-        )
-
-    if "week" in lower or weekday:
-        dow = _WEEKDAYS[weekday.group(1).lower()] if weekday else None
-        return _weekly(dow, hour, minute, tz, assumed)
+        if dows and (hour is not None or (times and len(times) == 1)):
+            h, m = times[0] if times else (hour, minute)
+            if len(dows) == 1:
+                # A single named weekday stays the weekly preset the schedule
+                # model already carries — same cron, honest interval class.
+                return _weekly(dows[0], h, m, tz, assumed)
+            cron = f"{m} {h} * * {_dow_field(dows)}"
+            return CadenceSpec(
+                interval="cron",
+                cron=cron,
+                timezone=tz,
+                description=(
+                    f"every {_dow_names(dows)} at {_clock(h, m)}"
+                    f"{_zone_txt(tz, assumed)}"
+                ),
+                timezone_assumed=assumed,
+            )
+        if len(dows) == 1:
+            # One named day with no time anchors to the start of that day —
+            # "weekly on Monday" means Monday 00:00, not whenever it was typed.
+            return _weekly(dows[0], hour, minute, tz, assumed)
+        if dows:
+            return _ask(
+                "That needs a time of day. Say e.g. “Tuesdays and Thursdays "
+                "at 16:15 UTC” — without a time it would run whenever it was created."
+            )
+        if "week" in lower or weekday:
+            dow = _WEEKDAYS[weekday.group(1).lower()] if weekday else None
+            return _weekly(dow, hour, minute, tz, assumed)
 
     if any(
         w in lower
