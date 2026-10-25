@@ -560,7 +560,9 @@ def request_password_reset(*, email: str, ip: str = "",
     Bot/abuse checks (form-token, Turnstile, IP+address velocity) never
     change the 202: throttling a bomber must not become an oracle."""
     started = time.monotonic()
-    fake = _forgot_response(f"pw-{uuid.uuid4().hex[:24]}")
+    # Same id shape as a real stored row (prt-<24 hex>) — the reply body
+    # must not reveal whether the account exists.
+    fake = _forgot_response(f"prt-{uuid.uuid4().hex[:24]}")
     verdict_form = form_token_mod.check(
         form_token, purpose="reset", honeypot=honeypot)
     if not verdict_form["ok"]:

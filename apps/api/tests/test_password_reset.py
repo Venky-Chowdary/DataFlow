@@ -417,3 +417,18 @@ def test_send_failed_event_is_registered():
     assert "password.reset.send_failed" in SECURITY_EVENTS
 
 
+def test_forgot_fake_and_real_replies_share_one_shape():
+    """Enumeration parity in the body: fake and real 202s are byte-identical
+    in shape — same keys and the same challenge_id form (prt-<24 hex>)."""
+    c = _client()
+    _verified_user(c)
+    fake = _forgot(c, "ghost@example.com").json()
+    real = _forgot(c).json()
+    assert set(fake) == set(real) == {"ok", "challenge_id",
+                                    "resend_after_sec", "expires_in_sec"}
+    for body in (fake, real):
+        assert re.fullmatch(r"prt-[0-9a-f]{24}", body["challenge_id"]), body
+        assert body["ok"] is True
+    assert fake["challenge_id"] != real["challenge_id"]
+
+
