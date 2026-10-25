@@ -31,7 +31,9 @@ COLLECTION = "platform_users"
 _EMPTY_FILE: dict[str, Any] = {"users": []}
 
 PLATFORM_ROLES = ("admin", "member")
-USER_STATUSES = ("active", "disabled")
+# ``banned`` = abuse hold from the signup/admin surface: cannot authenticate,
+# cannot re-verify, sessions revoked (banned sign-ins stay neutral).
+USER_STATUSES = ("active", "disabled", "banned")
 
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s.]+\.[^@\s]{2,}$")
 _MIN_PASSWORD_LEN = 12
@@ -46,7 +48,12 @@ _PUBLIC_FIELDS = (
     "updated_at",
     "last_login_at",
     "must_change_password",
+    "email_verified_at",
 )
+
+# Password hash algorithms this store may carry. ``bcrypt`` rows are
+# transparently rehashed to argon2id on the next successful login (P0-4).
+PASSWORD_ALGOS = ("bcrypt", "argon2id")
 
 
 class UserStoreError(ValueError):
@@ -180,6 +187,7 @@ def _read_one(email: str) -> dict[str, Any] | None:
 
 def list_users() -> list[dict[str, Any]]:
     """Every stored account, newest last, without credentials."""
+    ensure_backfilled()
     users = [public_user(u) for u in _read_all()]
     return sorted(users, key=lambda u: (str(u.get("created_at") or ""), str(u.get("email") or "")))
 
@@ -195,12 +203,14 @@ def credentials_for_auth() -> list[dict[str, Any]]:
     Disabled accounts are withheld rather than deleted so an operator can revoke
     access without losing who did what in the audit trail.
     """
+    ensure_backfilled()
     return [
         {
             "email": doc.get("email", ""),
             "name": doc.get("name") or doc.get("email", ""),
             "role": doc.get("role", "member"),
             "password_hash": doc.get("password_hash", ""),
+            "password_algo": doc.get("password_algo", "bcrypt"),
         }
         for doc in _read_all()
         if doc.get("status", "active") == "active" and doc.get("password_hash")
@@ -214,12 +224,19 @@ def create_user(
     role: str = "member",
     password: str | None = None,
     created_by: str = "",
+    email_verified: bool = True,
+    signup_ip: str = "",
+    signup_risk: float = 0.0,
 ) -> tuple[dict[str, Any], str | None]:
     """Create an account. Returns the public record and a one-time password.
 
     When the caller supplies no password we mint one and return it exactly once —
     there is no mail transport in a self-hosted deployment, so the admin has to
     be able to read it off the screen and hand it over.
+
+    Admin-created accounts are trusted: ``email_verified`` defaults True so a
+    Team-settings invite still signs in without an OTP round-trip. The signup
+    flow passes an already-hashed secret through :func:`create_signup_user`.
     """
     normalized = _validate_email(email)
     role_value = _validate_role(role)
@@ -235,6 +252,11 @@ def create_user(
         "role": role_value,
         "status": "active",
         "password_hash": hash_password(secret),
+        "password_algo": "bcrypt",
+        "canonical_email": normalized,
+        "email_verified_at": _now() if email_verified else None,
+        "signup_ip": signup_ip,
+        "signup_risk": float(signup_risk),
         "must_change_password": issued is not None,
         "created_at": _now(),
         "created_by": created_by,
@@ -243,6 +265,78 @@ def create_user(
     }
     _insert_one(doc)
     return public_user(doc), issued
+
+
+def create_signup_user(
+    *,
+    email: str,
+    name: str,
+    password_hash: str,
+    password_algo: str,
+    canonical: str,
+    signup_ip: str = "",
+    signup_risk: float = 0.0,
+) -> dict[str, Any]:
+    """Insert the verified account after a successful OTP challenge.
+
+    The caller owns the hash (argon2id from the pending row) — this path never
+    re-hashes. Verified at insert: a user row only exists after the code proved
+    the inbox.
+    """
+    normalized = _validate_email(email)
+    if password_algo not in PASSWORD_ALGOS:
+        raise UserStoreError(f"password_algo must be one of {', '.join(PASSWORD_ALGOS)}")
+    doc = {
+        "email": normalized,
+        "name": (name or "").strip()[:128] or normalized.split("@")[0],
+        "role": "member",
+        "status": "active",
+        "password_hash": password_hash,
+        "password_algo": password_algo,
+        "canonical_email": canonical or normalized,
+        "email_verified_at": _now(),
+        "signup_ip": signup_ip,
+        "signup_risk": float(signup_risk),
+        "must_change_password": False,
+        "created_at": _now(),
+        "created_by": "signup",
+        "updated_at": _now(),
+        "last_login_at": None,
+    }
+    _insert_one(doc)
+    return public_user(doc)
+
+
+def find_by_canonical(canonical: str) -> dict[str, Any] | None:
+    """Auth-credential row for a canonical email (enumeration-safe lookup)."""
+    for doc in _read_all():
+        if doc.get("canonical_email") == canonical:
+            return doc
+    return None
+
+
+def mark_email_verified(email: str) -> dict[str, Any]:
+    normalized = normalize_email(email)
+    doc = _read_one(normalized)
+    if doc is None:
+        raise UserStoreError(f"{normalized} has no account")
+    if not doc.get("email_verified_at"):
+        doc["email_verified_at"] = _now()
+        doc["updated_at"] = _now()
+        _write_one(doc)
+    return public_user(doc)
+
+
+def update_password_hash(*, email: str, password_hash: str, password_algo: str) -> None:
+    """Swap the stored hash — used by the transparent bcrypt→argon2id rehash."""
+    normalized = normalize_email(email)
+    doc = _read_one(normalized)
+    if doc is None:
+        return
+    doc["password_hash"] = password_hash
+    doc["password_algo"] = password_algo
+    doc["updated_at"] = _now()
+    _write_one(doc)
 
 
 def update_user(
@@ -295,6 +389,44 @@ def reset_password(*, email: str) -> tuple[dict[str, Any], str]:
 
 def delete_user(*, email: str) -> bool:
     return _delete_one(normalize_email(email))
+
+
+_BACKFILLED = False
+
+
+def backfill_signup_fields() -> int:
+    """P1-7 migration: existing accounts predate email verification.
+
+    Every pre-signup account was provisioned by an admin or env var — trusted,
+    so backfill marks them verified (``email_verified_at`` = ``created_at``),
+    stamps the canonical key, and records ``password_algo=bcrypt`` so the
+    transparent rehash knows what it's reading. Idempotent; runs once per
+    process from ``_read_all``.
+    """
+    updated = 0
+    for doc in _read_all():
+        changed = False
+        if not doc.get("canonical_email"):
+            doc["canonical_email"] = normalize_email(doc.get("email") or "")
+            changed = True
+        if not doc.get("email_verified_at"):
+            doc["email_verified_at"] = doc.get("created_at") or _now()
+            changed = True
+        if not doc.get("password_algo") and doc.get("password_hash"):
+            doc["password_algo"] = "bcrypt"
+            changed = True
+        if changed:
+            _write_one(doc)
+            updated += 1
+    return updated
+
+
+def ensure_backfilled() -> None:
+    """Cheap once-per-process guard called from reads."""
+    global _BACKFILLED
+    if not _BACKFILLED:
+        backfill_signup_fields()
+        _BACKFILLED = True
 
 
 def record_login(email: str) -> None:
