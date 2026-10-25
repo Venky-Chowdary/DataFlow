@@ -3309,6 +3309,17 @@
   max-width: 14ch;
 }
 
+/* Decorative accent rule under the H1 — a flow element with its own
+   margin, so it can never touch the heading at any width (was an
+   absolutely-positioned rail that could clip the trailing glyph). */
+.lp-login-brand-rule {
+  display: block;
+  width: 64px;
+  height: 1px;
+  margin: 18px 0 0;
+  background: linear-gradient(90deg, rgba(94, 234, 212, 0.6), transparent);
+}
+
 .lp-login-brand-kicker {
   color: #5eead4;
   font-size: 11px;
@@ -3952,11 +3963,7 @@
     margin: 0;
   }
 
-  .lp-login-brand-rail {
-    display: none;
-  }
-
-  .lp-login-auth {
+    .lp-login-auth {
     order: 1;
     overflow: visible;
     border-left: none;
@@ -8832,17 +8839,8 @@
   display: block;
 }
 
-/* Decorative rail: absolute-positioned at 42% — guaranteed never to
-   strike through copy on flow pages or any narrow viewport. */
-.lp-login--flow .lp-login-brand-rail {
-  display: none;
-}
-
-@media (max-width: 960px) {
-  .lp-login--gate .lp-login-brand-rail {
-    display: none;
-  }
-}
+/* (The decorative rail is gone — the accent rule under the H1 is a flow
+   element now, so nothing decorative needs hiding on narrow viewports.) */
 
 /* "Forgot password?" — a quiet text link, not a native button. */
 .lp-login--gate .lp-login-forgot {

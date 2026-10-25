@@ -26,7 +26,6 @@ export function AuthBrandPanel({ title, lead, onBack, metrics, dest }: AuthBrand
         <span className="lp-login-brand-mesh" />
         <span className="lp-login-brand-orb lp-login-brand-orb--a" />
         <span className="lp-login-brand-orb lp-login-brand-orb--b" />
-        <span className="lp-login-brand-rail" />
       </div>
 
       <div className="lp-login-brand-inner">
@@ -47,6 +46,7 @@ export function AuthBrandPanel({ title, lead, onBack, metrics, dest }: AuthBrand
         <div className="lp-login-brand-body">
           <p className="lp-login-brand-kicker">Enterprise data platform</p>
           <h1 className="lp-login-brand-title">{title}</h1>
+          <span className="lp-login-brand-rule" aria-hidden="true" />
           <p className="lp-login-brand-lead">{lead}</p>
 
           <div className="lp-login-proof" aria-hidden>

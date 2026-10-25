@@ -1756,16 +1756,6 @@ html:has(.lp) {
   animation: lp-login-orb 14s ease-in-out infinite alternate-reverse;
 }
 
-.lp-login-brand-rail {
-  position: absolute;
-  left: 12%;
-  right: 12%;
-  top: 42%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(94, 234, 212, 0.55), transparent);
-  opacity: 0.7;
-}
-
 @keyframes lp-login-orb {
   from { transform: translate3d(0, 0, 0) scale(1); }
   to { transform: translate3d(18px, 12px, 0) scale(1.06); }

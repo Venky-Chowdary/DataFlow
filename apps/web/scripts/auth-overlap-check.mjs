@@ -91,7 +91,7 @@ async function check(vpName, viewport, theme, screen) {
   // (positive z-index, or positioned after the text in DOM order).
   const overlaps = await page.evaluate(() => {
     const hits = [];
-    const decos = [".lp-login-brand-rail", ".lp-login-brand-overlay", ".lp-login-brand-orb",
+    const decos = [".lp-login-brand-overlay", ".lp-login-brand-orb",
       ".lp-login-brand-orb--a", ".lp-login-brand-orb--b", ".lp-login-brand-grid"]
       .map((s) => ({ s, el: document.querySelector(s) }))
       .filter((x) => x.el && x.el.getClientRects().length);
@@ -132,6 +132,27 @@ async function check(vpName, viewport, theme, screen) {
   });
   for (const h of overlaps) { log(`FAIL ${tag}: ${h}`); failures++; }
   if (!overlaps.length) log(`ok   ${tag}: no decorative/text overlap`);
+
+  // 1b) the accent rule under the H1 must keep a clear gap from the
+  // heading at every width — it lives in flow precisely so it can never
+  // clip the trailing glyph (was an absolute rail at top:42%).
+  const ruleGap = await page.evaluate(() => {
+    const title = document.querySelector(".lp-login-brand-title");
+    const rule = document.querySelector(".lp-login-brand-rule");
+    if (!title || !rule || !rule.getClientRects().length) return null;
+    const t = title.getBoundingClientRect();
+    const r = rule.getBoundingClientRect();
+    return { gap: r.top - t.bottom, intersectsTitle:
+      r.left < t.right && r.right > t.left && r.top < t.bottom && r.bottom > t.top };
+  });
+  if (ruleGap === null) {
+    log(`ok   ${tag}: accent rule absent on this layout`);
+  } else if (ruleGap.intersectsTitle || ruleGap.gap < 12) {
+    log(`FAIL ${tag}: accent rule gap ${ruleGap.gap.toFixed(1)}px (min 12, no intersection)`);
+    failures++;
+  } else {
+    log(`ok   ${tag}: accent rule clears the H1 by ${ruleGap.gap.toFixed(1)}px`);
+  }
 
   // 2) AA contrast on Back control, link-variant buttons, and CTAs —
   // measured on rendered pixels (element screenshot → the two dominant

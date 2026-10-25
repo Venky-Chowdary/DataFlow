@@ -98,3 +98,20 @@ describe("settings card spacing (review-10 item 6)", () => {
     }
   });
 });
+
+describe("accent rule under the brand H1 (review-10 item 8)", () => {
+  it("is a flow element with a clear top margin, never absolute", () => {
+    const rule = ruleBody(EDITORIAL, ".lp-login-brand-rule");
+    assert.ok(rule, "no .lp-login-brand-rule rule");
+    assert.doesNotMatch(rule, /position:\s*absolute/);
+    const m = rule.match(/margin:\s*(\d+)px/);
+    assert.ok(m && parseInt(m[1], 10) >= 12,
+            "accent rule must keep >=12px clear of the heading");
+    // The old absolutely-positioned rail is gone from markup and styles.
+    const panel = readFileSync(
+      join(STYLES_DIR, "../components/AuthBrandPanel.tsx"), "utf8");
+    assert.doesNotMatch(panel, /lp-login-brand-rail/);
+    assert.doesNotMatch(EDITORIAL, /\.lp-login-brand-rail/);
+    assert.doesNotMatch(LANDING, /\.lp-login-brand-rail/);
+  });
+});
