@@ -2375,6 +2375,8 @@ def _source_key_values(
         if str(m.get("target") or "").lower() == sk and m.get("source"):
             source_sort_key = str(m["source"])
             break
+    from services.value_serializer import SQL_NULL_SENTINEL
+
     seen: set[str] = set()
     values: list[Any] = []
     for rec in records:
@@ -2384,6 +2386,13 @@ def _source_key_values(
         if raw is None and source_sort_key != sort_key:
             raw = rec.get(sort_key)
         if raw is None or raw == "":
+            continue
+        # D86 — the NULL sentinel is metadata, never a bind value. Keep real
+        # NULL keys out of the IN (...) list; read_target_sample's IS NULL
+        # branch matches destination NULL keys instead.
+        if str(raw).lower() == SQL_NULL_SENTINEL.lower():
+            if None not in values:
+                values.append(None)
             continue
         marker = str(raw)
         if marker in seen:
