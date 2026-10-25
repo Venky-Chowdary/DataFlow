@@ -29,6 +29,11 @@ psycopg2-binary>=2.9.9
 # Last 4.x on PyPI is 4.8.0. Stay below 5 until fakesnow and the writer are
 # both re-proven on the new major.
 snowflake-connector-python>=3.6.0,<5
+# Mirror/SCD2 go through generic_sql's SQLAlchemy engine — without the dialect
+# package every keyed Snowflake mode failed with 'SQLAlchemy dialect/driver
+# for snowflake is not available' (D47). Pin 1.x: 2.x requires connector >=5
+# and Python 3.11, both above this image's floor.
+snowflake-sqlalchemy>=1.6.0,<2
 google-cloud-bigquery>=3.14.0
 google-cloud-storage>=2.14.0
 boto3>=1.34.0
