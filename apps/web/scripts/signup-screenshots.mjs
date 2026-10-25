@@ -277,6 +277,17 @@ async function run(vpName, viewport, theme) {
   await shot(page, `${tag}-18-signup-turnstile-testkey-mock`);
 
   // Authenticated settings: admin metrics card + change-email flow.
+  // Re-login first — the anonymous-screen navigations above wiped the
+  // verify-success session.
+  try {
+    await gotoLogin(page, theme);
+    await page.locator('input[type="email"]').first().fill(email);
+    await page.locator('input[type="password"]').first().fill("correct-horse-staple-9");
+    await page.locator('button[type="submit"]').last().click();
+    await page.waitForTimeout(2500);
+  } catch (e) {
+    console.log(`  ${tag}: re-login failed —`, e.message.split("\n")[0]);
+  }
   await page.route("**/api/v1/auth/admin/signup-metrics", (route) =>
     route.fulfill({
       status: 200, contentType: "application/json",
