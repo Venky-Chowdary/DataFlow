@@ -569,10 +569,15 @@ def request_password_reset(*, email: str, ip: str = "",
         return fake
     # Secure reset LINK (not a code): 256-bit single-use token, only the
     # HMAC is stored, and issuing it invalidates every earlier link.
-    token, stored = password_reset_store.issue(email=normalized, ip=ip, ua=ua)
+    # Everything is keyed to the STORED account address — never the typed
+    # variant — so a canonical alias can't route the link to a different
+    # mailbox and every variant supersedes the same token set.
+    account_email = user["email"]
+    token, stored = password_reset_store.issue(
+        email=account_email, ip=ip, ua=ua)
     base = (getenv_brand("APP_URL") or "https://www.datawrap.io").rstrip("/")
     try:
-        _send("reset_link", normalized,
+        _send("reset_link", account_email,
               {"name": user.get("name") or "there",
                "reset_url": f"{base}/reset-password?token={token}",
                "expires_minutes": int(password_reset_store.TOKEN_TTL.total_seconds() // 60)},
@@ -582,10 +587,10 @@ def request_password_reset(*, email: str, ip: str = "",
         # link can be requested right away.
         logger.warning("password-reset link send failed")
     record_security_event("password.reset.requested", outcome="succeeded",
-                          actor=normalized, session_id=stored["id"],
-                          details={"ip": ip})
+                          actor=account_email, session_id=stored["id"],
+                          details={"ip": ip, "requested_as": normalized})
     record_security_event("password.reset.sent", outcome="succeeded",
-                          actor=normalized, session_id=stored["id"],
+                          actor=account_email, session_id=stored["id"],
                           details={"ip": ip})
     return _forgot_response(stored["id"])
 

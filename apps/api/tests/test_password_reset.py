@@ -271,3 +271,33 @@ def test_email_change_velocity_429s_with_retry_after(monkeypatch):
                       json={"new_email": "grace@example.com"})
     assert last.status_code == 429
     assert last.json()["error"]["retry_after_sec"] > 0
+
+
+def test_variant_request_mails_only_the_stored_address():
+    """A canonical-equivalent variant (case/dots/+tag) must not route the
+    reset link to the typed mailbox — the link goes to the stored,
+    verified account address only."""
+    c = _client()
+    _verified_user(c, "ada.signup@gmail.com")
+    _forgot(c, "ADASIGNUP@gmail.com")
+    mail = ConsoleEmailSender.OUTBOX[-1]
+    assert mail.to == ["ada.signup@gmail.com"] or mail.to == "ada.signup@gmail.com"
+    _forgot(c, "ada.signup+alternate@gmail.com")
+    mail = ConsoleEmailSender.OUTBOX[-1]
+    assert mail.to == ["ada.signup@gmail.com"] or mail.to == "ada.signup@gmail.com"
+
+
+def test_variant_requests_supersede_one_token_set():
+    """Tokens are keyed to the account, not the typed string: a second
+    request through a different variant kills the first link."""
+    c = _client()
+    _verified_user(c, "ada.signup@gmail.com")
+    _forgot(c, "ada.signup@gmail.com")
+    first = _link_token()
+    _forgot(c, "adasignup@gmail.com")
+    second = _link_token()
+    assert first != second
+    probe = c.post("/api/v1/auth/password/reset/inspect", json={"token": first})
+    assert probe.json()["status"] == "used"
+    probe = c.post("/api/v1/auth/password/reset/inspect", json={"token": second})
+    assert probe.json()["ok"] is True
