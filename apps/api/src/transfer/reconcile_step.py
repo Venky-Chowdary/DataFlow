@@ -2888,6 +2888,31 @@ def _maybe_attach_verification_ladder(
     kind = conservation_kind(sync_mode, dest_count_before=dest_before)
     census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
     keyed = kind == KIND_KEYED
+    # X-OW1: a keyed run into an occupied destination is only comparable on
+    # the written batch's keys — the destination legitimately holds rows this
+    # run never wrote. Restrict the re-read population to the batch keys so
+    # L2–L5 grade the batch, not pre-existing rows; cardinality still uses the
+    # whole-table count via target_row_count / target_rows_before.
+    batch_scoped = False
+    if (
+        census is not None
+        and dest_before
+        and pk_column
+        and source_rows
+    ):
+        key_rows = [r for r in (records or []) if isinstance(r, dict)] or source_rows
+        batch_keys = {
+            str(r.get(pk_column))
+            for r in key_rows
+            if isinstance(r, dict) and r.get(pk_column) is not None
+        }
+        if batch_keys:
+            target_rows = [
+                r
+                for r in target_rows
+                if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
+            ]
+            batch_scoped = True
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -2903,7 +2928,12 @@ def _maybe_attach_verification_ladder(
         coerced_null_rows=int(report.get("coerced_null_rows") or 0),
         rows_skipped=int(report.get("rows_skipped") or 0),
         source_checksum=str(report.get("source_checksum") or ""),
-        target_checksum=str(report.get("target_checksum") or ""),
+        # The report-level dest digest covers the whole table; when the row
+        # list was re-scoped to the batch keys it is not comparable, so let L3
+        # recompute on the scoped population.
+        target_checksum=(
+            "" if batch_scoped else str(report.get("target_checksum") or "")
+        ),
         dest_db_type=dest_type,
         dest_types=dest_types,
         allow_extra_rows=allow_extra,
@@ -6064,17 +6094,23 @@ def _run_reconciliation_impl(
         if isinstance(stashed, list):
             sample_records = [r for r in stashed if isinstance(r, dict)]
     pk_column = str(pk_cols[0]) if len(pk_cols) == 1 else None
-    if allow_extra_early and pk_column and not written_ids and sample_records:
-        written_ids = [
-            str(x)
-            for x in _source_key_values(
-                sample_records,
-                sort_key=pk_column,
-                mappings=mapping_dicts,
-                limit=500,
-            )
-            if x is not None and str(x) != ""
-        ] or None
+    # X-OW1: derive the batch key list from whichever row collection this path
+    # actually holds — engine-copy runs may carry full `records` without a
+    # writer-stashed sample, and without keys the verify pass cannot re-scope
+    # the destination digest to the written batch.
+    if allow_extra_early and pk_column and not written_ids:
+        key_source_rows = sample_records or records or []
+        if key_source_rows:
+            written_ids = [
+                str(x)
+                for x in _source_key_values(
+                    key_source_rows,
+                    sort_key=pk_column,
+                    mappings=mapping_dicts,
+                    limit=500,
+                )
+                if x is not None and str(x) != ""
+            ] or None
 
     # Both digests computed by the engines when they will render identically —
     # the same population coverage at a fraction of the cost, since neither side
@@ -6090,7 +6126,12 @@ def _run_reconciliation_impl(
     # are the only two comparable values for such a run: recomputing either side
     # here would compare two different algorithms and always disagree.
     paired = _writer_supplied_engine_digests(dest_summary)
-    if paired is not None and not source_checksum_scope_note:
+    # X-OW1: an append into an occupied destination is only comparable on the
+    # staged population's keys — the destination legitimately holds rows this
+    # run never wrote. Whole-table digests (writer-supplied or re-read) count
+    # those pre-existing rows as corruption; the keyed census owns this scope.
+    append_scope_occupied = bool(_keyed_join_proof(dest_summary) and rows_before)
+    if paired is not None and not source_checksum_scope_note and not append_scope_occupied:
         # G-1i: the writer's dest digest was computed inside the copy
         # transaction — post-write tampering is invisible to it. Re-digest
         # the destination at verify time (same engine digest, same column
@@ -6153,7 +6194,7 @@ def _run_reconciliation_impl(
                 and (records or source_spool is not None)
             )
         )
-    ):
+    ) and not append_scope_occupied:
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
             dest_cfg=cfg,

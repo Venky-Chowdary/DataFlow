@@ -146,3 +146,80 @@ def test_overwrite_complete_snapshot_still_leftover_merges(tmp_path: Path) -> No
     )
     assert deleted == 1
     assert destination_row_count("sqlite", cfg, schema="", table_name="items") == 2
+
+
+def test_incremental_batch_scoped_verify_still_catches_tampered_batch_row(
+    tmp_path: Path,
+) -> None:
+    """X-OW1: batch-scoping must not disable value proof.
+
+    A pre-existing row outside the batch (id=99) is legal and must survive;
+    a *batch* row whose values were tampered after the write must still fail
+    reconciliation — the ladder grades the written keys, not the whole table.
+    """
+    src_t = "inc_src_" + uuid.uuid4().hex[:8]
+    dst_t = "inc_dst_" + uuid.uuid4().hex[:8]
+    src = tmp_path / "inc_src.db"
+    dst = tmp_path / "inc_dst.db"
+    _seed(src, src_t, [(1, "a"), (2, "b")])
+    _seed(dst, dst_t, [(1, "a"), (2, "b"), (99, "ghost")])
+    maps = [
+        {"source": "id", "target": "id", "confidence": 0.99},
+        {"source": "label", "target": "label", "confidence": 0.99},
+    ]
+    request = TransferRequest(
+        source=EndpointConfig(
+            kind="database",
+            format="sqlite",
+            database=str(src),
+            table=src_t,
+            connection_string=f"sqlite:///{src}",
+            ssl=False,
+        ),
+        destination=EndpointConfig(
+            kind="database",
+            format="sqlite",
+            database=str(dst),
+            table=dst_t,
+            connection_string=f"sqlite:///{dst}",
+            ssl=False,
+        ),
+        mappings=maps,
+        sync_mode="incremental_deduped",
+        stream_contracts=[
+            {
+                "name": src_t,
+                "sync_mode": "incremental_deduped",
+                "cursor_field": "id",
+                "cursor_semantics": "monotonic_sequence",
+                "primary_key": "id",
+                "selected": True,
+            }
+        ],
+        skip_preflight=False,
+        validation_mode="balanced",
+    )
+    cfg = {"database": str(dst)}
+
+    clean = UniversalTransferEngine().execute_tracked(
+        request, uuid.uuid4().hex[:24]
+    )
+    assert clean.success, clean.error
+    assert destination_row_count("sqlite", cfg, schema="", table_name=dst_t) == 3
+
+    # Tamper a batch row after the accepted run and re-run the same batch:
+    # the keyed re-scope must still see the divergence and fail closed.
+    con = sqlite3.connect(dst)
+    try:
+        con.execute(f'UPDATE "{dst_t}" SET label=? WHERE id=1', ("TAMPERED",))
+        con.commit()
+    finally:
+        con.close()
+
+    tampered = UniversalTransferEngine().execute_tracked(
+        request, uuid.uuid4().hex[:24]
+    )
+    assert not tampered.success
+    # Fail closed: the ghost and the tampered row are left for the operator,
+    # never silently deleted or overwritten back.
+    assert destination_row_count("sqlite", cfg, schema="", table_name=dst_t) == 3
