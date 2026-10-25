@@ -170,6 +170,38 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.ai.training.training_scheduler import schedule_training_on_transfer
 
+def _bounded_incremental_read(request: "TransferRequest") -> bool:
+    """True when this run's read narrows to a delta — a stored watermark is
+    bound to the declared cursor, so the opening message must not quote the
+    full-table row count (M4)."""
+    try:
+        from services.sync_cursor import resolve_incremental_read_scope
+
+        scope = resolve_incremental_read_scope(
+            sync_mode=getattr(request, "sync_mode", "") or "",
+            stream_contracts=getattr(request, "stream_contracts", None),
+            source_type=getattr(request.source, "format", "") or "",
+            source_database=getattr(request.source, "database", "") or "",
+            source_object=(
+                getattr(request.source, "table", "")
+                or getattr(request.source, "collection", "")
+                or ""
+            ),
+            dest_type=getattr(request.destination, "format", "") or "",
+            dest_database=getattr(request.destination, "database", "") or "",
+            dest_object=(
+                getattr(request.destination, "table", "")
+                or getattr(request.destination, "collection", "")
+                or ""
+            ),
+            source=request.source,
+            destination=request.destination,
+        )
+        return bool(getattr(scope, "bounded", False))
+    except Exception:
+        return False
+
+
 from services.batch_progress import (
     ThrottledCheckpoint,
     batch_write_message,
@@ -4230,7 +4262,11 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=opening_batch_message(total_rows, request.stream_contracts),
+                message=opening_batch_message(
+                    total_rows,
+                    request.stream_contracts,
+                    delta=_bounded_incremental_read(request),
+                ),
             )
 
             stream_contract = resolve_sync_contract(request.stream_contracts)
@@ -5291,7 +5327,11 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=opening_batch_message(total_rows, request.stream_contracts),
+                message=opening_batch_message(
+                    total_rows,
+                    request.stream_contracts,
+                    delta=_bounded_incremental_read(request),
+                ),
             )
 
             stream_contract = resolve_sync_contract(request.stream_contracts)
