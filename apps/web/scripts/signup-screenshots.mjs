@@ -302,13 +302,16 @@ async function run(vpName, viewport, theme) {
   try {
     // The icon-only Settings button is hidden on narrow layouts — open the
     // mobile nav and pick the Settings item (sidebar is inert until then).
-    const gear = page.locator('button[title="Settings"]');
-    if (await gear.isVisible().catch(() => false)) {
-      await gear.first().click();
-    } else {
-      await page.locator(".df2-mobile-menu").first().click();
-      await page.waitForTimeout(500);
+    // Check the hamburger FIRST: on narrow layouts the sidebar (and its
+    // Settings gear) renders offscreen via transform — isVisible() is true
+    // but the element is inert, and clicking it hangs on actionability.
+    const menu = page.locator(".df2-mobile-menu").first();
+    if (await menu.isVisible().catch(() => false)) {
+      await menu.click();
+      await page.locator('.df2-sidebar.open').waitFor({ timeout: 8000 });
       await page.locator('button.df2-nav-item[title="Security, team, SSO"]').click();
+    } else {
+      await page.locator('button[title="Settings"]').first().click();
     }
     await page.waitForTimeout(1500);
     await page.getByRole("tab", { name: /Security/ }).first().click();
