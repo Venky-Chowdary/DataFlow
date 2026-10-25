@@ -13,6 +13,8 @@ import {
   signupRequest,
   verifyEmail,
 } from "../lib/signupApi";
+import { changeEmailRequestError, codeEntryError, mailSendError } from "../lib/authFlowCopy";
+import { focusFirstInvalid, ResendRow } from "../components/AuthFlow";
 import { writeSession } from "../lib/session";
 
 function isValidEmail(value: string) {
@@ -82,63 +84,6 @@ function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (toke
 
   if (!siteKey) return null;
   return <div ref={hostRef} className="lp-login-turnstile" data-testid="turnstile-widget" />;
-}
-
-/** Focus the first field marked invalid inside the card. */
-function focusFirstInvalid(root: HTMLElement | null) {
-  root?.querySelector<HTMLElement>('[aria-invalid="true"], .lp-field.is-error .lp-input')?.focus();
-}
-
-/** Resend-with-cooldown row shared by verify + reset. */
-function ResendRow({ challengeId, initialCooldown }: { challengeId: string; initialCooldown: number }) {
-  const [cooldown, setCooldown] = useState(initialCooldown);
-  const [resending, setResending] = useState(false);
-  const [sent, setSent] = useState(false);
-  const [notice, setNotice] = useState("");
-  const { toast } = useToast();
-
-  useEffect(() => {
-    if (cooldown <= 0) return;
-    const t = window.setTimeout(() => setCooldown((s) => s - 1), 1000);
-    return () => window.clearTimeout(t);
-  }, [cooldown]);
-
-  const resend = async () => {
-    setResending(true);
-    setSent(false);
-    setNotice("");
-    try {
-      const r = await resendCode(challengeId);
-      setCooldown(r.resendAfterSec || 60);
-      setSent(true);
-      setNotice("New code sent — check your inbox.");
-      toast({ title: "New code sent", message: "Check your inbox for the latest 6-digit code.", tone: "info" });
-    } catch (err) {
-      const msg = err instanceof SignupApiError && err.code === "resend_limited"
-        ? `Too many resends — wait ${Math.max(1, Math.round(err.retryAfterSec / 60))} min.`
-        : "Couldn't resend the code. Try again shortly.";
-      setNotice(msg);
-      toast({ title: "Resend unavailable", message: msg, tone: "warning" });
-      if (err instanceof SignupApiError && err.retryAfterSec) setCooldown(err.retryAfterSec);
-    } finally {
-      setResending(false);
-    }
-  };
-
-  const disabled = cooldown > 0 || resending;
-  return (
-    <div className="lp-login-resend">
-      <p className="lp-login-legal">
-        Didn't get it?{" "}
-        <button type="button" onClick={resend} disabled={disabled} aria-disabled={disabled}>
-          {cooldown > 0 ? `Resend in ${cooldown}s` : resending ? "Sending…" : "Resend code"}
-        </button>
-      </p>
-      <p className="lp-login-resend-status" aria-live="polite">
-        {notice || (cooldown > 0 ? `You can request a new code in ${cooldown} seconds.` : "")}
-      </p>
-    </div>
-  );
 }
 
 /** Six-digit code entry. */
@@ -273,13 +218,10 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
       setChallenge({ id: r.challengeId, resendAfterSec: r.resendAfterSec });
       setStep("verify");
     } catch (err) {
-      if (err instanceof SignupApiError && err.code === "email_quota_exceeded") {
-        setError(`We couldn't send your code right now — try again in ${Math.max(1, Math.round(err.retryAfterSec / 60))} min.`);
-      } else if (err instanceof SignupApiError && err.code === "signup_rate_limited") {
-        setError(`Too many attempts from this network — try again in ${Math.max(1, Math.round(err.retryAfterSec / 60))} min.`);
-      } else {
-        setError(err instanceof Error ? err.message : "Signup failed. Try again.");
-      }
+      setError(mailSendError(
+        err instanceof SignupApiError ? err : {},
+        err instanceof Error ? err.message : "Signup failed. Try again.",
+      ));
       toast({ title: "Couldn't start signup", message: "Check the fields and try again.", tone: "error" });
     } finally {
       setBusy(false);
@@ -306,18 +248,11 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
       toast({ title: "Email verified", message: "Your workspace is ready.", tone: "success" });
       onAuthenticated(result.user.email);
     } catch (err) {
-      if (err instanceof SignupApiError && err.code === "invalid_code") {
-        setError(
-          err.attemptsRemaining && err.attemptsRemaining > 0
-            ? `That code isn't right. ${err.attemptsRemaining} attempt${err.attemptsRemaining === 1 ? "" : "s"} left.`
-            : "That code isn't right. Try again.",
-        );
-        setErrorIsField(true);
-      } else if (err instanceof SignupApiError && (err.code === "code_expired" || err.code === "otp_expired")) {
-        setError("This code has expired. Request a new one.");
-      } else {
-        setError(err instanceof Error ? err.message : "Couldn't verify that code. Try again.");
-      }
+      setError(codeEntryError(
+        err instanceof SignupApiError ? err : { message: err instanceof Error ? err.message : "" },
+        "Couldn't verify that code. Try again.",
+      ));
+      setErrorIsField(err instanceof SignupApiError && err.code === "invalid_code");
     } finally {
       setBusy(false);
     }
@@ -465,6 +400,7 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
   const [newPassword, setNewPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [codeServerError, setCodeServerError] = useState("");
   const cardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -476,7 +412,7 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
   const codeOk = code.trim().length === 6;
   const passwordOk = newPassword.length >= 12;
   const emailError = submitted && !emailOk ? "Enter a valid work email." : "";
-  const codeError = submitted && !codeOk ? "Enter the 6-digit code from the email." : "";
+  const codeError = codeServerError || (submitted && !codeOk ? "Enter the 6-digit code from the email." : "");
   const passwordError = submitted && !passwordOk ? "Use at least 12 characters." : "";
 
   const request = async (e: FormEvent) => {
@@ -491,7 +427,7 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
       setStep("reset");
     } catch (err) {
       if (err instanceof SignupApiError && err.code === "email_quota_exceeded") {
-        setError(`We couldn't send the code right now — try again in ${Math.max(1, Math.round(err.retryAfterSec / 60))} min.`);
+        setError(mailSendError(err, "Couldn't send the code. Try again."));
       } else {
         setStep("reset"); // uniform 202 semantics: proceed to code entry regardless
       }
@@ -504,6 +440,7 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
     e.preventDefault();
     setSubmitted(true);
     setError("");
+    setCodeServerError("");
     if (!codeOk || !passwordOk) { focusFirstInvalid(cardRef.current); return; }
     setBusy(true);
     try {
@@ -512,15 +449,12 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
       toast({ title: "Password updated", message: "Sign in with your new password.", tone: "success" });
     } catch (err) {
       if (err instanceof SignupApiError && err.code === "invalid_code") {
-        setError(
-          err.attemptsRemaining && err.attemptsRemaining > 0
-            ? `That code isn't right. ${err.attemptsRemaining} attempt${err.attemptsRemaining === 1 ? "" : "s"} left.`
-            : "That code isn't right. Try again.",
-        );
-      } else if (err instanceof SignupApiError && err.code === "code_expired") {
-        setError("This code has expired. Request a new one.");
+        setCodeServerError(codeEntryError(err, "That code isn't right. Try again."));
       } else {
-        setError(err instanceof Error ? err.message : "Couldn't reset the password. Request a new code.");
+        setError(codeEntryError(
+          err instanceof SignupApiError ? err : { message: err instanceof Error ? err.message : "" },
+          "Couldn't reset the password. Request a new code.",
+        ));
       }
     } finally {
       setBusy(false);
@@ -585,7 +519,7 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
                 <input
                   id="reset-code" className="lp-input" inputMode="numeric" autoComplete="one-time-code"
                   maxLength={6} value={code}
-                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  onChange={(e) => { setCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setCodeServerError(""); }}
                   placeholder="000000"
                   aria-invalid={Boolean(codeError)}
                   aria-describedby={codeError ? "reset-code-error" : undefined}

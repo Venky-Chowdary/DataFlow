@@ -5,6 +5,7 @@ import {
   requestEmailChange,
   SignupApiError,
 } from "../lib/signupApi";
+import { changeEmailConfirmError, changeEmailRequestError } from "../lib/authFlowCopy";
 import { useToast } from "./Toast";
 
 function isValidEmail(value: string) {
@@ -17,9 +18,9 @@ function isValidEmail(value: string) {
  * step 2 verifies it. Only renders when the deployment runs the
  * self-serve signup surface (the email-change endpoints live there).
  */
-export function ChangeEmailCard() {
+export function ChangeEmailCard({ enabled: enabledProp }: { enabled?: boolean | null } = {}) {
   const { toast } = useToast();
-  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [enabled, setEnabled] = useState<boolean | null>(enabledProp ?? null);
   const [step, setStep] = useState<"idle" | "request" | "code" | "done">("idle");
   const [newEmail, setNewEmail] = useState("");
   const [code, setCode] = useState("");
@@ -29,8 +30,12 @@ export function ChangeEmailCard() {
   const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
-    fetchSignupConfig().then((c) => setEnabled(c.enabled));
-  }, []);
+    if (enabledProp === undefined) {
+      fetchSignupConfig().then((c) => setEnabled(c.enabled));
+    } else {
+      setEnabled(enabledProp);
+    }
+  }, [enabledProp]);
 
   if (!enabled) return null;
 
@@ -49,13 +54,9 @@ export function ChangeEmailCard() {
       setSubmitted(false);
       setStep("code");
     } catch (err) {
-      if (err instanceof SignupApiError && err.code === "same_address") {
-        setError("That's already your sign-in email.");
-      } else if (err instanceof SignupApiError && err.code === "email_taken") {
-        setError("That address already belongs to another account.");
-      } else {
-        setError(err instanceof Error ? err.message : "Couldn't send the code. Try again.");
-      }
+      setError(changeEmailRequestError(
+        err instanceof SignupApiError ? err : { message: err instanceof Error ? err.message : "" },
+      ));
     } finally {
       setBusy(false);
     }
@@ -76,21 +77,9 @@ export function ChangeEmailCard() {
         tone: "success",
       });
     } catch (err) {
-      if (err instanceof SignupApiError && err.code === "invalid_code") {
-        setError(
-          err.attemptsRemaining && err.attemptsRemaining > 0
-            ? `That code isn't right. ${err.attemptsRemaining} attempt${err.attemptsRemaining === 1 ? "" : "s"} left.`
-            : "That code isn't right. Try again.",
-        );
-      } else if (err instanceof SignupApiError && err.code === "code_expired") {
-        setError("This code has expired. Request a new one.");
-      } else if (err instanceof SignupApiError && err.code === "email_taken") {
-        setError("That address already belongs to another account.");
-      } else if (err instanceof SignupApiError && err.code === "unavailable") {
-        setError("Email change is temporarily unavailable — try again shortly.");
-      } else {
-        setError(err instanceof Error ? err.message : "Couldn't confirm the change. Try again.");
-      }
+      setError(changeEmailConfirmError(
+        err instanceof SignupApiError ? err : { message: err instanceof Error ? err.message : "" },
+      ));
     } finally {
       setBusy(false);
     }
