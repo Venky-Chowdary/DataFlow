@@ -237,3 +237,196 @@ def test_concurrent_same_target_only_one_wins():
     owners = [e for e in ("ada@example.com", "bob@example.com")
               if user_store.get_user(e) is None]
     assert len(owners) == 1  # exactly one account rekeyed to shared@
+
+
+# ---------------------------------------------------------------------------
+# Review-4 regression tests: data-loss ordering, fail-closed index, typed
+# errors, legacy-canonical compare, retryable follow-on rekeys.
+# ---------------------------------------------------------------------------
+
+
+class _FakeColl:
+    """Dict-backed Mongo stand-in; failure flags simulate server errors."""
+
+    def __init__(self):
+        self.docs: dict[str, dict] = {}
+        self.fail_insert = False
+        self.fail_delete_keys: set[str] = set()
+        self.fail_index = False
+
+    def find_one(self, query, *_a, **_k):
+        return dict(self.docs.get(query.get("_id")) or {}) or None
+
+    def find(self, _query, *_a, **_k):
+        return [dict(d) for d in self.docs.values()]
+
+    def insert_one(self, doc, *_a, **_k):
+        if self.fail_insert or doc["_id"] in self.docs:
+            from pymongo.errors import DuplicateKeyError
+            raise DuplicateKeyError("dup")
+        self.docs[doc["_id"]] = dict(doc)
+        return None
+
+    def replace_one(self, query, doc, upsert=False, **_k):
+        self.docs[query["_id"]] = dict(doc)
+        return None
+
+    def delete_one(self, query, *_a, **_k):
+        if query["_id"] in self.fail_delete_keys:
+            raise RuntimeError("delete failed")
+        self.docs.pop(query["_id"], None)
+        return None
+
+    def create_index(self, *_a, **_k):
+        if self.fail_index:
+            raise RuntimeError("duplicate keys block index")
+        return "canonical_email_unique"
+
+    def count_documents(self, *_a, **_k):
+        return len(self.docs)
+
+
+class _FakeDb:
+    def __init__(self, coll):
+        self._coll = coll
+        self.name = "fake-mongo"
+
+    def __getitem__(self, _name):
+        return self._coll
+
+
+def _mongo_mode(monkeypatch, coll: _FakeColl) -> None:
+    monkeypatch.setattr(user_store, "mongo_database",
+                        lambda: _FakeDb(coll))
+    monkeypatch.setattr(user_store, "_CANONICAL_INDEXED", set())
+    monkeypatch.setattr(user_store, "_store_path",
+                        lambda: "/unused-in-mongo-mode")
+
+
+def _seed_user(coll: _FakeColl, email: str) -> dict:
+    doc = {
+        "email": email,
+        "name": "Ada",
+        "role": "member",
+        "status": "active",
+        "password_hash": "hash-value",
+        "password_algo": "bcrypt",
+        "canonical_email": email,
+        "email_verified_at": "2026-01-01T00:00:00+00:00",
+        "created_at": "2026-01-01T00:00:00+00:00",
+        "updated_at": "2026-01-01T00:00:00+00:00",
+    }
+    coll.docs[email] = doc
+    return doc
+
+
+def test_mongo_duplicate_insert_leaves_old_account_intact(monkeypatch):
+    """A lost canonical race must not delete the original account."""
+    coll = _FakeColl()
+    _mongo_mode(monkeypatch, coll)
+    _seed_user(coll, "ada@example.com")
+    coll.fail_insert = True
+    with pytest.raises(user_store.EmailTakenError):
+        user_store.change_email(email="ada@example.com",
+                                new_email="ada2@example.com")
+    intact = coll.docs["ada@example.com"]
+    assert intact["password_hash"] == "hash-value"
+    assert intact["status"] == "active"
+    assert "ada2@example.com" not in coll.docs
+
+
+def test_mongo_delete_failure_compensates_insert(monkeypatch):
+    """If the old-key delete fails after a committed insert, the new row is
+    removed again so the account does not exist under two keys."""
+    coll = _FakeColl()
+    _mongo_mode(monkeypatch, coll)
+    _seed_user(coll, "ada@example.com")
+    coll.fail_delete_keys.add("ada@example.com")
+    with pytest.raises(RuntimeError):
+        user_store.change_email(email="ada@example.com",
+                                new_email="ada2@example.com")
+    assert "ada@example.com" in coll.docs
+    assert "ada2@example.com" not in coll.docs
+
+
+def test_index_ensure_failure_fails_closed(monkeypatch):
+    """When the unique index cannot be ensured, rekey refuses (503 path)
+    instead of silently running without the atomic guarantee."""
+    coll = _FakeColl()
+    _mongo_mode(monkeypatch, coll)
+    _seed_user(coll, "ada@example.com")
+    coll.fail_index = True
+    with pytest.raises(user_store.IndexUnavailableError):
+        user_store.change_email(email="ada@example.com",
+                                new_email="ada2@example.com")
+
+
+def test_file_store_legacy_row_blocks_canonical(tmp_path, monkeypatch):
+    """Legacy rows without canonical_email still count as the canonical
+    owner — deriving it from their stored email."""
+    import json
+    from services.email_canonical import canonical_email
+
+    legacy = "a.da@gmail.com"
+    target = "ada@gmail.com"
+    assert canonical_email(legacy) == canonical_email(target)
+    users = tmp_path / "users.json"
+    users.write_text(json.dumps({"users": [
+        {"email": legacy, "password_hash": "h1"},
+        {"email": "bob@example.com", "password_hash": "h2",
+         "canonical_email": "bob@example.com"},
+    ]}))
+    monkeypatch.setattr(user_store, "_store_path", lambda: users)
+    with pytest.raises(user_store.EmailTakenError):
+        user_store.change_email(email="bob@example.com",
+                                new_email=target)
+
+
+def test_partial_rekey_flags_and_finish_retries():
+    c = _client()
+    _verified_user(c)
+    resp = _request_change(c, "ada2@example.com")
+    cid = resp.json()["challenge_id"]
+    code = re.search(r"\b(\d{6})\b",
+                     ConsoleEmailSender.OUTBOX[-1].text).group(1)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("membership store unavailable")
+
+    real = team_store.rekey_memberships
+    signup_service.team_store.rekey_memberships = _boom
+    try:
+        ok = c.post("/api/v1/auth/email/change/confirm",
+                    json={"challenge_id": cid, "code": code},
+                    headers={"x-csrf-token": c.cookies["dw_csrf"]})
+    finally:
+        signup_service.team_store.rekey_memberships = real
+    assert ok.status_code == 200
+    # Consistent + retryable: the account moved, carries the pending flag,
+    # and memberships are still on the old address.
+    assert user_store.rekey_pending("ada2@example.com") == "ada@example.com"
+    assert team_store._read_memberships(email="ada@example.com")
+    assert signup_service.finish_pending_rekeys(
+        email="ada2@example.com") is True
+    assert user_store.rekey_pending("ada2@example.com") is None
+    assert team_store._read_memberships(email="ada@example.com") == []
+    assert team_store._read_memberships(email="ada2@example.com")
+
+
+def test_backfill_reports_duplicate_canonicals(tmp_path, monkeypatch):
+    import json
+    users = tmp_path / "users.json"
+    users.write_text(json.dumps({"users": [
+        {"email": "ada@gmail.com", "password_hash": "h1"},
+        {"email": "a.da@gmail.com", "password_hash": "h2"},
+        {"email": "bob@example.com", "password_hash": "h3"},
+    ]}))
+    monkeypatch.setattr(user_store, "_store_path", lambda: users)
+    monkeypatch.setattr(user_store, "_BACKFILLED", False)
+    monkeypatch.setattr(user_store, "_CANONICAL_DUPLICATES", [])
+    user_store.backfill_signup_fields()
+    assert user_store.canonical_email_duplicates() == ["ada@gmail.com"]
+    rows = json.loads(users.read_text())["users"]
+    by_email = {r["email"]: r for r in rows}
+    assert by_email["ada@gmail.com"]["canonical_email"] == "ada@gmail.com"
+    assert by_email["a.da@gmail.com"]["canonical_email"] == "ada@gmail.com"

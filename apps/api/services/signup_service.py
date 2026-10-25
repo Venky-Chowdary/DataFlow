@@ -691,15 +691,23 @@ def confirm_email_change(*, challenge_id: str, code: str,
     try:
         user_store.change_email(
             email=old_email, new_email=new_email, canonical=canonical_new)
-    except Exception as exc:
-        # The store's atomic canonical claim is the real guard; a race loser
-        # gets email_taken, anything else stays a store error.
-        if "already belongs" in str(exc) or "already has" in str(exc):
-            raise ApiError(400, "email_taken",
-                           "that address already belongs to an account") from exc
-        raise
-    team_store.rekey_memberships(old_email, new_email)
-    org_store.rekey_creator(old_email, new_email)
+    except user_store.EmailTakenError as exc:
+        # The store's atomic canonical claim is the real guard; the race
+        # loser lands here.
+        raise ApiError(400, "email_taken",
+                       "that address already belongs to an account") from exc
+    except user_store.IndexUnavailableError as exc:
+        raise ApiError(503, "unavailable",
+                       "account rekey is temporarily unavailable") from exc
+    # Follow-on rekeys run after the row move. A partial failure leaves a
+    # consistent, retryable state: the account carries ``rekey_pending``
+    # and ``finish_pending_rekeys`` completes the move.
+    try:
+        team_store.rekey_memberships(old_email, new_email)
+        org_store.rekey_creator(old_email, new_email)
+    except Exception:
+        logger.error("email-change follow-on rekey failed", exc_info=True)
+        user_store.mark_rekey_pending(email=new_email, old_email=old_email)
     get_auth_state().revoke_all_for_user(old_email)
     try:
         _send("email_change_old_notice", old_email,
@@ -711,6 +719,23 @@ def confirm_email_change(*, challenge_id: str, code: str,
                           actor=new_email, session_id=challenge_id,
                           details={"ip": ip})
     return {"ok": True, "email": new_email}
+
+
+def finish_pending_rekeys(*, email: str) -> bool:
+    """Retry the follow-on rekeys for an account flagged ``rekey_pending``.
+
+    Memberships and org-creator rows move by email; when a partial failure
+    flagged the account, re-running these completes the move and clears the
+    flag. Safe to call repeatedly — the store functions are rewrites, not
+    increments.
+    """
+    old_email = user_store.rekey_pending(email)
+    if not old_email:
+        return False
+    team_store.rekey_memberships(old_email, email)
+    org_store.rekey_creator(old_email, email)
+    user_store.clear_rekey_pending(email=email)
+    return True
 
 
 def complete_onboarding(*, user_email: str, org_name: str = "",

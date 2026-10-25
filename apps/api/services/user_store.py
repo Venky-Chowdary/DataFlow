@@ -26,6 +26,7 @@ from pymongo.errors import DuplicateKeyError
 from services.metadata_backend import json_doc_transaction, load_json_doc, mongo_database
 from services.password_hash import hash_password
 from services.platform_config import data_dir
+from services.email_canonical import canonical_email
 
 logger = logging.getLogger(__name__)
 
@@ -61,6 +62,14 @@ PASSWORD_ALGOS = ("bcrypt", "argon2id")
 
 class UserStoreError(ValueError):
     """A caller asked for something the account store must refuse."""
+
+
+class EmailTakenError(UserStoreError):
+    """Raised when an address is already claimed by another account."""
+
+
+class IndexUnavailableError(UserStoreError):
+    """The canonical-claim index could not be ensured — fail closed."""
 
 
 def _now() -> str:
@@ -372,15 +381,19 @@ def _canonical_indexed_db():
 
     Sparse because rows written before the backfill lack the field; unique so
     the canonical-claim below is decided by the database, not by a
-    check-then-write race."""
+    check-then-write race. Fails CLOSED: when the ensure fails the guarantee
+    is not there (e.g. duplicate legacy canonicals blocking creation), so we
+    raise rather than pretend the claim is atomic."""
     db = mongo_database()
     if db is not None and db.name not in _CANONICAL_INDEXED:
         try:
             db[COLLECTION].create_index(
                 [("canonical_email", 1)], unique=True, sparse=True,
                 name="canonical_email_unique")
-        except Exception:
-            logger.debug("canonical_email index ensure failed", exc_info=True)
+        except Exception as exc:
+            logger.error("canonical_email index ensure failed", exc_info=True)
+            raise IndexUnavailableError(
+                "canonical_email unique index unavailable") from exc
         _CANONICAL_INDEXED.add(db.name)
     return db
 
@@ -406,12 +419,24 @@ def change_email(*, email: str, new_email: str,
     doc["updated_at"] = _now()
     db = _canonical_indexed_db()
     if db is not None:
-        db[COLLECTION].delete_one({"_id": normalized})
+        # Insert BEFORE delete: a lost canonical race must leave the
+        # original account intact, not deleted.
         try:
             db[COLLECTION].insert_one({"_id": new_normalized, **doc})
         except DuplicateKeyError as e:
-            raise UserStoreError(
+            raise EmailTakenError(
                 f"{canonical} already belongs to an account") from e
+        try:
+            db[COLLECTION].delete_one({"_id": normalized})
+        except Exception:
+            # Compensation: without it the account exists under both keys.
+            # Remove the just-inserted row so the original stays intact.
+            try:
+                db[COLLECTION].delete_one({"_id": new_normalized})
+            except Exception:
+                logger.error(
+                    "email rekey compensation failed", exc_info=True)
+            raise
     else:
         with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
             users = [
@@ -419,11 +444,38 @@ def change_email(*, email: str, new_email: str,
                 if isinstance(u, dict)
                 and normalize_email(u.get("email", "")) != normalized
             ]
-            if any(u.get("canonical_email") == canonical for u in users):
-                raise UserStoreError(
+            # Legacy rows predate the field — derive it instead of skipping.
+            if any((u.get("canonical_email")
+                    or canonical_email(u.get("email", ""))) == canonical
+                   for u in users):
+                raise EmailTakenError(
                     f"{canonical} already belongs to an account")
             data["users"] = [*users, doc]
     return public_user(doc)
+
+
+def mark_rekey_pending(*, email: str, old_email: str) -> None:
+    """Flag a moved account whose follow-on rekeys still need to run."""
+    normalized = normalize_email(email)
+    doc = _read_one(normalized)
+    if doc is not None:
+        doc["rekey_pending"] = normalize_email(old_email)
+        doc["updated_at"] = _now()
+        _write_one(doc)
+
+
+def rekey_pending(email: str) -> str | None:
+    """The pre-rekey address when follow-on rekeys are outstanding."""
+    doc = _read_one(normalize_email(email))
+    return doc.get("rekey_pending") if doc else None
+
+
+def clear_rekey_pending(*, email: str) -> None:
+    normalized = normalize_email(email)
+    doc = _read_one(normalized)
+    if doc is not None and doc.pop("rekey_pending", None) is not None:
+        doc["updated_at"] = _now()
+        _write_one(doc)
 
 
 def mark_onboarded(email: str) -> dict[str, Any]:
@@ -477,6 +529,14 @@ def delete_user(*, email: str) -> bool:
 _BACKFILLED = False
 
 
+_CANONICAL_DUPLICATES: list[str] = []
+
+
+def canonical_email_duplicates() -> list[str]:
+    """Canonical keys claimed by more than one account (backfill report)."""
+    return list(_CANONICAL_DUPLICATES)
+
+
 def backfill_signup_fields() -> int:
     """P1-7 migration: existing accounts predate email verification.
 
@@ -484,14 +544,22 @@ def backfill_signup_fields() -> int:
     so backfill marks them verified (``email_verified_at`` = ``created_at``),
     stamps the canonical key, and records ``password_algo=bcrypt`` so the
     transparent rehash knows what it's reading. Idempotent; runs once per
-    process from ``_read_all``.
+    process from ``_read_all``. Duplicate canonical keys (which would block
+    the unique index) are reported via ``canonical_email_duplicates``.
     """
     updated = 0
+    seen: dict[str, str] = {}
+    _CANONICAL_DUPLICATES.clear()
     for doc in _read_all():
         changed = False
         if not doc.get("canonical_email"):
-            doc["canonical_email"] = normalize_email(doc.get("email") or "")
+            doc["canonical_email"] = canonical_email(doc.get("email") or "")
             changed = True
+        claimer = doc.get("canonical_email")
+        if claimer and seen.get(claimer, doc.get("email")) != doc.get("email"):
+            if claimer not in _CANONICAL_DUPLICATES:
+                _CANONICAL_DUPLICATES.append(claimer)
+        seen[claimer] = doc.get("email") or ""
         if not doc.get("email_verified_at"):
             doc["email_verified_at"] = doc.get("created_at") or _now()
             changed = True
@@ -501,6 +569,9 @@ def backfill_signup_fields() -> int:
         if changed:
             _write_one(doc)
             updated += 1
+    if _CANONICAL_DUPLICATES:
+        logger.error("backfill: %d duplicate canonical_email key(s)",
+                     len(_CANONICAL_DUPLICATES))
     return updated
 
 
