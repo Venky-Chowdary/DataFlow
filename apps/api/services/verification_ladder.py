@@ -925,6 +925,91 @@ def read_sqlserver_rows(
         conn.close()
 
 
+def read_snowflake_rows(
+    *,
+    host: str,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    table: str,
+    columns: list[str] | None = None,
+    connection_string: str = "",
+    warehouse: str = "",
+    max_rows: int = MAX_LADDER_ROWS,
+) -> list[dict[str, Any]]:
+    """Population read of a Snowflake table, bounded by the ladder row budget.
+
+    Without it every Snowflake destination declined the cell-value ladder
+    (``destination_engine_not_in_ladder``) and a keyed incremental run could
+    never earn the independent re-read verdict (D3). The connector returns
+    VARIANT/OBJECT/ARRAY as their JSON text, so no ``TO_VARCHAR`` projection
+    is needed — the write-pass fingerprint sees the same shape.
+    """
+    from connectors.snowflake_conn import (
+        get_connection,
+        normalize_account,
+        resolve_or_fold_snowflake_table,
+        snowflake_qualified_table,
+    )
+    from connectors.sql_identifiers import (
+        quote_column_list,
+        quote_sql_identifier,
+        require_safe_identifier,
+        snowflake_fold_identifier,
+    )
+
+    conn = get_connection(
+        account=normalize_account(host),
+        username=username,
+        password=password,
+        database=database,
+        schema=snowflake_fold_identifier(schema or "PUBLIC"),
+        warehouse=warehouse,
+        connection_string=connection_string,
+    )
+    try:
+        with conn.cursor() as cur:
+            if warehouse:
+                try:
+                    wh = require_safe_identifier(warehouse, preserve_case=True)
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+                except Exception:
+                    pass
+            resolved = resolve_or_fold_snowflake_table(
+                cur, snowflake_fold_identifier(schema or "PUBLIC"), table
+            )
+            qualified = snowflake_qualified_table(
+                snowflake_fold_identifier(schema or "PUBLIC"), resolved
+            )
+            col_sql = (
+                "*"
+                if not columns
+                else quote_column_list(
+                    [
+                        require_safe_identifier(c, preserve_case=True)
+                        for c in columns
+                    ]
+                )
+            )
+            cur.execute(f"SELECT {col_sql} FROM {qualified}")  # nosec B608
+            rows: list[dict[str, Any]] = []
+            names: list[str] = []
+            while True:
+                batch = cur.fetchmany(_fetch_size(max_rows, len(rows)))
+                if not batch:
+                    return rows
+                if not names:
+                    names = (
+                        [d[0] for d in cur.description] if cur.description else []
+                    )
+                rows.extend(_row_cells(dict(zip(names, rec))) for rec in batch)
+                if max_rows and len(rows) > max_rows:
+                    raise PopulationTooLarge(len(rows), max_rows)
+    finally:
+        conn.close()
+
+
 def run_five_layer_verification(
     *,
     source_rows: list[dict[str, Any]],

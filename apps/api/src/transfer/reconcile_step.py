@@ -2648,6 +2648,7 @@ def _maybe_attach_verification_ladder(
         read_mysql_rows,
         read_postgres_rows,
         read_sqlite_rows,
+        read_snowflake_rows,
         read_sqlserver_rows,
         run_five_layer_verification,
     )
@@ -2701,6 +2702,7 @@ def _maybe_attach_verification_ladder(
         "postgresql",
         "redshift",
         "mysql",
+        "snowflake",
         "sqlserver",
         "mssql",
         "azure_sql",
@@ -2752,6 +2754,21 @@ def _maybe_attach_verification_ladder(
                 columns=target_cols,
                 connection_string=str(dest_cfg.get("connection_string") or ""),
                 ssl=bool(dest_cfg.get("ssl", False)),
+            )
+        elif dest_type == "snowflake":
+            # D3: without a Snowflake population read the cell ladder declined
+            # every sf dest (destination_engine_not_in_ladder) and a keyed
+            # incremental could never earn the independent re-read verdict.
+            target_rows = read_snowflake_rows(
+                host=str(dest_cfg.get("host") or ""),
+                database=str(dest_cfg.get("database") or ""),
+                username=str(dest_cfg.get("username") or ""),
+                password=str(dest_cfg.get("password") or ""),
+                schema=str(dest_cfg.get("schema") or "PUBLIC"),
+                table=str(endpoint.table or dest_cfg.get("table") or ""),
+                columns=target_cols,
+                connection_string=str(dest_cfg.get("connection_string") or ""),
+                warehouse=str(dest_cfg.get("warehouse") or ""),
             )
         elif dest_type in {"sqlserver", "mssql", "azure_sql"}:
             target_rows = read_sqlserver_rows(
@@ -2835,6 +2852,18 @@ def _maybe_attach_verification_ladder(
                         columns=target_cols,
                         connection_string=str(src_cfg.get("connection_string") or ""),
                         ssl=bool(src_cfg.get("ssl", False)),
+                    )
+                elif src_type == "snowflake":
+                    source_rows = read_snowflake_rows(
+                        host=str(src_cfg.get("host") or ""),
+                        database=str(src_cfg.get("database") or ""),
+                        username=str(src_cfg.get("username") or ""),
+                        password=str(src_cfg.get("password") or ""),
+                        schema=str(src_cfg.get("schema") or "PUBLIC"),
+                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                        columns=target_cols,
+                        connection_string=str(src_cfg.get("connection_string") or ""),
+                        warehouse=str(src_cfg.get("warehouse") or ""),
                     )
                 elif src_type == "mysql":
                     # X-22: MySQL sources declined the ladder — the run stayed
