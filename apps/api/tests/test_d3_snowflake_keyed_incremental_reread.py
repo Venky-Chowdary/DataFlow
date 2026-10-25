@@ -231,3 +231,30 @@ def test_snowflake_population_read_honours_ladder_budget() -> None:
             columns=["id", "seq", "v"],
             max_rows=2,
         )
+
+
+def test_culprit_census_conn_supports_snowflake() -> None:
+    """The failure-path key census advertised snowflake in its own
+    'has no census driver' message but _culprit_census_conn had no
+    snowflake branch — a failed Snowflake run could never name culprit
+    keys. Fails on c6c16128 (returns None)."""
+    from src.transfer.reconcile_step import _culprit_census_conn
+
+    info = _culprit_census_conn(
+        "snowflake",
+        {
+            "host": "localhost",
+            "username": "test",
+            "password": "test",
+            "database": "dataflow",
+            "schema": "public",
+            "warehouse": "",
+        },
+    )
+    assert info is not None
+    eng, conn = info
+    assert eng == "snowflake"
+    cur = conn.cursor()
+    cur.execute("SELECT 1")
+    assert cur.fetchone() is not None
+    conn.close()

@@ -3953,6 +3953,19 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
         from services.copy_sqlserver_sqlserver import _ss_connect
 
         return eng, _ss_connect(cfg)
+    if eng == "snowflake":
+        from connectors.snowflake_conn import get_connection, normalize_account
+        from connectors.sql_identifiers import snowflake_fold_identifier
+
+        return eng, get_connection(
+            account=normalize_account(str(cfg.get("host") or "")),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            database=str(cfg.get("database") or ""),
+            schema=snowflake_fold_identifier(str(cfg.get("schema") or "PUBLIC")),
+            warehouse=str(cfg.get("warehouse") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+        )
     return None
 
 
