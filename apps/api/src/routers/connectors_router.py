@@ -38,6 +38,49 @@ from services.ops_events import emit_event
 logger = logging.getLogger(__name__)
 
 
+def _job_contract_flags(xfer_req: Any) -> tuple[bool, bool]:
+    """Whether the saved transfer request declares a merge key or a cursor.
+
+    The rerun/retry duplicate gate must check the *contract*, not the mode
+    family (C20): a declared primary/merge key collapses a second copy, and a
+    declared cursor means an incremental rerun continues from the persisted
+    watermark instead of re-reading committed rows.
+    """
+    try:
+        from services.sync_cursor import resolve_sync_contract
+
+        contract = resolve_sync_contract(
+            list(getattr(xfer_req, "stream_contracts", None) or [])
+        )
+    except Exception:  # noqa: BLE001 - a malformed contract must not 500 the route
+        contract = None
+    read_options = getattr(xfer_req, "read_options", None) or {}
+    source_filter = getattr(xfer_req, "source_filter", None) or {}
+
+    def _field(*names: str) -> str:
+        for holder in (contract, read_options, source_filter):
+            if holder is None:
+                continue
+            for name in names:
+                try:
+                    if isinstance(holder, dict):
+                        val = holder.get(name)
+                    else:
+                        val = getattr(holder, name, None)
+                except Exception:  # noqa: BLE001
+                    val = None
+                if val:
+                    return str(val)
+        return ""
+
+    has_key = bool(
+        _field("primary_key", "dedupe_key", "upsert_key", "merge_key")
+        or (contract and getattr(contract, "primary_key", None))
+    )
+    has_cursor = bool(_field("cursor_field", "cursor", "cursor_column"))
+    return has_key, has_cursor
+
+
 def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
@@ -728,12 +771,15 @@ async def retry_transfer_job(
                 },
             )
         rows_committed, rows_known = committed_rows_of(job)
+        _has_key, _has_cursor = _job_contract_flags(xfer_req)
         retry_decision = decide_retry_from_start(
             status=status,
             sync_mode=getattr(xfer_req, "sync_mode", ""),
             rows_committed=rows_committed,
             rows_committed_known=rows_known,
             operator_requested=True,
+            has_key_contract=_has_key,
+            has_cursor_contract=_has_cursor,
         )
         if not retry_decision["allowed"] and not force:
             emit_event(
@@ -751,9 +797,35 @@ async def retry_transfer_job(
             raise HTTPException(status_code=409, detail=detail)
         # Retries from start also re-run preflight — never inherit skip_preflight.
         xfer_req.skip_preflight = False
+        # D6: the audit trail must name who started this attempt and what they
+        # acknowledged — a blank triggered_by / null governance hides it.
+        actor = _actor_email(request)
+        xfer_req.triggered_by = actor or f"retry of {job_id}"
+        forced = bool(force and not retry_decision["allowed"])
+        if forced:
+            xfer_req.acknowledgment_actor = actor
+            xfer_req.acknowledgment_reason = (
+                f"Operator accepted duplicate-row risk on retry of {job_id}."
+            )
+            # success=true must never ship a refused decision (D5).
+            retry_decision = {
+                **retry_decision,
+                "kind": "forced_override",
+                "allowed": True,
+                "forced": True,
+                "refusal_overridden": retry_decision["reason"],
+            }
         engine = get_transfer_engine()
         new_job_id = engine._create_pending_job(xfer_req)
-        forced = bool(force and not retry_decision["allowed"])
+        from datetime import datetime, timezone
+
+        confirmation = {
+            "actor": actor or "operator",
+            "action": "retry",
+            "of": job_id,
+            "forced": forced,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
         mongo.update_job_status(
             new_job_id,
             "pending",
@@ -762,13 +834,15 @@ async def retry_transfer_job(
                 f"Retry from start of job {job_id} (no checkpoint)"
                 + (
                     " — operator accepted duplicate rows: "
-                    f"{retry_decision['reason']}"
+                    f"{retry_decision['refusal_overridden']}"
                     if forced
                     else ""
                 )
             ),
             duplicate_risk_acknowledged=forced,
             retry_decision=retry_decision,
+            confirmation=confirmation,
+            triggered_by=xfer_req.triggered_by,
         )
 
         # From-zero: do not copy parent checkpoint / resume_from_job_id.
@@ -788,6 +862,9 @@ async def retry_transfer_job(
             "resume": False,
             "duplicate_risk_acknowledged": forced,
             "retry_decision": retry_decision,
+            "source": getattr(xfer_req.source, "table", "") or getattr(xfer_req.source, "collection", "") or "",
+            "destination": getattr(xfer_req.destination, "table", "") or getattr(xfer_req.destination, "collection", "") or "",
+            "rows_committed": rows_committed if rows_known else None,
             "message": (
                 "Retry from start — new job, source re-read from the beginning "
                 "(at-least-once)."
@@ -851,11 +928,14 @@ async def rerun_transfer_job(
         )
 
         rows_committed, rows_known = committed_rows_of(job)
+        _has_key, _has_cursor = _job_contract_flags(xfer_req)
         decision = decide_job_rerun(
             status=job.get("status"),
             sync_mode=getattr(xfer_req, "sync_mode", ""),
             rows_committed=rows_committed,
             rows_committed_known=rows_known,
+            has_key_contract=_has_key,
+            has_cursor_contract=_has_cursor,
         )
         if not decision["allowed"] and not force:
             detail = rerun_refusal_detail(decision["reason"])
@@ -863,9 +943,34 @@ async def rerun_transfer_job(
             detail["rows_committed_known"] = rows_known
             raise HTTPException(status_code=409, detail=detail)
         xfer_req.skip_preflight = False
+        # D6: record who triggered the rerun and what they acknowledged.
+        actor = _actor_email(request)
+        xfer_req.triggered_by = actor or f"rerun of {job_id}"
+        forced = bool(force and not decision["allowed"])
+        if forced:
+            xfer_req.acknowledgment_actor = actor
+            xfer_req.acknowledgment_reason = (
+                f"Operator accepted duplicate-row risk on rerun of {job_id}."
+            )
+            # success=true must never ship a refused decision (D5).
+            decision = {
+                **decision,
+                "kind": "forced_override",
+                "allowed": True,
+                "forced": True,
+                "refusal_overridden": decision["reason"],
+            }
         engine = get_transfer_engine()
         new_job_id = engine._create_pending_job(xfer_req)
-        forced = bool(force and not decision["allowed"])
+        from datetime import datetime, timezone
+
+        confirmation = {
+            "actor": actor or "operator",
+            "action": "rerun",
+            "of": job_id,
+            "forced": forced,
+            "at": datetime.now(timezone.utc).isoformat(),
+        }
         mongo.update_job_status(
             new_job_id,
             "pending",
@@ -874,13 +979,15 @@ async def rerun_transfer_job(
                 f"Re-run of job {job_id} (preflight kept)"
                 + (
                     " — operator accepted duplicate rows: "
-                    f"{decision['reason']}"
+                    f"{decision['refusal_overridden']}"
                     if forced
                     else ""
                 )
             ),
             duplicate_risk_acknowledged=forced,
             retry_decision=decision,
+            confirmation=confirmation,
+            triggered_by=xfer_req.triggered_by,
         )
         background_tasks.add_task(run_transfer_async, new_job_id, xfer_req, resume=False)
         emit_event(
@@ -899,6 +1006,9 @@ async def rerun_transfer_job(
             "skip_preflight": False,
             "duplicate_risk_acknowledged": forced,
             "retry_decision": decision,
+            "source": getattr(xfer_req.source, "table", "") or getattr(xfer_req.source, "collection", "") or "",
+            "destination": getattr(xfer_req.destination, "table", "") or getattr(xfer_req.destination, "collection", "") or "",
+            "rows_committed": rows_committed if rows_known else None,
             "message": (
                 "Re-run — new job linked with rerun_of. Preflight runs again "
                 "(at-least-once)."
@@ -1069,7 +1179,7 @@ async def cancel_transfer_job(job_id: str, request: Request):
                 job_id=job_id, workspace_id=job.get("workspace_id") or None,
                 reason="already_terminal", status=str(job.get("status")),
             )
-            return {"success": True, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal"}
+            return {"success": False, "job_id": job_id, "status": job.get("status"), "message": "Job already terminal — nothing was cancelled"}
         # Durable intent flag first, status second. The flag is what the worker
         # loop actually consults, and unlike `status` nothing in the progress
         # path ever overwrites it — so a cancel cannot be lost to a race with

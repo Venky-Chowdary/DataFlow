@@ -1125,7 +1125,16 @@ async def run_pipeline_now(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        job_id = _run_schedule(schedule_id, manual=True)
+        user = getattr(request.state, "user", None) or {}
+        actor = (
+            str(user.get("email") or user.get("name") or "").strip()
+            or str(request.headers.get("X-Actor") or "").strip()
+        )
+        job_id = _run_schedule(
+            schedule_id,
+            manual=True,
+            triggered_by=actor or "run-now",
+        )
     except ScheduleStartError as exc:
         raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
     if not job_id:
