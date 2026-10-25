@@ -563,6 +563,13 @@ def to_delimited_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         and not isinstance(parsed, bool)
     ):
         return value.strip()
+    if isinstance(value, Decimal) and isinstance(parsed, float):
+        # C26's JSON demote is right for the JSON wire (binary64 has no scale),
+        # but a Decimal input already states its scale — ``Decimal("10.50")``
+        # demoted to ``10.5`` loses the trailing digit on the delimited/excel
+        # wire where the file itself is the deliverable. Keep the Decimal so
+        # ``cell_to_string`` writes the stated digits.
+        return value
     return parsed
 
 
