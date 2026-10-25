@@ -7555,6 +7555,7 @@ def run_reconciliation(
     # src vs shaped dest here would flag every transformed row.
     if (
         recon.get("checksum_match") is False
+        and recon.get("passed") is not True
         and not recon.get("culprit_keys")
         and not recon.get("transform_applied")
     ):
