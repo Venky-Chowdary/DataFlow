@@ -60,11 +60,14 @@ def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
     file-transfer appliance without the extension failed the write outright
     with "Operation unsupported" after the bytes had already landed.
 
-    The fallback is the portable two-step. It is not atomic — there is a window
-    where the destination does not exist — so it is only taken when the server
-    actually refused the atomic form. Any other failure (permission, quota,
-    missing directory) must propagate: retrying it as delete-then-rename would
-    destroy the operator's existing file first and then fail the same way.
+    The fallback is a portable rename pair. Plain SFTP cannot swap two files
+    atomically, so the destination still leaves the namespace for the gap
+    between the two renames — but only for that gap (milliseconds), not for
+    the whole upload, and the park-and-restore keeps the original file
+    recoverable if the second rename fails. The old remove-then-rename
+    destroyed the existing file first and then could fail the same way,
+    leaving nothing. Any other failure (permission, quota, missing
+    directory) must propagate.
 
     paramiko maps only a few SFTP status codes onto errno (``ENOENT`` for
     missing, ``EACCES`` for denied) and raises a bare ``IOError(text)`` for
@@ -80,14 +83,37 @@ def _replace_remote(sftp: Any, temp_path: str, final_path: str) -> None:
         if isinstance(exc, OSError) and not _is_unsupported_operation(exc):
             raise
         logger.info(
-            "SFTP posix_rename unavailable (%s); falling back to remove+rename", exc
+            "SFTP posix_rename unavailable (%s); falling back to rename pair", exc
         )
 
+    trash_path = f"{final_path}.dataflow-{uuid.uuid4().hex}.trash"
+    parked = False
     try:
-        sftp.remove(final_path)
+        sftp.rename(final_path, trash_path)
+        parked = True
     except OSError as exc:
-        logger.debug("No existing %s to remove before rename: %s", final_path, exc)
-    sftp.rename(temp_path, final_path)
+        logger.debug("No existing %s to park before rename: %s", final_path, exc)
+    try:
+        sftp.rename(temp_path, final_path)
+    except Exception:
+        if parked:
+            try:
+                sftp.rename(trash_path, final_path)  # restore the original
+            except OSError:
+                logger.error(
+                    "SFTP could not restore %s from %s after a failed rename; "
+                    "the original file is still present at the trash path",
+                    final_path,
+                    trash_path,
+                )
+        raise
+    if parked:
+        try:
+            sftp.remove(trash_path)
+        except OSError:
+            logger.warning(
+                "SFTP parked file %s left behind after successful swap", trash_path
+            )
 
 
 def _is_unsupported_operation(exc: OSError) -> bool:
