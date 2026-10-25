@@ -754,7 +754,7 @@
 .df2-column-review-data-preview .df2-structure-table th {
   position: sticky;
   top: 0;
-  z-index: 1;
+  z-index: var(--df-z-base);
   font-size: 10.5px;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -1674,7 +1674,7 @@
 .lp-login-header {
   position: sticky;
   top: 0;
-  z-index: 20;
+  z-index: var(--df-z-sticky);
   display: flex;
   align-items: center;
   width: 100%;
@@ -1686,7 +1686,7 @@
 
 .lp-login-back {
   position: static;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-login-body {
@@ -1729,7 +1729,7 @@
 .df2-app .df2-sidebar-foot {
   flex-shrink: 0;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   background: inherit;
 }
 

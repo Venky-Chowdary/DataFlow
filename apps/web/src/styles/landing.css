@@ -108,7 +108,7 @@ html:has(.lp) {
 .lp-nav {
   position: sticky;
   top: 0;
-  z-index: 50;
+  z-index: var(--df-z-elevated);
   padding: 14px clamp(16px, 3vw, 32px) 10px;
   background: transparent;
   border-bottom: 0;
@@ -236,7 +236,7 @@ html:has(.lp) {
   border-radius: 12px;
   background: #fff;
   box-shadow: 0 16px 40px rgba(10, 10, 10, 0.1);
-  z-index: 60;
+  z-index: var(--df-z-flyout);
 }
 
 .lp-nav-item.is-open .lp-nav-dropdown {
@@ -1419,7 +1419,7 @@ html:has(.lp) {
 
 .lp-footer-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: min(1200px, calc(100% - clamp(32px, 6vw, 80px)));
   margin: 0 auto;
   padding: clamp(40px, 6vh, 64px) 0 clamp(28px, 4vh, 40px);
@@ -1699,7 +1699,7 @@ html:has(.lp) {
 
 .lp-login-brand-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -2357,7 +2357,7 @@ html:has(.lp) {
     border: 1px solid var(--lp-line);
     border-radius: 16px;
     box-shadow: 0 16px 40px rgba(10, 10, 10, 0.12);
-    z-index: 70;
+    z-index: var(--df-z-drawer);
   }
 
   .lp-nav-end {
@@ -3824,7 +3824,7 @@ html:has(.lp) {
   position: absolute;
   inset: -8% -10% auto -10%;
   height: 420px;
-  z-index: -1;
+  z-index: var(--df-z-under);
   pointer-events: none;
   background:
     radial-gradient(520px 240px at 28% 0%, rgba(13, 148, 136, 0.1), transparent 70%),
@@ -4125,7 +4125,7 @@ html:has(.lp) {
 
 .lp-enterprise > * {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 /* ─── CTA band — solid, no aurora fade ─── */
@@ -4148,7 +4148,7 @@ html:has(.lp) {
 
 .lp-cta-band > * {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-cta-band h3 {
@@ -5105,7 +5105,7 @@ html:has(.lp) {
   margin: -28px auto 0;
   padding: 0 clamp(16px, 4vw, 40px);
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 .lp-mkt-help-stat {
@@ -6274,7 +6274,7 @@ html:has(.lp) {
 .lp-nav {
   position: sticky;
   top: 0;
-  z-index: 50;
+  z-index: var(--df-z-elevated);
   padding: 0 !important;
   background: transparent;
   border-bottom: 1px solid transparent;
@@ -6370,14 +6370,14 @@ html:has(.lp) {
 
 .lp-main {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 /* Continuous ambient field — soft teal depth, not purple cubes */
 .lp-ambient {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--df-z-floor);
   pointer-events: none;
   overflow: hidden;
 }
@@ -6482,7 +6482,7 @@ html:has(.lp) {
 /* Full-bleed footer — edge to edge, Azure-weight CTA band */
 .lp-footer {
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   width: 100vw !important;
   max-width: 100vw !important;
   margin-left: calc(50% - 50vw) !important;
@@ -7032,7 +7032,7 @@ html:has(.lp) {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 0;
+  z-index: var(--df-z-floor);
   pointer-events: none;
   background:
     radial-gradient(ellipse 70% 55% at 78% 42%, rgba(13, 148, 136, 0.16), transparent 62%),
@@ -7042,7 +7042,7 @@ html:has(.lp) {
 
 .lp-hero-immersive-grid {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: minmax(280px, 0.88fr) minmax(0, 1.22fr);
   gap: clamp(24px, 4vw, 56px);
@@ -7550,13 +7550,13 @@ html:has(.lp) {
   width: 100%;
   height: 100%;
   pointer-events: none;
-  z-index: 4;
+  z-index: var(--df-z-canvas-rail);
 }
 
 /* Studio band below fold */
 .lp-studio-band {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   padding: clamp(48px, 8vh, 96px) clamp(20px, 4vw, 48px);
   background:
     radial-gradient(900px 280px at 50% 0%, rgba(13, 148, 136, 0.08), transparent 60%),
@@ -7664,7 +7664,7 @@ html:has(.lp) {
 
 .lp-infra-node {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   justify-items: center;
   gap: 10px;
@@ -7762,7 +7762,7 @@ html:has(.lp) {
   background: #ecfdf5;
   box-shadow: 0 0 18px rgba(94, 234, 212, 0.9);
   transition: left 700ms cubic-bezier(0.22, 1, 0.36, 1);
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 .lp-infra-caption {
@@ -7901,7 +7901,7 @@ html:has(.lp) {
   grid-template-columns: 1fr 1.1fr 1fr;
   align-items: end;
   gap: clamp(8px, 2vw, 24px);
-  z-index: 2;
+  z-index: var(--df-z-raised);
   perspective: 1000px;
 }
 
@@ -8114,7 +8114,7 @@ html:has(.lp) {
 
 .lp-d3-hud {
   position: absolute;
-  z-index: 5;
+  z-index: var(--df-z-canvas-overview);
   width: min(210px, 42%);
   padding: 12px;
   border-radius: 14px;
@@ -8205,7 +8205,7 @@ html:has(.lp) {
 .lp-d3-packets {
   position: absolute;
   inset: 0;
-  z-index: 4;
+  z-index: var(--df-z-canvas-rail);
   pointer-events: none;
 }
 
@@ -8901,7 +8901,7 @@ html:has(.lp) {
   width: min(1180px, calc(100% - 32px));
   margin: -28px auto 28px;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 .lp-mkt-help-showcase .lp-help-preview {
@@ -9163,7 +9163,7 @@ html:has(.lp) {
   border-color: rgba(13, 148, 136, 0.28);
   background: linear-gradient(180deg, #ffffff 0%, #f0fdfa 100%);
   animation-delay: 0.4s;
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 .lp-hero-flow-card--dest {
@@ -10120,7 +10120,7 @@ html:has(.lp) {
   background: #fff;
   overflow: hidden;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   box-shadow: 0 16px 36px rgba(15, 23, 42, 0.07);
 }
 
@@ -10277,7 +10277,7 @@ html:has(.lp) {
   max-width: var(--lp-shell-max);
   margin: -20px auto 48px;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   padding: 0;
 }
 
@@ -10600,7 +10600,7 @@ html:has(.lp) {
 
 .lp-cinema-band {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   padding: clamp(56px, 9vh, 108px) clamp(20px, 4vw, 48px);
   background:
     radial-gradient(1200px 320px at 15% 0%, rgba(13, 148, 136, 0.18), transparent 65%),
@@ -10636,7 +10636,7 @@ html:has(.lp) {
 
 .lp-cinema-band-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: min(1180px, 100%);
   margin: 0 auto;
 }

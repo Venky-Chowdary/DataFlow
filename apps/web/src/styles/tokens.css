@@ -398,6 +398,7 @@
   --dt-transition-slow: var(--df-dur) var(--df-ease);
 
   /* Stacking — one scale. Each layer has one value. */
+  --df-z-under: -1;
   --df-z-floor: 0;
   --df-z-base: 1;
   --df-z-raised: 2;
@@ -411,11 +412,18 @@
   --df-z-action: 30;
   --df-z-topbar: 40;
   --df-z-sidebar: 45;
+  --df-z-elevated: 50;
+  --df-z-flyout: 60;
+  --df-z-drawer: 70;
   --df-z-dropdown: 80;
   --df-z-popover: 90;
+  --df-z-overlay: 200;
   --df-z-modal: 1000;
   --df-z-toast: 1100;
   --df-z-boot: 1200;
+  --df-z-alert: 9999;
+  --df-z-splash: 10000;
+  --df-z-max: 12000;
 }
 
 html,

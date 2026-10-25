@@ -1407,7 +1407,7 @@ textarea.df2-pilot-composer textarea {
     height: 100dvh !important;
     max-height: 100dvh !important;
     overflow: hidden !important;
-    z-index: 50;
+    z-index: var(--df-z-elevated);
   }
 
   .df2-app .df2-nav {
@@ -1489,7 +1489,7 @@ textarea.df2-pilot-composer textarea {
   top: calc(100% + 6px);
   left: 0;
   right: 0;
-  z-index: 200;
+  z-index: var(--df-z-overlay);
   padding: 6px;
   border: 1px solid var(--df-border, #e2e8f0);
   border-radius: 12px;
@@ -3523,7 +3523,7 @@ textarea.df2-pilot-composer textarea {
 .dt-modal-overlay {
   position: fixed;
   inset: 0;
-  z-index: 1000;
+  z-index: var(--df-z-modal);
   display: flex !important;
   align-items: center;
   justify-content: center;
@@ -4940,7 +4940,7 @@ textarea.df2-pilot-composer textarea {
   align-items: center;
   gap: 8px;
   min-height: 148px;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .df2-flow-cluster {
@@ -5031,7 +5031,7 @@ textarea.df2-pilot-composer textarea {
   left: 50%;
   top: 50%;
   transform: translate(-50%, -50%);
-  z-index: 2;
+  z-index: var(--df-z-raised);
   pointer-events: none;
 }
 

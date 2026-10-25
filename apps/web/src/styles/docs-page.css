@@ -207,7 +207,7 @@
 
 .df2-page-docs .df2-docs-hero-stat {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   padding: 12px 14px;
   border: 1px solid rgba(148, 163, 184, 0.22);
   border-radius: 12px;
@@ -235,7 +235,7 @@
 
 .df2-page-docs .df2-docs-hero-progress {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   align-self: stretch;
   padding: 16px 16px 8px;
   border: 1px solid rgba(148, 163, 184, 0.22);
@@ -307,7 +307,7 @@
 .df2-page-docs .df2-docs-hero-copy,
 .df2-page-docs .df2-docs-hero-actions {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .df2-page-docs .df2-docs-hero-actions .df2-btn:not(.df2-btn-primary) {
@@ -1394,7 +1394,7 @@
   position: absolute;
   top: 18px;
   left: 18px;
-  z-index: 1;
+  z-index: var(--df-z-base);
   padding: 4px 8px;
   border-radius: 6px;
   background: rgba(11, 18, 32, 0.72);
@@ -1757,7 +1757,7 @@
 .docs-shot-reel-frame.is-active {
   opacity: 1;
   transform: none;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .docs-shot-reel-vignette {

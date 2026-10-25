@@ -2387,7 +2387,7 @@
 
 .lp-hero--home .lp-hero-flow-rail {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
@@ -2970,7 +2970,7 @@
   height: 100%;
   object-fit: cover;
   object-position: center;
-  z-index: 0;
+  z-index: var(--df-z-floor);
   transform: scale(1.02);
   animation: lp-pricing-hero-drift 28s ease-in-out infinite alternate;
 }
@@ -2978,7 +2978,7 @@
 .lp-pricing-hero-scrim {
   position: absolute;
   inset: 0;
-  z-index: 1;
+  z-index: var(--df-z-base);
   background:
     linear-gradient(105deg, rgba(7, 20, 26, 0.88) 0%, rgba(7, 20, 26, 0.55) 48%, rgba(7, 20, 26, 0.35) 100%),
     linear-gradient(0deg, rgba(7, 20, 26, 0.75) 0%, transparent 42%);
@@ -2986,7 +2986,7 @@
 
 .lp-pricing-hero-inner {
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   width: var(--lp-pricing-shell);
   margin: 0 auto;
   padding: clamp(72px, 12vh, 120px) 0 clamp(48px, 8vh, 80px);
@@ -3066,7 +3066,7 @@
   width: var(--lp-pricing-shell);
   margin: clamp(-36px, -5vh, -24px) auto 0;
   position: relative;
-  z-index: 3;
+  z-index: var(--df-z-canvas-stage);
   padding-bottom: clamp(40px, 6vh, 64px);
 }
 

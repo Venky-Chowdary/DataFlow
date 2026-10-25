@@ -404,14 +404,14 @@ html:has(.df2-app) #root {
 .df2-app .df2-content.df2-content-scroll .df2-page-actionbar {
   position: sticky;
   top: 0;
-  z-index: 3;
+  z-index: var(--df-z-canvas-stage);
   background: var(--df-surface, #fff);
 }
 
 .df2-app .df2-content.df2-content-scroll .df2-context-bar {
   position: sticky;
   top: 0;
-  z-index: 3;
+  z-index: var(--df-z-canvas-stage);
   background: var(--df-surface, #fff);
 }
 
