@@ -1042,7 +1042,7 @@ def _stream_database_transfer_impl(
             destination_config=dest_cfg,
         )
         cursor_key = scope.cursor_key
-        watermark = scope.watermark
+        watermark = scope.read_watermark
         from services.preflight_cursor_gate import refuse_unusable_cursor_state
         from services.sync_cursor import reconcile_cursor_tiebreak
 

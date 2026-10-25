@@ -234,6 +234,18 @@ def resolve_read_scope(
         return IncrementalReadScope()
 
 
+def _contract_lookback(contract: dict[str, Any]) -> int:
+    try:
+        days = int(
+            contract.get("cursor_lookback_days")
+            or contract.get("lookback_days")
+            or 0
+        )
+    except (TypeError, ValueError):
+        return 0
+    return days if days > 0 else 0
+
+
 def evaluate_stream_cursor_semantics(
     contracts: list[dict[str, Any]],
     *,
@@ -256,6 +268,7 @@ def evaluate_stream_cursor_semantics(
             cursor_field=cursor,
             declared=str(c.get("cursor_semantics") or ""),
             validation_mode=validation_mode,
+            lookback_days=_contract_lookback(c),
         )
         if verdict.status == "not_applicable":
             continue

@@ -50,7 +50,7 @@ class BatchIncrementalBound:
         delta, unbounded = records_after_watermark(
             records,
             self.scope.cursor_column,
-            self.scope.watermark,
+            self.scope.read_watermark,
             primary_key=self.scope.primary_key,
         )
         if unbounded:

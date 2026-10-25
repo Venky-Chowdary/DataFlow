@@ -475,7 +475,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "What cursor_column means in the source: insert_only, "
                         "modification_timestamp, monotonic_sequence, cdc_position, "
-                        "or business_date. Required for incremental_upsert. "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
                         "Never inferred from the column name."
                     ),
                 },
@@ -555,7 +556,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "What cursor_column means in the source: insert_only, "
                         "modification_timestamp, monotonic_sequence, cdc_position, "
-                        "or business_date. Required for incremental_upsert. "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
                         "Never inferred from the column name."
                     ),
                 },
@@ -666,7 +668,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "What cursor_column means in the source: insert_only, "
                         "modification_timestamp, monotonic_sequence, cdc_position, "
-                        "or business_date. Required for incremental_upsert. "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
                         "Never inferred from the column name."
                     ),
                 },
@@ -890,7 +893,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "What cursor_column means: insert_only, "
                         "modification_timestamp, monotonic_sequence, cdc_position, "
-                        "or business_date. Required for incremental_upsert."
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert."
                     ),
                 },
                 "name": {"type": "string", "description": "Schedule display name"},

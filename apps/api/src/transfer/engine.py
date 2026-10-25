@@ -5799,7 +5799,7 @@ class UniversalTransferEngine:
                 # that is a full extract. Only seek when a dest-owned mark exists.
                 if bound.active and bound.scope.watermark:
                     cursor_column = bound.scope.cursor_column
-                    cursor_after = bound.scope.watermark
+                    cursor_after = bound.scope.read_watermark
             except ValueError:
                 # Cursor-identity refusal is owned by execute_tracked after the
                 # read; do not turn it into a retried source error here.

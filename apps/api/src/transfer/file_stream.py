@@ -1776,7 +1776,7 @@ def stream_file_to_database(
             destination=destination,
         )
         cursor_key = scope.cursor_key
-        watermark = scope.watermark
+        watermark = scope.read_watermark
         cursor_pk_source = next(
             (
                 c
