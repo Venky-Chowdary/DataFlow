@@ -6956,6 +6956,12 @@ def destination_temporal_fractional_digits(
             return 3
         # MySQL/Maria/unknown bare DATETIME is FSP 0 — fail closed.
         return 0
+    if bare == "DATE" and db in _INSTANT_ONLY_TEMPORAL_ENGINES:
+        # BSON ``date`` is epoch milliseconds — the document store's only
+        # temporal carrier holds three fractional digits; reading it as a
+        # calendar DATE is what made the verdict label flip between "date"
+        # and "TIMESTAMPTZ(6)".
+        return 3
     return None
 
 
