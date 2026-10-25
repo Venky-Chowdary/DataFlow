@@ -587,7 +587,15 @@ def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
                     c["nullable"] if "nullable" in c else nullability.get(name, True)
                 ),
                 "data_type": str(
-                    c.get("data_type") or c.get("column_type") or schema_map.get(name) or ""
+                    c.get("data_type")
+                    or c.get("column_type")
+                    # Engine-declared type (PRAGMA/information_schema) is the
+                    # honest `data_type`; inference is not the declared type.
+                    or c.get("declared_type")
+                    or c.get("native_type")
+                    or c.get("type")
+                    or schema_map.get(name)
+                    or ""
                 ),
             })
             seen.add(name)
