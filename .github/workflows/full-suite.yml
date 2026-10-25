@@ -20,24 +20,6 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 150
     services:
-      postgres:
-        # Anonymous Docker Hub pull — GH-hosted runners are not subject to
-        # the anonymous rate limit the public.ecr.aws mirror hit. If a real
-        # 429 ever shows up, add a bounded docker-pull retry step instead.
-        image: postgres:16
-        ports:
-          - 5432:5432
-        env:
-          POSTGRES_USER: dataflow
-          POSTGRES_PASSWORD: dataflow
-          POSTGRES_DB: dataflow
-        # wal_level=logical is required by the native-CDC / x29 legs.
-        options: >-
-          --health-cmd "pg_isready -U dataflow"
-          --health-interval 10s --health-timeout 5s --health-retries 10
-        # wal_level=logical lands via ALTER SYSTEM + restart below — service
-        # 'options' are docker-create flags; '-c wal_level' would be parsed
-        # as docker --cpu-shares and kills container init.
       mssql:
         image: mcr.microsoft.com/mssql/server:2022-latest
         ports:
