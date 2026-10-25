@@ -21,12 +21,10 @@ jobs:
     timeout-minutes: 150
     services:
       postgres:
-        # Docker Hub auth from CI secrets defeats the anonymous-pull 429s
-        # (the ECR public.ecr.aws mirror is what rate-limited the old job).
+        # Anonymous Docker Hub pull — GH-hosted runners are not subject to
+        # the anonymous rate limit the public.ecr.aws mirror hit. If a real
+        # 429 ever shows up, add a bounded docker-pull retry step instead.
         image: postgres:16
-        credentials:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
         ports:
           - 5432:5432
         env:
@@ -42,9 +40,6 @@ jobs:
           -c max_wal_senders=8
       mysql:
         image: mysql:8.0
-        credentials:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
         ports:
           - 3306:3306
         env:
@@ -66,9 +61,6 @@ jobs:
           MSSQL_PID: Developer
       mongo:
         image: mongo:7
-        credentials:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
         ports:
           - 27017:27017
         # A single-node replica set so sessions / change streams / FastPath
@@ -77,9 +69,6 @@ jobs:
         options: --replSet rs0 --bind_ip_all
       redis:
         image: redis:7
-        credentials:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
         ports:
           - 6379:6379
         options: --health-cmd "redis-cli ping" --health-interval 10s --health-timeout 5s --health-retries 10
@@ -283,11 +272,14 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Dependency audit (report only, non-blocking)
+        run: npm audit --omit=dev --audit-level=high || true
+
       - name: Lint (no browser dialogs)
         run: npm --workspace apps/web run lint
 
-      - name: Unit tests
-        run: npm run test
+      - name: Unit tests (web only — the API suite is the engine job's)
+        run: npm --workspace apps/web run test
 
       - name: Web tests
         run: npm run test:web
