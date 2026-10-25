@@ -28,7 +28,6 @@ _PUBLIC_PREFIXES = (
     "/api/v1/auth/form-token",
     "/api/v1/auth/password/forgot",
     "/api/v1/auth/password/reset",
-    "/api/v1/public/sales-leads",
     "/api/v1/public/form-token",
     "/api/v1/public/email-events",
     "/auth/signup",
@@ -38,7 +37,6 @@ _PUBLIC_PREFIXES = (
     "/auth/form-token",
     "/auth/password/forgot",
     "/auth/password/reset",
-    "/public/sales-leads",
     "/public/form-token",
     "/public/email-events",
     # Alias paths when the web client omits /api/v1 (mis-set VITE_API_BASE).
