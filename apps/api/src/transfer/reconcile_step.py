@@ -3675,6 +3675,12 @@ def _localize_checksum_mismatch(
     """
     if report.get("checksum_match") is not False:
         return report
+    if report.get("passed") is True:
+        # ``checksum_match=False`` also means "digest unproven" on runs where
+        # no digest comparison could run (count-only scopes, a source with no
+        # census driver). The run verified on its stated basis — appending a
+        # "Gate-8 still fails" clause would contradict the verdict.
+        return report
     if (report.get("full_keyed_compare") or {}).get("passed") is False:
         return report
     summary = dest_summary or {}
@@ -7666,7 +7672,11 @@ def run_reconciliation(
                     )
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
-    # src vs shaped dest here would flag every transformed row.
+    # src vs shaped dest here would flag every transformed row. And this is a
+    # failure-path namer — on a passing count-only run ``checksum_match=False``
+    # means "digest unproven", not "mismatch", so there is no culprit to name
+    # (and no "(source 'kafka' has no census driver)" clause on a completed
+    # job's message, M17).
     if (
         recon.get("checksum_match") is False
         and recon.get("passed") is not True
