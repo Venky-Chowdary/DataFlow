@@ -576,7 +576,7 @@ async def query_schema(
 
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
-    endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source"}
+    endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
     try:
         info = introspect_endpoint(endpoint)
     except Exception as exc:

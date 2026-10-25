@@ -600,7 +600,7 @@ def _source_nullability_probe(source: EndpointConfig) -> dict[str, bool]:
     try:
         from .endpoint_intelligence import introspect_endpoint
 
-        source.extra = {**(source.extra or {}), "introspect_purpose": "source"}
+        source.extra = {**(source.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
         info = introspect_endpoint(source)
         return {
             str(k): bool(v)
@@ -5720,6 +5720,11 @@ class UniversalTransferEngine:
 
         from .endpoint_intelligence import build_transfer_plan, introspect_endpoint
 
+        source.extra = {
+            **(source.extra or {}),
+            "introspect_purpose": "source",
+            "introspect_strict": True,
+        }
         source_info = introspect_endpoint(source, sample_content, filename)
         if source_columns and not source_info.get("columns"):
             source_info["columns"] = source_columns

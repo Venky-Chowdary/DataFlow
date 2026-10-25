@@ -1327,7 +1327,12 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
         # Destination: stay in the operator-chosen DB/schema. Cross-namespace
         # "heal" invents Existing table when another DB on the host has the name.
-        strict_namespace = purpose == "destination"
+        # D91/D92: a transfer staging read (introspect_strict) resolves the
+        # canonical qualified name the operator named — fuzzy cross-schema
+        # search is reserved for interactive browsing.
+        strict_namespace = purpose == "destination" or bool(
+            (endpoint.extra or {}).get("introspect_strict")
+        )
         # Same role, different question: a destination is described by the
         # carrier its DDL declares, not by the shape of the rows already in it.
         physical_carriers = purpose == "destination"

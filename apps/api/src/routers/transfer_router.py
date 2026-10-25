@@ -438,7 +438,7 @@ async def introspect_endpoint_route(request: AnalyzeRequest):
     src = EndpointConfig.from_dict(request.source.kind, request.source.model_dump(by_alias=True))
     dst = EndpointConfig.from_dict(request.destination.kind, request.destination.model_dump(by_alias=True))
     # Role-tag so missing-table copy is correct (source ≠ create-on-write).
-    src.extra = {**(src.extra or {}), "introspect_purpose": "source"}
+    src.extra = {**(src.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
     dst.extra = {**(dst.extra or {}), "introspect_purpose": "destination"}
 
     def _probe() -> dict[str, Any]:
