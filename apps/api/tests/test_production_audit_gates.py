@@ -42,6 +42,8 @@ def test_production_bans_allow_dev_user(monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.setenv("DATAWRAP_ALLOW_DEV_USER", "1")
     monkeypatch.setenv("DATAFLOW_ALLOW_DEV_USER", "1")
+    monkeypatch.delenv("DATAWRAP_ENV", raising=False)
+    monkeypatch.delenv("DATAFLOW_ENV", raising=False)
     monkeypatch.setenv("DATAWRAP_REQUIRE_AUTH", "1")
     monkeypatch.setenv("DATAWRAP_AUTH_SECRET", "x" * 40)
     monkeypatch.setenv("DATAWRAP_SECRETS_KEY", "y" * 40)

@@ -12,7 +12,35 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 
 
 def is_railway() -> bool:
-    return bool(os.getenv("RAILWAY_ENVIRONMENT") or os.getenv("RAILWAY_SERVICE_ID"))
+    """Running on / linked to Railway infrastructure (deployed or `railway run`).
+
+    Used for host-hint and volume-path behavior, NOT for production policy —
+    see ``is_railway_deployed`` for the deploy-time signal.
+    """
+    return bool(
+        os.getenv("RAILWAY_ENVIRONMENT")
+        or os.getenv("RAILWAY_SERVICE_ID")
+        or is_railway_deployed()
+    )
+
+
+def is_railway_deployed() -> bool:
+    """True only inside a deployed Railway service.
+
+    Deployment-scoped markers (RAILWAY_ENVIRONMENT_NAME, RAILWAY_DEPLOYMENT_ID,
+    RAILWAY_REPLICA_ID) are set by Railway at deploy time. RAILWAY_ENVIRONMENT,
+    RAILWAY_SERVICE_ID and RAILWAY_TOKEN are also exported by `railway run`,
+    linked dev shells and CI agents that merely have the CLI installed — they
+    must not flip a dev box or test run into production policy.
+    """
+    return any(
+        os.getenv(k)
+        for k in (
+            "RAILWAY_ENVIRONMENT_NAME",
+            "RAILWAY_DEPLOYMENT_ID",
+            "RAILWAY_REPLICA_ID",
+        )
+    )
 
 
 def is_production() -> bool:
@@ -21,7 +49,8 @@ def is_production() -> bool:
     Fail-closed rules:
     - Explicit ``ENV=production|prod`` → production
     - Explicit ``ENV=development|dev|local|test`` → not production
-    - Railway (unless explicitly marked development) → production
+    - Deployed Railway service (deploy-time markers only — a `railway run`
+      shell or CLI token alone is not production) → production
     - ``ASSUME_PRODUCTION=1`` → production (bare-metal / k8s without ENV)
     - ``REQUIRE_AUTH=1`` with unset ENV → production (misconfigured host)
     - Otherwise unset ENV stays non-production for local developer UX
@@ -31,7 +60,7 @@ def is_production() -> bool:
         return False
     if env in ("production", "prod"):
         return True
-    if is_railway():
+    if is_railway_deployed():
         return True
     if getenv_brand("ASSUME_PRODUCTION", "0").lower() in ("1", "true", "yes"):
         return True
