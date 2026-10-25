@@ -266,7 +266,9 @@ def test_contract_failures_quarantine_with_rule_id(tmp_path: Path, engine_env):
     assert [r[0] for r in rows] == [1, 5]
     # Transforms + crosswalk applied in the destination image.
     by_id = {r[0]: r for r in rows}
-    assert by_id[1][1] == "ALICE"
+    # D13 contract: `upper` is case-only (SQL UPPER does not trim) — trimming
+    # is the separate `trim` transform — so ' alice ' lands as ' ALICE '.
+    assert by_id[1][1] == " ALICE "
     assert by_id[1][2] == "ACTIVE"
     assert by_id[5][2] == "INACTIVE"
 
