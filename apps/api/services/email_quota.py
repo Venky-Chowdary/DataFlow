@@ -7,7 +7,12 @@ provider cap:
   Redis errors fail *closed*: the send is refused with
   ``email_quota_exceeded`` rather than silently overrunning the provider
   quota — the caller's OTP challenge stays resendable.
-- unset                       → per-process counters (dev/test only).
+- MongoDB configured          → ``email_quota`` collection counters — the
+  same durable store as users/challenges, shared across replicas and
+  surviving redeploys. Mongo errors fail closed, same as Redis.
+- otherwise                   → ``email_quota.json`` under ``data_dir()`` —
+  durable per instance (survives restart when the volume is mounted),
+  like every other file-backed store on this tier.
 
 Limits: ``DATAWRAP_EMAIL_DAILY_LIMIT`` (100), ``DATAWRAP_EMAIL_MONTHLY_LIMIT``
 (3000). One ops event per send carries the counts; crossing 80% of either
@@ -19,11 +24,15 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 
 from services.brand_env import getenv_brand
 from services.email_sender import EmailQuotaExceeded
+from services.metadata_backend import (
+    json_doc_transaction, load_json_doc, mongo_database)
 from services.ops_events import emit_event
+from services.platform_config import data_dir
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +79,24 @@ _REDIS_CLIENT: Any = None
 _REDIS_FAILED = False
 _REDIS_LOCK = threading.Lock()
 
-_MEM_COUNTERS: dict[str, int] = {}
-_MEM_ALERTED: set[str] = set()
-_MEM_LOCK = threading.Lock()
+_COLLECTION = "email_quota"
+
+
+def _file_path() -> Path:
+    return data_dir() / "email_quota.json"
+
+
+def _db():
+    """The same durable store as users/challenges, when configured."""
+    return mongo_database()
+
+
+def _backend() -> str:
+    if _redis_url():
+        return "redis"
+    if _db() is not None:
+        return "mongo"
+    return "file"
 
 
 def _redis_url() -> str:
@@ -95,14 +119,15 @@ def _get_redis():
 
 
 def _reset_backends() -> None:
-    """Test hook."""
+    """Test hook — clears counters on every backend (incl. the file)."""
     global _REDIS_CLIENT, _REDIS_FAILED
     with _REDIS_LOCK:
         _REDIS_CLIENT = None
         _REDIS_FAILED = False
-    with _MEM_LOCK:
-        _MEM_COUNTERS.clear()
-        _MEM_ALERTED.clear()
+    try:
+        _file_path().unlink(missing_ok=True)
+    except OSError:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -118,26 +143,73 @@ def _incr_redis(key: str, reset_at: datetime) -> int:
     return int(count)
 
 
-def _incr_memory(key: str) -> int:
-    with _MEM_LOCK:
-        _MEM_COUNTERS[key] = _MEM_COUNTERS.get(key, 0) + 1
-        return _MEM_COUNTERS[key]
+def _incr_mongo(key: str, reset_at: datetime) -> int:
+    """Atomic $inc upsert — safe across replicas."""
+    from pymongo import ReturnDocument
+
+    db = _db()
+    assert db is not None
+    doc = db[_COLLECTION].find_one_and_update(
+        {"_id": key},
+        {"$inc": {"count": 1},
+         "$setOnInsert": {"resets_at": reset_at.isoformat()}},
+        upsert=True, return_document=ReturnDocument.AFTER)
+    return int(doc["count"])
+
+
+def _incr_file(key: str, reset_at: datetime) -> int:
+    """Durable per-instance counter — survives restart on a mounted volume;
+    two instances sharing the backend see each other's counts."""
+    with json_doc_transaction(_file_path(), {"counters": {}}) as doc:
+        counters = doc.setdefault("counters", {})
+        now = datetime.now(UTC).isoformat()
+        for k in [k for k, v in counters.items()
+                  if str(v.get("expires", "")) < now]:
+            del counters[k]
+        entry = counters.setdefault(
+            key, {"count": 0, "expires": reset_at.isoformat()})
+        entry["count"] += 1
+        return int(entry["count"])
+
+
+def _get_file(key: str) -> int:
+    doc = load_json_doc(_file_path(), {"counters": {}})
+    entry = doc.get("counters", {}).get(key) or {}
+    if str(entry.get("expires", "")) < datetime.now(UTC).isoformat():
+        return 0
+    return int(entry.get("count", 0))
 
 
 def _alert_once(kind: str, window_key: str, used: int, limit: int) -> None:
     """Emit the 80% alert once per window."""
     alert_key = f"{_KEY_PREFIX}:alert:{kind}:{window_key.rsplit(':', 1)[-1]}"
     fired = False
-    if _redis_url():
+    backend = _backend()
+    if backend == "redis":
         try:
             client = _get_redis()
             fired = bool(client.set(alert_key, "1", nx=True, ex=31 * 24 * 3600))
         except Exception:  # noqa: BLE001 — alerting must never block sends
             fired = False
+    elif backend == "mongo":
+        try:
+            from pymongo.errors import DuplicateKeyError
+
+            _db()[_COLLECTION].insert_one(
+                {"_id": alert_key,
+                 "resets_at": (datetime.now(UTC)
+                               + timedelta(days=31)).isoformat()})
+            fired = True
+        except DuplicateKeyError:
+            fired = False
+        except Exception:  # noqa: BLE001 — alerting must never block sends
+            fired = False
     else:
-        with _MEM_LOCK:
-            if alert_key not in _MEM_ALERTED:
-                _MEM_ALERTED.add(alert_key)
+        with json_doc_transaction(_file_path(),
+                                  {"counters": {}, "alerts": {}}) as doc:
+            alerts = doc.setdefault("alerts", {})
+            if alert_key not in alerts:
+                alerts[alert_key] = datetime.now(UTC).isoformat()
                 fired = True
     if fired:
         emit_event(
@@ -164,19 +236,25 @@ def consume_send_slot() -> dict[str, int]:
     monthly_limit = _monthly_limit()
     now = datetime.now(UTC)
 
-    if _redis_url():
-        try:
+    backend = _backend()
+    try:
+        if backend == "redis":
             day_used = _incr_redis(day_key, day_reset)
             month_used = _incr_redis(month_key, month_reset)
-        except Exception as exc:  # noqa: BLE001 — fail closed, sender retries later
-            _REDIS_FAILED = True
-            logger.warning("email quota backend unavailable: %s", type(exc).__name__)
-            raise EmailQuotaExceeded(
-                "email quota backend unavailable; send refused", retry_after_sec=60
-            ) from exc
-    else:
-        day_used = _incr_memory(day_key)
-        month_used = _incr_memory(month_key)
+        elif backend == "mongo":
+            day_used = _incr_mongo(day_key, day_reset)
+            month_used = _incr_mongo(month_key, month_reset)
+        else:
+            day_used = _incr_file(day_key, day_reset)
+            month_used = _incr_file(month_key, month_reset)
+    except EmailQuotaExceeded:
+        raise
+    except Exception as exc:  # noqa: BLE001 — fail closed, sender retries later
+        _REDIS_FAILED = True
+        logger.warning("email quota backend unavailable: %s", type(exc).__name__)
+        raise EmailQuotaExceeded(
+            "email quota backend unavailable; send refused", retry_after_sec=60
+        ) from exc
 
     emit_event(
         logger,
@@ -186,7 +264,7 @@ def consume_send_slot() -> dict[str, int]:
         day_limit=daily_limit,
         month_used=month_used,
         month_limit=monthly_limit,
-        backend="redis" if _redis_url() else "memory",
+        backend=backend,
     )
 
     if day_used >= _ALERT_FRACTION * daily_limit:
@@ -211,19 +289,25 @@ def quota_status() -> dict[str, Any]:
     """Read-only view for metrics/admin surfaces."""
     (day_key, day_reset), (month_key, month_reset) = _windows()
     day_used = month_used = 0
-    backend = "memory"
-    if _redis_url():
-        backend = "redis"
-        try:
+    backend = _backend()
+    try:
+        if backend == "redis":
             client = _get_redis()
             day_used = int(client.get(day_key) or 0)
             month_used = int(client.get(month_key) or 0)
-        except Exception:  # noqa: BLE001
-            backend = "redis-unreachable"
-    else:
-        with _MEM_LOCK:
-            day_used = _MEM_COUNTERS.get(day_key, 0)
-            month_used = _MEM_COUNTERS.get(month_key, 0)
+        elif backend == "mongo":
+            for key, which in ((day_key, "day"), (month_key, "month")):
+                doc = _db()[_COLLECTION].find_one({"_id": key}) or {}
+                if str(doc.get("resets_at", "")) > datetime.now(UTC).isoformat():
+                    if which == "day":
+                        day_used = int(doc.get("count", 0))
+                    else:
+                        month_used = int(doc.get("count", 0))
+        else:
+            day_used = _get_file(day_key)
+            month_used = _get_file(month_key)
+    except Exception:  # noqa: BLE001
+        backend = f"{backend}-unreachable"
     return {
         "backend": backend,
         "day_used": day_used,

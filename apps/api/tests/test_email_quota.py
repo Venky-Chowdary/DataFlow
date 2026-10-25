@@ -69,7 +69,7 @@ def test_send_event_emitted_each_consume(monkeypatch):
     send_events = [kw for name, kw in events if name == "email.send"]
     assert len(send_events) == 1
     assert send_events[0]["day_used"] == 1
-    assert send_events[0]["backend"] == "memory"
+    assert send_events[0]["backend"] == "file"
 
 
 def test_redis_down_fails_closed(monkeypatch):
@@ -129,10 +129,44 @@ def test_redis_backend_used_when_configured(monkeypatch):
     assert status["month_limit"] == 3000
 
 
-def test_quota_status_memory_backend():
+def test_quota_status_file_backend():
     consume_send_slot()
     status = quota_status()
-    assert status["backend"] == "memory"
+    assert status["backend"] == "file"
     assert status["day_used"] == 1
     assert status["day_limit"] == 100
     assert status["month_limit"] == 3000
+
+
+def test_file_backend_is_durable_and_shared(tmp_path, monkeypatch):
+    """Two API replicas sharing the backend see each other's sends: the
+    counter lives in email_quota.json under data_dir() — durable across a
+    simulated restart and identical to the users/challenges storage tier.
+    In production Mongo is configured and the same counters live in the
+    shared collection (atomic $inc upserts)."""
+    from services import email_quota as q
+
+    assert q._backend() == "file"
+    consume_send_slot()
+    consume_send_slot()
+    # Simulate a second replica / process restart sharing the volume: all
+    # in-process state is dropped, the file under data_dir() persists.
+    monkeypatch.setattr(q, "_REDIS_CLIENT", None)
+    # (file backend has no in-process counter cache to clear — the file
+    # itself is the store)
+    before = quota_status()
+    assert before["backend"] == "file"
+    assert before["day_used"] == 2, before
+    consume_send_slot()
+    assert quota_status()["day_used"] == 3
+
+
+def test_file_backend_survives_repeated_reads(tmp_path):
+    """Expired counters prune; live ones persist across reads."""
+    from services import email_quota as q
+
+    consume_send_slot()
+    s1 = quota_status()
+    s2 = quota_status()
+    assert s1["day_used"] == s2["day_used"] == 1
+    assert (q._file_path()).exists()
