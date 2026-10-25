@@ -25,7 +25,7 @@ from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.auth_state import get_auth_state
 from services.email_canonical import canonical_email
-from services import denylist_store, disposable_list, mx_check
+from services import denylist_store, disposable_list, mx_check, turnstile
 from services.email_policy import role_assessment
 from services.email_quota import consume_send_slot
 from services.email_sender import (
@@ -75,8 +75,21 @@ def request_signup(
     ip: str = "",
     device_id: str = "",
     ua: str = "",
+    turnstile_token: str = "",
 ) -> dict[str, Any]:
     """Accept a signup. Same 202 body for new/pending/existing addresses."""
+    # Turnstile: enforced when a secret is configured; unconfigured just
+    # raises the risk floor (P2-8 wires the full scorer).
+    if turnstile.configured():
+        verdict = turnstile.verify(
+            turnstile_token, remote_ip=ip,
+            expected_action="signup", expected_hostname="datawrap.io")
+        if not verdict["ok"]:
+            record_security_event("signup.blocked", outcome="failed",
+                                  reason_code=f"turnstile:{verdict['reason']}",
+                                  details={"ip": ip})
+            raise ApiError(400, "turnstile_required",
+                           "couldn't verify you're human — try again")
     normalized = user_store.validate_email(email)
     if not (MIN_PASSWORD_LEN <= len(password or "") <= MAX_PASSWORD_LEN):
         # Validation is fine to surface — it reveals nothing about the account.

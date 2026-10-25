@@ -10,6 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import services.signup_service as signup_service
 from services import signup_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
 
@@ -19,6 +20,7 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAWRAP_SIGNUP_ENABLED", "1")
     monkeypatch.setenv("DATAWRAP_EMAIL_PROVIDER", "console")
     monkeypatch.setenv("DATAWRAP_OTP_PEPPER", "test-pepper")
+    monkeypatch.setattr(signup_service.mx_check, "check_domain", lambda d: {"ok": True})
     monkeypatch.setenv("DATAWRAP_ENV", "test")
     monkeypatch.setattr(signup_store, "_pending_path", lambda: tmp_path / "pending.json")
     monkeypatch.setattr(signup_store, "_challenges_path", lambda: tmp_path / "challenges.json")

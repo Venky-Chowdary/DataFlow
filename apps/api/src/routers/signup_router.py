@@ -78,6 +78,7 @@ async def signup(body: SignupRequest, request: Request):
         ip=_client_ip(request),
         device_id=body.device_id,
         ua=request.headers.get("user-agent", "")[:512],
+        turnstile_token=body.turnstile_token,
     )
 
 
