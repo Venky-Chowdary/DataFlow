@@ -350,6 +350,61 @@ def coerce_sql_temporal(
             f"empty string cannot coerce to {base} — "
             "refuse silent NULL invent (quarantine or remap upstream)"
         )
+    if base in _TEMPORAL_BASES and base not in {
+        "TIME",
+        "TIME WITH TIME ZONE",
+        "TIME WITHOUT TIME ZONE",
+        "TIMETZ",
+    }:
+        # C02 — temporal edge values are data, not decoration:
+        #  * PG 'infinity'/'-infinity' carry verbatim to the PG family and are
+        #    refused everywhere else with a named reason — never clamped to a
+        #    finite date (silent data loss) and never left to fail after write.
+        #  * 'epoch' resolves to the real instant it names.
+        #  * A finite value a bounded carrier cannot store (MySQL DATETIME
+        #    1000..9999, SQL Server DATETIME ≥1753, SMALLDATETIME ≤2079-06-06,
+        #    warehouse 1..9999) is refused here so the row quarantines.
+        special = pg_temporal_special(value)
+        if special is not None:
+            if _is_postgres_family(engine):
+                return special
+            if special == "epoch":
+                instant = datetime(1970, 1, 1, tzinfo=timezone.utc)
+                aware = base in {
+                    "TIMESTAMPTZ",
+                    "TIMESTAMP_TZ",
+                    "TIMESTAMP_LTZ",
+                    "TIMESTAMP WITH TIME ZONE",
+                    "TIMESTAMP WITH LOCAL TIME ZONE",
+                    "DATETIMEOFFSET",
+                } or (base == "TIMESTAMP" and _bare_timestamp_is_instant(engine))
+                return instant if aware else instant.replace(tzinfo=None)
+            raise ValueError(
+                f"PostgreSQL {special!r} has no {base} carrier on "
+                f"{engine or 'this destination'} — quarantined; map to TEXT to "
+                "preserve the literal"
+            )
+        bounds = dest_temporal_bounds(engine, base)
+        if bounds is not None:
+            lo, hi = bounds
+            parsed = parse_sql_datetime(value, wall_clock=True)
+            if parsed is not None:
+                civil = parsed.replace(tzinfo=None)
+                if civil < lo or civil > hi:
+                    raise ValueError(
+                        f"{parsed.date().isoformat()} is outside "
+                        f"{engine or 'destination'} {base} range "
+                        f"{lo.date()} .. {hi.date()} — quarantined; map to a "
+                        "wider carrier"
+                    )
+            else:
+                year = _temporal_year_beyond(value, lo=lo.year, hi=hi.year)
+                if year is not None:
+                    raise ValueError(
+                        f"year {year} is outside {engine or 'destination'} "
+                        f"{base} range {lo.date()} .. {hi.date()} — "
+                        "quarantined; map to a wider carrier"
+                    )
     if base == "TIMESTAMP" and _is_mysql_engine(engine):
         from services.timezone_policy import (
             MYSQL_TIMESTAMP_MAX,
@@ -559,6 +614,132 @@ _TEMPORAL_BASES = frozenset({
     "DATETIME2",
     "SMALLDATETIME",
 })
+
+def pg_temporal_special(value: Any) -> str | None:
+    """Canonical PostgreSQL temporal literal for a cell, or None.
+
+    ``'infinity'`` / ``'-infinity'`` are real *data* on Postgres
+    DATE/TIMESTAMP/TIMESTAMPTZ — "no bound", never a parseable instant and
+    never something a migration may clamp to ``9999-12-31``. ``'epoch'`` is
+    also a PG literal but resolves to a real instant (1970-01-01 UTC), so it
+    round-trips as a normal timestamp instead of being refused.
+    """
+    if not isinstance(value, str):
+        return None
+    text = value.strip().lower()
+    if text in {"infinity", "+infinity"}:
+        return "infinity"
+    if text == "-infinity":
+        return "-infinity"
+    if text == "epoch":
+        return "epoch"
+    return None
+
+
+_PG_FAMILY = frozenset({
+    "postgresql",
+    "postgres",
+    "redshift",
+    "cockroachdb",
+    "timescaledb",
+    "supabase",
+})
+
+_MSSQL_FAMILY = frozenset({
+    "sqlserver",
+    "mssql",
+    "sql_server",
+    "microsoft_sql_server",
+    "azure_sql",
+    "azure_sql_database",
+    "synapse",
+    "synapse_analytics",
+    "azure_synapse_dedicated",
+    "azure_synapse_serverless",
+    "db2",
+    "h2",
+})
+
+
+def _is_postgres_family(engine: str) -> bool:
+    eng = (engine or "").strip().lower()
+    if not eng:
+        return False
+    from services.type_system import _normalize_dest_db
+
+    return _normalize_dest_db(eng) in _PG_FAMILY
+
+
+def dest_temporal_bounds(
+    engine: str, base: str
+) -> tuple[datetime, datetime] | None:
+    """Civil (wall-clock) storage window for ``base`` on ``engine``, or None.
+
+    Returns None for unbounded/text carriers (Postgres family, SQLite text,
+    DuckDB) — those carry whatever the source produced. For bounded carriers
+    a value outside the window must be refused/quarantined *before* write:
+    clamping it is silent data loss and failing after write leaves a
+    half-committed batch.
+    """
+    eng = (engine or "").strip().lower()
+    if not eng:
+        return None
+    from services.type_system import _normalize_dest_db
+
+    dialect = _normalize_dest_db(eng)
+    hi9999 = datetime(9999, 12, 31, 23, 59, 59, 999999)
+    if dialect == "mysql":
+        if base == "TIMESTAMP":
+            return None  # instant carrier — own epoch-bound branch above
+        return (datetime(1000, 1, 1), hi9999)
+    if dialect in _MSSQL_FAMILY or eng.startswith("mssql"):
+        if base == "SMALLDATETIME":
+            return (datetime(1900, 1, 1), datetime(2079, 6, 6, 23, 59, 59))
+        if base == "DATETIME":
+            return (datetime(1753, 1, 1), hi9999)
+        if base in {"DATE", "DATETIME2", "DATETIMEOFFSET"}:
+            return (datetime(1, 1, 1), hi9999)
+        return None
+    if dialect in {"snowflake", "bigquery", "databricks"}:
+        if base in _TEMPORAL_BASES and base not in {
+            "TIME",
+            "TIME WITH TIME ZONE",
+            "TIME WITHOUT TIME ZONE",
+            "TIMETZ",
+        }:
+            return (datetime(1, 1, 1), hi9999)
+        return None
+    if dialect == "oracle":
+        if base in {"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIMESTAMP_TZ", "TIMESTAMP_LTZ", "TIMESTAMP WITH TIME ZONE", "TIMESTAMP WITH LOCAL TIME ZONE"}:
+            return (datetime(1, 1, 1), hi9999)
+        return None
+    return None
+
+
+_LEADING_YEAR_RE = re.compile(r"^\s*(\d{4,6})-")
+
+
+def _temporal_year_beyond(value: Any, *, lo: int, hi: int) -> int | None:
+    """Leading ISO year of an unparseable wire that a bounded carrier rejects.
+
+    Python ``datetime`` cannot represent years outside 1..9999, so a PG date
+    like ``'10000-01-01'`` arrives unparseable and would otherwise reach the
+    engine to fail after write. SQL Server/MySQL then report it themselves;
+    refuse it first with a named reason.
+    """
+    if not isinstance(value, str):
+        return None
+    m = _LEADING_YEAR_RE.match(value)
+    if m is None:
+        return None
+    try:
+        year = int(m.group(1))
+    except ValueError:
+        return None
+    if year < lo or year > hi:
+        return year
+    return None
+
 
 # Destinations that bind temporals like MySQL/Postgres (ISO-Z literals unsafe).
 # Includes generic_sql dialects, warehouses, and common catalog aliases so Validate
