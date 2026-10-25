@@ -2241,32 +2241,11 @@ class DataPilotTools:
             "mappings_count": len(req.get("mappings") or []),
             "sync_mode": req.get("sync_mode") or job.get("operation"),
         }
-        live_schema: dict | None = None
-        # When job failed / quarantine, attach a live source schema snapshot if possible.
-        if (
-            route.get("source_connector_id")
-            and route.get("source_table")
-            and (status in {"failed", "cancelled"} or quarantine or job.get("rejected_rows"))
-        ):
-            try:
-                from .schema_tools import introspect_connector_schema
-
-                sch = introspect_connector_schema(
-                    connector_id=str(route["source_connector_id"]),
-                    table=str(route["source_table"]),
-                )
-                if sch.success and sch.output:
-                    live_schema = {
-                        "connector_name": sch.output.get("connector_name"),
-                        "table": sch.output.get("table"),
-                        "column_count": sch.output.get("column_count"),
-                        "columns": [
-                            {"name": c.get("name"), "inferred_type": c.get("inferred_type")}
-                            for c in (sch.output.get("columns") or [])[:40]
-                        ],
-                    }
-            except Exception:
-                live_schema = None
+        # D19: get_job reads only the stored record. A live source
+        # introspection here hung the whole call for minutes behind a slow or
+        # dead source (MCP -32001 timeouts after a cancel). The schema the run
+        # captured is on the record already.
+        live_schema = job.get("live_source_schema") or job.get("source_schema")
         return ToolResult(
             name="get_job",
             success=True,

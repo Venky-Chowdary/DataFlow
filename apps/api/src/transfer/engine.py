@@ -201,6 +201,7 @@ logger = logging.getLogger("dataflow.transfer")
 from src.transfer.reconcile_heartbeat import (  # noqa: E402
     reconcile_heartbeat_scope as _reconcile_heartbeat_scope,
     reconcile_phase_heartbeat as _reconcile_phase_heartbeat,
+    job_phase_heartbeat as _job_phase_heartbeat,
 )
 
 
@@ -2286,13 +2287,20 @@ class UniversalTransferEngine:
                 base_delay_seconds=0.5,
                 max_delay_seconds=5.0,
             )
-            records, columns, schema = with_retry(
-                lambda: self._read_source(request),
-                budget=read_budget,
-                on_transient=lifecycle_events.source_read_retry_callback(
-                    request, read_budget
-                ),
-            )
+            with _job_phase_heartbeat(
+                mongo,
+                job_id,
+                phase="reading",
+                message="Reading source data…",
+                progress_pct=5,
+            ):
+                records, columns, schema = with_retry(
+                    lambda: self._read_source(request),
+                    budget=read_budget,
+                    on_transient=lifecycle_events.source_read_retry_callback(
+                        request, read_budget
+                    ),
+                )
             schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
@@ -2934,32 +2942,38 @@ class UniversalTransferEngine:
                         source_is_record_batch,
                     )
 
-                    return write_destination_database(
-                        request.destination,
-                        records,
-                        columns,
-                        schema,
-                        mappings,
-                        on_checkpoint=throttled_checkpoint,
-                        validation_mode=request.validation_mode,
-                        backfill_new_fields=backfill_fields,
-                        write_mode=write_mode,
-                        conflict_columns=conflict_columns,
-                        job_id=job_id,
-                        skip_preflight=request.skip_preflight,
-                        sync_mode=request.sync_mode,
-                        # File/object-store blanks into typed columns are SQL
-                        # NULL (D1): the buffered path dropped the flag, so
-                        # Execute rejected blanks preflight accepted.
-                        empty_cells_as_null=source_is_record_batch(
-                            getattr(request.source, "kind", "") or "database",
-                            request.source.format,
-                        ),
-                        release_records=True,
-                        retain_engine_spill=True,
-                        collect_mirror_keys=effective_sync_lower
-                        in ("full_refresh_mirror", "mirror"),
-                    )
+                    with _job_phase_heartbeat(
+                        mongo,
+                        job_id,
+                        phase="writing",
+                        message="Connecting to destination and writing…",
+                    ):
+                        return write_destination_database(
+                            request.destination,
+                            records,
+                            columns,
+                            schema,
+                            mappings,
+                            on_checkpoint=throttled_checkpoint,
+                            validation_mode=request.validation_mode,
+                            backfill_new_fields=backfill_fields,
+                            write_mode=write_mode,
+                            conflict_columns=conflict_columns,
+                            job_id=job_id,
+                            skip_preflight=request.skip_preflight,
+                            sync_mode=request.sync_mode,
+                            # File/object-store blanks into typed columns are SQL
+                            # NULL (D1): the buffered path dropped the flag, so
+                            # Execute rejected blanks preflight accepted.
+                            empty_cells_as_null=source_is_record_batch(
+                                getattr(request.source, "kind", "") or "database",
+                                request.source.format,
+                            ),
+                            release_records=True,
+                            retain_engine_spill=True,
+                            collect_mirror_keys=effective_sync_lower
+                            in ("full_refresh_mirror", "mirror"),
+                        )
 
                 _scd2_opts = None
                 if effective_sync_lower == "scd2":
