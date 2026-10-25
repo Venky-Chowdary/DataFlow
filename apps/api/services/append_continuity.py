@@ -292,7 +292,20 @@ def save_baseline(key: str, fp: dict[str, Any], job_id: str) -> None:
         coll.replace_one({"key": key}, entry, upsert=True)
         return
     with _lock:
-        data = _load_file()
+        try:
+            data = _load_file()
+        except ContinuityStoreCorrupt as exc:
+            # The store cannot be read, so there are no baselines to preserve —
+            # the write side must not crash too, or rebaseline can never
+            # recover the store. Start a fresh map; the corrupt file is
+            # replaced atomically and the event is logged loudly.
+            logger.error(
+                "append continuity store unreadable (%s); saving '%s' replaces "
+                "the corrupt store — other baselines were already unreadable",
+                exc,
+                key,
+            )
+            data = {}
         data[key] = entry
         write_json_atomic(store_path(), data, indent=2)
 
@@ -580,7 +593,15 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
         raise RebaselineError(
             f"Table '{target.table}' could not be re-read; the baseline was not changed."
         )
-    previous = load_baseline(target.key)
+    store_error = ""
+    try:
+        previous = load_baseline(target.key)
+    except ContinuityStoreCorrupt as exc:
+        # The whole point of rebaseline is recovery — a corrupt store is not a
+        # reason to refuse it. The audit record must carry that the previous
+        # baseline was unreadable so the reset is traceable (X-CS).
+        previous = None
+        store_error = str(exc)
     rebaseline_id = f"rebaseline-{uuid.uuid4().hex[:12]}"
     prev_view = (
         {
@@ -605,6 +626,8 @@ def rebaseline(endpoint: Any, *, actor: str, reason: str) -> dict[str, Any]:
             "table": target.table,
             "reason": reason,
             "previous": prev_view,
+            "previous_store_unreadable": bool(store_error),
+            "store_error": store_error,
             "current": dict(current),
         },
     )

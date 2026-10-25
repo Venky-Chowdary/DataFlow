@@ -660,3 +660,64 @@ def test_corrupt_store_with_tampered_destination_fails_append_loudly(
     assert "baseline store could not be read" in r2.error
     assert dest.snapshot() == before
     assert file_store.read_bytes() == CORRUPTIONS[kind]
+
+
+def test_corrupt_store_rebaseline_audited(tmp_path, fake_store, monkeypatch):
+    """X-CS: an unreadable continuity store must be recoverable through the
+    audited rebaseline path — not a dead end that only raw file surgery can
+    fix. The audit record carries that the previous baseline was unreadable.
+    """
+    import services.audit_log as audit_log
+    import services.append_continuity as ac_mod
+
+    events: list[dict[str, Any]] = []
+    real_audit = audit_log.append_audit_event
+
+    def _spy(**kw):
+        if kw.get("action") == "append_continuity.rebaselined":
+            events.append(kw)
+            return kw
+        return real_audit(**kw)
+
+    monkeypatch.setattr(audit_log, "append_audit_event", _spy)
+    dest = _Dest("sqlite", tmp_path)
+    try:
+        src = _source(tmp_path, pk=True)
+        assert _runner(fake_store, src, dest, pk=True)().success
+        dest.tamper()
+        tampered = dest.snapshot()
+
+        # Corrupt the store — fail-loud on reads.
+        store = ac_mod.store_path()
+        store.write_text("{ not json")
+
+        # Run 2 fails closed naming the unreadable store.
+        _add_source_rows(src, 11, 13)
+        r2 = _runner(fake_store, src, dest, pk=True)()
+        assert not r2.success
+        assert "could not be read" in (r2.error or "")
+
+        # Audited rebaseline recovers: the new baseline is the tampered table.
+        client = _rebaseline_client()
+        resp = client.post(
+            "/api/v1/transfer/continuity/rebaseline",
+            json={
+                "destination": _endpoint_body(dest),
+                "reason": "INC-2: store file corrupted, reset after verify",
+            },
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert body["current"]["rows"] == len(tampered)
+        assert len(events) == 1
+        det = events[0]["details"]
+        assert det["previous_store_unreadable"] is True
+        assert det["store_error"]
+        assert det["rebaseline_id"] == body["rebaseline_id"]
+
+        # Store is readable again; next run is green.
+        assert ac_mod.load_baseline(_key(dest)) is not None
+        r3 = _runner(fake_store, src, dest, pk=True)()
+        assert r3.success, r3.error
+    finally:
+        dest.drop()
