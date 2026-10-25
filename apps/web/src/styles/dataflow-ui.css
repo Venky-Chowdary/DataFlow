@@ -3232,10 +3232,67 @@ body {
   cursor: pointer;
 }
 
+/* Custom-drawn box: a native disabled checkbox is visually identical to an
+   enabled empty one at small widths (UI-1). Disabled gets a dashed border,
+   sunken fill, and a diagonal slash — 3:1+ non-text contrast in both themes. */
 .df2-policy-toggle input {
+  appearance: none;
+  -webkit-appearance: none;
   width: 18px;
   height: 18px;
-  accent-color: #0f766e;
+  flex: none;
+  display: inline-grid;
+  place-content: center;
+  border: 1.5px solid var(--df-border-strong, #d0d6de);
+  border-radius: 4px;
+  background: var(--df-surface, #ffffff);
+  cursor: pointer;
+  margin: 0;
+}
+
+.df2-policy-toggle input::before {
+  content: "";
+  width: 10px;
+  height: 10px;
+  transform: scale(0);
+  transition: transform 0.12s ease;
+  clip-path: polygon(14% 44%, 0 65%, 50% 100%, 100% 16%, 80% 0%, 43% 62%);
+  background: #ffffff;
+}
+
+.df2-policy-toggle input:checked {
+  background: var(--df-brand, #0d9488);
+  border-color: var(--df-brand, #0d9488);
+}
+
+.df2-policy-toggle input:checked::before {
+  transform: scale(1);
+}
+
+.df2-policy-toggle input:disabled {
+  border-style: dashed;
+  border-color: var(--df-text-tertiary, #64748b);
+  background: var(--df-surface-sunken, #f8fafc);
+  cursor: not-allowed;
+}
+
+.df2-policy-toggle input:disabled::before {
+  transform: none;
+  width: 12px;
+  height: 2px;
+  clip-path: none;
+  border-radius: 1px;
+  background: var(--df-text-tertiary, #64748b);
+  rotate: -45deg;
+}
+
+.df2-policy-toggle:has(input:disabled) {
+  cursor: not-allowed;
+}
+
+.df2-policy-toggle:has(input:disabled) strong,
+.df2-policy-toggle:has(input:disabled) small {
+  color: var(--df-text-tertiary, #64748b);
 }
 
 .df2-policy-toggle strong,
