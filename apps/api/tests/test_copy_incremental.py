@@ -1167,8 +1167,10 @@ def test_sqlite_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             job_id=f"inc-sqlite-a-{suffix}",
         )
         assert first == 3, (first, ddl1, summary1)
-        assert summary1.get("copy_fast_path") == "used"
-        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        # M3: keyed incremental declines the COPY fast path so
+        # Gate-8 can independently re-read the bounded window on the row path.
+        assert summary1.get("copy_fast_path") == "declined"
+        assert str(summary1.get("sync_mode")) == "incremental_deduped"
         wm1 = str(summary1.get("watermark") or summary1.get("incremental_watermark") or "")
         assert wm1
         dest = sqlite3.connect(dst_path)
@@ -1196,10 +1198,13 @@ def test_sqlite_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-sqlite-b-{suffix}",
         )
-        # D60/D98: run seed is cursor >= watermark, so the boundary row at t2
-        # is re-read and upserted alongside the changed and new rows.
-        assert second == 3, (second, ddl2, summary2)
-        assert summary2.get("copy_fast_path") == "used"
+        # The keyed resume seeks strictly after the committed (cursor, pk)
+        # bookmark: the t2 boundary row was committed by key in run 1, so only
+        # the two t3 rows are read and upserted.
+        assert second == 2, (second, ddl2, summary2)
+        # M3: keyed incremental declines the COPY fast path so
+        # Gate-8 can independently re-read the bounded window on the row path.
+        assert summary2.get("copy_fast_path") == "declined"
         dest = sqlite3.connect(dst_path)
         try:
             dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
@@ -1213,8 +1218,7 @@ def test_sqlite_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
         assert dest_count == 4
         assert name == "ONE"
         assert staging_left is None
-        cursor_key = str(summary2.get("cursor_key") or "")
-        stored = get_watermark(cursor_key)
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored != wm1
         third, _ddl3, summary3, _ = _run_inc_sqlite(
@@ -1225,11 +1229,11 @@ def test_sqlite_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-sqlite-c-{suffix}",
         )
-        # D60/D98: the two rows at the t3 watermark are re-read and upserted
-        # again; dest data is unchanged (still 4).
-        assert third == 2
-        assert summary3.get("source_row_count") == 2
-        assert get_watermark(cursor_key) == stored
+        # Strict keyset resume: both t3 rows sit at/under the bookmark, so
+        # this poll is a no-op; dest data is unchanged (still 4).
+        assert third == 0
+        assert not summary3.get("source_row_count")
+        assert summary3.get("watermark") in (None, stored)
         dest = sqlite3.connect(dst_path)
         try:
             assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
@@ -1329,8 +1333,7 @@ def test_mysql_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
         assert dest_count == 4
         assert name == "ONE"
         assert staging_left is None
-        cursor_key = str(summary2.get("cursor_key") or "")
-        stored = get_watermark(cursor_key)
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored != wm1
         third, _ddl3, summary3, _ = _run_inc_into_sqlite(
@@ -1680,7 +1683,7 @@ def test_sqlite_pg_incremental_deduped_copy_delta_and_watermark(tmp_path):
         )
         assert first == 3, (first, ddl1, summary1)
         assert summary1.get("copy_fast_path") == "used"
-        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        assert str(summary1.get("sync_mode")) == "incremental_deduped"
         wm1 = str(summary1.get("watermark") or summary1.get("incremental_watermark") or "")
         assert wm1
         with pg.cursor() as cur:
@@ -2335,8 +2338,7 @@ def test_pg_pg_incremental_deduped_copy_delta_and_watermark():
         assert dest_count == 4
         assert name == "ONE"
         assert staging_left is None
-        cursor_key = str(summary2.get("cursor_key") or "")
-        stored = get_watermark(cursor_key)
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored != wm1
         third, _ddl3, summary3, _ = _run_inc(
@@ -2403,7 +2405,7 @@ def test_mysql_mysql_incremental_deduped_copy_delta_and_watermark():
         )
         assert first == 3, (first, ddl1, summary1)
         assert summary1.get("copy_fast_path") == "used"
-        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        assert str(summary1.get("sync_mode")) == "incremental_deduped"
         wm1 = str(summary1.get("watermark") or summary1.get("incremental_watermark") or "")
         assert wm1
         with conn.cursor() as cur:
@@ -2443,8 +2445,7 @@ def test_mysql_mysql_incremental_deduped_copy_delta_and_watermark():
         assert dest_count == 4
         assert name == "ONE"
         assert staging_left is None
-        cursor_key = str(summary2.get("cursor_key") or "")
-        stored = get_watermark(cursor_key)
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored != wm1
         third, _ddl3, summary3, _ = _run_inc(
@@ -2821,7 +2822,7 @@ def test_sqlite_pg_date_incremental_deduped_copy_delta_and_watermark(tmp_path):
         )
         assert first == 3, (first, ddl1, summary1)
         assert summary1.get("copy_fast_path") == "used"
-        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        assert str(summary1.get("sync_mode")) == "incremental_deduped"
         wm1 = str(summary1.get("watermark") or summary1.get("incremental_watermark") or "")
         assert wm1
         with pg.cursor() as cur:
@@ -3179,7 +3180,7 @@ def test_sqlite_mysql_date_incremental_deduped_copy_delta_and_watermark(tmp_path
         )
         assert first == 3, (first, ddl1, summary1)
         assert summary1.get("copy_fast_path") == "used"
-        assert "incremental_deduped" in str(summary1.get("load_method") or "")
+        assert str(summary1.get("sync_mode")) == "incremental_deduped"
         wm1 = str(summary1.get("watermark") or summary1.get("incremental_watermark") or "")
         assert wm1
         with my.cursor() as cur:
@@ -3318,7 +3319,7 @@ def test_sqlite_pg_integer_incremental_append_copy_nine_then_ten(tmp_path):
         assert dest_count == 3
         assert names == ["a", "b", "c"]
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, ddl3, summary3, _ = _run_inc_from_sqlite(
@@ -3439,7 +3440,7 @@ def test_sqlite_mysql_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
         assert name == "ONE"
         assert ver == 10
         assert staging_left is None
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, ddl3, summary3, _ = _run_inc_from_sqlite(
@@ -3533,7 +3534,7 @@ def test_sqlite_sqlite_integer_incremental_append_copy_nine_then_ten(tmp_path):
         assert dest_count == 3
         assert names == ["a", "b", "c"]
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc_sqlite(
@@ -3629,7 +3630,7 @@ def test_sqlite_pg_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
         assert dest_count == 4
         assert name == "ONE"
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, ddl3, summary3, _ = _run_inc_from_sqlite(
@@ -3723,7 +3724,7 @@ def test_sqlite_mysql_integer_incremental_append_copy_nine_then_ten(tmp_path):
             ver = int(cur.fetchone()[0])
         assert dest_count == 3
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, ddl3, summary3, _ = _run_inc_from_sqlite(
@@ -3792,7 +3793,9 @@ def test_sqlite_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_type="INTEGER",
         )
         assert first == 3, (first, ddl1, summary1)
-        assert summary1.get("copy_fast_path") == "used"
+        # M3: keyed incremental declines the COPY fast path so
+        # Gate-8 can independently re-read the bounded window on the row path.
+        assert summary1.get("copy_fast_path") == "declined"
         dest = sqlite3.connect(dst_path)
         try:
             n = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
@@ -3818,9 +3821,10 @@ def test_sqlite_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_field="version",
             cursor_type="INTEGER",
         )
-        # D60/D98: version-9 boundary row is re-read and upserted with the
-        # two v10 rows.
-        assert second == 3, (second, ddl2, summary2)
+        # The keyed resume seeks strictly after the committed (cursor, pk)
+        # bookmark: the v9 boundary row was committed by key in run 1, so only
+        # the two v10 rows are read and upserted.
+        assert second == 2, (second, ddl2, summary2)
         dest = sqlite3.connect(dst_path)
         try:
             dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
@@ -3833,7 +3837,7 @@ def test_sqlite_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
         assert dest_count == 4
         assert name == "ONE"
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc_sqlite(
@@ -3846,14 +3850,15 @@ def test_sqlite_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_field="version",
             cursor_type="INTEGER",
         )
-        # D60/D98: the two v10 boundary rows are re-read and upserted again.
-        assert third == 2
+        # Strict keyset resume: the v10 tie group sits at/under the bookmark,
+        # so this poll is a no-op.
+        assert third == 0
         dest = sqlite3.connect(dst_path)
         try:
             assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
         finally:
             dest.close()
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+        assert summary3.get("watermark") in (None, stored)
     finally:
         conn.close()
 
@@ -3927,7 +3932,7 @@ def test_pg_mysql_integer_incremental_append_copy_nine_then_ten():
             ver = int(cur.fetchone()[0])
         assert dest_count == 3
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc(
@@ -4033,7 +4038,7 @@ def test_mysql_pg_integer_incremental_deduped_copy_nine_then_ten():
         assert dest_count == 4
         assert name == "ONE"
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc(
@@ -4136,7 +4141,7 @@ def test_pg_mysql_integer_incremental_deduped_copy_nine_then_ten():
         assert dest_count == 4
         assert name == "ONE"
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc(
@@ -4234,7 +4239,7 @@ def test_mysql_pg_integer_incremental_append_copy_nine_then_ten():
             ver = int(cur.fetchone()[0])
         assert dest_count == 3
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc(
@@ -4333,7 +4338,7 @@ def test_pg_pg_integer_incremental_append_copy_nine_then_ten():
             ver = int(cur.fetchone()[0])
         assert dest_count == 3
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc(
@@ -4428,7 +4433,7 @@ def test_mysql_mysql_integer_incremental_deduped_copy_nine_then_ten():
         assert dest_count == 4
         assert name == "ONE"
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc(
@@ -4521,7 +4526,7 @@ def test_pg_sqlite_integer_incremental_append_copy_nine_then_ten(tmp_path):
             dest.close()
         assert dest_count == 3
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc_into_sqlite(
@@ -4624,7 +4629,7 @@ def test_mysql_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
         assert dest_count == 4
         assert name == "ONE"
         assert ver == 10
-        stored = get_watermark(str(summary2.get("cursor_key") or ""))
+        stored = str(summary2.get("watermark") or "")
         assert stored
         assert stored.split("\x1f")[0] == "10"
         third, _ddl3, summary3, _ = _run_inc_into_sqlite(
@@ -4643,7 +4648,7 @@ def test_mysql_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
         finally:
             dest.close()
-        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
+        assert summary3.get("watermark") in (None, stored)
     finally:
         with my.cursor() as cur:
             cur.execute(f"DROP TABLE IF EXISTS `{src}`")
