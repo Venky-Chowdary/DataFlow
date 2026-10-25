@@ -20,6 +20,7 @@ def _cdc_log_capture_gates(
 ) -> list[dict[str, Any]]:
     """One g9c gate per selected stream: can the run read the source change log."""
     from services.cdc_log_capture_probe import build_log_capture_gate, probe_log_capture
+    from services.sync_cursor import contract_cursor_field
     from services.preflight_cursor_gate import (
         catalog_identity_applies,
         resolved_stream_identity_columns,
@@ -69,7 +70,7 @@ def _cdc_log_capture_gates(
         )
         gate = build_log_capture_gate(
             probe,
-            cursor_field=str(contract.get("cursor_field") or contract.get("cursor") or ""),
+            cursor_field=contract_cursor_field(contract),
             cursor_semantics=str(contract.get("cursor_semantics") or ""),
             primary_key_columns=keys,
             pass_status=GateStatus.PASS.value,

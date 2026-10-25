@@ -13,6 +13,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from services.cursor_semantics import evaluate_cursor_semantics
+from services.sync_cursor import contract_cursor_field
 from services.sync_cursor import IncrementalReadScope, resolve_incremental_read_scope
 
 logger = logging.getLogger(__name__)
@@ -247,7 +248,7 @@ def evaluate_stream_cursor_semantics(
     verdicts: list[dict[str, Any]] = []
     issues: list[str] = []
     for c in contracts:
-        cursor = str(c.get("cursor_field") or c.get("cursor") or "").strip()
+        cursor = contract_cursor_field(c)
         if not cursor:
             continue
         verdict = evaluate_cursor_semantics(
@@ -359,7 +360,7 @@ def build_sync_contract_gate(
         c.get("name") or c.get("stream") or "stream"
         for c in contracts
         if requires_cursor
-        and not (c.get("cursor_field") or c.get("cursor"))
+        and not contract_cursor_field(c)
         # CDC's cursor is the log position, not a table column. A contract
         # that names no cursor_field is that log (cdc_position). Inventing
         # updated_at would skip rows the log had already captured. Incremental
@@ -410,7 +411,7 @@ def build_sync_contract_gate(
         for c in contracts:
             stream = c.get("name") or c.get("stream") or "stream"
             if requires_cursor:
-                cursor = str(c.get("cursor_field") or c.get("cursor") or "").strip()
+                cursor = contract_cursor_field(c)
                 if cursor and cursor.lower() not in source_col_set:
                     unknown_cursor.append(f"{stream}.{cursor}")
     if source_col_set and requires_primary_key:

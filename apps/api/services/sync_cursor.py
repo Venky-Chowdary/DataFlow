@@ -13,6 +13,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from typing import Any
 
 from services.atomic_file import write_json_atomic
@@ -244,6 +245,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def contract_cursor_field(data: Mapping[str, Any] | None) -> str:
+    """The one canonical read of a contract's cursor column.
+
+    ``cursor_column`` is the vocabulary schedules, preflight, and Pilot
+    speak; ``cursor_field`` is what the engine consumes. Reading only the
+    engine name silently dropped the operator's declared cursor and the
+    run fell back to polling the primary key (D28).
+    """
+    if not isinstance(data, Mapping):
+        return ""
+    return str(
+        data.get("cursor_field")
+        or data.get("cursor_column")
+        or data.get("cursor")
+        or ""
+    ).strip()
+
+
 @dataclass
 class SyncContract:
     name: str
@@ -278,7 +297,7 @@ class SyncContract:
             # Empty inherits request sync_mode via resolve_effective_sync_mode —
             # never hard-default to overwrite (that silently wiped append jobs).
             sync_mode=str(data.get("sync_mode") or "").strip(),
-            cursor_field=str(data.get("cursor_field") or data.get("cursor") or ""),
+            cursor_field=contract_cursor_field(data),
             primary_key=primary_key,
             schema_policy=str(data.get("schema_policy") or "manual_review"),
             validation_mode=str(data.get("validation_mode") or "strict"),
