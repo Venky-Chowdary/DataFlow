@@ -6,6 +6,7 @@ readback assertions. Matrices import these — do not copy-paste seeds.
 
 from __future__ import annotations
 
+import os
 import socket
 import uuid
 from datetime import datetime, timezone
@@ -309,7 +310,7 @@ def sqlserver_endpoint(table: str) -> EndpointConfig:
         port=1433,
         database="dataflow",
         username="sa",
-        password="DataFlow_CDC_2022!",
+        password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         schema="dbo",
         table=table,
         # ODBC Driver 18 encrypts and verifies the chain by default; the compose
@@ -899,7 +900,7 @@ def drop_sqlserver_table(table: str) -> None:
         server="localhost",
         port=1433,
         user="sa",
-        password="DataFlow_CDC_2022!",
+        password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         database="dataflow",
     )
     try:
@@ -920,7 +921,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
             server="localhost",
             port=1433,
             user="sa",
-            password="DataFlow_CDC_2022!",
+            password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             database="dataflow",
         )
         try:
@@ -950,7 +951,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
 
         conn = pyodbc.connect(
             "DRIVER={ODBC Driver 17 for SQL Server};"
-            "SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD=DataFlow_CDC_2022!;"
+            f"SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD={os.environ.get('DATAFLOW_TEST_MSSQL_PASSWORD', '')};"
             "TrustServerCertificate=yes;"
         )
         try:

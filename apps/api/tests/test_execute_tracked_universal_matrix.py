@@ -6,6 +6,7 @@ machine are skipped gracefully, so the same file can run in CI with many
 emulators or locally with only Postgres/Mongo/Redis/Minio/DuckDB/SQLite.
 """
 from __future__ import annotations
+import os
 
 import json
 import socket
@@ -437,7 +438,7 @@ def _build_db_endpoint(
             port=1433,
             database="dataflow",
             username="sa",
-            password="DataFlow_CDC_2022!",
+            password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             schema="dbo",
             table="payments_sqlserver",
             extra={"trust_server_certificate": True, "encrypt": "yes"},

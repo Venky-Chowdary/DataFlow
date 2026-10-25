@@ -8034,7 +8034,7 @@ def test_sqlserver_live_leftover_merge_when_reachable():
         "port": 1433,
         "database": "dataflow",
         "username": "sa",
-        "password": "DataFlow_CDC_2022!",
+        "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         "schema": "dbo",
     }
     table = "df_p9_leftover_merge"
@@ -8423,7 +8423,7 @@ def test_sqlserver_live_scd2_current_when_reachable():
         "port": 1433,
         "database": "dataflow",
         "username": "sa",
-        "password": "DataFlow_CDC_2022!",
+        "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         "schema": "dbo",
     }
     table = "df_p9_scd2_current"

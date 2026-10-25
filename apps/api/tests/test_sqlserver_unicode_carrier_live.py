@@ -13,6 +13,7 @@ polarity, because promoting it would report a widen the source never had.
 """
 
 from __future__ import annotations
+import os
 
 from typing import Any
 
@@ -86,7 +87,7 @@ def _sqlserver_conn() -> Any:
 
     return pyodbc.connect(
         "DRIVER={ODBC Driver 18 for SQL Server};SERVER=localhost,1433;"
-        "DATABASE=dataflow;UID=sa;PWD=DataFlow_CDC_2022!;"
+        f"DATABASE=dataflow;UID=sa;PWD={os.environ.get('DATAFLOW_TEST_MSSQL_PASSWORD', '')};"
         "Encrypt=yes;TrustServerCertificate=yes",
         timeout=15,
         autocommit=True,
