@@ -23,6 +23,7 @@ _CTX = {
     "location": "Berlin",
     "company": "Acme",
     "email": "ada@acme.example",
+    "reset_url": "https://www.datawrap.io/reset-password#token=test-token",
 }
 
 
@@ -34,6 +35,8 @@ def test_all_templates_render_html_and_text():
         "email_change_code",
         "email_change_old_notice",
         "signin_alert",
+        "reset_link",
+        "password_changed_notice",
         "sales_acknowledgement",
         "sales_lead_internal",
     }
@@ -48,10 +51,14 @@ def test_no_remote_images_or_tracking_pixels():
     for name in template_names():
         mail = render_email(name, dict(_CTX))
         assert "<img" not in mail.html.lower(), name
-        assert "http://" not in mail.html and "https://" not in mail.html, name
         assert "url(" not in mail.html, name
-        # no link rewriting: no redirect/proxy wrappers
-        assert re.search(r"href=", mail.html) is None, name
+        # No third-party URL anywhere; only first-party links are allowed
+        # (reset_link carries one — required for the flow) and they are
+        # direct, never a redirect/proxy wrapper.
+        scrubbed = mail.html.replace("https://www.datawrap.io", "")
+        assert "http://" not in scrubbed and "https://" not in scrubbed, name
+        for href in re.findall(r'href="([^"]*)"', mail.html):
+            assert href.startswith("https://www.datawrap.io/"), (name, href)
 
 
 def test_footer_names_only_datawrap_domain():
