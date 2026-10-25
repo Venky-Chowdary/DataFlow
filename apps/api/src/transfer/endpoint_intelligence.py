@@ -412,8 +412,9 @@ def _introspect_endpoint_impl(
                 # Absence from a bounded page is a hint, not proof. The SQL path
                 # below re-checks the specific table and is what Validate trusts;
                 # create-on-write is CREATE IF NOT EXISTS, so guessing "new" here
-                # is recoverable where refusing to answer would strand the run.
-                out["table_exists"] = False
+                # is recoverable where refusing to answer would strand the run —
+                # but only when the page was complete (M7).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -519,7 +520,10 @@ def _introspect_endpoint_impl(
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
-                out["table_exists"] = False
+                # Absence from a bounded page is a hint, not proof: a truncated
+                # object list must say unknown, not "new table" (M7 — G15
+                # labeled an existing table CREATE-NEW).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -544,7 +548,10 @@ def _introspect_endpoint_impl(
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
-                out["table_exists"] = False
+                # Absence from a bounded page is a hint, not proof: a truncated
+                # object list must say unknown, not "new table" (M7 — G15
+                # labeled an existing table CREATE-NEW).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -570,7 +577,10 @@ def _introspect_endpoint_impl(
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
-                out["table_exists"] = False
+                # Absence from a bounded page is a hint, not proof: a truncated
+                # object list must say unknown, not "new table" (M7 — G15
+                # labeled an existing table CREATE-NEW).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -590,7 +600,10 @@ def _introspect_endpoint_impl(
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
-                out["table_exists"] = False
+                # Absence from a bounded page is a hint, not proof: a truncated
+                # object list must say unknown, not "new table" (M7 — G15
+                # labeled an existing table CREATE-NEW).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
