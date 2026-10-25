@@ -58,6 +58,33 @@ class ResendRequest(BaseModel):
     turnstile_token: str = Field(default="", max_length=4096)
 
 
+class PasswordForgotRequest(BaseModel):
+    email: str
+
+
+@router.post("/password/forgot", status_code=202)
+async def password_forgot(body: PasswordForgotRequest,
+                          request: Request) -> dict[str, Any]:
+    from services import signup_service
+    return signup_service.request_password_reset(
+        email=body.email, ip=_client_ip(request))
+
+
+class PasswordResetRequest(BaseModel):
+    challenge_id: str
+    code: str
+    new_password: str
+
+
+@router.post("/password/reset")
+async def password_reset(body: PasswordResetRequest,
+                         request: Request) -> dict[str, Any]:
+    from services import signup_service
+    return signup_service.confirm_password_reset(
+        challenge_id=body.challenge_id, code=body.code,
+        new_password=body.new_password, ip=_client_ip(request))
+
+
 @router.get("/signup/config")
 async def signup_config():
     """Public client config for the signup flow (no secrets)."""

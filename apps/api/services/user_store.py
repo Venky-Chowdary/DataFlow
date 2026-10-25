@@ -361,12 +361,18 @@ def update_user(
     return public_user(doc)
 
 
-def set_password(*, email: str, password: str) -> dict[str, Any]:
+def set_password(*, email: str, password: str, algo: str = "bcrypt") -> dict[str, Any]:
     normalized = normalize_email(email)
     doc = _read_one(normalized)
     if doc is None:
         raise UserStoreError(f"{normalized} has no account")
-    doc["password_hash"] = hash_password(_validate_password(password))
+    if algo == "argon2id":
+        from services.password_hash import hash_password_argon2
+        doc["password_hash"] = hash_password_argon2(_validate_password(password))
+        doc["password_algo"] = "argon2id"
+    else:
+        doc["password_hash"] = hash_password(_validate_password(password))
+        doc["password_algo"] = "bcrypt"
     doc["must_change_password"] = False
     doc["updated_at"] = _now()
     _write_one(doc)

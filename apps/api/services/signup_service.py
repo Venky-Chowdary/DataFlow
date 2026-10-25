@@ -465,6 +465,74 @@ def resend_code(*, challenge_id: str) -> dict[str, Any]:
     }
 
 
+def _forgot_response(challenge_id: str) -> dict[str, Any]:
+    return {
+        "ok": True,
+        "challenge_id": challenge_id,
+        "resend_after_sec": RESEND_COOLDOWN_SEC,
+        "expires_in_sec": int(otp_service.OTP_TTL.total_seconds()),
+    }
+
+
+def request_password_reset(*, email: str, ip: str = "") -> dict[str, Any]:
+    """P4-1 forgot-password: uniform 202 with a challenge handle — a fake
+    id when the address has no usable account (enumeration parity)."""
+    fake = _forgot_response(f"pw-{uuid.uuid4().hex[:24]}")
+    try:
+        normalized = user_store.validate_email(email)
+    except ApiError:
+        return fake
+    canonical = canonical_email(normalized)
+    user = user_store.find_by_canonical(canonical)
+    if user is None or user.get("status", "active") != "active" \
+            or not user.get("email_verified_at"):
+        return fake
+    challenge, code = otp_service.issue(canonical, "reset")
+    try:
+        _send("reset_code", normalized,
+              {"name": user.get("name") or "there", "code": code,
+               "expires_minutes": int(otp_service.OTP_TTL.total_seconds() // 60)},
+              idempotency_key=f"otp:{challenge['id']}:{challenge['sent_count']}")
+    except (EmailSendError, EmailQuotaExceeded):
+        # Send failure must not change the response (enumeration); the
+        # challenge stays live so the caller can request another code.
+        logger.warning("password-reset code send failed")
+    record_security_event("password.reset.requested", outcome="succeeded",
+                          actor=normalized, session_id=challenge["id"],
+                          details={"ip": ip})
+    return _forgot_response(challenge["id"])
+
+
+def confirm_password_reset(*, challenge_id: str, code: str,
+                           new_password: str, ip: str = "") -> dict[str, Any]:
+    """P4-1: verify the reset code, set the argon2id hash, kill sessions."""
+    if not (MIN_PASSWORD_LEN <= len(new_password or "") <= MAX_PASSWORD_LEN):
+        raise ApiError(400, "invalid_password",
+                       f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
+    result = otp_service.verify(challenge_id, code)
+    if result != "ok":
+        record_security_event("otp.verify_failed", outcome="failed",
+                              session_id=challenge_id, reason_code=result)
+        if result in ("consumed", "not_found"):
+            raise ApiError(410, "code_expired",
+                           "this code is no longer valid — request a new one")
+        raise ApiError(400, "invalid_code", "that code doesn't match — try again")
+    challenge = signup_store.get_challenge(challenge_id)
+    if challenge is None or challenge.get("purpose") != "reset":
+        raise ApiError(410, "code_expired",
+                       "this code is no longer valid — request a new one")
+    canonical = challenge["subject_id"]
+    user = user_store.find_by_canonical(canonical)
+    if user is None:
+        raise ApiError(410, "code_expired", "this account no longer exists")
+    user_store.set_password(email=user["email"], password=new_password,
+                            algo="argon2id")
+    get_auth_state().revoke_all_for_user(user["email"])
+    record_security_event("password.reset.completed", outcome="succeeded",
+                          actor=user["email"], details={"ip": ip})
+    return {"ok": True}
+
+
 def _challenge_recipient(challenge: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Resolve (to, template-context) for a challenge's subject."""
     subject = str(challenge.get("subject_id") or "")
