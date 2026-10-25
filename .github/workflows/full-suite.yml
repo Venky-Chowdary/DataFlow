@@ -277,8 +277,8 @@ jobs:
       - name: Lint (no browser dialogs)
         run: npm --workspace apps/web run lint
 
-      - name: Unit tests
-        run: npm run test
+      - name: Unit tests (web only — the API suite is the engine job's)
+        run: npm --workspace apps/web run test
 
       - name: Web tests
         run: npm run test:web
