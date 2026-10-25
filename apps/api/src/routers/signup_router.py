@@ -79,9 +79,12 @@ async def password_forgot(body: PasswordForgotRequest,
 
 
 class PasswordResetRequest(BaseModel):
-    challenge_id: str
-    code: str
-    new_password: str
+    token: str = Field(min_length=8, max_length=256)
+    new_password: str = Field(min_length=1, max_length=256)
+
+
+class PasswordResetInspectRequest(BaseModel):
+    token: str = Field(min_length=8, max_length=256)
 
 
 @router.post("/password/reset")
@@ -89,8 +92,17 @@ async def password_reset(body: PasswordResetRequest,
                          request: Request) -> dict[str, Any]:
     from services import signup_service
     return signup_service.confirm_password_reset(
-        challenge_id=body.challenge_id, code=body.code,
+        token=body.token,
         new_password=body.new_password, ip=_client_ip(request))
+
+
+@router.post("/password/reset/inspect")
+async def password_reset_inspect(body: PasswordResetInspectRequest,
+                                 request: Request) -> dict[str, Any]:
+    """Landing-page probe: is this link still good? Token travels in the
+    JSON body (never the query string) so it can't leak via access logs."""
+    from services import signup_service
+    return signup_service.inspect_reset_token(token=body.token)
 
 
 class EmailChangeRequest(BaseModel):

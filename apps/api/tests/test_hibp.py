@@ -128,11 +128,14 @@ def test_reset_refuses_pwned_password(monkeypatch):
     assert c.post("/api/v1/auth/verify-email",
                   json={"challenge_id": r.json()["challenge_id"],
                         "code": code, "device_id": "d1"}).status_code == 200
-    f = c.post("/api/v1/auth/password/forgot",
-               json={"email": "ada@example.com"})
+    c.post("/api/v1/auth/password/forgot",
+           json={"email": "ada@example.com",
+                 "form_token": form_token_mod.issue("reset")})
+    token = re.search(r"reset-password\?token=([A-Za-z0-9_\-]+)",
+                      ConsoleEmailSender.OUTBOX[-1].text).group(1)
     monkeypatch.setattr(hibp, "pwned_count", lambda p, **kw: 5)
     resp = c.post("/api/v1/auth/password/reset", json={
-        "challenge_id": f.json()["challenge_id"], "code": "123456",
+        "token": token,
         "new_password": "breached-but-long-password"})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "pwned_password"

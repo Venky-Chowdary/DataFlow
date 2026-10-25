@@ -22,7 +22,7 @@ import secrets
 import uuid
 from typing import Any
 
-from services import otp_service, signup_store, team_store, user_store
+from services import otp_service, password_reset_store, signup_store, team_store, user_store
 from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.auth_state import get_auth_state
@@ -551,7 +551,7 @@ def request_password_reset(*, email: str, ip: str = "",
             return fake
     try:
         normalized = user_store.validate_email(email)
-    except ApiError:
+    except (ApiError, user_store.UserStoreError):
         return fake
     canonical = canonical_email(normalized)
     # Per-IP and per-target-address velocity: exceeded -> same 202 shape.
@@ -567,50 +567,77 @@ def request_password_reset(*, email: str, ip: str = "",
     if user is None or user.get("status", "active") != "active" \
             or not user.get("email_verified_at"):
         return fake
-    challenge, code = otp_service.issue(canonical, "reset")
+    # Secure reset LINK (not a code): 256-bit single-use token, only the
+    # HMAC is stored, and issuing it invalidates every earlier link.
+    token, stored = password_reset_store.issue(email=normalized, ip=ip, ua=ua)
+    base = (getenv_brand("APP_URL") or "https://www.datawrap.io").rstrip("/")
     try:
-        _send("reset_code", normalized,
-              {"name": user.get("name") or "there", "code": code,
-               "expires_minutes": int(otp_service.OTP_TTL.total_seconds() // 60)},
-              idempotency_key=f"otp:{challenge['id']}:{challenge['sent_count']}")
+        _send("reset_link", normalized,
+              {"name": user.get("name") or "there",
+               "reset_url": f"{base}/reset-password?token={token}",
+               "expires_minutes": int(password_reset_store.TOKEN_TTL.total_seconds() // 60)},
+              idempotency_key=f"reset-link:{stored['id']}")
     except (EmailSendError, EmailQuotaExceeded):
-        # Send failure must not change the response (enumeration); the
-        # challenge stays live so the caller can request another code.
-        logger.warning("password-reset code send failed")
+        # Send failure must not change the response (enumeration); a fresh
+        # link can be requested right away.
+        logger.warning("password-reset link send failed")
     record_security_event("password.reset.requested", outcome="succeeded",
-                          actor=normalized, session_id=challenge["id"],
+                          actor=normalized, session_id=stored["id"],
                           details={"ip": ip})
-    return _forgot_response(challenge["id"])
+    record_security_event("password.reset.sent", outcome="succeeded",
+                          actor=normalized, session_id=stored["id"],
+                          details={"ip": ip})
+    return _forgot_response(stored["id"])
 
 
-def confirm_password_reset(*, challenge_id: str, code: str,
+def inspect_reset_token(*, token: str) -> dict[str, Any]:
+    """Validate a reset link without consuming it (the landing page calls
+    this before showing the password form). Status mirrors the store."""
+    status = password_reset_store.inspect(token)
+    if status != "ok":
+        record_security_event("password.reset.failed", outcome="failed",
+                              reason_code=f"inspect:{status}")
+    return {"ok": status == "ok", "status": status}
+
+
+def confirm_password_reset(*, token: str,
                            new_password: str, ip: str = "") -> dict[str, Any]:
-    """P4-1: verify the reset code, set the argon2id hash, kill sessions."""
+    """Consume a reset-link token, set the argon2id hash, kill sessions."""
     if not (MIN_PASSWORD_LEN <= len(new_password or "") <= MAX_PASSWORD_LEN):
         raise ApiError(400, "invalid_password",
                        f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
     _refuse_pwned_password(new_password)
-    result, attempt_row = otp_service.verify_code(challenge_id, code)
-    if result != "ok":
-        record_security_event("otp.verify_failed", outcome="failed",
-                              session_id=challenge_id, reason_code=result)
-        if result in ("consumed", "not_found"):
-            raise ApiError(410, "code_expired",
-                           "this code is no longer valid — request a new one")
-        _raise_invalid_code(attempt_row)
-    challenge = signup_store.get_challenge(challenge_id)
-    if challenge is None or challenge.get("purpose") != "reset":
-        raise ApiError(410, "code_expired",
-                       "this code is no longer valid — request a new one")
-    canonical = challenge["subject_id"]
-    user = user_store.find_by_canonical(canonical)
+    status, doc = password_reset_store.consume(token)
+    if status != "ok" or doc is None:
+        # 'used' also covers links superseded by a newer request.
+        record_security_event("password.reset.failed", outcome="failed",
+                              reason_code=status, details={"ip": ip})
+        if status == "expired":
+            record_security_event("password.reset.expired", outcome="failed",
+                                  details={"ip": ip})
+        raise ApiError(410, "link_expired",
+                       "This link has expired or was already used. Send a new one.")
+    email = doc["email"]
+    user = user_store.get_user(email)
     if user is None:
-        raise ApiError(410, "code_expired", "this account no longer exists")
-    user_store.set_password(email=user["email"], password=new_password,
+        record_security_event("password.reset.failed", outcome="failed",
+                              reason_code="account_gone", actor=email)
+        raise ApiError(410, "link_expired", "this account no longer exists")
+    user_store.set_password(email=email, password=new_password,
                             algo="argon2id")
-    get_auth_state().revoke_all_for_user(user["email"])
+    get_auth_state().revoke_all_for_user(email)
+    record_security_event("password.reset.used", outcome="succeeded",
+                          actor=email, session_id=doc["id"],
+                          details={"ip": ip})
     record_security_event("password.reset.completed", outcome="succeeded",
-                          actor=user["email"], details={"ip": ip})
+                          actor=email, session_id=doc["id"],
+                          details={"ip": ip})
+    try:
+        _send("password_changed_notice", email,
+              {"name": user.get("name") or "there"},
+              idempotency_key=f"reset-notice:{doc['id']}")
+    except (EmailSendError, EmailQuotaExceeded):
+        logger.warning("password-changed notice send failed")
     return {"ok": True}
 
 
@@ -636,7 +663,10 @@ def request_email_change(*, user_email: str, new_email: str,
             raise ApiError(429, "rate_limited",
                            "too many requests — try again later",
                            retry_after_sec=retry)
-    normalized = user_store.validate_email(new_email)
+    try:
+        normalized = user_store.validate_email(new_email)
+    except (ApiError, user_store.UserStoreError):
+        raise ApiError(400, "invalid_email", "enter a valid email address")
     # Same address gate as signup: role-based/blocklist, disposable
     # (allow_domain wins inside is_disposable), MX, external verifier.
     bump, reasons = _check_address_deliverable(normalized, ip=ip)

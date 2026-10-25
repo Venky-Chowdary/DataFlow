@@ -82,6 +82,15 @@ def _code_box(code: str) -> str:
     )
 
 
+def _link_button(url: str, label: str) -> str:
+    return (
+        f'<div style="margin:24px 0;text-align:center;"><a href="{_esc(url)}" '
+        f'style="display:inline-block;padding:12px 28px;background:{_TILE};'
+        f'color:#ffffff;border-radius:8px;text-decoration:none;font-size:15px;'
+        f'font-weight:600;">{_esc(label)}</a></div>'
+    )
+
+
 def _muted(text: str) -> str:
     return f'<p style="margin:0 0 8px;font-size:12px;line-height:1.6;color:{_MUTED};">{_esc(text)}</p>'
 
@@ -147,6 +156,49 @@ def _reset_code(ctx: dict[str, Any]) -> RenderedEmail:
         f"    {code}\n\n"
         f"The code expires in {minutes} minutes. Resetting signs out every device.\n\n"
         "If you didn't request this, ignore this email - your password stays the same.\n\n"
+        "Datawrap - datawrap.io"
+    )
+    return RenderedEmail(subject, text, _shell(subject, body))
+
+
+def _reset_link(ctx: dict[str, Any]) -> RenderedEmail:
+    url = str(ctx.get("reset_url", ""))
+    minutes = int(ctx.get("expires_minutes", 30))
+    subject = "Reset your Datawrap password"
+    body = (
+        _h1("Reset your password")
+        + _p("Use the link below to choose a new password for your Datawrap account. "
+             "This link can be used once.")
+        + _link_button(url, "Reset password")
+        + _p(f"The link expires in {minutes} minutes. Resetting signs out every device.")
+        + _muted("If you didn't request a password reset, you can ignore this email - "
+                 "your password stays the same. No tracking links are used.")
+    )
+    text = (
+        "Reset your Datawrap password\n\n"
+        "Use this link to choose a new password (it works once):\n\n"
+        f"    {url}\n\n"
+        f"The link expires in {minutes} minutes. Resetting signs out every device.\n\n"
+        "If you didn't request this, ignore this email - your password stays the same.\n\n"
+        "Datawrap - datawrap.io"
+    )
+    return RenderedEmail(subject, text, _shell(subject, body))
+
+
+def _password_changed_notice(ctx: dict[str, Any]) -> RenderedEmail:
+    subject = "Your Datawrap password was changed"
+    body = (
+        _h1("Password changed")
+        + _p("The password on your Datawrap account was just changed. "
+             "Every signed-in device has been signed out.")
+        + _muted("If this wasn't you, contact contact@datawrap.io right away "
+                 "and reset your password again.")
+    )
+    text = (
+        "Your Datawrap password was changed\n\n"
+        "The password on your Datawrap account was just changed and every "
+        "signed-in device was signed out.\n\n"
+        "If this wasn't you, contact contact@datawrap.io right away.\n\n"
         "Datawrap - datawrap.io"
     )
     return RenderedEmail(subject, text, _shell(subject, body))
@@ -243,6 +295,8 @@ _TEMPLATES: dict[str, Callable[[dict[str, Any]], RenderedEmail]] = {
     "signup_code": _signup_code,
     "existing_account_notice": _existing_account_notice,
     "reset_code": _reset_code,
+    "reset_link": _reset_link,
+    "password_changed_notice": _password_changed_notice,
     "email_change_code": _email_change_code,
     "email_change_old_notice": _email_change_old_notice,
     "signin_alert": _signin_alert,
