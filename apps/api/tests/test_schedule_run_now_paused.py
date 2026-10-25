@@ -76,9 +76,10 @@ def test_run_now_paused_forwards_manual_flag(isolated, monkeypatch):
     assert sched.enabled is False
     seen: dict[str, object] = {}
 
-    def fake_run(schedule_id: str, *, manual: bool = False):
+    def fake_run(schedule_id: str, *, manual: bool = False, triggered_by: str = ""):
         seen["sid"] = schedule_id
         seen["manual"] = manual
+        seen["triggered_by"] = triggered_by
         return "job-now"
 
     monkeypatch.setattr("src.services.schedule_runner._run_schedule", fake_run)
@@ -97,7 +98,7 @@ def test_run_now_surfaces_conflict_not_connector_guess(isolated, monkeypatch):
     workspace_id = _workspace(admin, "Acme")
     sched = _paused_schedule(workspace_id)
 
-    def fake_run(schedule_id: str, *, manual: bool = False):
+    def fake_run(schedule_id: str, *, manual: bool = False, triggered_by: str = ""):
         raise ScheduleStartError(
             "A run is already in progress for this schedule or the same "
             "source→destination pair.",

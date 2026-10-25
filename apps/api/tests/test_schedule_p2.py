@@ -690,7 +690,7 @@ def test_paused_schedule_manual_run_starts_without_activating(temp_store, monkey
     sched = _make(store, enabled=False)
     monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
 
-    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode=""):
+    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode="", triggered_by=""):
         assert sid == sched.id
         assert resync_mode == ""
         return "job-manual" if allow_paused else None
@@ -707,15 +707,18 @@ def test_manual_run_forwards_resync_mode_without_activating(temp_store, monkeypa
     monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
     seen: dict[str, object] = {}
 
-    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode=""):
+    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode="", triggered_by=""):
         seen["sid"] = sid
         seen["allow_paused"] = allow_paused
         seen["resync_mode"] = resync_mode
+        seen["triggered_by"] = triggered_by
         return "job-sync"
 
     monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
     assert runner._run_schedule(sched.id, manual=True, resync_mode="full") == "job-sync"
-    assert seen == {"sid": sched.id, "allow_paused": True, "resync_mode": "full"}
+    assert seen["sid"] == sched.id
+    assert seen["allow_paused"] is True
+    assert seen["resync_mode"] == "full"
     assert store.get_schedule(sched.id).enabled is False
 
 
