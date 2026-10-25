@@ -783,6 +783,9 @@ async def retry_transfer_job(
             destination_engine=str(
                 getattr(getattr(xfer_req, "destination", None), "format", "") or ""
             ),
+            source_engine=str(
+                getattr(getattr(xfer_req, "source", None), "format", "") or ""
+            ),
         )
         if not retry_decision["allowed"] and not force:
             emit_event(

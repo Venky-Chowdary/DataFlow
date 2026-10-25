@@ -928,6 +928,8 @@ def _retry_decision(
         sync_mode=sync_mode,
         rows_committed=rows_committed,
         rows_committed_known=rows_committed_known,
+        source_engine=str((job_doc or {}).get("source_format") or ""),
+        destination_engine=str((job_doc or {}).get("destination_type") or ""),
     )
     if not decision["allowed"]:
         return {

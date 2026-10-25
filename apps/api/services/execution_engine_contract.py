@@ -154,6 +154,7 @@ def decide_retry_from_start(
     has_key_contract: bool = False,
     has_cursor_contract: bool = False,
     destination_engine: str | None = None,
+    source_engine: str | None = None,
 ) -> dict[str, Any]:
     """Decide whether re-running a finished attempt from zero is safe.
 
@@ -190,11 +191,29 @@ def decide_retry_from_start(
             "reason": "Zero committed rows — restarting from zero cannot duplicate.",
             "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         }
+    # M15: a Kafka *source* does not re-read from zero on retry — the
+    # consumer resumes at the group's committed offset (D85: offsets commit
+    # only after acceptance), so a retry cannot re-publish already-consumed
+    # messages unless the previous attempt's offsets never committed, which
+    # is the at-least-once edge the run reports honestly.
+    from services.copy_kafka_common import kafka_family_name
+    if kafka_family_name(source_engine or "") == "kafka":
+        return {
+            "kind": ResumeKind.FROM_CURSOR.value,
+            "allowed": True,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                "Kafka source resumes at the consumer group's committed offset "
+                "— a retry does not re-read already-committed messages "
+                "(at-least-once: messages consumed but not yet committed are "
+                "re-read and the destination key collapses them)."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
     # C26/D90: a Kafka topic cannot be rolled back — published messages are
     # final, and a declared key only helps log compaction (lazy, per-topic),
     # it does not make a second produce pass converge. The only honest retry
     # is a cursor-continuing incremental read or Resume from the checkpoint.
-    from services.copy_kafka_common import kafka_family_name
     if kafka_family_name(destination_engine or "") == "kafka":
         if has_cursor_contract and _is_incremental_mode(sync_mode):
             return {
