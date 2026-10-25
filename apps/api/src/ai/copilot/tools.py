@@ -486,8 +486,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
-                    "description": "Spoken schema posture only — never invent propagate_all",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
                 },
                 "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
                 "require_signed_contract": {"type": "boolean"},
@@ -569,8 +569,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
-                    "description": "Spoken schema posture only — never invent propagate_all",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
                 },
                 "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
                 "require_signed_contract": {"type": "boolean"},
@@ -682,8 +682,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
-                    "description": "Spoken schema posture only — never invent propagate_all",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
                 },
                 "contract_id": {"type": "string", "description": "Signed data contract to enforce on Confirm"},
                 "require_signed_contract": {"type": "boolean"},
@@ -921,7 +921,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
                 },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
@@ -977,7 +977,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
                 },
                 "limit": {"type": "integer"},
                 "source_timezone": {
@@ -6022,7 +6022,7 @@ def resolve_transfer_bind_kwargs(
     if mode in {"strict", "balanced", "lenient"}:
         out["validation_mode"] = mode
     policy = str(schema_policy or parsed.get("schema_policy") or "").strip()
-    if policy in {"manual_review", "type_locked", "pause_on_change"}:
+    if policy in {"manual_review", "type_locked", "pause_on_change", "propagate_columns"}:
         out["schema_policy"] = policy
     return out
 
@@ -6047,6 +6047,15 @@ def parse_transfer_schema_posture(lowered: str) -> dict[str, Any]:
         return {"schema_policy": "pause_on_change"}
     if any(w in lowered for w in ("type-locked", "type locked", "lock types", "lock type")):
         return {"schema_policy": "type_locked"}
+    # propagate_columns is opt-in by name: "propagate (the) columns",
+    # "accept additive drift", "auto-add new columns". propagate_all stays
+    # unreachable from chat — it silently rewrites dest types (D20 fix).
+    if any(w in lowered for w in (
+        "propagate column", "propagate the column", "propagate new column",
+        "propagate additive", "accept additive", "accept additive drift",
+        "auto-add column", "auto add column", "add new columns automatically",
+    )):
+        return {"schema_policy": "propagate_columns"}
     return {}
 
 

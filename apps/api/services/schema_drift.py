@@ -1439,6 +1439,29 @@ def detect_schema_drift(
         issues.append(f"{len(orphan_targets)} destination column(s) are unmapped")
     if type_mismatches:
         issues.append(f"{len(type_mismatches)} mapped column pair(s) have type mismatch")
+    # A removed/renamed source column is surfaced by name — the destination
+    # column keeps its history, so it is net-additive, not silent (D20).
+    soft_drops = [
+        str(c.get("column") or "")
+        for c in (evolution.get("soft_net_additive") or [])
+        if c.get("kind") == "drop" and c.get("column")
+    ]
+    if soft_drops:
+        issues.append(
+            f"Source column(s) removed: {', '.join(soft_drops[:8])} — "
+            "destination column(s) keep their history and are not written"
+        )
+    soft_renames = [
+        (str(c.get("column") or ""), str(c.get("to") or ""))
+        for c in (evolution.get("soft_net_additive") or [])
+        if c.get("kind") == "rename" and c.get("column")
+    ]
+    if soft_renames:
+        pairs = ", ".join(f"{a}→{b}" for a, b in soft_renames[:8])
+        issues.append(
+            f"Source column(s) renamed: {pairs} — destination keeps the "
+            "old column; the new name maps beside it"
+        )
     if evolution.get("hard_breaking"):
         issues.append(
             f"{len(evolution['hard_breaking'])} hard-breaking schema change(s) require review"
