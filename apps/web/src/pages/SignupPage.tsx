@@ -50,6 +50,23 @@ function AuthShell({ title, sub, onBack, children }: { title: string; sub: strin
   );
 }
 
+/** Render options handed to Turnstile — theme follows the app theme and the
+ * widget stretches to the field width (`size: "flexible"`). Pure so tests can
+ * pin the contract the widget renders with. */
+export function turnstileRenderOptions(
+  siteKey: string,
+  appTheme: "light" | "dark",
+  onToken: (token: string) => void,
+): Record<string, unknown> {
+  return {
+    sitekey: siteKey,
+    theme: appTheme,
+    size: "flexible",
+    callback: (token: string) => onToken(token),
+    "expired-callback": () => onToken(""),
+  };
+}
+
 /** Cloudflare Turnstile — renders only when the deployment publishes a
  *  site key; no-ops to invisible otherwise. */
 function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (token: string) => void }) {
@@ -63,13 +80,8 @@ function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (toke
       const turnstile = (window as unknown as { turnstile?: { render: (el: HTMLElement, opts: Record<string, unknown>) => void } }).turnstile;
       if (hostRef.current && turnstile) {
         const appTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-        turnstile.render(hostRef.current, {
-          sitekey: siteKey,
-          theme: appTheme,
-          size: "flexible",
-          callback: (token: string) => tokenRef.current(token),
-          "expired-callback": () => tokenRef.current(""),
-        });
+        turnstile.render(hostRef.current,
+          turnstileRenderOptions(siteKey, appTheme, (t) => tokenRef.current(t)));
       }
     };
     const existing = document.querySelector<HTMLScriptElement>('script[data-df-turnstile="1"]');
