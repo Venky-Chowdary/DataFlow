@@ -94,3 +94,32 @@ def test_signup_config_reachable_when_flag_off(monkeypatch):
         body = resp.json()
         assert body["enabled"] is False
         assert body["turnstile_site_key"] == ""
+
+
+def test_signup_config_response_shape_is_exact(monkeypatch):
+    """The capability probe returns ONLY {enabled, turnstile_site_key} — no
+    other deployment config may leak through this public unauth route."""
+    monkeypatch.setenv("DATAWRAP_TURNSTILE_SITE_KEY", "1x00000000000000000000AA")
+    client = _client(monkeypatch, enabled=True, require_auth=True)
+    for path in ("/api/v1/auth/signup/config", "/auth/signup/config"):
+        resp = client.get(path)
+        assert resp.status_code == 200
+        assert sorted(resp.json().keys()) == ["enabled", "turnstile_site_key"]
+        assert resp.json() == {
+            "enabled": True,
+            "turnstile_site_key": "1x00000000000000000000AA",
+        }
+
+
+def test_signup_config_is_public_and_rate_limit_shaped(monkeypatch):
+    """Public by design (the /auth/signup prefix covers /signup/config) and
+    counted by the same unauthenticated public limiter as the other public
+    auth GETs when DATAFLOW_PUBLIC_RATE_LIMIT is armed."""
+    monkeypatch.setenv("DATAFLOW_PUBLIC_RATE_LIMIT", "1")
+    client = _client(monkeypatch, enabled=True, require_auth=True)
+    resp = client.get("/api/v1/auth/signup/config")
+    # Served (200) or throttled (429 with the standard envelope) — never a
+    # bare 401: the route is deliberately public.
+    assert resp.status_code in (200, 429)
+    if resp.status_code == 429:
+        assert resp.headers.get("retry-after")
