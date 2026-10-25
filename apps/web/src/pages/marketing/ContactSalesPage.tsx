@@ -1,5 +1,6 @@
 import { useState, type FormEvent } from "react";
 import { DtIcon } from "../../components/DtIcon";
+import { API_BASE } from "../../lib/types";
 import { PilotRouteArt } from "../../components/marketing/hero-art/contactArt";
 import { TRANSFER_READY_DRIVERS } from "../../lib/provenEvidence";
 import type { PublicRoute } from "../../lib/publicNavigation";
@@ -120,30 +121,53 @@ export function ContactSalesPage({
   const [honeypot, setHoneypot] = useState("");
 
   const canSubmit = Boolean(firstName.trim() && lastName.trim() && email.trim() && company.trim());
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
 
-  const submit = (e: FormEvent) => {
+  const submit = async (e: FormEvent) => {
     e.preventDefault();
     if (honeypot.trim()) {
       setSent(true);
       return;
     }
-    if (!canSubmit) return;
-    // eslint-disable-next-line no-console
-    console.info("[marketing/contact] pilot request", {
-      sources,
-      destinations,
-      volume,
-      region,
-      timeframe,
-      name: `${firstName.trim()} ${lastName.trim()}`,
-      email: email.trim(),
-      company: company.trim(),
-      role: role.trim(),
-      phone: phone.trim(),
-      message: message.trim().slice(0, 1200),
-      submittedAt: new Date().toISOString(),
-    });
-    setSent(true);
+    if (!canSubmit || submitting) return;
+    setSubmitting(true);
+    setError("");
+    try {
+      const res = await fetch(`${API_BASE}/contact-sales`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          first_name: firstName.trim(),
+          last_name: lastName.trim(),
+          email: email.trim(),
+          company: company.trim(),
+          role: role.trim(),
+          phone: phone.trim(),
+          message: message.trim().slice(0, 1200),
+          sources,
+          destinations,
+          volume,
+          region,
+          timeframe,
+          website: honeypot,
+        }),
+      });
+      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      if (!res.ok || !data?.ok) {
+        setError(
+          data?.error === "rate_limited"
+            ? "Too many submissions — please email sales@datawrap.io directly."
+            : "We could not send your request. Please email sales@datawrap.io directly.",
+        );
+        return;
+      }
+      setSent(true);
+    } catch {
+      setError("We could not reach the server. Please email sales@datawrap.io directly.");
+    } finally {
+      setSubmitting(false);
+    }
   };
 
   return (
@@ -352,8 +376,13 @@ export function ContactSalesPage({
                   </button>
                   .
                 </p>
-                <button type="submit" className="lp-btn lp-btn--brand" disabled={!canSubmit}>
-                  Request pilot
+                {error ? (
+                  <p className="lp-sales-form-error" role="alert">
+                    {error}
+                  </p>
+                ) : null}
+                <button type="submit" className="lp-btn lp-btn--brand" disabled={!canSubmit || submitting}>
+                  {submitting ? "Sending…" : "Request pilot"}
                 </button>
               </div>
             </form>

@@ -45,6 +45,7 @@ from .routers.scim_router import router as scim_router
 from .routers.automation_router import router as automation_router
 from .routers.catalog_router import router as catalog_router
 from .routers.connectors_router import router as connectors_router
+from .routers.contact_router import router as contact_router
 from .routers.contracts_router import router as contracts_router
 from .routers.fidelity_router import router as fidelity_router
 from .routers.resource_acl_router import router as resource_acl_router
@@ -655,6 +656,7 @@ async def _add_timing_header_response(request: Request, call_next):
 app.include_router(ai_router, prefix="/api/v1")
 app.include_router(saved_connectors_router, prefix="/api/v1")
 app.include_router(connectors_router, prefix="/api/v1")
+app.include_router(contact_router, prefix="/api/v1")
 app.include_router(preflight_router, prefix="/api/v1")
 app.include_router(copilot_router, prefix="/api/v1")
 app.include_router(training_agent_router, prefix="/api/v1")
