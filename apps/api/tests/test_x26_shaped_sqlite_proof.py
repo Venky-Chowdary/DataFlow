@@ -127,7 +127,7 @@ def test_decimal_literal_is_never_pii():
 
 def test_real_pii_still_detected():
     assert pii_guard.pii_findings("555-123-4567").get("phone")
-    assert pii_guard.pii_findings("4111-1111-1111-1111").get("credit_card")
+    assert pii_guard.pii_findings("4111-1111-1111-1111").get("pci_pan")
     assert pii_guard.pii_findings("alice@example.com").get("email")
 
 

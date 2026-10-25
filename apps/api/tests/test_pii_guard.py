@@ -48,7 +48,7 @@ def test_detect_pii_phone():
 def test_detect_pii_credit_card():
     result = detect_pii("card 4111-1111-1111-1111")
     assert result["has_pii"]
-    assert "credit_card" in result["findings"]
+    assert "pci_pan" in result["findings"]
 
 
 def test_mask_short_and_long():

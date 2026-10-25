@@ -45,7 +45,9 @@ def test_compliance_score_flags_high_risk_for_identity_data() -> None:
     ]
 
     report = score_compliance_risk(columns, rows)
-    assert report["risk_score"] >= 0.5
+    # C28: an SSN is its own class — no phantom second "phone" label inflated
+    # the score, so the floor moved 0.5 -> 0.45 while staying high-risk.
+    assert report["risk_score"] >= 0.45
     assert report["requires_review"] is True
     assert report["high_risk_fields"]
 

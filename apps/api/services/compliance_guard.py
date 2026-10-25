@@ -20,7 +20,10 @@ SSN_RE = re.compile(r"^\d{3}-\d{2}-\d{4}$")
 # in ``_NAME_PATTERN_GROUPS`` — Fivetran / Airbyte / Collibra classifiers treat
 # date-of-birth as a semantic class, not "any 01/02/2024". Value-only matching
 # invented a HIPAA hold on ``event_date`` / ``created_at``.
-ACCOUNT_RE = re.compile(r"^(?:\d{8,19}|[A-Z]{2}\d{12,30})$")
+# PCI PAN is its own class: a bare 8-19 digit run is NOT an account number
+# (every order id matched). Cards are Luhn-valid 13-19 digits, tolerant of
+# space/dash separators — same classifier as services.pii_guard (C28).
+ACCOUNT_RE = re.compile(r"^[A-Z]{2}\d{12,30}$")
 
 _ACCOUNT_SURROGATE_NAME_RE = re.compile(r"account_?id\b")
 
@@ -56,12 +59,18 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"routing_?(?:number|no|num)?\b",
         r"\biban\b",
         r"\bswift\b",
-        r"\bcvv\b",
+    ), 0.4),
+    # PCI card data — own class (C28). Card number / PAN / CVV columns are
+    # PCI-DSS scope regardless of sampled values.
+    "pci_pan": ((
         r"card_?(?:number|no|num)\b",
         r"credit_?card",
         r"debit_?card",
         r"\bpan\b",
-    ), 0.4),
+        r"\bcvv\b",
+        r"card_?holder",
+        r"expir(?:y|ation)_?(?:date|month|year)?\b",
+    ), 0.45),
     # High-signal regulated IDs only — bare ``id`` / ``*Id`` matches every CRM field.
     # Technical UUID/GUID surrogate keys are not PCI/HIPAA identifiers.
     "identifier": ((
@@ -107,12 +116,19 @@ def _value_hits(values: list[str]) -> list[str]:
             continue
         if EMAIL_RE.match(text):
             hits.append("email")
-        elif PHONE_RE.match(text):
-            hits.append("phone")
         elif SSN_RE.match(text):
             hits.append("ssn")
-        elif ACCOUNT_RE.match(text):
-            hits.append("account")
+        else:
+            from services.pii_guard import luhn_valid
+
+            # A Luhn-valid 13-19 digit value is a PAN, not a phone/account —
+            # the phone shape matches card numbers, so PCI wins precedence.
+            if luhn_valid(text):
+                hits.append("pci_pan")
+            elif PHONE_RE.match(text):
+                hits.append("phone")
+            elif ACCOUNT_RE.match(text):
+                hits.append("account")
     return list(dict.fromkeys(hits))
 
 
@@ -198,7 +214,8 @@ def detect_pii_fields(
             _HIGH_RISK_NAME_RE.search(col.lower())
         )
         if personal_name or any(
-            cat in {"ssn", "dob", "account", "salary"} for cat in categories
+            cat in {"ssn", "dob", "account", "salary", "pci_pan"}
+            for cat in categories
         ):
             high_risk_fields.append(col)
 
@@ -241,6 +258,7 @@ def score_compliance_risk(
         "dob": 0.42,
         "ssn": 0.5,
         "account": 0.4,
+        "pci_pan": 0.45,
         "identifier": 0.28,
         "salary": 0.4,
     }
@@ -251,7 +269,7 @@ def score_compliance_risk(
         for category in field_risk.get(col, []):
             weight = weight_by_category.get(category, 0.12)
             total_weight += weight
-            if category in {"ssn", "dob", "account", "salary"}:
+            if category in {"ssn", "dob", "account", "salary", "pci_pan"}:
                 high_risk_weight += weight
 
     if not sensitive_fields:
@@ -268,7 +286,10 @@ def score_compliance_risk(
     compliance_tags: list[str] = []
     if any("ssn" in field_risk.get(col, []) or "dob" in field_risk.get(col, []) for col in sensitive_fields):
         compliance_tags.append("HIPAA")
-    if any("account" in field_risk.get(col, []) or "identifier" in field_risk.get(col, []) for col in sensitive_fields):
+    if any(
+        {"account", "identifier", "pci_pan"} & set(field_risk.get(col, []))
+        for col in sensitive_fields
+    ):
         compliance_tags.append("PCI-DSS")
     if sensitive_fields:
         compliance_tags.append("PII")
