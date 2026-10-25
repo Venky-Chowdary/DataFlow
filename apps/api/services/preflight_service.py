@@ -1980,7 +1980,108 @@ def run_file_preflight(
         confidence_threshold=confidence_threshold,
     )
 
-    extra_gates: list[dict[str, Any]] = [fit_gate] if fit_gate else []
+    # D99: an incremental run bounds the delta with ``cursor > watermark`` —
+    # and ``NULL > x`` is never true, so NULL-cursor rows are absent from
+    # every delta forever while the job reports verified. Warn (block under
+    # strict) with the live count; a probe that cannot measure skips honestly
+    # rather than fail-closing on unmeasured state.
+    null_cursor_gate: dict[str, Any] | None = None
+    try:
+        from services.sync_cursor import incremental_read_narrows
+
+        _nc_cursor = str(getattr(read_scope, "cursor_column", "") or "").strip()
+        if _nc_cursor and incremental_read_narrows(sync_mode):
+            _nc_nullable = (column_nullability or {}).get(_nc_cursor)
+            from services.null_cursor_probe import probe_null_cursor_count
+
+            _nc = probe_null_cursor_count(
+                source_connector_id=source_connector_id,
+                source_config=source_config,
+                source_table=source_table,
+                source_collection=str(
+                    (source_config or {}).get("collection") or ""
+                ),
+                cursor_column=_nc_cursor,
+            )
+            _nc_details: dict[str, Any] = {
+                "cursor_column": _nc_cursor,
+                "probe_status": _nc.status,
+                "null_count": _nc.null_count,
+                "column_nullable": _nc_nullable,
+            }
+            if _nc.ran and _nc.null_count:
+                _nc_strict = (validation_mode or "strict").lower() == "strict"
+                if _nc_strict:
+                    enriched_blockers.append(
+                        {
+                            "id": "g_nullable_cursor",
+                            "message": (
+                                f"{_nc.null_count} source row(s) carry a NULL "
+                                f"value in the incremental cursor column "
+                                f"'{_nc_cursor}' — an incremental read can "
+                                "never see them: they are absent from every "
+                                "delta and only arrive via a full refresh."
+                            ),
+                            "details": _nc_details,
+                            "suggested_actions": [
+                                "Fill the cursor column on the NULL rows and re-validate",
+                                "Add a COALESCE fallback cursor (e.g. created_at)",
+                                "Run as full refresh so every row is read",
+                            ],
+                        }
+                    )
+                null_cursor_gate = {
+                    "id": "g_nullable_cursor",
+                    "status": "block" if _nc_strict else "warn",
+                    "message": (
+                        f"{_nc.null_count} source row(s) carry a NULL value in "
+                        f"the incremental cursor column '{_nc_cursor}' — an "
+                        "incremental read can never see them: they are absent "
+                        "from every delta and only arrive via a full refresh. "
+                        "Fill the cursor column, add a COALESCE fallback "
+                        "cursor, or acknowledge the gap."
+                    ),
+                    "duration_ms": 0,
+                    "details": _nc_details,
+                }
+            elif _nc.ran:
+                null_cursor_gate = {
+                    "id": "g_nullable_cursor",
+                    "status": "warn" if _nc_nullable else "pass",
+                    "message": (
+                        f"Cursor column '{_nc_cursor}' holds no NULL values"
+                        + (
+                            " (the column is nullable — a future NULL row "
+                            "would be skipped by every incremental delta)"
+                            if _nc_nullable
+                            else ""
+                        )
+                    ),
+                    "duration_ms": 0,
+                    "details": _nc_details,
+                }
+            elif _nc_nullable:
+                null_cursor_gate = {
+                    "id": "g_nullable_cursor",
+                    "status": "warn",
+                    "message": (
+                        f"Cursor column '{_nc_cursor}' is nullable — NULL "
+                        "rows would be skipped by every incremental delta "
+                        f"({_nc.message})"
+                    ),
+                    "duration_ms": 0,
+                    "details": _nc_details,
+                }
+    except Exception as exc:  # noqa: BLE001 — unmeasured, never a false pass
+        logger.warning("NULL-cursor gate probe skipped: %s", exc, exc_info=exc)
+
+    null_cursor_blocked = bool(
+        null_cursor_gate and null_cursor_gate.get("status") == "block"
+    )
+    extra_gates: list[dict[str, Any]] = (
+        ([fit_gate] if fit_gate else [])
+        + ([null_cursor_gate] if null_cursor_gate else [])
+    )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)
     passed_count = result.passed_count + extra_passed
@@ -1990,7 +2091,8 @@ def run_file_preflight(
         # against travels with the verdict: a remediation resolved without it
         # would describe a different database's carriers.
         "destination_db_type": destination_db_type or "",
-        "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked,
+        "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
+        and not null_cursor_blocked,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),

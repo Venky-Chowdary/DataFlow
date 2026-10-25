@@ -1062,6 +1062,26 @@ def _stream_database_transfer_impl(
         and not source_bounds_cursor_reads(src_read_type)
     )
 
+    # D99: when the source bounds the delta in SQL, ``cursor > watermark``
+    # silently drops every NULL-cursor row — the job must say how many it
+    # skipped rather than report verified. (Client-bound sources refuse
+    # unbounded rows above instead of skipping them.)
+    null_cursor_rows_skipped: int | None = None
+    if incremental and cursor_source_col and watermark and not client_cursor_bound:
+        try:
+            from services.null_cursor_probe import probe_null_cursor_count
+
+            _ncp = probe_null_cursor_count(
+                source_config=src_cfg,
+                source_table=cursor_source_object or table,
+                source_collection=str(src_cfg.get("collection") or ""),
+                cursor_column=cursor_source_col,
+            )
+            if _ncp.ran:
+                null_cursor_rows_skipped = int(_ncp.null_count or 0)
+        except Exception:  # noqa: BLE001 — unmeasured, stamped as such below
+            null_cursor_rows_skipped = None
+
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
 
     if src_type == "gcs" and not src_cfg.get("database"):
@@ -4859,6 +4879,11 @@ def _stream_database_transfer_impl(
     # degrade: write pass hashes DECIMAL-declared, naive read-back hashes the
     # TEXT carrier literally).
     dest_summary.setdefault("gate8_digest_types", dict(digest_dest_types))
+    from services.null_cursor_probe import stamp_skipped_null_cursor_rows
+
+    stamp_skipped_null_cursor_rows(
+        dest_summary, null_cursor_rows_skipped, cursor_source_col
+    )
     return written, ddl_log, dest_summary, columns
 
 
