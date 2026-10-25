@@ -89,7 +89,7 @@ export function ChangeEmailCard({ enabled: enabledProp }: { enabled?: boolean | 
   return (
     <>
       <h3 className="df2-settings-subhead df2-settings-subhead--spaced">Sign-in email</h3>
-      <div className="df2-settings-policy" data-testid="change-email-card">
+      <div className="df2-settings-policy-grid" data-testid="change-email-card">
         {step === "idle" && (
           <div className="df2-settings-policy-row">
             <div>

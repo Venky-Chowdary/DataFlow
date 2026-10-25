@@ -905,7 +905,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       {signupMetrics && (
                         <>
                           <h3 className="df2-settings-subhead df2-settings-subhead--spaced">Signup & recovery</h3>
-                          <div className="df2-settings-policy" data-testid="signup-metrics-card">
+                          <div className="df2-settings-policy-grid" data-testid="signup-metrics-card">
                             {[
                               { title: "Pending signups", value: String(signupMetrics.pending_signups), desc: "Verified-pending accounts awaiting a code" },
                               { title: "Live OTP challenges", value: String(signupMetrics.active_challenges), desc: "Unexpired, unconsumed codes" },

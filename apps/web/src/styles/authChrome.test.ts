@@ -80,3 +80,21 @@ describe("disabled brand CTA", () => {
     assert.doesNotMatch(rule, /opacity:\s*0\./, "an opacity fade is not a style");
   });
 });
+
+describe("settings card spacing (review-10 item 6)", () => {
+  it("metric + change-email cards use the section's 12px gap token", () => {
+    const rule = ruleBody(
+      readFileSync(join(STYLES_DIR, "settings-enterprise.css"), "utf8"),
+      ".df2-settings-policy-grid");
+    assert.ok(rule, "no .df2-settings-policy-grid rule");
+    assert.match(rule, /gap:\s*12px/);
+    // Both card stacks must be on the grid token — a bare
+    // .df2-settings-policy container has no gap and rows stack flush.
+    for (const p of ["../pages/SettingsPage.tsx",
+                     "../components/ChangeEmailCard.tsx"]) {
+      const src = readFileSync(join(STYLES_DIR, p), "utf8");
+      assert.doesNotMatch(src, /className="df2-settings-policy"/,
+        `${p} still uses the gapless .df2-settings-policy`);
+    }
+  });
+});
