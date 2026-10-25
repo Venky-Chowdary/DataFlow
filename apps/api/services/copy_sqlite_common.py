@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Callable
-from datetime import date, datetime
+from datetime import date, datetime, time
 from pathlib import Path
 from typing import Any
 
@@ -97,6 +97,8 @@ def sqlite_bind_from_text(ddl: str, declared: str = "") -> Callable[[str | None]
         return _bind_int
     if base in _FLOAT_BASES or base.startswith("DOUBLE"):
         return _bind_float
+    if base in _NAIVE_TEMPORAL_BASES:
+        return _bind_naive_temporal_text
     if declared:
         from services.decision_kernel import normalize_logical_type
 
@@ -138,6 +140,44 @@ def _bind_decimal_text(value: str | None) -> str | None:
 
 def _bind_text(value: str | None) -> str | None:
     return value
+
+
+_NAIVE_TEMPORAL_BASES = frozenset({
+    "DATETIME", "TIMESTAMP", "TIMESTAMP_NTZ", "DATE", "TIME",
+})
+
+
+def _bind_naive_temporal_text(value: str | None) -> str | None:
+    """Canonical SQL wall-clock text for naive temporal carriers.
+
+    The COPY path binds strings verbatim, so a serializer that emits RFC 3339
+    ``2025-01-02T03:04:05`` landed the 'T' into a TIMESTAMP column while the
+    row writer stores the space-separated SQL form — reads comparing the two
+    spellings drifted (M6). Normalize to the space form; refuse tz-aware and
+    unparseable cells so the row path owns quarantine.
+    """
+    if value is None:
+        return None
+    text = value.strip()
+    if not text:
+        return value
+    probe = text.replace(" ", "T", 1)
+    try:
+        if "T" in probe:
+            parsed: object = datetime.fromisoformat(probe)
+        elif "-" in probe:
+            parsed = date.fromisoformat(probe)
+        else:
+            parsed = time.fromisoformat(probe)
+    except ValueError as exc:
+        raise FastPathUnavailable(
+            f"temporal cell {value!r} is not ISO COPY-safe"
+        ) from exc
+    if getattr(parsed, "tzinfo", None) is not None:
+        raise FastPathUnavailable(
+            f"tz-aware temporal cell {value!r} is not COPY-safe on a naive carrier"
+        )
+    return text.replace("T", " ", 1)
 
 
 def sqlite_type_is_copy_safe(declared: str) -> bool:
