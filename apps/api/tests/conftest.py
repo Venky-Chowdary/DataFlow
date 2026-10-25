@@ -280,25 +280,32 @@ def local_sftp():
 
 
 @pytest.fixture(autouse=True)
-def _isolate_process_env(request):
+def _isolate_process_env(monkeypatch, request):
     """Undo ``os.environ`` mutations a test makes outside monkeypatch.
 
-    ``apply_railway_defaults()`` writes production defaults straight into
-    ``os.environ`` during a ``with TestClient(app)`` startup; monkeypatch
-    never recorded them, so they leak into every later test (production
-    config 503s, secret-vault ``SecretVaultError``s). Snapshot the whole
-    environment and restore it exactly so a test can only affect the
-    process env through monkeypatch.
+    ``apply_railway_defaults()`` and startup/bootstrap code write env
+    defaults straight into ``os.environ`` during a ``with TestClient(app)``
+    startup; monkeypatch never recorded them, so they leak into every
+    later test (production config 503s, secret-vault ``SecretVaultError``s).
+    Snapshot the whole environment and restore it exactly so a test can
+    only affect the process env through monkeypatch.
     """
     snapshot = dict(os.environ)
     yield
+    patched = {
+        name
+        for (target, name, _prev) in getattr(monkeypatch, "_setitem", ())
+        if target is os.environ
+    }
     added = sorted(
         k for k in os.environ
-        if k not in snapshot and k != "PYTEST_CURRENT_TEST"
+        if k not in snapshot and k not in patched and k != "PYTEST_CURRENT_TEST"
     )
     changed = sorted(
         k for k in snapshot
-        if os.environ.get(k) != snapshot[k] and k != "PYTEST_CURRENT_TEST"
+        if os.environ.get(k) != snapshot[k]
+        and k not in patched
+        and k != "PYTEST_CURRENT_TEST"
     )
     for key in added:
         os.environ.pop(key, None)
