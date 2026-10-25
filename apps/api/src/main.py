@@ -62,6 +62,7 @@ from .routers.repair_router import router as repair_router
 from .routers.saved_connectors_router import router as saved_connectors_router
 from .routers.schedules_router import router as schedules_router
 from .routers.signup_router import router as signup_router
+from .routers.signup_router import public_router as signup_public_router
 from .routers.rule_compiler_router import router as rule_compiler_router
 from .routers.shape_router import router as shape_router
 from .routers.training_agent_router import router as training_agent_router
@@ -673,6 +674,8 @@ app.include_router(auth_router)
 # Self-serve signup: every route 404s while DATAWRAP_SIGNUP_ENABLED is off.
 app.include_router(signup_router, prefix="/api/v1")
 app.include_router(signup_router)
+app.include_router(signup_public_router, prefix="/api/v1")
+app.include_router(signup_public_router)
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(iam_router, prefix="/api/v1")
 app.include_router(scim_router, prefix="/api/v1")

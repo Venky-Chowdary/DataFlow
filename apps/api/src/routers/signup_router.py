@@ -36,6 +36,13 @@ router = APIRouter(
     dependencies=[Depends(_require_signup_enabled)],
 )
 
+# Unauthenticated marketing/public surface — same flag gate.
+public_router = APIRouter(
+    prefix="/public",
+    tags=["signup-public"],
+    dependencies=[Depends(_require_signup_enabled)],
+)
+
 
 class SignupRequest(BaseModel):
     email: str = Field(min_length=3, max_length=320)
@@ -312,3 +319,31 @@ async def resend(body: ResendRequest, request: Request):
     from services import signup_service
 
     return signup_service.resend_code(challenge_id=body.challenge_id)
+
+
+class SalesLeadRequest(BaseModel):
+    first_name: str = Field(default="", max_length=128)
+    last_name: str = Field(default="", max_length=128)
+    email: str = Field(min_length=3, max_length=320)
+    company: str = Field(default="", max_length=256)
+    role: str = Field(default="", max_length=128)
+    volume: str = Field(default="", max_length=128)
+    region: str = Field(default="", max_length=128)
+    timeframe: str = Field(default="", max_length=128)
+    phone: str = Field(default="", max_length=64)
+    message: str = Field(default="", max_length=4000)
+    sources: list[str] = Field(default_factory=list, max_length=20)
+    destinations: list[str] = Field(default_factory=list, max_length=20)
+    form_token: str = Field(default="", max_length=4096)
+    honeypot: str = Field(default="", max_length=256)
+
+
+@public_router.post("/sales-leads", status_code=202)
+async def sales_lead_submit(body: SalesLeadRequest,
+                            request: Request) -> dict[str, Any]:
+    from services import signup_service
+    fields = body.model_dump(exclude={"form_token", "honeypot"})
+    return signup_service.submit_sales_lead(
+        fields=fields, ip=_client_ip(request),
+        ua=request.headers.get("user-agent", ""),
+        form_token=body.form_token, honeypot=body.honeypot)
