@@ -251,6 +251,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # Rotating your own password is not workspace administration.
     ("POST", "/api/v1/auth/change-password", Permission.ACCOUNT_SELF),
     ("POST", "/auth/change-password", Permission.ACCOUNT_SELF),
+    # Listing/revoking your own sessions is likewise account-self.
+    ("*", "/api/v1/auth/sessions", Permission.ACCOUNT_SELF),
+    ("*", "/auth/sessions", Permission.ACCOUNT_SELF),
     # Accounts are deployment-level administration. Membership changes inside a
     # workspace are authorized by the *workspace* role in ``services.team_store``
     # (a workspace admin need not be a platform admin), so the middleware only

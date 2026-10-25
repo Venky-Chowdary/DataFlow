@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import ipaddress
 import logging
+import secrets
 import uuid
 from typing import Any
 
@@ -376,6 +377,7 @@ def verify_email(
         ua=ua,
         idle_seconds=idle_seconds,
         absolute_seconds=absolute_seconds,
+        csrf_token=secrets.token_urlsafe(32),
     )
     record_security_event(
         "signup.verified", outcome="succeeded",

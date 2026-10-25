@@ -150,7 +150,101 @@ async def verify_email(body: VerifyRequest, request: Request, response: Response
         samesite="lax",
         path="/",
     )
+    # Double-submit CSRF cookie — JS echoes it back as x-csrf-token on
+    # mutating cookie-authed requests (enforced by AuthMiddleware).
+    response.set_cookie(
+        "dw_csrf",
+        session["csrf"],
+        max_age=int(session["absolute_expires_at"] - session["created_at"]),
+        httponly=False,
+        secure=True,
+        samesite="strict",
+        path="/",
+    )
     return result
+
+
+def _session_summary(doc: dict, *, current_jti: str = "") -> dict:
+    return {
+        "jti": doc["jti"],
+        "device_id": doc.get("device_id", ""),
+        "ip": doc.get("ip", ""),
+        "ua": doc.get("ua", ""),
+        "created_at": doc.get("created_at"),
+        "last_seen_at": doc.get("last_seen_at"),
+        "absolute_expires_at": doc.get("absolute_expires_at"),
+        "current": doc["jti"] == current_jti,
+    }
+
+
+def _current_jti(request: Request) -> str:
+    jti = getattr(request.state, "cookie_session_jti", "") or ""
+    if not jti:
+        auth = request.headers.get("Authorization", "")
+        if auth.lower().startswith("bearer "):
+            from src.services import auth_service
+            jti = auth_service.token_jti(auth[7:].strip()) or ""
+    return jti
+
+
+@router.get("/sessions")
+async def list_sessions(request: Request):
+    """P3-3: the caller's own sessions (cookie or bearer auth)."""
+    email = getattr(request.state, "user_email", "") or ""
+    if not email:
+        from services.api_errors import ApiError
+        raise ApiError(401, "auth_required", "authentication required")
+    from services.auth_state import get_auth_state
+
+    current = _current_jti(request)
+    return {"sessions": [
+        _session_summary(doc, current_jti=current)
+        for doc in get_auth_state().list_sessions(email)
+    ]}
+
+
+@router.delete("/sessions/{jti}")
+async def revoke_session(jti: str, request: Request):
+    """P3-3: revoke one of the caller's own sessions."""
+    email = getattr(request.state, "user_email", "") or ""
+    if not email:
+        from services.api_errors import ApiError
+        raise ApiError(401, "auth_required", "authentication required")
+    from services.auth_state import get_auth_state
+
+    doc = get_auth_state().get_session(jti)
+    if not doc or doc.get("user_id") != email:
+        from services.api_errors import ApiError
+        raise ApiError(404, "not_found", "no such session")
+    get_auth_state().revoke_session(jti)
+    from services.audit_coverage import record_security_event
+    record_security_event("session.revoked", outcome="succeeded",
+                          actor=email, session_id=jti)
+    return {"ok": True}
+
+
+@router.delete("/sessions")
+async def revoke_other_sessions(request: Request):
+    """P3-3: revoke every session except the one making the request."""
+    email = getattr(request.state, "user_email", "") or ""
+    if not email:
+        from services.api_errors import ApiError
+        raise ApiError(401, "auth_required", "authentication required")
+    from services.auth_state import get_auth_state
+
+    current = _current_jti(request)
+    state = get_auth_state()
+    revoked = 0
+    for doc in state.list_sessions(email):
+        if doc["jti"] != current:
+            state.revoke_session(doc["jti"])
+            revoked += 1
+    if revoked:
+        from services.audit_coverage import record_security_event
+        record_security_event("session.revoked", outcome="succeeded",
+                              actor=email,
+                              details={"count": revoked, "kept": current})
+    return {"ok": True, "revoked": revoked}
 
 
 @router.post("/resend", status_code=202)

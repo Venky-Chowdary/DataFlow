@@ -173,6 +173,54 @@ def _attach_user(request: Request, token: str) -> bool:
     return _attach_user_reason(request, token) is None
 
 
+def _cookie_session(request: Request) -> dict | str | None:
+    """``__Host-dw_session`` -> active session doc (P3-1).
+
+    The CSRF check is done by the caller on non-public paths only, so a
+    stale cookie can't turn a public POST (signup/resend) into a 403.
+    """
+    try:
+        from services.signup_config import signup_enabled
+        if not signup_enabled():
+            return None
+    except Exception:  # noqa: BLE001 — flag read must never break auth
+        return None
+    try:
+        jti = (request.cookies or {}).get("__Host-dw_session", "")
+    except Exception:  # noqa: BLE001
+        jti = ""
+    if not jti:
+        return None
+    from services.auth_state import get_auth_state
+
+    doc = get_auth_state().get_session(jti)
+    if not doc or doc.get("revoked_at"):
+        return None
+    return doc
+
+
+def _attach_cookie_user(request: Request, doc: dict) -> str | None:
+    """Cookie-auth attach + CSRF double-submit for mutating methods."""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        supplied = request.headers.get("x-csrf-token", "")
+        if not supplied or supplied != (doc.get("csrf") or ""):
+            return "csrf_failed"
+    from services.user_store import get_user as get_stored_user
+
+    email = doc.get("user_id") or ""
+    stored = get_stored_user(email)
+    if stored and stored.get("status") in ("disabled", "banned"):
+        return "disabled_user"
+    request.state.user_email = email
+    user = lookup_user(email)
+    request.state.user = user if user else {"email": email, "role": "viewer"}
+    request.state.cookie_session_jti = doc["jti"]
+    from services.auth_state import get_auth_state
+
+    get_auth_state().touch_session(doc["jti"])
+    return None
+
+
 def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
     """Phase D2 — Host tenant must match authenticated identity claims."""
     tenant_id = getattr(request.state, "tenant_id", None) or ""
@@ -226,6 +274,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             auth = request.headers.get("Authorization", "")
             token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            cookie_doc = None
+            if not token:
+                cookie_doc = _cookie_session(request)
             # EventSource / SSE cannot send custom headers, so the token may be
             # passed as a query parameter.  Only allow this fallback on the SSE
             # stream paths to keep tokens out of general access logs.
@@ -288,9 +339,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             reason_code = (
                 "missing_credentials"
-                if not token
+                if not (token or cookie_doc)
                 else _attach_user_reason(request, token)
+                if token
+                else _attach_cookie_user(request, cookie_doc)
             )
+            if reason_code == "csrf_failed":
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "CSRF token required for cookie-authenticated requests"},
+                )
             if reason_code:
                 from services import audit_coverage
 

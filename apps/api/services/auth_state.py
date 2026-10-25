@@ -165,12 +165,14 @@ class SharedAuthState:
         idle_seconds: int = 12 * 3600,
         absolute_seconds: int = 24 * 3600,
         jti: str | None = None,
+        csrf_token: str = "",
     ) -> dict[str, Any]:
         now = int(time.time())
         jti = jti or uuid.uuid4().hex
         doc = {
             "jti": jti,
             "user_id": user_id,
+            "csrf": csrf_token,
             "device_id": device_id,
             "ip": ip,
             "ua": ua[:512],
@@ -226,6 +228,28 @@ class SharedAuthState:
         self._b.set(f"{_SESSION_PREFIX}{jti}", json.dumps(doc), remaining)
         self._mongo_mirror(doc)
 
+    def rotate_session(self, jti: str) -> dict[str, Any] | None:
+        """Privilege-change rotation (P3-2): mint a fresh jti carrying the
+        same identity/device/CSRF binding, revoke the old one. Callers on
+        login, verify and password-change paths so a stolen pre-elevation
+        session id dies immediately."""
+        old = self.get_session(jti)
+        if not old:
+            return None
+        remaining_idle = max(0, int(old["idle_expires_at"]) - int(time.time()))
+        remaining_abs = max(0, int(old["absolute_expires_at"]) - int(time.time()))
+        new = self.create_session(
+            user_id=old["user_id"],
+            device_id=old.get("device_id", ""),
+            ip=old.get("ip", ""),
+            ua=old.get("ua", ""),
+            idle_seconds=remaining_idle or 1,
+            absolute_seconds=remaining_abs or 1,
+            csrf_token=old.get("csrf", ""),
+        )
+        self.revoke_session(jti)
+        return new
+
     def revoke_all_for_user(self, user_id: str) -> int:
         jtis = self._b.smembers(f"{_USER_SESSIONS_PREFIX}{user_id}")
         for jti in jtis:
@@ -236,7 +260,7 @@ class SharedAuthState:
         out = []
         for jti in self._b.smembers(f"{_USER_SESSIONS_PREFIX}{user_id}"):
             doc = self.get_session(jti)
-            if doc:
+            if doc and not doc.get("revoked_at"):
                 out.append(doc)
         return sorted(out, key=lambda d: int(d.get("last_seen_at") or 0), reverse=True)
 
