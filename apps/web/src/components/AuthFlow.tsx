@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { resendCode, SignupApiError } from "../lib/signupApi";
+import { AuthButton } from "./AuthButton";
 import { useToast } from "./Toast";
 
 /** Focus the first field marked invalid inside the card. */
@@ -45,14 +46,13 @@ export function ResendRow({ challengeId, initialCooldown }: { challengeId: strin
     }
   };
 
-  const disabled = cooldown > 0 || resending;
   return (
     <div className="lp-login-resend">
       <p className="lp-login-legal">
         Didn't get it?{" "}
-        <button type="button" onClick={resend} disabled={disabled} aria-disabled={disabled}>
-          {cooldown > 0 ? `Resend in ${cooldown}s` : resending ? "Sending…" : "Resend code"}
-        </button>
+        <AuthButton variant="link" onClick={resend} disabled={cooldown > 0} loading={resending} loadingLabel="Sending…">
+          {cooldown > 0 ? `Resend in ${cooldown}s` : "Resend code"}
+        </AuthButton>
       </p>
       <p className="lp-login-resend-status" aria-live="polite">
         {notice || (cooldown > 0 ? `You can request a new code in ${cooldown} seconds.` : "")}

@@ -1,6 +1,7 @@
 import { ReactNode } from "react";
 import { BrandWordmark } from "./BrandWordmark";
 import { DtIcon } from "./DtIcon";
+import { AuthButton } from "./AuthButton";
 
 interface AuthBrandPanelProps {
   title: string;
@@ -31,10 +32,10 @@ export function AuthBrandPanel({ title, lead, onBack, metrics, dest }: AuthBrand
       <div className="lp-login-brand-inner">
         <header className="lp-login-brand-head">
           {onBack ? (
-            <button type="button" className="lp-login-back" onClick={onBack}>
-              <DtIcon name="chevron-left" size={15} />
-              <span>Back</span>
-            </button>
+            <AuthButton variant="link" className="lp-login-back" onClick={onBack}
+              leadingIcon={<DtIcon name="chevron-left" size={15} />}>
+              Back
+            </AuthButton>
           ) : (
             <span />
           )}

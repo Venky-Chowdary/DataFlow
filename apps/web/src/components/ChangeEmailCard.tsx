@@ -1,4 +1,5 @@
 import { FormEvent, useEffect, useState } from "react";
+import { Button } from "./ui/Button";
 import {
   confirmEmailChange,
   fetchSignupConfig,
@@ -95,9 +96,9 @@ export function ChangeEmailCard({ enabled: enabledProp }: { enabled?: boolean | 
               <h3>Change sign-in email</h3>
               <p>We email a 6-digit code to the new address — the change only lands after you confirm it.</p>
             </div>
-            <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => setStep("request")}>
+            <Button variant="primary" size="sm" onClick={() => setStep("request")}>
               Change email
-            </button>
+            </Button>
           </div>
         )}
 
@@ -123,12 +124,12 @@ export function ChangeEmailCard({ enabled: enabledProp }: { enabled?: boolean | 
               )}
             </div>
             <span className="df2-change-email-actions">
-              <button type="button" className="df2-btn df2-btn-sm" onClick={() => { setStep("idle"); setError(""); setSubmitted(false); }}>
+              <Button variant="secondary" size="sm" onClick={() => { setStep("idle"); setError(""); setSubmitted(false); }}>
                 Cancel
-              </button>
-              <button type="submit" className="df2-btn df2-btn-sm df2-btn-primary" disabled={busy}>
-                {busy ? "Sending…" : "Send code"}
-              </button>
+              </Button>
+              <Button variant="primary" size="sm" type="submit" loading={busy} loadingLabel="Sending…">
+                Send code
+              </Button>
             </span>
           </form>
         )}
@@ -155,12 +156,12 @@ export function ChangeEmailCard({ enabled: enabledProp }: { enabled?: boolean | 
               )}
             </div>
             <span className="df2-change-email-actions">
-              <button type="button" className="df2-btn df2-btn-sm" onClick={() => { setStep("request"); setError(""); setSubmitted(false); setCode(""); }}>
+              <Button variant="secondary" size="sm" onClick={() => { setStep("request"); setError(""); setSubmitted(false); setCode(""); }}>
                 Back
-              </button>
-              <button type="submit" className="df2-btn df2-btn-sm df2-btn-primary" disabled={busy || code.length < 6}>
-                {busy ? "Confirming…" : "Confirm change"}
-              </button>
+              </Button>
+              <Button variant="primary" size="sm" type="submit" disabled={code.length < 6} loading={busy} loadingLabel="Confirming…">
+                Confirm change
+              </Button>
             </span>
           </form>
         )}

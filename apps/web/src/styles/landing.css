@@ -384,6 +384,67 @@ html:has(.lp) {
   color: var(--lp-ink);
 }
 
+/* AuthButton shared variants — every auth-surface control routes here. */
+.lp-btn--link {
+  background: transparent;
+  color: var(--lp-accent-ink, var(--lp-accent));
+  border-color: transparent;
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.lp-btn--link:hover {
+  color: var(--lp-accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.lp-btn--danger {
+  background: var(--df-danger, #dc2626);
+  color: #fff;
+  border-color: var(--df-danger, #dc2626);
+}
+
+.lp-btn--danger:hover { filter: brightness(0.92); }
+
+.lp-btn--sm {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.lp-btn:disabled,
+.lp-btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+  filter: saturate(0.7);
+}
+
+.lp-btn--link:disabled,
+.lp-btn--link[aria-disabled="true"] {
+  color: var(--lp-muted);
+  text-decoration: none;
+  opacity: 0.8;
+}
+
+.lp-btn.is-loading { pointer-events: none; }
+
+.lp-btn-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: lp-btn-spin 0.7s linear infinite;
+  flex: none;
+}
+
+@keyframes lp-btn-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 640px) {
+  .lp-login-form .lp-btn { width: 100%; }
+}
+
 .lp-btn--lg {
   min-height: max(44px, calc(var(--df-btn-height, 36px) + 8px));
   padding: 0 18px;

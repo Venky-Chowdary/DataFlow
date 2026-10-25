@@ -1,6 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AuthBrandPanel } from "../components/AuthBrandPanel";
 import { DtIcon } from "../components/DtIcon";
+import { AuthButton } from "../components/AuthButton";
 import { useToast } from "../components/Toast";
 import { ApiError, fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
 import { fetchSignupConfig } from "../lib/signupApi";
@@ -314,25 +315,25 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
                   <span>Keep me signed in on this device</span>
                 </label>
                 {signupEnabled && onForgotPassword && (
-                  <button type="button" className="lp-login-forgot" onClick={onForgotPassword}>
+                  <AuthButton variant="link" className="lp-login-forgot" onClick={onForgotPassword}>
                     Forgot password?
-                  </button>
+                  </AuthButton>
                 )}
               </div>
 
-              <button
-                type="submit"
-                className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit"
-                disabled={checking}
+              <AuthButton
+                type="submit" size="lg" block
+                className="lp-login-submit"
+                loading={checking} loadingLabel="Verifying credentials…"
+                trailingIcon={<DtIcon name="arrow-right" size={16} />}
               >
-                {checking ? "Verifying credentials…" : "Sign in to workspace"}
-                {!checking && <DtIcon name="arrow-right" size={16} />}
-              </button>
+                Sign in to workspace
+              </AuthButton>
             </form>
 
             {signupEnabled && onSignup && (
               <p className="lp-login-legal">
-                New to Datawrap? <button type="button" onClick={onSignup}>Create an account</button>
+                New to Datawrap? <AuthButton variant="link" onClick={onSignup}>Create an account</AuthButton>
               </p>
             )}
 
@@ -341,14 +342,14 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
                 <div className="lp-login-divider"><span>Or continue with SSO</span></div>
                 <div className="lp-login-sso">
                   {ssoProviders.map((provider) => (
-                    <button
+                    <AuthButton
                       key={provider.type}
-                      type="button"
-                      className="lp-btn lp-btn--outline lp-login-sso-btn"
+                      variant="secondary"
+                      className="lp-login-sso-btn"
                       onClick={() => startSso(provider.type, provider.label)}
                     >
                       {provider.label}
-                    </button>
+                    </AuthButton>
                   ))}
                 </div>
               </>
@@ -359,9 +360,9 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
                 <p className="lp-login-dev-hint">
                   Dev: <code>test@gmail.com</code> / <code>password123</code> · API :8001
                 </p>
-                <button type="button" className="lp-btn lp-btn--outline lp-btn--block" onClick={enterDevPreview}>
+                <AuthButton variant="secondary" block onClick={enterDevPreview}>
                   Preview workspace (UI only)
-                </button>
+                </AuthButton>
               </div>
             )}
 
@@ -381,9 +382,9 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
             </ul>
             {onLegal ? (
               <p className="lp-login-legal">
-                <button type="button" onClick={() => onLegal("privacy")}>Privacy</button>
+                <AuthButton variant="link" onClick={() => onLegal("privacy")}>Privacy</AuthButton>
                 <span aria-hidden>·</span>
-                <button type="button" onClick={() => onLegal("terms")}>Terms</button>
+                <AuthButton variant="link" onClick={() => onLegal("terms")}>Terms</AuthButton>
               </p>
             ) : null}
           </div>
