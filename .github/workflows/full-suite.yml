@@ -38,19 +38,6 @@ jobs:
         # wal_level=logical lands via ALTER SYSTEM + restart below — service
         # 'options' are docker-create flags; '-c wal_level' would be parsed
         # as docker --cpu-shares and kills container init.
-      mysql:
-        image: mysql:8.0
-        ports:
-          - 3306:3306
-        env:
-          MYSQL_ROOT_PASSWORD: root_ci
-          MYSQL_DATABASE: dataflow
-          MYSQL_USER: dataflow
-          MYSQL_PASSWORD: dataflow
-        options: >-
-          --health-cmd "mysqladmin ping -h 127.0.0.1 -udataflow -pdataflow"
-          --health-interval 10s --health-timeout 5s --health-retries 12
-          --binlog-format=ROW --binlog-row-image=FULL
       mssql:
         image: mcr.microsoft.com/mssql/server:2022-latest
         ports:
@@ -59,14 +46,6 @@ jobs:
           ACCEPT_EULA: "Y"
           SA_PASSWORD: Dataflow_CI_2026!
           MSSQL_PID: Developer
-      mongo:
-        image: mongo:7
-        ports:
-          - 27017:27017
-        # A single-node replica set so sessions / change streams / FastPath
-        # work — a standalone mongod makes 21 live tests fail with
-        # FastPathUnavailable.
-        options: --replSet rs0 --bind_ip_all
       redis:
         image: redis:7
         ports:
@@ -151,28 +130,34 @@ jobs:
           # CI-3: nightly order shuffling so order-dependent tests surface.
           python -m pip install pytest-randomly
 
-      - name: Enable PG logical replication (wal_level=logical needs restart)
+      - name: Start Postgres / MySQL / Mongo (server args need docker run)
+        # GH service 'options' go to docker create BEFORE the image — server
+        # flags like --binlog-format or -c wal_level are not docker flags and
+        # the container dies at init (exit 125). docker run accepts the full
+        # command line, so engines needing server args are started here.
         run: |
-          cid=$(docker ps -qf ancestor=postgres:16)
-          docker exec "$cid" psql -U dataflow -d dataflow -c \
-            "ALTER SYSTEM SET wal_level=logical; ALTER SYSTEM SET max_replication_slots=8; ALTER SYSTEM SET max_wal_senders=8;"
-          docker restart "$cid"
-          for i in $(seq 1 30); do
-            pg_isready -h 127.0.0.1 -p 5432 -U dataflow >/dev/null 2>&1 && break
-            sleep 2
-          done
-          docker exec "$cid" psql -U dataflow -d dataflow -tAc 'SHOW wal_level' | grep -qx logical
+          docker run -d --name pg -p 5432:5432 \
+            -e POSTGRES_USER=dataflow -e POSTGRES_PASSWORD=dataflow \
+            -e POSTGRES_DB=dataflow \
+            postgres:16 \
+            postgres -c wal_level=logical -c max_replication_slots=8 \
+                     -c max_wal_senders=8
+          docker run -d --name mysql -p 3306:3306 \
+            -e MYSQL_ROOT_PASSWORD=root_ci -e MYSQL_DATABASE=dataflow \
+            -e MYSQL_USER=dataflow -e MYSQL_PASSWORD=dataflow \
+            mysql:8.0 --binlog-format=ROW --binlog-row-image=FULL
+          docker run -d --name mongo -p 27017:27017 mongo:7 \
+            --replSet rs0 --bind_ip_all
 
       - name: Initiate Mongo replica set
         run: |
           for i in $(seq 1 30); do
-            cid=$(docker ps -qf ancestor=mongo:7) && [ -n "$cid" ] && break
+            docker exec mongo mongosh --quiet --eval \
+              'try { rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]}) } catch(e) { print(e) }' 2>/dev/null && break
             sleep 2
           done
-          docker exec "$cid" mongosh --quiet --eval \
-            'try { rs.initiate({_id:"rs0",members:[{_id:0,host:"127.0.0.1:27017"}]}) } catch(e) { print(e) }'
           for i in $(seq 1 30); do
-            st=$(docker exec "$cid" mongosh --quiet --eval 'rs.status().myState' || true)
+            st=$(docker exec mongo mongosh --quiet --eval 'rs.status().myState' 2>/dev/null || true)
             [ "$st" = "1" ] && echo "mongo rs PRIMARY" && break
             sleep 2
           done
@@ -226,7 +211,7 @@ jobs:
           say() { printf '%-12s %s\n' "$1" "$2"; }
           pg_isready -h 127.0.0.1 -p 5432 -U dataflow >/dev/null 2>&1 \
             && say postgres ok || { say postgres MISS; fail=1; }
-          docker exec "$(docker ps -qf ancestor=mysql:8.0)" \
+          docker exec mysql \
             mysqladmin ping -h 127.0.0.1 -udataflow -pdataflow >/dev/null 2>&1 \
             && say mysql ok || { say mysql MISS; fail=1; }
           scid=$(docker ps -qf ancestor=mcr.microsoft.com/mssql/server:2022-latest)
@@ -236,7 +221,7 @@ jobs:
                  -C -Q 'SELECT 1' >/dev/null 2>&1; then mssqlok=1; break; fi
           done
           [ "$mssqlok" = 1 ] && say mssql ok || { say mssql MISS; fail=1; }
-          docker exec "$(docker ps -qf ancestor=mongo:7)" \
+          docker exec mongo \
             mongosh --quiet --eval 'exit(db.runCommand({ping:1}).ok ? 0 : 1)' \
             >/dev/null 2>&1 && say mongo ok || { say mongo MISS; fail=1; }
           docker exec "$(docker ps -qf ancestor=redis:7)" redis-cli ping \
@@ -254,7 +239,7 @@ jobs:
 
       - name: Grant MySQL CDC privileges
         run: |
-          cid=$(docker ps -qf ancestor=mysql:8.0)
+          cid=mysql
           for i in $(seq 1 30); do
             docker exec "$cid" mysql -udataflow -pdataflow -e 'SELECT 1' >/dev/null 2>&1 && break
             sleep 2
