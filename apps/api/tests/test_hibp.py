@@ -131,7 +131,7 @@ def test_reset_refuses_pwned_password(monkeypatch):
     c.post("/api/v1/auth/password/forgot",
            json={"email": "ada@example.com",
                  "form_token": form_token_mod.issue("reset")})
-    token = re.search(r"reset-password\?token=([A-Za-z0-9_\-]+)",
+    token = re.search(r"reset-password#token=([A-Za-z0-9_\-]+)",
                       ConsoleEmailSender.OUTBOX[-1].text).group(1)
     monkeypatch.setattr(hibp, "pwned_count", lambda p, **kw: 5)
     resp = c.post("/api/v1/auth/password/reset", json={
