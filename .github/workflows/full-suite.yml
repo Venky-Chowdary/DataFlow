@@ -62,7 +62,7 @@ jobs:
           - 1433:1433
         env:
           ACCEPT_EULA: "Y"
-          SA_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+          SA_PASSWORD: Dataflow_CI_2026!
           MSSQL_PID: Developer
       mongo:
         image: mongo:7
@@ -121,9 +121,9 @@ jobs:
       DATAFLOW_TEST_MSSQL_HOST: 127.0.0.1
       DATAFLOW_TEST_MSSQL_PORT: "1433"
       DATAFLOW_TEST_MSSQL_USER: sa
-      DATAFLOW_TEST_MSSQL_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+      DATAFLOW_TEST_MSSQL_PASSWORD: Dataflow_CI_2026!
       DATAFLOW_SQLSERVER_USER: sa
-      DATAFLOW_SQLSERVER_PASSWORD: ${{ env.MSSQL_SA_PASSWORD }}
+      DATAFLOW_SQLSERVER_PASSWORD: Dataflow_CI_2026!
       # Mongo — replica-set URI so sessions/change streams work
       MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
       DATAFLOW_TEST_MONGO_URI: mongodb://127.0.0.1:27017/dataflow?replicaSet=rs0
@@ -137,10 +137,10 @@ jobs:
       # (PLAIN mechanism) on 9094.
       DATAFLOW_LIVE_KAFKA_SASL_BOOTSTRAP: 127.0.0.1:9094
       DATAFLOW_LIVE_KAFKA_SASL_USER: admin
-      DATAFLOW_LIVE_KAFKA_SASL_PASSWORD: ${{ env.KAFKA_SASL_CI_PASSWORD }}
+      DATAFLOW_LIVE_KAFKA_SASL_PASSWORD: dataflow-ci-secret
       DATAFLOW_LIVE_KAFKA_SASL_MECHANISMS: PLAIN
       DATAFLOW_LIVE_KAFKA_SASL_USER_PLAIN: admin
-      DATAFLOW_LIVE_KAFKA_SASL_PASSWORD_PLAIN: ${{ env.KAFKA_SASL_CI_PASSWORD }}
+      DATAFLOW_LIVE_KAFKA_SASL_PASSWORD_PLAIN: dataflow-ci-secret
 
     steps:
       - name: Checkout
