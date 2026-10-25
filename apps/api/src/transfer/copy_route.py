@@ -61,6 +61,7 @@ def _try_copy_fast_path(
     incremental_cursor: str = "",
     incremental_watermark: str | None = None,
     incremental_pk: str = "",
+    incremental_key: str = "",
     job_id: str | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Move the whole table server-to-server, or return ``None`` to stream rows.
@@ -1027,6 +1028,7 @@ def _try_copy_fast_path(
                 incremental_cursor=incremental_cursor,
                 incremental_watermark=incremental_watermark,
                 incremental_pk=incremental_pk,
+                incremental_key=incremental_key,
                 job_id=job_id,
             )
             if sqlite_sqlite is not None:
@@ -4078,6 +4080,7 @@ def _try_sqlite_sqlite_copy_fast_path(
     incremental_cursor: str = "",
     incremental_watermark: str | None = None,
     incremental_pk: str = "",
+    incremental_key: str = "",
     job_id: str | None = None,
 ) -> tuple[int, list[str], dict[str, Any], list[str]] | None:
     """Identity SQLite→SQLite: ATTACH + INSERT SELECT. Dest COUNT is the proof."""
@@ -4114,7 +4117,7 @@ def _try_sqlite_sqlite_copy_fast_path(
     inc_mode = (incremental_mode or "").strip().lower()
     if (
         inc_mode == "incremental_deduped"
-        and incremental_pk
+        and incremental_key
         and incremental_cursor
         and should_reread_source(
             src_type="sqlite", dest_type="sqlite", incremental=True

@@ -898,7 +898,8 @@ def _stream_database_transfer_impl(
             checkpoint=checkpoint,
             incremental_cursor=cursor_source_col if incremental else "",
             incremental_watermark=pre_copy_watermark,
-            incremental_pk=(
+            incremental_pk=(cursor_pk_source or "") if incremental else "",
+            incremental_key=(
                 (pk_source_cols[0] if pk_source_cols else "")
                 if incremental else ""
             ),
