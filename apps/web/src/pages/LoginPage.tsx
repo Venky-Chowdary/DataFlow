@@ -225,24 +225,12 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
             )}
 
             {pendingVerify && (
-              <div className="lp-login-alert lp-login-alert--warn" role="alert">
-                <DtIcon name="alert" size={18} />
-                <div>
-                  <strong>Verify your email</strong>
-                  <p>
-                    {credentialError}{" "}
-                    {onVerifyPending && (
-                      <AuthButton
-                        variant="link"
-                        size="sm"
-                        onClick={() => onVerifyPending(pendingVerify.challengeId, pendingVerify.email)}
-                      >
-                        Enter verification code
-                      </AuthButton>
-                    )}
-                  </p>
-                </div>
-              </div>
+              <UnverifiedAlert
+                challengeId={pendingVerify.challengeId}
+                email={pendingVerify.email}
+                error={credentialError}
+                onVerifyPending={onVerifyPending}
+              />
             )}
 
             <form className="lp-login-form" onSubmit={submit} noValidate>
@@ -391,5 +379,43 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
         </div>
       </section>
     </main>
+  );
+}
+
+/**
+ * The 403 `email_unverified` alert — the API minted a fresh code, so the
+ * action jumps straight into code entry. The control is a styled link
+ * button (AuthButton variant="link"), never a raw unstyled <button>.
+ */
+export function UnverifiedAlert({
+  challengeId,
+  email,
+  error,
+  onVerifyPending,
+}: {
+  challengeId: string;
+  email: string;
+  error: string | null;
+  onVerifyPending?: (challengeId: string, email: string) => void;
+}) {
+  return (
+    <div className="lp-login-alert lp-login-alert--warn" role="alert">
+      <DtIcon name="alert" size={18} />
+      <div>
+        <strong>Verify your email</strong>
+        <p>
+          {error}{" "}
+          {onVerifyPending && (
+            <AuthButton
+              variant="link"
+              size="sm"
+              onClick={() => onVerifyPending(challengeId, email)}
+            >
+              Enter verification code
+            </AuthButton>
+          )}
+        </p>
+      </div>
+    </div>
   );
 }
