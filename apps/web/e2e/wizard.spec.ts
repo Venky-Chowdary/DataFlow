@@ -1,5 +1,5 @@
 import { expect, test } from "@playwright/test";
-import { openStudio, reachTransform, shoot } from "./support";
+import { openStudio, reachTransform, shoot, tokenColor } from "./support";
 
 test.describe("wizard baseline", () => {
   test.beforeEach(async ({ page }) => {
@@ -47,7 +47,9 @@ test.describe("wizard baseline", () => {
 
     const primary = page.locator(".df2-xform-actions .df2-btn-primary");
     const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
-    expect(color).toBe("rgb(13, 148, 136)");
+    // The primary fill is the --df-brand token — assert the resolved token,
+    // never a hex literal that goes stale on a brand repaint (UI-11).
+    expect(color).toBe(await tokenColor(page, "--df-brand"));
 
     // Toasts are hidden in shoot(), so these shots are the step list itself.
     // The compose-step sentence is part of the pre-upgrade builder.

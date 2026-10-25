@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { expectDisjoint, expectHitInside, expectStackedAbove, expectStudioShellClear, expectWithinViewport } from "./layout";
-import { openStudio, reachTransform, shoot } from "./support";
+import { openStudio, reachTransform, shoot, tokenColor } from "./support";
 
 /** A toast shifts the narrow page. Remove it before the shot; the mask alone does not. */
 async function setPalette(page: Page, open: boolean): Promise<void> {
@@ -353,7 +353,10 @@ test.describe("studio next", () => {
     const primary = page.locator(".df2-studio-next .df2-btn-primary").first();
     await expect(primary).toBeVisible();
     const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
-    expect(color).toBe("rgb(10, 61, 58)");
+    // The primary fill is the --df-brand-tile token (studio-next repaints
+    // --df-action-bg from it) — assert the resolved token, never a hex
+    // literal that goes stale on a brand repaint (UI-11).
+    expect(color).toBe(await tokenColor(page, "--df-brand-tile"));
   });
 
   test("sample export runs from the canvas recipe", async ({ page }) => {
@@ -1414,7 +1417,10 @@ test.describe("transfer wizard stepper", () => {
             if (pair.lineGap != null) expect(pair.lineGap, `${where} ${pair.text}`).toBeGreaterThanOrEqual(8);
             if (pair.nextGap != null) expect(pair.nextGap, `${where} ${pair.text}`).toBeGreaterThanOrEqual(8);
             if (pair.lineMid != null) expect(Math.abs(pair.lineMid - pair.iconMid), `${where} ${pair.text}`).toBeLessThanOrEqual(1);
-            if (pair.done) expect(pair.color, where).toBe("rgb(15, 118, 110)");
+            // Done lines paint from the --df-logo-ink token (enterprise-ui
+            // .df2-wizard-line.done) — assert the resolved token, not a stale
+            // hex (UI-11).
+            if (pair.done) expect(pair.color, where).toBe(await tokenColor(page, "--df-logo-ink"));
             else if (pair.color) expect(pair.color, where).toBe(report.border);
           }
           const lineGaps = report.pairs.map((pair) => pair.lineGap).filter((gap) => gap != null);
