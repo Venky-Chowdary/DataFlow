@@ -58,7 +58,7 @@
 }
 
 .df2-docs-arch-sub tspan {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   fill: #64748b;
 }
 

@@ -169,6 +169,7 @@
   --df-font-display: "Plus Jakarta Sans", "IBM Plex Sans", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
   --df-fs-xs: 11px;
+  --df-fs-body: 12px;
   --df-fs-sm: 12.5px;
   --df-fs-md: 13.5px;
   --df-fs-lg: 15px;
@@ -434,6 +435,12 @@ body,
   color: var(--df-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Body runs the product's 12px base size. Set on body (not html) so rem keeps
+   its 16px UA root and nothing else silently rescales. */
+body {
+  font-size: var(--df-fs-body);
 }
 
 /* Form controls do not inherit type from their container — without this the UA

@@ -162,7 +162,7 @@
 
 .df2-connection-status-grid span {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -388,7 +388,7 @@
 }
 
 .df2-docs-arch-sub {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   fill: #64748b;
 }
 
@@ -698,7 +698,7 @@
     font-size: 11px;
   }
   .df2-docs-arch-sub {
-    font-size: 8px;
+    font-size: var(--df-fs-xs);
   }
   .df2-docs-stats {
     grid-template-columns: repeat(2, minmax(0, 1fr));

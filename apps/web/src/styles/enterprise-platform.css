@@ -1075,7 +1075,7 @@ body {
 
 .df2-pilot-section-label {
   margin: 12px 0 6px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1087,7 +1087,7 @@ body {
 .df2-rail-kicker {
   display: block;
   margin-bottom: 6px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1139,7 +1139,7 @@ body {
 
 .df2-control-metric span {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1325,7 +1325,7 @@ body {
 
 .df2-login-proof-grid span {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -1768,7 +1768,7 @@ body {
 }
 
 .df2-upload-format-chip {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;

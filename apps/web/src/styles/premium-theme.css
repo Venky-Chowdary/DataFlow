@@ -37,7 +37,7 @@
   background: var(--df-success-bg);
   color: var(--df-brand-deep);
   border: 1px solid var(--df-brand-soft);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
 }
 
@@ -322,7 +322,7 @@
 
 .df2-dashboard-matrix button span {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -369,7 +369,7 @@
 }
 
 .df2-ops-card span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -563,7 +563,7 @@
 
 .df2-login-proof-grid span {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -778,7 +778,7 @@
 
 .df2-pilot-console-strip span {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -935,7 +935,7 @@
   position: absolute;
   top: 10px;
   right: 10px;
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1109,7 +1109,7 @@
 
 .df2-column-risk-id {
   font-family: ui-monospace, monospace;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: #64748b;
   max-width: 9rem;
   overflow: hidden;
@@ -1194,7 +1194,7 @@
 .df2-column-conf.block { color: #dc2626; font-weight: 600; }
 
 .df2-badge-xs {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   padding: 2px 6px;
   margin-left: 6px;
 }

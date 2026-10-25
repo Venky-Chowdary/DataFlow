@@ -471,7 +471,7 @@
 .df2-copilot-msg .df2-md-code-lang {
   display: block;
   padding: 4px 10px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -569,7 +569,7 @@
 }
 
 .df2-pilot-confirm-kicker {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -610,7 +610,7 @@
 }
 
 .df2-pilot-confirm-end-label {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -655,7 +655,7 @@
   margin-left: 8px;
   padding: 1px 6px;
   border-radius: 999px;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.02em;
   text-transform: uppercase;

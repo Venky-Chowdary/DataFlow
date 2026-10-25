@@ -310,7 +310,7 @@ body {
 }
 
 .df2-breadcrumb span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -2217,7 +2217,7 @@ body {
 }
 
 .df2-pilot-idea-cat {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -2744,7 +2744,7 @@ body {
 .df2-copilot-console span {
   display: block;
   margin-bottom: 3px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -3545,7 +3545,7 @@ body {
 }
 
 .df2-schema-route-kind {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -3606,7 +3606,7 @@ body {
 }
 
 .df2-schema-route-bridge-meta {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   color: #0f766e;
   text-transform: uppercase;
@@ -3801,7 +3801,7 @@ body {
 }
 
 .df2-mapping-pii {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   padding: 2px 6px;
   border-radius: 4px;
@@ -4107,7 +4107,7 @@ body {
 }
 
 .df2-nav-group-label {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.08em;
 }
 
@@ -4338,7 +4338,7 @@ body {
 
 .df2-login-proof-grid span {
   color: rgba(255, 255, 255, 0.56);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -4859,7 +4859,7 @@ body {
 
 .df2-page-signal span {
   color: #6a756d;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
@@ -5287,7 +5287,7 @@ body {
   display: block;
   margin-bottom: 5px;
   color: #66736b;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -5961,7 +5961,7 @@ html,
 .df2-sidebar-env small {
   margin-left: auto;
   color: rgba(232, 238, 232, 0.45);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -5985,7 +5985,7 @@ html,
   background: #fff;
   color: #66736b;
   font-family: var(--df-font-sans);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
 }
 
@@ -6524,7 +6524,7 @@ html,
   border: 1px solid #cbd5e1;
   border-radius: 6px;
   padding: 2px 7px;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   color: #1d4ed8;
   cursor: pointer;
@@ -6538,7 +6538,7 @@ html,
 }
 .df2-job-row-id {
   font-family: var(--df-font-mono, ui-monospace, monospace);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   color: #64748b;
   background: #f1f5f9;

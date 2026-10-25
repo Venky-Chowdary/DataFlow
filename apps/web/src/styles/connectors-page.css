@@ -51,7 +51,7 @@
   padding: 6px var(--df-list-row-pad-x);
   border-bottom: 1px solid var(--df-border, #e2e8f0);
   background: var(--df-surface-muted);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -138,7 +138,7 @@
 
 .df2-connector-row-role {
   justify-self: start;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   text-transform: none;
   letter-spacing: 0.01em;
   max-width: 100%;
@@ -346,7 +346,7 @@
 }
 
 .df2-drawer-kv dt {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;

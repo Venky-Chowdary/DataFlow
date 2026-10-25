@@ -540,7 +540,7 @@
 .df2-query-editor-dialect-pill {
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   background: var(--df-brand-muted);
@@ -901,7 +901,7 @@
 }
 
 .df2-qw-node-kind {
-  font-size: 9.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -949,7 +949,7 @@
   padding: 1px 5px;
   border-radius: 4px;
   font-family: var(--df-font-mono, ui-monospace, monospace);
-  font-size: 9.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -994,7 +994,7 @@
 }
 
 .df2-qw-col-flag {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   color: var(--df-text-tertiary);
 }
@@ -1010,7 +1010,7 @@
   background: rgba(148, 163, 184, 0.16);
   color: #cbd5e1;
   font-family: var(--df-font-mono, ui-monospace, monospace);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
 }
 
@@ -1018,7 +1018,7 @@
 
 .df2-qe-keys {
   margin-left: auto;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: #64748b;
   white-space: nowrap;
 }
@@ -1085,7 +1085,7 @@
   flex: none;
   border-radius: 3px;
   background: rgba(148, 163, 184, 0.2);
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   color: var(--df-text-tertiary);
 }
@@ -1103,7 +1103,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: #64748b;
 }
 
@@ -1143,7 +1143,7 @@
 .df2-qw-param input { width: 9rem; }
 
 .df2-qw-params-note {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   color: var(--df-text-tertiary);
 }
 
@@ -1300,7 +1300,7 @@
   width: 3rem;
   text-align: right;
   color: var(--df-text-tertiary);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
 }
 
 .df2-qw-rownum {
@@ -1349,7 +1349,7 @@
   padding: 7px 12px;
   border-top: 1px solid var(--df-border, #e6e9ee);
   background: var(--df-surface-muted, #f8fafc);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   line-height: 1.5;
   color: var(--df-text-tertiary);
 }
@@ -1391,7 +1391,7 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   color: var(--df-text-tertiary);
 }
@@ -1427,7 +1427,7 @@
 
 .df2-qw-history-item code {
   font-family: var(--df-font-mono, ui-monospace, monospace);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   color: var(--df-text-primary, #0f172a);
   overflow: hidden;
   text-overflow: ellipsis;
@@ -1435,7 +1435,7 @@
 }
 
 .df2-qw-history-meta {
-  font-size: 9.5px;
+  font-size: var(--df-fs-xs);
   font-variant-numeric: tabular-nums;
   color: var(--df-text-tertiary);
 }

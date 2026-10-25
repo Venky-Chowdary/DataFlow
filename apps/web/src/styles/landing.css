@@ -662,7 +662,7 @@ html:has(.lp) {
   color: #fff;
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -3143,7 +3143,7 @@ html:has(.lp) {
 
 .lp-mkt-mock-pass {
   font-style: normal;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -3990,7 +3990,7 @@ html:has(.lp) {
 
 .lp-flow-node-sub {
   font-family: var(--lp-font);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   fill: #64748b;
 }
 
@@ -4285,7 +4285,7 @@ html:has(.lp) {
   border-radius: 999px;
   background: var(--lp-grad-brand);
   color: #fff;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -4768,7 +4768,7 @@ html:has(.lp) {
   border-radius: 999px;
   background: var(--df-success-bg, #ecfdf5);
   color: var(--df-success, #059669);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -5698,7 +5698,7 @@ html:has(.lp) {
 
 .lp-mkt-ui-map-row code {
   font-family: var(--df-font-mono, "JetBrains Mono", monospace);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   padding: 4px 6px;
   border-radius: 6px;
   background: #fff;
@@ -5714,7 +5714,7 @@ html:has(.lp) {
   font-style: normal;
   font-weight: 700;
   color: var(--lp-accent-ink);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
 }
 
 .lp-mkt-ui-progress {
@@ -5802,7 +5802,7 @@ html:has(.lp) {
 }
 
 .lp-mkt-ui-metrics span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   color: var(--lp-muted-soft);
 }
@@ -5847,7 +5847,7 @@ html:has(.lp) {
 }
 
 .lp-mkt-ui-table th {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -5861,7 +5861,7 @@ html:has(.lp) {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -7258,7 +7258,7 @@ html:has(.lp) {
 }
 
 .lp-d3-rack-label {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--df-text-tertiary);
@@ -7357,7 +7357,7 @@ html:has(.lp) {
 }
 
 .lp-d3-hub-face--front small {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   opacity: 0.75;
 }
 
@@ -7497,7 +7497,7 @@ html:has(.lp) {
 
 .lp-d3-monitor-body footer {
   margin-top: 8px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: #64748b;
 }
 
@@ -7965,7 +7965,7 @@ html:has(.lp) {
 }
 
 .lp-d3-server-title {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--df-text-tertiary);
@@ -8160,7 +8160,7 @@ html:has(.lp) {
 
 .lp-d3-hud footer {
   margin-top: 8px;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   color: #64748b;
 }
 
@@ -9210,7 +9210,7 @@ html:has(.lp) {
   border-radius: 8px;
   background: #fff;
   border: 1px solid #e2e8f0;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: #334155;
   font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
 }
@@ -9227,7 +9227,7 @@ html:has(.lp) {
 .lp-hero-flow-edges li em {
   margin-left: auto;
   font-style: normal;
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -9853,7 +9853,7 @@ html:has(.lp) {
   border-radius: 999px;
   background: rgba(13, 148, 136, 0.1);
   color: var(--df-brand, #0d9488);
-  font-size: 9.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -9938,7 +9938,7 @@ html:has(.lp) {
 }
 
 .lp-price-plan-eyebrow {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -10229,7 +10229,7 @@ html:has(.lp) {
 
 .lp-cust-industry,
 .lp-cust-metric-chip {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 750;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -10845,7 +10845,7 @@ html:has(.lp) {
 
 .lp-cinema-field em {
   font-style: normal;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: #99f6e4;
@@ -12330,7 +12330,7 @@ html:has(.lp) {
 }
 
 .lp-journey-tab span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -12562,7 +12562,7 @@ html:has(.lp) {
 .lp-journey-metrics div.is-ok strong { color: #059669; }
 
 .lp-journey-metrics span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 650;
   color: #475569;
 }

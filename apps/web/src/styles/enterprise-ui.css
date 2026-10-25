@@ -296,7 +296,7 @@
   border-radius: 999px;
   background: var(--df-surface-muted);
   color: var(--df-text-secondary);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
 }
 
@@ -360,7 +360,7 @@
   margin: 12px 8px 6px;
   padding: 0;
   border: none;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -531,7 +531,7 @@
   border-radius: var(--df-radius-md) 0 0 var(--df-radius-md);
   background: var(--df-brand-deep);
   color: #fff;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -890,7 +890,7 @@
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-size: 10px !important;
+  font-size: var(--df-fs-xs) !important;
   padding: 2px 7px !important;
   text-transform: capitalize;
 }
@@ -1041,7 +1041,7 @@
 
 .df2-jobs-detail-tab-count {
   font-style: normal;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   line-height: 1;
   padding: 3px 6px;
@@ -1378,7 +1378,7 @@
 
 .df2-gate8-proof-kicker {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -1447,7 +1447,7 @@
 }
 
 .df2-gate8-proof-grid dt {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -1691,7 +1691,7 @@
 }
 
 .df2-result-cdc-strip dt {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.03em;
   color: #64748b;
@@ -2301,7 +2301,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-jobs-cdc-table th {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.03em;
   color: #64748b;
@@ -2327,7 +2327,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-jobs-v3-summary-metrics article span {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -2550,7 +2550,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 6px var(--df-list-row-pad-x);
   border-bottom: 1px solid var(--df-border, #e2e8f0);
   background: var(--df-surface-muted);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -3052,7 +3052,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-source-aside-formats { display: flex; flex-direction: column; gap: 8px; }
 .df2-source-aside-formats-label {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -3267,7 +3267,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border-radius: 999px;
   background: var(--df-danger, #dc2626);
   color: #fff;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   display: inline-flex;
   align-items: center;
@@ -5063,7 +5063,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-theater-v3-endpoint span {
   display: block;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: var(--df-text-tertiary);
 }
 
@@ -5201,7 +5201,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-progress-ring-label small {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   color: #64748b;
   font-weight: 600;
 }
@@ -5286,7 +5286,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-theater-v3-metric span {
-  font-size: 10px !important;
+  font-size: var(--df-fs-xs) !important;
   color: #64748b;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -5322,7 +5322,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-theater-pop-strip strong {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -5377,7 +5377,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-gate8-control-totals-table thead th {
   border-top: 0;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -5479,7 +5479,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border-radius: 999px;
   background: var(--df-surface-muted);
   color: var(--df-text-secondary);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
 }
 
@@ -5722,7 +5722,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   border-radius: 999px;
   background: rgba(16, 185, 129, 0.18);
   color: #34d399;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -5877,7 +5877,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-result-proof-dl dt {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -5957,7 +5957,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-jobs-v3-failure-meta dt {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -6337,7 +6337,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-result-route .df2-result-endpoint span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
 }
 
 .df2-result-route .df2-result-endpoint strong {
@@ -6391,7 +6391,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-result-metric span {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
@@ -6445,7 +6445,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   color: #64748b;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
 }
 
 .df2-result-meta-chip strong {
@@ -7818,7 +7818,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-brand-tag {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: var(--df-text-tertiary);
   margin-top: 2px;
   white-space: nowrap;
@@ -7842,7 +7842,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-nav-group-label {
   margin: 10px 8px 6px;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -9242,7 +9242,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-conservation-ledger-count span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.04em;
   text-transform: uppercase;
   opacity: 0.75;
@@ -9959,7 +9959,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-overview-v3-score-label span {
   margin-top: 2px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   color: var(--df-text-muted, #64748b);
   text-transform: uppercase;
@@ -11104,7 +11104,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 6px var(--df-list-row-pad-x);
   border-bottom: 1px solid var(--df-border, #e2e8f0);
   background: var(--df-surface-muted);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -11660,7 +11660,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
     font-size: 11px;
   }
   .df2-page-transfer-studio .df2-vd-hero-ring-label strong small {
-    font-size: 7px;
+    font-size: var(--df-fs-xs);
   }
   .df2-page-transfer-studio .df2-vd-hero-ring-label span {
     display: none; /* READY label overflows 48px ring */
@@ -11754,7 +11754,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 
   .df2-page-transfer-studio .df2-vd-hero-ring-label strong {
-    font-size: 10px;
+    font-size: var(--df-fs-xs);
   }
 
   .df2-page-transfer-studio .df2-vd-hero-ring-label span {
@@ -12092,7 +12092,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   margin-left: auto;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
 }
 
 .df2-result-transform-detail {
@@ -12513,7 +12513,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-xform-ledger strong {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.03em;
   color: var(--df-muted, #64748b);
@@ -12579,7 +12579,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-page-jobs .df2-job-row-badge {
   max-width: 96px;
   padding: 1px 6px !important;
-  font-size: 10px !important;
+  font-size: var(--df-fs-xs) !important;
 }
 
 .df2-page-jobs .df2-job-row-bar {
@@ -12608,7 +12608,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-page-jobs .df2-jobs-v3-summary-metrics article span {
-  font-size: 9.5px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.02em;
 }
 
@@ -12661,7 +12661,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-page-jobs .df2-conservation-ledger-count span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   line-height: 1.2;
 }
 
@@ -12881,7 +12881,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   .df2-pipeline-rows-head
 ) {
   padding: 6px var(--df-list-row-pad-x);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
 }
 
 .df2-app :is(
@@ -15029,7 +15029,7 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
     width: var(--df-stepper-mobile-node);
     height: var(--df-stepper-mobile-node);
     flex: 0 0 var(--df-stepper-mobile-node);
-    font-size: 10px;
+    font-size: var(--df-fs-xs);
   }
 
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label {
@@ -15039,7 +15039,7 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
   .df2-page-transfer-studio .df2-wizard-studio .df2-wizard-label-short {
     display: inline !important;
     overflow: visible;
-    font-size: 10px;
+    font-size: var(--df-fs-xs);
     text-overflow: clip;
     white-space: nowrap;
   }

@@ -93,7 +93,7 @@
     min-width: 16px;
     height: 16px;
     padding: 0 4px;
-    font-size: 9px;
+    font-size: var(--df-fs-xs);
   }
 
   /* Compact brand: logo + expand only — taller header so the control is never clipped */
@@ -751,7 +751,7 @@ select.df2-select {
 .dt-flow-node-role {
   display: block;
   margin-top: 2px;
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
@@ -1237,7 +1237,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-workspace-switcher-label {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -1559,7 +1559,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-search-result-kind {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -1870,7 +1870,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-jobs-now > span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -2204,7 +2204,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-chunk-more {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: var(--df-text-muted, #94a3b8);
   align-self: center;
   margin-left: 4px;
@@ -2405,7 +2405,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-intelligence-stats span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.04em;
   color: var(--df-text-tertiary);
@@ -3125,7 +3125,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-structure-field-chip small {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: var(--df-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -3172,7 +3172,7 @@ textarea.df2-pilot-composer textarea {
   display: block;
   font-weight: 500;
   color: var(--df-text-tertiary);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   margin-top: 2px;
 }
 
@@ -3253,7 +3253,7 @@ textarea.df2-pilot-composer textarea {
 .df2-col-badge-new {
   display: inline-flex;
   align-items: center;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   letter-spacing: 0.02em;
   padding: 1px 6px;
@@ -3283,7 +3283,7 @@ textarea.df2-pilot-composer textarea {
   background: #f8fafc;
   color: #475569;
   border: 1px dashed #cbd5e1;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   padding: 1px 6px;
   border-radius: 4px;
@@ -3454,13 +3454,13 @@ textarea.df2-pilot-composer textarea {
   }
 
   .dt-connection-hub-node-label {
-    font-size: 10px;
+    font-size: var(--df-fs-xs);
     max-width: 72px;
   }
 
   .dt-connection-hub-center-inner {
     padding: 10px 14px;
-    font-size: 9px;
+    font-size: var(--df-fs-xs);
   }
 
   .dt-flow-node-role {
@@ -3828,7 +3828,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .dt-connection-hub-compact .dt-flow-node-role {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
 }
 
 .dt-topology-routes {
@@ -4067,7 +4067,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-overview-ring-val span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   color: #64748b;
   text-transform: uppercase;
@@ -4245,7 +4245,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-overview-conn-type {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   color: #64748b;
   text-transform: uppercase;
@@ -4863,7 +4863,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-chart-axis {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   fill: #94a3b8;
   font-weight: 600;
   font-variant-numeric: tabular-nums;
@@ -4953,7 +4953,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-flow-cluster-label {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -5074,7 +5074,7 @@ textarea.df2-pilot-composer textarea {
   box-shadow:
     0 12px 40px rgba(0, 0, 0, 0.25),
     0 0 0 1px rgba(255, 255, 255, 0.5) inset;
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: var(--df-fw-bold);
   letter-spacing: 0.12em;
   text-transform: uppercase;
@@ -5200,7 +5200,7 @@ textarea.df2-pilot-composer textarea {
   justify-self: center;
   padding: 3px 10px;
   border-radius: 999px;
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -5363,7 +5363,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-chart-label {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   fill: #94a3b8;
   font-weight: 600;
 }
@@ -5396,7 +5396,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 .df2-donut-lbl {
-  font-size: 8px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   fill: #94a3b8;
   text-transform: uppercase;
