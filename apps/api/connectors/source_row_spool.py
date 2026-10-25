@@ -118,6 +118,9 @@ class SourceRowSpool:
         self.spill_max_size = max(1, int(spill_max_size))
         self.headers: list[str] = []
         self.row_count = 0
+        # Pre-expand input rows; ``row_count - unexpanded_row_count`` is the
+        # STRUCT explode delta Gate-8 needs. ``append_row`` keeps it in parity.
+        self.unexpanded_row_count = 0
         self.size = 0
         self.spilled = False
         self._spool = tempfile.SpooledTemporaryFile(
@@ -133,10 +136,23 @@ class SourceRowSpool:
     ) -> None:
         from services.json_intelligence import iter_struct_materialized_rows
 
-        header_list, row_iter = iter_struct_materialized_rows(headers, rows, mappings)
+        consumed = {"n": 0}
+
+        def _counted() -> Iterator[list[Any]]:
+            for row in rows:
+                consumed["n"] += 1
+                yield row
+
+        header_list, row_iter = iter_struct_materialized_rows(
+            headers, _counted(), mappings
+        )
         self.headers = list(header_list)
         for row in row_iter:
             self.append_row(row)
+        # Input rows the materializer consumed (pre-expand). Gate-8 derives
+        # ``rows_expanded`` as ``row_count - unexpanded_row_count``; for
+        # non-explode matrices the two are equal and the delta stays zero.
+        self.unexpanded_row_count = consumed["n"]
 
     def append_row(self, row: list[Any]) -> None:
         """Write one matrix row. Keys-only census uses this without STRUCT explode."""
@@ -153,6 +169,7 @@ class SourceRowSpool:
         )
         self._spool.write(b"\n")
         self.row_count += 1
+        self.unexpanded_row_count += 1
         self.size = int(self._spool.tell())
         self.spilled = self.size > self.spill_max_size
 

@@ -55,7 +55,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-pipeline-node-stack {
@@ -134,7 +134,7 @@
 
 .df2-pipeline-muted {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-style: italic;
 }
 
@@ -149,7 +149,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-pipeline-route-list {

@@ -158,7 +158,7 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
     meta = getattr(result, "meta", None)
     if isinstance(meta, dict) and meta:
         # Promote Gate-8 sample / identity stamps into destination_summary.
-        for key in ("reconcile_sample", "written_ids", "source_row_count"):
+        for key in ("reconcile_sample", "written_ids", "source_row_count", "rows_expanded"):
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]
     return out
@@ -1440,6 +1440,15 @@ def write_destination_database(
             "source_row_count": spill.source_row_count,
             "unexpanded_row_count": spill.unexpanded_row_count,
         }
+        # STRUCT explode expands the matrix inside the spool: source_row_count
+        # is the expanded population, unexpanded is what the reader fetched.
+        # Gate-8 expected = source - filtered + expanded; without this stamp
+        # every exploded row reads as an unexplained extra on the target.
+        _expanded = int(spill.source_row_count or 0) - int(
+            spill.unexpanded_row_count or 0
+        )
+        if _expanded > 0:
+            summary["rows_expanded"] = _expanded
         if retain_engine_spill:
             summary[ENGINE_SPILL_SUMMARY_KEY] = spill
         else:

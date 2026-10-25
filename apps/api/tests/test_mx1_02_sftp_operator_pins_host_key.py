@@ -9,6 +9,7 @@ connector only. Live against atmoz/sftp on 127.0.0.1:2222.
 from __future__ import annotations
 
 import inspect
+import os
 import re
 import socket
 
@@ -21,13 +22,30 @@ from src.ai.copilot.lifecycle_tools import (
 from src.ai.copilot.tools import TOOL_DEFINITIONS, DataPilotTools
 from src.transfer.connector_registry import run_probe
 
-_CFG = {"type": "sftp", "host": "127.0.0.1", "port": 2222, "username": "df", "password": "df",
-        "database": "/upload", "connection_string": "", "ssl": False}
+
+@pytest.fixture(autouse=True)
+def _egress_hermetic(monkeypatch):
+    """``sftp.example.com`` fixtures resolve to TEST-NET-1 (198.18.0.0/15) on
+    this box, which the egress guard refuses without an explicit allowlist.
+    Pin the range here so the tests are hermetic wherever they run."""
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "198.18.0.0/15")
+
+
+# Live pin-connect creds match the qa-sftp container by default and are
+# overridable per box (DATAFLOW_TEST_SFTP_*).
+_SFTP_HOST = os.environ.get("DATAFLOW_TEST_SFTP_HOST", "127.0.0.1")
+_SFTP_PORT = int(os.environ.get("DATAFLOW_TEST_SFTP_PORT", "2222"))
+_SFTP_USER = os.environ.get("DATAFLOW_TEST_SFTP_USER", "dataflow")
+_SFTP_PASSWORD = os.environ.get("DATAFLOW_TEST_SFTP_PASSWORD", "dataflow")
+_SFTP_PATH = os.environ.get("DATAFLOW_TEST_SFTP_PATH", "uploads")
+
+_CFG = {"type": "sftp", "host": _SFTP_HOST, "port": _SFTP_PORT, "username": _SFTP_USER,
+        "password": _SFTP_PASSWORD, "database": _SFTP_PATH, "connection_string": "", "ssl": False}
 
 
 def _up() -> bool:
     try:
-        socket.create_connection(("127.0.0.1", 2222), timeout=1).close()
+        socket.create_connection((_SFTP_HOST, _SFTP_PORT), timeout=1).close()
         return True
     except OSError:
         return False
@@ -69,6 +87,12 @@ def test_untrusted_host_names_fingerprint_and_operator_pin_then_pin_connects(mon
     m = re.search(r"host_key=(SHA256:[A-Za-z0-9+/=]+)", msg)
     assert m, msg
     ok, msg = run_probe("sftp", {**_CFG, "host_key": m.group(1)})
+    if not ok and re.search(r"auth|permission denied|password", msg, re.I):
+        pytest.skip(
+            "SFTP login refused — set DATAFLOW_TEST_SFTP_USER / "
+            "DATAFLOW_TEST_SFTP_PASSWORD / DATAFLOW_TEST_SFTP_PATH to the "
+            f"container's credentials (tried {_SFTP_USER}@{_SFTP_HOST}:{_SFTP_PORT} {_SFTP_PATH}): {msg}"
+        )
     assert ok, msg
     ok, msg = run_probe("sftp", {**_CFG, "host_key": "ssh-ed25519 SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"})
     assert not ok

@@ -13,7 +13,7 @@ import { WizardSteps } from "../components/ui/WizardSteps";
 import { ButtonLoader, LoadingBlock, Spinner } from "../components/LoadingState";
 import { useToast } from "../components/Toast";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
-import { MAPPING_TIMEOUT_MS, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
+import { MAPPING_TIMEOUT_MS, mappingErrorSummary, mappingTimeoutCopy, withEgressHint } from "../lib/mappingError";
 import { countGateStatuses } from "../lib/preflightGates";
 import { PermissionNotice } from "../components/PermissionNotice";
 import { TransferMapStep } from "./transfer/TransferMapStep";
@@ -3743,9 +3743,12 @@ export function TransferPage({
           loadedSchemaMessage || "Retry mapping, or go back and confirm the destination table schema is reachable."
         );
         setMappingError(detail);
+        // D-BP-16: the full refusal renders inline on the step (with a
+        // collapsible Details block) — the toast stays a short pointer, not a
+        // second copy of the same ~80-word message.
         toast({
           title: "Mappings did not load",
-          message: detail,
+          message: "See the error on the Map step.",
           tone: "warning",
         });
       }
@@ -3753,7 +3756,7 @@ export function TransferPage({
       const message = e instanceof Error ? e.message : "Could not prepare column mappings.";
       const detail = hintEgress(message);
       setMappingError(detail);
-      toast({ title: "Mapping setup failed", message: detail, tone: "error" });
+      toast({ title: "Mapping setup failed", message: "See the error on the Map step.", tone: "error" });
       console.error(e);
     } finally {
       setAnalyzing(false);
@@ -6450,43 +6453,34 @@ export function TransferPage({
         <div className="df2-transfer-studio-chrome-row">
         <WizardSteps
           variant="studio"
-          steps={studioFlags.canvas ? [
-            { n: STEP_SOURCE, label: "Connect", shortLabel: "Connect", icon: "upload" },
-            { n: STEP_MAP, label: "Review", shortLabel: "Review", icon: "sparkle" },
-            { n: STEP_RUN, label: "Run", shortLabel: "Run", icon: "transfer" },
-          ] : STEPS}
-          current={studioFlags.canvas
-            ? (step <= STEP_SHAPE ? STEP_SOURCE : step === STEP_VALIDATE ? STEP_MAP : step)
-            : step}
+          // P1-3: canvas mode shows the same six-step flow with the same
+          // separators — the mandated Source→Destination→Transform→Map→
+          // Validate→Run sequence is the product's contract, not a mode.
+          steps={STEPS}
+          current={step}
           onStepClick={(n) => {
             if (!studioFlags.canvas) {
               setStep(n);
               return;
             }
-            if (n === STEP_SOURCE) setStep(STEP_SOURCE);
-            else if (n === STEP_MAP) {
-              if (columnMappings.length) {
-                setStep(STEP_MAP);
-                void executePreflight(undefined, undefined, { stayOnReview: true });
-              } else {
-                void goToMapping();
-              }
-            } else if (n === STEP_RUN) setStep(STEP_RUN);
-          }}
-          canGoTo={(n) => {
-            if (!studioFlags.canvas) {
-              return n < step ||
-                n === STEP_SOURCE ||
-                (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
-                (n === STEP_SHAPE && canRunPreflight) ||
-                (n === STEP_MAP && canRunPreflight) ||
-                (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
-                (n === STEP_RUN && canExecute);
+            if (n === STEP_MAP && columnMappings.length) {
+              setStep(STEP_MAP);
+              void executePreflight(undefined, undefined, { stayOnReview: true });
+            } else if (n === STEP_MAP) {
+              void goToMapping();
+            } else {
+              setStep(n);
             }
-            return n === STEP_SOURCE
-              || (n === STEP_MAP && canRunPreflight)
-              || (n === STEP_RUN && canExecute);
           }}
+          canGoTo={(n) =>
+            n < step ||
+            n === STEP_SOURCE ||
+            (n === STEP_DESTINATION && canConfigureDest && !sourceIntrospecting) ||
+            (n === STEP_SHAPE && canRunPreflight) ||
+            (n === STEP_MAP && canRunPreflight) ||
+            (n === STEP_VALIDATE && canRunPreflight && columnMappings.length > 0) ||
+            (n === STEP_RUN && canExecute)
+          }
         />
         <TransferRouteBar
           sourceLabel={sourceLabel}
@@ -6500,6 +6494,9 @@ export function TransferPage({
           rowCount={parsed?.row_count ?? sourceRowEstimate ?? undefined}
           live={routeBarLiveWhileWriting(transferring)}
         />
+        {/* D-BP-20: toasts dock into the header chrome as compact pills —
+            never over content, no permanent lane, no reflow. */}
+        <div className="df2-toast-dock" data-df2-toast-dock />
         </div>
       </header>
 
@@ -6631,10 +6628,10 @@ export function TransferPage({
       {(step === STEP_MAP || (studioFlags.canvas && step === STEP_VALIDATE)) && !analyzing && columnMappings.length === 0 && (
         <div className="df2-transfer-step-panel">
           <EmptyState
-            icon="sparkle"
-            title="Preparing column mappings"
+            icon={mappingError ? "warning" : "sparkle"}
+            title={mappingError ? "Couldn't load column mappings" : "Preparing column mappings"}
             description={mappingError
-              ? mappingError
+              ? mappingErrorSummary(mappingError)
               : analysis?.columns.length
               ? "Analysis finished but mappings did not load — retry to map source columns to your destination."
               : "Configure your destination first, then we will fetch the existing schema and map source columns intelligently."}
@@ -6648,6 +6645,12 @@ export function TransferPage({
               </button>
             }
           />
+          {mappingError && (
+            <details className="df2-map-error-details">
+              <summary>Details</summary>
+              <p>{mappingError}</p>
+            </details>
+          )}
         </div>
       )}
 

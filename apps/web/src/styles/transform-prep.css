@@ -100,7 +100,7 @@
   margin-left: 8px;
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
 }
 
 .df2-tab.active .df2-xform-pane-count,
@@ -1702,7 +1702,7 @@
   font-weight: 600;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
 }
 .df2-rule-ledger-unused {
   margin: 8px 0 0;

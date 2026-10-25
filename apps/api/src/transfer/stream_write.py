@@ -45,6 +45,13 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
         for key in ("vector_docs_unchanged_skipped", "vector_docs_embedded"):
             if isinstance(meta.get(key), (int, float)):
                 out[key] = int(meta[key])
+        # Gate-8 identity/expansion stamps from the writer — adapters parity.
+        # ``rows_expanded`` is the STRUCT explode delta (spool out minus the
+        # rows the reader fetched); without it Gate-8 reads exploded rows as
+        # unexplained extras on the target (X-30).
+        for key in ("reconcile_sample", "written_ids", "source_row_count", "rows_expanded"):
+            if key in meta and meta[key] is not None:
+                out[key] = meta[key]
     if isinstance(meta, dict) and isinstance(meta.get("embedding_usage"), dict):
         out["embedding_usage"] = dict(meta["embedding_usage"])
     return out

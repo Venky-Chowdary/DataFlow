@@ -354,7 +354,7 @@
   font-weight: 700;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
   padding: 0 8px;
 }
 
@@ -387,7 +387,7 @@
 }
 
 .df2-page-docs .df2-docs-toc-item .dt-nav-icon {
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
   transition: color 140ms ease;
 }
 
@@ -507,7 +507,7 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
 }
 
 .df2-page-docs .df2-docs-arch-plane-tag.is-data {
@@ -560,7 +560,7 @@
 .df2-page-docs .df2-docs-arch-footnote {
   font-size: 12px;
   font-weight: 600;
-  fill: var(--df-text-tertiary, #94a3b8);
+  fill: var(--df-text-tertiary);
   letter-spacing: -0.01em;
 }
 
@@ -701,7 +701,7 @@
   border-radius: 6px;
   border: 1px solid #e2e8f0;
   background: #f8fafc;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-search-results {
@@ -1070,7 +1070,7 @@
 
 .docs-cta-band p {
   margin: 0;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-cta-actions {
@@ -1132,7 +1132,7 @@
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-sidebar-group ul {
@@ -1176,7 +1176,7 @@
   align-items: center;
   margin-bottom: 18px;
   font-size: 13px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-breadcrumb button {
@@ -1233,7 +1233,7 @@
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-toc ul {
@@ -1532,7 +1532,7 @@
 .docs-sidebar-brand span {
   display: block;
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-sidebar-home.is-active {
@@ -1642,7 +1642,7 @@
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-space-tree-group ul {
@@ -1687,7 +1687,7 @@
 .docs-space-tree-group button em {
   font-style: normal;
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-toc--inline {
@@ -1703,7 +1703,7 @@
   font-size: 11px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .docs-toc--inline ul {

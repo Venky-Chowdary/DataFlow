@@ -393,7 +393,7 @@
   flex-direction: column;
   padding: 10px 0;
   background: #152033;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font: 12px/20px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   text-align: right;
   user-select: none;
@@ -1414,7 +1414,7 @@
   flex: 0 0 12px;
   width: 12px;
   height: 18px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 .df2-route-bar-arrow svg {
   display: block;
@@ -1851,7 +1851,7 @@ button.df2-map-band-chip:hover {
   margin-left: auto;
   font-size: 11px;
   font-weight: 500;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-map-visual-drawer-body {
@@ -2142,15 +2142,24 @@ button.df2-map-band-chip:hover {
   }
 }
 
-/* Viewport fallback when container queries unsupported / very narrow */
+/* Viewport fallback when container queries unsupported / very narrow.
+   display:flex is required — the base row is display:grid, which silently
+   ignores flex-direction and left the wizard squeezed into the `auto`
+   track at 150px (labels overlapping) at <=1280 (D-BP-23). */
 @media (max-width: 1280px) {
-  .df2-transfer-studio-chrome-row {
+  .df2-page-transfer-studio .df2-transfer-studio-chrome-row {
+    /* Specificity (0,2,0) beats the bare display:grid bases in
+       enterprise-ui — the row stacks as a flex column (D-BP-23). */
+    display: flex;
     flex-direction: column;
     align-items: stretch;
     gap: 6px;
   }
 
-  .df2-transfer-studio-chrome .df2-route-bar {
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar {
+    /* (0,4,0) — enterprise-ui's 768–1279 rules cap the bar at 150px with
+       (0,3,0) in a later-loaded file; the names ellipsized to "sam… → JS…"
+       (D-BP-25). Full width in the stacked column. */
     max-width: none;
     width: 100%;
     flex: 0 0 auto;
@@ -2158,6 +2167,46 @@ button.df2-map-band-chip:hover {
 
   .df2-transfer-studio-chrome .df2-wizard-studio {
     max-width: none;
+  }
+
+  /* D-BP-25: with the bar full-width in the stacked column, the per-name
+     caps (min(200px,28vw) / 220px flex basis) only exist to ellipsize —
+     drop them so the real source/destination names render in full. */
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-label {
+    max-width: none;
+  }
+}
+
+/* D-BP-25: above the stack breakpoint the chip must still show full endpoint
+   names — enterprise-ui.css (later in cascade) caps the bar at
+   flex-basis 220px / max-width 240px globally, ellipsizing ~110px names.
+   (0,4,0) restores a size-to-content bar with a sane outer cap. */
+@media (min-width: 1281px) {
+  /* shrink OTHER chrome first (D-BP-25): the wizard column takes the deficit
+     and its track wraps; the route-bar column sizes to content. */
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row {
+    grid-template-columns: minmax(0, 1fr) max-content;
+  }
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-wizard-studio .df2-wizard-track {
+    flex-wrap: wrap;
+    overflow: visible;
+  }
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar {
+    flex: 0 0 auto;
+    /* the bar sits in a grid track ~230px wide at this range; width:max-content
+       makes it take its content width (overflowing a smaller track) instead
+       of shrinking to the track and ellipsizing the endpoint names. */
+    width: max-content;
+    max-width: 560px;
+    overflow: visible;
+  }
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-label {
+    max-width: none;
+  }
+  /* endpoints were flex:1 1 0% — the bar's intrinsic width collapsed to
+     ~min-content; size each endpoint to its content so the bar can grow. */
+  .df2-page-transfer-studio .df2-transfer-studio-chrome .df2-transfer-studio-chrome-row .df2-route-bar-endpoint {
+    flex: 0 1 auto;
   }
 }
 
@@ -3062,6 +3111,19 @@ th.df2-type-string .df2-type-badge {
   white-space: nowrap;
 }
 
+/* D-BP-26: below ~1100px the nowrap footer cannot hold every status span —
+   ellipsizing mid-word reads as broken ("Validat…", "…uniquene…"). Keep the
+   primary status (first span: "Validate <state>" / "Route …" / map status)
+   and drop the secondary detail/blocker spans — the full text remains in
+   the status span's title and in the card content above. */
+@media (max-width: 1100px) {
+  .df2-page-transfer-studio .df2-map-footer-status > span:not(:first-child),
+  .df2-page-transfer-studio .df2-validate-footer-status > span:not(:first-child),
+  .df2-page-transfer-studio .df2-run-footer-status > span:not(:first-child) {
+    display: none;
+  }
+}
+
 /* Narrow / short viewports ? keep footer one compact band */
 @media (max-width: 960px), (max-height: 720px) {
   .df2-page-transfer-studio .df2-transfer-step-viewport > .df2-card-footer.df2-wizard-footer,
@@ -3522,7 +3584,7 @@ th.df2-type-string .df2-type-badge {
   max-width: 100%;
   overflow: hidden;
   box-sizing: border-box;
-  border: 1px solid var(--df-border);
+  border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: var(--df-surface);
   cursor: pointer;
@@ -3621,7 +3683,7 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-dest-step .df2-plan-callout-more {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-style: italic;
   list-style: none;
   margin-left: -16px;
@@ -4836,7 +4898,7 @@ th.df2-type-string .df2-type-badge {
   border: 1px solid #e2e8f0;
   border-radius: var(--df-radius-md, 8px);
   background: var(--df-surface);
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   box-sizing: border-box;
 }
 
@@ -4851,7 +4913,7 @@ th.df2-type-string .df2-type-badge {
 }
 
 .df2-dest-engine-search input::placeholder {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-dest-engine-hint {
@@ -6052,7 +6114,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-theater-v3-log-empty {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   padding: 8px 0;
   font-style: italic;
 }
@@ -6076,7 +6138,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-theater-v3-log-head span {
   font-size: 10px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 @keyframes df2-theater-live-pulse {
@@ -6209,7 +6271,7 @@ th.df2-type-string .df2-type-badge {
   font-size: 11px;
   font-weight: 600;
   border: 1px solid #e2e8f0;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   background: var(--df-surface);
 }
 
@@ -6279,7 +6341,7 @@ th.df2-type-string .df2-type-badge {
   border: 1px solid #e2e8f0;
   border-radius: 8px;
   background: var(--df-navy-900);
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 11px;
   font-family: ui-monospace, monospace;
 }
@@ -6413,7 +6475,7 @@ th.df2-type-string .df2-type-badge {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-source-aside-sample .df2-structure-preview {
@@ -6520,7 +6582,7 @@ th.df2-type-string .df2-type-badge {
 .df2-source-aside-more {
   margin: 0;
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: center;
 }
 
@@ -6619,7 +6681,7 @@ th.df2-type-string .df2-type-badge {
 .df2-structure-field-strip .df2-type-badge {
   background: transparent !important;
   border: none !important;
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
   padding: 0 !important;
   font-size: 9.5px !important;
   letter-spacing: 0.03em;
@@ -6814,7 +6876,7 @@ th.df2-type-string .df2-type-badge {
   font-size: 10px;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 .df2-theater-v3-endpoint-copy strong {
   display: block;
@@ -6942,8 +7004,8 @@ th.df2-type-string .df2-type-badge {
   box-shadow: 0 -2px 12px rgba(15, 23, 42, 0.08);
 }
 .df2-theater-v3-log-section:has(.df2-live-log.is-collapsed) {
-  flex: 0 0 auto !important;
-  min-height: 0 !important;
+  flex: 0 0 auto;
+  min-height: 0;
 }
 .df2-live-log.is-jobs {
   min-height: 280px;
@@ -6997,7 +7059,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-live-log-head span {
   font-size: 10px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-variant-numeric: tabular-nums;
 }
 .df2-live-log-toggle {
@@ -7031,7 +7093,7 @@ th.df2-type-string .df2-type-badge {
   border: 0;
   border-top: 1px solid rgba(148, 163, 184, 0.18);
   background: linear-gradient(180deg, #111827 0%, #0b1220 100%);
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: left;
   padding: 10px 12px 12px;
   font-size: 11px;
@@ -7093,7 +7155,7 @@ th.df2-type-string .df2-type-badge {
 
 .df2-live-log-empty {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   padding: 12px 0;
   font-style: italic;
 }
@@ -7158,7 +7220,7 @@ th.df2-type-string .df2-type-badge {
 .df2-theater-v3-log-dot { color: #34d399; }
 .df2-theater-v3-log-empty {
   font-size: 12px;
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
   padding: 8px 0;
   font-style: italic;
 }
@@ -7180,7 +7242,7 @@ th.df2-type-string .df2-type-badge {
 }
 .df2-theater-v3-log-head span {
   font-size: 10px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-theater-v3-alert.warn {
@@ -7201,35 +7263,35 @@ th.df2-type-string .df2-type-badge {
 /* VALIDATE ? Proof + rules dashboard (scroll chain must not trap) */
 .df2-content-studio:has(.is-validate-step),
 .df2-content-studio:has(.df2-validate-dashboard-host) {
-  min-height: 0 !important;
-  overflow: hidden !important;
-  display: flex !important;
-  flex-direction: column !important;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .df2-content-studio:has(.is-validate-step) > .df2-screen-panel,
 .df2-content-studio:has(.df2-validate-dashboard-host) > .df2-screen-panel {
-  flex: 1 1 0 !important;
-  min-height: 0 !important;
-  overflow: hidden !important;
-  display: flex !important;
-  flex-direction: column !important;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .df2-content-studio:has(.is-validate-step) .df2-page-transfer-studio,
 .df2-content-studio:has(.df2-validate-dashboard-host) .df2-page-transfer-studio {
-  flex: 1 1 0 !important;
-  min-height: 0 !important;
-  max-height: 100% !important;
-  overflow: hidden !important;
-  display: flex !important;
-  flex-direction: column !important;
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: 100%;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .df2-content-studio:has(.is-validate-step) .df2-transfer-studio-shell,
 .df2-content-studio:has(.df2-validate-dashboard-host) .df2-transfer-studio-shell {
-  flex: 1 1 0 !important;
-  min-height: 0 !important;
-  overflow: hidden !important;
-  display: flex !important;
-  flex-direction: column !important;
+  flex: 1 1 0;
+  min-height: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 .df2-transfer-studio-body.is-validate-step {
   display: grid !important;
@@ -7238,6 +7300,27 @@ th.df2-type-string .df2-type-badge {
   min-height: 0 !important;
   overflow: hidden !important;
   align-items: stretch !important;
+}
+.df2-transfer-studio-body.is-validate-step .df2-transfer-main-panel {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+  overflow: hidden !important;
+  display: flex !important;
+  flex-direction: column !important;
+}
+.df2-transfer-step-viewport.df2-validate-dashboard-host,
+.df2-transfer-step-viewport.df2-validate-split,
+.df2-validate-dashboard-host {
+  flex: 1 1 0 !important;
+  min-height: 0 !important;
+  max-height: 100% !important;
+  height: 100% !important;
+  overflow-x: hidden !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+  padding: 0 !important;
 }
 .df2-vd {
   display: flex;
@@ -7250,6 +7333,14 @@ th.df2-type-string .df2-type-badge {
   min-height: min-content;
   overflow: visible;
 }
+.df2-transfer-studio-body.is-validate-step .df2-validate-rail {
+  min-height: 0 !important;
+  max-height: 100% !important;
+  overflow-y: auto !important;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
 /* Remediation audit ? what AI / operator fixed */
 .df2-vd-remediation-log {
   margin: 0 0 14px;
@@ -7506,7 +7597,7 @@ th.df2-type-string .df2-type-badge {
   font-size: 8px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   margin-top: 1px;
   max-width: 100%;
   overflow: hidden;
@@ -8010,7 +8101,7 @@ th.df2-type-string .df2-type-badge {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-vd-map-proof-kpis strong {
@@ -8079,7 +8170,7 @@ th.df2-type-string .df2-type-badge {
   font-weight: 700;
   color: var(--df-text-primary);
 }
-.df2-vd-ring-val small { font-size: 9px; color: #94a3b8; }
+.df2-vd-ring-val small { font-size: 9px; color: var(--df-text-tertiary); }
 .df2-vd-ring-copy { min-width: 0; }
 .df2-vd-ring-copy strong {
   display: block;
@@ -8089,7 +8180,7 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-ring-copy span {
   display: block;
   font-size: 11.5px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 /* Nine rules as tabs. Long and short proofs share one panel, so a short gate
@@ -9624,7 +9715,7 @@ button.df2-vd-assist-toggle:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.df2-vd-muted { color: #94a3b8; }
+.df2-vd-muted { color: var(--df-text-tertiary); }
 
 .df2-result-section-label {
   display: none;
@@ -9727,7 +9818,7 @@ button.df2-vd-assist-toggle:focus-visible {
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 .df2-vd-chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
 .df2-vd-chip {
@@ -9801,7 +9892,7 @@ button.df2-vd-assist-toggle:focus-visible {
   font-size: 11px;
   letter-spacing: 0.02em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   border-bottom: 1px solid #e2e8f0;
   white-space: nowrap;
 }
@@ -9823,11 +9914,11 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-vd-coerce-row.sev-warn { background: var(--df-warning-bg); }
 .df2-vd-coerce-row.sev-warn:hover { background: var(--df-warning-bg); }
 .df2-vd-coerce-row.is-open { background: var(--df-brand-muted); }
-.df2-vd-coerce-caret { width: 28px; color: #94a3b8; }
+.df2-vd-coerce-caret { width: 28px; color: var(--df-text-tertiary); }
 .df2-vd-coerce-caret .dt-nav-icon { display: inline-flex; }
 .df2-vd-coerce-col { display: flex; flex-direction: column; gap: 1px; }
 .df2-vd-coerce-col strong { font-size: 12.5px; color: var(--df-text-primary); }
-.df2-vd-coerce-col span { font-size: 11px; color: #94a3b8; }
+.df2-vd-coerce-col span { font-size: 11px; color: var(--df-text-tertiary); }
 .df2-vd-coerce-types {
   display: flex;
   align-items: center;
@@ -9841,7 +9932,7 @@ button.df2-vd-assist-toggle:focus-visible {
   color: var(--df-text-secondary);
   font-size: 11.5px;
 }
-.df2-vd-coerce-types .dt-nav-icon { display: inline-flex; color: #94a3b8; }
+.df2-vd-coerce-types .dt-nav-icon { display: inline-flex; color: var(--df-text-tertiary); }
 
 .df2-vd-sev {
   display: inline-flex;
@@ -9888,7 +9979,7 @@ button.df2-vd-assist-toggle:focus-visible {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   background: var(--df-surface-muted);
   border-bottom: 1px solid #e2e8f0;
 }
@@ -9984,11 +10075,7 @@ button.df2-vd-assist-toggle:focus-visible {
   overflow: hidden !important;
 }
 
-/* Validate step layout — canonical rule (earlier copies consolidated here:
- * flex/height/align-self kept; !important retained where enterprise-ui
- * flatteners declare the same properties with !important). */
 .df2-transfer-studio-body.is-validate-step .df2-transfer-main-panel {
-  flex: 1 1 0 !important;
   min-height: 0 !important;
   max-height: 100% !important;
   height: 100% !important;
@@ -10004,13 +10091,12 @@ button.df2-vd-assist-toggle:focus-visible {
   height: 100% !important;
   align-self: stretch;
   overflow-x: hidden;
-  overflow-y: auto !important;
+  overflow-y: auto;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
 }
 
 .df2-transfer-step-viewport.df2-validate-dashboard-host,
-.df2-transfer-step-viewport.df2-validate-split,
 .df2-validate-dashboard-host {
   flex: 1 1 0 !important;
   min-height: 0 !important;
@@ -10020,7 +10106,6 @@ button.df2-vd-assist-toggle:focus-visible {
   overflow-x: hidden !important;
   overscroll-behavior: contain;
   -webkit-overflow-scrolling: touch;
-  padding: 0 !important;
 }
 
 /* Multi-load history (Validate + Run remediation) */
@@ -10259,13 +10344,13 @@ button.df2-vd-assist-toggle:focus-visible {
   color: #64748b;
 }
 .df2-vd-explain-gate.is-muted {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-weight: 500;
 }
 .df2-vd-explain-gate code {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 10px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   background: var(--df-surface-muted);
   padding: 1px 5px;
   border-radius: 4px;
@@ -10348,7 +10433,7 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-notify-channel {
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 .df2-notify-strip.is-compact .df2-notify-strip-item {
   grid-template-columns: 72px 1fr;
@@ -10440,21 +10525,138 @@ button.df2-vd-assist-toggle:focus-visible {
   line-height: 1.3;
 }
 
-/* Footer wraps to ~two rows at ≤1440 (status + actions) — 84px clears the
-   tallest wizard footer; the scroll body pads below so the last content row
-   (contract search/select) is never painted under a toast (D-BP-11). */
-body:has(.df2-page-transfer-studio .df2-transfer-step-panel) .dt-toast-host {
-  bottom: calc(84px + env(safe-area-inset-bottom, 0px)) !important;
+/* D-BP-20: toasts dock into the header chrome as compact pills — the
+   provider portals .dt-toast-host into [data-df2-toast-dock] when present.
+   No floating overlay: content keeps the full width aligned to the stepper,
+   nothing sits under a toast, and show/dismiss cannot reflow the page. */
+.df2-toast-dock {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+  max-width: min(560px, 44vw);
+  overflow: hidden;
+}
+.df2-toast-dock .dt-toast-host {
+  position: static;
+  display: flex;
+  flex-direction: row;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: 6px;
+  align-items: center;
+  width: auto;
+  max-width: 100%;
+  max-height: none;
+  overflow: hidden;
+  pointer-events: auto;
+}
+.df2-toast-dock .dt-toast {
+  position: relative;
+  width: auto;
+  min-width: 0;
+  max-width: min(300px, 100%);
+  flex-shrink: 0;
+  padding: 5px 8px;
+  border-radius: 8px;
+  gap: 6px;
+}
+.df2-toast-dock .dt-toast-body {
+  min-width: 0;
+  overflow: hidden;
+}
+.df2-toast-dock .dt-toast-title,
+.df2-toast-dock .dt-toast-message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: block;
+}
+.df2-toast-dock .dt-toast-message {
+  max-width: 220px;
+  font-size: 11px;
+}
+/* At <=1280 the chrome stacks as a flex column (D-BP-23); the dock becomes
+   a full-width in-flow row of that column — a reserved lane inside the
+   header band. An absolute overlay strip used to cover the content below
+   (D-BP-24); in-flow it covers nothing and overlaps nothing. */
+@media (max-width: 1280px) {
+  .df2-page-transfer-studio .df2-toast-dock {
+    margin-left: 0;
+    width: 100%;
+    max-width: none;
+  }
+  .df2-page-transfer-studio .df2-toast-dock:has(.dt-toast) {
+    display: flex;
+    justify-content: flex-end;
+  }
+}
+
+/* D-BP-21 continued: generic wizard footers (hint + primary) keep one row
+   too — the hint may truncate, the row may not wrap. */
+.df2-page-transfer-studio .df2-wizard-footer {
+  flex-wrap: nowrap;
+}
+.df2-page-transfer-studio .df2-wizard-footer > .df2-label-hint,
+.df2-page-transfer-studio .df2-run-footer-status {
+  min-width: 0;
+  overflow: hidden;
+}
+@media (max-width: 900px) {
+  .df2-page-transfer-studio .df2-wizard-footer {
+    flex-wrap: wrap;
+  }
 }
 
 .df2-page-transfer-studio .df2-transfer-step-viewport {
   scroll-padding-bottom: 110px;
 }
 
+/* D-BP-18: the actual scroller is .df2-validate-scroll (overflow-y:auto),
+   not the viewport — scroll-padding on the viewport was dead code and the
+   Column matches card could rest cropped against the contract rail. The
+   padding keeps the last card fully above the rail boundary. Residual: a
+   clear scroll-edge separator (border + elevation) on the rail and a
+   deliberate fade so a partially-scrolled card never looks sliced. */
+.df2-page-transfer-studio .df2-validate-scroll,
+.df2-page-transfer-studio .df2-card-body.df2-validate-body {
+  scroll-padding-bottom: 160px;
+  padding-bottom: 16px;
+  /* Residual: the metric cards were still sliced crisp under the contract
+     rail — the fade must be tall enough to swallow a half-scrolled card
+     (was 24px, invisible) and must live on the element that actually
+     scrolls (.df2-validate-body — .df2-validate-scroll does not exist in
+     this DOM). */
+  -webkit-mask-image: linear-gradient(to bottom, #000 calc(100% - 64px), transparent 100%);
+  mask-image: linear-gradient(to bottom, #000 calc(100% - 64px), transparent 100%);
+}
+.df2-page-transfer-studio .df2-validate-footer-contract {
+  border-top: 1px solid var(--df-border);
+  box-shadow: 0 -10px 18px -12px rgba(15, 23, 42, 0.22);
+  background: var(--df-surface);
+  position: relative;
+  z-index: 2;
+}
+
+/* D-BP-22: one gutter token for the Validate column — scroller, contract
+   rail, and action footer share the same horizontal inset so their left
+   edges line up with the cards above them. */
+.df2-page-transfer-studio {
+  --df-studio-gutter: 16px;
+}
+.df2-page-transfer-studio .df2-validate-scroll,
+.df2-page-transfer-studio .df2-card-body.df2-validate-body,
+.df2-page-transfer-studio .df2-validate-footer-cdc,
+.df2-page-transfer-studio .df2-validate-footer-contract,
+.df2-page-transfer-studio .df2-validate-footer {
+  padding-left: var(--df-studio-gutter);
+  padding-right: var(--df-studio-gutter);
+}
+
 /* Transform's sticky footer is taller than the shared 60px clearance, and a
    success toast was painting over Review result and the sample. */
 body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
-  bottom: calc(104px + env(safe-area-inset-bottom, 0px)) !important;
+  bottom: calc(104px + env(safe-area-inset-bottom, 0px));
   max-height: min(240px, 32vh);
 }
 
@@ -10521,7 +10723,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 .df2-structure-field-summary span {
   font-size: 11px;
   font-weight: 500;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-structure-field-block:not([open]) .df2-structure-field-strip {
@@ -10669,8 +10871,8 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 
 .df2-page-transfer-studio .df2-source-ocr-toggle,
 .df2-page-transfer-studio label:has(> input[type="checkbox"]) {
-  min-height: 28px !important;
-  margin: 0 0 4px !important;
+  min-height: 28px;
+  margin: 0 0 4px;
   gap: 6px;
 }
 
@@ -11323,14 +11525,14 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 .df2-page-transfer-studio .df2-dest-connector-card-meta {
   font-size: 11px !important;
   font-weight: 500 !important;
-  color: var(--df-text-tertiary) !important;
+  color: #64748b !important;
 }
 
 .df2-page-transfer-studio .df2-dest-connector-card-status {
   font-size: 10px !important;
   font-weight: 700 !important;
   text-transform: uppercase !important;
-  color: var(--df-success) !important;
+  color: #059669 !important;
 }
 
 .df2-page-transfer-studio .df2-dest-picker-empty {
@@ -11510,7 +11712,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   border: 0 !important;
   border-radius: var(--df-radius-sm, 6px) !important;
   background: transparent !important;
-  color: #94a3b8 !important;
+  color: var(--df-text-tertiary) !important;
   cursor: pointer !important;
 }
 
@@ -11792,11 +11994,49 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-card-footer.df2-wizard-footer,
 .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-wizard-footer,
 .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer.df2-wizard-footer,
-.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer,
-.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-footer {
+.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer {
   max-height: none !important;
-  flex-wrap: wrap !important;
+  /* D-BP-21: one footer row at >=901px — wrap drops Back+status and the
+     actions onto a second centered line (seen live at 1024). Below 900px
+     the deliberate stacked layout in the media rule below takes over.
+     This selector's specificity already beats the shell-polish
+     .df2-card-footer.df2-wizard-footer wrap — no !important needed. */
+  flex-wrap: nowrap;
   height: auto !important;
+}
+
+/* D-BP-21: one footer row — Back + status left, actions right-aligned;
+   never a second centered line. Below 900px it stacks deliberately. */
+.df2-page-transfer-studio:not(.is-studio-next) .df2-validate-footer,
+.df2-page-transfer-studio:not(.is-studio-next) .df2-run-footer,
+.df2-page-transfer-studio .df2-validate-footer,
+.df2-page-transfer-studio .df2-run-footer {
+  max-height: none !important;
+  flex-wrap: nowrap;
+  justify-content: flex-start !important;
+  height: auto !important;
+}
+.df2-page-transfer-studio .df2-validate-footer-actions,
+.df2-page-transfer-studio .df2-run-footer-actions {
+  margin-left: auto;
+}
+@media (max-width: 900px) {
+  /* Match the nowrap rule's specificity so this later rule wins at <=900px. */
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-run-footer,
+  .df2-page-transfer-studio .df2-validate-footer,
+  .df2-page-transfer-studio .df2-run-footer {
+    flex-wrap: wrap;
+    justify-content: space-between !important;
+  }
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-dest-step > .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step > .df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-card-footer.df2-wizard-footer,
+  .df2-page-transfer-studio:not(.is-studio-next) .df2-validate-step > .df2-wizard-footer {
+    flex-wrap: wrap;
+  }
 }
 
 /* Studio primary — label stays readable. Density locks must not collapse it to 32px. */
@@ -11959,12 +12199,12 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 /* Flagged shell is flush. These beat the page gutter and the card-body
    padding lock. A flags-off page does not carry .is-studio-next. */
 .df2-app .df2-content:has(.df2-page-transfer-studio.is-studio-next) {
-  padding: 0 !important;
+  padding: 0;
 }
 
 .df2-app.df2-app-with-edge .df2-content-inner.is-transfer-studio-view:has(.df2-page-transfer-studio.is-studio-next),
 .df2-content-inner.df2-content-studio:has(.df2-page-transfer-studio.is-studio-next) {
-  padding: 0 !important;
+  padding: 0;
 }
 
 .df2-page-transfer-studio.is-studio-next .df2-transfer-step-viewport > .df2-card-body,
@@ -12046,4 +12286,28 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   min-height: 0 !important;
   overflow-x: hidden !important;
   overflow-y: auto !important;
+}
+
+/* D-BP-16: full probe refusal lives behind a disclosure so the inline error
+   stays one line and doesn't fight the toast for the same copy. */
+.df2-map-error-details {
+  max-width: 640px;
+  margin: 0.5rem auto 0;
+  font-size: 12px;
+  color: var(--df-text-secondary);
+  text-align: left;
+}
+.df2-map-error-details > summary {
+  cursor: pointer;
+  color: var(--df-brand-text);
+  text-align: center;
+}
+.df2-map-error-details > p {
+  margin: 0.5rem 0 0;
+  padding: 0.6rem 0.8rem;
+  background: var(--df-bg-subtle);
+  border: 1px solid var(--df-border);
+  border-radius: 8px;
+  white-space: pre-wrap;
+  word-break: break-word;
 }

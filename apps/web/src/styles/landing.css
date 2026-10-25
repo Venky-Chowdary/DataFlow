@@ -370,7 +370,7 @@ html:has(.lp) {
 
 .lp-btn--outline:hover {
   background: var(--lp-soft);
-  border-color: #94a3b8;
+  border-color: var(--df-text-tertiary);
 }
 
 .lp-btn--ghost {
@@ -1597,7 +1597,7 @@ html:has(.lp) {
 .lp-footer-bottom a {
   display: inline;
   margin: 0;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-footer-bottom a:hover {
@@ -1810,7 +1810,7 @@ html:has(.lp) {
   max-width: 38ch;
   font-size: clamp(16px, 1.5vw, 18px);
   line-height: 1.55;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-login-metrics {
@@ -1842,7 +1842,7 @@ html:has(.lp) {
   margin-top: 4px;
   font-size: 12px;
   line-height: 1.35;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-login-brand-dest {
@@ -2016,7 +2016,7 @@ html:has(.lp) {
 }
 
 .lp-login--gate .lp-input::placeholder {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-login--gate .lp-input:focus {
@@ -2083,7 +2083,7 @@ html:has(.lp) {
   align-items: center;
   gap: 8px;
   font-size: 12.5px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-login-checks li.is-ok {
@@ -2156,7 +2156,7 @@ html:has(.lp) {
   align-items: center;
   gap: 12px;
   margin: 24px 0 14px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 12px;
   font-weight: 650;
   letter-spacing: 0.04em;
@@ -2211,7 +2211,7 @@ html:has(.lp) {
   margin: 28px 0 0;
   font-size: 12px;
   line-height: 1.5;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: center;
 }
 
@@ -3126,7 +3126,7 @@ html:has(.lp) {
 .lp-mkt-mock-row > span:first-child {
   font-size: 11px;
   font-weight: 700;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-mkt-mock-row strong {
@@ -5758,7 +5758,7 @@ html:has(.lp) {
   color: #0f766e;
 }
 
-.lp-mkt-ui-gates li.is-pending { color: #94a3b8; }
+.lp-mkt-ui-gates li.is-pending { color: var(--df-text-tertiary); }
 .lp-mkt-ui-gates em { font-style: normal; font-weight: 700; }
 
 .lp-mkt-ui-theater-head {
@@ -5822,7 +5822,7 @@ html:has(.lp) {
   gap: 6px;
   font-size: 11px;
   font-weight: 600;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-mkt-ui-timeline li.is-done { color: #0f766e; }
@@ -6168,7 +6168,7 @@ html:has(.lp) {
 
 .lp-footer a,
 .lp-footer-link {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-footer a:hover,
@@ -6849,7 +6849,7 @@ html:has(.lp) {
   align-items: center;
   padding: clamp(24px, 3vh, 32px) 0 0 !important;
   margin: 0 !important;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 13px;
   background: transparent;
 }
@@ -6953,7 +6953,7 @@ html:has(.lp) {
 .lp-trust-proof-row em,
 .lp-mkt-security-proof-row em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-mkt-security-proof {
@@ -7261,7 +7261,7 @@ html:has(.lp) {
   font-size: 9px;
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: center;
 }
 
@@ -7748,7 +7748,7 @@ html:has(.lp) {
 
 .lp-infra-node small {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-infra-packet {
@@ -7968,7 +7968,7 @@ html:has(.lp) {
   font-size: 10px;
   letter-spacing: 0.1em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: center;
   font-weight: 650;
 }
@@ -8600,7 +8600,7 @@ html:has(.lp) {
 }
 
 .lp-help-map-row code { color: #0f766e; }
-.lp-help-map-row i { color: #94a3b8; font-style: normal; }
+.lp-help-map-row i { color: var(--df-text-tertiary); font-style: normal; }
 .lp-help-map-row em { font-style: normal; font-weight: 700; color: #059669; }
 
 .lp-help-progress {
@@ -8668,7 +8668,7 @@ html:has(.lp) {
   padding: 8px;
   border-radius: 10px;
   background: #0f172a;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 12px;
 }
 
@@ -9017,7 +9017,7 @@ html:has(.lp) {
   text-align: center;
   font-size: 11px;
   font-weight: 650;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   transition: background 280ms ease, color 280ms ease, border-color 280ms ease;
 }
 
@@ -9220,7 +9220,7 @@ html:has(.lp) {
 }
 
 .lp-hero-flow-edges li span {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: center;
 }
 
@@ -9577,7 +9577,7 @@ html:has(.lp) {
   font-weight: 750;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-mkt-gate-table-row + .lp-mkt-gate-table-row {
@@ -10031,7 +10031,7 @@ html:has(.lp) {
 }
 
 .lp-price-plan-row--enterprise .lp-price-plan-period {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-price-plan-row--enterprise .lp-price-plan-row-blurb {
@@ -10730,7 +10730,7 @@ html:has(.lp) {
 
 .lp-cinema-stage figcaption {
   margin: 0;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 13px;
   line-height: 1.5;
   padding-top: 8px;
@@ -11038,7 +11038,7 @@ html:has(.lp) {
 .lp-cinema-gate-body em {
   font-style: normal;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-cinema-gate-status {
@@ -11095,7 +11095,7 @@ html:has(.lp) {
 }
 
 .lp-cinema-cell-label {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.06em;
@@ -11170,7 +11170,7 @@ html:has(.lp) {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.14em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-weight: 600;
 }
 
@@ -11206,7 +11206,7 @@ html:has(.lp) {
 
 .lp-cinema-metric span {
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
@@ -11238,7 +11238,7 @@ html:has(.lp) {
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.14em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-align: center;
 }
 
@@ -11314,7 +11314,7 @@ html:has(.lp) {
 
 .lp-cinema-proof-quarantine li em {
   font-style: normal;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 @media (max-width: 720px) {
@@ -11364,7 +11364,7 @@ html:has(.lp) {
 .lp-cinema-cdc-phase-head em {
   font-style: normal;
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.1em;
 }
@@ -11395,7 +11395,7 @@ html:has(.lp) {
   border-radius: 999px;
   background: rgba(15, 23, 42, 0.7);
   border: 1px solid rgba(148, 163, 184, 0.22);
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   opacity: 0.4;
   transition: opacity 0.4s ease, border-color 0.4s ease, color 0.4s ease;
 }
@@ -11629,7 +11629,7 @@ html:has(.lp) {
 .lp-contact-stepper-body em {
   font-style: normal;
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .lp-contact-wizard-form {
@@ -11670,7 +11670,7 @@ html:has(.lp) {
   padding: 0;
   margin: 0 0 6px;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   text-transform: uppercase;
   letter-spacing: 0.1em;
   font-weight: 600;
@@ -11796,7 +11796,7 @@ html:has(.lp) {
   margin: 12px auto 0;
   max-width: 720px;
   text-align: center;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 13px;
   line-height: 1.6;
 }

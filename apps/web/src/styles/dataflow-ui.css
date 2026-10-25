@@ -199,7 +199,7 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   padding: 0 10px;
   margin: 16px 0 6px;
 }
@@ -314,7 +314,7 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-breadcrumb strong {
@@ -628,7 +628,7 @@ body {
 
 .df2-stat-sub {
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   margin-top: 2px;
 }
 
@@ -804,7 +804,7 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.045em;
-  color: var(--df-text-tertiary, #94a3b8);
+  color: var(--df-text-tertiary);
   background: var(--df-table-head-bg, var(--df-surface-muted));
   border-bottom: 1px solid var(--df-table-border, var(--df-border));
   white-space: nowrap;
@@ -853,7 +853,7 @@ body {
 
 .df2-cell-meta {
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-family: var(--df-font-mono);
   min-width: 0;
 }
@@ -1570,7 +1570,7 @@ body {
 .df2-upload-hint {
   margin: 0;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 /* ─── Jobs workspace ─── */
@@ -1635,7 +1635,7 @@ body {
   gap: 12px;
   min-width: 0;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-job-meta span {
@@ -1782,7 +1782,7 @@ body {
   flex-wrap: wrap;
   gap: 16px;
   font-size: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   margin-bottom: 14px;
 }
 
@@ -1881,7 +1881,7 @@ body {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   margin: 16px 0 8px;
 }
 
@@ -2526,7 +2526,7 @@ body {
 
 .df2-chunk-more {
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   align-self: center;
   margin-left: 4px;
 }
@@ -2551,7 +2551,7 @@ body {
 }
 
 .df2-theater-log-line {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   line-height: 1.6;
 }
 
@@ -2627,7 +2627,7 @@ body {
 
 /* Jobs page extras */
 .df2-job-item.failed { border-left: 3px solid var(--df-danger); }
-.df2-job-arrow { color: #94a3b8; font-weight: 400; }
+.df2-job-arrow { color: var(--df-text-tertiary); font-weight: 400; }
 .df2-job-error-preview {
   margin: 8px 0 0;
   font-size: 11px;
@@ -3037,7 +3037,7 @@ body {
 .df2-rail-stage.ok { border-color: #bbf7d0; background: var(--df-success-bg); }
 .df2-rail-stage.warn { border-color: #fed7aa; background: var(--df-warning-bg); }
 .df2-rail-stage.block { border-color: #fecaca; background: #fef2f2; }
-.df2-rail-stage.muted { color: #94a3b8; }
+.df2-rail-stage.muted { color: var(--df-text-tertiary); }
 
 .df2-rail-kicker {
   margin-bottom: 10px;
@@ -3489,7 +3489,7 @@ body {
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-schema-route-name {
@@ -3542,7 +3542,7 @@ body {
 .df2-schema-route-arrow {
   font-size: 18px;
   font-weight: 700;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-schema-route-bridge-meta {
@@ -3729,7 +3729,7 @@ body {
 
 .df2-mapping-col-type {
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-mapping-evidence {
@@ -3835,7 +3835,7 @@ body {
 .df2-mapping-mobile-meta {
   grid-column: 1 / -1;
   font-size: 11px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-family: inherit;
 }
 
@@ -6440,7 +6440,7 @@ html,
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   flex-shrink: 0;
 }
 .df2-copy-id-value {

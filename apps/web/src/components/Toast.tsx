@@ -1,4 +1,5 @@
-import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { DtIcon } from "./DtIcon";
 import {
   mergeToastStack,
@@ -97,10 +98,27 @@ export function ToastProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo(() => ({ toast, dismiss, dismissMatching }), [toast, dismiss, dismissMatching]);
 
-  return (
-    <ToastContext.Provider value={value}>
-      {children}
-      <div className="dt-toast-host" aria-live="polite" aria-relevant="additions" aria-atomic="false">
+  // D-BP-20: pages that declare a toast dock ([data-df2-toast-dock], e.g. the
+  // studio header chrome) take the host as an inline pill strip — no floating
+  // overlay, so toasts can never cover content and cannot reflow the page.
+  const [dock, setDock] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    const sync = () => {
+      const el = document.querySelector<HTMLElement>("[data-df2-toast-dock]");
+      setDock((prev) => (prev === el ? prev : el));
+    };
+    sync();
+    // The dock mounts/unmounts inside children without re-rendering this
+    // provider (children prop is referentially stable), so a bare
+    // querySelector-on-render misses it — a toast emitted before the dock
+    // existed would float forever. Observe instead (D-BP-20 residual).
+    const mo = new MutationObserver(sync);
+    mo.observe(document.body, { childList: true, subtree: true });
+    return () => mo.disconnect();
+  }, []);
+
+  const host = (
+    <div className="dt-toast-host" aria-live="polite" aria-relevant="additions" aria-atomic="false">
         {items.map((t) => (
           <div key={t.id} className={`dt-toast dt-toast--${t.tone}`} role={t.tone === "error" ? "alert" : "status"}>
             <span className="dt-toast-icon" aria-hidden>
@@ -116,7 +134,13 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <span className={`dt-toast-timer dt-toast-timer--${t.tone}`} aria-hidden />
           </div>
         ))}
-      </div>
+    </div>
+  );
+
+  return (
+    <ToastContext.Provider value={value}>
+      {children}
+      {dock ? createPortal(host, dock) : host}
     </ToastContext.Provider>
   );
 }

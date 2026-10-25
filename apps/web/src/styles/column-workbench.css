@@ -160,7 +160,7 @@
 }
 
 .df2-map-proof-route-meta {
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 12px;
 }
 
@@ -315,7 +315,7 @@
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-map-proof-src,
@@ -397,7 +397,7 @@
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-map-proof-axes {
@@ -490,7 +490,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-map-proof-evidence dd {
@@ -619,7 +619,7 @@
   font-weight: 500;
   text-transform: none;
   letter-spacing: 0;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 /* Scroll host wraps the entire column review panel */
@@ -923,7 +923,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   line-height: 1.2;
 }
 
@@ -1070,7 +1070,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   background: #fafbfc;
   border-bottom: 1px solid #f1f5f9;
 }
@@ -1126,7 +1126,7 @@
 
 .df2-mapping-intelligence-pair .pair-arrow {
   text-align: center;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 11px;
 }
 
@@ -1285,7 +1285,7 @@
 .df2-column-workbench-search-wrap > svg:first-child {
   position: absolute;
   left: 12px;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   pointer-events: none;
 }
 
@@ -1548,7 +1548,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   margin-bottom: 2px;
 }
 
@@ -1578,7 +1578,7 @@
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
 }
 
 .df2-mapping-pairs-list {
@@ -1630,7 +1630,7 @@
 
 .df2-mapping-pair-arrow {
   text-align: center;
-  color: #94a3b8;
+  color: var(--df-text-tertiary);
   font-size: 12px;
 }
 

@@ -141,6 +141,13 @@ def test_tampered_non_recipe_column_names_itself(monkeypatch):
         steps = proof.get("culprit_steps") or []
         assert not any("case" in s for s in steps), steps
         assert any("not explained by a recipe step" in s for s in steps), steps
+        # X-32: the rendered message must be one clean sentence — not the two
+        # templates spliced ("…not explained by a recipe step did not apply as
+        # declared").
+        assert proof.get("non_recipe_drift_columns") == ["amount"], proof
+        msg = str(recon.get("message") or "")
+        assert "is not explained by any recipe step" in msg, msg
+        assert "did not apply as declared" not in msg, msg
 
 
 def test_tampered_recipe_column_still_names_the_step(monkeypatch):
