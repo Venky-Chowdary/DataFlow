@@ -4090,6 +4090,7 @@ def _try_sqlite_sqlite_copy_fast_path(
     from services.copy_pg_mysql import mapping_is_plain_carry
     from services.copy_sqlite_common import sqlite_type_is_copy_safe
     from services.copy_sqlite_sqlite import copy_sqlite_to_sqlite
+    from services.source_reread import should_reread_source
 
     ok, reason = mapping_is_plain_carry(mappings)
     if not ok:
@@ -4111,6 +4112,24 @@ def _try_sqlite_sqlite_copy_fast_path(
         sqlite_ddls.append(declared or "TEXT")
 
     inc_mode = (incremental_mode or "").strip().lower()
+    if (
+        inc_mode == "incremental_deduped"
+        and incremental_pk
+        and incremental_cursor
+        and should_reread_source(
+            src_type="sqlite", dest_type="sqlite", incremental=True
+        )
+    ):
+        # M3 — a keyed incremental can earn an independent bounded-window
+        # source re-read and a key-scoped destination digest on the row path
+        # (verified / full_checksum). This COPY's proof is a key-existence
+        # join (pk_join_count) — cardinality only, so its verdict can never
+        # pass 'partial'. Take the row path where real verification exists.
+        note_copy_decline(
+            "SQLite→SQLite COPY declined: keyed incremental takes the row "
+            "path so Gate-8 can independently re-read the bounded window"
+        )
+        return None
     try:
         if inc_mode in COPY_INCREMENTAL_MODES:
             result = copy_sqlite_to_sqlite_incremental(

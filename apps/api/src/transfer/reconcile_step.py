@@ -2888,6 +2888,42 @@ def _maybe_attach_verification_ladder(
     kind = conservation_kind(sync_mode, dest_count_before=dest_before)
     census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
     keyed = kind == KIND_KEYED
+    # M3: a bounded source re-read stamps the exact [seed, max_seen] window
+    # its digest covers. Every other population this ladder compares has to
+    # share that window — without it the unbounded source re-read feeds L1–L5
+    # whole-table rows while ``source_checksum`` describes only the window,
+    # and ``key_rows`` below degenerates to every key in the table.
+    _win_cursor = str(dest_summary.get("incremental_window_cursor") or "").strip()
+    if _win_cursor and source_rows:
+        from services.sync_cursor import compare_cursor_values, row_after_watermark
+
+        _win_seed = dest_summary.get("incremental_window_seed")
+        _win_max = dest_summary.get("incremental_window_max")
+        _win_pk = str(dest_summary.get("incremental_window_pk") or "").strip()
+        _in_window: list[dict[str, Any]] = []
+        for _wr in source_rows:
+            if not isinstance(_wr, dict):
+                continue
+            if _win_seed not in (None, "") and row_after_watermark(
+                _wr, _win_cursor, str(_win_seed), primary_key=_win_pk
+            ) is not True:
+                continue
+            if _win_max not in (None, ""):
+                _wrc = _wr.get(_win_cursor)
+                _candidate = str(_wrc) if _wrc is not None else ""
+                if _win_pk and _win_pk != _win_cursor:
+                    from services.keyset_pagination import encode_keyset_bookmark
+
+                    _candidate = encode_keyset_bookmark(
+                        [
+                            _candidate,
+                            str(_wr.get(_win_pk) or ""),
+                        ]
+                    )
+                if compare_cursor_values(_candidate, str(_win_max)) > 0:
+                    continue
+            _in_window.append(_wr)
+        source_rows = _in_window
     # X-OW1: a keyed run into an occupied destination is only comparable on
     # the written batch's keys — the destination legitimately holds rows this
     # run never wrote. Restrict the re-read population to the batch keys so

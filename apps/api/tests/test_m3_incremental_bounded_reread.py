@@ -112,14 +112,18 @@ def test_incremental_clean_run_independently_rereads_the_window(
     assert second.success, second.error
     recon = second.reconciliation or {}
     # The proof came from a second source scan of the bounded window, not
-    # the write-pass bytes: the window holds 4 rows (seq>=3: ids 2,3,4,5)
-    # while the destination holds all 5.
+    # the write-pass bytes: a deduped run seeds past the stored composite
+    # watermark, so the window is the written batch {2,4,5} (3 rows) while
+    # the destination holds all 5.
     assert recon.get("passed") is True, recon
     assert recon.get("checksum_match") is True, recon
     assert recon.get("verification_verdict") == "verified", recon
     assert recon.get("assurance_level") == "full_checksum", recon
-    assert recon.get("checksum_scope") == "verify_time_population_digest", recon
-    assert recon.get("source_rows") == 4, recon  # the [watermark, max_seen] window
+    assert recon.get("source_independently_reread") is True, recon
+    # The destination digest is re-scoped to the batch keys; the source
+    # digest is the verify-time re-read (checksum_mode carries that half).
+    assert recon.get("checksum_scope") == "written_batch_keys", recon
+    assert recon.get("source_rows") == 3, recon  # the (watermark, max_seen] window
     assert recon.get("target_rows") == 5, recon
 
 

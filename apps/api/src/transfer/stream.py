@@ -892,7 +892,10 @@ def _stream_database_transfer_impl(
             checkpoint=checkpoint,
             incremental_cursor=cursor_source_col if incremental else "",
             incremental_watermark=pre_copy_watermark,
-            incremental_pk=cursor_pk_source if incremental else "",
+            incremental_pk=(
+                (pk_source_cols[0] if pk_source_cols else "")
+                if incremental else ""
+            ),
             job_id=job_id,
         )
     finally:
@@ -2093,6 +2096,10 @@ def _stream_database_transfer_impl(
         keyset_after = watermark
         keyset_run_seed = True
     _seed_inclusive = keyset_run_seed
+    # The bookmark this run started from — the digest window's lower bound.
+    # ``keyset_after`` itself advances per committed page, so it must be
+    # captured here; the seed is checkpoint.resume or the stored watermark.
+    incremental_seed_bookmark = keyset_after if keyset_after not in (None, "") else watermark
     # D60/D98 — unkeyed append runs re-read the cursor tie group; keyed
     # appends dedupe it in the writer (ON CONFLICT / dedupe-by-key) and
     # upserts overwrite it. For an append with no declared key the only
@@ -4487,8 +4494,30 @@ def _stream_database_transfer_impl(
         if incremental and cursor_source_col:
             cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
         checksum_cursor_col = cursor_source_col if incremental else ""
-        checksum_cursor_after = watermark if incremental else None
+        checksum_cursor_after = incremental_seed_bookmark if incremental else None
         checksum_cursor_max = running_cursor if incremental else None
+        _seed_tiebreak = bool(
+            cursor_pk_source and cursor_pk_source != checksum_cursor_col
+        )
+        _seed_cursor_part: str | None = None
+        if incremental and checksum_cursor_after not in (None, ""):
+            from services.keyset_pagination import split_cursor_bookmark as _split_bm
+
+            _seed_cursor_part = _split_bm(
+                str(checksum_cursor_after), has_tiebreak=_seed_tiebreak
+            )[0]
+        # M3 — publish the exact window the digest covers so Gate-8 scopes
+        # every other population the same way (the ladder's own source
+        # re-read and the destination key filter are unbounded without it —
+        # a whole-table digest compared to a window digest reads as a
+        # checksum mismatch on a correct run).
+        if incremental and checksum_cursor_col:
+            dest_summary["incremental_window_cursor"] = checksum_cursor_col
+            dest_summary["incremental_window_pk"] = cursor_pk_source or ""
+            if checksum_cursor_after not in (None, ""):
+                dest_summary["incremental_window_seed"] = str(checksum_cursor_after)
+            if checksum_cursor_max not in (None, ""):
+                dest_summary["incremental_window_max"] = str(checksum_cursor_max)
         use_checksum_keyset = False
         if incremental and checksum_cursor_col:
             use_checksum_keyset = True
@@ -4523,6 +4552,12 @@ def _stream_database_transfer_impl(
                         cursor_column=checksum_cursor_col,
                         cursor_after=checksum_cursor_after,
                         cursor_type=cursor_type_for_read,
+                        # A tie-broken incremental watermark is composite
+                        # (cursor + pk). Every read of this run has to name
+                        # the same primary key or the bookmark decodes as
+                        # one part and the page dies on arity — this re-read
+                        # is bound by the same contract as the write pass.
+                        cursor_primary_key=cursor_pk_source or None,
                         known_total_rows=total_rows,
                         **_scan_kw,
                     )
@@ -4541,16 +4576,28 @@ def _stream_database_transfer_impl(
                     and use_checksum_keyset
                     and checksum_cursor_col in (batch.headers or [])
                 ):
-                    # M3 — bound the window at the max cursor this run
-                    # observed: rows that arrived after the run started are
-                    # outside its population, so hashing them compares the
-                    # destination to a future the write pass never wrote.
+                    # M3 — bound the digest to the [watermark, max_seen]
+                    # window this run covered. The upper bound drops rows
+                    # that arrived after the run started; the lower bound is
+                    # the write pass's own watermark predicate — a snapshot
+                    # or OFFSET scan does not seek, so below-watermark rows
+                    # would otherwise hash against a destination population
+                    # this run never wrote.
                     _win_rows = []
                     for _r in digest_rows:
                         _rc = max_cursor_value(
                             [_r], batch.headers, checksum_cursor_col,
                             cursor_pk_source or None,
                         )
+                        if _seed_cursor_part is not None:
+                            # Lower bound: the whole tie group at the seed —
+                            # same inclusive ``cursor >= seed`` semantics the
+                            # write pass used, so compare cursor parts only.
+                            _rc_part, _rc_pk = _split_bm(
+                                str(_rc or ""), has_tiebreak=_seed_tiebreak
+                            )
+                            if compare_cursor_values(_rc_part, _seed_cursor_part) < 0:
+                                continue
                         if compare_cursor_values(_rc, checksum_cursor_max) <= 0:
                             _win_rows.append(_r)
                     # No early break: OFFSET pages do not guarantee cursor
@@ -4613,7 +4660,16 @@ def _stream_database_transfer_impl(
                 if len(batch.rows) < read_limit:
                     break
                 if use_checksum_keyset and checksum_cursor_col in (batch.headers or []):
-                    checksum_cursor_after = batch.rows[-1][batch.headers.index(checksum_cursor_col)]
+                    # Advance on the composite (cursor, pk) max — the same
+                    # bookmark shape the write pass seeds and the reader
+                    # seeks with. A bare cursor value would drop tie rows on
+                    # the next page and undercount the window.
+                    checksum_cursor_after = max_cursor_value(
+                        batch.rows,
+                        batch.headers,
+                        checksum_cursor_col,
+                        cursor_pk_source or None,
+                    )
                 elif use_reread_offset:
                     read_offset += len(batch.rows)
         finally:
