@@ -98,9 +98,10 @@
 }
 
 .df2-command-search:focus-within {
-  background: var(--df-surface);
-  border-color: #99f6e4;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
+  background: var(--df-surface, #fff);
+  border-color: var(--df-brand, #0d9488);
+  outline: 2px solid var(--df-focus-ring, #0d9488);
+  outline-offset: 2px;
 }
 
 .df2-system-pill {

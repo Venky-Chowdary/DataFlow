@@ -3921,8 +3921,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-toolbar .df2-btn:focus-visible,
 .df2-toolbar .df2-btn.df2-btn-sm:focus-visible {
   outline: none !important;
-  border-color: var(--df-brand, #0f766e) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  border-color: var(--df-brand, #0d9488) !important;
+  outline: 2px solid var(--df-focus-ring, #0d9488) !important;
+  outline-offset: 2px;
 }
 
 /* Same filter density for panel-scoped tabs (e.g. MCP request log) */
@@ -4390,8 +4391,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app textarea.df2-input:focus,
 .df2-app textarea.df2-input:focus-visible {
   outline: none !important;
-  border-color: var(--df-brand, #0f766e) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  border-color: var(--df-brand, #0d9488) !important;
+  outline: 2px solid var(--df-focus-ring, #0d9488) !important;
+  outline-offset: 2px;
 }
 
 .df2-app .df2-command-search,
@@ -4402,14 +4404,15 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-command-search:hover,
 .df2-app .df2-workspace-search:hover {
-  border-color: #cbd5e1 !important;
+  border-color: var(--df-border-strong, #cbd5e1) !important;
 }
 
 .df2-app .df2-command-search:focus-within,
 .df2-app .df2-workspace-search:focus-within {
   background: var(--df-surface) !important;
-  border-color: var(--df-brand, #0f766e) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  border-color: var(--df-brand, #0d9488) !important;
+  outline: 2px solid var(--df-focus-ring, #0d9488) !important;
+  outline-offset: 2px;
 }
 
 .df2-app .df2-command-search input,
@@ -4430,8 +4433,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-app .df2-btn:focus-visible {
   outline: none !important;
-  border-color: var(--df-brand, #0f766e) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  border-color: var(--df-brand, #0d9488) !important;
+  outline: 2px solid var(--df-focus-ring, #0d9488) !important;
+  outline-offset: 2px;
 }
 
 .df2-app .df2-tab:focus-visible {
@@ -4462,8 +4466,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .dt-modal-body .df2-select:focus,
 .dt-modal-body .df2-select:focus-visible {
   outline: none !important;
-  border-color: var(--df-brand, #0f766e) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.14) !important;
+  border-color: var(--df-brand, #0d9488) !important;
+  outline: 2px solid var(--df-focus-ring, #0d9488) !important;
+  outline-offset: 2px;
 }
 
 .df2-app .dt-modal-actions .df2-btn:focus-visible,

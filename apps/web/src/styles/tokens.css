@@ -110,7 +110,7 @@
   /* Leftover sheets still read these undeclared names and fall back to paper. */
   --df-surface-subtle: var(--df-surface-muted);
   --df-surface-sunken: var(--df-surface-muted);
-  --df-focus-ring: var(--df-brand-ring);
+  --df-focus-ring: var(--df-brand);  /* solid logo primary, ~3.2:1 on light surfaces */
 
   /* Motion — shared easings / durations for landing + workspace */
   --df-ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -642,6 +642,7 @@ html.df2-theme-dark:has(.df2-app),
   --df-text-tertiary: #8a99ab;
   --df-text-muted: #8a97a8;
   --df-brand-strong: #5eead4;
+  --df-focus-ring: #2dd4bf;  /* ~7:1 on dark surfaces */
   --df-action-bg: #0f766e;
   --df-action-bg-hover: #115e59;
   --df-brand-hover: #2dd4bf;

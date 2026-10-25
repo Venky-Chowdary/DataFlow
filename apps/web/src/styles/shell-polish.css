@@ -3785,8 +3785,9 @@ textarea.df2-pilot-composer textarea {
 .df2-command-search:focus-within,
 .df2-workspace-search:focus-within {
   background: var(--df-surface) !important;
-  border-color: var(--df-brand, #0f766e) !important;
-  box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12) !important;
+  border-color: var(--df-brand, #0d9488) !important;
+  outline: 2px solid var(--df-focus-ring, #0d9488) !important;
+  outline-offset: 2px;
 }
 
 .df2-workspace-search .dt-nav-icon,

@@ -685,6 +685,12 @@
   color: #64748b;
 }
 
+.docs-search:focus-within {
+  border-color: var(--df-brand, #0d9488);
+  outline: 2px solid var(--df-focus-ring, #0d9488);
+  outline-offset: 2px;
+}
+
 .docs-search input {
   flex: 1;
   border: 0;

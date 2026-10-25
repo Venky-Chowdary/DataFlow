@@ -446,6 +446,12 @@
   overflow: auto;
 }
 
+/* Keyboard ring on the transparent overlay itself (it fills the wrapper) */
+.df2-sql-input:focus-visible {
+  outline: 2px solid var(--df-focus-ring, #0d9488);
+  outline-offset: -2px;
+}
+
 .df2-sql-input::placeholder { color: #64748b; }
 
 .df2-sql-editor-status {
@@ -2994,6 +3000,12 @@ th.df2-type-string .df2-type-badge {
   flex-shrink: 0;
 }
 
+.df2-dest-connector-search:focus-within {
+  border-color: var(--df-brand, #0d9488);
+  outline: 2px solid var(--df-focus-ring, #0d9488);
+  outline-offset: 2px;
+}
+
 .df2-dest-connector-search input {
   flex: 1 1 auto;
   min-width: 0;
@@ -4901,6 +4913,12 @@ th.df2-type-string .df2-type-badge {
   background: var(--df-surface);
   color: var(--df-text-tertiary);
   box-sizing: border-box;
+}
+
+.df2-dest-engine-search:focus-within {
+  border-color: var(--df-brand, #0d9488);
+  outline: 2px solid var(--df-focus-ring, #0d9488);
+  outline-offset: 2px;
 }
 
 .df2-dest-engine-search input {

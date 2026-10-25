@@ -132,6 +132,12 @@
   width: 100%;
 }
 
+.df2-pilot-v2 .df2-pilot-composer-bar:focus-within {
+  border-color: var(--df-brand, #0d9488);
+  outline: 2px solid var(--df-focus-ring, #0d9488);
+  outline-offset: 2px;
+}
+
 .df2-pilot-v2 .df2-pilot-composer-sticky .df2-pilot-composer-bar {
   margin: 0 auto;
 }
