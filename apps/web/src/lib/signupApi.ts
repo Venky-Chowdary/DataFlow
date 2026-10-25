@@ -120,16 +120,20 @@ export async function forgotPassword(email: string, formToken?: string, turnstil
 }
 
 export async function resetPassword(input: {
-  challengeId: string;
-  code: string;
+  token: string;
   newPassword: string;
 }): Promise<{ ok: boolean }> {
   const data = await call("/auth/password/reset", {
-    challenge_id: input.challengeId,
-    code: input.code,
+    token: input.token,
     new_password: input.newPassword,
   });
   return { ok: Boolean(data.ok) };
+}
+
+/** Landing-page probe for a reset link — never consumes the token. */
+export async function inspectResetToken(token: string): Promise<{ ok: boolean; status: string }> {
+  const data = await call("/auth/password/reset/inspect", { token });
+  return { ok: Boolean(data.ok), status: String(data.status ?? "invalid") };
 }
 
 export interface SsoRoute {

@@ -4,6 +4,8 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "node:test";
 import { focusFirstInvalid, ResendRow } from "../components/AuthFlow.js";
 import { ChangeEmailCard } from "../components/ChangeEmailCard.js";
+import { ForgotPasswordPage, ResetPasswordPage } from "./SignupPage.js";
+import { inspectResetToken, resetPassword } from "../lib/signupApi.js";
 
 describe("ResendRow", () => {
   it("renders the cooldown state muted, aria-disabled, and announces via aria-live", () => {
@@ -59,5 +61,75 @@ describe("ChangeEmailCard", () => {
     assert.match(markup, /df2-settings/);
     assert.match(markup, /New sign-in email|new-email|email/i);
     assert.match(markup, /df2-btn/);
+  });
+});
+
+describe("ForgotPasswordPage (reset link)", () => {
+  it("asks only for the account email and explains the 30-minute link", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ForgotPasswordPage, { onSignIn: () => {}, onBack: () => {} }),
+    );
+    assert.match(markup, /type="email"/);
+    assert.match(markup, /Send reset link|reset link/i);
+    assert.match(markup, /lp-btn/);
+    // No code entry — the flow is an emailed single-use link, not an OTP.
+    assert.doesNotMatch(markup, /one-time-code|6-digit/i);
+  });
+});
+
+describe("ResetPasswordPage", () => {
+  it("starts in the checking state while the token is inspected", () => {
+    const markup = renderToStaticMarkup(
+      createElement(ResetPasswordPage, {
+        token: "tok123",
+        onSignIn: () => {},
+        onSendNewLink: () => {},
+      }),
+    );
+    assert.match(markup, /Checking your link/i);
+  });
+});
+
+describe("reset link API helpers", () => {
+  const savedFetch = globalThis.fetch;
+
+  function withMockFetch(status: number, body: unknown, calls: string[]) {
+    globalThis.fetch = (async (url: unknown, init?: RequestInit) => {
+      calls.push(String(url));
+      return new Response(JSON.stringify(body), {
+        status,
+        headers: { "Content-Type": "application/json" },
+      });
+    }) as typeof fetch;
+    return () => { globalThis.fetch = savedFetch; };
+  }
+
+  it("inspectResetToken sends the token in the POST body, never the URL", async () => {
+    const calls: string[] = [];
+    const restore = withMockFetch(200, { ok: true, status: "ok" }, calls);
+    try {
+      const r = await inspectResetToken("SECRET-TOKEN-VALUE");
+      assert.equal(r.ok, true);
+      assert.equal(r.status, "ok");
+      assert.equal(calls.length, 1);
+      assert.match(calls[0], /\/auth\/password\/reset\/inspect$/);
+      // Token must travel in the body so it cannot leak via access logs.
+      assert.doesNotMatch(calls[0], /SECRET-TOKEN-VALUE/);
+    } finally {
+      restore();
+    }
+  });
+
+  it("resetPassword posts token + new_password to /auth/password/reset", async () => {
+    const calls: string[] = [];
+    const restore = withMockFetch(200, { ok: true }, calls);
+    try {
+      await resetPassword({ token: "SECRET-TOKEN-VALUE", newPassword: "x".repeat(14) });
+      assert.equal(calls.length, 1);
+      assert.match(calls[0], /\/auth\/password\/reset$/);
+      assert.doesNotMatch(calls[0], /SECRET-TOKEN-VALUE/);
+    } finally {
+      restore();
+    }
   });
 });

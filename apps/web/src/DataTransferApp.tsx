@@ -26,7 +26,7 @@ import { useTheme } from "./lib/useTheme";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
-import { ForgotPasswordPage, SignupPage } from "./pages/SignupPage";
+import { ForgotPasswordPage, ResetPasswordPage, SignupPage } from "./pages/SignupPage";
 import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
@@ -1042,7 +1042,19 @@ export function DataTransferApp() {
 
 function DataTransferAppInner() {
   const [signupSeed, setSignupSeed] = useState<{ challengeId: string; email: string } | null>(null);
-  const [stage, setStage] = useState<"landing" | "login" | "signup" | "forgot" | "app">(() => {
+  // Emailed reset links land on /reset-password?token=... — capture the
+  // token once at boot; the page itself strips it from the URL.
+  const [resetToken] = useState<string>(() => {
+    if (window.location.pathname === "/reset-password") {
+      return new URLSearchParams(window.location.search).get("token") ?? "";
+    }
+    return "";
+  });
+  const [stage, setStage] = useState<"landing" | "login" | "signup" | "forgot" | "reset-link" | "app">(() => {
+    if (window.location.pathname === "/reset-password"
+        && new URLSearchParams(window.location.search).get("token")) {
+      return "reset-link";
+    }
     if (readStoredUser()) return "app";
     return "landing";
   });
@@ -1215,6 +1227,14 @@ function DataTransferAppInner() {
         <ForgotPasswordPage
           onSignIn={() => setStage("login")}
           onBack={() => setStage("login")}
+        />
+      )}
+
+      {stage === "reset-link" && (
+        <ResetPasswordPage
+          token={resetToken}
+          onSignIn={() => { window.history.replaceState({}, "", "/"); setStage("login"); }}
+          onSendNewLink={() => { window.history.replaceState({}, "", "/"); setStage("forgot"); }}
         />
       )}
 
