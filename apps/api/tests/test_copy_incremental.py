@@ -1509,7 +1509,9 @@ def test_pg_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-pg-sqlite-d-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        # >= seeds re-read the boundary row; it merges back by key, so 3
+        # staged rows cover the 2 genuinely new ones (at-least-once).
+        assert second == 3, (second, ddl2, summary2)
         dest = sqlite3.connect(dst_path)
         try:
             dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
@@ -1535,8 +1537,10 @@ def test_pg_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-pg-sqlite-d-c-{suffix}",
         )
-        assert third == 0
-        assert summary3.get("source_row_count") == 0
+        # Run 3 re-reads the 2 boundary rows at the max watermark (>= seed);
+        # they merge back by key as no-ops — nothing new is written.
+        assert third == 2
+        assert summary3.get("source_row_count") == 2
         assert get_watermark(cursor_key) == stored
         dest = sqlite3.connect(dst_path)
         try:
@@ -1700,9 +1704,11 @@ def test_sqlite_pg_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-sqlite-pg-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        # >= seeds re-read the boundary row; it merges back by key, so 3
+        # staged rows cover the 2 genuinely new ones (at-least-once).
+        assert second == 3, (second, ddl2, summary2)
         assert summary2.get("copy_fast_path") == "used"
-        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 2
+        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 3
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             dest_count = int(cur.fetchone()[0])
@@ -1727,8 +1733,10 @@ def test_sqlite_pg_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-sqlite-pg-c-{suffix}",
         )
-        assert third == 0
-        assert summary3.get("source_row_count") == 0
+        # Run 3 re-reads the 2 boundary rows at the max watermark (>= seed);
+        # they merge back by key as no-ops — nothing new is written.
+        assert third == 2
+        assert summary3.get("source_row_count") == 2
         assert get_watermark(cursor_key) == stored
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
@@ -1885,7 +1893,9 @@ def test_sqlite_pg_datetime_incremental_deduped_copy_delta_and_watermark(tmp_pat
             job_id=f"inc-sqlite-pg-dt-b-{suffix}",
             cursor_type="DATETIME",
         )
-        assert second == 2, (second, ddl2, summary2)
+        # >= seeds re-read the boundary row; it merges back by key, so 3
+        # staged rows cover the 2 genuinely new ones (at-least-once).
+        assert second == 3, (second, ddl2, summary2)
         assert summary2.get("copy_fast_path") == "used"
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
@@ -1900,7 +1910,9 @@ def test_sqlite_pg_datetime_incremental_deduped_copy_delta_and_watermark(tmp_pat
             job_id=f"inc-sqlite-pg-dt-c-{suffix}",
             cursor_type="DATETIME",
         )
-        assert third == 0, (third, ddl3, summary3)
+        # Run 3 re-reads the 2 boundary rows at the max watermark (>= seed);
+        # they merge back by key as no-ops — nothing new is written.
+        assert third == 2, (third, ddl3, summary3)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             assert int(cur.fetchone()[0]) == 4
@@ -2304,9 +2316,11 @@ def test_pg_pg_incremental_deduped_copy_delta_and_watermark():
             sync_mode="incremental_deduped",
             job_id=f"inc-pg-pg-dd-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        # >= seeds re-read the boundary row; it merges back by key, so 3
+        # staged rows cover the 2 genuinely new ones (at-least-once).
+        assert second == 3, (second, ddl2, summary2)
         assert summary2.get("copy_fast_path") == "used"
-        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 2
+        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 3
         with conn.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             dest_count = int(cur.fetchone()[0])
@@ -2332,8 +2346,10 @@ def test_pg_pg_incremental_deduped_copy_delta_and_watermark():
             sync_mode="incremental_deduped",
             job_id=f"inc-pg-pg-dd-c-{suffix}",
         )
-        assert third == 0
-        assert summary3.get("source_row_count") == 0
+        # Run 3 re-reads the 2 boundary rows at the max watermark (>= seed);
+        # they merge back by key as no-ops — nothing new is written.
+        assert third == 2
+        assert summary3.get("source_row_count") == 2
         assert get_watermark(cursor_key) == stored
         with conn.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
@@ -2832,7 +2848,9 @@ def test_sqlite_pg_date_incremental_deduped_copy_delta_and_watermark(tmp_path):
             job_id=f"inc-sqlite-pg-date-b-{suffix}",
             cursor_type="DATE",
         )
-        assert second == 2, (second, ddl2, summary2)
+        # >= seeds re-read the boundary row; it merges back by key, so 3
+        # staged rows cover the 2 genuinely new ones (at-least-once).
+        assert second == 3, (second, ddl2, summary2)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             dest_count = int(cur.fetchone()[0])
@@ -2863,7 +2881,9 @@ def test_sqlite_pg_date_incremental_deduped_copy_delta_and_watermark(tmp_path):
             job_id=f"inc-sqlite-pg-date-c-{suffix}",
             cursor_type="DATE",
         )
-        assert third == 0, (third, ddl3, summary3)
+        # Run 3 re-reads the 2 boundary rows at the max watermark (>= seed);
+        # they merge back by key as no-ops — nothing new is written.
+        assert third == 2, (third, ddl3, summary3)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             assert int(cur.fetchone()[0]) == 4
@@ -3596,7 +3616,9 @@ def test_sqlite_pg_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert second == 2, (second, ddl2, summary2)
+        # >= seeds re-read the boundary row; it merges back by key, so 3
+        # staged rows cover the 2 genuinely new ones (at-least-once).
+        assert second == 3, (second, ddl2, summary2)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             dest_count = int(cur.fetchone()[0])
@@ -3619,7 +3641,9 @@ def test_sqlite_pg_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert third == 0, (third, ddl3, summary3)
+        # Run 3 re-reads the 2 boundary rows at the max watermark (>= seed);
+        # they merge back by key as no-ops — nothing new is written.
+        assert third == 2, (third, ddl3, summary3)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             assert int(cur.fetchone()[0]) == 4
