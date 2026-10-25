@@ -729,6 +729,9 @@ def run_file_preflight(
     compliance_acknowledged: bool = False,
     schema_drift_acknowledged: bool = False,
     fk_risk_acknowledged: bool = False,
+    # Operator approved the DDL DataFlow disclosed for this run (e.g. the
+    # unique index an upsert needs on an existing destination table — D101).
+    ddl_changes_acknowledged: bool = False,
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
@@ -1614,6 +1617,141 @@ def run_file_preflight(
         incremental_tiebreak_column=read_scope.primary_key,
     )
 
+    # D101: an upsert into an existing table needs a unique constraint on the
+    # upsert columns. If the destination lacks one, the writer would silently
+    # CREATE UNIQUE INDEX at run time — undisclosed DDL that fails raw on
+    # duplicates. Inspect, count duplicates, disclose the DDL, require approval.
+    upsert_ddl_gate: dict[str, Any] | None = None
+    try:
+        from services.sync_cursor import requires_upsert as _requires_upsert
+
+        if _requires_upsert(sync_mode) and destination_table_exists is True:
+            from services.destination_key_collision_probe import _identity_pairs
+            from services.upsert_ddl_gate import (
+                count_dest_duplicate_keys,
+                dest_unique_covering_columns,
+            )
+
+            _uk_pairs = _identity_pairs(
+                mappings=mappings,
+                source_columns=columns,
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+                destination_pk_columns=destination_pk_columns,
+                contract_primary_key=contract_primary_key,
+                stream_contracts=stream_contracts,
+                source_table=source_table,
+                destination_table=destination_table,
+            )
+            _uk_cols = [t for _s, t in _uk_pairs]
+            if _uk_cols and not dest_unique_covering_columns(
+                destination_pk_columns, destination_unique_keys, _uk_cols
+            ):
+                _planned_idx = (
+                    f"uidx_{destination_table}_{'_'.join(_uk_cols)}"
+                )
+                _planned_ddl = (
+                    f"CREATE UNIQUE INDEX {_planned_idx} ON "
+                    f"{destination_table} ({', '.join(_uk_cols)})"
+                )
+                _dup = {"ran": False, "duplicate_keys": 0, "duplicate_rows": 0,
+                        "samples": [], "message": "destination probe skipped"}
+                try:
+                    _dup = count_dest_duplicate_keys(
+                        dict(destination_config or {}),
+                        destination_table,
+                        _uk_cols,
+                    )
+                except Exception as _dexc:  # noqa: BLE001
+                    _dup = {
+                        "ran": False,
+                        "duplicate_keys": 0,
+                        "duplicate_rows": 0,
+                        "samples": [],
+                        "message": f"duplicate-key probe failed: {_dexc}"[:300],
+                    }
+                _details = {
+                    "rule_id": "g_upsert_dest_key",
+                    "remediation_kind": "approve_ddl_or_dedupe",
+                    "upsert_key_columns": list(_uk_cols),
+                    "planned_ddl": _planned_ddl,
+                    "duplicate_key_count": _dup.get("duplicate_keys"),
+                    "duplicate_row_count": _dup.get("duplicate_rows"),
+                    "duplicate_samples": _dup.get("samples") or [],
+                    "probe_ran": bool(_dup.get("ran")),
+                    "ddl_acknowledged": bool(ddl_changes_acknowledged),
+                }
+                if _dup.get("duplicate_keys"):
+                    upsert_ddl_gate = {
+                        "id": "g_upsert_dest_key",
+                        "status": "block",
+                        "message": (
+                            f"Destination '{destination_table}' holds "
+                            f"{_dup['duplicate_keys']} duplicate upsert-key "
+                            f"value(s) on ({', '.join(_uk_cols)}) and has no "
+                            "unique constraint — the merge cannot be keyed "
+                            "safely. Deduplicate the destination or choose "
+                            "different key columns, then re-validate."
+                        ),
+                        "duration_ms": 0,
+                        "details": _details,
+                        "suggested_actions": [
+                            "Remove the duplicate key values listed in the probe",
+                            "Pick different upsert key columns",
+                            "Run full refresh overwrite instead of upsert",
+                        ],
+                    }
+                elif ddl_changes_acknowledged:
+                    upsert_ddl_gate = {
+                        "id": "g_upsert_dest_key",
+                        "status": "pass",
+                        "message": (
+                            f"Approved destination DDL: {_planned_ddl} "
+                            "(operator acknowledged)"
+                        ),
+                        "duration_ms": 0,
+                        "details": {**_details, "acknowledged": True},
+                    }
+                else:
+                    upsert_ddl_gate = {
+                        "id": "g_upsert_dest_key",
+                        "status": "block",
+                        "message": (
+                            f"Upsert into existing '{destination_table}' needs "
+                            f"a unique constraint on ({', '.join(_uk_cols)}). "
+                            f"DataFlow would run: {_planned_ddl} — disclose "
+                            "and approve destination DDL before executing."
+                        ),
+                        "duration_ms": 0,
+                        "details": {**_details, "requires_approval": True},
+                        "suggested_actions": [
+                            "Approve the disclosed DDL and re-validate",
+                            "Create a unique constraint on the upsert key yourself",
+                        ],
+                    }
+            elif _uk_cols:
+                upsert_ddl_gate = {
+                    "id": "g_upsert_dest_key",
+                    "status": "pass",
+                    "message": (
+                        f"Destination enforces uniqueness on the upsert key "
+                        f"({', '.join(_uk_cols)}) — no new DDL required"
+                    ),
+                    "duration_ms": 0,
+                    "details": {"upsert_key_columns": list(_uk_cols)},
+                }
+    except Exception as _uexc:  # noqa: BLE001 — unmeasured, warn not pass
+        logger.warning("upsert dest-key gate skipped: %s", _uexc, exc_info=_uexc)
+        upsert_ddl_gate = {
+            "id": "g_upsert_dest_key",
+            "status": "warn",
+            "message": (
+                f"Upsert destination key inspection could not run: {_uexc}"
+            )[:400],
+            "duration_ms": 0,
+            "details": {},
+        }
+
     from services.preflight_source_kind import source_is_record_batch
 
     ctx = _ps.FilePreflightContext(
@@ -2078,9 +2216,24 @@ def run_file_preflight(
     null_cursor_blocked = bool(
         null_cursor_gate and null_cursor_gate.get("status") == "block"
     )
+    upsert_ddl_blocked = bool(
+        upsert_ddl_gate and upsert_ddl_gate.get("status") == "block"
+    )
+    if upsert_ddl_blocked:
+        enriched_blockers.append(
+            {
+                "id": "g_upsert_dest_key",
+                "message": str(upsert_ddl_gate.get("message") or ""),
+                "details": dict(upsert_ddl_gate.get("details") or {}),
+                "suggested_actions": list(
+                    upsert_ddl_gate.get("suggested_actions") or []
+                ),
+            }
+        )
     extra_gates: list[dict[str, Any]] = (
         ([fit_gate] if fit_gate else [])
         + ([null_cursor_gate] if null_cursor_gate else [])
+        + ([upsert_ddl_gate] if upsert_ddl_gate else [])
     )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)
@@ -2092,7 +2245,7 @@ def run_file_preflight(
         # would describe a different database's carriers.
         "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
-        and not null_cursor_blocked,
+        and not null_cursor_blocked and not upsert_ddl_blocked,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),

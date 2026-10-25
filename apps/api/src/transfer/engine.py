@@ -2992,6 +2992,11 @@ class UniversalTransferEngine:
                                 getattr(request.source, "kind", "") or "database",
                                 request.source.format,
                             ),
+                            upsert_ddl_approved=bool(
+                                getattr(
+                                    request, "ddl_changes_acknowledged", False
+                                )
+                            ),
                             release_records=True,
                             retain_engine_spill=True,
                             collect_mirror_keys=effective_sync_lower

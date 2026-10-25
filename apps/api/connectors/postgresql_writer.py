@@ -2205,6 +2205,35 @@ def write_mapped_rows(
                 index_name = sanitize_identifier(
                     f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                 )
+                if pg_table_existed:
+                    # D101: DDL on an operator's existing table is disclosed
+                    # and approved at Validate — never created silently.
+                    cursor.execute(
+                        "SELECT 1 FROM pg_index i "
+                        "JOIN pg_class t ON t.oid = i.indrelid "
+                        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                        "WHERE i.indisunique AND t.relname = %s "
+                        "AND n.nspname = %s "
+                        "AND (SELECT array_agg(a.attname ORDER BY a.attname) "
+                        "     FROM pg_attribute a "
+                        "     WHERE a.attrelid = t.oid "
+                        "       AND a.attnum = ANY(i.indkey)) "
+                        "  = (SELECT array_agg(x ORDER BY x) "
+                        "     FROM unnest(%s::text[]) x) LIMIT 1",
+                        (table_name, schema, list(conflict_cols)),
+                    )
+                    if cursor.fetchone() is None and not bool(
+                        _kwargs.get("upsert_ddl_approved")
+                    ):
+                        raise ValueError(
+                            f"Upsert into existing table "
+                            f"'{schema}.{table_name}' needs unique index "
+                            f"{index_name} on ({', '.join(conflict_cols)}) — "
+                            "destination DDL must be disclosed and approved "
+                            "at Validate (ddl_changes_acknowledged); "
+                            "DataFlow does not silently alter a table it "
+                            "did not create."
+                        )
                 cursor.execute(
                     sql.SQL(
                         "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}.{} ({})"

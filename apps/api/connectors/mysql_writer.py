@@ -1076,6 +1076,47 @@ def write_mapped_rows(
             # ``_fetch_mysql_column_types``), so a just-created table has no
             # stale entry to drop — only real ALTER paths invalidate.
 
+        # D101: upsert into an EXISTING table needs a unique key on the
+        # conflict columns — without one, ON DUPLICATE KEY UPDATE never
+        # triggers and every row lands as a duplicate. DDL on an operator's
+        # table is disclosed and approved at Validate, never created silently.
+        if write_mode == "upsert" and conflict_columns and table_existed:
+            conflict_cols = [c for c in conflict_columns if c in target_cols]
+            if conflict_cols:
+                cursor.execute(
+                    "SELECT INDEX_NAME, COLUMN_NAME "
+                    "FROM INFORMATION_SCHEMA.STATISTICS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+                    "AND NON_UNIQUE = 0",
+                    (table_name,),
+                )
+                index_cols: dict[str, set[str]] = {}
+                for idx_name, col_name in cursor.fetchall():
+                    index_cols.setdefault(str(idx_name), set()).add(str(col_name))
+                want = {str(c) for c in conflict_cols}
+                covered = any(cols == want for cols in index_cols.values())
+                index_name = sanitize_identifier(
+                    f"uidx_{table_name}_{'_'.join(conflict_cols)}"
+                )
+                if not covered:
+                    if not bool(_kwargs.get("upsert_ddl_approved")):
+                        raise ValueError(
+                            f"Upsert into existing table '{table_name}' needs "
+                            f"unique index {index_name} on "
+                            f"({', '.join(conflict_cols)}) — destination DDL "
+                            "must be disclosed and approved at Validate "
+                            "(ddl_changes_acknowledged); DataFlow does not "
+                            "silently alter a table it did not create."
+                        )
+                    cols = ", ".join(
+                        quote_sql_identifier(c, "`") for c in conflict_cols
+                    )
+                    cursor.execute(
+                        f"CREATE UNIQUE INDEX "
+                        f"{quote_sql_identifier(index_name, '`')} "
+                        f"ON {table_q} ({cols})"
+                    )
+
         if backfill_new_fields:
             cursor.execute(
                 "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
