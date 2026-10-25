@@ -1259,6 +1259,9 @@ def update_connector(  # nosec B107
             str(changes.get("host") or ""),
             str(changes.get("connection_string") or ""),
             workspace_id=str(conn.get("workspace_id") or ""),
+            db_type=str(
+                changes.get("type") or conn.get("type") or conn.get("db_type") or ""
+            ),
         )
         if refusal:
             return _tool_result("update_connector", success=False, output=None, error=refusal)

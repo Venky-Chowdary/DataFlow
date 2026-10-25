@@ -1966,6 +1966,7 @@ class DataPilotTools:
             str(draft.get("host") or ""),
             str(draft.get("connection_string") or ""),
             workspace_id=str(draft.get("workspace_id") or ""),
+            db_type=str(draft.get("type") or ""),
         )
         if refusal:
             from .ack_ledger import redact_payload
