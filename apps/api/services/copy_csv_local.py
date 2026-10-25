@@ -1094,10 +1094,6 @@ def copy_csv_to_postgres(
     dest_ref = _table_ref(dest_schema_n, dest_table)
     delim = "E'\\t'" if ext == "tsv" else "','"
     col_list = ", ".join(_quote(c) for c in target_cols)
-    copy_sql = (
-        f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
-        f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '\\N')"
-    )
 
     dest_conn = _pg_connect(dest_cfg)
     created_here = False
@@ -1149,6 +1145,13 @@ def copy_csv_to_postgres(
             dest_conn.commit()
             created_here = True
 
+        # Built after the swap decision: an overwrite loads the staging table,
+        # not the live destination (C03/X-OW2 — writing the real table here
+        # appended the batch, then the staging COUNT(*) refused it).
+        copy_sql = (
+            f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
+            f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '\\N')"
+        )
         with open(mapped_path, "r", encoding="utf-8") as handle:
             dst_cur.copy_expert(copy_sql, handle)
         dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
