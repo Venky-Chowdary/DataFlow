@@ -126,3 +126,58 @@ def test_verifier_outage_never_blocks_signup(monkeypatch):
         "email": "ok@example.com", "password": "a-very-long-password",
         "form_token": form_token_mod.issue("signup"), "device_id": "d1"})
     assert resp.status_code == 202
+
+
+def _configured(monkeypatch):
+    monkeypatch.setenv("DATAWRAP_EMAIL_VERIFIER", "abstract")
+    monkeypatch.setenv("DATAWRAP_EMAIL_VERIFIER_KEY", "s3cr3t-k3y")
+
+
+def test_email_is_urlencoded_in_query(monkeypatch):
+    """Plus-addresses and & / # in the local part must not break or
+    inject into the query string."""
+    _configured(monkeypatch)
+    seen: list[str] = []
+
+    def spy(url, **kw):
+        seen.append(url)
+        return _resp({"deliverability": "deliverable"})
+
+    email_verifier.verify("a+b@x.com", http_get=spy)
+    email_verifier.verify("a&b#c@x.com", http_get=spy)
+    import urllib.parse
+    q1 = urllib.parse.parse_qs(
+        urllib.parse.urlparse(seen[0]).query)
+    q2 = urllib.parse.parse_qs(
+        urllib.parse.urlparse(seen[1]).query)
+    assert q1["email"] == ["a+b@x.com"]
+    assert q2["email"] == ["a&b#c@x.com"]
+    # no parameter smuggling: exactly the two expected keys
+    assert sorted(q1) == sorted(q2) == ["api_key", "email"]
+
+
+def test_key_never_in_logged_output_on_error(monkeypatch, caplog):
+    _configured(monkeypatch)
+
+    def boom(url, **kw):
+        raise ConnectionError(f"request to {url} blew up")
+
+    import logging
+    with caplog.at_level(logging.WARNING):
+        r = email_verifier.verify("a@x.com", http_get=boom)
+    assert r == {"ok": False, "verdict": "unknown"}
+    haystack = "\n".join(
+        rec.getMessage() for rec in caplog.records)
+    assert "s3cr3t-k3y" not in haystack
+    assert "api_key" not in haystack
+
+
+def test_key_not_in_logged_output_on_bad_status(monkeypatch, caplog):
+    _configured(monkeypatch)
+    import logging
+    with caplog.at_level(logging.WARNING):
+        r = email_verifier.verify(
+            "a@x.com", http_get=lambda u, **k: _resp({}, status=500))
+    assert r == {"ok": False, "verdict": "unknown"}
+    assert "s3cr3t-k3y" not in "\n".join(
+        rec.getMessage() for rec in caplog.records)
