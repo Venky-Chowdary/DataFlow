@@ -3911,34 +3911,42 @@
     min-height: 100dvh;
   }
 
+  /* Brand collapses to a compact header ABOVE the card — Back stays
+     top-left, logo right, and the page title is the one line of copy. */
   .lp-login-brand {
     min-height: auto;
-    order: 2;
+    order: 0;
   }
 
   .lp-login-brand-inner {
     max-height: none;
     overflow: visible;
-    gap: 14px;
-    padding: 20px 20px 24px;
+    gap: 10px;
+    padding: 14px 16px 16px;
   }
 
   .lp-login-brand-body {
     justify-content: flex-start;
-    gap: 12px;
+    gap: 6px;
+  }
+
+  .lp-login-brand-kicker,
+  .lp-login-brand-lead,
+  .lp-login-proof,
+  .lp-login-metrics,
+  .lp-login-brand-dest,
+  .lp-login-brand-foot {
+    display: none;
   }
 
   .lp-login-brand-title {
-    font-size: clamp(1.55rem, 6.5vw, 2.1rem);
+    font-size: clamp(1.25rem, 5.5vw, 1.6rem);
     max-width: none;
+    margin: 0;
   }
 
-  .lp-login-brand-lead {
-    max-width: none;
-  }
-
-  .lp-login-metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .lp-login-brand-rail {
+    display: none;
   }
 
   .lp-login-auth {
