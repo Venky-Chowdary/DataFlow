@@ -3173,8 +3173,16 @@ class DataPilotTools:
                 "updated in place without a full reload."
             )
         elif has_cursor and has_primary_key and needs_history:
-            mode = "incremental_deduped"
-            reason = "Cursor and key allow efficient updates while preserving change history."
+            # D37: history means every changed row keeps a version — upsert
+            # (incremental_deduped) collapses to one row per key and destroys
+            # it. SCD2 is the history-preserving mode.
+            mode = "scd2"
+            reason = (
+                "Change history needs every version of a row, not one row per "
+                "key. Incremental upsert would overwrite the old version and the "
+                "history is lost. SCD-2 closes the current version and inserts "
+                "the new one, keyed by the primary key."
+            )
         elif has_primary_key and mentions_update:
             mode = "incremental_deduped"
             reason = (
@@ -3233,6 +3241,7 @@ class DataPilotTools:
             ),
             "cdc_incremental": "Incremental CDC",
             "full_refresh_mirror": "Mirror",
+            "scd2": "SCD-2 Versioned History",
         }
         return ToolResult(name="recommend_sync_mode", success=True, output={
             "recommended_mode": mode,
@@ -3246,6 +3255,7 @@ class DataPilotTools:
                     "incremental_deduped",
                     "cdc_incremental",
                     "full_refresh_mirror",
+                    "scd2",
                 },
                 "cdc_log_access": mode == "cdc_incremental",
             },
