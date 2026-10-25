@@ -64,9 +64,11 @@ def test_forgot_returns_202_for_unknown_and_known_alike():
     c = _client()
     _verified_user(c)
     r_unknown = c.post("/api/v1/auth/password/forgot",
-                       json={"email": "ghost@example.com"})
+                       json={"email": "ghost@example.com",
+                     "form_token": form_token_mod.issue("reset")})
     r_known = c.post("/api/v1/auth/password/forgot",
-                     json={"email": "ada@example.com"})
+                     json={"email": "ada@example.com",
+                     "form_token": form_token_mod.issue("reset")})
     assert r_unknown.status_code == r_known.status_code == 202
     for resp in (r_unknown, r_known):
         body = resp.json()
@@ -81,7 +83,8 @@ def test_forgot_unknown_sends_no_mail():
     _verified_user(c)
     before = len(ConsoleEmailSender.OUTBOX)
     c.post("/api/v1/auth/password/forgot",
-           json={"email": "nobody@example.com"})
+           json={"email": "nobody@example.com",
+                 "form_token": form_token_mod.issue("reset")})
     assert len(ConsoleEmailSender.OUTBOX) == before
 
 
@@ -91,7 +94,8 @@ def test_reset_flow_updates_password_and_revokes_sessions():
     state = auth_state.get_auth_state()
     assert state.list_sessions("ada@example.com")
     r = c.post("/api/v1/auth/password/forgot",
-               json={"email": "ada@example.com"})
+               json={"email": "ada@example.com",
+                     "form_token": form_token_mod.issue("reset")})
     code = re.search(r"\b(\d{6})\b",
                      ConsoleEmailSender.OUTBOX[-1].text).group(1)
     resp = c.post("/api/v1/auth/password/reset", json={
@@ -108,7 +112,8 @@ def test_reset_with_fake_challenge_id_is_410():
     c = _client()
     _verified_user(c)
     r = c.post("/api/v1/auth/password/forgot",
-               json={"email": "ghost@example.com"})
+               json={"email": "ghost@example.com",
+                     "form_token": form_token_mod.issue("reset")})
     resp = c.post("/api/v1/auth/password/reset", json={
         "challenge_id": r.json()["challenge_id"], "code": "123456",
         "new_password": "an-even-better-password"})
@@ -120,7 +125,8 @@ def test_reset_wrong_code_is_400_and_code_single_use():
     c = _client()
     _verified_user(c)
     r = c.post("/api/v1/auth/password/forgot",
-               json={"email": "ada@example.com"})
+               json={"email": "ada@example.com",
+                     "form_token": form_token_mod.issue("reset")})
     cid = r.json()["challenge_id"]
     bad = c.post("/api/v1/auth/password/reset", json={
         "challenge_id": cid, "code": "000000",
@@ -142,9 +148,35 @@ def test_reset_rejects_short_password_400():
     c = _client()
     _verified_user(c)
     r = c.post("/api/v1/auth/password/forgot",
-               json={"email": "ada@example.com"})
+               json={"email": "ada@example.com",
+                     "form_token": form_token_mod.issue("reset")})
     resp = c.post("/api/v1/auth/password/reset", json={
         "challenge_id": r.json()["challenge_id"], "code": "123456",
         "new_password": "short"})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "invalid_password"
+
+
+def test_forgot_without_form_token_still_202_but_sends_nothing():
+    c = _client()
+    _verified_user(c)
+    before = len(ConsoleEmailSender.OUTBOX)
+    r = c.post("/api/v1/auth/password/forgot",
+               json={"email": "ada@example.com"})
+    # uniform 202 shape even though the bot wall refused the mail
+    assert r.status_code == 202
+    assert r.json()["challenge_id"]
+    assert len(ConsoleEmailSender.OUTBOX) == before
+
+
+def test_forgot_per_address_velocity_keeps_uniform_202(monkeypatch):
+    monkeypatch.setenv("DATAWRAP_FORGOT_EMAIL_DAILY", "1")
+    c = _client()
+    _verified_user(c)
+    for _ in range(3):
+        r = c.post("/api/v1/auth/password/forgot",
+                   json={"email": "ada@example.com",
+                         "form_token": form_token_mod.issue("reset")})
+        assert r.status_code == 202
+        assert set(r.json()) == {"ok", "challenge_id",
+                                 "resend_after_sec", "expires_in_sec"}

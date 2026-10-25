@@ -59,7 +59,11 @@ class ResendRequest(BaseModel):
 
 
 class PasswordForgotRequest(BaseModel):
-    email: str
+    email: str = Field(min_length=3, max_length=320)
+    turnstile_token: str = Field(default="", max_length=4096)
+    form_token: str = Field(default="", max_length=4096)
+    device_id: str = Field(default="", max_length=128)
+    honeypot: str = Field(default="", max_length=256)
 
 
 @router.post("/password/forgot", status_code=202)
@@ -67,7 +71,11 @@ async def password_forgot(body: PasswordForgotRequest,
                           request: Request) -> dict[str, Any]:
     from services import signup_service
     return signup_service.request_password_reset(
-        email=body.email, ip=_client_ip(request))
+        email=body.email, ip=_client_ip(request),
+        device_id=body.device_id,
+        ua=request.headers.get("user-agent", "")[:512],
+        turnstile_token=body.turnstile_token,
+        form_token=body.form_token, honeypot=body.honeypot)
 
 
 class PasswordResetRequest(BaseModel):
@@ -113,8 +121,13 @@ class EmailChangeConfirm(BaseModel):
 async def email_change_confirm(body: EmailChangeConfirm,
                                request: Request) -> dict[str, Any]:
     from services import signup_service
+    requester = getattr(request.state, "user_email", None)
+    if not requester:
+        user = getattr(request.state, "user", None) or {}
+        requester = user.get("email")
     return signup_service.confirm_email_change(
         challenge_id=body.challenge_id, code=body.code,
+        requester=requester or "",
         ip=_client_ip(request))
 
 
@@ -147,10 +160,22 @@ class SsoRouteRequest(BaseModel):
 
 
 @router.post("/sso/route")
-async def sso_route(body: SsoRouteRequest) -> dict[str, Any]:
-    """P4-6: which IdP (if any) claims this address's domain."""
+async def sso_route(body: SsoRouteRequest, request: Request) -> dict[str, Any]:
+    """P4-6: which IdP (if any) claims this address's domain.
+
+    Tenant discovery is rate-limited per IP; over-limit and unclaimed
+    domains get the identical {sso: null} shape so throttling is not an
+    oracle either. The lookup still runs on a throttle so timing parity
+    holds between claimed and unclaimed answers."""
+    from services.auth_state import get_auth_state
     from services.sso_routing import route_for_email
-    return route_for_email(body.email)
+    ip = _client_ip(request)
+    allowed, _ = get_auth_state().rate_limit_hit(
+        f"sso-route:ip:{ip or 'unknown'}", limit=30, window_sec=60)
+    route = route_for_email(body.email)
+    if not allowed:
+        return {"sso": None}
+    return route
 
 
 @router.get("/signup/config")

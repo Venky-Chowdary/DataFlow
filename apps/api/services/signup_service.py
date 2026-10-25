@@ -76,6 +76,57 @@ def _subnet_key(ip: str) -> str:
     return str(net.network_address)
 
 
+def _check_address_deliverable(normalized: str, *,
+                               ip: str = "") -> tuple[int, list[str]]:
+    """Shared anti-abuse address gate (P2): role-based block, denylist email
+    kind + disposable (team ``allow_domain`` wins inside is_disposable), MX,
+    and the optional external verifier. Returns the verifier's risk bump and
+    reasons for the risk scorer; raises ApiError on a hard refusal."""
+    role = role_assessment(normalized)
+    if role == "blocked":
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code="role_address",
+                              details={"ip": ip})
+        raise ApiError(400, "blocked_address",
+                       "this address can't be used for signup")
+    domain = normalized.split("@", 1)[-1]
+    if denylist_store.is_denied(canonical_email(normalized), kind="email") or \
+            disposable_list.is_disposable(normalized):
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code="denied_domain",
+                              details={"ip": ip})
+        raise ApiError(400, "blocked_address",
+                       "this address can't be used for signup")
+    mx = mx_check.check_domain(domain)
+    if not mx["ok"]:
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code=f"mx:{mx['reason']}",
+                              details={"ip": ip})
+        raise ApiError(400, "undeliverable_domain",
+                       "that email domain can't receive mail")
+
+    # P2-9 external verifier (optional, fail-open): undeliverable is refused
+    # like an MX failure; a "risky" verdict feeds the risk scorer.
+    bump, reasons = 0, []
+    if email_verifier.configured():
+        verdict = email_verifier.verify(normalized)
+        if verdict["verdict"] == "undeliverable":
+            record_security_event("signup.blocked", outcome="failed",
+                                  reason_code="verifier:undeliverable",
+                                  details={"ip": ip})
+            raise ApiError(400, "undeliverable_domain",
+                           "that email domain can't receive mail")
+        if verdict["verdict"] == "risky":
+            bump, reasons = 20, ["verifier:risky"]
+    return bump, reasons
+
+
+def _velocity_bucket(key: str, *, limit: int, window_sec: int) -> int:
+    allowed, retry_after = get_auth_state().rate_limit_hit(
+        key, limit=limit, window_sec=window_sec)
+    return 0 if allowed else (retry_after or window_sec)
+
+
 def _check_signup_velocity(*, ip: str, device_id: str, canonical: str) -> int:
     """Per-IP, per-subnet, per-device and per-address caps (P2-6).
 
@@ -167,44 +218,10 @@ def request_signup(
         raise ApiError(400, "invalid_password",
                        f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
     _refuse_pwned_password(password)
-    role = role_assessment(normalized)
-    if role == "blocked":
-        record_security_event("signup.blocked", outcome="failed",
-                              reason_code="role_address",
-                              details={"ip": ip})
-        raise ApiError(400, "blocked_address",
-                       "this address can't be used for signup")
-    domain = normalized.split("@", 1)[-1]
-    if denylist_store.is_denied(canonical_email(normalized), kind="email") or \
-            disposable_list.is_disposable(normalized):
-        record_security_event("signup.blocked", outcome="failed",
-                              reason_code="denied_domain",
-                              details={"ip": ip})
-        raise ApiError(400, "blocked_address",
-                       "this address can't be used for signup")
-    mx = mx_check.check_domain(domain)
-    if not mx["ok"]:
-        record_security_event("signup.blocked", outcome="failed",
-                              reason_code=f"mx:{mx['reason']}",
-                              details={"ip": ip})
-        raise ApiError(400, "undeliverable_domain",
-                       "that email domain can't receive mail")
+    verifier_bump, verifier_reasons = _check_address_deliverable(
+        normalized, ip=ip)
+    role_flagged = role_assessment(normalized) == "flagged"
     canonical = canonical_email(normalized)
-
-    # P2-9 external verifier (optional, fail-open): undeliverable is refused
-    # like an MX failure; a "risky" verdict feeds the risk scorer.
-    verifier_bump, verifier_reasons = 0, []
-    if email_verifier.configured():
-        verdict = email_verifier.verify(normalized)
-        if verdict["verdict"] == "undeliverable":
-            record_security_event("signup.blocked", outcome="failed",
-                                  reason_code="verifier:undeliverable",
-                                  details={"ip": ip})
-            raise ApiError(400, "undeliverable_domain",
-                           "that email domain can't receive mail")
-        if verdict["verdict"] == "risky":
-            verifier_bump = 20
-            verifier_reasons = ["verifier:risky"]
 
     # P2-8 risk scorer — deny drops with a decoy 202 (nothing stored/mailed);
     # hold stores the pending row with its score but skips the OTP mail.
@@ -262,7 +279,7 @@ def request_signup(
         ip=ip,
         device_id=device_id,
         risk_score=max(float(risk["score"]),
-                       10.0 if role == "flagged" else 0.0),
+                       10.0 if role_flagged else 0.0),
     )
     if risk["action"] == "hold":
         record_security_event("admin.signup_held", outcome="skipped",
@@ -489,15 +506,44 @@ def _refuse_pwned_password(password: str) -> None:
                        "choose a different one")
 
 
-def request_password_reset(*, email: str, ip: str = "") -> dict[str, Any]:
+def request_password_reset(*, email: str, ip: str = "",
+                           device_id: str = "", ua: str = "",
+                           turnstile_token: str = "", form_token: str = "",
+                           honeypot: str = "") -> dict[str, Any]:
     """P4-1 forgot-password: uniform 202 with a challenge handle — a fake
-    id when the address has no usable account (enumeration parity)."""
+    id when the address has no usable account (enumeration parity).
+    Bot/abuse checks (form-token, Turnstile, IP+address velocity) never
+    change the 202: throttling a bomber must not become an oracle."""
     fake = _forgot_response(f"pw-{uuid.uuid4().hex[:24]}")
+    verdict_form = form_token_mod.check(
+        form_token, purpose="reset", honeypot=honeypot)
+    if not verdict_form["ok"]:
+        record_security_event("password.reset.requested", outcome="failed",
+                              reason_code=f"form:{verdict_form['reason']}",
+                              details={"ip": ip})
+        return fake
+    if turnstile.configured():
+        verdict = turnstile.verify(
+            turnstile_token, remote_ip=ip, user_agent=ua)
+        if not verdict["ok"]:
+            record_security_event("password.reset.requested", outcome="failed",
+                                  reason_code=f"turnstile:{verdict['reason']}",
+                                  details={"ip": ip})
+            return fake
     try:
         normalized = user_store.validate_email(email)
     except ApiError:
         return fake
     canonical = canonical_email(normalized)
+    # Per-IP and per-target-address velocity: exceeded -> same 202 shape.
+    for key, limit, window in (
+            (f"forgot:ip:{ip or 'unknown'}", _env_int("FORGOT_IP_HOURLY", 10), 3600),
+            (f"forgot:em:{canonical}", _env_int("FORGOT_EMAIL_DAILY", 5), 86400)):
+        if _velocity_bucket(key, limit=limit, window_sec=window):
+            record_security_event("password.reset.requested", outcome="held",
+                                  reason_code="rate_limited",
+                                  details={"ip": ip})
+            return fake
     user = user_store.find_by_canonical(canonical)
     if user is None or user.get("status", "active") != "active" \
             or not user.get("email_verified_at"):
@@ -556,10 +602,35 @@ def request_email_change(*, user_email: str, new_email: str,
     user = user_store.get_user(user_email)
     if user is None:
         raise ApiError(401, "unauthorized", "sign in to change your email")
+    # Mail-bomb/velocity: this route sends mail to an arbitrary new address,
+    # so cap per-IP, per-requester and per-target before any address work.
+    for key, limit, window in (
+            (f"emchg:ip:{ip or 'unknown'}", _env_int("EMCHG_IP_HOURLY", 10), 3600),
+            (f"emchg:user:{user_email}", _env_int("EMCHG_USER_DAILY", 5), 86400),
+            (f"emchg:em:{canonical_email(new_email)}",
+             _env_int("EMCHG_EMAIL_DAILY", 3), 86400)):
+        retry = _velocity_bucket(key, limit=limit, window_sec=window)
+        if retry:
+            record_security_event("email_change.requested", outcome="failed",
+                                  reason_code="rate_limited",
+                                  actor=user_email, details={"ip": ip})
+            raise ApiError(429, "rate_limited",
+                           "too many requests — try again later",
+                           retry_after_sec=retry)
     normalized = user_store.validate_email(new_email)
-    if disposable_list.is_disposable(normalized):
-        raise ApiError(400, "disposable_domain",
-                       "that email domain can't be used for an account")
+    # Same address gate as signup: role-based/blocklist, disposable
+    # (allow_domain wins inside is_disposable), MX, external verifier.
+    bump, reasons = _check_address_deliverable(normalized, ip=ip)
+    risk = risk_scorer.score_signals(
+        ip=ip, ua="", device_id="",
+        turnstile_ok=None, extra_score=bump, extra_reasons=reasons)
+    if risk["action"] in ("deny", "hold"):
+        record_security_event("email_change.requested", outcome="failed",
+                              reason_code=f"risk:{risk['action']}",
+                              actor=user_email,
+                              details={"ip": ip, "score": risk["score"]})
+        raise ApiError(400, "blocked_address",
+                       "that address can't be used for an account")
     canonical_new = canonical_email(normalized)
     if user_store.find_by_canonical(canonical_new) is not None:
         raise ApiError(400, "email_taken",
@@ -585,6 +656,7 @@ def request_email_change(*, user_email: str, new_email: str,
 
 
 def confirm_email_change(*, challenge_id: str, code: str,
+                         requester: str = "",
                          ip: str = "") -> dict[str, Any]:
     """P4-2: verify the new-address code, rekey the account, memberships
     and orgs, revoke every session, notify the old address."""
@@ -604,12 +676,28 @@ def confirm_email_change(*, challenge_id: str, code: str,
     if not old_email or not new_email:
         raise ApiError(410, "code_expired",
                        "this code is no longer valid — request a new one")
+    # Defense in depth: the mailed code proves new-address ownership; the
+    # request must ALSO be authenticated as the account being rekeyed, so a
+    # leaked code alone cannot hijack the account.
+    if not requester:
+        raise ApiError(401, "unauthorized", "sign in to confirm the change")
+    if requester.strip().lower() != old_email.strip().lower():
+        raise ApiError(403, "forbidden",
+                       "this challenge belongs to a different account")
     canonical_new = canonical_email(new_email)
     if user_store.find_by_canonical(canonical_new) is not None:
         raise ApiError(400, "email_taken",
                        "that address already belongs to an account")
-    user_store.change_email(
-        email=old_email, new_email=new_email, canonical=canonical_new)
+    try:
+        user_store.change_email(
+            email=old_email, new_email=new_email, canonical=canonical_new)
+    except Exception as exc:
+        # The store's atomic canonical claim is the real guard; a race loser
+        # gets email_taken, anything else stays a store error.
+        if "already belongs" in str(exc) or "already has" in str(exc):
+            raise ApiError(400, "email_taken",
+                           "that address already belongs to an account") from exc
+        raise
     team_store.rekey_memberships(old_email, new_email)
     org_store.rekey_creator(old_email, new_email)
     get_auth_state().revoke_all_for_user(old_email)

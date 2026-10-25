@@ -68,3 +68,18 @@ def test_email_domains_persist_on_config():
     _claim("oidc", ["acme.com", "acme.io"])
     cfg = integrations_store.get_sso_configs()["oidc"]
     assert cfg["email_domains"] == ["acme.com", "acme.io"]
+
+
+def test_route_is_ip_throttled_but_shape_never_changes(monkeypatch):
+    from services import auth_state
+    auth_state.reset_auth_state()
+    _claim("oidc", ["acme.com"])
+    c = _client()
+    # exhaust the 30/min bucket
+    for _ in range(31):
+        auth_state.get_auth_state().rate_limit_hit(
+            "sso-route:ip:testclient", limit=30, window_sec=60)
+    resp = c.post("/api/v1/auth/sso/route", json={"email": "a@acme.com"})
+    # throttled answers are the same {sso: null} shape as an unclaimed domain
+    assert resp.status_code == 200
+    assert resp.json() == {"sso": None}
