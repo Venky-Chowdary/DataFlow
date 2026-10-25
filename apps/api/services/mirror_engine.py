@@ -363,10 +363,15 @@ def _compute_active_checksum(
 
     dialect_name = _dialect_of(conn)
     q = _qchar(dialect_name)
-    col_quoted = quote_sql_identifier(soft_delete_column, q)
-    pred = sql_bool_is_not_true(dialect_name, col_quoted)
     cols_quoted = ",".join(quote_sql_identifier(c, q) for c in target_cols)
-    sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {pred}"  # nosec B608
+    if soft_delete_column:
+        col_quoted = quote_sql_identifier(soft_delete_column, q)
+        pred = sql_bool_is_not_true(dialect_name, col_quoted)
+        sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {pred}"  # nosec B608
+    else:
+        # Hard-delete mirror: no lattice column exists — the whole table is
+        # the live population.
+        sql = f"SELECT {cols_quoted} FROM {qualified}"  # nosec B608
     return stream_select_checksum(
         conn,
         sa.text(sql),
@@ -403,6 +408,7 @@ def apply_inferred_deletes_via_staging(
     soft_delete_column: str = SOFT_DELETE_COLUMN,
     dialect: str = "",
     target_table: str = "",
+    delete_mode: str = "soft",
 ) -> dict[str, Any]:
     """Set-based inferred deletes: keys in staging stay active; dest \\ staging soft-delete.
 
@@ -435,7 +441,7 @@ def apply_inferred_deletes_via_staging(
         sql_bool_true_literal,
     )
 
-    _ensure_soft_delete_column(conn, target_qualified, soft_delete_column)
+    delete_mode = (delete_mode or "soft").strip().lower()
     dialect_name = dialect or _dialect_of(conn)
     q = _qchar(dialect_name)
     col_quoted = quote_sql_identifier(soft_delete_column, q)
@@ -451,6 +457,70 @@ def apply_inferred_deletes_via_staging(
         f"{outer_ref}.{quote_sql_identifier(c, q)}"
         for c in pk_columns
     )
+
+    if delete_mode == "hard":
+        # D38: the documented mirror behavior — keys missing from this
+        # snapshot are DELETEed, not tombstoned behind an undeclared
+        # ``_deleted`` lattice column. A dest upgraded from an earlier
+        # soft-delete run may still carry the lattice: probe it (savepoint,
+        # failure must not abort the write txn), clear flags on rows the
+        # snapshot re-presents, then delete every key the snapshot misses —
+        # tombstoned or not.
+        # Reflect the catalog: a SELECT probe cannot prove the column on
+        # SQLite, whose double-quoted-string fallback happily selects a
+        # missing identifier as a literal.
+        lattice_present = False
+        try:
+            _probe_table = (
+                target_table
+                or target_qualified.split(".")[-1].strip('"[]`')
+            )
+            _cols = sa.inspect(conn).get_columns(_probe_table)
+            lattice_present = soft_delete_column in {
+                str(c.get("name")) for c in _cols
+            }
+        except Exception as exc:  # noqa: BLE001
+            logging.getLogger(__name__).debug(
+                "lattice reflection failed: %s", exc, exc_info=exc
+            )
+        scanned = _dest_engine_count(
+            conn,
+            f"SELECT COUNT(*) FROM {target_qualified}",  # nosec B608
+        )
+        hard_deleted = _dest_engine_count(
+            conn,
+            f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
+            f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
+        )
+        if lattice_present:
+            conn.execute(
+                sa.text(
+                    f"UPDATE {target_qualified} SET {col_quoted} = {false_lit} "  # nosec B608
+                    f"WHERE {deleted_pred} AND EXISTS "
+                    f"(SELECT 1 FROM {staging_from} WHERE {join_pred})"
+                )
+            )
+        conn.execute(
+            sa.text(
+                f"DELETE FROM {target_qualified} "  # nosec B608
+                f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})"
+            )
+        )
+        physical = _dest_engine_count(
+            conn,
+            f"SELECT COUNT(*) FROM {target_qualified}",  # nosec B608
+        )
+        return {
+            "soft_deleted": 0,
+            "hard_deleted": hard_deleted,
+            "reactivated": 0,
+            "mirror_delete_mode": "hard",
+            "tombstone_rows": 0,
+            "physical_rows": physical,
+            "rows_scanned": scanned,
+        }
+
+    _ensure_soft_delete_column(conn, target_qualified, soft_delete_column)
     reactivated = _dest_engine_count(
         conn,
         f"SELECT COUNT(*) FROM {target_qualified} "  # nosec B608
@@ -486,9 +556,15 @@ def apply_inferred_deletes_via_staging(
         conn,
         f"SELECT COUNT(*) FROM {target_qualified}",  # nosec B608
     )
+    tombstones = _dest_engine_count(
+        conn,
+        f"SELECT COUNT(*) FROM {target_qualified} WHERE {deleted_pred}",  # nosec B608
+    )
     return {
         "soft_deleted": soft_deleted,
         "reactivated": reactivated,
+        "mirror_delete_mode": "soft",
+        "tombstone_rows": tombstones,
         "soft_delete_column": soft_delete_column,
         "physical_rows": physical,
         "rows_scanned": physical,
@@ -733,6 +809,7 @@ def apply_inferred_soft_deletes(
     source_spool: Any = None,
     source_key_spool: Any = None,
     pk_sources: list[str] | None = None,
+    delete_mode: str = "soft",
 ) -> dict[str, Any]:
     """Soft-delete destination rows that are no longer in the source snapshot.
 
@@ -765,6 +842,11 @@ def apply_inferred_soft_deletes(
     )
     if not resolved_pk_sources:
         raise ValueError("mirror sync requires a primary key / conflict column")
+    delete_mode = (delete_mode or "soft").strip().lower()
+    if delete_mode not in {"hard", "soft"}:
+        raise ValueError(
+            f"Unknown mirror delete_mode {delete_mode!r} — declare 'hard' or 'soft'."
+        )
 
     from connectors.generic_sql import get_sql_schema, get_sqlalchemy_engine
     from src.transfer.adapters import resolve_connector_config
@@ -795,7 +877,8 @@ def apply_inferred_soft_deletes(
     source_key_rows = 0
     try:
         with engine.connect() as conn:
-            _ensure_soft_delete_column(conn, qualified, soft_delete_column)
+            if delete_mode == "soft":
+                _ensure_soft_delete_column(conn, qualified, soft_delete_column)
             dialect_name = _dialect_of(conn) or engine_dialect
             _reap_orphan_staging(conn, schema_name or "", dialect_name)
             _create_pk_staging(conn, stg_qualified, qualified, pk_quoted, dialect_name)
@@ -827,13 +910,14 @@ def apply_inferred_soft_deletes(
                 soft_delete_column=soft_delete_column,
                 dialect=dialect_name,
                 target_table=table,
+                delete_mode=delete_mode,
             )
             conn.commit()
             active_rows, active_checksum = _compute_active_checksum(
                 conn,
                 qualified,
                 target_cols,
-                soft_delete_column,
+                soft_delete_column if delete_mode == "soft" else "",
                 batch_size,
                 dest_types=target_fingerprint_types(mappings, schema),
             )
@@ -856,14 +940,19 @@ def apply_inferred_soft_deletes(
         physical = census.get("rows_scanned")
     return {
         "soft_deleted": census.get("soft_deleted"),
+        "hard_deleted": census.get("hard_deleted"),
         "reactivated": census.get("reactivated"),
+        "mirror_delete_mode": census.get("mirror_delete_mode") or delete_mode,
+        "tombstone_rows": census.get("tombstone_rows"),
         "physical_rows": physical,
         "rows_scanned": physical,
         "active_rows": active_rows,
         "active_checksum": active_checksum,
         "target_columns": target_cols,
         "primary_key_columns": pk_columns,
-        "soft_delete_column": census.get("soft_delete_column") or soft_delete_column,
+        "soft_delete_column": census.get("soft_delete_column") or (
+            soft_delete_column if delete_mode == "soft" else ""
+        ),
         "source_key_rows": source_key_rows,
         "mode": "mirror",
     }

@@ -535,7 +535,19 @@ def stream_scd2_mirror_transfer(
                     "rejected_rows", int(upsert_summary.get("rejected_rows") or 0)
                 )
 
-            # Single SQL pass to reactivate present keys and soft-delete missing keys.
+            # Single SQL pass to reactivate present keys and delete missing
+            # keys. D38: default is the documented HARD delete; ``_deleted``
+            # tombstones exist only when the contract declares soft delete.
+            mirror_delete_mode = (
+                (contract.delete_mode if contract else "")
+                or (scd2_opts or {}).get("delete_mode")
+                or "hard"
+            )
+            if mirror_delete_mode not in {"hard", "soft"}:
+                raise ValueError(
+                    f"Unknown mirror delete_mode {mirror_delete_mode!r} — "
+                    "declare 'hard' or 'soft' on the stream contract."
+                )
             engine = get_sqlalchemy_engine(dest_cfg)
             if contract and contract.primary_key:
                 pk_cols = [
@@ -555,6 +567,7 @@ def stream_scd2_mirror_transfer(
                         pk_cols,
                         dialect=dest_type,
                         target_table=destination.table or staging.table,
+                        delete_mode=mirror_delete_mode,
                     )
                 )
                 conn.commit()
@@ -562,7 +575,7 @@ def stream_scd2_mirror_transfer(
                     conn,
                     target_qualified,
                     target_cols,
-                    "_deleted",
+                    "_deleted" if mirror_delete_mode == "soft" else "",
                     batch_size=1_000,
                     dest_types=digest_types,
                 )
@@ -570,6 +583,7 @@ def stream_scd2_mirror_transfer(
             release_engine(engine)
             dest_summary["active_rows"] = active_count
             dest_summary["active_checksum"] = active_checksum
+            dest_summary["mirror_delete_mode"] = mirror_delete_mode
 
         else:
             raise ValueError(f"Unsupported sync mode for SCD2/mirror streaming: {effective_sync}")

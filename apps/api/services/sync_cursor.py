@@ -257,6 +257,9 @@ class SyncContract:
     #: a table whose rows are updated in place, and a business date is set from
     #: a calendar, not a clock. See :data:`CURSOR_SEMANTICS`.
     cursor_semantics: str = ""
+    #: Mirror delete behavior: ``hard`` (docs default — DELETE missing keys) or
+    #: ``soft`` (declared — keep them as ``_deleted`` tombstones).
+    delete_mode: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
@@ -280,6 +283,9 @@ class SyncContract:
             schema_policy=str(data.get("schema_policy") or "manual_review"),
             validation_mode=str(data.get("validation_mode") or "strict"),
             cursor_semantics=str(data.get("cursor_semantics") or "").strip().lower(),
+            delete_mode=str(
+                data.get("delete_mode") or data.get("delete_strategy") or ""
+            ).strip().lower(),
         )
 
     def primary_key_columns(self) -> list[str]:

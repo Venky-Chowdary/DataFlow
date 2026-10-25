@@ -143,7 +143,12 @@ def test_stream_mirror_sqlite_to_sqlite():
                 destination=_endpoint(db_path, "dst"),
                 sync_mode="mirror",
                 stream_contracts=[
-                    {"selected": True, "primary_key": "id", "sync_mode": "mirror"}
+                    {
+                        "selected": True,
+                        "primary_key": "id",
+                        "sync_mode": "mirror",
+                        "delete_mode": "soft",
+                    }
                 ],
                 mappings=mappings,
                 validation_mode="strict",
@@ -162,7 +167,12 @@ def test_stream_mirror_sqlite_to_sqlite():
                 destination=_endpoint(db_path, "dst"),
                 sync_mode="mirror",
                 stream_contracts=[
-                    {"selected": True, "primary_key": "id", "sync_mode": "mirror"}
+                    {
+                        "selected": True,
+                        "primary_key": "id",
+                        "sync_mode": "mirror",
+                        "delete_mode": "soft",
+                    }
                 ],
                 mappings=mappings,
                 validation_mode="strict",
@@ -185,7 +195,12 @@ def test_stream_mirror_sqlite_to_sqlite():
                 destination=_endpoint(db_path, "dst"),
                 sync_mode="mirror",
                 stream_contracts=[
-                    {"selected": True, "primary_key": "id", "sync_mode": "mirror"}
+                    {
+                        "selected": True,
+                        "primary_key": "id",
+                        "sync_mode": "mirror",
+                        "delete_mode": "soft",
+                    }
                 ],
                 mappings=mappings,
                 validation_mode="strict",
@@ -215,7 +230,12 @@ def test_stream_mirror_sqlite_to_sqlite():
                 destination=_endpoint(db_path, "dst"),
                 sync_mode="mirror",
                 stream_contracts=[
-                    {"selected": True, "primary_key": "id", "sync_mode": "mirror"}
+                    {
+                        "selected": True,
+                        "primary_key": "id",
+                        "sync_mode": "mirror",
+                        "delete_mode": "soft",
+                    }
                 ],
                 mappings=mappings,
                 validation_mode="strict",

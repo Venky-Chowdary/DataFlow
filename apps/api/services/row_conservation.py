@@ -1003,6 +1003,9 @@ def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
             "active_checksum": data.get("active_checksum"),
             "soft_delete_column": data.get("soft_delete_column") or "_deleted",
             "soft_deleted": data.get("soft_deleted"),
+            "hard_deleted": data.get("hard_deleted"),
+            "mirror_delete_mode": data.get("mirror_delete_mode"),
+            "tombstone_rows": data.get("tombstone_rows"),
             "reactivated": data.get("reactivated"),
             "physical_rows": data.get("physical_rows"),
             "rows_scanned": data.get("rows_scanned"),
@@ -1317,7 +1320,12 @@ def _account_mirror(
     """Close active dest population, not physical COUNT(*) (which does not drop)."""
     payload = dict(mirror or {})
     active = _as_optional_int(payload.get("active_rows"))
+    # Inferred deletes count keys removed from the live view under either
+    # delete mode — D38: a hard-delete mirror reports hard_deleted.
     inferred = _as_optional_int(payload.get("soft_deleted"))
+    _hard = _as_optional_int(payload.get("hard_deleted"))
+    if _hard is not None:
+        inferred = _hard
     reactivated = _as_optional_int(payload.get("reactivated"))
     scanned = _as_optional_int(payload.get("rows_scanned"))
     physical = _as_optional_int(payload.get("physical_rows"))

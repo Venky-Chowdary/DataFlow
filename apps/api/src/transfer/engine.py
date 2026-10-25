@@ -3195,6 +3195,19 @@ class UniversalTransferEngine:
                             if isinstance(dest_summary, dict)
                             else None
                         )
+                        from services.sync_cursor import (
+                            resolve_sync_contract as _resolve_mirror_contract,
+                        )
+
+                        _mirror_contract = _resolve_mirror_contract(
+                            list(getattr(request, "stream_contracts", None) or [])
+                        )
+                        # D38: docs default is a hard delete; ``_deleted``
+                        # tombstones only when the contract declares soft.
+                        _mirror_delete_mode = (
+                            (_mirror_contract.delete_mode if _mirror_contract else "")
+                            or "hard"
+                        )
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
                             records,
@@ -3202,6 +3215,7 @@ class UniversalTransferEngine:
                             schema,
                             mappings,
                             conflict_columns,
+                            delete_mode=_mirror_delete_mode,
                             source_spool=getattr(spill_holder, "spool", None),
                             source_key_spool=getattr(spill_holder, "key_spool", None),
                             pk_sources=getattr(spill_holder, "pk_sources", None),
