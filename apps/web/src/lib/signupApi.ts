@@ -174,7 +174,9 @@ export async function fetchSignupConfig(): Promise<SignupConfig> {
 async function authedCall(path: string, body: unknown): Promise<Record<string, unknown>> {
   const { apiBearerToken } = await import("./session");
   const token = apiBearerToken() ?? "";
-  const csrf = (document.cookie.match(/(?:^|;\s*)dw_csrf=([^;]+)/) ?? [])[1];
+  const csrf = typeof document !== "undefined"
+    ? (document.cookie.match(/(?:^|;\s*)dw_csrf=([^;]+)/) ?? [])[1]
+    : undefined;
   const res = await fetch(`${API_BASE}${path}`, {
     method: "POST",
     headers: {
