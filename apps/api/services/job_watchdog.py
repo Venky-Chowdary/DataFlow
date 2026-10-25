@@ -177,6 +177,9 @@ def _settle_stalled(mongo: Any, job: dict[str, Any], info: dict[str, Any]) -> bo
 def _flag_stalled(mongo: Any, job: dict[str, Any], info: dict[str, Any]) -> None:
     job_id = str(job.get("_id") or job.get("id") or "")
     try:
+        # The flag write is bookkeeping, not job progress — stamping
+        # updated_at here would reset the quiet clock the next sweep
+        # measures, so a stalled job could never escalate to failed.
         mongo.update_job_fields(
             job_id,
             {
@@ -184,6 +187,7 @@ def _flag_stalled(mongo: Any, job: dict[str, Any], info: dict[str, Any]) -> None
                 "stall_seconds": int(info["stall_seconds"]),
                 "stall_step": info["step"],
             },
+            touch_updated_at=False,
         )
     except Exception as exc:  # noqa: BLE001 — flagging must not kill the sweep
         _logger.debug("stall flag %s failed: %s", job_id, exc)
