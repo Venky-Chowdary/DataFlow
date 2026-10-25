@@ -442,13 +442,24 @@ def ambiguous_number_columns(
     for col in cols:
         if _declared_text_column(declared, str(col)):
             continue
+        if _declared_non_numeric_column(declared, str(col)):
+            continue
         samples: list[str] = []
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            raw = str(row.get(col) or "").strip()
+            cell = row.get(col)
+            # Only delimited-file *text* can be grouping-ambiguous — a typed
+            # cell (Parquet timestamp, Decimal, int) already carries a value.
+            if not isinstance(cell, str):
+                continue
+            raw = cell.strip()
             if not raw or not _looks_like_grouped_number(raw):
                 continue
+            if raw[:1] in "{[":
+                continue  # JSON documents are not locale numbers (D61 family)
+            if _parse_datetime(raw) is not None or _parse_date(raw) is not None:
+                continue  # temporal text — its own contract, its own error (D61)
             if _parse_decimal(raw) is None:
                 samples.append(raw)
         if samples:
@@ -474,6 +485,26 @@ def _declared_text_column(column_types: dict[str, str], column: str) -> bool:
     from services.type_system import normalize_logical_type
 
     return normalize_logical_type(raw) in {"string", "text"}
+
+
+#: Declared contracts that can never carry US/EU grouping ambiguity — only a
+#: *numeric* or undeclared column in a delimited file is in scope (D61).
+_NON_NUMERIC_DECLARED: Final[frozenset[str]] = frozenset({
+    "string", "text",
+    "date", "time", "datetime", "timestamp", "timestamptz",
+    "boolean", "bool",
+    "json", "object", "array", "map", "list", "struct",
+    "binary", "bytes", "uuid",
+})
+
+
+def _declared_non_numeric_column(column_types: dict[str, str], column: str) -> bool:
+    raw = str(column_types.get(column) or "").strip()
+    if not raw:
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(raw) in _NON_NUMERIC_DECLARED
 
 
 def assumed_number_locale(
