@@ -4020,6 +4020,9 @@ class DataPilotTools:
         source_timezone: str = "",
         schema_drift_acknowledged: bool = False,
         pii_acknowledgement: dict | None = None,
+        upsert_key: str = "",
+        primary_key: str = "",
+        dedupe_key: str = "",
     ) -> ToolResult:
         from .dataset_transfer import stage_dataset_transfer
 
@@ -4037,6 +4040,9 @@ class DataPilotTools:
             source_timezone=source_timezone,
             schema_drift_acknowledged=schema_drift_acknowledged,
             pii_acknowledgement=pii_acknowledgement,
+            upsert_key=upsert_key,
+            primary_key=primary_key,
+            dedupe_key=dedupe_key,
         )
 
     def _create_schedule(

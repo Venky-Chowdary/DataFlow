@@ -163,7 +163,23 @@ def create_schedule(
     bound_cursor = str(
         (plan.get("data_rules") or {}).get("cursor_column") or cursor_column or ""
     ).strip()
-    if mode in _CURSOR_MODES and not bound_cursor:
+    # A file/object-store source has no watermark column to advance: the file
+    # ledger decides newness by checksum, and a keyed mode's identity is the
+    # upsert key. Requiring updated_at here refused every keyed file sync
+    # (C22) while an unnamed mode staged the same route and ran it.
+    from services.preflight_source_kind import source_is_record_batch
+
+    _src_plan = plan.get("source") or {}
+    _file_source = source_is_record_batch(
+        str(_src_plan.get("kind") or ""),
+        str(_src_plan.get("type") or _src_plan.get("format") or ""),
+    )
+    _needs_cursor = (
+        mode in _CURSOR_MODES
+        and not bound_cursor
+        and not (_file_source and mode in {"incremental_deduped"})
+    )
+    if _needs_cursor:
         return _tool_result(
             tool,
             success=False,
