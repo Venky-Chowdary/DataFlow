@@ -441,6 +441,10 @@ body,
    its 16px UA root and nothing else silently rescales. */
 body {
   font-size: var(--df-fs-body);
+  /* Full-bleed sections size against vw, which includes the scrollbar strip —
+     clip the residual overflow at the root instead of per-section. `clip`
+     (not `hidden`) keeps position:sticky working (no scroll container). */
+  overflow-x: clip;
 }
 
 /* Form controls do not inherit type from their container — without this the UA
@@ -520,7 +524,7 @@ body:has(.df2-app) #root {
 }
 
 /* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */
-@media (max-width: 1680px) {
+@media (max-width: 1679px) {
   .df2-app {
     --df-btn-height: 32px;
     --df-btn-height-sm: 28px;

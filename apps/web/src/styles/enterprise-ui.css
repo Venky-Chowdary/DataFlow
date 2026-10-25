@@ -914,7 +914,7 @@
   white-space: nowrap;
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-job-row-meta {
     flex-wrap: wrap;
   }
@@ -1609,7 +1609,7 @@
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-gate8-proof-grid,
   .df2-gate8-proof.is-compact .df2-gate8-proof-grid {
     grid-template-columns: minmax(0, 1fr);
@@ -2727,7 +2727,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-pipeline-rows-head,
   .df2-pipeline-row {
     grid-template-columns: auto auto minmax(0, 1.6fr) 100px 90px 72px;
@@ -3219,7 +3219,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   letter-spacing: -0.02em;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .lp-value-strip { grid-template-columns: 1fr; }
 }
 
@@ -4058,7 +4058,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 /* Other toolbars: wrap actions under filters on laptop widths */
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-toolbar:not(:has(.df2-toolbar-actions-cluster)) .df2-toolbar-end {
     flex: 1 1 100%;
     margin-left: 0;
@@ -6635,7 +6635,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-result-dashboard {
     --df-result-pad-x: 12px;
   }
@@ -9378,7 +9378,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-conservation-ledger-chips {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -10065,7 +10065,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-overview-v3-kpis {
     grid-template-columns: repeat(4, minmax(0, 1fr));
   }
@@ -10082,7 +10082,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-overview-v3-kpis {
     grid-template-columns: 1fr;
   }
@@ -11445,7 +11445,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 /* Short stepper labels before route bar overlaps (tablet / 14" / split view) */
-@media (max-width: 1440px) {
+@media (max-width: 1439px) {
   .df2-page-transfer-studio .df2-wizard-progress {
     display: none;
   }
@@ -12625,7 +12625,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-page-jobs .df2-jobs-v3-summary-metrics article {
     flex: 1 1 100%;
   }

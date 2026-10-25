@@ -236,7 +236,7 @@
   .df2-connector-row-used { display: none; }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-connector-row-quick .df2-btn { display: none; }
 }
 
@@ -419,7 +419,7 @@
   flex-wrap: wrap;
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-drawer-kv {
     grid-template-columns: 1fr;
   }
@@ -528,7 +528,7 @@
 
 .df2-drawer-actions .df2-drawer-action-delete { margin-left: auto; }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-drawer-actions-extra { display: none; }
   .df2-drawer-actions-menu { display: block; width: 100%; }
   .df2-drawer-actions .df2-drawer-action-delete { margin-left: 0; }
@@ -546,7 +546,7 @@
   justify-content: flex-start;
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-drawer-facts { grid-template-columns: 1fr; }
   .df2-drawer-actions .df2-drawer-action-delete { margin-left: 0; }
 }
@@ -607,7 +607,7 @@
   color: #475569;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-connectors-empty-features {
     grid-template-columns: 1fr;
   }

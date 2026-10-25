@@ -2030,7 +2030,7 @@ html.df2-canvas-focus .df2-app .df2-page-transfer-studio.is-studio-next .df2-xfo
   gap: var(--df-space-2);
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-app .df2-page-transfer-studio.is-studio-next .df2-transfer-studio-shell.is-flow-connect:not(.is-flow-transform) .df2-transfer-main-panel {
     grid-template-columns: minmax(0, 1fr);
     grid-template-rows: none;

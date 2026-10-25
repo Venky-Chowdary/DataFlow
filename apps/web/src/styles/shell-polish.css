@@ -358,7 +358,7 @@
   margin-bottom: 20px;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-overview-glance {
     grid-template-columns: repeat(2, 1fr);
   }
@@ -1836,7 +1836,7 @@ textarea.df2-pilot-composer textarea {
   background: linear-gradient(135deg, rgba(13, 148, 136, 0.05) 0%, rgba(99, 102, 241, 0.04) 100%);
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-jobs-command {
     grid-template-columns: 1fr;
   }
@@ -2411,7 +2411,7 @@ textarea.df2-pilot-composer textarea {
   color: var(--df-text-tertiary);
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-intelligence-stats {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2729,7 +2729,7 @@ textarea.df2-pilot-composer textarea {
   align-items: start;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-transfer-grid {
     grid-template-columns: 1fr;
   }
@@ -2805,7 +2805,7 @@ textarea.df2-pilot-composer textarea {
   border-radius: 0 0 14px 14px;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-pilot {
     flex-direction: column;
   }
@@ -3399,7 +3399,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 /* ─── Responsive: topology + overview + shell ─── */
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-dashboard-command {
     grid-template-columns: 1fr;
   }
@@ -3413,7 +3413,7 @@ textarea.df2-pilot-composer textarea {
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-page {
     padding: 20px 16px 32px;
   }
@@ -4336,7 +4336,7 @@ textarea.df2-pilot-composer textarea {
 }
 
 /* Responsive overview */
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-overview-workspace {
     grid-template-columns: 1fr;
   }
@@ -4507,7 +4507,7 @@ textarea.df2-pilot-composer textarea {
   min-width: 0;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-grid-2,
   .df2-overview-workspace,
   .df2-transfer-grid,
@@ -4607,7 +4607,7 @@ textarea.df2-pilot-composer textarea {
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-intelligence-stats {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -5481,7 +5481,7 @@ textarea.df2-pilot-composer textarea {
   background: linear-gradient(90deg, #059669, #34d399);
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-overview-enterprise .df2-overview-workspace {
     grid-template-columns: 1fr;
   }

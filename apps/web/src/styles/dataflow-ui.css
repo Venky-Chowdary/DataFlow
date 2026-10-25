@@ -640,7 +640,7 @@ body {
   border-radius: 10px;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-stats-hero {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
@@ -701,7 +701,7 @@ body {
   border-left: 3px solid var(--df-logo-strap);
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-ops-board { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 
@@ -888,7 +888,7 @@ body {
   align-items: start;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-grid-2 { grid-template-columns: 1fr; }
 }
 
@@ -916,7 +916,7 @@ body {
   margin-bottom: 12px;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-catalog-layout { grid-template-columns: 1fr; }
 }
 
@@ -1709,7 +1709,7 @@ body {
   align-items: start;
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-settings-layout { grid-template-columns: 1fr; }
 }
 
@@ -2315,7 +2315,7 @@ body {
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-pilot-console-strip,
   .df2-pilot-capability-grid {
     grid-template-columns: 1fr;
@@ -3630,7 +3630,7 @@ body {
   }
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-mapping-body {
     grid-template-columns: 1fr;
     max-height: none;
@@ -4046,7 +4046,7 @@ body {
   .df2-mapping-mobile { display: flex; }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-transfer-control-plane,
   .df2-assurance-strip {
     grid-template-columns: 1fr;
@@ -5737,7 +5737,7 @@ body {
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-topbar {
     height: auto;
     min-height: 64px;
@@ -6420,7 +6420,7 @@ html,
   color: var(--df-text-primary);
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .dt-toast-host {
     top: auto;
     right: 12px;

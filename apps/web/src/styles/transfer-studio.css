@@ -1077,7 +1077,7 @@
   line-height: 1.45;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-transfer-studio-workspace .df2-transfer-grid {
     grid-template-columns: minmax(0, 1fr);
   }
@@ -2217,7 +2217,7 @@ button.df2-map-band-chip:hover {
   }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-route-bar {
     max-width: none;
     width: 100%;
@@ -2253,7 +2253,7 @@ button.df2-map-band-chip:hover {
 }
 
 /* 14" laptop / compact */
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-page-transfer-studio .df2-source-kind-grid {
     grid-template-columns: 1fr;
   }
@@ -3129,7 +3129,7 @@ th.df2-type-string .df2-type-badge {
    primary status (first span: "Validate <state>" / "Route …" / map status)
    and drop the secondary detail/blocker spans — the full text remains in
    the status span's title and in the card content above. */
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-page-transfer-studio .df2-map-footer-status > span:not(:first-child),
   .df2-page-transfer-studio .df2-validate-footer-status > span:not(:first-child),
   .df2-page-transfer-studio .df2-run-footer-status > span:not(:first-child) {
@@ -3258,7 +3258,7 @@ th.df2-type-string .df2-type-badge {
   }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-dest-step-layout {
     grid-template-columns: 1fr;
     overflow: auto;
@@ -3940,7 +3940,7 @@ th.df2-type-string .df2-type-badge {
   color: var(--df-info);
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .df2-dest-target-grid,
   .df2-dest-target-grid.has-schema,
   .df2-dest-target-grid.has-dataset {
@@ -4605,7 +4605,7 @@ th.df2-type-string .df2-type-badge {
 }
 
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-source-step .df2-transfer-step-split {
     grid-template-columns: 1fr;
   }
@@ -4726,7 +4726,7 @@ th.df2-type-string .df2-type-badge {
   width: min(420px, 100%);
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .df2-dest-step.is-advanced .df2-policy-toolbar {
     grid-template-columns: 1fr;
   }
@@ -5519,7 +5519,7 @@ th.df2-type-string .df2-type-badge {
   flex: 0 0 auto !important;
 }
 
-@media (max-width: 1100px) and (min-width: 641px) {
+@media (max-width: 1099px) and (min-width: 641px) {
   .df2-page-transfer-studio .df2-validate-footer {
     flex-wrap: nowrap;
   }
@@ -11279,7 +11279,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
 }
 
 /* Beat responsive-shell 1100px full-width action wrap ? keep one compact band */
-@media (max-width: 1100px) and (min-width: 641px) {
+@media (max-width: 1099px) and (min-width: 641px) {
   .df2-page-transfer-studio .df2-wizard-footer,
   .df2-page-transfer-studio .df2-card-footer.df2-wizard-footer {
     flex-wrap: nowrap !important;
@@ -11874,7 +11874,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   padding: 8px 10px !important;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   /* The desktop lock carries :not(.is-studio-next), so this override needs
      the same class or a 390px classic page stays on two columns. Leave
      overflow at the lower specificity so the later hidden lock still wins. */
@@ -12155,7 +12155,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   font-size: inherit !important;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-app .df2-page-transfer-studio:not(.is-studio-next) .df2-source-step .df2-transfer-step-split {
     grid-template-columns: minmax(0, 1fr) !important;
   }
@@ -12277,7 +12277,7 @@ body:has(.df2-page-transfer-studio .df2-xform) .dt-toast-host {
   overflow-wrap: anywhere;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .df2-page-transfer-studio .df2-dest-step-left,
   .df2-page-transfer-studio .df2-dest-picker {
     overflow: hidden !important;
