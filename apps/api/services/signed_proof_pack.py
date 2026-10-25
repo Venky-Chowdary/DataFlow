@@ -215,7 +215,9 @@ def apply_fidelity_veto(report: dict[str, Any]) -> dict[str, Any]:
             # Failed still said "Row fidelity verified".
             out["message"] = veto.note
         elif loc and loc not in base:
-            out["message"] = f"{base} — {loc}"
+            # Failure-first (X-44): the localized culprit is the cause and
+            # must lead; the "Row count verified …" fact trails as context.
+            out["message"] = f"{loc} — {base}"
     return out
 
 

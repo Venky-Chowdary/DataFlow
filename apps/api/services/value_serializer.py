@@ -724,6 +724,11 @@ def operator_binary_cell_text(text: str | None, ddl_type: str = "") -> str | Non
 
     if normalize_logical_type(ddl_type) != "binary":
         return text
+    # A NULL/absent cell must render as NULL, not as hex. JSON read-backs can
+    # hand the literal "null" to a binary column, and "null" is valid base64 —
+    # it decoded to \x9e\xe9\x65 and displayed as 0x9ee965 (X-131).
+    if text.strip() in NULL_WIRE_SENTINELS or text.strip().lower() == "null":
+        return "NULL"
     if text == "":
         return "0x"  # zero-length bytes — real value, distinct from NULL
     try:

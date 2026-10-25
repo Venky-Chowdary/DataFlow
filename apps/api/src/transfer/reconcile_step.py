@@ -7419,11 +7419,19 @@ def run_reconciliation(
                     why_txt = (
                         f"{steps_txt} did not apply as declared"
                         if steps_txt
-                        else str(proof.get("reason") or "the recipe output differs")
+                        else str(proof.get('reason') or "the recipe output differs")
                     )
+                head = "Transform-applied proof failed: the destination does not hold the approved recipe's output"
+                cell = recon.get("artifact_cell_compare")
+                if isinstance(cell, dict) and cell.get("passed") is False:
+                    # File/object destinations: the re-read artifact already
+                    # differs from what was sent — that tamper is the real
+                    # cause, not a recipe/transform defect. Lead with the
+                    # read-back wording so operators check the destination
+                    # file, not their declared transforms.
+                    head = "Read-back verification failed: the written file changed after send"
                 recon["message"] = (
-                    f"Transform-applied proof failed: the destination does not "
-                    f"hold the approved recipe's output — {why_txt} (recipe "
+                    f"{head} — {why_txt} (recipe "
                     f"{proof.get('recipe_hash')})."
                     f"{proof.get('key_note') or ''}"
                 )

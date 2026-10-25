@@ -2179,6 +2179,40 @@ class DataPilotTools:
             },
         )
 
+    @staticmethod
+    def _offers_bad_data_fix(job: dict, quarantine: list, stored_rejected: int) -> bool:
+        """True only when row-level bad data is the plausible cause.
+
+        Held-out rows (quarantine / rejected_rows / rejected_details) always
+        qualify. A bare failure qualifies only when the error names a value-
+        level defect (cast, null, overflow, constraint on data) — structural
+        causes (missing destination, schema drift, pagination, array/struct
+        gaps, auth/network faults) get no Fix-bad-data CTA.
+        """
+        if quarantine or stored_rejected or job.get("rejected_details"):
+            return True
+        err = str(job.get("error") or job.get("message") or "").lower()
+        if not err:
+            return False
+        structural = (
+            "does not exist", "dropped", "destination reset", "schema drift",
+            "drifted", "pagination", "next page", "array", "struct",
+            "could not translate host", "authentication failed",
+            "permission denied", "connection refused", "timed out",
+            "no persisted column mappings", "not a supported destination",
+            "privilege", "decision artifact", "content_hash",
+        )
+        if any(k in err for k in structural):
+            return False
+        value_level = (
+            "invalid integer", "invalid number", "cannot cast", "could not cast",
+            "invalid literal", "not null", "null value", "violates",
+            "overflow", "too long", "do not fit", "does not fit",
+            "cannot fit", "invalid timestamp", "invalid boolean",
+            "quarantined cell", "rejected row",
+        )
+        return any(k in err for k in value_level)
+
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
@@ -2226,7 +2260,12 @@ class DataPilotTools:
         remediations: list[dict[str, str]] = []
         status = str(job.get("status") or "").lower()
         if status in {"failed", "cancelled"} or job.get("rejected_rows") or quarantine:
-            remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
+            # "Fix bad data" only remediates row-level value failures — a
+            # dropped destination table, schema drift, REST pagination gaps
+            # or transport faults send operators to a screen that cannot
+            # help them. Filter by failure class (C23 / D81 / D82).
+            if _offers_bad_data_fix(job, quarantine, stored_rejected):
+                remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
             remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
             remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
         req = job.get("transfer_request") or {}
