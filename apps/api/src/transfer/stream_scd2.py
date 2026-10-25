@@ -356,11 +356,16 @@ def stream_scd2_mirror_transfer(
                     engine = get_sqlalchemy_engine(dest_cfg)
                     try:
                         with engine.connect() as conn:
+                            # One run clock: the delete-close stamp is an
+                            # explicit instant taken by the caller, never a
+                            # hidden second _now_utc() inside the function —
+                            # D38 "gap in the delete-close timestamp".
                             closed = close_versions_missing_from_snapshot(
                                 conn,
                                 target_qualified,
                                 staging_qualified,
                                 conflict_columns,
+                                timestamp=_dt_cls.now(_tz.utc),
                                 dialect=dest_type,
                                 cols=_scd2_cols,
                             )
