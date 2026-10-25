@@ -124,10 +124,10 @@ def test_create_schedule_persists_new_fields(temp_store):
     assert reloaded.primary_key == "id"
     assert reloaded.max_retries == 2
     assert reloaded.notify_on_success is True
-    # next_run is computed from cron in the schedule timezone.
-    assert reloaded.next_run_at is not None
-    parsed = datetime.fromisoformat(reloaded.next_run_at)
-    assert parsed.tzinfo is not None
+    # Created without mappings → force-disabled by the empty-mapping park,
+    # and a disabled schedule has no next run (M24).
+    assert reloaded.enabled is False
+    assert reloaded.next_run_at is None
 
 
 def test_create_schedule_persists_studio_data_and_migration_rules(temp_store):

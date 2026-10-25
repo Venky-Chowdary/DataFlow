@@ -289,6 +289,10 @@ class ScheduleResponse(BaseModel):
         mappings = list(data.get("mappings") or [])
         data["mappings"] = mappings
         data["mapping_count"] = len(mappings)
+        # Paused / parked schedules do not fire — surface no next run (M24/D96).
+        from services.schedule_store import visible_next_run_at
+
+        data["next_run_at"] = visible_next_run_at(s)
         # run_history / running_instance stay on the history endpoint.
         allowed = set(cls.model_fields)
         return cls(**{k: v for k, v in data.items() if k in allowed})

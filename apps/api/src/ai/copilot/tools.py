@@ -3380,7 +3380,11 @@ class DataPilotTools:
         return None, None
 
     def _schedule_summary(self, s) -> dict:
-        from services.schedule_store import has_open_approval, schedule_bind_summary
+        from services.schedule_store import (
+            has_open_approval,
+            schedule_bind_summary,
+            visible_next_run_at,
+        )
 
         row = {
             "id": s.id,
@@ -3392,7 +3396,7 @@ class DataPilotTools:
             "source_table": s.source_table,
             "dest_table": s.dest_table,
             "sync_mode": getattr(s, "sync_mode", "") or "",
-            "next_run_at": s.next_run_at,
+            "next_run_at": visible_next_run_at(s),
             "last_run_at": s.last_run_at,
             "last_status": s.last_status,
             "run_count": s.run_count,

@@ -1311,12 +1311,14 @@ def set_schedule_enabled(resolver: Any, schedule_id: str = "", name: str = "", e
         return _tool_result("set_schedule_enabled", success=False, output=None,
             error=f"Pipeline “{sched.name}” is already {state}.",
         )
+    from services.schedule_store import visible_next_run_at
+
     preview = {
         "schedule_id": sched.id,
         "name": sched.name,
         "enabled_now": currently,
         "enabled_after": bool(enabled),
-        "next_run_at": getattr(sched, "next_run_at", "") or "",
+        "next_run_at": visible_next_run_at(sched) or "",
     }
     return _stage(
         "set_schedule_enabled",
