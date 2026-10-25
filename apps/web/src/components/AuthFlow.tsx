@@ -49,15 +49,17 @@ export function ResendRow({ challengeId, initialCooldown }: { challengeId: strin
 
   return (
     <div className="lp-login-resend">
-      <p className="lp-login-legal">
+      <p className="lp-login-legal" aria-live="polite">
         Didn't get it?{" "}
         <AuthButton variant="link" onClick={resend} disabled={cooldown > 0} loading={resending} loadingLabel="Sending…">
           {cooldown > 0 ? `Resend in ${cooldown}s` : "Resend code"}
         </AuthButton>
       </p>
-      <p className="lp-login-resend-status" aria-live="polite">
-        {notice || (cooldown > 0 ? `You can request a new code in ${cooldown} seconds.` : "")}
-      </p>
+      {notice && (
+        <p className="lp-login-resend-status" aria-live="polite">
+          {notice}
+        </p>
+      )}
     </div>
   );
 }

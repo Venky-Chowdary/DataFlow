@@ -16,7 +16,8 @@ describe("ResendRow", () => {
     assert.match(markup, /aria-disabled="true"/);
     assert.match(markup, /disabled=""/);
     assert.match(markup, /aria-live="polite"/);
-    assert.match(markup, /request a new code in 42 seconds/);
+    // one live countdown only — no duplicate sentence under the link
+    assert.doesNotMatch(markup, /request a new code in/);
   });
 
   it("renders an active resend link once the cooldown is zero", () => {
