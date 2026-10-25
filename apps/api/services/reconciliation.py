@@ -4510,6 +4510,12 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             logger.debug("Raw bytes are not valid base64; encoding as base64 for checksum")
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
+        # Same canonical form as the string-JSON branch below — compact,
+        # key-sorted, numbers normalized — so a decoded dict fingerprints
+        # identically to its wire text.
+        canon = canonical_json_text(json.dumps(value, default=json_default))
+        if canon is not None:
+            return canon
         return json.dumps(value, sort_keys=True, default=json_default)
     raw_text = str(value)
     if ddl_type:
