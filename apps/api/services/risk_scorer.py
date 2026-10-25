@@ -30,7 +30,9 @@ HEADLESS_UA = re.compile(
 
 def score_signals(*, ip: str = "", ua: str = "", device_id: str = "",
                   turnstile_ok: bool | None = None,
-                  geoip_result: dict[str, Any] | None = None) -> dict[str, Any]:
+                  geoip_result: dict[str, Any] | None = None,
+                  extra_score: int = 0,
+                  extra_reasons: list[str] | None = None) -> dict[str, Any]:
     """``{"score": int, "action": str, "reasons": [str]}``."""
     score = 0
     reasons: list[str] = []
@@ -70,6 +72,8 @@ def score_signals(*, ip: str = "", ua: str = "", device_id: str = "",
             if geo.get("is_vpn"):
                 score += 25
                 reasons.append("vpn_or_hosting")
+    score += max(0, extra_score)
+    reasons.extend(extra_reasons or [])
     score = max(0, min(100, score))
     if score >= 85:
         action = "deny"

@@ -31,6 +31,7 @@ from services import form_token as form_token_mod
 from services.brand_env import getenv_brand
 from services.email_policy import role_assessment
 from services import risk_scorer
+from services import email_verifier
 from services.email_quota import consume_send_slot
 from services.email_sender import (
     EmailQuotaExceeded,
@@ -185,11 +186,27 @@ def request_signup(
                        "that email domain can't receive mail")
     canonical = canonical_email(normalized)
 
+    # P2-9 external verifier (optional, fail-open): undeliverable is refused
+    # like an MX failure; a "risky" verdict feeds the risk scorer.
+    verifier_bump, verifier_reasons = 0, []
+    if email_verifier.configured():
+        verdict = email_verifier.verify(normalized)
+        if verdict["verdict"] == "undeliverable":
+            record_security_event("signup.blocked", outcome="failed",
+                                  reason_code="verifier:undeliverable",
+                                  details={"ip": ip})
+            raise ApiError(400, "undeliverable_domain",
+                           "that email domain can't receive mail")
+        if verdict["verdict"] == "risky":
+            verifier_bump = 20
+            verifier_reasons = ["verifier:risky"]
+
     # P2-8 risk scorer — deny drops with a decoy 202 (nothing stored/mailed);
     # hold stores the pending row with its score but skips the OTP mail.
     risk = risk_scorer.score_signals(
         ip=ip, ua=ua, device_id=device_id,
-        turnstile_ok=True if turnstile.configured() else None)
+        turnstile_ok=True if turnstile.configured() else None,
+        extra_score=verifier_bump, extra_reasons=verifier_reasons)
     if risk["action"] == "deny":
         record_security_event("signup.blocked", outcome="failed",
                               reason_code="risk:deny",
