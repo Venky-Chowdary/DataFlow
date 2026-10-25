@@ -93,6 +93,41 @@ async def form_token_issuer(purpose: str = "signup"):
     return {"form_token": issue(purpose[:32] or "signup")}
 
 
+@router.post("/resend-webhook")
+async def resend_webhook(request: Request):
+    """Svix-signed Resend events (P2-10): email.bounced / email.complained
+    feed the suppression list. Unsigned or forged payloads -> 401."""
+    from services import denylist_store, webhook_verify
+    from services.audit_coverage import record_security_event
+
+    body = await request.body()
+    if not webhook_verify.verify(body, request.headers):
+        from services.api_errors import ApiError
+        raise ApiError(401, "invalid_signature", "invalid webhook signature")
+    import json
+    try:
+        event = json.loads(body)
+    except ValueError:
+        return {"ignored": True}
+    etype = event.get("type", "")
+    if etype not in ("email.bounced", "email.complained"):
+        return {"ignored": True}
+    data = event.get("data") or {}
+    recipients = data.get("to") or ([data["email"]] if data.get("email") else [])
+    suppressed = []
+    for addr in recipients:
+        try:
+            denylist_store.deny_email_and_domain(
+                addr, source="bounce", reason=f"resend_{etype}",
+                added_by="resend-webhook")
+            suppressed.append(addr)
+        except Exception:  # noqa: BLE001 — suppression is best-effort per address
+            pass
+    record_security_event("email.event.received", outcome="succeeded",
+                          details={"type": etype, "suppressed": len(suppressed)})
+    return {"ok": True, "suppressed": len(suppressed)}
+
+
 @router.post("/verify-email")
 async def verify_email(body: VerifyRequest, request: Request, response: Response):
     from services import signup_service
