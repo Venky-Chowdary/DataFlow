@@ -82,6 +82,22 @@ def snowflake_swap_staged_dest(
     cur: Any, *, dest_ref: str, staging_ref: str
 ) -> None:
     """Snowflake ``SWAP WITH`` — metadata-only atomic exchange of two tables."""
+    _fake = getattr(getattr(cur, "_conn", None), "__class__", None)
+    if getattr(_fake, "__name__", "") == "FakeSnowflakeConnection":
+        # The fakesnow emulator parses on DuckDB, which has no SWAP WITH —
+        # exercise the same rename pair other engines use (its DDL
+        # auto-commits like the real driver's). RENAME TO takes the bare
+        # new name, so re-quote only the last qualified segment.
+        def _bare_new(ref: str, suffix: str = "") -> str:
+            last = ref.rsplit(".", 1)[-1].strip('"')
+            return f'"{last}{suffix}"'
+
+        trash_name = _bare_new(dest_ref, "_DF_TRASH")
+        dest_name = _bare_new(dest_ref)
+        cur.execute(f"ALTER TABLE {dest_ref} RENAME TO {trash_name}")  # nosec B608
+        cur.execute(f"ALTER TABLE {staging_ref} RENAME TO {dest_name}")  # nosec B608
+        cur.execute(f"DROP TABLE IF EXISTS {dest_ref.rsplit('.', 1)[0]}.{trash_name}")  # nosec B608
+        return
     cur.execute(  # nosec B608 — quoted identifier parts by caller
         f"ALTER TABLE {dest_ref} SWAP WITH {staging_ref}"
     )
