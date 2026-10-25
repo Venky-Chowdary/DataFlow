@@ -17,7 +17,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 API_ROOT = Path(__file__).resolve().parents[1]
-PROOF_DIR = API_ROOT / "data" / "proofs"
+def _proof_dir() -> Path:
+    from services.platform_config import data_dir
+
+    return data_dir() / "proofs"
 FIXTURES = API_ROOT / "tests" / "fixtures"
 GOLDEN = FIXTURES / "mapping_golden.json"
 ENTERPRISE = FIXTURES / "mapping_golden_enterprise.json"
@@ -480,7 +483,7 @@ def measure_enterprise_accuracy() -> dict[str, Any]:
 
 
 def measure_connector_pair_matrix() -> dict[str, Any]:
-    pair_dir = PROOF_DIR / "mapping_connector_pair_matrix"
+    pair_dir = _proof_dir() / "mapping_connector_pair_matrix"
     if not pair_dir.exists():
         return {
             "pair_count": 0,
@@ -705,7 +708,7 @@ def _ensure_connector_pair_proofs() -> None:
     """Lightweight materialization of pair proofs used by the catalog."""
     from services.mapping_pipeline import run_mapping_pipeline
 
-    pair_dir = PROOF_DIR / "mapping_connector_pair_matrix"
+    pair_dir = _proof_dir() / "mapping_connector_pair_matrix"
     pair_dir.mkdir(parents=True, exist_ok=True)
     sources = ("postgresql", "mysql", "mongodb", "sqlserver", "oracle", "snowflake")
     dests = ("postgresql", "mysql", "snowflake", "bigquery", "mongodb", "sqlserver", "oracle", "redshift")
@@ -800,10 +803,11 @@ def write_evidence_catalog(
     *,
     refresh_pairs: bool = False,
 ) -> tuple[Path, Path]:
-    PROOF_DIR.mkdir(parents=True, exist_ok=True)
+    proof_dir = _proof_dir()
+    proof_dir.mkdir(parents=True, exist_ok=True)
     catalog = catalog or build_evidence_catalog(refresh_pairs=refresh_pairs)
-    json_path = PROOF_DIR / "evidence_catalog.json"
-    md_path = PROOF_DIR / "EVIDENCE_CATALOG.md"
+    json_path = proof_dir / "evidence_catalog.json"
+    md_path = proof_dir / "EVIDENCE_CATALOG.md"
     json_path.write_text(json.dumps(catalog, indent=2), encoding="utf-8")
     md_path.write_text(catalog_to_markdown(catalog), encoding="utf-8")
     return json_path, md_path

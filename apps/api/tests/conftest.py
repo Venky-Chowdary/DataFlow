@@ -29,6 +29,25 @@ sys.path.insert(0, str(_api_root))
 # causing compatibility shims to import themselves recursively.
 import services as _canonical_services  # noqa: E402,F401
 
+# Session-level data-dir redirect: modules that bind `data_dir()` at import
+# time (STORE_PATH-style constants) capture it before any fixture can run,
+# so the env has to be set here — ahead of test-module imports. Per-test
+# tmp_path isolation still happens in _isolate_file_backed_test_stores for
+# stores that resolve data_dir() lazily; this session dir only catches
+# import-time snapshots. The session-end guard below fails the run if
+# anything still lands in apps/api/data.
+#
+# Set the fallback brand var (DATAFLOW_DATA_DIR), never DATAWRAP_DATA_DIR:
+# `data_dir()` resolves DATAWRAP_ first, so a permanently-set DATAWRAP_
+# value would shadow every test that monkeypatches DATAFLOW_DATA_DIR to
+# isolate itself — those tests would all share one dir and pollute each
+# other. With only the fallback var set, a test patching either var wins.
+import tempfile  # noqa: E402
+
+os.environ.setdefault(
+    "DATAFLOW_DATA_DIR",
+    tempfile.mkdtemp(prefix="df-suite-data-"))
+
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 # Local proof dials Postgres and MySQL on loopback. Production deploy does
@@ -107,16 +126,19 @@ def _oracle_transaction_detection_grant_for_opt_out_live_tests(request):
 # worker its own catalog; the product already reads this override.
 _xdist_worker = os.environ.get("PYTEST_XDIST_WORKER")
 if _xdist_worker:
+    _worker_data_dir = Path(
+        os.environ.get("DATAFLOW_DATA_DIR") or tempfile.mkdtemp(prefix="df-suite-data-")
+    )
     os.environ.setdefault(
         "FAKESNOW_DB_PATH",
-        str(_api_root / "data" / f"fakesnow_data_{_xdist_worker}"),
+        str(_worker_data_dir / f"fakesnow_data_{_xdist_worker}"),
     )
-    # Load-history JSON must not share apps/api/data/quality_profiles across
+    # Load-history JSON must not share the dev data dir's quality_profiles across
     # workers — leftover 1M / prior-pytest runs inflate rows_written_total.
     # Do not rewrite DATAFLOW_DATA_DIR here (connectors/tenants live there).
     os.environ.setdefault(
         "DATAFLOW_QUALITY_PROFILES_DIR",
-        str(_api_root / "data" / f"quality_profiles_{_xdist_worker}"),
+        str(_worker_data_dir / f"quality_profiles_{_xdist_worker}"),
     )
 
 # Slim CI images omit sentence-transformers; use a deterministic hash embedder
@@ -274,6 +296,14 @@ def _isolate_cdc_leases(monkeypatch):
 @pytest.fixture(autouse=True)
 def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
     """Keep test persistence out of the developer's default data directory."""
+    # The master dial: every store that resolves ``platform_config.data_dir()``
+    # (users, challenges, resets, workspaces, quota, ...) lands in a per-test
+    # tmp dir, so no test can touch apps/api/data or another test's state.
+    # Drop DATAWRAP_DATA_DIR (the higher-priority brand var) and set the
+    # fallback DATAFLOW_DATA_DIR instead, so a test that monkeypatches either
+    # variable to point at its own directory is never shadowed by this one.
+    monkeypatch.delenv("DATAWRAP_DATA_DIR", raising=False)
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "dw-data"))
     from services import audit_log, auth_sessions, mcp_invocation_log
 
     monkeypatch.setattr(
@@ -552,3 +582,34 @@ def spend_pilot_ack(ack_id: str, actor: str) -> dict:
             ConfirmActionRequest(ack_id=ack_id, actor=actor), _HttpRequest(), BackgroundTasks()
         )
     )
+
+
+def _data_dir_fingerprint() -> dict[str, tuple[int, int]]:
+    """relpath -> (mtime_ns, size) for everything under the dev data dir."""
+    root = _api_root / "data"
+    if not root.is_dir():
+        return {}
+    out: dict[str, tuple[int, int]] = {}
+    for p in root.rglob("*"):
+        if p.is_file():
+            st = p.stat()
+            out[str(p.relative_to(root))] = (st.st_mtime_ns, st.st_size)
+    return out
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _guard_no_test_writes_dev_data_dir():
+    """The suite must never write into apps/api/data — per-test stores live
+    under tmp_path via DATAWRAP_DATA_DIR. Fails the run listing every file a
+    test created or modified in the shared dev directory."""
+    before = _data_dir_fingerprint()
+    yield
+    after = _data_dir_fingerprint()
+    changed = sorted(p for p, sig in after.items() if before.get(p) != sig)
+    removed = sorted(p for p in before if p not in after)
+    if changed or removed:
+        pytest.fail(
+            "tests wrote into apps/api/data — route the store through "
+            "data_dir() (DATAWRAP_DATA_DIR is tmp_path in tests). "
+            f"changed/created: {changed[:20]}; removed: {removed[:20]}"
+        )

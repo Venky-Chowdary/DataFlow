@@ -218,7 +218,12 @@ def _now() -> str:
 
 def _store_path() -> Path:
     env = getenv_brand("TEAM_STORE", "").strip()
-    return Path(env) if env else STORE_PATH
+    if env:
+        return Path(env)
+    # Resolve data_dir() per call — the module-level STORE_PATH snapshot is
+    # bound at import time, before test isolation (DATAWRAP_DATA_DIR) or a
+    # reconfigured volume can take effect.
+    return data_dir() / "teams.json"
 
 
 def normalize_role(role: str) -> str:
