@@ -32,7 +32,10 @@ from connectors.writer_common import (  # noqa: E402
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
-from services.keyset_pagination import max_keyset_bookmark  # noqa: E402
+from services.keyset_pagination import (
+    header_column_index,
+    max_keyset_bookmark,
+)  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
@@ -334,15 +337,18 @@ def _purge_route_key_tuples(
     from connectors.sql_identifiers import quote_table_ref, split_qualified_table
 
     key_ix = [
-        batch.headers.index(c) if c in batch.headers else -1
-        for c in pk_source_cols
+        i if i is not None else -1
+        for i in (header_column_index(batch.headers, c) for c in pk_source_cols)
     ]
     if any(i < 0 for i in key_ix):
         # The recipe renamed a key component earlier — audit names are the
         # source-side spelling for the same key.
         key_ix = [
-            batch.headers.index(c) if c in batch.headers else -1
-            for c in (pk_audit_cols or [])
+            i if i is not None else -1
+            for i in (
+                header_column_index(batch.headers, c)
+                for c in (pk_audit_cols or [])
+            )
         ]
     keys: set[tuple] = set(diverted_keys or [])
     if key_ix and not any(i < 0 for i in key_ix):
@@ -2116,7 +2122,7 @@ def _stream_database_transfer_impl(
             and not requires_upsert(effective_sync)
             and not pk_target_cols
             and keyset_col
-            and keyset_col in (batch.headers or [])
+            and header_column_index(batch.headers or [], keyset_col) is not None
             and watermark
         ):
             return batch
@@ -2132,7 +2138,7 @@ def _stream_database_transfer_impl(
             if bookmark is None:
                 return batch
             cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
-            cidx = batch.headers.index(keyset_col)
+            cidx = header_column_index(batch.headers, keyset_col)
             boundary_idx = [
                 i
                 for i, row in enumerate(batch.rows)
@@ -2734,17 +2740,15 @@ def _stream_database_transfer_impl(
         the same thing a ``WHERE cursor > :watermark`` means. Returns the kept
         rows and how many carried no cursor value at all.
         """
-        try:
-            cursor_idx = headers.index(cursor_source_col)
-        except ValueError:
+        cursor_idx = header_column_index(headers, cursor_source_col)
+        if cursor_idx is None:
             # The cursor column is not on the page: nothing here can be proven
             # historical, and dropping the page would lose rows.
             return list(rows), 0
-        pk_idx = (
-            headers.index(cursor_pk_source)
-            if cursor_pk_source and cursor_pk_source in headers
-            else -1
-        )
+        pk_idx = -1
+        if cursor_pk_source:
+            _pki = header_column_index(headers, cursor_pk_source)
+            pk_idx = _pki if _pki is not None else -1
         kept: list[list[str]] = []
         unbounded = 0
         for row in rows:
@@ -2800,7 +2804,9 @@ def _stream_database_transfer_impl(
                 [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
             )
             keyset_mark = max_keyset_bookmark(batch.rows, batch.headers, order_cols)
-            if keyset_mark is None and keyset_col in (batch.headers or []):
+            if keyset_mark is None and header_column_index(
+                batch.headers or [], keyset_col
+            ) is not None:
                 keyset_mark = max_cursor_value(
                     batch.rows, batch.headers, keyset_col, keyset_tiebreak or None
                 )
@@ -4574,7 +4580,8 @@ def _stream_database_transfer_impl(
                 if (
                     incremental
                     and use_checksum_keyset
-                    and checksum_cursor_col in (batch.headers or [])
+                    and header_column_index(batch.headers or [], checksum_cursor_col)
+                    is not None
                 ):
                     # M3 — bound the digest to the [watermark, max_seen]
                     # window this run covered. The upper bound drops rows
@@ -4659,7 +4666,11 @@ def _stream_database_transfer_impl(
                     break
                 if len(batch.rows) < read_limit:
                     break
-                if use_checksum_keyset and checksum_cursor_col in (batch.headers or []):
+                if (
+                    use_checksum_keyset
+                    and header_column_index(batch.headers or [], checksum_cursor_col)
+                    is not None
+                ):
                     # Advance on the composite (cursor, pk) max — the same
                     # bookmark shape the write pass seeds and the reader
                     # seeks with. A bare cursor value would drop tie rows on
@@ -5139,9 +5150,8 @@ class _StepRawLedger:
         if not rows or not self.key_columns:
             return
         self.hashed_columns = list(headers)
-        try:
-            kid = [headers.index(k) for k in self.key_columns]
-        except ValueError:
+        kid = [header_column_index(headers, k) for k in self.key_columns]
+        if any(i is None for i in kid):
             return
         for row in rows:
             try:

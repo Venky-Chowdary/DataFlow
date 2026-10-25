@@ -2379,12 +2379,30 @@ def _source_key_values(
 
     seen: set[str] = set()
     values: list[Any] = []
+    # Records keyed by engine-returned headers can carry the folded case
+    # (Snowflake/Oracle fold unquoted names to UPPER), so an exact lookup on
+    # the contract-declared key misses every row and the keyed scope stays
+    # empty — same fold handled by keyset_pagination.header_column_index.
+    from services.keyset_pagination import header_column_index
+
+    key_names = [source_sort_key]
+    if source_sort_key != sort_key:
+        key_names.append(sort_key)
+
+    def _key_raw(rec: dict) -> Any:
+        for name in key_names:
+            raw = rec.get(name)
+            if raw is not None:
+                return raw
+            idx = header_column_index(list(rec.keys()), name)
+            if idx is not None:
+                return rec[list(rec.keys())[idx]]
+        return None
+
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        raw = rec.get(source_sort_key)
-        if raw is None and source_sort_key != sort_key:
-            raw = rec.get(sort_key)
+        raw = _key_raw(rec)
         if raw is None or raw == "":
             continue
         # D86 — the NULL sentinel is metadata, never a bind value. Keep real

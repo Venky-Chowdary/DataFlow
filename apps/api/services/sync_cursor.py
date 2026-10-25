@@ -1166,17 +1166,15 @@ def max_cursor_value(
     """
     if not cursor_column or not rows:
         return None
-    try:
-        idx = headers.index(cursor_column)
-    except ValueError:
+    from services.keyset_pagination import header_column_index
+
+    idx = header_column_index(headers, cursor_column)
+    if idx is None:
         return None
     pk = (cursor_primary_key or "").strip()
     pk_idx: int | None = None
     if pk and pk != cursor_column:
-        try:
-            pk_idx = headers.index(pk)
-        except ValueError:
-            pk_idx = None
+        pk_idx = header_column_index(headers, pk)
 
     if pk_idx is None:
         values: list[str] = []
