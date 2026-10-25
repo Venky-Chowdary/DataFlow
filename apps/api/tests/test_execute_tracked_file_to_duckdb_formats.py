@@ -141,7 +141,10 @@ def test_file_to_duckdb_preserves_types(fmt: str):
             '{"k":"v"}',
             '["a","b"]',
         )
-        text_blank = "" if fmt in {"csv", "tsv"} else None
+        # C04 codec: an unquoted empty CSV/TSV cell is SQL NULL — only a
+        # quoted "" cell lands as ''. DictWriter writes this fixture's ""
+        # unquoted, so all formats expect NULL here.
+        text_blank = None
         assert rows[1] == (
             2,
             Decimal("2000.5000"),
