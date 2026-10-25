@@ -15,7 +15,7 @@ import {
   verifyEmail,
 } from "../lib/signupApi";
 import { changeEmailRequestError, codeEntryError, mailSendError } from "../lib/authFlowCopy";
-import { focusFirstInvalid, ResendRow } from "../components/AuthFlow";
+import { focusFirstInvalid, PasswordToggle, ResendRow } from "../components/AuthFlow";
 import { AuthButton } from "../components/AuthButton";
 import { writeSession } from "../lib/session";
 
@@ -361,14 +361,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
                 aria-invalid={Boolean(passwordError)}
                 aria-describedby={passwordError ? "signup-password-error" : undefined}
               />
-              <button
-                type="button"
-                className="lp-input-password-toggle"
-                onClick={() => setShowPassword((v) => !v)}
-                aria-label={showPassword ? "Hide password" : "Show password"}
-              >
-                <DtIcon name={showPassword ? "lock" : "scan"} size={15} />
-              </button>
+              <PasswordToggle show={showPassword} onToggle={() => setShowPassword((v) => !v)} />
             </div>
             {passwordError && <small id="signup-password-error" className="lp-field-error">{passwordError}</small>}
           </div>
@@ -643,14 +636,7 @@ export function ResetPasswordPage({ token, onSignIn, onSendNewLink }: {
                     aria-invalid={Boolean(passwordError)}
                     aria-describedby={passwordError ? "reset-password-error" : undefined}
                   />
-                  <button
-                    type="button"
-                    className="lp-input-password-toggle"
-                    onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? "Hide password" : "Show password"}
-                  >
-                    <DtIcon name={showPassword ? "lock" : "scan"} size={15} />
-                  </button>
+                  <PasswordToggle show={showPassword} onToggle={() => setShowPassword((v) => !v)} />
                 </div>
                 {passwordError && <small id="reset-password-error" className="lp-field-error">{passwordError}</small>}
               </div>

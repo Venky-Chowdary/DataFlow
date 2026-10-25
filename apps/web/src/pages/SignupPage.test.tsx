@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "node:test";
-import { focusFirstInvalid, ResendRow } from "../components/AuthFlow.js";
+import { focusFirstInvalid, PasswordToggle, ResendRow } from "../components/AuthFlow.js";
 import { ChangeEmailCard } from "../components/ChangeEmailCard.js";
 import { ForgotPasswordPage, ResetPasswordPage } from "./SignupPage.js";
 import { inspectResetToken, resetPassword } from "../lib/signupApi.js";
@@ -131,5 +131,25 @@ describe("reset link API helpers", () => {
     } finally {
       restore();
     }
+  });
+});
+
+/**
+ * Review-8 item 7: show/hide uses a real eye/eye-off icon with aria-pressed
+ * and a 44px hit target — not the old bracket/expand glyph.
+ */
+describe("PasswordToggle", () => {
+  it("renders the eye icon with aria-pressed and a labelled state", () => {
+    const off = renderToStaticMarkup(
+      createElement(PasswordToggle, { show: false, onToggle: () => {} }),
+    );
+    assert.match(off, /lp-input-password-toggle/);
+    assert.match(off, /aria-label="Show password"/);
+    assert.match(off, /aria-pressed="false"/);
+    const on = renderToStaticMarkup(
+      createElement(PasswordToggle, { show: true, onToggle: () => {} }),
+    );
+    assert.match(on, /aria-label="Hide password"/);
+    assert.match(on, /aria-pressed="true"/);
   });
 });

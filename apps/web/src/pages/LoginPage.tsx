@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from "react";
 import { AuthBrandPanel } from "../components/AuthBrandPanel";
 import { DtIcon } from "../components/DtIcon";
 import { AuthButton } from "../components/AuthButton";
+import { PasswordToggle } from "../components/AuthFlow";
 import { useToast } from "../components/Toast";
 import { ApiError, fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
 import { fetchSignupConfig } from "../lib/signupApi";
@@ -285,14 +286,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
                     placeholder="Enter your password"
                     aria-invalid={Boolean(passwordError || (credentialError && alertKind === "auth"))}
                   />
-                  <button
-                    type="button"
-                    className="lp-input-password-toggle"
-                    onClick={() => setShowPassword((v) => !v)}
-                    aria-label={showPassword ? "Hide password" : "Show password"}
-                  >
-                    <DtIcon name={showPassword ? "lock" : "scan"} size={15} />
-                  </button>
+                  <PasswordToggle show={showPassword} onToggle={() => setShowPassword((v) => !v)} />
                 </div>
                 {passwordError && <small className="lp-field-error">{passwordError}</small>}
               </div>

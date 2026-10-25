@@ -2112,18 +2112,32 @@ html:has(.lp) {
 .lp-login--gate .lp-input-password-toggle {
   position: absolute;
   top: 50%;
-  right: 10px;
+  right: 2px;
   transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   border: none;
   border-radius: 10px;
   background: transparent;
   color: #64748b;
   cursor: pointer;
+}
+
+.lp-login--gate .lp-input-password-toggle:focus-visible {
+  outline: 2px solid #0d9488;
+  outline-offset: -2px;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle {
+  color: #94a3b8;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
+  background: rgba(148, 163, 184, 0.14);
+  color: #e2e8f0;
 }
 
 .lp-login--gate .lp-input-password-toggle:hover {

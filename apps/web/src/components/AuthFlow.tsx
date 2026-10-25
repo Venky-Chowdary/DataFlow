@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { resendCode, SignupApiError } from "../lib/signupApi";
 import { AuthButton } from "./AuthButton";
+import { DtIcon } from "./DtIcon";
 import { useToast } from "./Toast";
 
 /** Focus the first field marked invalid inside the card. */
@@ -58,5 +59,21 @@ export function ResendRow({ challengeId, initialCooldown }: { challengeId: strin
         {notice || (cooldown > 0 ? `You can request a new code in ${cooldown} seconds.` : "")}
       </p>
     </div>
+  );
+}
+
+/** Show/hide password toggle — proper eye/eye-off icon, aria-pressed, and
+ *  the 44px hit target comes from .lp-input-password-toggle. */
+export function PasswordToggle({ show, onToggle }: { show: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      className="lp-input-password-toggle"
+      onClick={onToggle}
+      aria-label={show ? "Hide password" : "Show password"}
+      aria-pressed={show}
+    >
+      <DtIcon name={show ? "eye-off" : "eye"} size={16} />
+    </button>
   );
 }
