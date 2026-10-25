@@ -424,8 +424,16 @@ def peek_file_source(
         total = 0
         headers: list[str] = []
         with _text_reader(content, encoding=enc) as reader_file:
+            # C04: preview sees the codec's cells — unquoted empty is None,
+            # quoted "" is '' — so inferred schema and the write pass agree.
+            from services.csv_codec import iter_csv_records
+
             headers, rows = header_and_rows(
-                csv.reader(reader_file, delimiter=delim),
+                iter_csv_records(
+                    reader_file,
+                    delim,
+                    empty_cell=str(getattr(opts, "empty_cell", "null") or "null"),
+                ),
                 opts,
                 header_names=csv_header_names,
                 source_label="CSV",
@@ -706,6 +714,8 @@ def _iter_csv_batches(
     content: bytes | str | os.PathLike,
     chunk_size: int,
     read_options: ReadOptions | None = None,
+    *,
+    nulled: list[int] | None = None,
 ):
     opts = read_options or ReadOptions()
     sample_bytes = _first_bytes(content)
@@ -715,8 +725,17 @@ def _iter_csv_batches(
     with _text_reader(content, encoding=enc, newline="") as reader_file:
         # Header, preamble, blank-line and head/tail rules live in one place, so
         # the rows streamed here are exactly the rows count_csv_rows counted.
+        # C04: the codec decodes cells — an unquoted empty field is already
+        # None (SQL NULL) and a quoted "" is '' here, on every engine.
+        from services.csv_codec import iter_csv_records
+
         headers, rows = header_and_rows(
-            csv.reader(reader_file, delimiter=delim),
+            iter_csv_records(
+                reader_file,
+                delim,
+                empty_cell=str(getattr(opts, "empty_cell", "null") or "null"),
+                nulled=nulled,
+            ),
             opts,
             header_names=csv_header_names,
             source_label="CSV",
@@ -773,6 +792,8 @@ def _batch_iterator_for_type(
     batch_size: int,
     read_options: ReadOptions | None = None,
     declared_name: str | None = None,
+    *,
+    nulled: list[int] | None = None,
 ):
     """Return a fresh batch iterator for the given file type.
 
@@ -783,7 +804,9 @@ def _batch_iterator_for_type(
     ``.xlsx`` both load; the cache suffix does not choose the format.
     """
     if file_type in ("csv", "tsv"):
-        return _iter_csv_batches(content, batch_size, read_options=read_options)
+        return _iter_csv_batches(
+            content, batch_size, read_options=read_options, nulled=nulled
+        )
     if file_type == "json":
         return _iter_json_array_batches(content, batch_size)
     if file_type == "jsonl" or file_type == "ndjson":
@@ -913,6 +936,37 @@ def _batch_iterator_for_type(
 
         return _fwf_batches()
     raise ValueError(f"File type '{file_type}' does not support streaming ingest")
+
+
+def file_empty_cell_bind(value: Any, carrier: str, *, empty_cell: str = "null") -> Any:
+    """C04/X-87/X-88: one empty-file-cell rule for every engine and column.
+
+    The CSV codec already lands an *unquoted* empty field as ``None`` and a
+    quoted ``""`` as ``''`` (with ``empty_cell='keep'`` an unquoted empty is
+    ``''`` too). What reaches this bind is therefore a real empty string or a
+    non-CSV ``''`` (JSON/Excel): a text-family carrier keeps ``''``; a
+    non-text column still lands NULL — ``''`` is never a number.
+    """
+    if value is None or value != "":
+        return value
+    if _TEXT_FAMILY_DDL_RE.match(str(carrier or "").strip()):
+        return ""
+    return None
+
+
+def _apply_empty_cell_rule(
+    batch: list, carriers: dict, counter: list[int]
+) -> list:
+    """Rewrite ``''`` → ``None`` on non-text carriers, counting the cells."""
+    for row in batch:
+        if not isinstance(row, dict):
+            continue
+        for name, value in row.items():
+            bound = file_empty_cell_bind(value, str(carriers.get(name) or ""))
+            if bound is not value:
+                row[name] = bound
+                counter[0] += 1
+    return batch
 
 
 def iter_source_rows(
@@ -1377,11 +1431,27 @@ def stream_file_to_database(
     for col in columns:
         ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, schema.get(col, 'string'))}")
 
+    # C04/X-87/X-88: one empty-cell rule on every engine. The codec lands an
+    # unquoted empty field as NULL and a quoted "" as ''; a '' on a non-text
+    # carrier is still not a number — bound to NULL once at the source edge so
+    # writers, Gate-8 and the digest see the same cells. The run summary names
+    # the rule and counts the NULL-landed cells.
+    empty_cell_nulls: list[int] = [0]
     batch_iter = _batch_iterator_for_type(
-        file_type, content, batch_size, read_options, declared_name=filename
+        file_type, content, batch_size, read_options, declared_name=filename,
+        nulled=empty_cell_nulls,
     )
+    dest_summary_extra_cells: dict[str, Any] = {
+        "file_empty_cell_rule": str(
+            getattr(read_options, "empty_cell", "null") or "null"
+        ),
+    }
 
     column_types = {c: ddl_carrier_type(schema.get(c, "string")) for c in columns}
+    batch_iter = (
+        _apply_empty_cell_rule(b, column_types, empty_cell_nulls)
+        for b in batch_iter
+    )
     target_cols, logical_types = _resolve_file_stream_target_columns(
         dest_type, mappings, column_types
     )
@@ -3145,4 +3215,8 @@ def stream_file_to_database(
     # The exact type basis this stream fingerprinted on — Gate-8's dest
     # read-back must hash against it (SQLite TEXT degrade; see stream.py).
     dest_summary.setdefault("gate8_digest_types", dict(fingerprint_dest_types))
+    # C04/X-87/X-88: name the empty-cell rule applied and how many cells it
+    # NULL-landed (codec unquoted-empty + carrier bind on non-text '').
+    dest_summary.update(dest_summary_extra_cells)
+    dest_summary["empty_string_as_null_cells"] = int(empty_cell_nulls[0])
     return written, ddl_log, dest_summary, columns

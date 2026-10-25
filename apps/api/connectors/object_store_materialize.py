@@ -183,40 +183,42 @@ class ObjectStoreEncoder:
             self._append_json_array(mapped_rows)
         self._records_written += len(mapped_rows)
 
-    def _ensure_csv(self) -> csv.DictWriter:
+    def _ensure_csv(self) -> str:
         if self._csv is not None:
             return self._csv
+        from services.csv_codec import format_csv_row
+
         delim = "\t" if self.key_l.endswith(".tsv") else ","
         self._text = _SpoolTextSink(self._spool)
-        self._csv = csv.DictWriter(
-            self._text,
-            fieldnames=self.target_cols,
-            delimiter=delim,
-            extrasaction="ignore",
-        )
-        self._csv.writeheader()
+        self._csv = delim
+        self._text.write(format_csv_row(list(self.target_cols), delim) + "\n")
         self._header_written = True
-        return self._csv
+        return delim
 
     def _append_delimited(self, mapped_rows: Sequence[tuple]) -> None:
         from connectors.writer_common import iter_mapped_delimited_records
+        from services.csv_codec import csv_cell_encode, format_csv_row
 
-        writer = self._ensure_csv()
+        delim = self._ensure_csv()
         for record in iter_mapped_delimited_records(
             list(mapped_rows), self.target_cols, self.dest_types
         ):
-            # CSV has no null token. ``""`` is a real empty string. SQL NULL
-            # is the shared sentinel so a Postgres NULL does not read back as
-            # an empty name (R7-001). ``normalize_cell`` already maps it back.
-            writer.writerow(
-                {
-                    k: (
-                        SQL_NULL_SENTINEL
-                        if v is None
-                        else cell_to_string(v)
-                    )
-                    for k, v in record.items()
-                }
+            # C04: one codec — NULL is an empty unquoted cell, a real '' is
+            # quoted "", so a Postgres NULL cannot read back as an empty
+            # name and vice versa (R7-001 without a sentinel).
+            self._text.write(
+                format_csv_row(
+                    [
+                        csv_cell_encode(
+                            None
+                            if record.get(k) is None
+                            else cell_to_string(record.get(k))
+                        )
+                        for k in self.target_cols
+                    ],
+                    delim,
+                )
+                + "\n"
             )
         if self._text is not None:
             self._text.flush()

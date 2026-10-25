@@ -609,7 +609,16 @@ def _iter_csv_source_records(
     )
     source_cols = [p[0] for p in pairs]
     with _csv_text(content, encoding=encoding) as handle:
-        reader = csv.reader(handle, delimiter=delim)
+        # C04: the codec decodes cells — an unquoted empty field is None
+        # (SQL NULL), a quoted "" is '', and legacy \N is NULL — so COPY and
+        # the row path bind the same values on every engine.
+        from services.csv_codec import iter_csv_records
+
+        reader = iter_csv_records(
+            handle,
+            delim,
+            empty_cell=str(getattr(read_options, "empty_cell", "null") or "null"),
+        )
         header = next(reader, None)
         if not header:
             raise FastPathUnavailable("CSV file has no header row")
@@ -626,12 +635,13 @@ def _iter_csv_source_records(
             raise FastPathUnavailable(f"CSV header missing mapped column {missing[0]!r}")
         positions = [index[c.lower()] for c in source_cols]
         for row in reader:
-            if not row or all(str(c).strip() == "" for c in row):
+            if not row or all(c is None or str(c).strip() == "" for c in row):
                 continue
             record: dict[str, str | None] = {}
             for col, pos in zip(source_cols, positions, strict=True):
-                cell = row[pos] if pos < len(row) else ""
-                record[col] = _empty_to_none(cell)
+                # Codec already decoded: None = NULL, '' = quoted "" — pass
+                # through untouched (an absent trailing field is absent → NULL).
+                record[col] = row[pos] if pos < len(row) else None
             yield record
 
 
@@ -670,6 +680,10 @@ def _write_mapped_csv(
     delim = "\t" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else ","
     source_cols = [p[0] for p in pairs]
     dest_cols = [p[1] for p in pairs]
+    try:
+        from transfer.file_stream import file_empty_cell_bind
+    except ImportError:  # pragma: no cover
+        from src.transfer.file_stream import file_empty_cell_bind
     carriers = list(declared_types or [""] * len(pairs))
     if len(carriers) != len(pairs):
         raise FastPathUnavailable("declared type list / column list mismatch")
@@ -724,18 +738,25 @@ def _write_mapped_csv(
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
         for rec in rows:
+            # C04: '' (a quoted "" or a JSON/Excel empty string) is not a
+            # number — NULL on a non-text carrier, on every engine, before
+            # the COPY-safe check sees the cell.
             copy_cells = {
-                col: (
-                    _sqlite_copy_cell_text(
-                        rec.get(col),
-                        carriers[index] if index < len(carriers) else "",
-                        column=col,
-                    )
-                    if sqlite_dest
-                    else rec.get(col)
+                col: file_empty_cell_bind(
+                    rec.get(col),
+                    carriers[index] if index < len(carriers) else "",
                 )
                 for index, col in enumerate(source_cols)
             }
+            if sqlite_dest:
+                copy_cells = {
+                    col: _sqlite_copy_cell_text(
+                        copy_cells.get(col),
+                        carriers[index] if index < len(carriers) else "",
+                        column=col,
+                    )
+                    for index, col in enumerate(source_cols)
+                }
             for col, logical, physical in census:
                 cell = copy_cells.get(col)
                 if not text_cell_copy_safe(
