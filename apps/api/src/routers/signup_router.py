@@ -72,15 +72,20 @@ class PasswordForgotRequest(BaseModel):
 async def password_forgot(body: PasswordForgotRequest,
                           request: Request) -> dict[str, Any]:
     from services import signup_service
-    # The uniform pacing floor sleeps in request_password_reset — run it on a
-    # worker thread so it never blocks the event loop. Per-IP velocity inside
-    # the service caps how many workers one address can pin at once.
-    return await asyncio.to_thread(signup_service.request_password_reset,
+    # Per-IP velocity inside the service caps request rate; the pacing
+    # floor itself is awaited on the event loop (asyncio.sleep), so a
+    # distributed flood parks cheap coroutines instead of pinning every
+    # default-executor worker.
+    reply, pad = await asyncio.to_thread(
+        signup_service.request_password_reset,
         email=body.email, ip=_client_ip(request),
         device_id=body.device_id,
         ua=request.headers.get("user-agent", "")[:512],
         turnstile_token=body.turnstile_token,
         form_token=body.form_token, honeypot=body.honeypot)
+    if pad > 0:
+        await asyncio.sleep(pad)
+    return reply
 
 
 class PasswordResetRequest(BaseModel):

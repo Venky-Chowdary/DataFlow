@@ -72,18 +72,19 @@ def _deliver_later(fn) -> None:
         fn()
 
 
-def _forgot_reply(body: dict[str, Any], started: float) -> dict[str, Any]:
-    """Uniform pacing: fake and real branches pad to the same floor, so
-    neither elapsed time nor body shape reveals whether an account exists."""
+def _forgot_reply(body: dict[str, Any],
+                  started: float) -> tuple[dict[str, Any], float]:
+    """Uniform pacing: fake and real branches get the same remaining pad
+    to FORGOT_FLOOR_SEC. The pad is RETURNED, not slept here — the async
+    route awaits it with asyncio.sleep, so a flood of forgot requests
+    parks coroutines instead of pinning pool workers."""
     elapsed = time.monotonic() - started
     pad = FORGOT_FLOOR_SEC - elapsed
-    if pad > 0:
-        time.sleep(pad)
-    else:
+    if pad <= 0:
         # A real branch that overruns the floor makes the fake branch a
         # timing oracle again — surface it instead of silently leaking.
         logger.warning("password-reset floor overrun: %.3fs > %.3fs", elapsed, FORGOT_FLOOR_SEC)
-    return body
+    return body, max(0.0, pad)
 
 
 
@@ -563,7 +564,9 @@ def request_password_reset(*, email: str, ip: str = "",
     """P4-1 forgot-password: uniform 202 with a challenge handle — a fake
     id when the address has no usable account (enumeration parity).
     Bot/abuse checks (form-token, Turnstile, IP+address velocity) never
-    change the 202: throttling a bomber must not become an oracle."""
+    change the 202: throttling a bomber must not become an oracle.
+    Returns (reply_body, pad_seconds) — the route awaits the pad with
+    asyncio.sleep so the pacing floor costs no worker thread."""
     started = time.monotonic()
     # Same id shape as a real stored row (prt-<24 hex>) — the reply body
     # must not reveal whether the account exists.

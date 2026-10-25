@@ -449,3 +449,54 @@ def test_real_branch_stays_under_the_floor(monkeypatch):
     assert r.status_code == 202
     # Generous headroom vs the 0.25s production floor.
     assert elapsed < 0.2, f"real branch took {elapsed:.3f}s"
+
+
+def test_forgot_floor_parks_coroutines_not_workers(monkeypatch):
+    """The pacing floor must be awaited on the event loop, not slept on a
+    pool worker: a flood of concurrent forgot requests (more than the
+    default executor's workers) all finish near the floor, and unrelated
+    to_thread work is not queued behind sleeping pads."""
+    import asyncio
+    import httpx
+
+    monkeypatch.setattr(signup_service, "FORGOT_FLOOR_SEC", 0.3)
+
+    from src.routers.signup_router import router
+    from services.api_errors import ApiError, api_error_handler
+    from src.middleware.auth_middleware import AuthMiddleware
+
+    app = FastAPI()
+    app.add_exception_handler(ApiError, api_error_handler)
+    app.add_middleware(AuthMiddleware)
+    app.include_router(router, prefix="/api/v1")
+
+    async def run():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+                transport=transport, base_url="http://t") as ac:
+            n = 64  # well over any default-executor worker count
+            tokens = [form_token_mod.issue("reset") for _ in range(n)]
+            t0 = time.monotonic()
+            reqs = [ac.post("/api/v1/auth/password/forgot", json={
+                "email": f"u{i}@example.com",
+                "form_token": tk}) for i, tk in enumerate(tokens)]
+
+            async def probe():
+                # unrelated to_thread work launched mid-flood: if the pads
+                # were pool sleeps, this queues behind waves of them.
+                await asyncio.sleep(0.05)
+                t1 = time.monotonic()
+                await asyncio.to_thread(lambda: None)
+                return time.monotonic() - t1
+
+            rs = await asyncio.gather(*reqs, probe())
+            total = time.monotonic() - t0
+            probe_dt = rs[-1]
+            assert all(r.status_code == 202 for r in rs[:-1])
+            assert probe_dt < 0.25, (
+                f"unrelated to_thread waited {probe_dt:.2f}s — pads are "
+                "pinning pool workers")
+            assert total < 1.2, (
+                f"{n} concurrent pads took {total:.2f}s — pads are not "
+                "concurrent coroutine sleeps")
+    asyncio.run(run())
