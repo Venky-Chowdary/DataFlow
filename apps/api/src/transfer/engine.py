@@ -1037,6 +1037,41 @@ def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
         )
 
 
+def _commit_kafka_offsets_on_accept(request: Any, dest_summary: dict) -> None:
+    """D85 — commit Kafka consumer-group offsets once, only on acceptance.
+
+    Called on the success path after reconcile passed and the destination
+    committed. During the run, ``stream`` accumulates the per-partition end
+    offsets in ``dest_summary['kafka_offsets']`` and never commits; a failed or
+    cancelled run leaves the broker position untouched so the next run
+    re-reads every uncommitted message (at-least-once).
+    """
+    kafka_commit = dest_summary.get("kafka_offsets") or {}
+    pending = kafka_commit.get("pending_offsets") or []
+    if (request.source.format or "") != "kafka" or not pending:
+        return
+    try:
+        from connectors.kafka_reader import commit_kafka_offsets
+
+        commit_kafka_offsets(
+            resolve_connector_config(request.source),
+            {
+                "group_id": kafka_commit.get("group_id"),
+                "topic": kafka_commit.get("topic"),
+                "pending_offsets": pending,
+            },
+        )
+    except Exception as exc:
+        from services.execution_engine_contract import (
+            kafka_offset_commit_must_fail_closed,
+        )
+
+        raise kafka_offset_commit_must_fail_closed(exc) from exc
+    kafka_commit["committed"] = True
+    kafka_commit["committed_offsets"] = [dict(item) for item in pending]
+    dest_summary["kafka_offsets"] = kafka_commit
+
+
 def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -> Any:
     """Write the success terminal status, or record the commit on a cancelled job.
 
@@ -3386,6 +3421,7 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
+            _commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,
                 job_id,
@@ -5345,6 +5381,7 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
+            _commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,
                 job_id,

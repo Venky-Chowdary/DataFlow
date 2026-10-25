@@ -3912,31 +3912,17 @@ def _stream_database_transfer_impl(
                 ) from wm_exc
         # Fail-closed: no durable resume point ⇒ abort (do not keep writing).
         checkpoint_service.require_save(checkpoint)
-        if src_type == "kafka" and kafka_cursor and src_cfg:
-            try:
-                from connectors.kafka_reader import commit_kafka_offsets
-
-                commit_kafka_offsets(src_cfg, kafka_cursor)
-                # After durable commit, clear pending so a retry does not double-commit.
-                if isinstance(kafka_cursor, dict):
-                    kafka_cursor = {**kafka_cursor, "pending_offsets": [], "committed": True}
-                    checkpoint.kafka_cursor = kafka_cursor
-                    checkpoint_service.require_save(checkpoint)
-            except Exception as exc:
-                # Checkpoint persistence must abort the job — never swallow it.
-                try:
-                    from services.checkpoint_service import CheckpointPersistenceError
-                except ImportError:  # pragma: no cover
-                    from src.services.checkpoint_service import CheckpointPersistenceError
-                if isinstance(exc, CheckpointPersistenceError):
-                    raise
-                # Module 14: Kafka offset commit after durable checkpoint must
-                # fail closed — never swallow (delivery state becomes unexplained).
-                from services.execution_engine_contract import (
-                    kafka_offset_commit_must_fail_closed,
-                )
-
-                raise kafka_offset_commit_must_fail_closed(exc) from exc
+        if src_type == "kafka" and kafka_cursor:
+            # D85 — never commit consumer offsets inside the run. Accumulate the
+            # per-partition end offsets in the checkpoint cursor so a crash
+            # resumes the full uncommitted range; the engine commits the group
+            # offsets exactly once, only after the job is accepted (reconcile
+            # passed + destination committed). A failure/cancel leaves the
+            # broker position untouched, so the next run re-reads every
+            # uncommitted message (at-least-once).
+            kafka_cursor = _kafka_accumulate_offsets(dest_summary, kafka_cursor)
+            checkpoint.kafka_cursor = kafka_cursor
+            checkpoint_service.require_save(checkpoint)
         if on_checkpoint:
             on_checkpoint(idx, chunks, written, checkpoint.to_dict())
 
@@ -4026,6 +4012,7 @@ def _stream_database_transfer_impl(
                 setattr(_row_exc, "failed_batch_undo_note", _undo_note)
         except Exception:  # noqa: BLE001 - undo must not hide the write failure
             pass
+        _kafka_failure_offset_note(src_type, dest_summary, _row_exc)
         raise
     finally:
         if run_after:
@@ -4939,6 +4926,68 @@ class _StepRawLedger:
         else:
             out["entries"] = self._d
         return out
+
+
+def _kafka_accumulate_offsets(
+    dest_summary: dict[str, Any], kafka_cursor: dict[str, Any]
+) -> dict[str, Any]:
+    """Accumulate a run's uncommitted Kafka offsets (D85).
+
+    Merges the chunk's ``pending_offsets`` with everything already accumulated
+    in ``dest_summary['kafka_offsets']`` (max offset wins per partition), stamps
+    the cumulative range back on the cursor and on the job record, and returns
+    the updated cursor. Nothing here commits to the broker — the engine commits
+    the group offsets exactly once after the job is accepted.
+    """
+    merged: dict[tuple[str, int], int] = {}
+
+    def _add(items: Any) -> None:
+        for item in items or []:
+            try:
+                key = (str(item["topic"]), int(item["partition"]))
+                merged[key] = max(merged.get(key, -1), int(item["offset"]))
+            except (KeyError, TypeError, ValueError):
+                continue
+
+    prev = dest_summary.get("kafka_offsets") or {}
+    _add(prev.get("pending_offsets"))
+    _add(kafka_cursor.get("pending_offsets"))
+    cumulative = [
+        {"topic": t, "partition": p, "offset": o}
+        for (t, p), o in sorted(merged.items())
+    ]
+    kafka_cursor = {**kafka_cursor, "pending_offsets": cumulative}
+    dest_summary["kafka_offsets"] = {
+        "group_id": kafka_cursor.get("group_id"),
+        "topic": kafka_cursor.get("topic"),
+        # Job audit: the broker position the run started from (the uncommitted
+        # range carried in by a resumed run) and the end offsets committed on
+        # acceptance.
+        "start_offsets": prev.get("start_offsets") or prev.get("pending_offsets") or [],
+        "pending_offsets": cumulative,
+    }
+    return kafka_cursor
+
+
+def _kafka_failure_offset_note(
+    src_type: str, dest_summary: dict[str, Any], exc: BaseException
+) -> None:
+    """D85 — a failed Kafka run's message must state the offset position.
+
+    Group offsets are never committed inside a run, so on failure the broker
+    position is untouched; the exception carries the pending range so the
+    operator sees exactly where consumption will resume.
+    """
+    if src_type != "kafka":
+        return
+    pending = (dest_summary.get("kafka_offsets") or {}).get("pending_offsets") or []
+    if not pending:
+        return
+    exc.args = (
+        *exc.args,
+        f"Kafka consumer offsets NOT committed (pending: {pending}); "
+        "the next run re-reads from the last committed position.",
+    )
 
 
 class _NoOpCheckpointService:
