@@ -2268,6 +2268,12 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   color: #64748b;
 }
 
+/* The resend hint is one short line — never let "Didn't get it?" orphan
+   onto a second line beside the countdown at mobile widths. */
+.lp-login-resend .lp-login-legal {
+  white-space: nowrap;
+}
+
 .lp-login-legal button {
   appearance: none;
   border: 0;

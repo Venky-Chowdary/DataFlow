@@ -49,3 +49,11 @@ describe("brand wordmark on the always-dark panel", () => {
     assert.doesNotMatch(rule, /color:\s*var\(--df-text-primary\)/);
   });
 });
+
+describe("resend hint row", () => {
+  it("stays on one line at mobile widths", () => {
+    const rule = ruleBody(LANDING, ".lp-login-resend .lp-login-legal");
+    assert.ok(rule, "no nowrap rule for the resend hint");
+    assert.match(rule, /white-space:\s*nowrap/);
+  });
+});
