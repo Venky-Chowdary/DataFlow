@@ -350,14 +350,14 @@ def _provision_verified_user(pending: dict[str, Any]) -> tuple[dict, dict, objec
         raise
 
 
-def _raise_invalid_code(challenge_id: str) -> None:
-    """Wrong code — include attempts_remaining so the UI can show
-    'N attempts left' instead of a bare rejection."""
-    row = signup_store.get_challenge(challenge_id) or {}
+def _raise_invalid_code(attempt_row: dict[str, Any] | None) -> None:
+    """Wrong code — include attempts_remaining from the post-increment row
+    so concurrent submissions can't race a second, stale read."""
+    row = attempt_row or {}
     left = max(0, int(row.get("max_attempts") or signup_store.MAX_ATTEMPTS)
                - int(row.get("attempts") or 0))
     raise ApiError(400, "invalid_code",
-                   "that code doesn't match — try again",
+                   "That code doesn't match — try again.",
                    extra={"attempts_remaining": left})
 
 
@@ -372,7 +372,7 @@ def verify_email(
     absolute_seconds: int = 24 * 3600,
 ) -> dict[str, Any]:
     """Verify the code; on success create everything and open the session."""
-    result = otp_service.verify(challenge_id, code)
+    result, attempt_row = otp_service.verify_code(challenge_id, code)
     challenge = signup_store.get_challenge(challenge_id)
     if result != "ok":
         record_security_event(
@@ -382,7 +382,7 @@ def verify_email(
         if result in ("consumed", "not_found"):
             raise ApiError(410, "code_expired",
                            "this code is no longer valid — request a new one")
-        _raise_invalid_code(challenge_id)
+        _raise_invalid_code(attempt_row)
     if challenge is None or challenge.get("purpose") != "signup":
         raise ApiError(410, "code_expired",
                        "this code is no longer valid — request a new one")
@@ -590,14 +590,14 @@ def confirm_password_reset(*, challenge_id: str, code: str,
         raise ApiError(400, "invalid_password",
                        f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
     _refuse_pwned_password(new_password)
-    result = otp_service.verify(challenge_id, code)
+    result, attempt_row = otp_service.verify_code(challenge_id, code)
     if result != "ok":
         record_security_event("otp.verify_failed", outcome="failed",
                               session_id=challenge_id, reason_code=result)
         if result in ("consumed", "not_found"):
             raise ApiError(410, "code_expired",
                            "this code is no longer valid — request a new one")
-        _raise_invalid_code(challenge_id)
+        _raise_invalid_code(attempt_row)
     challenge = signup_store.get_challenge(challenge_id)
     if challenge is None or challenge.get("purpose") != "reset":
         raise ApiError(410, "code_expired",
@@ -682,14 +682,14 @@ def confirm_email_change(*, challenge_id: str, code: str,
                          ip: str = "") -> dict[str, Any]:
     """P4-2: verify the new-address code, rekey the account, memberships
     and orgs, revoke every session, notify the old address."""
-    result = otp_service.verify(challenge_id, code)
+    result, attempt_row = otp_service.verify_code(challenge_id, code)
     if result != "ok":
         record_security_event("otp.verify_failed", outcome="failed",
                               session_id=challenge_id, reason_code=result)
         if result in ("consumed", "not_found"):
             raise ApiError(410, "code_expired",
                            "this code is no longer valid — request a new one")
-        _raise_invalid_code(challenge_id)
+        _raise_invalid_code(attempt_row)
     challenge = signup_store.get_challenge(challenge_id)
     if challenge is None or challenge.get("purpose") != "email_change":
         raise ApiError(410, "code_expired",

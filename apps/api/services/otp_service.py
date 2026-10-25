@@ -92,19 +92,34 @@ def reissue(challenge_id: str) -> tuple[dict[str, Any] | None, str | None]:
 
 def verify(challenge_id: str, code: str) -> VerifyResult:
     """Constant-time check. A wrong code counts; the cap burns the challenge."""
+    result, _row = verify_code(challenge_id, code)
+    return result
+
+
+def verify_code(challenge_id: str, code: str) -> tuple[VerifyResult, dict[str, Any] | None]:
+    """verify + the post-increment challenge row on a wrong code, so callers
+    report attempts_remaining from the same atomic read that counted the
+    attempt — never a second, racy fetch."""
     row = signup_store.get_challenge(challenge_id)
     if row is None:
-        return "not_found"
+        return "not_found", None
     if row.get("consumed_at"):
-        return "consumed"
+        return "consumed", row
     if int(row.get("attempts") or 0) >= int(row.get("max_attempts") or MAX_ATTEMPTS):
-        return "consumed"  # already burned
+        return "consumed", row  # already burned
 
     candidate = code_hmac(challenge_id, str(row.get("purpose") or ""), (code or "").strip())
     expected = str(row.get("code_hmac") or "")
     if hmac.compare_digest(candidate, expected):
         signup_store.consume_challenge(challenge_id)
-        return "ok"
+        return "ok", row
 
-    signup_store.record_attempt(challenge_id)
-    return "invalid"
+    updated = signup_store.record_attempt(challenge_id)
+    if updated is None:
+        return "consumed", row
+    # The submission that burns the challenge still reports invalid_code with
+    # attempts_remaining=0; submissions landing past the cap observe the
+    # already-burned challenge instead of a misleading fresh wrong-code verdict.
+    if int(updated.get("attempts") or 0) > int(updated.get("max_attempts") or MAX_ATTEMPTS):
+        return "consumed", updated
+    return "invalid", updated

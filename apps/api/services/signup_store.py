@@ -271,17 +271,45 @@ def _update_challenge(cid: str, **fields: Any) -> None:
 
 
 def record_attempt(challenge_id: str) -> dict[str, Any] | None:
-    """Increment attempts; burn the challenge when the cap is hit."""
-    row = get_challenge(challenge_id)
-    if row is None:
-        return None
-    attempts = int(row.get("attempts") or 0) + 1
-    fields: dict[str, Any] = {"attempts": attempts}
-    if attempts >= int(row.get("max_attempts") or MAX_ATTEMPTS) and not row.get("consumed_at"):
-        fields["consumed_at"] = _now().isoformat()
-    _update_challenge(challenge_id, **fields)
-    row.update(fields)
-    return row
+    """Atomically increment attempts; burn the challenge when the cap is hit.
+    Returns the post-increment row so callers never report a stale
+    attempts_remaining under concurrent wrong-code submissions."""
+    db = _database()
+    if db is not None:
+        from pymongo import ReturnDocument
+        row = db[CHALLENGES_COLLECTION].find_one_and_update(
+            {"_id": challenge_id},
+            {"$inc": {"attempts": 1}},
+            return_document=ReturnDocument.AFTER,
+            projection={"_id": False},
+        )
+        if row is None:
+            return None
+        if (
+            int(row.get("attempts") or 0) >= int(row.get("max_attempts") or MAX_ATTEMPTS)
+            and not row.get("consumed_at")
+        ):
+            consumed = _now().isoformat()
+            db[CHALLENGES_COLLECTION].update_one(
+                {"_id": challenge_id, "consumed_at": None},
+                {"$set": {"consumed_at": consumed}},
+            )
+            row["consumed_at"] = consumed
+        return dict(row)
+    with _LOCK:
+        with json_doc_transaction(_challenges_path(), {"otp_challenges": []}) as data:
+            for row in data.get("otp_challenges", []):
+                if (
+                    isinstance(row, dict)
+                    and row.get("id") == challenge_id
+                    and not _expired(row)
+                ):
+                    attempts = int(row.get("attempts") or 0) + 1
+                    row["attempts"] = attempts
+                    if attempts >= int(row.get("max_attempts") or MAX_ATTEMPTS) and not row.get("consumed_at"):
+                        row["consumed_at"] = _now().isoformat()
+                    return dict(row)
+            return None
 
 
 def mark_sent(challenge_id: str, *, code_hmac: str, ttl: timedelta) -> dict[str, Any] | None:
