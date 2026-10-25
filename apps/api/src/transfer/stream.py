@@ -1948,6 +1948,11 @@ def _stream_database_transfer_impl(
             partial_write_pass=False,
         )
         and src_read_type in REREAD_SCAN_SOURCES
+        # M3 — an incremental write pass is batch-sized, so keeping its
+        # fingerprints is cheap and they are the fallback digest when the
+        # re-read window cannot be bounded (no cursor column / no observed
+        # max). Whether they are used is decided at reconcile time.
+        and not incremental
     )
     # Restore cumulative quarantine counts on resume — Gate-8 conservation is
     # source - (rejected - coerced_null) - skipped. committed_offset already spans
@@ -4395,6 +4400,15 @@ def _stream_database_transfer_impl(
         incremental=incremental,
         partial_write_pass=_partial_write_pass,
     )
+    if incremental and _reread and not (
+        cursor_source_col and running_cursor and pk_target_cols
+    ):
+        # M3 — an incremental re-read is only honest when it is bounded to
+        # the [watermark, max_seen] window this run covered AND the
+        # destination read-back can be scoped to the run's keys (X-OW1).
+        # No cursor bound or no key scope → keep the write-pass digest and
+        # its honest write-confirmed label.
+        _reread = False
     if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()
         final_checksum = write_pass_fp.digest()
@@ -4404,14 +4418,24 @@ def _stream_database_transfer_impl(
         dest_summary["checksum_mode"] = "inline_write_pass"
         dest_summary["source_independently_reread"] = False
         dest_summary["identity_hash_aligned"] = False
+        _unbounded = incremental and not (
+            cursor_source_col and running_cursor and pk_target_cols
+        )
         dest_summary["checksum_note"] = (
             "Source fingerprints accumulated during the write pass (Phase F1) — "
-            "no second source scan. Full-refresh warehouse routes re-read by "
-            "default, including same-engine. This run stayed on the write-pass "
-            "(incremental, CDC, or DATAFLOW_RECONCILE_SOURCE_REREAD=0). "
-            "Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second scan."
+            "no second source scan. Warehouse routes re-read by default, "
+            "including same-engine; incremental runs re-read the bounded "
+            "[watermark, max_seen] window. This run stayed on the write-pass "
+            + (
+                "(incremental — the re-read window or the destination key "
+                "scope could not be bounded). "
+                if _unbounded
+                else "(non-warehouse route, CDC, or "
+                     "DATAFLOW_RECONCILE_SOURCE_REREAD=0). "
+            )
+            + "Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second scan."
         )
-    elif src_read_type in REREAD_SCAN_SOURCES:
+    elif _reread and src_read_type in REREAD_SCAN_SOURCES:
         # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
         from connectors.sql_snapshot_scan import close_table_scan
 
@@ -4429,6 +4453,7 @@ def _stream_database_transfer_impl(
             cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
         checksum_cursor_col = cursor_source_col if incremental else ""
         checksum_cursor_after = watermark if incremental else None
+        checksum_cursor_max = running_cursor if incremental else None
         use_checksum_keyset = False
         if incremental and checksum_cursor_col:
             use_checksum_keyset = True
@@ -4476,10 +4501,30 @@ def _stream_database_transfer_impl(
                 # ``batch.rows`` stays intact — the keyset cursor advances on the
                 # last row actually read, not on the digest scope.
                 digest_rows = batch.rows
+                if (
+                    incremental
+                    and use_checksum_keyset
+                    and checksum_cursor_col in (batch.headers or [])
+                ):
+                    # M3 — bound the window at the max cursor this run
+                    # observed: rows that arrived after the run started are
+                    # outside its population, so hashing them compares the
+                    # destination to a future the write pass never wrote.
+                    _win_rows = []
+                    for _r in digest_rows:
+                        _rc = max_cursor_value(
+                            [_r], batch.headers, checksum_cursor_col,
+                            cursor_pk_source or None,
+                        )
+                        if compare_cursor_values(_rc, checksum_cursor_max) <= 0:
+                            _win_rows.append(_r)
+                    # No early break: OFFSET pages do not guarantee cursor
+                    # ordering, so a straddling page does not end the window.
+                    digest_rows = _win_rows
                 if keyed_upsert_scope:
                     digest_rows, _excluded_now = live_rows_for_digest(
                         batch.headers,
-                        batch.rows,
+                        digest_rows,
                         key_columns=pk_target_cols,
                         mappings=mappings,
                     )

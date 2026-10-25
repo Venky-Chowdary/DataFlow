@@ -105,11 +105,14 @@ def should_reread_source(
     comparing a session digest to a full destination is a false mismatch.
     ``DATAFLOW_RECONCILE_SOURCE_REREAD=0`` still cannot suppress that.
 
-    Auto (default): warehouse → warehouse full refresh, including same-engine.
+    Auto (default): warehouse → warehouse, including same-engine.
     HVR Compare checksums a fresh source read against the target; a write-pass
-    digest is the bytes we just sent, not that second read. Incremental and
-    CDC stay on the write-pass — a second scan of a moving table is a false
-    mismatch, and CDC remains at-least-once upsert.
+    digest is the bytes we just sent, not that second read. Incremental runs
+    re-read too, but only the bounded ``[watermark, max_seen]`` window this
+    run covered — an unbounded second scan of a moving table is a false
+    mismatch (the caller bounds the window and requires a cursor column; a
+    run that cannot bound it stays on the write-pass digest). CDC remains
+    at-least-once upsert.
     """
     if partial_write_pass:
         return True
@@ -118,8 +121,6 @@ def should_reread_source(
         return False
     if mode == "on":
         return True
-    if incremental:
-        return False
     src = engine_family(src_type)
     dest = engine_family(dest_type)
     raw_src = (src_type or "").strip().lower()
