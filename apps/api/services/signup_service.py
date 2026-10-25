@@ -25,7 +25,7 @@ from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.auth_state import get_auth_state
 from services.email_canonical import canonical_email
-from services import denylist_store, disposable_list
+from services import denylist_store, disposable_list, mx_check
 from services.email_policy import role_assessment
 from services.email_quota import consume_send_slot
 from services.email_sender import (
@@ -93,10 +93,17 @@ def request_signup(
     if denylist_store.is_denied(canonical_email(normalized), kind="email") or \
             disposable_list.is_disposable(normalized):
         record_security_event("signup.blocked", outcome="failed",
-                              reason_code="denied_domain" if domain else "denied",
+                              reason_code="denied_domain",
                               details={"ip": ip})
         raise ApiError(400, "blocked_address",
                        "this address can't be used for signup")
+    mx = mx_check.check_domain(domain)
+    if not mx["ok"]:
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code=f"mx:{mx['reason']}",
+                              details={"ip": ip})
+        raise ApiError(400, "undeliverable_domain",
+                       "that email domain can't receive mail")
     canonical = canonical_email(normalized)
 
     # Constant-work: hash on every path so timing doesn't reveal whether the
