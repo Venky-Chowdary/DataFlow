@@ -326,3 +326,28 @@ def active_challenge(subject_id: str, purpose: str) -> dict[str, Any] | None:
         ):
             return row
     return None
+
+
+def pending_count() -> int:
+    """Live (unexpired) pending signups — admin metrics."""
+    db = _database()
+    if db is not None:
+        rows = db[PENDING_COLLECTION].find({}, {"_id": False})
+        return sum(1 for r in rows if not _expired(r))
+    rows = load_json_doc(_pending_path(), {"pending_signups": []}).get(
+        "pending_signups", [])
+    return sum(1 for r in rows if isinstance(r, dict) and not _expired(r))
+
+
+def active_challenge_count() -> int:
+    """Live (unexpired, unconsumed) OTP challenges — admin metrics."""
+    db = _database()
+    if db is not None:
+        rows = db[CHALLENGES_COLLECTION].find({}, {"_id": False})
+        return sum(1 for r in rows
+                   if not _expired(r) and not r.get("consumed_at"))
+    rows = load_json_doc(_challenges_path(), {"otp_challenges": []}).get(
+        "otp_challenges", [])
+    return sum(1 for r in rows
+               if isinstance(r, dict) and not _expired(r)
+               and not r.get("consumed_at"))

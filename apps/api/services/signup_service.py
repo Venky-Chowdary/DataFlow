@@ -32,7 +32,7 @@ from services import form_token as form_token_mod
 from services.brand_env import getenv_brand
 from services.email_policy import role_assessment
 from services import risk_scorer
-from services import email_verifier
+from services import email_verifier, email_quota
 from services.email_quota import consume_send_slot
 from services.email_sender import (
     EmailQuotaExceeded,
@@ -778,3 +778,13 @@ def challenge_for_pending_login(email: str, request: Any | None = None) -> str |
     record_security_event("otp.resent", outcome="succeeded",
                           session_id=challenge["id"], request=request)
     return challenge["id"]
+
+
+def signup_metrics() -> dict[str, Any]:
+    """P5: admin metrics for the signup surface — pending work, live
+    challenges and the shared send-quota position."""
+    return {
+        "pending_signups": signup_store.pending_count(),
+        "active_challenges": signup_store.active_challenge_count(),
+        "email_quota": email_quota.quota_status(),
+    }

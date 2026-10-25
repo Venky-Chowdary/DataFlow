@@ -267,7 +267,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("POST", "/auth/email/change", Permission.ACCOUNT_SELF),
     ("POST", "/auth/email/change/confirm", Permission.ACCOUNT_SELF),
     # Onboarding answers belong to the caller's own account/org.
+    ("GET", "/api/v1/auth/admin/signup-metrics", Permission.IAM_MANAGE),
     ("POST", "/api/v1/auth/onboarding", Permission.ACCOUNT_SELF),
+    ("GET", "/auth/admin/signup-metrics", Permission.IAM_MANAGE),
     ("POST", "/auth/onboarding", Permission.ACCOUNT_SELF),
     # Accounts are deployment-level administration. Membership changes inside a
     # workspace are authorized by the *workspace* role in ``services.team_store``

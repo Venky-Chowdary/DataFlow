@@ -178,6 +178,13 @@ async def sso_route(body: SsoRouteRequest, request: Request) -> dict[str, Any]:
     return route
 
 
+@router.get("/admin/signup-metrics")
+async def signup_metrics(request: Request) -> dict[str, Any]:
+    """P5: admin-only metrics for the signup surface."""
+    from services import signup_service
+    return signup_service.signup_metrics()
+
+
 @router.get("/signup/config")
 async def signup_config():
     """Public client config for the signup flow (no secrets)."""
