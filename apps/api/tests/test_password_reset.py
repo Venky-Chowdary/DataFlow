@@ -379,3 +379,41 @@ def test_reset_link_uses_fragment_not_query():
     body = mail.text + (mail.html or "")
     assert "reset-password?token=" not in body
     assert "reset-password#token=" in body
+
+
+def test_delivery_exception_is_audited_and_rerequest_works(monkeypatch):
+    """A non-mail exception inside _deliver must not be swallowed by the
+    Future: it logs, records password.reset.send_failed, and the account
+    holder can immediately re-request a fresh link."""
+    events = []
+    monkeypatch.setattr(signup_service, "record_security_event",
+                        lambda event, **kw: events.append((event, kw)))
+    calls = {"n": 0}
+    real_send = signup_service._send
+
+    def flaky_send(kind, *a, **kw):
+        if kind == "reset_link":
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("provider exploded")
+        return real_send(kind, *a, **kw)
+
+    c = _client()
+    _verified_user(c)
+    monkeypatch.setattr(signup_service, "_send", flaky_send)
+    r1 = _forgot(c)
+    assert r1.status_code == 202  # the reply never reveals the failure
+    assert any(e == "password.reset.send_failed" for e, _ in events), events
+    # Re-request works right away and a fresh link actually goes out.
+    before = len(ConsoleEmailSender.OUTBOX)
+    r2 = _forgot(c)
+    assert r2.status_code == 202
+    assert len(ConsoleEmailSender.OUTBOX) == before + 1
+    assert _link_token()
+
+
+def test_send_failed_event_is_registered():
+    from services.audit_coverage import SECURITY_EVENTS
+    assert "password.reset.send_failed" in SECURITY_EVENTS
+
+

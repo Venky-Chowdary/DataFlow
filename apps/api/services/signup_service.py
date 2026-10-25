@@ -60,7 +60,7 @@ MAX_PASSWORD_LEN = 128
 # Mail delivery runs off the request path (one serialized lane) so provider
 # latency can't time-leak account existence; every /password/forgot reply —
 # fake or real — is also padded to the same floor.
-_MAIL_LANE = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dw-mail")
+_MAIL_LANE = ThreadPoolExecutor(max_workers=1, thread_name_prefix="dw-mail")
 FORGOT_FLOOR_SEC = 0.25
 
 
@@ -621,6 +621,19 @@ def request_password_reset(*, email: str, ip: str = "",
             # Send failure must not change the response (enumeration); a
             # fresh link can be requested right away.
             logger.warning("password-reset link send failed")
+        except Exception:
+            # Any other failure is swallowed by the Future — log it and
+            # leave a security event so the dropped mail is auditable. The
+            # user can immediately re-request a fresh link (each new issue
+            # supersedes this token).
+            logger.error("password-reset link delivery failed", exc_info=True)
+            try:
+                record_security_event("password.reset.send_failed",
+                                      outcome="failed", actor=account_email,
+                                      session_id=stored["id"],
+                                      details={"ip": ip})
+            except Exception:
+                logger.error("password-reset send_failed audit event failed", exc_info=True)
 
     _deliver_later(_deliver)
     record_security_event("password.reset.requested", outcome="succeeded",

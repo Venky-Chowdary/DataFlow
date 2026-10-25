@@ -71,6 +71,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "session.revoked": "A session was revoked.",
     "password.reset.requested": "A password reset link was requested.",
     "password.reset.sent": "A password reset link was emailed.",
+    "password.reset.send_failed": "Delivering a password reset link failed.",
     "password.reset.used": "A password reset link was consumed.",
     "password.reset.expired": "A password reset link was used after expiry.",
     "password.reset.failed": "A password reset attempt failed.",
