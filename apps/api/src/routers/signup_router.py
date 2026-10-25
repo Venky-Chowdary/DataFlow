@@ -125,6 +125,30 @@ async def email_change_confirm(body: EmailChangeConfirm,
         ip=_client_ip(request))
 
 
+class OnboardingRequest(BaseModel):
+    org_name: str = Field(default="", max_length=128)
+    use_case: str = Field(default="", max_length=64)
+    team_size: str = Field(default="", max_length=32)
+    heard_from: str = Field(default="", max_length=128)
+
+
+@router.post("/onboarding")
+async def onboarding(body: OnboardingRequest,
+                     request: Request) -> dict[str, Any]:
+    from services import signup_service
+    user_email = getattr(request.state, "user_email", None)
+    if not user_email:
+        user = getattr(request.state, "user", None) or {}
+        user_email = user.get("email")
+    if not user_email:
+        raise ApiError(401, "unauthorized", "sign in to finish onboarding")
+    return signup_service.complete_onboarding(
+        user_email=user_email, org_name=body.org_name,
+        profile={"use_case": body.use_case, "team_size": body.team_size,
+                 "heard_from": body.heard_from},
+        ip=_client_ip(request))
+
+
 @router.get("/signup/config")
 async def signup_config():
     """Public client config for the signup flow (no secrets)."""

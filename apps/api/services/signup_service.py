@@ -41,6 +41,8 @@ from services.email_sender import (
     get_email_sender,
 )
 from services.email_templates import render_email
+from datetime import UTC, datetime
+
 from services.org_store import create_organization
 from services import org_store
 from services.password_hash import hash_password_argon2
@@ -673,6 +675,30 @@ def submit_sales_lead(*, fields: dict[str, Any], ip: str = "",
                                    "domain": str(fields.get("email") or "")
                                    .split("@")[-1]})
     return {"ok": True}
+
+
+def complete_onboarding(*, user_email: str, org_name: str = "",
+                        profile: dict[str, Any] | None = None,
+                        ip: str = "") -> dict[str, Any]:
+    """P4-4: persist the onboarding answers on the user's org and stamp
+    the account as onboarded."""
+    user = user_store.get_user(user_email)
+    if user is None:
+        raise ApiError(401, "unauthorized", "sign in to finish onboarding")
+    orgs = org_store.organizations_for_user(user_email)
+    org_id = None
+    if orgs:
+        org = orgs[0]
+        patch: dict[str, Any] = {
+            "onboarding_profile": {**(profile or {}),
+                                   "completed_at": datetime.now(UTC)
+                                   .isoformat()}}
+        if org_name.strip():
+            patch["name"] = org_name.strip()[:128]
+        org_store.update_organization(org["id"], **patch)
+        org_id = org["id"]
+    user_store.mark_onboarded(user_email)
+    return {"ok": True, "org_id": org_id}
 
 
 def _challenge_recipient(challenge: dict[str, Any]) -> tuple[str, dict[str, Any]]:

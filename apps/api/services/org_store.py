@@ -149,8 +149,10 @@ def rekey_creator(old_email: str, new_email: str) -> int:
 
 
 def update_organization(org_id: str, **fields: Any) -> dict[str, Any] | None:
-    """Patch allowed fields (name, plan_tier, billing_customer_id, status)."""
-    allowed = {"name", "plan_tier", "billing_customer_id", "status"}
+    """Patch allowed fields (name, plan_tier, billing_customer_id, status,
+    onboarding_profile)."""
+    allowed = {"name", "plan_tier", "billing_customer_id", "status",
+               "onboarding_profile"}
     db = _database()
     if db is not None:
         current = db[ORGANIZATIONS_COLLECTION].find_one({"_id": org_id})

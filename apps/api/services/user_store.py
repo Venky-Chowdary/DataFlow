@@ -394,6 +394,18 @@ def change_email(*, email: str, new_email: str,
     return public_user(doc)
 
 
+def mark_onboarded(email: str) -> dict[str, Any]:
+    """Stamp onboarding completion on the account (P4-4)."""
+    normalized = normalize_email(email)
+    doc = _read_one(normalized)
+    if doc is None:
+        raise UserStoreError(f"{normalized} has no account")
+    doc["onboarded_at"] = _now()
+    doc["updated_at"] = _now()
+    _write_one(doc)
+    return public_user(doc)
+
+
 def set_password(*, email: str, password: str, algo: str = "bcrypt") -> dict[str, Any]:
     normalized = normalize_email(email)
     doc = _read_one(normalized)
