@@ -43,11 +43,14 @@ class DataTransferTrainingAgent:
     synthesizes conversations, updates RAG, exports OpenAI/Anthropic datasets.
     """
 
-    OUTPUT_DIR = os.path.join(
-        os.path.dirname(__file__), "..", "..", "..", "data", "training", "copilot"
-    )
+    @staticmethod
+    def _output_dir() -> str:
+        """One resolver for every writer — DATAFLOW_DATA_DIR isolation (X-DD)."""
+        from services.platform_config import data_dir
+        return str(data_dir() / "training" / "copilot")
 
     def __init__(self):
+        self.OUTPUT_DIR = self._output_dir()
         self.feeder = UniversalDataFeeder()
         self.conversation_synth = ConversationSynthesizer()
         self.data_synth = DataTransferDataSynthesizer()

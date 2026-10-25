@@ -34,7 +34,8 @@ def _default_path() -> Path:
     override = getenv_brand("PILOT_ACK_PATH", "").strip()
     if override:
         return Path(override)
-    return Path(__file__).resolve().parents[3] / "data" / "pilot_acks.json"
+    from services.platform_config import data_dir
+    return data_dir() / "pilot_acks.json"
 
 
 def _now() -> float:
