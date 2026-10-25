@@ -132,13 +132,14 @@
 }
 
 .lp-btn--brand {
-  background: linear-gradient(180deg, #14b8a6 0%, #0d9488 100%);
+  /* Deep-teal stops: white label stays >= 4.5:1 across the gradient (WCAG AA) */
+  background: linear-gradient(180deg, #0f766e 0%, #115e59 100%);
   border-color: transparent;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.2) inset, 0 8px 20px rgba(13, 148, 136, 0.28);
 }
 
 .lp-btn--brand:hover {
-  background: linear-gradient(180deg, #2dd4bf 0%, #0f766e 100%);
+  background: linear-gradient(180deg, #115e59 0%, #134e4a 100%);
   transform: translateY(-1px);
 }
 
