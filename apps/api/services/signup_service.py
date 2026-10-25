@@ -350,6 +350,17 @@ def _provision_verified_user(pending: dict[str, Any]) -> tuple[dict, dict, objec
         raise
 
 
+def _raise_invalid_code(challenge_id: str) -> None:
+    """Wrong code — include attempts_remaining so the UI can show
+    'N attempts left' instead of a bare rejection."""
+    row = signup_store.get_challenge(challenge_id) or {}
+    left = max(0, int(row.get("max_attempts") or signup_store.MAX_ATTEMPTS)
+               - int(row.get("attempts") or 0))
+    raise ApiError(400, "invalid_code",
+                   "that code doesn't match — try again",
+                   extra={"attempts_remaining": left})
+
+
 def verify_email(
     *,
     challenge_id: str,
@@ -371,7 +382,7 @@ def verify_email(
         if result in ("consumed", "not_found"):
             raise ApiError(410, "code_expired",
                            "this code is no longer valid — request a new one")
-        raise ApiError(400, "invalid_code", "that code doesn't match — try again")
+        _raise_invalid_code(challenge_id)
     if challenge is None or challenge.get("purpose") != "signup":
         raise ApiError(410, "code_expired",
                        "this code is no longer valid — request a new one")
@@ -586,7 +597,7 @@ def confirm_password_reset(*, challenge_id: str, code: str,
         if result in ("consumed", "not_found"):
             raise ApiError(410, "code_expired",
                            "this code is no longer valid — request a new one")
-        raise ApiError(400, "invalid_code", "that code doesn't match — try again")
+        _raise_invalid_code(challenge_id)
     challenge = signup_store.get_challenge(challenge_id)
     if challenge is None or challenge.get("purpose") != "reset":
         raise ApiError(410, "code_expired",
@@ -678,7 +689,7 @@ def confirm_email_change(*, challenge_id: str, code: str,
         if result in ("consumed", "not_found"):
             raise ApiError(410, "code_expired",
                            "this code is no longer valid — request a new one")
-        raise ApiError(400, "invalid_code", "that code doesn't match — try again")
+        _raise_invalid_code(challenge_id)
     challenge = signup_store.get_challenge(challenge_id)
     if challenge is None or challenge.get("purpose") != "email_change":
         raise ApiError(410, "code_expired",

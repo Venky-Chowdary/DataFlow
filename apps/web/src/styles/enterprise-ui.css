@@ -15208,3 +15208,10 @@ html[data-theme="dark"]:has(.df2-app) .df2-object-combobox-option.is-create .df2
     font-weight: var(--df-fw-bold);
   }
 }
+
+/* Settings → Sign-in email change card */
+.df2-change-email-actions {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+}

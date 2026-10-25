@@ -1,0 +1,191 @@
+import { FormEvent, useEffect, useState } from "react";
+import {
+  confirmEmailChange,
+  fetchSignupConfig,
+  requestEmailChange,
+  SignupApiError,
+} from "../lib/signupApi";
+import { useToast } from "./Toast";
+
+function isValidEmail(value: string) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(value.trim());
+}
+
+/**
+ * Settings → Security: change the sign-in email. Step 1 sends a 6-digit
+ * code to the NEW address (the account stays unchanged until confirmed);
+ * step 2 verifies it. Only renders when the deployment runs the
+ * self-serve signup surface (the email-change endpoints live there).
+ */
+export function ChangeEmailCard() {
+  const { toast } = useToast();
+  const [enabled, setEnabled] = useState<boolean | null>(null);
+  const [step, setStep] = useState<"idle" | "request" | "code" | "done">("idle");
+  const [newEmail, setNewEmail] = useState("");
+  const [code, setCode] = useState("");
+  const [challengeId, setChallengeId] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [submitted, setSubmitted] = useState(false);
+
+  useEffect(() => {
+    fetchSignupConfig().then((c) => setEnabled(c.enabled));
+  }, []);
+
+  if (!enabled) return null;
+
+  const emailError = submitted && !isValidEmail(newEmail) ? "Enter a valid email." : "";
+  const codeError = submitted && code.trim().length !== 6 ? "Enter the 6-digit code." : "";
+
+  const request = async (e: FormEvent) => {
+    e.preventDefault();
+    setSubmitted(true);
+    setError("");
+    if (!isValidEmail(newEmail)) return;
+    setBusy(true);
+    try {
+      const r = await requestEmailChange(newEmail.trim());
+      setChallengeId(r.challengeId);
+      setSubmitted(false);
+      setStep("code");
+    } catch (err) {
+      if (err instanceof SignupApiError && err.code === "same_address") {
+        setError("That's already your sign-in email.");
+      } else if (err instanceof SignupApiError && err.code === "email_taken") {
+        setError("That address already belongs to another account.");
+      } else {
+        setError(err instanceof Error ? err.message : "Couldn't send the code. Try again.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const confirm = async (e: FormEvent) => {
+    e.preventDefault();
+    setSubmitted(true);
+    setError("");
+    if (code.trim().length !== 6) return;
+    setBusy(true);
+    try {
+      await confirmEmailChange(challengeId, code.trim());
+      setStep("done");
+      toast({
+        title: "Sign-in email changed",
+        message: "Your other sessions were signed out. Sign back in with the new address.",
+        tone: "success",
+      });
+    } catch (err) {
+      if (err instanceof SignupApiError && err.code === "invalid_code") {
+        setError(
+          err.attemptsRemaining && err.attemptsRemaining > 0
+            ? `That code isn't right. ${err.attemptsRemaining} attempt${err.attemptsRemaining === 1 ? "" : "s"} left.`
+            : "That code isn't right. Try again.",
+        );
+      } else if (err instanceof SignupApiError && err.code === "code_expired") {
+        setError("This code has expired. Request a new one.");
+      } else if (err instanceof SignupApiError && err.code === "email_taken") {
+        setError("That address already belongs to another account.");
+      } else if (err instanceof SignupApiError && err.code === "unavailable") {
+        setError("Email change is temporarily unavailable — try again shortly.");
+      } else {
+        setError(err instanceof Error ? err.message : "Couldn't confirm the change. Try again.");
+      }
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <>
+      <h3 className="df2-settings-subhead df2-settings-subhead--spaced">Sign-in email</h3>
+      <div className="df2-settings-policy" data-testid="change-email-card">
+        {step === "idle" && (
+          <div className="df2-settings-policy-row">
+            <div>
+              <h3>Change sign-in email</h3>
+              <p>We email a 6-digit code to the new address — the change only lands after you confirm it.</p>
+            </div>
+            <button type="button" className="df2-btn df2-btn-sm df2-btn-primary" onClick={() => setStep("request")}>
+              Change email
+            </button>
+          </div>
+        )}
+
+        {step === "request" && (
+          <form className="df2-settings-policy-row" onSubmit={request} noValidate>
+            <div>
+              <h3>New sign-in email</h3>
+              <p>A 6-digit code goes to this address. Your sessions keep working until you confirm.</p>
+              <input
+                id="change-email-input"
+                className="df2-input"
+                type="email"
+                inputMode="email"
+                autoComplete="username"
+                placeholder="you@company.com"
+                value={newEmail}
+                onChange={(e) => { setNewEmail(e.target.value); setError(""); }}
+                aria-invalid={Boolean(emailError || error)}
+                aria-describedby={emailError || error ? "change-email-error" : undefined}
+              />
+              {(emailError || error) && (
+                <p id="change-email-error" className="df2-label-hint df2-field-error-text">{emailError || error}</p>
+              )}
+            </div>
+            <span className="df2-change-email-actions">
+              <button type="button" className="df2-btn df2-btn-sm" onClick={() => { setStep("idle"); setError(""); setSubmitted(false); }}>
+                Cancel
+              </button>
+              <button type="submit" className="df2-btn df2-btn-sm df2-btn-primary" disabled={busy}>
+                {busy ? "Sending…" : "Send code"}
+              </button>
+            </span>
+          </form>
+        )}
+
+        {step === "code" && (
+          <form className="df2-settings-policy-row" onSubmit={confirm} noValidate>
+            <div>
+              <h3>Enter the 6-digit code</h3>
+              <p>We sent it to <strong>{newEmail.trim()}</strong> — it expires in 10 minutes.</p>
+              <input
+                id="change-email-code"
+                className="df2-input"
+                inputMode="numeric"
+                autoComplete="one-time-code"
+                maxLength={6}
+                placeholder="000000"
+                value={code}
+                onChange={(e) => { setCode(e.target.value.replace(/\D/g, "").slice(0, 6)); setError(""); }}
+                aria-invalid={Boolean(codeError || error)}
+                aria-describedby={codeError || error ? "change-email-code-error" : undefined}
+              />
+              {(codeError || error) && (
+                <p id="change-email-code-error" className="df2-label-hint df2-field-error-text">{codeError || error}</p>
+              )}
+            </div>
+            <span className="df2-change-email-actions">
+              <button type="button" className="df2-btn df2-btn-sm" onClick={() => { setStep("request"); setError(""); setSubmitted(false); setCode(""); }}>
+                Back
+              </button>
+              <button type="submit" className="df2-btn df2-btn-sm df2-btn-primary" disabled={busy || code.length < 6}>
+                {busy ? "Confirming…" : "Confirm change"}
+              </button>
+            </span>
+          </form>
+        )}
+
+        {step === "done" && (
+          <div className="df2-settings-policy-row">
+            <div>
+              <h3>Email changed</h3>
+              <p>Your sign-in email is now <strong>{newEmail.trim()}</strong>. Other sessions were signed out — sign back in with the new address.</p>
+            </div>
+            <span className="df2-badge df2-badge-live">Done</span>
+          </div>
+        )}
+      </div>
+    </>
+  );
+}

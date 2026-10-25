@@ -1,9 +1,9 @@
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { BrandWordmark } from "../components/BrandWordmark";
+import { AuthBrandPanel } from "../components/AuthBrandPanel";
 import { DtIcon } from "../components/DtIcon";
 import { useToast } from "../components/Toast";
 import { ApiError, fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
-import { fetchFormToken } from "../lib/signupApi";
+import { fetchSignupConfig } from "../lib/signupApi";
 import { classifySignInFailure, SignInFailure } from "../lib/signInFailure";
 import { UI_PREVIEW_TOKEN, writeSession } from "../lib/session";
 import { Screen } from "../lib/types";
@@ -63,9 +63,9 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
 
   useEffect(() => {
     fetchSsoProviders().then(setSsoProviders).catch(() => setSsoProviders([]));
-    // The signup router is only mounted when DATAWRAP_SIGNUP_ENABLED=1 — the
-    // form-token route 404s otherwise, which is also the feature check.
-    fetchFormToken("signup").then((t) => setSignupEnabled(Boolean(t)));
+    // Read-only capability probe on the always-mounted auth router — never
+    // mints a form token just to feature-detect the signup surface.
+    fetchSignupConfig().then((c) => setSignupEnabled(c.enabled));
   }, []);
 
   const emailTrimmed = email.trim();
@@ -178,66 +178,13 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
 
   return (
     <main className="lp-login lp-login--gate">
-      <section className="lp-login-brand" aria-label="Datawrap">
-        <div className="lp-login-brand-bg" aria-hidden>
-          <span className="lp-login-brand-mesh" />
-          <span className="lp-login-brand-orb lp-login-brand-orb--a" />
-          <span className="lp-login-brand-orb lp-login-brand-orb--b" />
-          <span className="lp-login-brand-rail" />
-        </div>
-
-        <div className="lp-login-brand-inner">
-          <header className="lp-login-brand-head">
-            <button type="button" className="lp-login-back" onClick={onBack}>
-              <DtIcon name="chevron-left" size={15} />
-              <span>Back</span>
-            </button>
-            <div className="lp-login-brand-logo">
-              <BrandWordmark markSize={32} title="" />
-            </div>
-          </header>
-
-          <div className="lp-login-brand-body">
-            <p className="lp-login-brand-kicker">Enterprise data platform</p>
-            <h1 className="lp-login-brand-title">Sign in to governed transfers</h1>
-            <p className="lp-login-brand-lead">
-              Semantic mapping, named preflight gates, and checksum proof — for humans and agents.
-            </p>
-
-            <div className="lp-login-proof" aria-hidden>
-              <div className="lp-login-proof-flow">
-                <span>Map</span>
-                <i />
-                <span>Preflight</span>
-                <i />
-                <span>Prove</span>
-              </div>
-              <p>Every session inherits workspace RBAC. Agents never skip gates.</p>
-            </div>
-
-            <div className="lp-login-metrics" role="list">
-              {TRUST_METRICS.map((m) => (
-                <div key={m.label} className="lp-login-metric" role="listitem">
-                  <strong>{m.value}</strong>
-                  <span>{m.label}</span>
-                </div>
-              ))}
-            </div>
-
-            <p className="lp-login-brand-dest">
-              Continue to <strong>{targetLabel}</strong>
-            </p>
-          </div>
-
-          <footer className="lp-login-brand-foot">
-            <span>Self-host ready</span>
-            <span aria-hidden>·</span>
-            <span>SSO / RBAC</span>
-            <span aria-hidden>·</span>
-            <span>Audit trails</span>
-          </footer>
-        </div>
-      </section>
+      <AuthBrandPanel
+        title="Sign in to governed transfers"
+        lead="Semantic mapping, named preflight gates, and checksum proof — for humans and agents."
+        onBack={onBack}
+        metrics={TRUST_METRICS}
+        dest={<>Continue to <strong>{targetLabel}</strong></>}
+      />
 
       <section className="lp-login-auth" aria-labelledby="login-form-title">
         <div className="lp-login-auth-bg" aria-hidden>
@@ -286,6 +233,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
                     {onVerifyPending && (
                       <button
                         type="button"
+                        className="lp-login-alert-link"
                         onClick={() => onVerifyPending(pendingVerify.challengeId, pendingVerify.email)}
                       >
                         Enter verification code

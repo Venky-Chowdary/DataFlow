@@ -12,14 +12,16 @@ export class SignupApiError extends Error {
   readonly code: string;
   readonly retryAfterSec: number;
   readonly challengeId: string;
+  readonly attemptsRemaining: number | null;
 
-  constructor(status: number, code: string, message: string, retryAfterSec = 0, challengeId = "") {
+  constructor(status: number, code: string, message: string, retryAfterSec = 0, challengeId = "", attemptsRemaining: number | null = null) {
     super(message);
     this.name = "SignupApiError";
     this.status = status;
     this.code = code;
     this.retryAfterSec = retryAfterSec;
     this.challengeId = challengeId;
+    this.attemptsRemaining = attemptsRemaining;
   }
 }
 
@@ -39,6 +41,7 @@ async function call(path: string, body?: unknown): Promise<Record<string, unknow
       String(err.message ?? data.detail ?? "Request failed."),
       Number(err.retry_after_sec ?? 0),
       String(data.challenge_id ?? ""),
+      typeof err.attempts_remaining === "number" ? err.attempts_remaining : null,
     );
   }
   return data;
@@ -77,12 +80,14 @@ export async function signupRequest(input: {
   name: string;
   password: string;
   formToken?: string;
+  turnstileToken?: string;
 }): Promise<ChallengeResponse> {
   const data = await call("/auth/signup", {
     email: input.email,
     name: input.name,
     password: input.password,
     form_token: input.formToken || undefined,
+    turnstile_token: input.turnstileToken || undefined,
     honeypot: "",
   });
   return challenge(data);
@@ -104,10 +109,11 @@ export async function resendCode(challengeId: string): Promise<ChallengeResponse
   return challenge(data);
 }
 
-export async function forgotPassword(email: string, formToken?: string): Promise<ChallengeResponse> {
+export async function forgotPassword(email: string, formToken?: string, turnstileToken?: string): Promise<ChallengeResponse> {
   const data = await call("/auth/password/forgot", {
     email,
     form_token: formToken || undefined,
+    turnstile_token: turnstileToken || undefined,
     honeypot: "",
   });
   return challenge(data);
@@ -138,4 +144,67 @@ export async function routeSsoForEmail(email: string): Promise<SsoRoute> {
   } catch {
     return { sso: null };
   }
+}
+
+export interface SignupConfig {
+  enabled: boolean;
+  turnstileSiteKey: string;
+}
+
+/** Capability probe on the always-mounted auth router — answers flag-off
+ *  so login surfaces never mint a form token to feature-detect. */
+export async function fetchSignupConfig(): Promise<SignupConfig> {
+  try {
+    const res = await fetch(`${API_BASE}/auth/signup/config`, { credentials: "include" });
+    if (!res.ok) return { enabled: false, turnstileSiteKey: "" };
+    const data = (await res.json()) as Record<string, unknown>;
+    return {
+      enabled: Boolean(data.enabled),
+      turnstileSiteKey: String(data.turnstile_site_key ?? ""),
+    };
+  } catch {
+    return { enabled: false, turnstileSiteKey: "" };
+  }
+}
+
+async function authedCall(path: string, body: unknown): Promise<Record<string, unknown>> {
+  const { apiBearerToken } = await import("./session");
+  const token = apiBearerToken() ?? "";
+  const res = await fetch(`${API_BASE}${path}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(body),
+    credentials: "include",
+  });
+  const data = (await res.json().catch(() => ({}))) as Record<string, unknown>;
+  if (!res.ok) {
+    const err = (data.error ?? {}) as Record<string, unknown>;
+    throw new SignupApiError(
+      res.status,
+      String(err.code ?? "request_failed"),
+      String(err.message ?? data.detail ?? "Request failed."),
+      Number(err.retry_after_sec ?? 0),
+      String(data.challenge_id ?? ""),
+      typeof err.attempts_remaining === "number" ? err.attempts_remaining : null,
+    );
+  }
+  return data;
+}
+
+/** Authenticated: email a 6-digit code to the new address. */
+export async function requestEmailChange(newEmail: string): Promise<ChallengeResponse> {
+  const data = await authedCall("/auth/email/change", { new_email: newEmail });
+  return challenge(data);
+}
+
+/** Authenticated: confirm the change with the code sent to the new address. */
+export async function confirmEmailChange(challengeId: string, code: string): Promise<{ ok: boolean }> {
+  const data = await authedCall("/auth/email/change/confirm", {
+    challenge_id: challengeId,
+    code,
+  });
+  return { ok: Boolean(data.ok) };
 }

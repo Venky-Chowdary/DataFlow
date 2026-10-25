@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { STUDIO_CANVAS_KEY, STUDIO_SCHEMA_BROWSER_KEY, writeLocalStudioFlag } from "../lib/studioFlags";
 import { DtIcon } from "../components/DtIcon";
+import { ChangeEmailCard } from "../components/ChangeEmailCard";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
@@ -921,6 +922,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           </div>
                         </>
                       )}
+
+                      <ChangeEmailCard />
 
                       <h3 className="df2-settings-subhead df2-settings-subhead--spaced">Compliance roadmap</h3>
                       <div className="df2-settings-policy-grid" style={{ marginBottom: 24 }}>

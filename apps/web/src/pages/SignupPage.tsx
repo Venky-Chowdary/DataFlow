@@ -1,9 +1,10 @@
-import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import { BrandWordmark } from "../components/BrandWordmark";
+import { FormEvent, ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { AuthBrandPanel } from "../components/AuthBrandPanel";
 import { DtIcon } from "../components/DtIcon";
 import { useToast } from "../components/Toast";
 import {
   fetchFormToken,
+  fetchSignupConfig,
   forgotPassword,
   resendCode,
   resetPassword,
@@ -24,47 +25,12 @@ interface AuthFlowProps {
   onBack: () => void;
 }
 
-/** Shared two-column chrome: brand rail left, form card right. */
-function AuthShell({ title, sub, children }: { title: string; sub: string; children: React.ReactNode }) {
+/** Shared two-column chrome: brand rail left, form card right.
+ *  Back lives on the dark brand header — never as a pill on the card. */
+function AuthShell({ title, sub, onBack, children }: { title: string; sub: string; onBack: () => void; children: ReactNode }) {
   return (
-    <main className="lp-login lp-login--gate">
-      <section className="lp-login-brand" aria-label="Datawrap">
-        <div className="lp-login-brand-bg" aria-hidden>
-          <span className="lp-login-brand-mesh" />
-          <span className="lp-login-brand-orb lp-login-brand-orb--a" />
-          <span className="lp-login-brand-orb lp-login-brand-orb--b" />
-          <span className="lp-login-brand-rail" />
-        </div>
-        <div className="lp-login-brand-inner">
-          <header className="lp-login-brand-head">
-            <div className="lp-login-brand-logo">
-              <BrandWordmark markSize={32} title="" />
-            </div>
-          </header>
-          <div className="lp-login-brand-body">
-            <p className="lp-login-brand-kicker">Enterprise data platform</p>
-            <h1 className="lp-login-brand-title">{title}</h1>
-            <p className="lp-login-brand-lead">{sub}</p>
-            <div className="lp-login-proof" aria-hidden>
-              <div className="lp-login-proof-flow">
-                <span>Map</span>
-                <i />
-                <span>Preflight</span>
-                <i />
-                <span>Prove</span>
-              </div>
-              <p>Every session inherits workspace RBAC. Agents never skip gates.</p>
-            </div>
-          </div>
-          <footer className="lp-login-brand-foot">
-            <span>Self-host ready</span>
-            <span aria-hidden>·</span>
-            <span>SSO / RBAC</span>
-            <span aria-hidden>·</span>
-            <span>Audit trails</span>
-          </footer>
-        </div>
-      </section>
+    <main className="lp-login lp-login--gate lp-login--flow">
+      <AuthBrandPanel title={title} lead={sub} onBack={onBack} />
       <section className="lp-login-auth">
         <div className="lp-login-auth-bg" aria-hidden>
           <span className="lp-login-auth-glow lp-login-auth-glow--a" />
@@ -80,25 +46,55 @@ function AuthShell({ title, sub, children }: { title: string; sub: string; child
   );
 }
 
-/** Six-digit code entry with resend cooldown. */
-function CodeStep({
-  email,
-  challengeId,
-  resendAfterSec,
-  onSubmitCode,
-  busy,
-  error,
-}: {
-  email: string;
-  challengeId: string;
-  resendAfterSec: number;
-  onSubmitCode: (code: string) => void;
-  busy: boolean;
-  error: string;
-}) {
-  const [code, setCode] = useState("");
-  const [cooldown, setCooldown] = useState(resendAfterSec);
+/** Cloudflare Turnstile — renders only when the deployment publishes a
+ *  site key; no-ops to invisible otherwise. */
+function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (token: string) => void }) {
+  const hostRef = useRef<HTMLDivElement | null>(null);
+  const tokenRef = useRef(onToken);
+  tokenRef.current = onToken;
+
+  useEffect(() => {
+    if (!siteKey) return;
+    const render = () => {
+      const turnstile = (window as unknown as { turnstile?: { render: (el: HTMLElement, opts: Record<string, unknown>) => void } }).turnstile;
+      if (hostRef.current && turnstile) {
+        turnstile.render(hostRef.current, {
+          sitekey: siteKey,
+          callback: (token: string) => tokenRef.current(token),
+          "expired-callback": () => tokenRef.current(""),
+        });
+      }
+    };
+    const existing = document.querySelector<HTMLScriptElement>('script[data-df-turnstile="1"]');
+    if (existing) {
+      if ((window as unknown as { turnstile?: unknown }).turnstile) render();
+      else existing.addEventListener("load", render, { once: true });
+      return;
+    }
+    const script = document.createElement("script");
+    script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
+    script.async = true;
+    script.defer = true;
+    script.dataset.dfTurnstile = "1";
+    script.addEventListener("load", render, { once: true });
+    document.head.appendChild(script);
+  }, [siteKey]);
+
+  if (!siteKey) return null;
+  return <div ref={hostRef} className="lp-login-turnstile" data-testid="turnstile-widget" />;
+}
+
+/** Focus the first field marked invalid inside the card. */
+function focusFirstInvalid(root: HTMLElement | null) {
+  root?.querySelector<HTMLElement>('[aria-invalid="true"], .lp-field.is-error .lp-input')?.focus();
+}
+
+/** Resend-with-cooldown row shared by verify + reset. */
+function ResendRow({ challengeId, initialCooldown }: { challengeId: string; initialCooldown: number }) {
+  const [cooldown, setCooldown] = useState(initialCooldown);
   const [resending, setResending] = useState(false);
+  const [sent, setSent] = useState(false);
+  const [notice, setNotice] = useState("");
   const { toast } = useToast();
 
   useEffect(() => {
@@ -109,14 +105,19 @@ function CodeStep({
 
   const resend = async () => {
     setResending(true);
+    setSent(false);
+    setNotice("");
     try {
       const r = await resendCode(challengeId);
       setCooldown(r.resendAfterSec || 60);
+      setSent(true);
+      setNotice("New code sent — check your inbox.");
       toast({ title: "New code sent", message: "Check your inbox for the latest 6-digit code.", tone: "info" });
     } catch (err) {
       const msg = err instanceof SignupApiError && err.code === "resend_limited"
         ? `Too many resends — wait ${Math.max(1, Math.round(err.retryAfterSec / 60))} min.`
         : "Couldn't resend the code. Try again shortly.";
+      setNotice(msg);
       toast({ title: "Resend unavailable", message: msg, tone: "warning" });
       if (err instanceof SignupApiError && err.retryAfterSec) setCooldown(err.retryAfterSec);
     } finally {
@@ -124,8 +125,46 @@ function CodeStep({
     }
   };
 
+  const disabled = cooldown > 0 || resending;
   return (
-    <>
+    <div className="lp-login-resend">
+      <p className="lp-login-legal">
+        Didn't get it?{" "}
+        <button type="button" onClick={resend} disabled={disabled} aria-disabled={disabled}>
+          {cooldown > 0 ? `Resend in ${cooldown}s` : resending ? "Sending…" : "Resend code"}
+        </button>
+      </p>
+      <p className="lp-login-resend-status" aria-live="polite">
+        {notice || (cooldown > 0 ? `You can request a new code in ${cooldown} seconds.` : "")}
+      </p>
+    </div>
+  );
+}
+
+/** Six-digit code entry. */
+function CodeStep({
+  email,
+  challengeId,
+  resendAfterSec,
+  onSubmitCode,
+  busy,
+  error,
+  errorIsField,
+}: {
+  email: string;
+  challengeId: string;
+  resendAfterSec: number;
+  onSubmitCode: (code: string) => void;
+  busy: boolean;
+  error: string;
+  errorIsField: boolean;
+}) {
+  const [code, setCode] = useState("");
+  const cardRef = useRef<HTMLDivElement | null>(null);
+  const fieldError = errorIsField ? error : "";
+
+  return (
+    <div ref={cardRef}>
       <div className="lp-login-auth-head">
         <p className="lp-login-auth-kicker">Check your inbox</p>
         <h2>Enter the 6-digit code</h2>
@@ -133,14 +172,22 @@ function CodeStep({
           We sent a verification code to <strong>{email}</strong>. It expires in 10 minutes.
         </p>
       </div>
-      {error && (
+      {error && !errorIsField && (
         <div className="lp-login-alert lp-login-alert--warn" role="alert">
           <DtIcon name="alert" size={18} />
-          <div><strong>Verification</strong><p>{error}</p></div>
+          <div><strong>Couldn't verify that code</strong><p>{error}</p></div>
         </div>
       )}
-      <form className="lp-login-form" onSubmit={(e) => { e.preventDefault(); if (code.trim().length >= 6) onSubmitCode(code.trim()); }} noValidate>
-        <div className="lp-field">
+      <form
+        className="lp-login-form"
+        onSubmit={(e) => {
+          e.preventDefault();
+          if (code.trim().length < 6) { focusFirstInvalid(cardRef.current); return; }
+          onSubmitCode(code.trim());
+        }}
+        noValidate
+      >
+        <div className={`lp-field ${fieldError ? "is-error" : ""}`}>
           <label className="lp-label" htmlFor="auth-code">Verification code</label>
           <input
             id="auth-code"
@@ -152,20 +199,18 @@ function CodeStep({
             onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
             placeholder="000000"
             autoFocus
+            aria-invalid={Boolean(fieldError)}
+            aria-describedby={fieldError ? "auth-code-error" : undefined}
           />
+          {fieldError && <small id="auth-code-error" className="lp-field-error">{fieldError}</small>}
         </div>
         <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit" disabled={busy || code.length < 6}>
           {busy ? "Verifying…" : "Verify email"}
           {!busy && <DtIcon name="arrow-right" size={16} />}
         </button>
-        <p className="lp-login-legal">
-          Didn't get it?{" "}
-          <button type="button" onClick={resend} disabled={cooldown > 0 || resending}>
-            {cooldown > 0 ? `Resend in ${cooldown}s` : resending ? "Sending…" : "Resend code"}
-          </button>
-        </p>
+        <ResendRow challengeId={challengeId} initialCooldown={resendAfterSec} />
       </form>
-    </>
+    </div>
   );
 }
 
@@ -179,13 +224,17 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
   const [submitted, setSubmitted] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [errorIsField, setErrorIsField] = useState(false);
   const [formToken, setFormToken] = useState("");
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
   const [challenge, setChallenge] = useState({ id: initialChallengeId, resendAfterSec: 60 });
   const [ssoHint, setSsoHint] = useState<{ sso: string; startUrl: string } | null>(null);
-  const mountedAt = useRef(Date.now());
+  const cardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     fetchFormToken("signup").then((t) => setFormToken(t ?? ""));
+    fetchSignupConfig().then((c) => setTurnstileSiteKey(c.turnstileSiteKey));
   }, []);
 
   const emailOk = isValidEmail(email);
@@ -211,7 +260,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
     e.preventDefault();
     setSubmitted(true);
     setError("");
-    if (!ready) return;
+    if (!ready) { focusFirstInvalid(cardRef.current); return; }
     setBusy(true);
     try {
       const r = await signupRequest({
@@ -219,6 +268,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
         name: name.trim(),
         password,
         formToken: formToken || undefined,
+        turnstileToken: turnstileToken || undefined,
       });
       setChallenge({ id: r.challengeId, resendAfterSec: r.resendAfterSec });
       setStep("verify");
@@ -239,6 +289,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
   const submitCode = async (code: string) => {
     setBusy(true);
     setError("");
+    setErrorIsField(false);
     try {
       const result = await verifyEmail({ challengeId: challenge.id, code });
       writeSession(
@@ -255,12 +306,17 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
       toast({ title: "Email verified", message: "Your workspace is ready.", tone: "success" });
       onAuthenticated(result.user.email);
     } catch (err) {
-      if (err instanceof SignupApiError && err.code === "otp_expired") {
-        setError("That code expired — request a fresh one below.");
-      } else if (err instanceof SignupApiError) {
-        setError(err.message || "Invalid code.");
+      if (err instanceof SignupApiError && err.code === "invalid_code") {
+        setError(
+          err.attemptsRemaining && err.attemptsRemaining > 0
+            ? `That code isn't right. ${err.attemptsRemaining} attempt${err.attemptsRemaining === 1 ? "" : "s"} left.`
+            : "That code isn't right. Try again.",
+        );
+        setErrorIsField(true);
+      } else if (err instanceof SignupApiError && (err.code === "code_expired" || err.code === "otp_expired")) {
+        setError("This code has expired. Request a new one.");
       } else {
-        setError("Invalid code. Check the email and try again.");
+        setError(err instanceof Error ? err.message : "Couldn't verify that code. Try again.");
       }
     } finally {
       setBusy(false);
@@ -269,7 +325,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
 
   if (step === "verify") {
     return (
-      <AuthShell title="Verify your email" sub="One step left — confirm the address owns this workspace.">
+      <AuthShell title="Verify your email" sub="One step left — confirm the address owns this workspace." onBack={onBack}>
         <CodeStep
           email={email.trim()}
           challengeId={challenge.id}
@@ -277,116 +333,120 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
           onSubmitCode={submitCode}
           busy={busy}
           error={error}
+          errorIsField={errorIsField}
         />
       </AuthShell>
     );
   }
 
   return (
-    <AuthShell title="Create your workspace" sub="Verified email, governed transfers, and checksum proof — in minutes.">
-      <button type="button" className="lp-login-back" onClick={onBack} style={{ marginBottom: 8 }}>
-        <DtIcon name="chevron-left" size={15} />
-        <span>Back</span>
-      </button>
-      <div className="lp-login-auth-head">
-        <p className="lp-login-auth-kicker">Self-serve signup</p>
-        <h2>Get started</h2>
-        <p className="lp-login-auth-sub">
-          We'll email you a 6-digit code to verify your address.
+    <AuthShell title="Create your workspace" sub="Verified email, governed transfers, and checksum proof — in minutes." onBack={onBack}>
+      <div ref={cardRef}>
+        <div className="lp-login-auth-head">
+          <p className="lp-login-auth-kicker">Self-serve signup</p>
+          <h2>Get started</h2>
+          <p className="lp-login-auth-sub">
+            We'll email you a 6-digit code to verify your address.
+          </p>
+        </div>
+
+        {ssoHint && (
+          <div className="lp-login-alert lp-login-alert--warn" role="status">
+            <DtIcon name="shield" size={18} />
+            <div>
+              <strong>Your organization uses SSO</strong>
+              <p>
+                Sign in through your identity provider instead.{" "}
+                <a href={ssoHint.startUrl}>Continue with {ssoHint.sso.toUpperCase()}</a>
+              </p>
+            </div>
+          </div>
+        )}
+
+        {error && (
+          <div className="lp-login-alert lp-login-alert--danger" role="alert">
+            <DtIcon name="alert" size={18} />
+            <div><strong>Couldn't start signup</strong><p>{error}</p></div>
+          </div>
+        )}
+
+        <form className="lp-login-form" onSubmit={submit} noValidate>
+          <div className={`lp-field ${nameError ? "is-error" : ""}`}>
+            <label className="lp-label" htmlFor="signup-name">Full name</label>
+            <input
+              id="signup-name"
+              className="lp-input"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              autoComplete="name"
+              placeholder="Ada Lovelace"
+              aria-invalid={Boolean(nameError)}
+              aria-describedby={nameError ? "signup-name-error" : undefined}
+            />
+            {nameError && <small id="signup-name-error" className="lp-field-error">{nameError}</small>}
+          </div>
+
+          <div className={`lp-field ${emailError ? "is-error" : emailOk ? "is-ok" : ""}`}>
+            <div className="lp-label-row">
+              <label className="lp-label" htmlFor="signup-email">Work email</label>
+              {emailOk && <span className="lp-field-status lp-field-status--ok">Valid</span>}
+            </div>
+            <input
+              id="signup-email"
+              className="lp-input"
+              type="email"
+              inputMode="email"
+              value={email}
+              onChange={(e) => { setEmail(e.target.value); setError(""); }}
+              autoComplete="username"
+              autoCapitalize="none"
+              autoCorrect="off"
+              spellCheck={false}
+              placeholder="you@company.com"
+              aria-invalid={Boolean(emailError)}
+              aria-describedby={emailError ? "signup-email-error" : undefined}
+            />
+            {emailError && <small id="signup-email-error" className="lp-field-error">{emailError}</small>}
+          </div>
+
+          <div className={`lp-field ${passwordError ? "is-error" : passwordOk ? "is-ok" : ""}`}>
+            <label className="lp-label" htmlFor="signup-password">Password</label>
+            <div className="lp-input-password">
+              <input
+                id="signup-password"
+                className="lp-input"
+                type={showPassword ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                autoComplete="new-password"
+                placeholder="At least 12 characters"
+                aria-invalid={Boolean(passwordError)}
+                aria-describedby={passwordError ? "signup-password-error" : undefined}
+              />
+              <button
+                type="button"
+                className="lp-input-password-toggle"
+                onClick={() => setShowPassword((v) => !v)}
+                aria-label={showPassword ? "Hide password" : "Show password"}
+              >
+                <DtIcon name={showPassword ? "lock" : "scan"} size={15} />
+              </button>
+            </div>
+            {passwordError && <small id="signup-password-error" className="lp-field-error">{passwordError}</small>}
+          </div>
+
+          <TurnstileWidget siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
+
+          <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit" disabled={busy}>
+            {busy ? "Sending code…" : "Send verification code"}
+            {!busy && <DtIcon name="arrow-right" size={16} />}
+          </button>
+        </form>
+
+        <p className="lp-login-legal">
+          Already have an account? <button type="button" onClick={onSignIn}>Sign in</button>
         </p>
       </div>
-
-      {ssoHint && (
-        <div className="lp-login-alert lp-login-alert--warn" role="status">
-          <DtIcon name="shield" size={18} />
-          <div>
-            <strong>Your organization uses SSO</strong>
-            <p>
-              Sign in through your identity provider instead.{" "}
-              <a href={ssoHint.startUrl}>Continue with {ssoHint.sso.toUpperCase()}</a>
-            </p>
-          </div>
-        </div>
-      )}
-
-      {error && (
-        <div className="lp-login-alert lp-login-alert--danger" role="alert">
-          <DtIcon name="alert" size={18} />
-          <div><strong>Signup</strong><p>{error}</p></div>
-        </div>
-      )}
-
-      <form className="lp-login-form" onSubmit={submit} noValidate>
-        <div className={`lp-field ${nameError ? "is-error" : ""}`}>
-          <label className="lp-label" htmlFor="signup-name">Full name</label>
-          <input
-            id="signup-name"
-            className="lp-input"
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            autoComplete="name"
-            placeholder="Ada Lovelace"
-            aria-invalid={Boolean(nameError)}
-          />
-          {nameError && <small className="lp-field-error">{nameError}</small>}
-        </div>
-
-        <div className={`lp-field ${emailError ? "is-error" : emailOk ? "is-ok" : ""}`}>
-          <div className="lp-label-row">
-            <label className="lp-label" htmlFor="signup-email">Work email</label>
-            {emailOk && <span className="lp-field-status lp-field-status--ok">Valid</span>}
-          </div>
-          <input
-            id="signup-email"
-            className="lp-input"
-            type="email"
-            inputMode="email"
-            value={email}
-            onChange={(e) => { setEmail(e.target.value); setError(""); }}
-            autoComplete="username"
-            autoCapitalize="none"
-            autoCorrect="off"
-            spellCheck={false}
-            placeholder="you@company.com"
-            aria-invalid={Boolean(emailError)}
-          />
-          {emailError && <small className="lp-field-error">{emailError}</small>}
-        </div>
-
-        <div className={`lp-field ${passwordError ? "is-error" : passwordOk ? "is-ok" : ""}`}>
-          <label className="lp-label" htmlFor="signup-password">Password</label>
-          <div className="lp-input-password">
-            <input
-              id="signup-password"
-              className="lp-input"
-              type={showPassword ? "text" : "password"}
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              autoComplete="new-password"
-              placeholder="At least 12 characters"
-              aria-invalid={Boolean(passwordError)}
-            />
-            <button
-              type="button"
-              className="lp-input-password-toggle"
-              onClick={() => setShowPassword((v) => !v)}
-              aria-label={showPassword ? "Hide password" : "Show password"}
-            >
-              <DtIcon name={showPassword ? "lock" : "scan"} size={15} />
-            </button>
-          </div>
-          {passwordError && <small className="lp-field-error">{passwordError}</small>}
-        </div>
-
-        <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit" disabled={busy}>
-          {busy ? "Sending code…" : "Send verification code"}
-          {!busy && <DtIcon name="arrow-right" size={16} />}
-        </button>
-      </form>
-
-      <p className="lp-login-legal">
-        Already have an account? <button type="button" onClick={onSignIn}>Sign in</button>
-      </p>
     </AuthShell>
   );
 }
@@ -398,24 +458,35 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [formToken, setFormToken] = useState("");
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
   const [challenge, setChallenge] = useState({ id: "", resendAfterSec: 60 });
   const [code, setCode] = useState("");
   const [newPassword, setNewPassword] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
+  const [submitted, setSubmitted] = useState(false);
+  const cardRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     fetchFormToken("reset").then((t) => setFormToken(t ?? ""));
+    fetchSignupConfig().then((c) => setTurnstileSiteKey(c.turnstileSiteKey));
   }, []);
+
+  const emailOk = isValidEmail(email);
+  const codeOk = code.trim().length === 6;
+  const passwordOk = newPassword.length >= 12;
+  const emailError = submitted && !emailOk ? "Enter a valid work email." : "";
+  const codeError = submitted && !codeOk ? "Enter the 6-digit code from the email." : "";
+  const passwordError = submitted && !passwordOk ? "Use at least 12 characters." : "";
 
   const request = async (e: FormEvent) => {
     e.preventDefault();
+    setSubmitted(true);
     setError("");
-    if (!isValidEmail(email)) {
-      setError("Enter a valid work email.");
-      return;
-    }
+    if (!emailOk) { focusFirstInvalid(cardRef.current); return; }
     setBusy(true);
     try {
-      const r = await forgotPassword(email.trim(), formToken || undefined);
+      const r = await forgotPassword(email.trim(), formToken || undefined, turnstileToken || undefined);
       setChallenge({ id: r.challengeId, resendAfterSec: r.resendAfterSec });
       setStep("reset");
     } catch (err) {
@@ -431,107 +502,138 @@ export function ForgotPasswordPage({ onSignIn, onBack }: { onSignIn: () => void;
 
   const reset = async (e: FormEvent) => {
     e.preventDefault();
+    setSubmitted(true);
     setError("");
-    if (code.trim().length < 6 || newPassword.length < 12) {
-      setError("Enter the 6-digit code and a password of at least 12 characters.");
-      return;
-    }
+    if (!codeOk || !passwordOk) { focusFirstInvalid(cardRef.current); return; }
     setBusy(true);
     try {
       await resetPassword({ challengeId: challenge.id, code: code.trim(), newPassword });
       setStep("done");
       toast({ title: "Password updated", message: "Sign in with your new password.", tone: "success" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Reset failed. Request a new code.");
+      if (err instanceof SignupApiError && err.code === "invalid_code") {
+        setError(
+          err.attemptsRemaining && err.attemptsRemaining > 0
+            ? `That code isn't right. ${err.attemptsRemaining} attempt${err.attemptsRemaining === 1 ? "" : "s"} left.`
+            : "That code isn't right. Try again.",
+        );
+      } else if (err instanceof SignupApiError && err.code === "code_expired") {
+        setError("This code has expired. Request a new one.");
+      } else {
+        setError(err instanceof Error ? err.message : "Couldn't reset the password. Request a new code.");
+      }
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <AuthShell title="Reset your password" sub="We'll email a one-time code; your sessions stay signed out until the reset completes.">
-      <button type="button" className="lp-login-back" onClick={onBack} style={{ marginBottom: 8 }}>
-        <DtIcon name="chevron-left" size={15} />
-        <span>Back</span>
-      </button>
-      {step === "email" && (
-        <>
+    <AuthShell title="Reset your password" sub="We'll email a one-time code; your sessions stay signed out until the reset completes." onBack={onBack}>
+      <div ref={cardRef}>
+        {step === "email" && (
+          <>
+            <div className="lp-login-auth-head">
+              <p className="lp-login-auth-kicker">Account recovery</p>
+              <h2>Forgot password</h2>
+              <p className="lp-login-auth-sub">Enter your work email — if an account exists we'll send a reset code.</p>
+            </div>
+            {error && (
+              <div className="lp-login-alert lp-login-alert--warn" role="alert">
+                <DtIcon name="alert" size={18} />
+                <div><strong>Couldn't send the code</strong><p>{error}</p></div>
+              </div>
+            )}
+            <form className="lp-login-form" onSubmit={request} noValidate>
+              <div className={`lp-field ${emailError ? "is-error" : ""}`}>
+                <label className="lp-label" htmlFor="forgot-email">Work email</label>
+                <input
+                  id="forgot-email" className="lp-input" type="email" inputMode="email"
+                  value={email} onChange={(e) => setEmail(e.target.value)}
+                  autoComplete="username" placeholder="you@company.com"
+                  aria-invalid={Boolean(emailError)}
+                  aria-describedby={emailError ? "forgot-email-error" : undefined}
+                />
+                {emailError && <small id="forgot-email-error" className="lp-field-error">{emailError}</small>}
+              </div>
+              <TurnstileWidget siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
+              <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit" disabled={busy}>
+                {busy ? "Sending…" : "Email me a reset code"}
+                {!busy && <DtIcon name="arrow-right" size={16} />}
+              </button>
+            </form>
+            <p className="lp-login-legal">
+              Remembered it? <button type="button" onClick={onSignIn}>Back to sign in</button>
+            </p>
+          </>
+        )}
+        {step === "reset" && (
+          <>
+            <div className="lp-login-auth-head">
+              <p className="lp-login-auth-kicker">Check your inbox</p>
+              <h2>Enter reset code</h2>
+              <p className="lp-login-auth-sub">If <strong>{email.trim()}</strong> has an account, a 6-digit code is on its way.</p>
+            </div>
+            {error && (
+              <div className="lp-login-alert lp-login-alert--warn" role="alert">
+                <DtIcon name="alert" size={18} />
+                <div><strong>Couldn't reset the password</strong><p>{error}</p></div>
+              </div>
+            )}
+            <form className="lp-login-form" onSubmit={reset} noValidate>
+              <div className={`lp-field ${codeError ? "is-error" : ""}`}>
+                <label className="lp-label" htmlFor="reset-code">Reset code</label>
+                <input
+                  id="reset-code" className="lp-input" inputMode="numeric" autoComplete="one-time-code"
+                  maxLength={6} value={code}
+                  onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
+                  placeholder="000000"
+                  aria-invalid={Boolean(codeError)}
+                  aria-describedby={codeError ? "reset-code-error" : undefined}
+                />
+                {codeError && <small id="reset-code-error" className="lp-field-error">{codeError}</small>}
+              </div>
+              <div className={`lp-field ${passwordError ? "is-error" : ""}`}>
+                <label className="lp-label" htmlFor="reset-password">New password</label>
+                <div className="lp-input-password">
+                  <input
+                    id="reset-password" className="lp-input"
+                    type={showPassword ? "text" : "password"}
+                    value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
+                    autoComplete="new-password" placeholder="At least 12 characters"
+                    aria-invalid={Boolean(passwordError)}
+                    aria-describedby={passwordError ? "reset-password-error" : undefined}
+                  />
+                  <button
+                    type="button"
+                    className="lp-input-password-toggle"
+                    onClick={() => setShowPassword((v) => !v)}
+                    aria-label={showPassword ? "Hide password" : "Show password"}
+                  >
+                    <DtIcon name={showPassword ? "lock" : "scan"} size={15} />
+                  </button>
+                </div>
+                {passwordError && <small id="reset-password-error" className="lp-field-error">{passwordError}</small>}
+              </div>
+              <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit" disabled={busy}>
+                {busy ? "Updating…" : "Set new password"}
+                {!busy && <DtIcon name="arrow-right" size={16} />}
+              </button>
+            </form>
+            {challenge.id && <ResendRow challengeId={challenge.id} initialCooldown={challenge.resendAfterSec} />}
+          </>
+        )}
+        {step === "done" && (
           <div className="lp-login-auth-head">
-            <p className="lp-login-auth-kicker">Account recovery</p>
-            <h2>Forgot password</h2>
-            <p className="lp-login-auth-sub">Enter your work email — if an account exists we'll send a reset code.</p>
-          </div>
-          {error && (
-            <div className="lp-login-alert lp-login-alert--warn" role="alert">
-              <DtIcon name="alert" size={18} />
-              <div><strong>Recovery</strong><p>{error}</p></div>
-            </div>
-          )}
-          <form className="lp-login-form" onSubmit={request} noValidate>
-            <div className="lp-field">
-              <label className="lp-label" htmlFor="forgot-email">Work email</label>
-              <input
-                id="forgot-email" className="lp-input" type="email" inputMode="email"
-                value={email} onChange={(e) => setEmail(e.target.value)}
-                autoComplete="username" placeholder="you@company.com"
-              />
-            </div>
-            <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block" disabled={busy}>
-              {busy ? "Sending…" : "Email me a reset code"}
+            <p className="lp-login-auth-kicker">All set</p>
+            <h2>Password updated</h2>
+            <p className="lp-login-auth-sub">Your old sessions were signed out. Sign in with the new password.</p>
+            <button type="button" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block lp-login-submit lp-login-cta-spaced" onClick={onSignIn}>
+              Sign in
+              <DtIcon name="arrow-right" size={16} />
             </button>
-          </form>
-          <p className="lp-login-legal">
-            Remembered it? <button type="button" onClick={onSignIn}>Back to sign in</button>
-          </p>
-        </>
-      )}
-      {step === "reset" && (
-        <>
-          <div className="lp-login-auth-head">
-            <p className="lp-login-auth-kicker">Check your inbox</p>
-            <h2>Enter reset code</h2>
-            <p className="lp-login-auth-sub">If <strong>{email.trim()}</strong> has an account, a 6-digit code is on its way.</p>
           </div>
-          {error && (
-            <div className="lp-login-alert lp-login-alert--warn" role="alert">
-              <DtIcon name="alert" size={18} />
-              <div><strong>Reset</strong><p>{error}</p></div>
-            </div>
-          )}
-          <form className="lp-login-form" onSubmit={reset} noValidate>
-            <div className="lp-field">
-              <label className="lp-label" htmlFor="reset-code">Reset code</label>
-              <input
-                id="reset-code" className="lp-input" inputMode="numeric" autoComplete="one-time-code"
-                maxLength={6} value={code}
-                onChange={(e) => setCode(e.target.value.replace(/\D/g, "").slice(0, 6))}
-                placeholder="000000"
-              />
-            </div>
-            <div className="lp-field">
-              <label className="lp-label" htmlFor="reset-password">New password</label>
-              <input
-                id="reset-password" className="lp-input" type="password"
-                value={newPassword} onChange={(e) => setNewPassword(e.target.value)}
-                autoComplete="new-password" placeholder="At least 12 characters"
-              />
-            </div>
-            <button type="submit" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block" disabled={busy}>
-              {busy ? "Updating…" : "Set new password"}
-            </button>
-          </form>
-        </>
-      )}
-      {step === "done" && (
-        <div className="lp-login-auth-head">
-          <p className="lp-login-auth-kicker">All set</p>
-          <h2>Password updated</h2>
-          <p className="lp-login-auth-sub">Your old sessions were signed out. Sign in with the new password.</p>
-          <button type="button" className="lp-btn lp-btn--brand lp-btn--lg lp-btn--block" onClick={onSignIn} style={{ marginTop: 16 }}>
-            Sign in
-          </button>
-        </div>
-      )}
+        )}
+      </div>
     </AuthShell>
   );
 }
