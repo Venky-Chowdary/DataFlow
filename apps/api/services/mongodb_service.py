@@ -533,21 +533,6 @@ class MongoDBService:
         result = collection.insert_one(job_data)
         return str(result.inserted_id)
 
-def _failure_message_to_headline(status: str, fields: dict) -> None:
-    """A failed job's message names the failure, not the last progress text.
-
-    Callers historically updated status+error but left ``message`` at the
-    progress copy ("Validating mapping and schema…"), so failed-at-Validate
-    jobs displayed "Validating…" while ``error`` held the reason (C23).
-    ``cancelled``/``completed_with_quarantine`` keep their own messages —
-    D102 writes a committed-row report there.
-    """
-    if str(status or "").lower() not in {"failed", "error"}:
-        return
-    if "message" not in fields and fields.get("error"):
-        fields["message"] = str(fields["error"])[:500]
-
-
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         """Update transfer job status.
 
@@ -1295,6 +1280,20 @@ def _failure_message_to_headline(status: str, fields: dict) -> None:
             out.append(doc)
         return out
 
+
+def _failure_message_to_headline(status: str, fields: dict) -> None:
+    """A failed job's message names the failure, not the last progress text.
+
+    Callers historically updated status+error but left ``message`` at the
+    progress copy ("Validating mapping and schema…"), so failed-at-Validate
+    jobs displayed "Validating…" while ``error`` held the reason (C23).
+    ``cancelled``/``completed_with_quarantine`` keep their own messages —
+    D102 writes a committed-row report there.
+    """
+    if str(status or "").lower() not in {"failed", "error"}:
+        return
+    if "message" not in fields and fields.get("error"):
+        fields["message"] = str(fields["error"])[:500]
 
 def _created_sort_stamp(value: Any) -> str:
     """One comparable stamp. Memory jobs mix datetime and ISO strings."""
