@@ -291,17 +291,12 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
                 {passwordError && <small className="lp-field-error">{passwordError}</small>}
               </div>
 
-              <div className="lp-login-row">
-                <label className="lp-login-remember">
-                  <input type="checkbox" checked={remember} onChange={(e) => setRemember(e.target.checked)} />
-                  <span>Keep me signed in on this device</span>
-                </label>
-                {signupEnabled && onForgotPassword && (
-                  <AuthButton variant="link" className="lp-login-forgot" onClick={onForgotPassword}>
-                    Forgot password?
-                  </AuthButton>
-                )}
-              </div>
+              <LoginAuxRows
+                remember={remember}
+                onRemember={setRemember}
+                showForgot={Boolean(signupEnabled && onForgotPassword)}
+                onForgot={onForgotPassword}
+              />
 
               <AuthButton
                 type="submit" size="lg" block
@@ -411,5 +406,41 @@ export function UnverifiedAlert({
         </p>
       </div>
     </div>
+  );
+}
+
+/**
+ * The forgot-password link and the remember-me checkbox each get their own
+ * line: the link sits right-aligned directly under the password field, the
+ * checkbox follows below — they never share a row (the checkbox copy would
+ * wrap to two lines).
+ */
+export function LoginAuxRows({
+  remember,
+  onRemember,
+  showForgot,
+  onForgot,
+}: {
+  remember: boolean;
+  onRemember: (v: boolean) => void;
+  showForgot: boolean;
+  onForgot?: () => void;
+}) {
+  return (
+    <>
+      {showForgot && onForgot && (
+        <div className="lp-login-forgot-row">
+          <AuthButton variant="link" className="lp-login-forgot" onClick={onForgot}>
+            Forgot password?
+          </AuthButton>
+        </div>
+      )}
+      <div className="lp-login-row">
+        <label className="lp-login-remember">
+          <input type="checkbox" checked={remember} onChange={(e) => onRemember(e.target.checked)} />
+          <span>Keep me signed in on this device</span>
+        </label>
+      </div>
+    </>
   );
 }

@@ -8853,16 +8853,12 @@
   outline-offset: 2px;
 }
 
-@media (max-width: 560px) {
-  .lp-login--gate .lp-login-row {
-    flex-wrap: wrap;
-  }
-
-  .lp-login--gate .lp-login-forgot {
-    flex-basis: 100%;
-    text-align: left;
-    padding-left: 0;
-  }
+/* "Forgot password?" sits on its own line right under the password field,
+   right-aligned; the remember checkbox keeps a line of its own below. */
+.lp-login--gate .lp-login-forgot-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -4px;
 }
 
 /* Inline actions inside alerts (e.g. "Enter verification code"). */

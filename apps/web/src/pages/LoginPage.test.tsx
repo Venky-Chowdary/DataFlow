@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { describe, it } from "node:test";
-import { UnverifiedAlert } from "./LoginPage.js";
+import { LoginAuxRows, UnverifiedAlert } from "./LoginPage.js";
 
 /**
  * Back-fill for a3bb18e1: the email_unverified alert action must be the
@@ -34,5 +34,32 @@ describe("UnverifiedAlert", () => {
       }),
     );
     assert.doesNotMatch(markup, /Enter verification code/);
+  });
+});
+
+/**
+ * Review-8 item 6: "Forgot password?" sits right-aligned on its own line
+ * under the password field; the remember checkbox is the line below —
+ * sharing one row wrapped the checkbox copy to two lines.
+ */
+describe("LoginAuxRows", () => {
+  it("puts the forgot link on its own row above the checkbox row", () => {
+    const markup = renderToStaticMarkup(
+      createElement(LoginAuxRows, {
+        remember: true,
+        onRemember: () => {},
+        showForgot: true,
+        onForgot: () => {},
+      }),
+    );
+    assert.match(markup, /lp-login-forgot-row/);
+    assert.match(markup, /Forgot password\?/);
+    // the link must NOT share the checkbox's row
+    const forgotRow = markup.indexOf("lp-login-forgot-row");
+    const checkRow = markup.indexOf("lp-login-remember");
+    assert.ok(forgotRow > -1 && checkRow > -1);
+    assert.ok(forgotRow < checkRow, "forgot link must render before the checkbox row");
+    const rowHtml = markup.slice(markup.indexOf('class="lp-login-row"'));
+    assert.doesNotMatch(rowHtml, /Forgot password\?/);
   });
 });
