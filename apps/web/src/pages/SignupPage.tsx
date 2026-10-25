@@ -62,8 +62,11 @@ function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (toke
     const render = () => {
       const turnstile = (window as unknown as { turnstile?: { render: (el: HTMLElement, opts: Record<string, unknown>) => void } }).turnstile;
       if (hostRef.current && turnstile) {
+        const appTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
         turnstile.render(hostRef.current, {
           sitekey: siteKey,
+          theme: appTheme,
+          size: "flexible",
           callback: (token: string) => tokenRef.current(token),
           "expired-callback": () => tokenRef.current(""),
         });
