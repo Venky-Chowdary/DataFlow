@@ -780,6 +780,9 @@ async def retry_transfer_job(
             operator_requested=True,
             has_key_contract=_has_key,
             has_cursor_contract=_has_cursor,
+            destination_engine=str(
+                getattr(getattr(xfer_req, "destination", None), "format", "") or ""
+            ),
         )
         if not retry_decision["allowed"] and not force:
             emit_event(

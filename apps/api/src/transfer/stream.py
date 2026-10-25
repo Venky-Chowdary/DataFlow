@@ -650,6 +650,24 @@ def _stream_database_transfer_impl(
         cursor_pk_source = incremental_tiebreak_column(
             src_read_type, cursor_source_col, pk_source_cols
         )
+    if not pk_target_cols:
+        from services.copy_kafka_common import kafka_family_name
+        if kafka_family_name(dest_type) == "kafka":
+            # A Kafka key is partitioning/compaction identity, not a merge
+            # constraint — any declared identity (primary_key, upsert_key,
+            # dedupe_key, merge_key) is the right produce key (D88).
+            from types import SimpleNamespace
+            from services.sync_cursor import declared_identity_columns
+            pk_source_cols = declared_identity_columns(
+                SimpleNamespace(
+                    stream_contracts=stream_contracts or [],
+                    read_options={},
+                    source_filter=source_filter or {},
+                )
+            )
+            pk_target_cols = [
+                map_source_to_target(c, mappings) for c in pk_source_cols
+            ]
     if requires_upsert(effective_sync) and not pk_target_cols:
         # No contract key, but the destination table may declare one. That is
         # catalog evidence, not a guess, so an upsert keyed on it resolves rows
@@ -935,7 +953,8 @@ def _stream_database_transfer_impl(
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
     resume_key_resolved = False
-    if resuming and write_mode == "insert":
+    from services.copy_kafka_common import kafka_family_name as _kafka_family
+    if resuming and write_mode == "insert" and _kafka_family(dest_type) != "kafka":
         resume_key_resolved = True
         if not pk_target_cols:
             # No stream contract, but the destination itself may enforce a key.

@@ -1487,3 +1487,49 @@ def map_source_to_target(column: str, mappings: list[dict[str, Any]]) -> str:
         if str(m.get("source") or "") == column:
             return str(m.get("target") or column)
     return column
+
+
+#: Field names operators use to declare a row identity. ``primary_key`` feeds
+#: the stream contract; the rest are recognized aliases the contract parser
+#: does not read — destinations like Kafka that want a *declared* identity
+#: (produce key) rather than a merge constraint can accept any of them.
+_DECLARED_KEY_FIELDS: tuple[str, ...] = (
+    "primary_key",
+    "primary_keys",
+    "upsert_key",
+    "dedupe_key",
+    "merge_key",
+)
+
+
+def declared_identity_columns(request: Any) -> list[str]:
+    """Source columns the operator declared as row identity, in order.
+
+    Reads ``stream_contracts`` entries first, then ``read_options`` and
+    ``source_filter``. Returns the first non-empty declaration found.
+    Unlike the stream contract's primary_key this is not a write contract —
+    callers use it only where a declared identity is wanted (e.g. the Kafka
+    message key), never to authorize upsert/merge semantics.
+    """
+    holders: list[Any] = list(getattr(request, "stream_contracts", None) or [])
+    holders.append(getattr(request, "read_options", None) or {})
+    holders.append(getattr(request, "source_filter", None) or {})
+    for holder in holders:
+        if not isinstance(holder, dict):
+            continue
+        cols: list[str] = []
+        for name in _DECLARED_KEY_FIELDS:
+            val = holder.get(name)
+            if isinstance(val, (list, tuple)):
+                pieces = val
+            elif val:
+                pieces = str(val).replace(";", ",").split(",")
+            else:
+                continue
+            for piece in pieces:
+                s = str(piece).strip()
+                if s and s not in cols:
+                    cols.append(s)
+            if cols:
+                return cols
+    return []

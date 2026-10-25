@@ -512,6 +512,47 @@ def run_transfer_policy_gates(
             }
         )
 
+    # Kafka-family destinations are append-only topics. Any sync mode that
+    # promises destination-side semantics — overwrite replace, deduped/upsert
+    # merge, mirror delete, scd2 versioning, reverse_etl — would silently run
+    # as a plain produce, publishing duplicates that cannot be rolled back.
+    # Refuse at Validate instead of failing mid-run (C26/D90).
+    from services.copy_kafka_common import kafka_family_name
+    if kafka_family_name(dest) == "kafka":
+        kafka_append_modes = {"full_refresh_append", "incremental_append"}
+        if sync in kafka_append_modes:
+            gates.append(
+                {
+                    "id": "g_kafka_append_only",
+                    "status": GateStatus.PASS.value,
+                    "message": (
+                        "Kafka destination: append produce — published messages "
+                        "are final and cannot be rolled back"
+                    ),
+                    "duration_ms": 0,
+                    "details": {"dest_type": dest, "sync_mode": sync},
+                }
+            )
+        else:
+            gates.append(
+                {
+                    "id": "g_kafka_append_only",
+                    "status": GateStatus.BLOCK.value,
+                    "message": (
+                        f"Kafka destination supports append only — sync_mode "
+                        f"'{sync}' cannot replace, dedupe or merge a topic. "
+                        "Choose Append or Incremental append; published "
+                        "messages are final and cannot be rolled back."
+                    ),
+                    "duration_ms": 0,
+                    "details": {
+                        "dest_type": dest,
+                        "sync_mode": sync,
+                        "allowed_modes": sorted(kafka_append_modes),
+                    },
+                }
+            )
+
     from services.cdc_exactly_once import (
         preflight_delivery_gate, route_declares_log_position, route_has_cdc_pk)
 

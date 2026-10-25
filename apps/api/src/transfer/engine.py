@@ -2424,6 +2424,15 @@ class UniversalTransferEngine:
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
+            if not conflict_columns and dest_driver == "kafka":
+                # Kafka's key is partitioning/compaction identity, not a merge
+                # constraint — any declared identity is the right produce key
+                # (D88: keyed messages went out key=None).
+                from services.sync_cursor import declared_identity_columns
+                conflict_columns = [
+                    map_source_to_target(c, mappings)
+                    for c in declared_identity_columns(request)
+                ]
             if requires_upsert(effective_sync):
                 if not conflict_columns:
                     # The destination's own declared key is catalog evidence, not
@@ -2861,23 +2870,37 @@ class UniversalTransferEngine:
                                     "note": "checkpoint ahead of or equal to source size",
                                 },
                             )
-                        if write_mode == "insert" and not conflict_columns:
+                        if dest_driver == "kafka" and write_mode == "insert":
+                            # No merge exists on a topic — resume is a
+                            # positional skip of the produced prefix, then
+                            # append the remainder (at-least-once).
+                            records = records[skip_n:]
+                            dest_summary_resume_note = (
+                                f"Resume after {skip_n:,} produced row(s) — "
+                                "publishing the remainder (Kafka append)."
+                            )
+                        elif write_mode == "insert" and not conflict_columns:
                             raise ValueError(
                                 "Cannot safely resume a buffered insert without primary key; "
                                 "use upsert sync mode or restart with full_refresh_overwrite"
                             )
-                        # Force upsert so re-applying prior rows is idempotent.
-                        if conflict_columns:
+                        elif conflict_columns:
+                            # Force upsert so re-applying prior rows is idempotent.
                             write_mode = "upsert"
-                        # Keep full population — no positional slice.
+                            dest_summary_resume_note = (
+                                f"Idempotent resume after {skip_n:,} prior row(s) — "
+                                "re-applying full population via upsert (key-addressed)."
+                            )
+                        else:
+                            dest_summary_resume_note = (
+                                f"Resume after {skip_n:,} prior row(s)."
+                            )
+                        # Keep full population — no positional slice (Kafka's
+                        # positional skip already applied above).
                         # Engine record spill owns the population; do not
                         # duplicate the dict list for resume.
                         resume_full_records = []
                         resume_skipped_rows = 0
-                        dest_summary_resume_note = (
-                            f"Idempotent resume after {skip_n:,} prior row(s) — "
-                            "re-applying full population via upsert (key-addressed)."
-                        )
                         total_rows = len(records)
                         mongo.update_job_status(
                             job_id,

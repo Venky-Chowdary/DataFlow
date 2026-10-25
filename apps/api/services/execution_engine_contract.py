@@ -153,6 +153,7 @@ def decide_retry_from_start(
     operator_requested: bool = False,
     has_key_contract: bool = False,
     has_cursor_contract: bool = False,
+    destination_engine: str | None = None,
 ) -> dict[str, Any]:
     """Decide whether re-running a finished attempt from zero is safe.
 
@@ -187,6 +188,43 @@ def decide_retry_from_start(
             "allowed": True,
             "delivery": DEFAULT_DELIVERY_SEMANTICS,
             "reason": "Zero committed rows — restarting from zero cannot duplicate.",
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    # C26/D90: a Kafka topic cannot be rolled back — published messages are
+    # final, and a declared key only helps log compaction (lazy, per-topic),
+    # it does not make a second produce pass converge. The only honest retry
+    # is a cursor-continuing incremental read or Resume from the checkpoint.
+    from services.copy_kafka_common import kafka_family_name
+    if kafka_family_name(destination_engine or "") == "kafka":
+        if has_cursor_contract and _is_incremental_mode(sync_mode):
+            return {
+                "kind": ResumeKind.FROM_CURSOR.value,
+                "allowed": True,
+                "delivery": DEFAULT_DELIVERY_SEMANTICS,
+                "reason": (
+                    f"sync_mode={sync_mode} carries a cursor contract — the new "
+                    "attempt reads only rows after the persisted watermark, so "
+                    "already-published messages are not produced again. Note: "
+                    "messages already on the topic are final and cannot be "
+                    "rolled back."
+                ),
+                "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+            }
+        committed = (
+            f"{int(rows_committed or 0)} row(s)"
+            if rows_committed_known
+            else "an unknown number of rows"
+        )
+        return {
+            "kind": ResumeKind.REFUSED.value,
+            "allowed": False,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                f"This attempt already published {committed} to a Kafka topic, "
+                "which cannot be rolled back or merged — retrying from start "
+                "would produce a second copy downstream. Resume from the last "
+                "committed checkpoint instead."
+            ),
             "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         }
     # C20/D5: the gate must check the contract, not the mode family. A declared

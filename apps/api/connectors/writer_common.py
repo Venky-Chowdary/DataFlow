@@ -627,6 +627,29 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         if coerced is not value:
             return coerced
         return value
+    if ctype in {
+        "integer",
+        "int",
+        "bigint",
+        "smallint",
+        "tinyint",
+        "decimal",
+        "numeric",
+        "float",
+        "double",
+        "real",
+        "number",
+    } and isinstance(value, (int, float, Decimal)) and not isinstance(
+        value, bool
+    ):
+        # Native numeric cell (e.g. a source driver that already decoded the
+        # value): demote Decimal to float only when binary64 is exact, so the
+        # JSON wire emits a number; inexact values stay Decimal and serialize
+        # as exact text via ``_decimal_to_json`` (C26/D88 — Kafka and the
+        # object-store writers share this path).
+        from services.value_serializer import _demote_exactly_representable
+
+        return _demote_exactly_representable(value)
     if isinstance(value, str):
         text = value.strip()
         if not text:

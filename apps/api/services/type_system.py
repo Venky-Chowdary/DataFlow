@@ -569,6 +569,26 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "object",
         LOGICAL_BINARY: "binary",
     },
+    # Kafka is a JSON wire, not a DDL engine — carriers are the logical
+    # spellings ``to_json_value`` binds natively: numbers stay numbers,
+    # booleans stay booleans, decimals keep exact precision (JSON number when
+    # exactly representable, declared string otherwise), datetimes go out
+    # ISO-8601. Stamping TEXT here stringified every cell (D88).
+    "kafka": {
+        LOGICAL_STRING: "string",
+        LOGICAL_TEXT: "string",
+        LOGICAL_INTEGER: "integer",
+        LOGICAL_DECIMAL: "decimal",
+        LOGICAL_FLOAT: "float",
+        LOGICAL_BOOLEAN: "boolean",
+        LOGICAL_DATE: "date",
+        LOGICAL_DATETIME: "datetime",
+        LOGICAL_TIME: "time",
+        LOGICAL_UUID: "string",
+        LOGICAL_JSON: "json",
+        LOGICAL_ARRAY: "array",
+        LOGICAL_BINARY: "string",
+    },
     # Engines reached via generic_sql — keep DDL honest for preflight.
     "duckdb": {
         LOGICAL_STRING: "VARCHAR",
@@ -798,6 +818,7 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "databricks": "STRING",
     "iceberg": "string",
     "redis": "string",
+    "kafka": "string",
     "dynamodb": "S",
     "elasticsearch": "text",
     "duckdb": "VARCHAR",
@@ -3073,6 +3094,7 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     # Keep lakehouse NTZ spellings aligned with DDL_TYPES[LOGICAL_DATETIME].
     # Databricks TIMESTAMP is session-TZ aware; NTZ sources must stamp TIMESTAMP_NTZ.
     "databricks": "TIMESTAMP_NTZ",
+    "kafka": "datetime",
     "clickhouse": "DateTime64(3)",
     "trino": "timestamp(3)",
     "presto": "timestamp",
@@ -3199,6 +3221,7 @@ _TZ_LTZ_DDL: Final[dict[str, str]] = {
     "clickhouse": "DateTime64(6, 'UTC')",
     "trino": "timestamp(6) with time zone",
     "iceberg": "timestamptz",
+    "kafka": "timestamptz",
 }
 _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "snowflake": "TIMESTAMP_TZ",
@@ -3218,6 +3241,7 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "clickhouse": "DateTime64(6, 'UTC')",
     "trino": "timestamp(6) with time zone",
     "iceberg": "timestamptz",
+    "kafka": "timestamptz",
 }
 
 
