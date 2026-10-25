@@ -4339,6 +4339,7 @@ def fingerprint_for_reconcile(
     ddl_type: str = "",
     engine: str = "",
     transform: str | None = None,
+    source_locale: str = "",
 ) -> str:
     """Canonical Gate-8 fingerprint: transform → destination bind → normalize_cell.
 
@@ -4364,9 +4365,21 @@ def fingerprint_for_reconcile(
         if value is None:
             converted, err = None, None
         else:
-            converted, err = apply_transform(
-                cell if cell is not None else "", transform or "none"
+            # The writer ran this transform under the run's number locale,
+            # and a raw source cell ('1,234' text from a DB driver) must be
+            # fingerprinted the same way — ``source_locale`` carries it.
+            # A canonical cell (file-reader output: '1.234') must NOT be
+            # re-interpreted — its caller leaves source_locale unset and WIRE
+            # reads the canonical form as itself.
+            locale_token = set_active_number_locale(
+                source_locale or NUMBER_LOCALE_WIRE
             )
+            try:
+                converted, err = apply_transform(
+                    cell if cell is not None else "", transform or "none"
+                )
+            finally:
+                reset_active_number_locale(locale_token)
         if err:
             # Quarantine / coerce_null write path stores SQL NULL for failed cells.
             # Fingerprint must match that — not the raw bad wire — or Gate-8
@@ -4389,7 +4402,10 @@ def fingerprint_for_reconcile(
         # WIRE reads that canonical form as itself — ``20.500`` out of
         # ``NUMERIC(12,3)`` is 20.5, not a refusal that left one side of the
         # compare unquantized and reported a faithful row as corruption.
-        token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+        # A *source* cell is the same shape: raw driver values get the run
+        # locale the writer bound under; canonical (reader-parsed) cells get
+        # WIRE so '1.234' stays '1.234' — ``source_locale or`` picks per caller.
+        token = set_active_number_locale(source_locale or NUMBER_LOCALE_WIRE)
         try:
             try:
                 wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
@@ -4849,6 +4865,7 @@ def build_reconciliation_proof(
     primary_key: str | None = None,
     sample_size: int = 50,
     dest_db_type: str = "",
+    source_locale: str = "",
     dest_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic proof object for row-level transfer verification.
@@ -4929,6 +4946,7 @@ def build_reconciliation_proof(
             sort_key=None,
             dest_db_type=dest_db_type,
             dest_types=dest_types,
+            source_locale=source_locale,
         )
         sample_compare = {
             **sample_compare,
@@ -4962,6 +4980,7 @@ def build_reconciliation_proof(
         sort_key=key_col,
         dest_db_type=dest_db_type,
         dest_types=dest_types,
+        source_locale=source_locale,
     )
 
     matched_key_count = len(matched_keys)
@@ -5044,6 +5063,7 @@ def sample_compare_rows(
     rows_are_paired: bool = False,
     duplicate_policy: str = "",
     inserted_keys: set[str] | list[str] | None = None,
+    source_locale: str = "",
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
@@ -5140,7 +5160,9 @@ def sample_compare_rows(
             ),
         }
 
-    def _fingerprint(raw: Any, *, transform: str | None, tgt_col: str) -> str:
+    def _fingerprint(
+        raw: Any, *, transform: str | None, tgt_col: str, source_locale: str = ""
+    ) -> str:
         ddl = (
             dest_types.get(tgt_col)
             or dest_types.get(tgt_col.lower())
@@ -5186,7 +5208,11 @@ def sample_compare_rows(
         if eng and ddl:
             try:
                 return fingerprint_for_reconcile(
-                    raw, ddl_type=ddl, engine=eng, transform=transform
+                    raw,
+                    ddl_type=ddl,
+                    engine=eng,
+                    transform=transform,
+                    source_locale=source_locale,
                 )
             except Exception:
                 pass
@@ -5547,11 +5573,17 @@ def sample_compare_rows(
                             converted = None
                             break
                 src_val = _fingerprint(
-                    converted, transform=None, tgt_col=tgt_col
+                    converted,
+                    transform=None,
+                    tgt_col=tgt_col,
+                    source_locale=source_locale,
                 )
             else:
                 src_val = _fingerprint(
-                    raw_src, transform=transform, tgt_col=tgt_col
+                    raw_src,
+                    transform=transform,
+                    tgt_col=tgt_col,
+                    source_locale=source_locale,
                 )
             # Destination already applied bind at write — fingerprint without
             # re-transform so read-back bools/JSON match source write-path form.

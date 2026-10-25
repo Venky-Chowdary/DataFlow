@@ -3231,4 +3231,8 @@ def stream_file_to_database(
     # NULL-landed (codec unquoted-empty + carrier bind on non-text '').
     dest_summary.update(dest_summary_extra_cells)
     dest_summary["empty_string_as_null_cells"] = int(empty_cell_nulls[0])
+    # reconcile_sample holds the reader's parse output — already canonical
+    # (EU "1,234" read as "1.234"). Gate-8 fingerprints it under WIRE; the
+    # run's number_locale must NOT be stamped here or the canonical cells
+    # would be re-interpreted ("1.234" → 1234 under EU).
     return written, ddl_log, dest_summary, columns

@@ -3557,6 +3557,7 @@ def _name_row_on_checksum_only_failure(
             dest_db_type=db_type,
             dest_types=ctx.get("dest_types"),
             duplicate_policy=str(ctx.get("duplicate_policy") or ""),
+            source_locale=str(ctx.get("source_locale") or ""),
         )
     except Exception as exc:  # noqa: BLE001 — naming never changes the verdict
         _logger.warning("Gate-8 full keyed compare unavailable: %s", exc)
@@ -6763,12 +6764,14 @@ def _run_reconciliation_impl(
                 dest_types=dest_types,
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
                 inserted_keys=dest_summary.get("inserted_keys"),
+                source_locale=str(dest_summary.get("number_locale") or ""),
             )
             full_compare_ctx.update(
                 db_type=db_type, cfg=cfg, schema=schema, table_name=table_name,
                 target_cols=target_cols, sort_key=sort_key, mappings=mapping_dicts,
                 dest_types=dest_types, records=sample_records,
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
+                source_locale=str(dest_summary.get("number_locale") or ""),
                 source_endpoint=source_endpoint,
             )
 
@@ -7339,6 +7342,7 @@ def _file_export_cell_readback(
         sort_key=pk[0] if len(pk) == 1 else None,
         dest_db_type=str(fmt or ""),
         dest_types=_dest_types_from_mappings(mapping_dicts),
+        source_locale=str(summary.get("number_locale") or ""),
     )
 
 def run_reconciliation(

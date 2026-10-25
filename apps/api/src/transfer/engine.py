@@ -4496,6 +4496,12 @@ class UniversalTransferEngine:
                     dest_summary.setdefault("sync_mode", effective_sync)
                     dest_summary.setdefault("job_id", job_id)
                     dest_summary.setdefault("streaming", True)
+                    # The locale the run bound number text under — Gate-8's
+                    # source-side fingerprint interprets source cells under
+                    # the same locale (EU "1,234" → 1.234), never WIRE.
+                    dest_summary.setdefault(
+                        "number_locale", _run_number_locale(request)
+                    )
                     # Stamped before reconciliation: the ladder and the ledger
                     # read the recipe identity and the rows it removed off this
                     # summary, so a shaped run balances instead of reporting a
