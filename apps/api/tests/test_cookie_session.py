@@ -123,6 +123,22 @@ def test_mutating_request_with_csrf_passes():
     assert resp.status_code == 401
 
 
+def test_csrf_compare_is_exact_not_prefix():
+    c = _client()
+    _signup_and_verify(c)
+    jti = c.cookies["__Host-dw_session"]
+    csrf = c.cookies["dw_csrf"]
+    # tokens that share a prefix, differ in length, or are empty must all 403 —
+    # a naive startswith/substring compare would pass the prefix case
+    for bad in (csrf[:-1], csrf + "x", csrf[: len(csrf) // 2], "", " "):
+        resp = c.delete(f"/api/v1/auth/sessions/{jti}",
+                        headers={"x-csrf-token": bad})
+        assert resp.status_code == 403, bad
+    # GET is exempt from the double-submit check even with a bad header
+    resp = c.get("/api/v1/auth/sessions", headers={"x-csrf-token": "bogus"})
+    assert resp.status_code == 200
+
+
 def test_public_post_unaffected_by_stale_cookie():
     c = _client()
     _signup_and_verify(c)

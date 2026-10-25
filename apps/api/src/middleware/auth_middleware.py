@@ -4,6 +4,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+import hmac
+
 from services.platform_config import docs_enabled
 from services.tenant_bind import principal_allowed_for_tenant
 
@@ -206,7 +208,8 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     """Cookie-auth attach + CSRF double-submit for mutating methods."""
     if request.method not in ("GET", "HEAD", "OPTIONS"):
         supplied = request.headers.get("x-csrf-token", "")
-        if not supplied or supplied != (doc.get("csrf") or ""):
+        expected = doc.get("csrf") or ""
+        if not supplied or not expected or not hmac.compare_digest(supplied, expected):
             return "csrf_failed"
     from services.user_store import get_user as get_stored_user
 
