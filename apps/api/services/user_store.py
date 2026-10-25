@@ -72,6 +72,10 @@ class IndexUnavailableError(UserStoreError):
     """The canonical-claim index could not be ensured — fail closed."""
 
 
+class SameAddressError(UserStoreError):
+    """The new address canonicalizes to the account's own current one."""
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -158,19 +162,27 @@ def _insert_one(doc: dict[str, Any]) -> None:
 
     Checking "does this email exist?" before writing would let two concurrent
     admins both pass the check and the second write clobber the first account's
-    password. The unique ``_id`` (and the file lock) decide instead.
+    password. The unique ``_id`` (and the file lock) decide instead — and the
+    canonical claim is held by the unique index (Mongo, ensured here so a
+    fresh database can't run two variant-canonical creates without it) or by
+    the same-claim check inside the file lock.
     """
-    db = mongo_database()
+    db = _canonical_indexed_db()
     if db is not None:
         try:
             db[COLLECTION].insert_one({"_id": doc["email"], **doc})
         except DuplicateKeyError as e:
-            raise UserStoreError(f"{doc['email']} already has an account") from e
+            raise EmailTakenError(f"{doc['email']} already has an account") from e
         return
+    canonical = doc.get("canonical_email")
     with json_doc_transaction(_store_path(), _EMPTY_FILE) as data:
         users = [u for u in data.get("users", []) if isinstance(u, dict)]
-        if any(normalize_email(u.get("email", "")) == doc["email"] for u in users):
-            raise UserStoreError(f"{doc['email']} already has an account")
+        if any(normalize_email(u.get("email", "")) == doc["email"]
+               or (canonical
+                   and (u.get("canonical_email")
+                        or canonical_email(u.get("email", ""))) == canonical)
+               for u in users):
+            raise EmailTakenError(f"{doc['email']} already has an account")
         data["users"] = [*users, doc]
 
 
@@ -414,6 +426,11 @@ def change_email(*, email: str, new_email: str,
         raise UserStoreError(f"{normalized} has no account")
     if _read_one(new_normalized) is not None:
         raise UserStoreError(f"{new_normalized} already has an account")
+    if canonical == doc.get("canonical_email"):
+        # A same-canonical "change" (case-only, or a variant folding to the
+        # account's own key) has nothing to claim — refuse it up front.
+        raise SameAddressError(
+            f"{new_normalized} canonicalizes to the current address")
     doc["email"] = new_normalized
     doc["canonical_email"] = canonical
     doc["updated_at"] = _now()
@@ -552,14 +569,18 @@ def backfill_signup_fields() -> int:
     _CANONICAL_DUPLICATES.clear()
     for doc in _read_all():
         changed = False
+        if not doc.get("email"):
+            # No address => nothing meaningful to stamp or dedupe on.
+            continue
         if not doc.get("canonical_email"):
             doc["canonical_email"] = canonical_email(doc.get("email") or "")
             changed = True
         claimer = doc.get("canonical_email")
-        if claimer and seen.get(claimer, doc.get("email")) != doc.get("email"):
-            if claimer not in _CANONICAL_DUPLICATES:
-                _CANONICAL_DUPLICATES.append(claimer)
-        seen[claimer] = doc.get("email") or ""
+        if claimer:
+            if seen.get(claimer, doc.get("email")) != doc.get("email"):
+                if claimer not in _CANONICAL_DUPLICATES:
+                    _CANONICAL_DUPLICATES.append(claimer)
+            seen[claimer] = doc.get("email") or ""
         if not doc.get("email_verified_at"):
             doc["email_verified_at"] = doc.get("created_at") or _now()
             changed = True

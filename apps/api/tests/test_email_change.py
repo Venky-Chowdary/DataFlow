@@ -110,7 +110,7 @@ def test_request_refuses_taken_address():
     c = _client()
     _verified_user(c)
     _verified_user(c, email="bob@example.com")
-    resp = _request_change(c, "bob@example.com")
+    resp = _request_change(c, "ada@example.com")
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "email_taken"
 
@@ -430,3 +430,159 @@ def test_backfill_reports_duplicate_canonicals(tmp_path, monkeypatch):
     by_email = {r["email"]: r for r in rows}
     assert by_email["ada@gmail.com"]["canonical_email"] == "ada@gmail.com"
     assert by_email["a.da@gmail.com"]["canonical_email"] == "ada@gmail.com"
+
+
+# ---------------------------------------------------------------------------
+# Review-5 regression tests: rekey self-heal on session resolution, index
+# ensure at create, same-address guard, empty-canonical backfill skip.
+# ---------------------------------------------------------------------------
+
+
+def test_pending_rekey_heals_on_next_authenticated_request():
+    """Force the follow-on rekey to fail at confirm; the flag persists; the
+    next cookie-authenticated request completes the move and clears it."""
+    c = _client()
+    _verified_user(c)
+    resp = _request_change(c, "ada2@example.com")
+    cid = resp.json()["challenge_id"]
+    code = re.search(r"\b(\d{6})\b",
+                     ConsoleEmailSender.OUTBOX[-1].text).group(1)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("membership store unavailable")
+
+    real = team_store.rekey_memberships
+    signup_service.team_store.rekey_memberships = _boom
+    try:
+        ok = c.post("/api/v1/auth/email/change/confirm",
+                    json={"challenge_id": cid, "code": code},
+                    headers={"x-csrf-token": c.cookies["dw_csrf"]})
+    finally:
+        signup_service.team_store.rekey_memberships = real
+    assert ok.status_code == 200
+    assert user_store.rekey_pending("ada2@example.com") == "ada@example.com"
+    assert team_store._read_memberships(email="ada@example.com")
+
+    # Sessions were revoked at rekey; sign in again with the new address and
+    # any authenticated request heals the flag.
+    session = auth_state.get_auth_state().create_session(
+        user_id="ada2@example.com", device_id="d2", ip="", ua="",
+        csrf_token="tok")
+    # Fresh client: the old jar still carries the revoked __Host-dw_session.
+    c2 = _client()
+    c2.cookies.set("__Host-dw_session", session["jti"])
+    c2.cookies.set("dw_csrf", "tok")
+    c2.post("/api/v1/auth/email/change",
+            json={"new_email": "irrelevant@example.com"},
+            headers={"x-csrf-token": "tok"})  # any authed request heals it
+    assert user_store.rekey_pending("ada2@example.com") is None
+    assert team_store._read_memberships(email="ada@example.com") == []
+    assert team_store._read_memberships(email="ada2@example.com")
+
+
+def test_rekey_flag_write_failure_surfaces():
+    """If mark_rekey_pending itself fails, the account stays half-moved AND
+    the failure is surfaced (logged at ERROR + security event), not dropped."""
+    c = _client()
+    _verified_user(c)
+    resp = _request_change(c, "ada2@example.com")
+    cid = resp.json()["challenge_id"]
+    code = re.search(r"\b(\d{6})\b",
+                     ConsoleEmailSender.OUTBOX[-1].text).group(1)
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("down")
+
+    real_rekey = team_store.rekey_memberships
+    real_mark = user_store.mark_rekey_pending
+    signup_service.team_store.rekey_memberships = _boom
+    signup_service.user_store.mark_rekey_pending = _boom
+    try:
+        ok = c.post("/api/v1/auth/email/change/confirm",
+                    json={"challenge_id": cid, "code": code},
+                    headers={"x-csrf-token": c.cookies["dw_csrf"]})
+    finally:
+        signup_service.team_store.rekey_memberships = real_rekey
+        signup_service.user_store.mark_rekey_pending = real_mark
+    assert ok.status_code == 200  # the move itself committed; flag write failed
+    moved = user_store.get_user("ada2@example.com")
+    assert moved is not None  # account rekeyed, healing is by other means
+
+
+def test_concurrent_create_canonical_variants_exactly_one_account(tmp_path, monkeypatch):
+    """On a fresh store, two racing variant-canonical creates produce one
+    account — the file lock (or the Mongo unique index) decides."""
+    import threading
+
+    monkeypatch.setattr(user_store, "_store_path",
+                        lambda: tmp_path / "users.json")
+    from services.email_canonical import canonical_email
+
+    variants = ["ada@gmail.com", "a.da@gmail.com"]
+    assert canonical_email(variants[0]) == canonical_email(variants[1])
+    errors: list[Exception] = []
+
+    def make(addr: str) -> None:
+        try:
+            user_store.create_signup_user(
+                email=addr, name="Ada", password_hash="argon-hash",
+                password_algo="argon2id",
+                canonical=canonical_email(addr))
+        except Exception as exc:  # noqa: BLE001 - collected for assertion
+            errors.append(exc)
+
+    threads = [threading.Thread(target=make, args=(v,)) for v in variants]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(errors) == 1
+    assert isinstance(errors[0], user_store.EmailTakenError)
+    all_users = user_store._read_all()
+    assert len(all_users) == 1
+
+
+def test_create_fails_closed_when_index_unavailable(monkeypatch):
+    coll = _FakeColl()
+    _mongo_mode(monkeypatch, coll)
+    coll.fail_index = True
+    with pytest.raises(user_store.IndexUnavailableError):
+        user_store.create_signup_user(
+            email="ada@example.com", name="Ada", password_hash="h",
+            password_algo="argon2id", canonical="ada@example.com")
+
+
+def test_same_canonical_change_rejected_as_same_address():
+    c = _client()
+    _verified_user(c, email="ada@gmail.com")
+    # dot-variant folds to the account's own canonical → same_address, not email_taken
+    resp = _request_change(c, "a.da@gmail.com")
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "same_address"
+
+
+def test_store_same_address_raises_typed_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(user_store, "_store_path",
+                        lambda: tmp_path / "users.json")
+    user_store.create_user(email="ada+old@gmail.com", password="x" * 12)
+    doc = user_store._read_one("ada+old@gmail.com")
+    doc["canonical_email"] = "ada@gmail.com"  # backfill-style fold
+    user_store._write_one(doc)
+    with pytest.raises(user_store.SameAddressError):
+        user_store.change_email(email="ada+old@gmail.com",
+                                new_email="ada+new@gmail.com",
+                                canonical="ada@gmail.com")
+
+
+def test_backfill_skips_empty_canonical_keys(tmp_path, monkeypatch):
+    import json
+    users = tmp_path / "users.json"
+    users.write_text(json.dumps({"users": [
+        {"password_hash": "h1"},
+        {"password_hash": "h2"},
+    ]}))
+    monkeypatch.setattr(user_store, "_store_path", lambda: users)
+    monkeypatch.setattr(user_store, "_BACKFILLED", False)
+    monkeypatch.setattr(user_store, "_CANONICAL_DUPLICATES", [])
+    user_store.backfill_signup_fields()
+    assert user_store.canonical_email_duplicates() == []

@@ -388,7 +388,15 @@ def verify_email(
         signup_store.delete_pending_signup(pending_id=pending["id"])
         raise ApiError(409, "account_exists", "this email already has an account")
 
-    user, org, workspace = _provision_verified_user(pending)
+    try:
+        user, org, workspace = _provision_verified_user(pending)
+    except user_store.IndexUnavailableError as exc:
+        raise ApiError(503, "unavailable",
+                       "signup is temporarily unavailable") from exc
+    except user_store.EmailTakenError as exc:
+        signup_store.delete_pending_signup(pending_id=pending["id"])
+        raise ApiError(409, "account_exists",
+                       "this email already has an account") from exc
     signup_store.delete_pending_signup(pending_id=pending["id"])
 
     session = get_auth_state().create_session(
@@ -632,6 +640,9 @@ def request_email_change(*, user_email: str, new_email: str,
         raise ApiError(400, "blocked_address",
                        "that address can't be used for an account")
     canonical_new = canonical_email(normalized)
+    if canonical_new == canonical_email(user_email):
+        raise ApiError(400, "same_address",
+                       "that address is already yours")
     if user_store.find_by_canonical(canonical_new) is not None:
         raise ApiError(400, "email_taken",
                        "that address already belongs to an account")
@@ -685,6 +696,9 @@ def confirm_email_change(*, challenge_id: str, code: str,
         raise ApiError(403, "forbidden",
                        "this challenge belongs to a different account")
     canonical_new = canonical_email(new_email)
+    if canonical_new == canonical_email(old_email):
+        raise ApiError(400, "same_address",
+                       "that address is already yours")
     if user_store.find_by_canonical(canonical_new) is not None:
         raise ApiError(400, "email_taken",
                        "that address already belongs to an account")
@@ -696,6 +710,9 @@ def confirm_email_change(*, challenge_id: str, code: str,
         # loser lands here.
         raise ApiError(400, "email_taken",
                        "that address already belongs to an account") from exc
+    except user_store.SameAddressError as exc:
+        raise ApiError(400, "same_address",
+                       "that address is already yours") from exc
     except user_store.IndexUnavailableError as exc:
         raise ApiError(503, "unavailable",
                        "account rekey is temporarily unavailable") from exc
@@ -707,7 +724,16 @@ def confirm_email_change(*, challenge_id: str, code: str,
         org_store.rekey_creator(old_email, new_email)
     except Exception:
         logger.error("email-change follow-on rekey failed", exc_info=True)
-        user_store.mark_rekey_pending(email=new_email, old_email=old_email)
+        try:
+            user_store.mark_rekey_pending(email=new_email, old_email=old_email)
+        except Exception:
+            # The flag IS the retry path — if it can't be written the account
+            # stays half-moved with no way to heal, so surface loudly.
+            logger.error("email-change rekey flag write failed", exc_info=True)
+            record_security_event(
+                "email_change.rekey_flag_failed", outcome="failed",
+                actor=new_email, session_id=challenge_id,
+                details={"ip": ip})
     get_auth_state().revoke_all_for_user(old_email)
     try:
         _send("email_change_old_notice", old_email,
