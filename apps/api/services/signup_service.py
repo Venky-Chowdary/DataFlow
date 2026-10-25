@@ -603,11 +603,15 @@ def request_password_reset(*, email: str, ip: str = "",
     token, stored = password_reset_store.issue(
         email=account_email, ip=ip, ua=ua)
     base = (getenv_brand("APP_URL") or "https://www.datawrap.io").rstrip("/")
+    # The token rides the URL fragment, not the query string — it can never
+    # reach a server, CDN or proxy access log or a Referer header.
+    reset_url = f"{base}/reset-password#token={token}"
+
     def _deliver() -> None:
         try:
             _send("reset_link", account_email,
                   {"name": user.get("name") or "there",
-                   "reset_url": f"{base}/reset-password?token={token}",
+                   "reset_url": reset_url,
                    "expires_minutes": int(password_reset_store.TOKEN_TTL.total_seconds() // 60)},
                   idempotency_key=f"reset-link:{stored['id']}")
             record_security_event("password.reset.sent", outcome="succeeded",

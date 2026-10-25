@@ -94,7 +94,7 @@ def _forgot(c: TestClient, email: str = "ada@example.com"):
 
 
 def _link_token() -> str:
-    m = re.search(r"reset-password\?token=([A-Za-z0-9_\-]+)",
+    m = re.search(r"reset-password#token=([A-Za-z0-9_\-]+)",
                   ConsoleEmailSender.OUTBOX[-1].text)
     assert m, ConsoleEmailSender.OUTBOX[-1].text
     return m.group(1)
@@ -127,7 +127,7 @@ def test_link_goes_to_account_address_only_and_has_no_crlf():
     _forgot(c, "ada@example.com")
     mail = ConsoleEmailSender.OUTBOX[-1]
     assert mail.to == ["ada@example.com"] or mail.to == "ada@example.com"
-    assert "www.datawrap.io/reset-password?token=" in mail.text
+    assert "www.datawrap.io/reset-password#token=" in mail.text
     # injection-shaped input is refused before any mail work
     before = len(ConsoleEmailSender.OUTBOX)
     _forgot(c, "ada@example.com\r\nBCC: evil@example.com")
@@ -367,3 +367,15 @@ def test_missing_pepper_fails_closed_in_production(monkeypatch):
     from services import otp_service
     with pytest.raises(RuntimeError):
         otp_service.code_hmac("cid", "signup", "123456")
+
+
+def test_reset_link_uses_fragment_not_query():
+    """The token rides `#token=` — never `?token=` — so it cannot reach
+    server/CDN/proxy access logs or a Referer header."""
+    c = _client()
+    _verified_user(c)
+    _forgot(c)
+    mail = ConsoleEmailSender.OUTBOX[-1]
+    body = mail.text + (mail.html or "")
+    assert "reset-password?token=" not in body
+    assert "reset-password#token=" in body

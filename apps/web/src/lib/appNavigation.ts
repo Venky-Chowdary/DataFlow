@@ -89,6 +89,16 @@ export function isResetLinkRoute(pathname: string, hash: string): boolean {
 }
 
 /**
+ * The emailed link is `/reset-password#token=…` — the token rides the URL
+ * fragment so it can never reach a server/CDN/proxy access log or a Referer
+ * header. Returns "" for any other route.
+ */
+export function resetLinkToken(pathname: string, hash: string): string {
+  if (pathname !== "/reset-password") return "";
+  return new URLSearchParams(hash.replace(/^#/, "")).get("token") ?? "";
+}
+
+/**
  * Help hashes (`#/help`, `#/help/<slug>`, aliases) are public marketing when
  * signed out. Signed-in operators must stay in the workspace Help screen —
  * dumping them to MarketingSite was P2-5.

@@ -6,6 +6,7 @@ import { describe, it } from "node:test";
 import {
   focusFromHash,
   isResetLinkRoute,
+  resetLinkToken,
   isSignedInHelpHash,
   screenFromHash,
   signedInHelpArticleFromHash,
@@ -75,5 +76,17 @@ describe("isResetLinkRoute", () => {
     assert.equal(isResetLinkRoute("/", "#/dashboard"), false);
     assert.equal(isResetLinkRoute("/login", "#/login"), false);
     assert.equal(isResetLinkRoute("/reset-passwords", "#/reset-passwords"), false);
+  });
+});
+
+describe("resetLinkToken", () => {
+  it("reads the token from the URL fragment", () => {
+    assert.equal(resetLinkToken("/reset-password", "#token=abc.def-123"), "abc.def-123");
+  });
+  it("rejects query-string and non-reset routes", () => {
+    assert.equal(resetLinkToken("/reset-password", ""), "");
+    assert.equal(resetLinkToken("/reset-password", "#/other"), "");
+    assert.equal(resetLinkToken("/login", "#token=x"), "");
+    assert.equal(resetLinkToken("/reset-passwords", "#token=x"), "");
   });
 });

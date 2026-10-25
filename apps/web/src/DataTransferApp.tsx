@@ -31,7 +31,7 @@ import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, isResetLinkRoute, isSignedInHelpHash, readAppHash, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -1042,17 +1042,12 @@ export function DataTransferApp() {
 
 function DataTransferAppInner() {
   const [signupSeed, setSignupSeed] = useState<{ challengeId: string; email: string } | null>(null);
-  // Emailed reset links land on /reset-password?token=... — capture the
+  // Emailed reset links land on /reset-password#token=... — capture the
   // token once at boot; the page itself strips it from the URL.
-  const [resetToken] = useState<string>(() => {
-    if (isResetLinkRoute(window.location.pathname, "")) {
-      return new URLSearchParams(window.location.search).get("token") ?? "";
-    }
-    return "";
-  });
+  const [resetToken] = useState<string>(() =>
+    resetLinkToken(window.location.pathname, window.location.hash));
   const [stage, setStage] = useState<"landing" | "login" | "signup" | "forgot" | "reset-link" | "app">(() => {
-    if (isResetLinkRoute(window.location.pathname, "")
-        && new URLSearchParams(window.location.search).get("token")) {
+    if (resetToken) {
       return "reset-link";
     }
     if (readStoredUser()) return "app";
