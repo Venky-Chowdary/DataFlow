@@ -34,7 +34,10 @@ _PREPARED: set[str] = set()
 
 
 def _pepper() -> str:
-    return (getenv_brand("OTP_PEPPER") or "").strip() or "datawrap-dev-otp-pepper"
+    """Canonical OTP pepper — fails closed in production (otp_service owns it)."""
+    from services import otp_service
+
+    return otp_service._pepper()
 
 
 def _hash(token: str) -> str:

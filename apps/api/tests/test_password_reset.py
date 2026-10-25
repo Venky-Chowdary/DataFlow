@@ -350,3 +350,20 @@ def test_mailer_latency_never_blocks_the_request(monkeypatch):
     while not ConsoleEmailSender.OUTBOX and time.monotonic() < deadline:
         time.sleep(0.05)
     assert ConsoleEmailSender.OUTBOX
+
+
+def test_missing_pepper_fails_closed_in_production(monkeypatch):
+    """In production a missing OTP_PEPPER refuses to issue or verify — the
+    dev-pepper fallback must not fail open (reset store and OTP share it)."""
+    monkeypatch.delenv("DATAWRAP_OTP_PEPPER", raising=False)
+    monkeypatch.delenv("DATAFLOW_OTP_PEPPER", raising=False)
+    monkeypatch.setenv("DATAWRAP_ENV", "production")
+    from services import platform_config
+    assert platform_config.is_production()
+    errs = platform_config.validate_production_config()
+    assert any("OTP_PEPPER" in e for e in errs)
+    with pytest.raises(RuntimeError):
+        password_reset_store.issue(email="ada@example.com", ip="", ua="")
+    from services import otp_service
+    with pytest.raises(RuntimeError):
+        otp_service.code_hmac("cid", "signup", "123456")

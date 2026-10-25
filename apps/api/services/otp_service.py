@@ -37,10 +37,11 @@ def _pepper() -> str:
     pepper = (getenv_brand("OTP_PEPPER") or "").strip()
     if pepper:
         return pepper
-    # Dev/test fallback derived from the auth secret — production must set
-    # DATAWRAP_OTP_PEPPER (validate_production_config enforces).
+    # Fail closed: in production a missing pepper must refuse to issue or
+    # verify — logging and continuing with a derived key is an oracle.
     if is_production():
-        logger.error("DATAWRAP_OTP_PEPPER is unset in production")
+        raise RuntimeError(
+            "DATAWRAP_OTP_PEPPER is unset in production — refusing to issue or verify")
     return (getenv_brand("AUTH_SECRET") or _DEV_PEPPER).strip()
 
 

@@ -214,6 +214,11 @@ def validate_production_config() -> list[str]:
             "DATAWRAP_SECRETS_KEY (or DATAFLOW_SECRETS_KEY) must be set for "
             "Fernet encryption of connector credentials in production"
         )
+    if not (getenv_brand("OTP_PEPPER") or "").strip():
+        errors.append(
+            "DATAWRAP_OTP_PEPPER must be set in production — OTP codes and "
+            "password-reset tokens must not fall back to the dev pepper"
+        )
     try:
         import cryptography.fernet  # noqa: F401
     except Exception:
