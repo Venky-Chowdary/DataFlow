@@ -68,6 +68,7 @@ pytesseract>=0.3.10
 # Security
 cryptography>=42.0.0
 bcrypt>=4.1.0
+argon2-cffi>=23.1.0  # services.password_hash — argon2id signup/login hashing
 PyJWT>=2.8.0  # services.oidc_client — app import fails without it
 defusedxml>=0.7.1  # XXE-safe XML parse for coerce_xml_wire
 python3-saml>=1.16.0,<1.17.0

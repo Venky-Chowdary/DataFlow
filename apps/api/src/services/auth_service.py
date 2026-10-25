@@ -270,6 +270,27 @@ def verify_password(password: str, password_hash: str) -> bool:
     return _verify_password(password, password_hash)
 
 
+def _maybe_rehash(email: str, password: str, password_hash: str) -> None:
+    """Transparent bcrypt→argon2id upgrade on a successful login (P0-4).
+
+    Only runs while the signup flag is on; env-provisioned users aren't in
+    the store so ``update_password_hash`` is a silent no-op for them.
+    """
+    try:
+        from services.password_hash import needs_rehash
+        from services.user_store import update_password_hash
+
+        if needs_rehash(password_hash):
+            from services.password_hash import hash_password_argon2
+
+            update_password_hash(
+                email=email, password_hash=hash_password_argon2(password),
+                password_algo="argon2id",
+            )
+    except Exception:  # noqa: BLE001 — a failed upgrade must never break login
+        logger.warning("password rehash failed for a stored account")
+
+
 def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
     normalized = email.strip().lower()
     users = _load_users()
@@ -283,6 +304,7 @@ def authenticate(email: str, password: str) -> Optional[dict[str, str]]:
             # Stored accounts carry a last-seen stamp so an admin can tell a
             # dormant login from a live one; env-provisioned users are a no-op.
             record_login(user["email"])
+            _maybe_rehash(user["email"], password, user.get("password_hash", ""))
             return {
                 "email": user["email"],
                 "name": user.get("name", user["email"]),
