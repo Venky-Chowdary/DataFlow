@@ -25,10 +25,13 @@ def _client(monkeypatch: pytest.MonkeyPatch, *, enabled: bool, require_auth: boo
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "test-secret-for-unit-tests")
 
     from src.middleware.auth_middleware import AuthMiddleware
+    from src.routers.auth_router import router as auth_router
     from src.routers.signup_router import router as signup_router
 
     app = FastAPI()
     app.add_middleware(AuthMiddleware)
+    app.include_router(auth_router, prefix="/api/v1")
+    app.include_router(auth_router)
     app.include_router(signup_router, prefix="/api/v1")
     app.include_router(signup_router)
     return TestClient(app)
@@ -37,9 +40,10 @@ def _client(monkeypatch: pytest.MonkeyPatch, *, enabled: bool, require_auth: boo
 def test_signup_routes_404_when_flag_off_unauthenticated_prod(monkeypatch):
     """Production posture: auth required. Flag off -> defined routes 404."""
     client = _client(monkeypatch, enabled=False, require_auth=True)
-    # The one route this router defines today must 404, not 401/405.
-    assert client.get("/api/v1/auth/signup/config").status_code == 404
-    assert client.get("/auth/signup/config").status_code == 404
+    # Signup data routes must 404, not 401/405. The capability probe
+    # (signup/config) is the one route that answers flag-off by design.
+    assert client.post("/api/v1/auth/signup", json={}).status_code == 404
+    assert client.get("/auth/form-token").status_code == 404
     # Paths no router defines are 404 anyway — flag state is invisible.
     assert client.post("/api/v1/auth/signup", json={}).status_code == 404
     assert client.post("/api/v1/auth/verify-email", json={}).status_code == 404
@@ -48,7 +52,7 @@ def test_signup_routes_404_when_flag_off_unauthenticated_prod(monkeypatch):
 
 def test_signup_routes_404_when_flag_off_dev_mode(monkeypatch):
     client = _client(monkeypatch, enabled=False, require_auth=False)
-    assert client.get("/api/v1/auth/signup/config").status_code == 404
+    assert client.post("/api/v1/auth/verify-email", json={}).status_code == 404
     assert client.post("/api/v1/auth/signup", json={}).status_code == 404
 
 
@@ -60,8 +64,8 @@ def test_flag_off_get_vs_post_on_defined_route():
     surface, and matches how every other router behaves.
     """
     client = _client(pytest.MonkeyPatch(), enabled=False, require_auth=True)
-    assert client.get("/api/v1/auth/signup/config").status_code == 404
-    assert client.post("/api/v1/auth/signup/config", json={}).status_code == 405
+    assert client.get("/api/v1/auth/form-token").status_code == 404
+    assert client.post("/api/v1/auth/form-token", json={}).status_code == 405
 
 
 def test_signup_config_reachable_when_flag_on(monkeypatch):
@@ -78,3 +82,15 @@ def test_signup_config_root_alias_when_flag_on(monkeypatch):
     resp = client.get("/auth/signup/config")
     assert resp.status_code == 200
     assert resp.json()["enabled"] is True
+
+
+def test_signup_config_reachable_when_flag_off(monkeypatch):
+    """Capability probe must answer (enabled:false) with the flag off so
+    the login page can feature-detect without minting a form token."""
+    client = _client(monkeypatch, enabled=False, require_auth=True)
+    for path in ("/api/v1/auth/signup/config", "/auth/signup/config"):
+        resp = client.get(path)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["enabled"] is False
+        assert body["turnstile_site_key"] == ""

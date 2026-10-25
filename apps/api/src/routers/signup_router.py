@@ -12,7 +12,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from services.api_errors import ApiError
-from services.signup_config import signup_enabled, turnstile_site_key
+from services.signup_config import signup_enabled
 
 
 def _require_signup_enabled() -> None:
@@ -183,15 +183,6 @@ async def signup_metrics(request: Request) -> dict[str, Any]:
     """P5: admin-only metrics for the signup surface."""
     from services import signup_service
     return signup_service.signup_metrics()
-
-
-@router.get("/signup/config")
-async def signup_config():
-    """Public client config for the signup flow (no secrets)."""
-    return {
-        "enabled": True,
-        "turnstile_site_key": turnstile_site_key(),
-    }
 
 
 @router.post("/signup", status_code=202)

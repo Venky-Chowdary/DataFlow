@@ -316,6 +316,20 @@ async def sso_providers():
     return {"providers": list_sso_providers_public()}
 
 
+@router.get("/signup/config")
+async def signup_config():
+    """Read-only capability probe: answers even when the flag is off so
+    login/signup surfaces don't have to mint a form token just to learn
+    whether self-serve signup exists on this deployment."""
+    from services.signup_config import signup_enabled, turnstile_site_key
+
+    enabled = signup_enabled()
+    return {
+        "enabled": enabled,
+        "turnstile_site_key": turnstile_site_key() if enabled else "",
+    }
+
+
 @router.get("/sso/{sso_type}/start")
 async def sso_start(sso_type: str, request: Request):
     from services.integrations_store import get_sso_config_raw, validate_sso_config
