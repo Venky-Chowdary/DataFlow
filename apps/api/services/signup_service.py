@@ -627,16 +627,16 @@ def request_password_reset(*, email: str, ip: str = "",
             record_security_event("password.reset.sent", outcome="succeeded",
                                   actor=account_email, session_id=stored["id"],
                                   details={"ip": ip})
-        except (EmailSendError, EmailQuotaExceeded):
-            # Send failure must not change the response (enumeration); a
-            # fresh link can be requested right away.
-            logger.warning("password-reset link send failed")
-        except Exception:
-            # Any other failure is swallowed by the Future — log it and
-            # leave a security event so the dropped mail is auditable. The
-            # user can immediately re-request a fresh link (each new issue
-            # supersedes this token).
-            logger.error("password-reset link delivery failed", exc_info=True)
+        except Exception as exc:
+            # Every delivery failure must leave a security event — a
+            # provider timeout or transport error means the mail never
+            # went out, and silent loss is forbidden. The reply never
+            # reveals it (enumeration parity); a fresh link can be
+            # requested right away (each new issue supersedes this token).
+            if isinstance(exc, EmailSendError):
+                logger.warning("password-reset link send failed")
+            else:
+                logger.error("password-reset link delivery failed", exc_info=True)
             try:
                 record_security_event("password.reset.send_failed",
                                       outcome="failed", actor=account_email,

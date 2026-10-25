@@ -500,3 +500,51 @@ def test_forgot_floor_parks_coroutines_not_workers(monkeypatch):
                 f"{n} concurrent pads took {total:.2f}s — pads are not "
                 "concurrent coroutine sleeps")
     asyncio.run(run())
+
+
+def test_provider_timeout_is_bounded_and_send_failed_audited(monkeypatch):
+    """The serialized mail lane (max_workers=1) can head-of-line-block: a
+    stalled provider call must be bounded by a short timeout, the NEXT mail
+    must still go out, and the failure must audit password.reset.send_failed."""
+    import concurrent.futures
+    from services.email_sender import (
+        EmailProviderError, _RESEND_TIMEOUT_SEC)
+
+    # Provider calls are bounded well under any human-perceivable delay so one
+    # hung Resend socket can't stall every reset/OTP mail behind it.
+    assert _RESEND_TIMEOUT_SEC <= 10.0
+
+    events = []
+    monkeypatch.setattr(signup_service, "record_security_event",
+                        lambda event, **kw: events.append((event, kw)))
+    futures = []
+    lane = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setattr(
+        signup_service, "_deliver_later",
+        lambda fn: futures.append(lane.submit(fn)))
+
+    sends: list[str] = []
+
+    def stalled_then_ok(kind, to, ctx, *, idempotency_key):
+        if kind != "reset_link":
+            return None
+        sends.append(to)
+        if len(sends) == 1:
+            # Simulates urllib's timeout firing on a hung provider socket.
+            time.sleep(0.2)
+            raise EmailProviderError("resend timeout", retryable=True)
+
+    c = _client()
+    _verified_user(c, "one@example.com")
+    _verified_user(c, "two@example.com")
+    monkeypatch.setattr(signup_service, "_send", stalled_then_ok)
+    r1 = _forgot(c, "one@example.com")
+    r2 = _forgot(c, "two@example.com")
+    assert r1.status_code == 202 and r2.status_code == 202
+    concurrent.futures.wait(futures, timeout=10)
+    lane.shutdown()
+    # Serialized lane drained: the stalled send failed, the next mail went out.
+    assert sends == ["one@example.com", "two@example.com"]
+    kinds = [e for e, _ in events]
+    assert kinds.count("password.reset.send_failed") == 1, events
+    assert kinds.count("password.reset.sent") == 1, events
