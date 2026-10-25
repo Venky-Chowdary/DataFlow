@@ -21,6 +21,7 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAWRAP_SIGNUP_ENABLED", "1")
     monkeypatch.setenv("DATAWRAP_EMAIL_PROVIDER", "console")
     monkeypatch.setenv("DATAWRAP_OTP_PEPPER", "test-pepper")
+    monkeypatch.setenv("DATAWRAP_ENV", "test")
     monkeypatch.setattr(signup_store, "_pending_path", lambda: tmp_path / "pending.json")
     monkeypatch.setattr(signup_store, "_challenges_path", lambda: tmp_path / "challenges.json")
     monkeypatch.setattr(user_store, "_store_path", lambda: tmp_path / "users.json")
