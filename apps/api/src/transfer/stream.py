@@ -32,6 +32,7 @@ from connectors.writer_common import (  # noqa: E402
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
+from services.keyset_pagination import max_keyset_bookmark  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
@@ -2041,8 +2042,111 @@ def _stream_database_transfer_impl(
         ]
     keyset_tiebreak = next((c for c in keyset_order_cols if c != keyset_col), "")
     keyset_after = None if sdk_source else checkpoint.cursor_value
+    keyset_run_seed = False
     if keyset_after in (None, "") and incremental and keyset_col == cursor_source_col:
+        # D60/D98 — a run seeded from the watermark re-reads the whole tie
+        # group at the watermark (cursor >= watermark). Page edges advanced
+        # inside the run keep the exclusive seek — only this seed is inclusive.
         keyset_after = watermark
+        keyset_run_seed = True
+    _seed_inclusive = keyset_run_seed
+    # D60/D98 — unkeyed append runs re-read the cursor tie group; keyed
+    # appends dedupe it in the writer (ON CONFLICT / dedupe-by-key) and
+    # upserts overwrite it. For an append with no declared key the only
+    # honest dedupe is full-row content, which needs the destination's
+    # boundary rows once (lazily, on the first qualifying batch).
+    _boundary_fps_state: dict[str, Any] = {"fps": None}
+
+    def _dedupe_run_seed_boundary(batch):
+        if batch is None or not getattr(batch, "rows", None):
+            return batch
+        if not (
+            _seed_inclusive
+            and incremental
+            and not requires_upsert(effective_sync)
+            and not pk_target_cols
+            and keyset_col
+            and keyset_col in (batch.headers or [])
+            and watermark
+        ):
+            return batch
+        try:
+            from services.keyset_pagination import (
+                present_cursor_bookmark,
+                split_cursor_bookmark,
+            )
+            from services.target_sample import read_target_sample
+            from services.value_serializer import present_cell_text
+
+            bookmark = present_cursor_bookmark(watermark)
+            if bookmark is None:
+                return batch
+            cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+            cidx = batch.headers.index(keyset_col)
+            boundary_idx = [
+                i
+                for i, row in enumerate(batch.rows)
+                if cidx < len(row) and present_cell_text(row[cidx]) == str(cur_val)
+            ]
+            if not boundary_idx:
+                return batch
+            if _boundary_fps_state["fps"] is None:
+                _boundary_fps_state["fps"] = set()
+                cursor_dest_col = next(
+                    (
+                        m.get("target")
+                        for m in mappings
+                        if m.get("source") == cursor_source_col
+                    ),
+                    cursor_source_col,
+                )
+                dest_rows = read_target_sample(
+                    dest_bind_dialect or dest_type,
+                    dest_cfg,
+                    schema=str(dest_cfg.get("schema") or "public"),
+                    table_name=dest_table,
+                    columns=list(target_cols or []),
+                    limit=10_000,
+                    sort_key=str(cursor_dest_col or ""),
+                    key_values=[cur_val],
+                )
+                dest_tups = []
+                for dr in dest_rows or []:
+                    low = {str(k).lower(): v for k, v in dr.items()}
+                    dest_tups.append(
+                        tuple(low.get(str(c).lower()) for c in (target_cols or []))
+                    )
+                _boundary_fps_state["fps"] = {
+                    fp
+                    for _k, fp in row_fingerprints(
+                        dest_tups,
+                        list(target_cols or []),
+                        dest_db_type=dest_bind_dialect,
+                        dest_types=digest_dest_types,
+                    )
+                }
+            dest_fps = _boundary_fps_state["fps"]
+            if not dest_fps:
+                return batch
+            return _boundary_append_dedupe(
+                batch,
+                boundary_idx,
+                dest_fps,
+                mappings=mappings,
+                target_cols=list(target_cols or []),
+                column_types=column_types,
+                stream_error_policy=stream_error_policy,
+                digest_dest_types=digest_dest_types,
+                dest_bind_dialect=dest_bind_dialect,
+                keyset_order_cols=keyset_order_cols,
+                keyset_col=keyset_col,
+                keyset_tiebreak=keyset_tiebreak,
+                watermark_value=str(cur_val),
+            )
+        except Exception as exc:  # fail open — dedupe must never lose a row
+            logger.warning("Boundary dedupe skipped (fail-open): %s", exc)
+            return batch
+
     decision = decide_keyset_pagination(
         src_type=src_read_type,
         keyset_order_cols=keyset_order_cols,
@@ -2251,7 +2355,7 @@ def _stream_database_transfer_impl(
         return result
 
     def _fetch_source_batch(last_batch):
-        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, kafka_cursor, qdrant_offset
+        nonlocal ddb_cursor, es_search_after, redis_scan_state, keyset_after, kafka_cursor, qdrant_offset, keyset_run_seed
         if bulk_export_iter is not None:
             try:
                 return next(bulk_export_iter)
@@ -2444,6 +2548,8 @@ def _stream_database_transfer_impl(
                             keyset_tiebreak or None,
                         )
                 keyset_after = advanced or keyset_after
+                if advanced:
+                    keyset_run_seed = False
             _key_cols = keyset_order_cols or (
                 [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
             )
@@ -2458,6 +2564,7 @@ def _stream_database_transfer_impl(
                     database=src_db,
                     cursor_column=keyset_col or (_key_cols[0] if _key_cols else ""),
                     cursor_after=keyset_after,
+                    cursor_inclusive=keyset_run_seed,
                     cursor_type=column_types.get(
                         keyset_col or (_key_cols[0] if _key_cols else ""), "VARCHAR"
                     ),
@@ -2472,7 +2579,7 @@ def _stream_database_transfer_impl(
                 es_search_after = extra
             elif src_type == "redis":
                 redis_scan_state = extra
-            return batch
+            return _dedupe_run_seed_boundary(batch)
         elif src_type == "elasticsearch":
             batch, es_search_after = _unwrap_read(
                 _read_batch(
@@ -4926,6 +5033,91 @@ class _StepRawLedger:
         else:
             out["entries"] = self._d
         return out
+
+
+def _boundary_append_dedupe(
+    batch: Any,
+    boundary_idx: list[int],
+    dest_fps: set,
+    *,
+    mappings: list[dict],
+    target_cols: list[str],
+    column_types: dict | None,
+    stream_error_policy: str | None,
+    digest_dest_types: dict | None,
+    dest_bind_dialect: str,
+    keyset_order_cols: list[str] | None,
+    keyset_col: str,
+    keyset_tiebreak: str,
+    watermark_value: str,
+) -> Any:
+    """Drop re-read boundary rows already present in the destination.
+
+    D60/D98 — the inclusive run seed (``cursor >= watermark``) re-reads the
+    whole tie group. Upsert overwrites the re-read rows by key and keyed
+    append dedupes by key in the writer; an unkeyed append must dedupe by
+    full-row content or every rerun duplicates the boundary population.
+
+    Fail-open by construction: a quarantine mapping that changes row count, a
+    fingerprint that does not match, or any missing fingerprint keeps the row —
+    a duplicate is recoverable, a silently dropped row is not.
+    """
+    brows = [batch.rows[i] for i in boundary_idx]
+    mapped, _rejected = map_rows_for_fingerprint(
+        headers=list(batch.headers or []),
+        data_rows=brows,
+        mappings=mappings,
+        target_cols=target_cols,
+        column_types=column_types,
+        error_policy=stream_error_policy,
+        dest_types=digest_dest_types,
+        dest_kind=dest_bind_dialect,
+    )
+    if len(mapped) != len(brows):
+        return batch
+    fps = [
+        fp
+        for _k, fp in row_fingerprints(
+            mapped,
+            target_cols,
+            dest_db_type=dest_bind_dialect,
+            dest_types=digest_dest_types,
+        )
+    ]
+    drop = {boundary_idx[i] for i, fp in enumerate(fps) if fp in dest_fps}
+    if not drop:
+        return batch
+    kept = [r for i, r in enumerate(batch.rows) if i not in drop]
+    logger.info(
+        "Boundary re-read dedupe dropped %d already-present row(s) at "
+        "watermark %r (unkeyed append).",
+        len(drop),
+        watermark_value,
+    )
+    # Deduped rows were still read: the rebuilt page must carry the original
+    # edge so the keyset seek advances past them instead of stopping early on
+    # a page that survived smaller (or empty).
+    raw_keyset = _raw_page_keyset(batch)
+    if not raw_keyset:
+        edge_cols = keyset_order_cols or (
+            [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
+        )
+        raw_keyset = (
+            max_keyset_bookmark(batch.rows, list(batch.headers or []), edge_cols)
+            or ""
+        )
+    return batch.__class__(
+        headers=list(batch.headers or []),
+        rows=kept,
+        offset=getattr(batch, "offset", 0),
+        total_rows=getattr(batch, "total_rows", None),
+        meta=getattr(batch, "meta", None),
+        raw_page_rows=_raw_page_rows(batch) or len(batch.rows),
+        raw_page_cursor=_raw_page_cursor(batch),
+        raw_page_keyset=raw_keyset,
+        raw_page_filtered=getattr(batch, "raw_page_filtered", 0),
+        raw_page_cursor_bounded=getattr(batch, "raw_page_cursor_bounded", 0),
+    )
 
 
 def _kafka_accumulate_offsets(

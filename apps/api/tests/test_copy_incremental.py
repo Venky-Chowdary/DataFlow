@@ -58,9 +58,10 @@ def test_pg_cursor_predicate_matches_reader_lexicographic():
         watermark="2024-06-01 00:00:00\x1f42",
         pk_column="id",
     )
-    assert '("updated_at", "id") >' in sql
-    assert "'2024-06-01 00:00:00'" in sql
-    assert "'42'" in sql
+    # D60/D98: the run seed re-reads the whole tie group (>=) instead of
+    # resuming by key order inside the tie; the pk position is dropped.
+    assert sql == '"updated_at" >= \'2024-06-01 00:00:00\''
+    assert "'42'" not in sql
     empty = pg_cursor_predicate_sql(
         _Cur(), cursor_column="updated_at", watermark=None, pk_column="id"
     )
@@ -68,7 +69,7 @@ def test_pg_cursor_predicate_matches_reader_lexicographic():
     single = pg_cursor_predicate_sql(
         _Cur(), cursor_column="id", watermark="100", pk_column="id"
     )
-    assert single.startswith('"id" >')
+    assert single.startswith('"id" >=')
     assert "," not in single.split(">")[0]
 
 
@@ -90,9 +91,9 @@ def test_mysql_cursor_predicate_matches_reader_lexicographic():
         watermark="2024-06-01 00:00:00\x1f42",
         pk_column="id",
     )
-    assert "(`updated_at`, `id`) >" in sql
-    assert "'2024-06-01 00:00:00'" in sql
-    assert "'42'" in sql
+    # D60/D98: run-seed >= re-read of the tie group; pk position dropped.
+    assert sql == "`updated_at` >= '2024-06-01 00:00:00'"
+    assert "'42'" not in sql
     empty = mysql_cursor_predicate_sql(
         _Cur(), cursor_column="updated_at", watermark=None, pk_column="id"
     )
@@ -100,7 +101,7 @@ def test_mysql_cursor_predicate_matches_reader_lexicographic():
     single = mysql_cursor_predicate_sql(
         _Cur(), cursor_column="id", watermark="100", pk_column="id"
     )
-    assert single.startswith("`id` >")
+    assert single.startswith("`id` >=")
     assert "," not in single.split(">")[0]
 
 
@@ -110,11 +111,11 @@ def test_sqlite_cursor_predicate_matches_lexicographic():
         watermark="2024-06-01 00:00:00\x1f42",
         pk_column="id",
     )
-    # A date-time watermark compares on the separator-normalized cell (MX3-04).
-    assert sql.startswith('((CASE WHEN "updated_at" GLOB')
-    assert ', "id") >' in sql
-    assert "'2024-06-01 00:00:00'" in sql
-    assert "'42'" in sql
+    # A date-time watermark compares on the separator-normalized cell (MX3-04);
+    # D60/D98: run-seed >= re-read of the tie group; pk position dropped.
+    assert sql.startswith('(CASE WHEN "updated_at" GLOB')
+    assert ") >= '2024-06-01 00:00:00'" in sql
+    assert "'42'" not in sql
     empty = sqlite_cursor_predicate_sql(
         cursor_column="updated_at", watermark=None, pk_column="id"
     )
@@ -122,7 +123,7 @@ def test_sqlite_cursor_predicate_matches_lexicographic():
     single = sqlite_cursor_predicate_sql(
         cursor_column="id", watermark="100", pk_column="id"
     )
-    assert single.startswith('"id" >')
+    assert single.startswith('"id" >=')
     assert "," not in single.split(">")[0]
 
 
@@ -1195,7 +1196,9 @@ def test_sqlite_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-sqlite-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        # D60/D98: run seed is cursor >= watermark, so the boundary row at t2
+        # is re-read and upserted alongside the changed and new rows.
+        assert second == 3, (second, ddl2, summary2)
         assert summary2.get("copy_fast_path") == "used"
         dest = sqlite3.connect(dst_path)
         try:
@@ -1222,8 +1225,10 @@ def test_sqlite_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-sqlite-c-{suffix}",
         )
-        assert third == 0
-        assert summary3.get("source_row_count") == 0
+        # D60/D98: the two rows at the t3 watermark are re-read and upserted
+        # again; dest data is unchanged (still 4).
+        assert third == 2
+        assert summary3.get("source_row_count") == 2
         assert get_watermark(cursor_key) == stored
         dest = sqlite3.connect(dst_path)
         try:
@@ -3789,7 +3794,9 @@ def test_sqlite_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_field="version",
             cursor_type="INTEGER",
         )
-        assert second == 2, (second, ddl2, summary2)
+        # D60/D98: version-9 boundary row is re-read and upserted with the
+        # two v10 rows.
+        assert second == 3, (second, ddl2, summary2)
         dest = sqlite3.connect(dst_path)
         try:
             dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
@@ -3815,7 +3822,8 @@ def test_sqlite_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_field="version",
             cursor_type="INTEGER",
         )
-        assert third == 0
+        # D60/D98: the two v10 boundary rows are re-read and upserted again.
+        assert third == 2
         dest = sqlite3.connect(dst_path)
         try:
             assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4

@@ -282,7 +282,7 @@ def read_table_scan_batch(
         filter_q = quote_sql_identifier(
             require_safe_identifier(filter_column, preserve_case=True), "`"
         )
-        where_sql = f" WHERE {filter_q} > %s"
+        where_sql = f" WHERE {filter_q} >= %s"
         params = (filter_value,)
     if not scan_state.get("started"):
         table_ref = quote_table_ref(table, dialect="mysql")
@@ -381,6 +381,7 @@ def read_table_cursor_batch(
     columns: list[str] | None = None,
     limit: int = 500,
     cursor_primary_key: str | None = None,
+    cursor_inclusive: bool = False,
     conn: Any | None = None,
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — for incremental sync.
@@ -434,7 +435,22 @@ def read_table_cursor_batch(
             )
             bookmark = present_cursor_bookmark(cursor_after)
             if bookmark is not None:
-                if pk_q:
+                if cursor_inclusive:
+                    # D60/D98 — run-seed watermark: re-read the whole tie group
+                    # (cursor >= watermark); page edges still seek with > below.
+                    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+                    if pk_q:
+                        query = (
+                            f"{base} WHERE {cursor_q} >= %s "
+                            f"ORDER BY {cursor_q}, {pk_q} LIMIT %s"
+                        )
+                    else:
+                        query = (
+                            f"{base} WHERE {cursor_q} >= %s "
+                            f"ORDER BY {cursor_q} LIMIT %s"
+                        )
+                    cur.execute(query, (cur_val, limit))
+                elif pk_q:
                     cur_val, pk_val = split_cursor_bookmark(
                         bookmark, has_tiebreak=True
                     )

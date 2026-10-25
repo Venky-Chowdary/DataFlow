@@ -3296,7 +3296,7 @@ def _count_table_raw(
         from connectors.sql_identifiers import require_safe_identifier
 
         col = quote_sql_identifier(require_safe_identifier(filter_column, preserve_case=True), q)
-        where = f" WHERE {col} > :df_after"
+        where = f" WHERE {col} >= :df_after"
         params = {"df_after": filter_value}
     try:
         return conn.execute(
@@ -3573,8 +3573,9 @@ def read_table_scan_batch(
                             f"Cursor column '{filter_column}' not found in table {table}"
                         )
                     filter_col_obj = table_obj.c[_fname]
+                    # D60/D98: run seed re-reads the boundary tie group.
                     stmt = stmt.where(
-                        filter_col_obj > sa.cast(sa.literal(filter_value), filter_col_obj.type)
+                        filter_col_obj >= sa.cast(sa.literal(filter_value), filter_col_obj.type)
                     )
                     order_cols = [filter_col_obj] + [
                         c for c in order_cols if c is not filter_col_obj
@@ -3693,6 +3694,7 @@ def read_table_cursor_batch(
     limit: int = 20_000,
     cursor_primary_key: str | None = None,
     cursor_key_columns: list[str] | None = None,
+    cursor_inclusive: bool = False,
     **extra: Any,
 ) -> ReadBatch:
     """Cursor/keyset pagination for incremental and streaming transfers.
@@ -3775,7 +3777,18 @@ def read_table_cursor_batch(
             key_cols = [table_obj.c[n] for n in key_names]
             stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
             bookmark = present_cursor_bookmark(cursor_after)
-            if bookmark is not None:
+            if bookmark is not None and cursor_inclusive:
+                # D60/D98 — run-seed watermark: re-read the whole tie group
+                # (cursor >= watermark); key order inside a tie must never
+                # decide what is skipped. Page edges still use the keyset
+                # > clause below.
+                from services.keyset_pagination import split_cursor_bookmark
+
+                cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+                stmt = stmt.where(
+                    key_cols[0] >= sa.cast(sa.literal(cur_val), key_cols[0].type)
+                )
+            elif bookmark is not None:
                 seek_cols = key_cols
                 if (
                     not cursor_key_columns

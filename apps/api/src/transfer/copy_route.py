@@ -2363,7 +2363,7 @@ def _try_copy_fast_path(
         if incremental_copy and mode == "incremental_deduped"
         else (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed)."
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed)."
             if incremental_copy
             else (
                 "Proof: staging COUNT(*) equals source snapshot; dest PK ⋈ staging "
@@ -2548,7 +2548,7 @@ def _try_pg_mysql_copy_fast_path(
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed)."
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed)."
         )
     elif merge_upsert:
         proof_line = (
@@ -3126,7 +3126,7 @@ def _try_pg_sqlite_copy_fast_path(
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed). DATE lands as TEXT."
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed). DATE lands as TEXT."
         )
     else:
         proof_line = (
@@ -4193,7 +4193,7 @@ def _try_sqlite_sqlite_copy_fast_path(
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed)."
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed)."
         )
     else:
         proof_line = (
@@ -4348,7 +4348,7 @@ def _try_sqlite_pg_copy_fast_path(
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed). Naive ISO DATETIME "
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed). Naive ISO DATETIME "
             "is COPY-safe; unix-epoch, tz-aware, and date-only cells decline."
         )
     else:
@@ -4696,7 +4696,7 @@ def _try_sqlite_mysql_copy_fast_path(
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed). Naive ISO DATETIME "
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed). Naive ISO DATETIME "
             "is COPY-safe; unix-epoch, tz-aware, and date-only cells decline."
         )
     else:
@@ -8344,7 +8344,7 @@ def _try_mysql_pg_copy_fast_path(
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed)."
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed)."
         )
     else:
         proof_line = "Proof: destination COUNT(*) equals source snapshot count."
@@ -8492,7 +8492,7 @@ def _try_mysql_mysql_copy_fast_path(
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed)."
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed)."
         )
     else:
         proof_line = "Proof: destination COUNT(*) equals source snapshot count."
@@ -9454,7 +9454,7 @@ def _try_mysql_sqlite_copy_fast_path(
     elif inc_mode == "incremental_append":
         proof_line = (
             "Proof: staging COUNT(*) equals filtered source snapshot; dest COUNT(*) "
-            "equals dest_before + staging (duplicate PK fails closed)."
+            "equals dest_before + inserted (watermark boundary rows deduped; non-boundary duplicate PK fails closed)."
         )
     else:
         proof_line = (

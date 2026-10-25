@@ -334,7 +334,7 @@ def read_table_scan_batch(
     schema, table = _bind(schema, table)
     filter_value = scan_filter_value(filter_column, filter_after)
     if filter_value is not None:
-        where_sql = sql.SQL(" WHERE {} > %s").format(sql.Identifier(filter_column))
+        where_sql = sql.SQL(" WHERE {} >= %s").format(sql.Identifier(filter_column))
         params: tuple[Any, ...] = (filter_value,)
     else:
         where_sql = sql.SQL("")
@@ -480,6 +480,7 @@ def read_table_cursor_batch(
     limit: int = 500,
     cursor_primary_key: str | None = None,
     conn: Any | None = None,
+    cursor_inclusive: bool = False,
 ) -> ReadBatch:
     """Read rows with cursor_column > watermark — for incremental sync.
 
@@ -531,7 +532,31 @@ def read_table_cursor_batch(
                 # Composite order: cursor then primary key when provided so tied
                 # watermarks do not skip peer rows (timestamp-cursor Airbyte trap).
                 pk = (cursor_primary_key or "").strip()
-                if pk and pk != cursor_column:
+                if cursor_inclusive:
+                    # D60/D98 — run-seed watermark: re-read the whole tie group
+                    # (cursor >= watermark). Key order inside a tie must never
+                    # decide what is skipped; page edges after this first seek
+                    # still use the composite > seek below.
+                    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+                    if pk and pk != cursor_column:
+                        query = sql.SQL(
+                            "{} WHERE {} >= %s ORDER BY {}, {} LIMIT %s"
+                        ).format(
+                            base,
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(pk),
+                        )
+                    else:
+                        query = sql.SQL(
+                            "{} WHERE {} >= %s ORDER BY {} LIMIT %s"
+                        ).format(
+                            base,
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(cursor_column),
+                        )
+                    cur.execute(query, (cur_val, limit))
+                elif pk and pk != cursor_column:
                     cur_val, pk_val = split_cursor_bookmark(
                         bookmark, has_tiebreak=True
                     )

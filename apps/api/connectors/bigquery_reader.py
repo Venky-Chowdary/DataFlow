@@ -149,6 +149,7 @@ def read_table_cursor_batch(
     warehouse: str = "",
     service_account: str = "",
     cursor_primary_key: str | None = None,
+    cursor_inclusive: bool = False,
 ) -> ReadBatch:
     """Keyset incremental read — never silently fall back to OFFSET under concurrent writes."""
     del username, password, ssl, warehouse
@@ -192,7 +193,19 @@ def read_table_cursor_batch(
         where = ""
         order = cursor_q
         bookmark = present_cursor_bookmark(cursor_after)
-        if bookmark is not None:
+        if bookmark is not None and cursor_inclusive:
+            # D60/D98 — run-seed watermark: re-read the whole tie group
+            # (cursor >= watermark); page edges still seek with > below.
+            cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+            params.append(bigquery.ScalarQueryParameter("cursor", "STRING", str(cur_val)))
+            where = f" WHERE {cursor_q} >= @cursor"
+            if pk and pk != cursor_column:
+                pk_q = quote_column_list(
+                    [require_safe_identifier(pk, preserve_case=True)],
+                    quote_char="`",
+                )
+                order = f"{cursor_q}, {pk_q}"
+        elif bookmark is not None:
             has_tiebreak = bool(pk and pk != cursor_column)
             cur_val, split_pk = split_cursor_bookmark(
                 bookmark, has_tiebreak=has_tiebreak
