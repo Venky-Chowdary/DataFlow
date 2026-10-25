@@ -5,6 +5,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   focusFromHash,
+  isResetLinkRoute,
   isSignedInHelpHash,
   screenFromHash,
   signedInHelpArticleFromHash,
@@ -57,5 +58,22 @@ describe("signed-in Help hashes stay in the workspace", () => {
     assert.equal(signedInHelpArticleFromHash("#/help"), "help");
     assert.equal(signedInHelpArticleFromHash("#/docs"), null);
     assert.equal(signedInHelpArticleFromHash("#/pilot"), null);
+  });
+});
+
+describe("isResetLinkRoute", () => {
+  it("claims the emailed path form at boot", () => {
+    assert.equal(isResetLinkRoute("/reset-password", ""), true);
+  });
+
+  it("claims the stripped-token hash form so the router leaves it alone", () => {
+    assert.equal(isResetLinkRoute("/", "#/reset-password"), true);
+  });
+
+  it("does not claim ordinary routes", () => {
+    assert.equal(isResetLinkRoute("/", ""), false);
+    assert.equal(isResetLinkRoute("/", "#/dashboard"), false);
+    assert.equal(isResetLinkRoute("/login", "#/login"), false);
+    assert.equal(isResetLinkRoute("/reset-passwords", "#/reset-passwords"), false);
   });
 });

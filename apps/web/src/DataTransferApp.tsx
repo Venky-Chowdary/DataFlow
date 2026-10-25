@@ -31,7 +31,7 @@ import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, isSignedInHelpHash, readAppHash, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, isResetLinkRoute, isSignedInHelpHash, readAppHash, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -1045,13 +1045,13 @@ function DataTransferAppInner() {
   // Emailed reset links land on /reset-password?token=... — capture the
   // token once at boot; the page itself strips it from the URL.
   const [resetToken] = useState<string>(() => {
-    if (window.location.pathname === "/reset-password") {
+    if (isResetLinkRoute(window.location.pathname, "")) {
       return new URLSearchParams(window.location.search).get("token") ?? "";
     }
     return "";
   });
   const [stage, setStage] = useState<"landing" | "login" | "signup" | "forgot" | "reset-link" | "app">(() => {
-    if (window.location.pathname === "/reset-password"
+    if (isResetLinkRoute(window.location.pathname, "")
         && new URLSearchParams(window.location.search).get("token")) {
       return "reset-link";
     }
@@ -1064,6 +1064,7 @@ function DataTransferAppInner() {
 
   useEffect(() => {
     const syncFromHash = () => {
+      if (isResetLinkRoute(window.location.pathname, window.location.hash)) return;
       const hash = window.location.hash;
       const session = readStoredUser();
       const screen = session

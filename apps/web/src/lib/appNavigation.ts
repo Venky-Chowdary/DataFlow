@@ -78,6 +78,17 @@ export function readAppHash(): Screen | null {
 }
 
 /**
+ * Emailed password-reset links land on `/reset-password?token=…`; after the
+ * page strips the token the route lives on as `#/reset-password`. Both forms
+ * belong to the reset-link stage — the generic hash router must not bounce
+ * them back to landing/app.
+ */
+export function isResetLinkRoute(pathname: string, hash: string): boolean {
+  return pathname === "/reset-password"
+    || hash.split("?")[0] === "#/reset-password";
+}
+
+/**
  * Help hashes (`#/help`, `#/help/<slug>`, aliases) are public marketing when
  * signed out. Signed-in operators must stay in the workspace Help screen —
  * dumping them to MarketingSite was P2-5.
