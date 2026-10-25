@@ -58,7 +58,8 @@ if docs_enabled():
 
 def _is_public_sso_path(path: str) -> bool:
     if path.startswith("/api/v1/auth/sso/") or path.startswith("/auth/sso/"):
-        return path.endswith("/start") or path.endswith("/callback") or path.endswith("/providers")
+        return (path.endswith("/start") or path.endswith("/callback")
+                or path.endswith("/providers") or path.endswith("/route"))
     return False
 
 

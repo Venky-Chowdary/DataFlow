@@ -149,6 +149,17 @@ async def onboarding(body: OnboardingRequest,
         ip=_client_ip(request))
 
 
+class SsoRouteRequest(BaseModel):
+    email: str = Field(min_length=3, max_length=320)
+
+
+@router.post("/sso/route")
+async def sso_route(body: SsoRouteRequest) -> dict[str, Any]:
+    """P4-6: which IdP (if any) claims this address's domain."""
+    from services.sso_routing import route_for_email
+    return route_for_email(body.email)
+
+
 @router.get("/signup/config")
 async def signup_config():
     """Public client config for the signup flow (no secrets)."""
