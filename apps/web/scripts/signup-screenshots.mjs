@@ -298,7 +298,9 @@ async function run(vpName, viewport, theme) {
     }));
   try {
     await page.locator('button[title="Settings"]').first().click();
-    await page.waitForTimeout(1800);
+    await page.waitForTimeout(1500);
+    await page.getByRole("tab", { name: /Security/ }).first().click();
+    await page.waitForTimeout(1200);
     const metrics = page.locator('[data-testid="signup-metrics-card"]');
     if (await metrics.count()) {
       await metrics.scrollIntoViewIfNeeded();
