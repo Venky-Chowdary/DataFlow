@@ -662,7 +662,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
   const privacy = [
     {
       h: "Who we are",
-      p: "Datawrap, Inc. (“Datawrap”, “we”, “us”) provides a governed data-movement platform. This policy explains how we handle personal data when you visit datawrap.com, create a workspace, or use Transfer Studio, pipelines, Pilot, or MCP. For source and destination datasets you connect, you are the controller; Datawrap is the processor.",
+      p: "Datawrap, Inc. (“Datawrap”, “we”, “us”) provides a governed data-movement platform. This policy explains how we handle personal data when you visit datawrap.io, create a workspace, or use Transfer Studio, pipelines, Pilot, or MCP. For source and destination datasets you connect, you are the controller; Datawrap is the processor.",
     },
     {
       h: "What we process",
@@ -686,7 +686,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
     },
     {
       h: "Sharing and subprocessors",
-      p: "We share data with infrastructure providers that host the control plane, send transactional email, and (on Enterprise) your identity provider and KMS. We do not share connected datasets with other customers. A current subprocessor list is available on request from privacy@datawrap.ai.",
+      p: "We share data with infrastructure providers that host the control plane, send transactional email, and (on Enterprise) your identity provider and KMS. We do not share connected datasets with other customers. A current subprocessor list is available on request from contact@datawrap.io.",
     },
     {
       h: "International transfers",
@@ -698,7 +698,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
     },
     {
       h: "Your rights",
-      p: "You may request access, correction, export, or deletion of workspace personal data through your admin or privacy@datawrap.ai. You may object to or restrict certain processing where the law allows. You may lodge a complaint with your supervisory authority.",
+      p: "You may request access, correction, export, or deletion of workspace personal data through your admin or contact@datawrap.io. You may object to or restrict certain processing where the law allows. You may lodge a complaint with your supervisory authority.",
     },
     {
       h: "Cookies",
@@ -714,7 +714,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
     },
     {
       h: "Changes and contact",
-      p: "We will post material changes on this page and update the date below. Questions: privacy@datawrap.ai. Enterprise customers may attach a DPA to their order form.",
+      p: "We will post material changes on this page and update the date below. Questions: contact@datawrap.io. Enterprise customers may attach a DPA to their order form.",
     },
   ];
   const terms = [
@@ -776,7 +776,7 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
     },
     {
       h: "Changes and contact",
-      p: "We will post material changes on this page and update the date below. Continued use after the effective date constitutes acceptance, except that enterprise customers are governed by the notice terms in their order form. Questions: legal@datawrap.ai.",
+      p: "We will post material changes on this page and update the date below. Continued use after the effective date constitutes acceptance, except that enterprise customers are governed by the notice terms in their order form. Questions: contact@datawrap.io.",
     },
   ];
   const blocks = kind === "privacy" ? privacy : terms;
@@ -789,8 +789,8 @@ function LegalPage({ kind }: { kind: "privacy" | "terms" }) {
         title={kind === "privacy" ? "Privacy policy" : "Terms of service"}
         meta={
           kind === "privacy"
-            ? "Last updated August 2026 · privacy@datawrap.ai · You are the controller of connected data"
-            : "Last updated August 2026 · legal@datawrap.ai · A signed MSA supersedes where it conflicts"
+            ? "Last updated August 2026 · contact@datawrap.io · You are the controller of connected data"
+            : "Last updated August 2026 · contact@datawrap.io · A signed MSA supersedes where it conflicts"
         }
         lead={
           kind === "privacy"

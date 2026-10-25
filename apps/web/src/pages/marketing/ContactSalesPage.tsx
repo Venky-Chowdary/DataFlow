@@ -161,7 +161,11 @@ export function ContactSalesPage({
               <a className="lp-sales-mail" href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">
                 sales@datawrap.io
               </a>
-              <span>One business day. No SOC 2 certificate is claimed.</span>
+              <span>
+                One business day. General questions:{" "}
+                <a className="lp-sales-mail" href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
+                No SOC 2 certificate is claimed.
+              </span>
             </p>
             {/* The drawing carries these three steps above 960px; below it, the list does. */}
             <ol className="lp-sales-hero-steps lp-sales-hero-steps--narrow">

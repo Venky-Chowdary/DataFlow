@@ -380,7 +380,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     userPassFields.push(
       text("host", "SMTP host", { placeholder: "smtp.gmail.com" }),
       number("port", "Port", { placeholder: "587" }),
-      text("authSource", "From address", { placeholder: "noreply@datawrap.app" }),
+      text("authSource", "From address", { placeholder: "noreply@example.com" }),
       text("database", "Recipients", { placeholder: "alice@example.com, bob@example.com" }),
       text("username", "SMTP username"),
       password("password", "SMTP password"),
@@ -490,7 +490,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
     connStrFields.push(
       textarea("connection_string", "SMTP URL", {
         rows: 2,
-        placeholder: "smtp://user:pass@smtp.gmail.com:587/?from=noreply@datawrap.app&to=alice@example.com",
+        placeholder: "smtp://user:pass@smtp.gmail.com:587/?from=noreply@example.com&to=alice@example.com",
         hint: "smtp:// or smtps:// URL. Use query params from= and to= for sender/recipients.",
       })
     );

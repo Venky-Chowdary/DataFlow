@@ -348,6 +348,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
           <div className="lp-footer-bottom">
             <span>© {new Date().getFullYear()} Datawrap</span>
             <span className="lp-footer-legal">
+              <a href="mailto:contact@datawrap.io">contact@datawrap.io</a>
               <a href={link("privacy")} onClick={(e) => { e.preventDefault(); go("privacy"); }}>Privacy</a>
               <a href={link("terms")} onClick={(e) => { e.preventDefault(); go("terms"); }}>Terms</a>
               <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>Security</a>
