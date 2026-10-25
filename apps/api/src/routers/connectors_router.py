@@ -2091,6 +2091,13 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         dest_summary = dict(dest_summary or {})
         dest_summary["sync_mode"] = "incremental_deduped"
         dest_summary["source_row_count"] = len(records)
+        # C21: the ladder must scope its destination read-back to the
+        # replayed keys, not the whole table. Without conflict_columns the
+        # scope is empty and a 1-row replay is digested against every row
+        # the destination holds — a guaranteed mismatch that stamped
+        # "verified" nowhere but reported diverging on a correct write.
+        if conflict_columns:
+            dest_summary["conflict_columns"] = list(conflict_columns)
         # reconcile_sample is operator-facing: records carry the
         # ``__DF_SQL_NULL__`` wire sentinel for the writer, but the sample
         # must show real NULL — the destination holds real NULL too (R4).

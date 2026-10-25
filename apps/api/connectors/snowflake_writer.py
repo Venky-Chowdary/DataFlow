@@ -790,6 +790,7 @@ def _sf_apply_sparse_upsert(
     sparse_rows: list[tuple],
     rejected_details: list[dict[str, Any]] | None = None,
     policy: str = "quarantine",
+    row_numbers: list[int] | None = None,
 ) -> tuple[int, int, list[tuple]]:
     """Per-row Snowflake upsert omitting DF_MISSING — never SET col=NULL for absent."""
     from connectors.sql_bind import normalize_sql_bind_value
@@ -831,12 +832,15 @@ def _sf_apply_sparse_upsert(
                     )[:120]
                 except Exception:
                     sample = ""
-                from connectors.writer_common import append_write_quarantine_detail
+                from connectors.writer_common import (
+                    append_write_quarantine_detail,
+                    resolve_row_number,
+                )
 
                 append_write_quarantine_detail(
                     rejected_details,
                     {
-                        "row": row_idx,
+                        "row": resolve_row_number(row_numbers, row_idx),
                         "column": "*",
                         "value": sample,
                         "reason": str(exc)[:300],
@@ -1832,6 +1836,15 @@ def write_mapped_rows(
                                 sparse_bound,
                                 rejected_details=rejected_details,
                                 policy=policy,
+                                row_numbers=(
+                                    list(
+                                        getattr(
+                                            finished, "sparse_row_numbers", None
+                                        )
+                                        or []
+                                    )
+                                    or None
+                                ),
                             )
                         )
                         written += sparse_written

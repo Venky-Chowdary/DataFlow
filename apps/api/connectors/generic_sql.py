@@ -6000,10 +6000,17 @@ def write_mapped_rows(
                                         append_write_quarantine_detail,
                                     )
 
+                                    _dense_nums = getattr(
+                                        finished, "dense_row_numbers", None
+                                    ) or []
                                     append_write_quarantine_detail(
                                         rejected_details,
                                         {
-                                            "row": start + row_i,
+                                            "row": (
+                                                int(_dense_nums[offset + row_i])
+                                                if offset + row_i < len(_dense_nums)
+                                                else start + row_i
+                                            ),
                                             "column": col_name,
                                             "value": sample_val,
                                             "reason": str(row_exc)[:300],
