@@ -30,6 +30,7 @@ from services import denylist_store, disposable_list, mx_check, turnstile
 from services import form_token as form_token_mod
 from services.brand_env import getenv_brand
 from services.email_policy import role_assessment
+from services import risk_scorer
 from services.email_quota import consume_send_slot
 from services.email_sender import (
     EmailQuotaExceeded,
@@ -184,6 +185,18 @@ def request_signup(
                        "that email domain can't receive mail")
     canonical = canonical_email(normalized)
 
+    # P2-8 risk scorer — deny drops with a decoy 202 (nothing stored/mailed);
+    # hold stores the pending row with its score but skips the OTP mail.
+    risk = risk_scorer.score_signals(
+        ip=ip, ua=ua, device_id=device_id,
+        turnstile_ok=True if turnstile.configured() else None)
+    if risk["action"] == "deny":
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code="risk:deny",
+                              details={"ip": ip, "score": risk["score"],
+                                       "signals": risk["reasons"]})
+        return form_token_mod.fake_accept_body()
+
     # Constant-work: hash on every path so timing doesn't reveal whether the
     # hash is stored (new/pending) or discarded (existing).
     password_hash = hash_password_argon2(password)
@@ -226,8 +239,15 @@ def request_signup(
         password_hash=password_hash,
         ip=ip,
         device_id=device_id,
-        risk_score=10.0 if role == "flagged" else 0.0,
+        risk_score=max(float(risk["score"]),
+                       10.0 if role == "flagged" else 0.0),
     )
+    if risk["action"] == "hold":
+        record_security_event("admin.signup_held", outcome="skipped",
+                              details={"ip": ip, "score": risk["score"],
+                                       "signals": risk["reasons"],
+                                       "pending_id": row["id"]})
+        return form_token_mod.fake_accept_body()
     challenge, code = otp_service.issue(row["id"], "signup")
     try:
         _send("signup_code", normalized,
