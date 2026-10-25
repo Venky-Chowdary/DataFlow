@@ -45,7 +45,11 @@ async function gotoLogin(page, theme) {
   const ctx = page.context();
   await ctx.addInitScript((t) => {
     window.localStorage.setItem("df2.theme", t);
-    window.localStorage.removeItem("df2.session");
+    // Only the anonymous auth screens lose the session; signed-in
+    // destinations (settings, app) keep it.
+    if (!location.hash || location.hash === "#/") {
+      window.localStorage.removeItem("df2.session");
+    }
   }, theme);
   await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
   await page.waitForTimeout(800);
@@ -99,10 +103,12 @@ function mintResetToken(email) {
 import sys; sys.path.insert(0, ".")
 from services import password_reset_store
 token, _doc = password_reset_store.issue(email="${email}", ip="127.0.0.1", ua="screenshot-harness")
-print(token)
+print("DWTOKEN::" + token)
 `);
-  // The Mongo-fallback warning line precedes the token on stdout.
-  return out.split("\n").pop().trim();
+  // Log noise can surround the token; extract it by sentinel.
+  const m = out.match(/DWTOKEN::([A-Za-z0-9_\-]+)/);
+  if (!m) throw new Error(`reset token mint produced no sentinel: ${out.slice(-200)}`);
+  return m[1];
 }
 
 async function run(vpName, viewport, theme) {
