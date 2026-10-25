@@ -194,7 +194,7 @@ async function run(vpName, viewport, theme) {
   // Valid reset link → password form.
   try {
     const token = mintResetToken(email);
-    await page.goto(`${BASE}/reset-password?token=${token}`, { waitUntil: "networkidle" });
+    await page.goto(`${BASE}/reset-password#token=${token}`, { waitUntil: "networkidle" });
     await page.waitForTimeout(1200);
     await shot(page, `${tag}-11-reset-form`);
 
@@ -217,9 +217,101 @@ async function run(vpName, viewport, theme) {
   }
 
   // Bogus link → expired/used page.
-  await page.goto(`${BASE}/reset-password?token=not-a-real-token-000`, { waitUntil: "networkidle" });
+  await page.goto(`${BASE}/reset-password#token=not-a-real-token-000`, { waitUntil: "networkidle" });
   await page.waitForTimeout(1200);
   await shot(page, `${tag}-14-reset-expired`);
+
+  // ---- review-8 item 11: missing states ----
+
+  // Submit button: hover, focus-visible, loading (spinner + label).
+  await gotoLogin(page, theme);
+  await page.getByText("Create an account").first().click();
+  await page.waitForTimeout(600);
+  const submitBtn = page.locator('button[type="submit"]').last();
+  await submitBtn.hover();
+  await shot(page, `${tag}-15-btn-hover`);
+  await submitBtn.focus();
+  await shot(page, `${tag}-16-btn-focus`);
+  await page.route("**/api/v1/auth/signup", async (route) => {
+    await new Promise((r) => setTimeout(r, 1800));
+    await route.continue();
+  });
+  await page.locator("#signup-name").fill("Ada Lovelace");
+  await page.locator('input[type="email"]').first().fill(`busy.${uniq}@datawrap.io`);
+  await page.locator('input[type="password"]').first().fill("correct-horse-staple-9");
+  await page.waitForTimeout(3300);
+  await submitBtn.click();
+  await page.waitForTimeout(450);
+  await shot(page, `${tag}-17-btn-loading`);
+  await page.unroute("**/api/v1/auth/signup");
+  await page.waitForTimeout(1600);
+
+  // Turnstile production look — MOCK container (no real sitekey locally);
+  // the filename labels it as a test-sitekey mock.
+  await gotoLogin(page, theme);
+  await page.getByText("Create an account").first().click();
+  await page.waitForTimeout(600);
+  await page.evaluate(() => {
+    const form = document.querySelector(".lp-login-form");
+    if (form && !form.querySelector(".lp-login-turnstile")) {
+      const dark = document.documentElement.dataset.theme === "dark";
+      const mock = document.createElement("div");
+      mock.className = "lp-login-turnstile";
+      mock.setAttribute("data-shot-mock", "turnstile-test-sitekey");
+      mock.innerHTML = `<div style="display:flex;align-items:center;gap:10px;width:100%;height:65px;border-radius:8px;padding:0 14px;box-sizing:border-box;border:1px solid ${dark ? "#4b5563" : "#d4d4d4"};background:${dark ? "#1f2937" : "#f9f9f9"}"><span style="width:20px;height:20px;border:2px solid ${dark ? "#9ca3af" : "#6b7280"};border-radius:4px;flex:none"></span><span style="font:14px Roboto,system-ui,sans-serif;color:${dark ? "#e5e7eb" : "#333"}">Verify you are human</span><span style="margin-left:auto;font:10px Roboto,system-ui,sans-serif;color:${dark ? "#9ca3af" : "#888"};text-align:right;line-height:1.4">Cloudflare<br>Privacy · Terms</span></div>`;
+      form.insertBefore(mock, form.querySelector('button[type="submit"]'));
+    }
+  });
+  await shot(page, `${tag}-18-signup-turnstile-testkey-mock`);
+
+  // Authenticated settings: admin metrics card + change-email flow.
+  await page.route("**/api/v1/auth/admin/signup-metrics", (route) =>
+    route.fulfill({
+      status: 200, contentType: "application/json",
+      body: JSON.stringify({
+        pending_signups: 3, active_challenges: 2,
+        email_quota: { day_used: 41, day_limit: 500, backend: "file" },
+      }),
+    }));
+  try {
+    await page.goto(`${BASE}/#/settings`, { waitUntil: "networkidle" });
+    await page.waitForTimeout(1800);
+    const metrics = page.locator('[data-testid="signup-metrics-card"]');
+    if (await metrics.count()) {
+      await metrics.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(300);
+      await shot(page, `${tag}-19-admin-metrics`);
+    } else {
+      console.log(`  ${tag}: metrics card not rendered`);
+    }
+    const card = page.locator('[data-testid="change-email-card"]');
+    if (await card.count()) {
+      await card.scrollIntoViewIfNeeded();
+      await page.waitForTimeout(300);
+      await shot(page, `${tag}-20-change-email-idle`);
+      await card.locator('button').first().click();
+      await page.waitForTimeout(400);
+      const input = page.locator("#change-email-input");
+      if (await input.count()) {
+        await input.fill(`new.${uniq}@datawrap.io`);
+        await shot(page, `${tag}-21-change-email-request`);
+        // Rate-limit/quota message via a stubbed 429.
+        await page.route("**/api/v1/auth/email/change", (route) =>
+          route.fulfill({
+            status: 429, contentType: "application/json",
+            body: JSON.stringify({ error: { code: "rate_limited", retry_after_sec: 120, message: "Too many requests — retry in 2 min." } }),
+          }));
+        await card.locator('button[type="submit"]').first().click();
+        await page.waitForTimeout(800);
+        await shot(page, `${tag}-22-change-email-rate-limited`);
+        await page.unroute("**/api/v1/auth/email/change");
+      }
+    } else {
+      console.log(`  ${tag}: change-email card not rendered`);
+    }
+  } catch (e) {
+    console.log(`  ${tag}: settings states skipped —`, e.message.split("\n")[0]);
+  }
 
   await ctx.close();
 }
