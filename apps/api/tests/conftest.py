@@ -294,6 +294,12 @@ def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
     monkeypatch.setattr(append_continuity, "data_dir", lambda: tmp_path)
     monkeypatch.setattr(append_continuity, "_collection", lambda: None)
 
+    # Signup feature stores — file fallbacks land in tmp_path per test.
+    from services import org_store
+
+    monkeypatch.setattr(org_store, "_orgs_path", lambda: tmp_path / "organizations.json")
+    monkeypatch.setattr(org_store, "_plans_path", lambda: tmp_path / "plan_entitlements.json")
+
     test_name = request.node.path.name
     if test_name.startswith("test_mcp"):
         from services import contract_store, preflight_run_store, schema_registry
