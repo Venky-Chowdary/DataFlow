@@ -341,12 +341,30 @@ def _sql_null_safe_eq(dialect: str, left: str, right: str) -> str:
 
 
 def _sql_text_eq(dialect: str, ident: str, literal: str) -> str:
-    lit = "'" + str(literal).replace("'", "''") + "'"
+    # The bookmark literal comes from present_cell_text (ISO ``T``), while an
+    # engine's temporal text form renders space-separated — compare both sides
+    # in the same separator-normalized form (same rule as
+    # sqlite_cursor_sort_expr / sqlite_normalize_cursor_watermark, MX3-04).
+    lit = (
+        "'"
+        + sqlite_normalize_cursor_watermark(str(literal)).replace("'", "''")
+        + "'"
+    )
     if dialect == "mysql":
-        return f"CAST({ident} AS CHAR) = {lit}"
+        return (
+            f"(CASE WHEN CAST({ident} AS CHAR) REGEXP "
+            "'^[0-9]{4}-[0-9]{2}-[0-9]{2}T' THEN "
+            f"CONCAT(SUBSTRING(CAST({ident} AS CHAR), 1, 10), ' ', "
+            f"SUBSTRING(CAST({ident} AS CHAR), 12)) "
+            f"ELSE CAST({ident} AS CHAR) END) = {lit}"
+        )
     if dialect == "sqlite":
-        return f"CAST({ident} AS TEXT) = {lit}"
-    return f"{ident}::text = {lit}"
+        return f"{sqlite_cursor_sort_expr(f'CAST({ident} AS TEXT)')} = {lit}"
+    return (
+        f"(CASE WHEN {ident}::text ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T' THEN "
+        f"substring({ident}::text from 1 for 10) || ' ' || "
+        f"substring({ident}::text from 12) ELSE {ident}::text END) = {lit}"
+    )
 
 
 def boundary_append_insert_sql(
