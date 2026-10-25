@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import timedelta
 from concurrent.futures import ThreadPoolExecutor
 
@@ -23,6 +24,10 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAWRAP_EMAIL_PROVIDER", "console")
     monkeypatch.setenv("DATAWRAP_ENV", "test")
     monkeypatch.setenv("DATAWRAP_OTP_PEPPER", "test-pepper")
+    # Deterministic mail: deliveries run inline unless a test restores the
+    # background lane; the timing floor stays on (tests assert it).
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
+    monkeypatch.setattr(signup_service, "FORGOT_FLOOR_SEC", 0.02)
     monkeypatch.setenv("DATAWRAP_APP_URL", "https://www.datawrap.io")
     monkeypatch.setattr(signup_store, "_pending_path",
                         lambda: tmp_path / "pending.json")
@@ -301,3 +306,47 @@ def test_variant_requests_supersede_one_token_set():
     assert probe.json()["status"] == "used"
     probe = c.post("/api/v1/auth/password/reset/inspect", json={"token": second})
     assert probe.json()["ok"] is True
+
+
+def test_forgot_pads_both_branches_to_floor(monkeypatch):
+    """Fake (no account) and real (verified account) replies are padded to
+    the same floor — elapsed time reveals nothing about existence."""
+    monkeypatch.setattr(signup_service, "FORGOT_FLOOR_SEC", 0.30)
+    c = _client()
+    t0 = time.monotonic()
+    _forgot(c, "ghost@example.com")
+    fake_dt = time.monotonic() - t0
+    _verified_user(c)
+    t0 = time.monotonic()
+    _forgot(c, "ada@example.com")
+    real_dt = time.monotonic() - t0
+    assert fake_dt >= 0.30
+    assert real_dt >= 0.30
+
+
+def test_mailer_latency_never_blocks_the_request(monkeypatch):
+    """The request path returns without awaiting the provider — a slow
+    Resend call cannot become an existence oracle."""
+    monkeypatch.setattr(
+        signup_service, "_deliver_later",
+        lambda fn: signup_service._MAIL_LANE.submit(fn))
+    import services.email_sender as sender_mod
+    orig_send = sender_mod.ConsoleEmailSender.send
+
+    def slow_send(self, *a, **kw):
+        time.sleep(0.5)
+        return orig_send(self, *a, **kw)
+    monkeypatch.setattr(sender_mod.ConsoleEmailSender, "send", slow_send)
+    monkeypatch.setattr(signup_service, "FORGOT_FLOOR_SEC", 0.0)
+    c = _client()
+    _verified_user(c)
+    t0 = time.monotonic()
+    resp = _forgot(c)
+    dt = time.monotonic() - t0
+    assert resp.status_code == 202
+    assert dt < 0.45, f"request awaited the mailer ({dt:.2f}s)"
+    # the delivery still lands once the lane drains
+    deadline = time.monotonic() + 5
+    while not ConsoleEmailSender.OUTBOX and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert ConsoleEmailSender.OUTBOX

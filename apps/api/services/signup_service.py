@@ -19,7 +19,9 @@ from __future__ import annotations
 import ipaddress
 import logging
 import secrets
+import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from services import otp_service, password_reset_store, signup_store, team_store, user_store
@@ -54,6 +56,30 @@ RESEND_HOURLY_CAP = 5
 RESEND_DAILY_CAP = 10
 MIN_PASSWORD_LEN = 12
 MAX_PASSWORD_LEN = 128
+
+# Mail delivery runs off the request path (one serialized lane) so provider
+# latency can't time-leak account existence; every /password/forgot reply —
+# fake or real — is also padded to the same floor.
+_MAIL_LANE = ThreadPoolExecutor(max_workers=2, thread_name_prefix="dw-mail")
+FORGOT_FLOOR_SEC = 0.25
+
+
+def _deliver_later(fn) -> None:
+    """Fire-and-forget mail delivery; the request path never awaits it."""
+    try:
+        _MAIL_LANE.submit(fn)
+    except RuntimeError:  # executor shut down (interpreter exit/tests)
+        fn()
+
+
+def _forgot_reply(body: dict[str, Any], started: float) -> dict[str, Any]:
+    """Uniform pacing: fake and real branches pad to the same floor, so
+    neither elapsed time nor body shape reveals whether an account exists."""
+    pad = FORGOT_FLOOR_SEC - (time.monotonic() - started)
+    if pad > 0:
+        time.sleep(pad)
+    return body
+
 
 
 def _env_int(name: str, default: int) -> int:
@@ -533,6 +559,7 @@ def request_password_reset(*, email: str, ip: str = "",
     id when the address has no usable account (enumeration parity).
     Bot/abuse checks (form-token, Turnstile, IP+address velocity) never
     change the 202: throttling a bomber must not become an oracle."""
+    started = time.monotonic()
     fake = _forgot_response(f"pw-{uuid.uuid4().hex[:24]}")
     verdict_form = form_token_mod.check(
         form_token, purpose="reset", honeypot=honeypot)
@@ -540,7 +567,7 @@ def request_password_reset(*, email: str, ip: str = "",
         record_security_event("password.reset.requested", outcome="failed",
                               reason_code=f"form:{verdict_form['reason']}",
                               details={"ip": ip})
-        return fake
+        return _forgot_reply(fake, started)
     if turnstile.configured():
         verdict = turnstile.verify(
             turnstile_token, remote_ip=ip, user_agent=ua)
@@ -548,11 +575,11 @@ def request_password_reset(*, email: str, ip: str = "",
             record_security_event("password.reset.requested", outcome="failed",
                                   reason_code=f"turnstile:{verdict['reason']}",
                                   details={"ip": ip})
-            return fake
+            return _forgot_reply(fake, started)
     try:
         normalized = user_store.validate_email(email)
     except (ApiError, user_store.UserStoreError):
-        return fake
+        return _forgot_reply(fake, started)
     canonical = canonical_email(normalized)
     # Per-IP and per-target-address velocity: exceeded -> same 202 shape.
     for key, limit, window in (
@@ -562,11 +589,11 @@ def request_password_reset(*, email: str, ip: str = "",
             record_security_event("password.reset.requested", outcome="held",
                                   reason_code="rate_limited",
                                   details={"ip": ip})
-            return fake
+            return _forgot_reply(fake, started)
     user = user_store.find_by_canonical(canonical)
     if user is None or user.get("status", "active") != "active" \
             or not user.get("email_verified_at"):
-        return fake
+        return _forgot_reply(fake, started)
     # Secure reset LINK (not a code): 256-bit single-use token, only the
     # HMAC is stored, and issuing it invalidates every earlier link.
     # Everything is keyed to the STORED account address — never the typed
@@ -576,23 +603,26 @@ def request_password_reset(*, email: str, ip: str = "",
     token, stored = password_reset_store.issue(
         email=account_email, ip=ip, ua=ua)
     base = (getenv_brand("APP_URL") or "https://www.datawrap.io").rstrip("/")
-    try:
-        _send("reset_link", account_email,
-              {"name": user.get("name") or "there",
-               "reset_url": f"{base}/reset-password?token={token}",
-               "expires_minutes": int(password_reset_store.TOKEN_TTL.total_seconds() // 60)},
-              idempotency_key=f"reset-link:{stored['id']}")
-    except (EmailSendError, EmailQuotaExceeded):
-        # Send failure must not change the response (enumeration); a fresh
-        # link can be requested right away.
-        logger.warning("password-reset link send failed")
+    def _deliver() -> None:
+        try:
+            _send("reset_link", account_email,
+                  {"name": user.get("name") or "there",
+                   "reset_url": f"{base}/reset-password?token={token}",
+                   "expires_minutes": int(password_reset_store.TOKEN_TTL.total_seconds() // 60)},
+                  idempotency_key=f"reset-link:{stored['id']}")
+            record_security_event("password.reset.sent", outcome="succeeded",
+                                  actor=account_email, session_id=stored["id"],
+                                  details={"ip": ip})
+        except (EmailSendError, EmailQuotaExceeded):
+            # Send failure must not change the response (enumeration); a
+            # fresh link can be requested right away.
+            logger.warning("password-reset link send failed")
+
+    _deliver_later(_deliver)
     record_security_event("password.reset.requested", outcome="succeeded",
                           actor=account_email, session_id=stored["id"],
                           details={"ip": ip, "requested_as": normalized})
-    record_security_event("password.reset.sent", outcome="succeeded",
-                          actor=account_email, session_id=stored["id"],
-                          details={"ip": ip})
-    return _forgot_response(stored["id"])
+    return _forgot_reply(_forgot_response(stored["id"]), started)
 
 
 def inspect_reset_token(*, token: str) -> dict[str, Any]:
