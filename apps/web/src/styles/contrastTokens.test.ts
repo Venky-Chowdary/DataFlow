@@ -163,3 +163,139 @@ describe("text-bearing controls route through --df-action-bg", () => {
     }
   });
 });
+
+/* ── UI-3: palette-wide AA ratchet — text tokens on surfaces, both themes ──
+   The original 9 tests above pin specific painted rules; this block parses
+   tokens.css, resolves var() chains, and fails any canonical ink/surface
+   pair under WCAG AA (4.5:1 text, 3:1 for the non-text focus ring). */
+
+type RGBA = [number, number, number, number];
+
+/** Extract the declarations of a `selector { … }` block. */
+function tokenBlock(css: string, selector: string): string {
+  const start = css.indexOf(selector);
+  assert.notEqual(start, -1, `missing ${selector} block`);
+  const open = css.indexOf("{", start);
+  let depth = 0;
+  for (let i = open; i < css.length; i += 1) {
+    if (css[i] === "{") depth += 1;
+    else if (css[i] === "}") {
+      depth -= 1;
+      if (depth === 0) return css.slice(open + 1, i);
+    }
+  }
+  assert.fail(`unterminated ${selector} block`);
+}
+
+function tokenMap(body: string): Map<string, string> {
+  const map = new Map<string, string>();
+  for (const m of body.matchAll(/(--[a-zA-Z][a-zA-Z0-9-]*)\s*:\s*([^;]+);/g)) {
+    map.set(m[1], m[2].trim());
+  }
+  return map;
+}
+
+/** Resolve a token to an RGBA, following var() chains. */
+function resolveToken(name: string, map: Map<string, string>, depth = 0): RGBA | null {
+  assert.ok(depth < 12, `var() chain too deep at ${name}`);
+  const raw = map.get(name);
+  if (raw == null) return null;
+  const value = raw.trim();
+  const varRef = /^var\((--[a-zA-Z0-9-]+)\)$/.exec(value);
+  if (varRef) return resolveToken(varRef[1], map, depth + 1);
+  const hex = /^#([0-9a-f]{3,8})$/i.exec(value);
+  if (hex) {
+    const h = hex[1];
+    if (h.length === 3) return [parseInt(h[0] + h[0], 16), parseInt(h[1] + h[1], 16), parseInt(h[2] + h[2], 16), 1];
+    if (h.length === 6) return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16), 1];
+    if (h.length === 8) return [parseInt(h.slice(0, 2), 16), parseInt(h.slice(2, 4), 16), parseInt(h.slice(4, 6), 16), parseInt(h.slice(6, 8), 16) / 255];
+  }
+  const rgb = /^rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*(?:,\s*([\d.]+)\s*)?\)$/.exec(value);
+  if (rgb) return [Number(rgb[1]), Number(rgb[2]), Number(rgb[3]), rgb[4] == null ? 1 : Number(rgb[4])];
+  return null; // gradient / color-mix — not a flat colour
+}
+
+function compositeFg(fg: RGBA, bg: RGBA): [number, number, number] {
+  const a = fg[3];
+  return [
+    Math.round(fg[0] * a + bg[0] * (1 - a)),
+    Math.round(fg[1] * a + bg[1] * (1 - a)),
+    Math.round(fg[2] * a + bg[2] * (1 - a)),
+  ];
+}
+
+function rgbCss([r, g, b]: [number, number, number]): string {
+  return `rgb(${r}, ${g}, ${b})`;
+}
+
+const allTokens = sheet("tokens.css");
+const lightTheme = tokenMap(tokenBlock(allTokens, ":root"));
+const darkTheme = new Map(lightTheme);
+{
+  const marker = allTokens.indexOf('data-theme="dark"');
+  assert.notEqual(marker, -1, "missing dark theme block in tokens.css");
+  const region = allTokens.slice(marker);
+  for (const m of region.matchAll(/\{([^}]*)\}/g)) {
+    for (const [k, v] of tokenMap(m[1])) darkTheme.set(k, v);
+  }
+}
+
+const INKS = ["--df-text-primary", "--df-text-secondary", "--df-text-tertiary", "--df-text-muted"];
+const SURFACES = ["--df-bg-canvas", "--df-bg-subtle", "--df-surface", "--df-surface-raised", "--df-surface-muted"];
+const TINTED: Array<[string, string]> = [
+  ["--df-success-text", "--df-success-bg"],
+  ["--df-warning-text", "--df-warning-bg"],
+  ["--df-info-text", "--df-info-bg"],
+  ["--df-brand-text", "--df-brand-muted"],
+  ["--df-brand-text", "--df-brand-soft"],
+  ["--df-brand-text", "--df-surface"],
+  ["--df-brand-strong", "--df-surface"],
+];
+const ACTION_FILLS = ["--df-action-bg", "--df-action-bg-hover"];
+
+function pairRatio(fgToken: string, bgToken: string, map: Map<string, string>): number {
+  // A translucent *bg* (e.g. rgba() tint badges) first composites over the
+  // page surface; a translucent *fg* composites over that result.
+  const surf = resolveToken("--df-surface", map);
+  assert.ok(surf, "--df-surface does not resolve");
+  const bgRaw = resolveToken(bgToken, map);
+  assert.ok(bgRaw, `${bgToken} does not resolve to a flat colour`);
+  const bgEff = bgRaw[3] < 1 ? compositeFg(bgRaw, [surf[0], surf[1], surf[2], 1]) : ([bgRaw[0], bgRaw[1], bgRaw[2]] as [number, number, number]);
+  const fg = resolveToken(fgToken, map);
+  assert.ok(fg, `${fgToken} does not resolve to a flat colour`);
+  const fgOpaque = compositeFg(fg, [bgEff[0], bgEff[1], bgEff[2], 1]);
+  return contrastRatio(rgbCss(fgOpaque), rgbCss(bgEff));
+}
+
+for (const [themeName, map] of [["light", lightTheme], ["dark", darkTheme]] as const) {
+  describe(`token contrast — ${themeName} theme`, () => {
+    for (const ink of INKS) {
+      for (const surface of SURFACES) {
+        it(`${ink} on ${surface} >= 4.5:1`, () => {
+          const ratio = pairRatio(ink, surface, map);
+          assert.ok(ratio >= 4.5, `${ink} on ${surface} is ${ratio.toFixed(2)}:1`);
+        });
+      }
+    }
+    for (const [fg, bg] of TINTED) {
+      it(`${fg} on ${bg} >= 4.5:1`, () => {
+        const ratio = pairRatio(fg, bg, map);
+        assert.ok(ratio >= 4.5, `${fg} on ${bg} is ${ratio.toFixed(2)}:1`);
+      });
+    }
+    for (const fill of ACTION_FILLS) {
+      it(`white text on ${fill} >= 4.5:1`, () => {
+        const bg = resolveToken(fill, map);
+        assert.ok(bg);
+        const ratio = contrastRatio("rgb(255, 255, 255)", rgbCss([bg[0], bg[1], bg[2]]));
+        assert.ok(ratio >= 4.5, `white on ${fill} is ${ratio.toFixed(2)}:1`);
+      });
+    }
+    it("focus ring clears 3:1 on every surface (non-text UI)", () => {
+      for (const surface of SURFACES) {
+        const ratio = pairRatio("--df-focus-ring", surface, map);
+        assert.ok(ratio >= 3, `focus ring on ${surface} is ${ratio.toFixed(2)}:1`);
+      }
+    });
+  });
+}
