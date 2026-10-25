@@ -137,8 +137,12 @@ def _is_absent_object_error(message: str) -> bool:
 _INTERNAL_OBJECT_PREFIXES = ("_df_mirrorkeys_", "_dataflow_stg_", "_df_dlq_")
 
 
-def _operator_visible_objects(names, type_label: str) -> list[dict]:
-    """Listing entries for objects the operator owns, in probe order."""
+def _operator_visible_objects(names, type_label: str, type_map: dict | None = None) -> list[dict]:
+    """Listing entries for objects the operator owns, in probe order.
+
+    ``type_map`` (probe ``table_types``) overrides ``type_label`` per name —
+    the PG listing now reports views as views (M18).
+    """
     out: list[dict] = []
     for raw in names or []:
         name = str(raw)
@@ -146,7 +150,7 @@ def _operator_visible_objects(names, type_label: str) -> list[dict]:
             continue
         if name.startswith(_INTERNAL_OBJECT_PREFIXES):
             continue
-        out.append({"name": name, "type": type_label})
+        out.append({"name": name, "type": (type_map or {}).get(name) or type_label})
     return out
 
 
@@ -404,7 +408,9 @@ def _introspect_endpoint_impl(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
@@ -516,7 +522,9 @@ def _introspect_endpoint_impl(
             **snowflake_session_kwargs(cfg),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -543,7 +551,9 @@ def _introspect_endpoint_impl(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
@@ -573,7 +583,9 @@ def _introspect_endpoint_impl(
             service_account=cfg.get("service_account", ""),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
@@ -596,7 +608,9 @@ def _introspect_endpoint_impl(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
