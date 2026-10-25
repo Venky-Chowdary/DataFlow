@@ -264,7 +264,7 @@ function pairRatio(fgToken: string, bgToken: string, map: Map<string, string>): 
   const fg = resolveToken(fgToken, map);
   assert.ok(fg, `${fgToken} does not resolve to a flat colour`);
   const fgOpaque = compositeFg(fg, [bgEff[0], bgEff[1], bgEff[2], 1]);
-  return contrastRatio(rgbCss(fgOpaque), rgbCss(bgEff));
+  return ratio(rgbCss(fgOpaque), rgbCss(bgEff));
 }
 
 for (const [themeName, map] of [["light", lightTheme], ["dark", darkTheme]] as const) {
@@ -287,8 +287,8 @@ for (const [themeName, map] of [["light", lightTheme], ["dark", darkTheme]] as c
       it(`white text on ${fill} >= 4.5:1`, () => {
         const bg = resolveToken(fill, map);
         assert.ok(bg);
-        const ratio = contrastRatio("rgb(255, 255, 255)", rgbCss([bg[0], bg[1], bg[2]]));
-        assert.ok(ratio >= 4.5, `white on ${fill} is ${ratio.toFixed(2)}:1`);
+        const r = ratio("rgb(255, 255, 255)", rgbCss([bg[0], bg[1], bg[2]]));
+        assert.ok(r >= 4.5, `white on ${fill} is ${r.toFixed(2)}:1`);
       });
     }
     it("focus ring clears 3:1 on every surface (non-text UI)", () => {
