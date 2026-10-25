@@ -1265,6 +1265,9 @@ def _finish_verified_run(
                 progress_pct=100,
                 phase="completed",
                 message=message,
+                # Gate-8 already passed on this path — the verified 100, same
+                # as the normal success sites (M1).
+                reconcile_pct=100,
                 rejected_rows=int(summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(summary.get("coerced_null_rows", 0) or 0),
                 destination_summary=summary,
@@ -3554,6 +3557,9 @@ class UniversalTransferEngine:
                 message=recon.get(
                     "message", f"Transferred {rows_written:,} rows successfully"
                 ),
+                # The scan heartbeat paints 0–99 while rows hash; a passed
+                # Gate-8 is the 100 — verified jobs must not freeze at 99 (M1).
+                reconcile_pct=100,
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
@@ -4697,6 +4703,9 @@ class UniversalTransferEngine:
                 message=recon.get(
                     "message", f"Transferred {rows_written:,} rows successfully"
                 ),
+                # The scan heartbeat paints 0–99 while rows hash; a passed
+                # Gate-8 is the 100 — verified jobs must not freeze at 99 (M1).
+                reconcile_pct=100,
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
@@ -5538,6 +5547,9 @@ class UniversalTransferEngine:
                 message=recon.get(
                     "message", f"Transferred {rows_written:,} rows successfully"
                 ),
+                # The scan heartbeat paints 0–99 while rows hash; a passed
+                # Gate-8 is the 100 — verified jobs must not freeze at 99 (M1).
+                reconcile_pct=100,
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
