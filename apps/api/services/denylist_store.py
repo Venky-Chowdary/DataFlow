@@ -66,14 +66,14 @@ def add_entry(*, value: str, kind: str, source: str = "team",
     if coll is not None:
         coll.update_one(
             {"kind": kind, "value": value}, {"$set": entry}, upsert=True)
-        _audit("denylist.add", added_by, entry)
+        _audit_add(added_by, entry)
         return entry
     with json_doc_transaction(_path(), {"entries": []}) as doc:
         doc["entries"] = [
             e for e in doc.get("entries", [])
             if not (e.get("kind") == kind and e.get("value") == value)]
         doc["entries"].append(entry)
-    _audit("denylist.add", added_by, entry)
+    _audit_add(added_by, entry)
     return entry
 
 
@@ -84,7 +84,7 @@ def remove_entry(*, value: str, kind: str) -> bool:
         deleted = coll.delete_one(
             {"kind": kind, "value": value}).deleted_count > 0
         if deleted:
-            _audit("denylist.remove", "", {"kind": kind, "value": value})
+            _audit_remove("", {"kind": kind, "value": value})
         return deleted
     removed = False
     with json_doc_transaction(_path(), {"entries": []}) as doc:
@@ -94,7 +94,7 @@ def remove_entry(*, value: str, kind: str) -> bool:
             if not (e.get("kind") == kind and e.get("value") == value)]
         removed = len(doc["entries"]) != before
     if removed:
-        _audit("denylist.remove", "", {"kind": kind, "value": value})
+        _audit_remove("", {"kind": kind, "value": value})
     return removed
 
 
@@ -110,11 +110,20 @@ def is_denied(value: str, *, kind: str) -> bool:
                for e in list_entries())
 
 
-def _audit(event: str, actor: str, entry: dict[str, Any]) -> None:
+def _audit_add(actor: str, entry: dict[str, Any]) -> None:
     from services.audit_coverage import record_security_event
 
     record_security_event(
-        event, outcome="succeeded", actor=actor or "system",
+        "denylist.add", outcome="succeeded", actor=actor or "system",
+        details={"kind": entry.get("kind"), "value": entry.get("value"),
+                 "source": entry.get("source"), "reason": entry.get("reason")})
+
+
+def _audit_remove(actor: str, entry: dict[str, Any]) -> None:
+    from services.audit_coverage import record_security_event
+
+    record_security_event(
+        "denylist.remove", outcome="succeeded", actor=actor or "system",
         details={"kind": entry.get("kind"), "value": entry.get("value"),
                  "source": entry.get("source"), "reason": entry.get("reason")})
 
