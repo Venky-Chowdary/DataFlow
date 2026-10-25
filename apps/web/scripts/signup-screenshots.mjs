@@ -265,7 +265,10 @@ async function run(vpName, viewport, theme) {
   await page.waitForTimeout(600);
   await page.evaluate(() => {
     const form = document.querySelector(".lp-login-form");
-    if (form && !form.querySelector(".lp-login-turnstile")) {
+    if (form && !form.querySelector("[data-shot-mock]")) {
+      // Hide the real test-key widget so the shot shows the production look.
+      const real = form.querySelector(".lp-login-turnstile");
+      if (real) (real as HTMLElement).style.display = "none";
       const dark = document.documentElement.dataset.theme === "dark";
       const mock = document.createElement("div");
       mock.className = "lp-login-turnstile";
