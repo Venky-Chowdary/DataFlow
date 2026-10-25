@@ -73,6 +73,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "password.reset.completed": "A password reset completed.",
     "email_change.requested": "An email change was requested.",
     "email_change.completed": "An email change completed.",
+    "email_change.rekey_flag_failed": "Flagging a half-moved account for rekey retry itself failed.",
     "admin.ban": "An admin banned or unbanned a user.",
     "admin.signup_held": "A signup was held for admin review.",
     "denylist.add": "A denylist entry was added.",
