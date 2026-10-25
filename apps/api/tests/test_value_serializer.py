@@ -83,11 +83,20 @@ def test_decimal_sanitize_json_value_is_exact_string():
 
 
 def test_cell_to_string_preserves_decimal_in_nested_json():
+    """Decimal leaves stay JSON *numbers* inside a document (D74).
+
+    The string-wire policy is for a DECIMAL column cell; inside a JSON
+    document ``"amount": "1000.00"`` retypes the leaf to text, so the digits
+    ride as an unquoted number with every digit intact.
+    """
     payload = {"amount": Decimal("1000.00"), "precision": Decimal("0.0000000000001")}
     text = cell_to_string(payload)
-    parsed = json.loads(text)
-    assert parsed["amount"] == "1000.00"
-    assert parsed["precision"] == "0.0000000000001"
+    compact = text.replace(" ", "")
+    assert '"amount":1000.00' in compact
+    assert '"precision":0.0000000000001' in compact
+    parsed = json.loads(text, parse_float=Decimal)
+    assert parsed["amount"] == Decimal("1000.00")
+    assert parsed["precision"] == Decimal("0.0000000000001")
 
 
 def test_cell_to_string_decimal_scalar_is_text():

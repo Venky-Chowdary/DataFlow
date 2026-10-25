@@ -61,6 +61,7 @@ from services.value_serializer import (
     cell_to_string,
     is_missing_sentinel,
     json_default,
+    canonical_json_text,
     json_loads_exact,
     load_http_json,
     operator_binary_cell_text,
@@ -4565,9 +4566,9 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if ddl_type and _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip()):
         if text.startswith(("{", "[")):
             try:
-                parsed = json_loads_exact(text)
-                if isinstance(parsed, (dict, list)):
-                    return json.dumps(parsed, sort_keys=True, default=json_default)
+                canon = canonical_json_text(text)
+                if canon is not None and canon.startswith(("{", "[")):
+                    return canon
             except (json.JSONDecodeError, TypeError):
                 pass
         if (
@@ -4617,9 +4618,9 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
-            parsed = json_loads_exact(text)
-            if isinstance(parsed, (dict, list)):
-                return json.dumps(parsed, sort_keys=True, default=json_default)
+            canon = canonical_json_text(text)
+            if canon is not None and canon.startswith(("{", "[")):
+                return canon
         except (json.JSONDecodeError, TypeError):
             pass
     # Date/time normalization: cheap heuristic first to avoid running the date

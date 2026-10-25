@@ -1200,7 +1200,11 @@ def _copy_text_value(value: Any) -> str:
         # escape and hand jsonb a different string — "C:\\temp" arrives as
         # "C:\temp", whose \t jsonb reads as a tab. Where the leftover escape is
         # not valid JSON at all the row is rejected outright.
-        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
+        # Document numbers stay numbers — a Decimal leaf is not a string
+        # (``{"pi": 3.14}`` must not write ``{"pi": "3.14"}``, D74).
+        from services.value_serializer import json_document_text
+
+        raw = json_document_text(value)
     elif isinstance(value, (bytes, bytearray, memoryview)):
         # ``\x`` is COPY's hex character escape, so an unescaped
         # ``\x68656c6c6f`` is consumed as the byte 0x68 plus the literal text

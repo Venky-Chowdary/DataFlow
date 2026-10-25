@@ -756,18 +756,40 @@ def read_postgres_rows(
     try:
         with conn.cursor(name=cursor_name) as cur:
             cur.itersize = _READ_BATCH
-            if columns:
-                col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
-                q = sql.SQL("SELECT {} FROM {}.{}").format(
-                    col_sql,
-                    sql.Identifier(schema_n),
-                    sql.Identifier(table),
+            # Project json/jsonb as engine text — psycopg2 decodes jsonb into
+            # Python, after which JSON ``null`` is indistinguishable from SQL
+            # NULL (and ``"1"``/``1`` collapse). The transfer reader projects
+            # ``col::text`` for the same reason; the independent re-read must
+            # fingerprint the same values (D75).
+            from connectors.postgresql_reader import _json_column_names
+
+            json_cols = _json_column_names(cur, schema_n, table)
+            names = columns
+            if names is None:
+                names = [d[0] for d in cur.description] if cur.description else []
+            if not names:
+                cur.execute(
+                    sql.SQL("SELECT * FROM {}.{} WHERE false").format(
+                        sql.Identifier(schema_n), sql.Identifier(table)
+                    )
+                )
+                names = [d[0] for d in cur.description] if cur.description else []
+            if json_cols:
+                col_sql = sql.SQL(", ").join(
+                    sql.SQL(
+                        "CASE WHEN {c} IS NULL THEN NULL ELSE {c}::text END AS {c}"
+                    ).format(c=sql.Identifier(n))
+                    if n in json_cols
+                    else sql.Identifier(n)
+                    for n in names
                 )
             else:
-                q = sql.SQL("SELECT * FROM {}.{}").format(
-                    sql.Identifier(schema_n),
-                    sql.Identifier(table),
-                )
+                col_sql = sql.SQL(", ").join(map(sql.Identifier, names))
+            q = sql.SQL("SELECT {} FROM {}.{}").format(
+                col_sql,
+                sql.Identifier(schema_n),
+                sql.Identifier(table),
+            )
             cur.execute(q)
             rows: list[dict[str, Any]] = []
             names: list[str] = []

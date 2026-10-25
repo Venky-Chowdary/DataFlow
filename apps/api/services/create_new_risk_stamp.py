@@ -198,7 +198,7 @@ def apply_create_new_risk_stamps(
             fid = str(row.get("fidelity") or "").strip().lower()
             # Lossless ADD COLUMN (INTEGER→INTEGER) — Approve-eligible, not 70% spam.
             # Still not silent Ready; operator confirms invent onto existing table.
-            if fid in {"preserve", "lossless"} and not risks:
+            if fid in {"preserve", "lossless", "normalizing"} and not risks:
                 row["requires_review"] = False
                 row["mapping_class"] = "equivalent_add_column"
                 try:
@@ -230,7 +230,7 @@ def apply_create_new_risk_stamps(
                 fid = "preserve"
             # Equivalent create-new (preserve) — high type certainty, still not
             # silent Ready: UI Approve / Approve-eligible; no Risk Contract spam.
-            if fid in {"preserve", "lossless"}:
+            if fid in {"preserve", "lossless", "normalizing"}:
                 row["requires_review"] = False
                 row["mapping_class"] = "equivalent_create_new"
                 try:

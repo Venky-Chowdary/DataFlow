@@ -510,6 +510,68 @@ def _document_text(value: Any, *, sort_keys: bool = False) -> str:
     return _document_text(_json_default(value), sort_keys=sort_keys)
 
 
+def _canonical_number_text(value: Any) -> str | None:
+    """One canonical spelling per real number — ``3.0`` ≡ ``3`` ≡ ``3e0``.
+
+    JSON has one numeric domain: engines that store documents as real numbers
+    (Snowflake VARIANT, Mongo, jsonb) read ``3.0`` back as ``3``. A semantic
+    compare must not call that a mismatch, and must not collapse ``3.0001``
+    into ``3`` either — only the spelling is folded, not the value (D73).
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        # Decimal.normalize() folds 3.0/3.00/3e0 to one digit string.
+        return format(value.normalize(), "f")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer() and abs(value) < 2**63:
+            return str(int(value))
+        return repr(value)
+    return None
+
+
+def canonical_json_text(document_text: str) -> str | None:
+    """Canonical form of a JSON document for fingerprint/semantic compare.
+
+    Parses exactly (``json_loads_exact`` — no binary64 rounding), then renders
+    every number through ``_canonical_number_text`` and sorts object keys, so
+    ``{"n": 3.0}`` and ``{"n": 3}`` — the same JSON value — compare equal while
+    ``{"n": 3.0001}`` still differs. Returns ``None`` when the text is not a
+    JSON document a strict parser accepts.
+    """
+    try:
+        parsed = json_loads_exact(document_text)
+    except Exception:
+        return None
+
+    def render(v: Any) -> str:
+        num = _canonical_number_text(v)
+        if num is not None:
+            return num
+        if v is None or isinstance(v, JsonNullToken):
+            return "null"
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, str):
+            return json.dumps(v, ensure_ascii=False)
+        if isinstance(v, (list, tuple)):
+            return "[" + ",".join(render(i) for i in v) + "]"
+        if isinstance(v, Mapping):
+            return "{" + ",".join(
+                f"{json.dumps(str(k), ensure_ascii=False)}:{render(val)}"
+                for k, val in sorted(v.items(), key=lambda kv: str(kv[0]))
+            ) + "}"
+        return render(_json_default(v))
+
+    return render(parsed)
+
+
 class JsonNullToken:
     """JSON null as engine text ``null``, distinct from SQL NULL.
 
@@ -761,14 +823,10 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
         return sanitize_json_value(value.value)
 
     if isinstance(value, (dict, list, tuple, set, frozenset)):
-        return json.dumps(
-            sanitize_json_value(value),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-            default=json_default,
-            allow_nan=False,
-        )
+        # Numbers inside a document stay numbers — the string-wire policy for a
+        # DECIMAL column does not apply to a JSON document's leaves, so ``{"pi":
+        # 3.14}`` must not be rewritten as ``{"pi": "3.14"}`` (D74).
+        return json_document_text(value, sort_keys=True)
 
     # Fallback to str() — never repr().
     return str(value)

@@ -128,9 +128,11 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
         return value
     if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
         if isinstance(value, (dict, list)):
-            return json.dumps(
-                value, ensure_ascii=False, separators=(",", ":"), default=json_default
-            )
+            # Document leaves stay numbers — a Decimal leaf must not write as
+            # a JSON string (``{"pi": 3.14}`` not ``{"pi": "3.14"}``, D74).
+            from services.value_serializer import json_document_text
+
+            return json_document_text(value)
         return value
     if upper in {"BINARY", "BLOB", "BYTEA", "VARBINARY"} or upper.startswith(
         ("BINARY(", "VARBINARY(", "BLOB(")

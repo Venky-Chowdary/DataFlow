@@ -295,7 +295,7 @@ def _reconcile_preserve_lossy_review(mappings: list[dict]) -> list[dict]:
         fid = str(row.get("fidelity") or "").strip().lower()
         reason = str(row.get("reasoning") or "")
         if (
-            fid in {"preserve", "lossless"}
+            fid in {"preserve", "lossless", "normalizing"}
             and not row.get("type_narrowing")
             and row.get("requires_review")
             and "lossy type pair" in reason.lower()
@@ -1664,7 +1664,7 @@ def run_mapping_pipeline(
         if (
             destination_table_exists is None
             and destination_is_file_export(destination_db_type)
-            and str(row.get("fidelity") or "") == "preserve"
+            and str(row.get("fidelity") or "") in {"preserve", "normalizing"}
         ):
             row["fidelity"] = FIDELITY_DEST_TYPE_UNREAD
             row["fidelity_reason"] = DEST_TYPE_UNREAD_REASON
