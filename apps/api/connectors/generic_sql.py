@@ -2715,6 +2715,41 @@ def _sample_raw_table(
     return headers, rows
 
 
+def _is_not_found_error(exc: BaseException) -> bool:
+    """'object does not exist' — an expected state, not a probe failure.
+
+    Cross-dialect: DuckDB ``CatalogException`` ("Table with name X does
+    not exist"), SQLAlchemy ``NoSuchTableError``, PostgreSQL
+    ``UndefinedTable``, Oracle ORA-00942, SQL Server "Invalid object name",
+    MySQL 1146. Walks ``__cause__``/``__context__`` so a SQLAlchemy
+    ``ProgrammingError`` wrapping the driver's own not-found still counts.
+    """
+    import re
+
+    if isinstance(exc, sa.exc.NoSuchTableError):
+        return True
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    names = {type(e).__name__ for e in chain}
+    if names & {"NoSuchTableError", "UndefinedTable", "CatalogException"}:
+        return True
+    blob = " ".join(str(e) for e in chain)[:4000]
+    return bool(
+        re.search(
+            r"does not exist|doesn't exist|invalid object name|"
+            r"ora-00942|sqlstate 42p01|\(1146\)|unknown table|"
+            r"catalog error: (table|schema|database)",
+            blob,
+            re.IGNORECASE,
+        )
+    )
+
+
 def introspect_table_schema(
     cfg: dict[str, Any],
     table: str,
@@ -2910,6 +2945,23 @@ def introspect_table_schema(
             "schema": schema or "",
         }
     except Exception as exc:
+        if _is_not_found_error(exc):
+            # A table that does not exist yet (first run, create-on-write)
+            # is an expected answer, not an error — one line, no traceback
+            # (D4: noisy CatalogException on the first DuckDB run).
+            logger.info(
+                "generic_sql introspect: %s.%s does not exist", schema, table
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"Table {schema + '.' if schema else ''}{table} "
+                    "does not exist"
+                ),
+                "not_found": True,
+                "columns": [],
+                "tables": [],
+            }
         logger.warning("generic_sql introspect failed", exc_info=True)
         # Surface the driver's own reason — an operator cannot fix
         # "OperationalError" with no message attached (QA sqlserver→* routes
