@@ -3915,10 +3915,14 @@
   }
 
   /* Brand collapses to a compact header ABOVE the card — Back stays
-     top-left, logo right, and the page title is the one line of copy. */
+     top-left, logo right, and the page title is the one line of copy.
+     The bottom edge is a deliberate rounded seam instead of a hard
+     horizontal cut where the gradient stops. */
   .lp-login-brand {
     min-height: auto;
     order: 0;
+    border-radius: 0 0 26px 26px;
+    box-shadow: 0 1px 0 rgba(13, 148, 136, 0.18);
   }
 
   .lp-login-brand-inner {

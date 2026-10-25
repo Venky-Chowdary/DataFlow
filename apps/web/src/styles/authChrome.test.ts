@@ -57,3 +57,9 @@ describe("resend hint row", () => {
     assert.match(rule, /white-space:\s*nowrap/);
   });
 });
+
+describe("mobile brand header edge", () => {
+  it("ends on a deliberate rounded seam, not a hard cut", () => {
+    assert.match(EDITORIAL, /\.lp-login-brand\s*\{[^}]*border-radius:\s*0 0 26px 26px/);
+  });
+});
