@@ -35,7 +35,12 @@ def create_pending_job(engine: Any, request: Any) -> str:
         or "destination"
     )
     job_doc: dict[str, Any] = {
-        "source_type": request.source.kind,
+        # The connector format is the type operators read ("s3", "rest_api",
+        # "postgresql"); the endpoint kind is routing ("database" even for
+        # S3/REST reads). Stamping kind here showed source_type="database"
+        # on S3 and REST jobs (M2).
+        "source_type": request.source.format or request.source.kind,
+        "source_kind": request.source.kind,
         "source_name": source_name,
         "name": f"{source_name} → {dest_label}",
         "name_key": f"{source_name} → {dest_label}".strip().casefold(),
