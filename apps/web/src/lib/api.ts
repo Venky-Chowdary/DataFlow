@@ -206,7 +206,10 @@ async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): 
   // Cookie session (P3): mutating requests echo the readable dw_csrf cookie so
   // the middleware's double-submit check can bind the call to this browser.
   const method = (requestInit.method ?? "GET").toUpperCase();
-  if (method !== "GET" && method !== "HEAD" && !headers.has("x-csrf-token")) {
+  if (
+    method !== "GET" && method !== "HEAD" && !headers.has("x-csrf-token")
+    && typeof document !== "undefined"
+  ) {
     const csrf = (document.cookie.match(/(?:^|;\s*)dw_csrf=([^;]+)/) ?? [])[1];
     if (csrf) headers.set("x-csrf-token", decodeURIComponent(csrf));
   }
