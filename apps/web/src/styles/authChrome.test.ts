@@ -13,10 +13,11 @@ const EDITORIAL = readFileSync(join(STYLES_DIR, "marketing-editorial.css"), "utf
 const LANDING = readFileSync(join(STYLES_DIR, "landing.css"), "utf8");
 
 function ruleBody(css: string, selector: string): string | null {
-  const i = css.indexOf(`${selector} {`);
+  const i = css.indexOf(selector);
   if (i === -1) return null;
-  const end = css.indexOf("}", i);
-  return end === -1 ? null : css.slice(i + selector.length + 1, end);
+  const open = css.indexOf("{", i);
+  const end = open === -1 ? -1 : css.indexOf("}", open);
+  return end === -1 ? null : css.slice(open + 1, end);
 }
 
 /** sRGB relative-luminance contrast ratio. */
