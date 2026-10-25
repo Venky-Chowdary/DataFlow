@@ -59,6 +59,26 @@ SECURITY_EVENTS: dict[str, str] = {
     "scim.group.role_change": "A SCIM group changed a workspace role.",
     "scim.group.member_add": "Members were added to a SCIM group.",
     "scim.group.member_remove": "Members were removed from a SCIM group.",
+    # Self-serve signup surface (DATAWRAP_SIGNUP_ENABLED).
+    "signup.requested": "A self-serve signup was accepted for verification.",
+    "signup.verified": "A signup email was verified and the account created.",
+    "signup.blocked": "A signup attempt was refused by an abuse check.",
+    "otp.sent": "A one-time code was sent.",
+    "otp.resent": "A one-time code was re-sent.",
+    "otp.verify_failed": "A one-time code verification failed.",
+    "otp.burned": "A one-time code challenge hit the attempt cap.",
+    "session.created": "A session was created.",
+    "session.revoked": "A session was revoked.",
+    "password.reset.requested": "A password reset code was requested.",
+    "password.reset.completed": "A password reset completed.",
+    "email_change.requested": "An email change was requested.",
+    "email_change.completed": "An email change completed.",
+    "admin.ban": "An admin banned or unbanned a user.",
+    "admin.signup_held": "A signup was held for admin review.",
+    "denylist.add": "A denylist entry was added.",
+    "denylist.remove": "A denylist entry was removed.",
+    "sales.lead.created": "A contact-sales lead was received.",
+    "email.event.received": "An email delivery webhook event was received.",
 }
 
 _REQUEST_PRINCIPAL: ContextVar[dict[str, str] | None] = ContextVar(

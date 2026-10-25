@@ -238,6 +238,7 @@ class Workspace:
     name: str
     created_at: str = field(default_factory=_now)
     created_by: str = ""
+    org_id: str = ""  # owning organization (signup-created orgs; "" = pre-org era)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -249,6 +250,7 @@ class Workspace:
             name=data.get("name", ""),
             created_at=data.get("created_at", _now()),
             created_by=data.get("created_by", ""),
+            org_id=data.get("org_id", ""),
         )
 
 
@@ -425,7 +427,7 @@ def _delete_workspace_rows(workspace_id: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def create_workspace(*, name: str, created_by: str) -> Workspace:
+def create_workspace(*, name: str, created_by: str, org_id: str = "") -> Workspace:
     """Create a workspace and make its creator the first admin, as one unit.
 
     The workspace row and its first membership are two documents, so writing them
@@ -438,6 +440,7 @@ def create_workspace(*, name: str, created_by: str) -> Workspace:
         id=str(uuid.uuid4()),
         name=name.strip()[:128] or "Workspace",
         created_by=normalize_email(created_by),
+        org_id=org_id,
     )
     first_admin = Membership(
         workspace_id=ws.id,
