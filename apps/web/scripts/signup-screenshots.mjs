@@ -116,7 +116,8 @@ async function run(vpName, viewport, theme) {
   const page = await ctx.newPage();
   const tag = `${vpName}-${theme}`;
   const uniq = `${vpName}.${theme}`;
-  const email = `verify.${uniq}@datawrap.io`;
+  const runId = Date.now().toString(36);
+  const email = `verify.${uniq}.${runId}@datawrap.io`;
 
   await gotoLogin(page, theme);
   await shot(page, `${tag}-01-login`);
