@@ -289,18 +289,24 @@ def _split_routed_batch(
             # map's SOURCE names from the shared batch headers, emit the
             # TARGET names. The row dict is never rewritten at shape time —
             # every routed row keeps the shared shape (RT-3).
-            wanted = [str(s) for s in route_map.keys() if str(s) in batch.headers]
+            wanted = [
+                str(s)
+                for s in route_map.keys()
+                if header_column_index(batch.headers, str(s)) is not None
+            ]
             emit = [str(route_map[s]) for s in wanted]
-            ix = [batch.headers.index(c) for c in wanted]
+            ix = [header_column_index(batch.headers, c) for c in wanted]
             headers = emit
             rows = [
                 [r[i] for i in ix] for r in (batch.rows[i] for i in groups[name])
             ]
         else:
             wanted = [
-                c for c in recipe.route_output_columns(name) if c in batch.headers
+                c
+                for c in recipe.route_output_columns(name)
+                if header_column_index(batch.headers, c) is not None
             ]
-            ix = [batch.headers.index(c) for c in wanted]
+            ix = [header_column_index(batch.headers, c) for c in wanted]
             headers = [batch.headers[i] for i in ix]
             rows = [
                 [r[i] for i in ix] for r in (batch.rows[i] for i in groups[name])
@@ -2901,7 +2907,14 @@ def _stream_database_transfer_impl(
             headers = list(batch.headers or [])
             if pin_ledger is not None:
                 pin_ledger.add_page(headers, batch.rows)
-            unknown = [h for h in headers if h and h not in shape_inputs]
+            _shape_inputs_folded = {
+                str(s).casefold() for s in (shape_inputs or [])
+            }
+            unknown = [
+                h
+                for h in headers
+                if h and str(h).casefold() not in _shape_inputs_folded
+            ]
             if unknown:
                 # A column the recipe was never validated against cannot be
                 # shaped, and writing it raw beside shaped columns would put two
