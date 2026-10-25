@@ -25,6 +25,7 @@ from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.auth_state import get_auth_state
 from services.email_canonical import canonical_email
+from services.email_policy import role_assessment
 from services.email_quota import consume_send_slot
 from services.email_sender import (
     EmailQuotaExceeded,
@@ -80,6 +81,13 @@ def request_signup(
         # Validation is fine to surface — it reveals nothing about the account.
         raise ApiError(400, "invalid_password",
                        f"password must be {MIN_PASSWORD_LEN}-{MAX_PASSWORD_LEN} characters")
+    role = role_assessment(normalized)
+    if role == "blocked":
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code="role_address",
+                              details={"ip": ip})
+        raise ApiError(400, "blocked_address",
+                       "this address can't be used for signup")
     canonical = canonical_email(normalized)
 
     # Constant-work: hash on every path so timing doesn't reveal whether the
@@ -124,7 +132,7 @@ def request_signup(
         password_hash=password_hash,
         ip=ip,
         device_id=device_id,
-        risk_score=0.0,
+        risk_score=10.0 if role == "flagged" else 0.0,
     )
     challenge, code = otp_service.issue(row["id"], "signup")
     try:
