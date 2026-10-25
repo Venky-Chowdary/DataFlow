@@ -4504,6 +4504,15 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         if abs(ss - round(ss)) > 1e-9:
             return f"{sign}{hh:02d}:{mm:02d}:{ss:09.6f}".rstrip("0").rstrip(".")
         return f"{sign}{hh:02d}:{mm:02d}:{int(ss):02d}"
+    if (
+        ddl_type
+        and not isinstance(value, bool)
+        and isinstance(value, (float, int, Decimal, str))
+        and _single_precision_carrier(ddl_type, engine)
+    ):
+        _f32_text = _float32_cell_text(value)
+        if _f32_text is not None:
+            return _f32_text
     if isinstance(value, float):
         # Pass the float through — str(float) keeps IEEE residue and false-fails
         # Gate-8 vs DECIMAL sinks (106.60000000000001 vs 106.6).
@@ -4713,6 +4722,82 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
 def _checksum_datetime_utc_z(iso_text: str) -> str:
     """Backward-compatible alias — checksums use wall-clock UTC, not Z."""
     return _checksum_datetime_utc_wall(iso_text)
+
+
+def _single_precision_carrier(ddl_type: str, engine: str) -> bool:
+    """True when ``ddl_type`` is an IEEE-754 binary32 carrier on ``engine``.
+
+    ``float_mantissa_bits`` resolves the unambiguous single-precision tokens
+    (``REAL`` off the double-REAL dialects, ``FLOAT4``/``FLOAT32``/
+    ``BINARY_FLOAT``, ``FLOAT(p≤24)``) but reports bare ``FLOAT`` as
+    width-unknown. Bare ``FLOAT`` IS binary32 on MySQL/MariaDB and DuckDB,
+    so those engines resolve it here; everywhere else bare FLOAT stays
+    unknown and no float32 fold applies (PG ``float`` is float8, MSSQL
+    ``float`` is float8, Snowflake ``FLOAT`` is float8).
+    """
+    from services.numeric_fit import float_mantissa_bits
+
+    bits = float_mantissa_bits(ddl_type, dest_db=engine)
+    if bits is not None:
+        return bits == 24
+    eng = (engine or "").strip().lower()
+    raw = re.sub(r"\s+", "", str(ddl_type or "").upper())
+    raw = raw.replace("UNSIGNED", "")
+    return raw == "FLOAT" and eng in {"mysql", "mariadb", "duckdb"}
+
+
+def _float32_cell_text(value: Any) -> str | None:
+    """Canonical text of a cell at IEEE-754 binary32 granularity.
+
+    A single-precision carrier keeps 24 significand bits, so the same stored
+    value reads back as ``0.33333334`` from one driver and
+    ``0.3333333432674408`` (the float64 widening) from another. The fold
+    rounds through ``struct.pack('f')`` and emits the shortest decimal that
+    round-trips that float32 — the same contract
+    ``_decimal_from_ieee_float`` (.15g) gives doubles. ``-0.0`` folds to
+    ``"0"`` for parity with the double path's zero handling. Returns ``None``
+    for values that cannot take the float path so the caller falls through to
+    the generic branches.
+    """
+    import math
+    import struct
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            f = float(text)
+        except ValueError:
+            return None
+    elif isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        try:
+            f = float(value)
+        except (OverflowError, ValueError, TypeError):
+            return None
+    else:
+        return None
+    if math.isnan(f):
+        return "nan"
+    if math.isinf(f):
+        return "Infinity" if f > 0 else "-Infinity"
+    try:
+        packed = struct.pack("f", f)
+    except (OverflowError, struct.error):
+        return None
+    v32 = struct.unpack("f", packed)[0]
+    if v32 == 0:
+        return "0"
+    # Shortest decimal that round-trips the float32 (9 significant digits is
+    # always enough for binary32).
+    for precision in range(1, 10):
+        candidate = format(v32, f".{precision}g")
+        try:
+            if struct.pack("f", float(candidate)) == packed:
+                return candidate
+        except (ValueError, OverflowError, struct.error):
+            continue
+    return format(v32, ".9g")
 
 
 def _decimal_from_ieee_float(value: float) -> Decimal | None:
