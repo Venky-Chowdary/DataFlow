@@ -6,6 +6,7 @@ pending row is gone; the challenge is consumed.
 
 from __future__ import annotations
 
+import services.form_token as form_token_mod
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -21,6 +22,8 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAWRAP_EMAIL_PROVIDER", "console")
     monkeypatch.setenv("DATAWRAP_OTP_PEPPER", "test-pepper")
     monkeypatch.setattr(signup_service.mx_check, "check_domain", lambda d: {"ok": True})
+    import services.form_token as form_token_mod
+    monkeypatch.setattr(form_token_mod, "MIN_FILL_MS", 0)
     monkeypatch.setenv("DATAWRAP_ENV", "test")
     monkeypatch.setattr(signup_store, "_pending_path", lambda: tmp_path / "pending.json")
     monkeypatch.setattr(signup_store, "_challenges_path", lambda: tmp_path / "challenges.json")
@@ -53,6 +56,7 @@ def _signup_and_code(client: TestClient, email="ada@example.com") -> tuple[str, 
     resp = client.post("/api/v1/auth/signup", json={
         "email": email, "password": "a-very-long-password", "name": "Ada",
         "device_id": "d1",
+        "form_token": form_token_mod.issue("signup"),
     })
     assert resp.status_code == 202
     mail = ConsoleEmailSender.OUTBOX[-1]

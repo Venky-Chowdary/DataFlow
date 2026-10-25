@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 
+import services.form_token as form_token_mod
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
@@ -23,6 +24,7 @@ def _isolate(monkeypatch, tmp_path):
     import services.signup_service as signup_service
     monkeypatch.setattr(signup_service.mx_check, "check_domain",
                         lambda d: {"ok": True})
+    monkeypatch.setattr(form_token_mod, "MIN_FILL_MS", 0)
     disposable_list._reset_for_tests()
     yield
     disposable_list._reset_for_tests()
@@ -111,6 +113,7 @@ def test_signup_refuses_vendored_domain():
     app.add_exception_handler(ApiError, api_error_handler)
     app.include_router(router, prefix="/api/v1")
     resp = TestClient(app).post("/api/v1/auth/signup", json={
-        "email": "a@mailinator.com", "password": "a-very-long-password"})
+        "email": "a@mailinator.com", "password": "a-very-long-password",
+        "form_token": form_token_mod.issue("signup")})
     assert resp.status_code == 400
     assert resp.json()["error"]["code"] == "blocked_address"

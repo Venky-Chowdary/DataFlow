@@ -7,6 +7,7 @@ notice mail instead of a code; nothing about which path ran is visible.
 from __future__ import annotations
 
 import pytest
+import services.form_token as ft
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
@@ -21,6 +22,8 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAWRAP_EMAIL_PROVIDER", "console")
     monkeypatch.setenv("DATAWRAP_OTP_PEPPER", "test-pepper")
     monkeypatch.setattr(signup_service.mx_check, "check_domain", lambda d: {"ok": True})
+    import services.form_token as form_token_mod
+    monkeypatch.setattr(form_token_mod, "MIN_FILL_MS", 0)
     monkeypatch.setenv("DATAWRAP_ENV", "test")
     monkeypatch.setattr(signup_store, "_pending_path", lambda: tmp_path / "pending.json")
     monkeypatch.setattr(signup_store, "_challenges_path", lambda: tmp_path / "challenges.json")
@@ -56,7 +59,7 @@ def _body(**kw):
         "password": kw.get("password", "a-very-long-password"),
         "name": kw.get("name", "Ada"),
         "turnstile_token": "",
-        "form_token": "",
+        "form_token": ft.issue("signup"),
         "device_id": "d1",
         "honeypot": "",
     }

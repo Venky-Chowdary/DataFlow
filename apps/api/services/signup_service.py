@@ -26,6 +26,7 @@ from services.audit_coverage import record_security_event
 from services.auth_state import get_auth_state
 from services.email_canonical import canonical_email
 from services import denylist_store, disposable_list, mx_check, turnstile
+from services import form_token as form_token_mod
 from services.email_policy import role_assessment
 from services.email_quota import consume_send_slot
 from services.email_sender import (
@@ -76,8 +77,19 @@ def request_signup(
     device_id: str = "",
     ua: str = "",
     turnstile_token: str = "",
+    form_token: str = "",
+    honeypot: str = "",
 ) -> dict[str, Any]:
     """Accept a signup. Same 202 body for new/pending/existing addresses."""
+    # Bot wall: honeypot filled or a bad/expired/fast form token gets a fake
+    # 202 — nothing stored, nothing mailed, nothing logged beyond the event.
+    verdict_form = form_token_mod.check(
+        form_token, purpose="signup", honeypot=honeypot)
+    if not verdict_form["ok"]:
+        record_security_event("signup.blocked", outcome="failed",
+                              reason_code=f"form:{verdict_form['reason']}",
+                              details={"ip": ip})
+        return form_token_mod.fake_accept_body()
     # Turnstile: enforced when a secret is configured; unconfigured just
     # raises the risk floor (P2-8 wires the full scorer).
     if turnstile.configured():

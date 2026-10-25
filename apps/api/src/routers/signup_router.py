@@ -79,7 +79,18 @@ async def signup(body: SignupRequest, request: Request):
         device_id=body.device_id,
         ua=request.headers.get("user-agent", "")[:512],
         turnstile_token=body.turnstile_token,
+        form_token=body.form_token,
+        honeypot=body.honeypot,
     )
+
+
+@router.get("/form-token")
+async def form_token_issuer(purpose: str = "signup"):
+    """Signed form-start token (P2-7). Mounted under /auth but it is the
+    public form endpoint — signup and sales forms fetch one on mount."""
+    from services.form_token import issue
+
+    return {"form_token": issue(purpose[:32] or "signup")}
 
 
 @router.post("/verify-email")
