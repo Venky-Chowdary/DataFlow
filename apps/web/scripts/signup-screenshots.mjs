@@ -195,11 +195,16 @@ async function run(vpName, viewport, theme) {
   try {
     const token = mintResetToken(email);
     await page.goto(`${BASE}/reset-password#token=${token}`, { waitUntil: "networkidle" });
-    await page.waitForTimeout(1200);
+    const newPass = page.locator("#reset-password");
+    try {
+      await newPass.waitFor({ timeout: 15000 });
+    } catch {
+      await shot(page, `${tag}-11-reset-form-BAD`);
+      throw new Error("reset form never reached status=ok");
+    }
     await shot(page, `${tag}-11-reset-form`);
 
     // Weak password → inline error.
-    const newPass = page.locator('input[autocomplete="new-password"]').first();
     if (await newPass.count()) {
       await newPass.fill("short");
       await page.locator('button[type="submit"]').last().click();
@@ -218,7 +223,7 @@ async function run(vpName, viewport, theme) {
 
   // Bogus link → expired/used page.
   await page.goto(`${BASE}/reset-password#token=not-a-real-token-000`, { waitUntil: "networkidle" });
-  await page.waitForTimeout(1200);
+  await page.getByText("This link has expired or was already used").waitFor({ timeout: 15000 }).catch(() => {});
   await shot(page, `${tag}-14-reset-expired`);
 
   // ---- review-8 item 11: missing states ----
@@ -234,7 +239,7 @@ async function run(vpName, viewport, theme) {
   await shot(page, `${tag}-16-btn-focus`);
   await page.route("**/api/v1/auth/signup", async (route) => {
     await new Promise((r) => setTimeout(r, 1800));
-    await route.continue();
+    try { await route.continue(); } catch { /* request already settled */ }
   });
   await page.locator("#signup-name").fill("Ada Lovelace");
   await page.locator('input[type="email"]').first().fill(`busy.${uniq}@datawrap.io`);
