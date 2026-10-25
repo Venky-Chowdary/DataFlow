@@ -297,12 +297,16 @@ async function run(vpName, viewport, theme) {
       }),
     }));
   try {
-    // The icon-only Settings button is hidden on narrow layouts; the
-    // account button (title/aria-label = email) opens the same screen.
+    // The icon-only Settings button is hidden on narrow layouts — open the
+    // mobile nav and pick the Settings item (sidebar is inert until then).
     const gear = page.locator('button[title="Settings"]');
-    const acct = page.locator('button[aria-label*="@"]');
-    if (await gear.count()) await gear.first().click();
-    else await acct.first().click();
+    if (await gear.isVisible().catch(() => false)) {
+      await gear.first().click();
+    } else {
+      await page.locator(".df2-mobile-menu").first().click();
+      await page.waitForTimeout(500);
+      await page.locator('button.df2-nav-item[title="Security, team, SSO"]').click();
+    }
     await page.waitForTimeout(1500);
     await page.getByRole("tab", { name: /Security/ }).first().click();
     await page.waitForTimeout(1200);
