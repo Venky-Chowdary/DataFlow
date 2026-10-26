@@ -985,13 +985,18 @@ def _run_g14() -> list[dict[str, Any]]:
     return cells
 
 
+def _sqlserver_host() -> str:
+    return os.environ.get("DATAFLOW_SQLSERVER_HOST") or os.environ.get("DATAFLOW_TEST_MSSQL_HOST", "localhost")
+
+
 def _sqlserver_prepare(table: str) -> str | None:
-    if not reachable("localhost", 1433):
-        return "SQL Server not reachable on 1433"
+    host = _sqlserver_host()
+    if not reachable(host, 1433):
+        return f"SQL Server not reachable on {host}:1433"
     import pymssql
 
     conn = pymssql.connect(
-        server="localhost", port=1433, user="sa",
+        server=host, port=1433, user="sa",
         password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""), database="dataflow",
     )
     try:
@@ -1011,7 +1016,7 @@ def _sqlserver_count(table: str) -> int:
     import pymssql
 
     conn = pymssql.connect(
-        server="localhost", port=1433, user="sa",
+        server=_sqlserver_host(), port=1433, user="sa",
         password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""), database="dataflow",
     )
     try:

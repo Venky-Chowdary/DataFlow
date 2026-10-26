@@ -302,11 +302,15 @@ def redis_endpoint(prefix: str) -> EndpointConfig:
     )
 
 
+def _sqlserver_host() -> str:
+    return os.environ.get("DATAFLOW_SQLSERVER_HOST") or os.environ.get("DATAFLOW_TEST_MSSQL_HOST", "localhost")
+
+
 def sqlserver_endpoint(table: str) -> EndpointConfig:
     return EndpointConfig(
         kind="database",
         format="sqlserver",
-        host="localhost",
+        host=_sqlserver_host(),
         port=1433,
         database="dataflow",
         username="sa",
@@ -897,7 +901,7 @@ def drop_sqlserver_table(table: str) -> None:
     import pymssql
 
     conn = pymssql.connect(
-        server="localhost",
+        server=_sqlserver_host(),
         port=1433,
         user="sa",
         password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
@@ -918,7 +922,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
         import pymssql
 
         conn = pymssql.connect(
-            server="localhost",
+            server=_sqlserver_host(),
             port=1433,
             user="sa",
             password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
@@ -951,7 +955,7 @@ def read_sqlserver_row(table: str, row_id: int = 1) -> dict[str, Any]:
 
         conn = pyodbc.connect(
             "DRIVER={ODBC Driver 17 for SQL Server};"
-            f"SERVER=localhost,1433;DATABASE=dataflow;UID=sa;PWD={os.environ.get('DATAFLOW_TEST_MSSQL_PASSWORD', '')};"
+            f"SERVER={_sqlserver_host()},1433;DATABASE=dataflow;UID=sa;PWD={os.environ.get('DATAFLOW_TEST_MSSQL_PASSWORD', '')};"
             "TrustServerCertificate=yes;"
         )
         try:
