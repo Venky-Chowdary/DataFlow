@@ -61,9 +61,12 @@ def _pg_csv_export_expr(source: str, declared: str, target: str) -> str:
     """Project one column as operator CSV text.
 
     PostgreSQL COPY writes a boolean as ``t``/``f``. The file the operator
-    downloads spells ``true``/``false``. NULL is the shared SQL sentinel, not
-    an empty field: CSV has no null token, and ``NULL ''`` made a Postgres
-    NULL indistinguishable from ``""`` (R7-001).
+    downloads spells ``true``/``false``. NULL travels the C04 codec: an
+    unquoted empty field (PostgreSQL's CSV NULL ''), while a real '' is
+    emitted quoted ``""`` by COPY itself — so NULL, '', and a literal
+    '__DF_SQL_NULL__' read back as three distinct values. The old
+    ``NULL '__DF_SQL_NULL__'`` convention both wrote literal sentinel text
+    into operator files and let a real '' escape unquoted (reads back NULL).
     """
     from services.copy_pg_mysql import _pg_base
 
@@ -163,11 +166,13 @@ def copy_postgres_to_s3(
             _pg_csv_export_expr(src, live_l.get(src.lower()) or "", tgt)
             for src, tgt in pairs
         )
-        # Operator CSV: an empty field is NULL, a boolean is true/false.
-        # PostgreSQL's default COPY text (\\N and t/f) is not that file.
+        # Operator CSV (C04): an unquoted empty field is NULL, a quoted "" is
+        # a real ''. PostgreSQL's CSV writer already emits exactly that with
+        # NULL '' (it quotes '' itself), while its default text format
+        # (\\N and t/f) is not that file.
         copy_sql = (
             f"COPY (SELECT {select_list} FROM {source_ref}) "  # nosec B608
-            f"TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER {delim}, NULL '__DF_SQL_NULL__')"
+            f"TO STDOUT WITH (FORMAT csv, HEADER true, DELIMITER {delim}, NULL '')"
         )
         fd, tmp_path = tempfile.mkstemp(prefix="df-pg-s3-", suffix=f".{ext}")
         os.close(fd)
