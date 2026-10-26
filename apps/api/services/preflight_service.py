@@ -33,7 +33,13 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.data_profiler import source_types_are_authoritative
-from services.db_type_utils import dest_declares_column_ddl, normalize_dest_kind
+from services.db_type_utils import (
+    DESTS_WITHOUT_SCHEMA_RECREATE,
+    NO_RELATIONAL_DDL_DESTS,
+    SCHEMALESS_DESTS,
+    dest_declares_column_ddl,
+    normalize_dest_kind,
+)
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.preflight_fk_gate import build_fk_block
 from services.preflight_file_plan import (
@@ -1676,7 +1682,21 @@ def run_file_preflight(
         _upsert_constraint_mode = _requires_upsert(sync_mode) and _nsm(
             sync_mode, default=""
         ) != "scd2"
-        if _upsert_constraint_mode and destination_table_exists is True:
+        # Non-relational destinations (SaaS REST, object stores, schemaless,
+        # Kafka/vector) are natively keyed upserts — DataFlow never runs
+        # CREATE UNIQUE INDEX on them, so there is no DDL to disclose. Blocking
+        # them here false-blocks every reverse-ETL route with a pre-existing
+        # object (e.g. HubSpot 'contacts').
+        _dest_no_unique_ddl = (
+            dest_kind in DESTS_WITHOUT_SCHEMA_RECREATE
+            or dest_kind in NO_RELATIONAL_DDL_DESTS
+            or dest_kind in SCHEMALESS_DESTS
+        )
+        if (
+            _upsert_constraint_mode
+            and not _dest_no_unique_ddl
+            and destination_table_exists is True
+        ):
             from services.destination_key_collision_probe import _identity_pairs
             from services.upsert_ddl_gate import (
                 count_dest_duplicate_keys,
