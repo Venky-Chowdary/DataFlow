@@ -3992,6 +3992,19 @@
   }
 }
 
+@media (max-width: 560px) {
+  /* "Create your workspace" sat ~8px under the Back row on 390px — give
+     the head->title stack the same vertical rhythm token the tablet
+     header uses instead of the tight compact-header gap. */
+  .lp-login-brand-inner {
+    gap: var(--lp-brand-head-gap, 22px);
+  }
+
+  .lp-login-brand-body {
+    padding-top: var(--lp-brand-title-pad, 8px);
+  }
+}
+
 @media (max-width: 640px) {
   .lp-login-brand-proof,
   .lp-login-proof {
