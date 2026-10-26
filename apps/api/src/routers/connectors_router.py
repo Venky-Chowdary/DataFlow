@@ -25,6 +25,7 @@ from services.runtime_estimate import estimate_for_job_doc
 from services.team_store import can_read_workspace, can_write_workspace
 from services.workspace_access import assert_resource_workspace, workspace_resource_is_visible
 from services.value_serializer import json_default
+from services.upload_limits import PayloadTooLarge, read_upload
 from services.connector_telemetry import connector_operation, driver_family
 
 from ..services.file_parser import FileParser
@@ -2437,7 +2438,7 @@ async def upload_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        content = await file.read()
+        content = await read_upload(file)
         use_ocr = enable_ocr.lower() in ("true", "1", "yes")
         result = FileParser.parse(
             content,
@@ -2518,7 +2519,7 @@ async def upload_file(
             "ocr_status": ocr_dependency_status(),
         }
 
-    except HTTPException:
+    except (HTTPException, PayloadTooLarge):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2569,7 +2570,7 @@ async def transfer_data(
         if ident_err:
             raise HTTPException(status_code=400, detail=ident_err)
 
-        content = await file.read()
+        content = await read_upload(file)
         src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
         if src_fmt == "unknown":
             src_fmt = "csv"
@@ -2665,7 +2666,7 @@ async def transfer_data(
             "ddl_executed": result.ddl_executed,
             "operation": result.operation,
         }
-    except HTTPException:
+    except (HTTPException, PayloadTooLarge):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
