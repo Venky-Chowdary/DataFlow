@@ -226,10 +226,13 @@ def caller_role(role: str, permissions: Iterable[str] | None = None) -> Iterator
 @contextlib.contextmanager
 def bind_request_principal(http_request: Any, role: str) -> Iterator[None]:
     """Bind the role and scoped permissions for an HTTP request principal."""
+    from services.connector_access import bind_connector_caller, caller_from_request
     from services.rbac import principal_permissions
 
     user = getattr(http_request.state, "user", None)
-    with caller_role(
+    # Tools resolve saved connectors by id or name; bind the caller's workspace
+    # scope with the role so a tool cannot reach another tenant's connector.
+    with bind_connector_caller(caller_from_request(http_request)), caller_role(
         role,
         permissions=principal_permissions(user, role) if role else None,
     ):

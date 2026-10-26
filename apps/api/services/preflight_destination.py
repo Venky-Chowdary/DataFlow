@@ -82,6 +82,7 @@ def inspect_destination_for_preflight(
     dest_service_account: str | None = None,
     dest_kind: str = "database",
     dest_extra: dict[str, Any] | None = None,
+    workspace_id: str | None = None,
 ) -> dict[str, Any]:
     """Introspect destination for table existence and column schema.
 
@@ -123,7 +124,7 @@ def inspect_destination_for_preflight(
         )
         from services.destination_identity import stamp_destination_identity
 
-        ok, msg, cfg = probe_saved_connector(connector_id)
+        ok, msg, cfg = probe_saved_connector(connector_id, workspace_id=workspace_id)
         db_type = (cfg.get("type") or dest_type or "").lower()
         out["db_type"] = db_type
         # Credentials travel to the collision probe / engine inside a general
@@ -143,6 +144,7 @@ def inspect_destination_for_preflight(
             collection=dest_collection or dest_table or "",
             schema=dest_schema or "",
             database=dest_database or "",
+            workspace_id=workspace_id,
         )
         if not endpoint:
             out["message"] = f"Connector '{connector_id}' not found"
@@ -498,9 +500,11 @@ def inspect_destination_for_preflight(
             try:
                 from services.connector_store import get_connector, update_connector
 
-                conn = get_connector(connector_id)
+                conn = get_connector(connector_id, workspace_id=workspace_id)
                 if conn and (conn.auth_source or "") != resolved_auth:
-                    update_connector(connector_id, {"auth_source": resolved_auth})
+                    update_connector(
+                        connector_id, {"auth_source": resolved_auth}, workspace_id=workspace_id
+                    )
             except Exception as exc:
                 logger.debug(
                     "mongodb auth_source persistence failed: %s", exc, exc_info=exc

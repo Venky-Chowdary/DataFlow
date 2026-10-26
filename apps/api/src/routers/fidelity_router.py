@@ -65,12 +65,13 @@ def _assert_connector_workspace(
     workspace_id: str,
     request: Request,
 ) -> None:
-    from services.connector_store import get_connector
+    from services.connector_store import connector_owner_workspace
 
-    scoped = get_connector(connector_id, workspace_id=workspace_id or None)
-    connector = scoped or get_connector(connector_id)
-    if connector is not None:
-        _assert_resource_visible(request, str(getattr(connector, "workspace_id", "") or ""))
+    # Authorization reads the owner without caller scope: a foreign connector
+    # must be denied (and audited), not silently treated as missing.
+    exists, owner_workspace = connector_owner_workspace(connector_id)
+    if exists:
+        _assert_resource_visible(request, owner_workspace)
 
 
 def _endpoints_from_schedule(

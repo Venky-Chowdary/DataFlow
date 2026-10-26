@@ -105,3 +105,26 @@ def assert_resource_workspace(request: Request, resource_workspace_id: str | Non
     # filter by scope, so an id-addressed read has to agree with them.
     if scope and not workspace_resource_is_visible(rid, scope):
         raise HTTPException(status_code=404, detail="Not found")
+
+
+def assert_connector_accessible(
+    request: Request, connector_id: str | None, *, write: bool = False
+) -> None:
+    """404 when a saved connector id belongs to a workspace the caller may not use.
+
+    Checked against the connector's own stored ``workspace_id``, not the request
+    header, so omitting ``X-Workspace-Id`` cannot widen the caller's reach. An id
+    that does not exist is left to the caller's own not-found handling.
+    """
+    from services.connector_access import caller_from_request, current_caller
+    from services.connector_store import connector_owner_workspace
+
+    cid = str(connector_id or "").strip()
+    if not cid:
+        return
+    caller = current_caller() or caller_from_request(request)
+    if caller is None:
+        return
+    exists, owner_workspace = connector_owner_workspace(cid)
+    if exists and not caller.may_access(owner_workspace, write=write):
+        raise HTTPException(status_code=404, detail="Connector not found")

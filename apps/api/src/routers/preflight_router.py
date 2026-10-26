@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.acknowledgment_contract import (
@@ -196,20 +196,31 @@ def _probe_inline_destination(body: PreflightRequest) -> tuple[bool, str]:
     return run_probe(db_type, cfg)
 
 
-def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
+def _probe_saved_connector(connector_id: str, workspace_id: str | None = None) -> tuple[bool, str]:
     """Live connectivity probe for any saved connector type — same as Connectors Test."""
     from services.connector_probe import probe_saved_connector
 
-    ok, msg, _cfg = probe_saved_connector(connector_id)
+    ok, msg, _cfg = probe_saved_connector(connector_id, workspace_id=workspace_id)
     return ok, msg
 
 
 @router.post("/run")
-async def run_preflight(body: PreflightRequest):
+async def run_preflight(
+    body: PreflightRequest,
+    http_request: Request,
+    x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
     """
     Run core G1–G9 preflight gates before a transfer.
     Blocks transfer if any gate fails — no mocked pass when connectors or samples are missing.
     """
+    from services.workspace_access import assert_connector_accessible, resolve_read_workspace
+
+    # Preflight probes and introspects saved connectors with their stored
+    # credentials: authorize the workspace and each connector's own owner first.
+    workspace_id = resolve_read_workspace(http_request, x_workspace_id) or None
+    assert_connector_accessible(http_request, body.connector_id)
+    assert_connector_accessible(http_request, body.source_connector_id)
     if not body.columns:
         raise HTTPException(status_code=400, detail="No columns provided for preflight")
     if not body.mappings:
@@ -252,6 +263,7 @@ async def run_preflight(body: PreflightRequest):
         dest_service_account=body.dest_service_account,
         dest_kind=body.dest_kind,
         dest_extra=dict(body.dest_extra or {}),
+        workspace_id=workspace_id,
     )
 
     if body.dest_kind == "file_export" or dest_meta.get("connected"):
@@ -265,7 +277,7 @@ async def run_preflight(body: PreflightRequest):
     source_connected = True
     source_error: str | None = None
     if body.source_connector_id:
-        source_connected, msg = _probe_saved_connector(body.source_connector_id)
+        source_connected, msg = _probe_saved_connector(body.source_connector_id, workspace_id)
         if not source_connected:
             source_error = msg
 

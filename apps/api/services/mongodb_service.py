@@ -15,6 +15,8 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
+from services import connector_access
+
 # Callers import the terminal-status set from this module (cancel-race guard).
 from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.ops_events import emit_event
@@ -367,7 +369,7 @@ class MongoDBService:
         result = collection.find_one({"$or": id_clauses})
         if result:
             result["_id"] = str(result["_id"])
-            return _decrypt_connector_secrets(result)
+            return connector_access.visible(_decrypt_connector_secrets(result))
         return result
 
     def list_connectors(self) -> list[dict]:
@@ -379,10 +381,17 @@ class MongoDBService:
         for doc in collection.find().sort("created_at", -1):
             doc["_id"] = str(doc["_id"])
             connectors.append(_decrypt_connector_secrets(doc) or doc)
-        return connectors
+        return connector_access.visible_items(connectors)
+
+    def _caller_may_write_connector(self, connector_id: str) -> bool:
+        if connector_access.current_caller() is None:
+            return True
+        return connector_access.writable(self.get_connector(connector_id))
 
     def update_connector(self, connector_id: str, updates: dict) -> bool:
         """Update a connector configuration"""
+        if not self._caller_may_write_connector(connector_id):
+            return False
         db = self.get_database()
         collection = db["connectors"]
 
@@ -401,6 +410,8 @@ class MongoDBService:
 
     def delete_connector(self, connector_id: str) -> bool:
         """Delete a connector"""
+        if not self._caller_may_write_connector(connector_id):
+            return False
         db = self.get_database()
         collection = db["connectors"]
 
@@ -1434,7 +1445,7 @@ class MemoryMongoDBService:
         if rec:
             rec = dict(rec)
             rec["_id"] = str(rec["_id"])
-            return _decrypt_connector_secrets(rec)
+            return connector_access.visible(_decrypt_connector_secrets(rec))
         return None
 
     def list_connectors(self) -> list[dict]:
@@ -1447,9 +1458,16 @@ class MemoryMongoDBService:
         for c in items:
             row = dict(c, _id=str(c["_id"]))
             out.append(_decrypt_connector_secrets(row) or row)
-        return out
+        return connector_access.visible_items(out)
+
+    def _caller_may_write_connector(self, connector_id: str) -> bool:
+        if connector_access.current_caller() is None:
+            return True
+        return connector_access.writable(self.get_connector(connector_id))
 
     def update_connector(self, connector_id: str, updates: dict) -> bool:
+        if not self._caller_may_write_connector(connector_id):
+            return False
         rec = self._connectors.get(connector_id)
         if not rec:
             return False
@@ -1458,6 +1476,8 @@ class MemoryMongoDBService:
         return True
 
     def delete_connector(self, connector_id: str) -> bool:
+        if not self._caller_may_write_connector(connector_id):
+            return False
         return self._connectors.pop(connector_id, None) is not None
 
     def insert_data(
