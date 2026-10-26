@@ -1948,6 +1948,43 @@ def _stream_database_transfer_impl(
     if dest_key_addressed:
         dest_summary[KEY_ADDRESSED_KEY] = True
     keyed_upsert_scope = write_mode == "upsert" and bool(pk_target_cols)
+    # D111 — strict keyed upsert on a populated PG destination: row-copy the
+    # pre-run table to __dfbak_<job> so a failed verification restores the
+    # exact prior state (DELETE + INSERT FROM backup) instead of leaving the
+    # rejected batch in place. Armed only on the first pass — a resume must
+    # not snapshot mid-run state — and only where undo is contractually
+    # allowed (strict family). Other engines/modes keep the honest
+    # "left in place" report.
+    if (
+        keyed_upsert_scope
+        and dest_type == "postgresql"
+        and not resumed_pass
+        and str(validation_mode or "").strip().lower() in {"strict", "maximum", ""}
+        and int(dest_summary.get(PRECOUNT_KEY) or 0) > 0
+        and shape_runner.recipe.router_step is None
+    ):
+        try:
+            from connectors.table_manager import create_pg_table_backup
+
+            _bak_pair = create_pg_table_backup(
+                dest_cfg,
+                schema=schema_from_cfg(dest_type, dest_cfg),
+                table=str(dest_table),
+                job_id=str(job_id or ""),
+            )
+            if _bak_pair:
+                _dextra = dict(getattr(destination, "extra", None) or {})
+                _dextra.setdefault("route_backups", {})[
+                    str(_bak_pair.get("table") or dest_table)
+                ] = _bak_pair
+                destination.extra = _dextra
+                dest_summary["route_backups"] = dict(_dextra["route_backups"])
+        except Exception as _bak_exc:  # noqa: BLE001 - never abort a write for the safety net
+            logger.warning(
+                "Strict-run destination backup of %s failed: %s",
+                dest_table,
+                _bak_exc,
+            )
     keyed_census_acc = (
         KeyCensusAccumulator()
         if pk_target_cols and (keyed_upsert_scope or dest_key_addressed)

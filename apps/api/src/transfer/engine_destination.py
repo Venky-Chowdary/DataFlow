@@ -297,16 +297,26 @@ def _failed_batch_undo_note_impl(
     # MySQL rename-aside above, one per route).
     if extra.get("route_backups"):
         restored = _engine._settle_overwrite_backup(destination, restore=True)
+        _what = (
+            "The destination table"
+            if len(extra.get("route_backups") or {}) == 1
+            else "Every route table"
+        )
         if restored:
             note = (
-                "Every route table was restored to its pre-run content: "
+                f"{_what} was restored to its pre-run content: "
                 "this run's new rows were removed and the pre-run rows were "
                 "restored from the backup copies."
             )
             dest_summary["partial_batch_undo"] = "restored"
+            from services.batch_undo import restore_route_watermark_after_undo
+
+            wm_note = restore_route_watermark_after_undo(dest_summary)
+            if wm_note:
+                note = f"{note}{wm_note}"
         else:
             note = (
-                "One or more route tables could not be restored. "
+                "One or more backed-up tables could not be restored. "
                 "The __dfbak backup tables were left in place."
             )
             dest_summary["partial_batch_undo"] = "restore_failed"
