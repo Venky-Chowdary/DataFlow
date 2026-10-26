@@ -180,9 +180,15 @@ def _refine_columns_by_samples(
     if not candidates:
         return columns
 
+    from connectors.sql_identifiers import quote_sql_identifier
+
     q = quote_char
-    cols_sql = ", ".join(f"{q}{c['name']}{q}" for c in candidates)
-    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+    cols_sql = ", ".join(quote_sql_identifier(c["name"], q) for c in candidates)
+    qualified = (
+        f"{quote_sql_identifier(schema, q)}.{quote_sql_identifier(table, q)}"
+        if schema
+        else quote_sql_identifier(table, q)
+    )
     try:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {cols_sql} FROM {qualified} LIMIT %s", (sample_limit,))  # nosec B608
