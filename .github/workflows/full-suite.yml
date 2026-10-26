@@ -254,6 +254,7 @@ jobs:
 
       - name: Diag — PG ssl fallback
         working-directory: apps/api
+        continue-on-error: true
         run: |
           python - <<'PY'
           import logging, traceback
@@ -283,8 +284,11 @@ jobs:
                   print("pymssql connect: FAIL", repr(exc)[:200])
           except ImportError as exc:
               print("pymssql import:", exc)
-          print("odbcinst:", subprocess.run(["odbcinst","-q","-d"],
-                  capture_output=True, text=True).stdout.strip())
+          try:
+              print("odbcinst:", subprocess.run(["odbcinst","-q","-d"],
+                      capture_output=True, text=True).stdout.strip())
+          except Exception as exc:
+              print("odbcinst: MISSING", repr(exc)[:120])
           from connectors.postgresql_conn import get_connection
           for host in ("127.0.0.1", "localhost"):
               try:
