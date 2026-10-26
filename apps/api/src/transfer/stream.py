@@ -338,7 +338,11 @@ def _purge_route_key_tuples(
     of rows removed. Tables that do not exist yet or lack the key columns
     are skipped — they cannot hold a stale keyed copy.
     """
-    from connectors.sql_identifiers import quote_table_ref, split_qualified_table
+    from connectors.sql_identifiers import (
+        quote_sql_identifier,
+        quote_table_ref,
+        split_qualified_table,
+    )
 
     key_ix = [
         i if i is not None else -1
@@ -402,7 +406,7 @@ def _purge_route_key_tuples(
             # The batch carries source-side values (often text) while the
             # route table typed the key (bigint etc.) — compare as text so
             # the purge never needs the column's declared type.
-            cols = ", ".join(f'"{c}"::text' for c in rpk)
+            cols = ", ".join(f"{quote_sql_identifier(c)}::text" for c in rpk)
             nkey = len(rpk)
             for off in range(0, len(key_list), max_keys_per_statement):
                 chunk = key_list[off : off + max_keys_per_statement]
