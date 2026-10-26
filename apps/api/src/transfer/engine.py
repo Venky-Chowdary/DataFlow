@@ -5832,9 +5832,9 @@ class UniversalTransferEngine:
             hydrate_file_source(request)
             content = request.source_content or b""
             if not content and request.source_path:
-                from pathlib import Path as _Path
+                from services.dataset_file import confine_source_path
 
-                p = _Path(request.source_path)
+                p = confine_source_path(request.source_path)
                 if p.is_file():
                     content = p.read_bytes()
             if not content:

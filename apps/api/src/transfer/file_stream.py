@@ -248,13 +248,18 @@ def prepare_stream_content(
 ) -> bytes | str:
     """Return the most efficient source reference for streaming.
 
-    If an explicit ``source_path`` is provided and exists, it is used.
+    If an explicit ``source_path`` is provided and exists, it is used. It must
+    resolve inside the upload/staging roots; anything else raises ``ValueError``.
     If ``content`` is larger than ``FILE_SPILL_THRESHOLD`` bytes, it is written
     to a temporary file and that path is returned so iteration can stream from
     disk.  Otherwise the original ``bytes`` payload is returned.
     """
-    if source_path and os.path.isfile(source_path):
-        return source_path
+    if source_path:
+        from services.dataset_file import confine_source_path
+
+        confined = confine_source_path(source_path)
+        if confined.is_file():
+            return str(confined)
     if not content:
         return content
     if len(content) <= FILE_SPILL_THRESHOLD:
