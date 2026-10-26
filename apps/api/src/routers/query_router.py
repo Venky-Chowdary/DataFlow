@@ -39,26 +39,77 @@ def _is_safe_sql(raw_query: str) -> bool:
 
     Uses ``sqlparse`` when installed; otherwise a conservative regex fallback so
     Datawrap Pilot / query playground never hard-fail on a missing optional dep.
+    Every lexing in ``sql_code_views`` must pass: a quote inside a comment or a
+    quoted identifier is not a literal, and text one engine reads as a comment
+    can be a second statement on another.
     """
     try:
-        import sqlparse
-        from sqlparse.sql import TokenList
-        from sqlparse.tokens import Comment, Keyword, Newline, Whitespace
+        import sqlparse  # noqa: F401
     except ImportError:
         return _is_safe_sql_fallback(raw_query)
 
-    from services.sql_literals import sql_outside_literals
+    from services.sql_literals import sql_code_views
 
-    # A semicolon or DROP inside a quote is not a second statement (QA R2-001/002).
+    if _raw_has_second_statement(raw_query):
+        return False
+    heads: set[str] = set()
+    for code in sql_code_views(raw_query):
+        head = _read_only_head(code)
+        if head is None:
+            return False
+        heads.add(head)
+    if _has_side_effect_functions(raw_query):
+        return False
+    if "PRAGMA" in heads and not _pragma_is_readonly(raw_query):
+        return False
+    return bool(heads)
+
+
+_DESTRUCTIVE_KEYWORDS = frozenset({
+    "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+    "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
+    "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
+})
+_SAFE_STARTS = frozenset({
+    "SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES",
+})
+
+
+def _raw_has_second_statement(raw_query: str) -> bool:
+    """Cross-check on the unmasked text with sqlparse's own lexer.
+
+    A ``;`` token followed by anything but comments is a second statement.
+    """
+    import sqlparse
+    from sqlparse.tokens import Comment, Newline, Punctuation, Whitespace
+
+    seen_semicolon = False
+    for ttype, value in sqlparse.lexer.tokenize(raw_query or ""):
+        if ttype in (Whitespace, Newline) or ttype in Comment:
+            continue
+        if ttype is Punctuation and value == ";":
+            seen_semicolon = True
+            continue
+        if seen_semicolon:
+            return True
+    return False
+
+
+def _read_only_head(code: str) -> str | None:
+    """Safe leading keyword of one masked view, or ``None`` when it is a write."""
+    import sqlparse
+    from sqlparse.sql import TokenList
+    from sqlparse.tokens import Comment, Keyword, Newline, Whitespace
+
     try:
-        parsed = sqlparse.parse(sql_outside_literals(raw_query).strip())
+        parsed = sqlparse.parse(code.strip())
     except Exception:
         # sqlparse's grouping pass refuses left-associative chains deeper than
         # 100 (a 250-column ``||`` concat is valid SQL — M19). Re-validate on
         # the ungrouped token stream: the keyword scan needs no nesting.
-        return _is_safe_sql_flat(raw_query)
+        return _flat_read_only_head(code)
     if not parsed or len(parsed) != 1:
-        return False
+        return None
 
     stmt = parsed[0]
 
@@ -68,41 +119,27 @@ def _is_safe_sql(raw_query: str) -> bool:
             for child in token.tokens:
                 yield from _walk_tokens(child)
 
-    destructive = {
-        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-        "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
-        "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
-    }
-    safe_starts = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES"}
     first_keyword = None
-
     for token in _walk_tokens(stmt):
         if token.ttype in (Whitespace, Newline) or Comment in (token.ttype, getattr(token.ttype, "__class__", None)):
             continue
         if token.is_whitespace:
             continue
         kw = token.value.upper() if token.value else ""
-        if first_keyword is None and kw in safe_starts:
+        if first_keyword is None and kw in _SAFE_STARTS:
             first_keyword = kw
         if token.ttype in Keyword or (hasattr(token.ttype, "parents") and Keyword in token.ttype.parents):
-            if kw in destructive:
-                return False
+            if kw in _DESTRUCTIVE_KEYWORDS:
+                return None
             # SELECT ... INTO / WITH ... INTO creates tables; block it.
             if kw == "INTO" and first_keyword in {"SELECT", "WITH"}:
-                return False
+                return None
 
     # If sqlparse reports a concrete DML/DDL statement type that is not SELECT, reject it.
     stmt_type = (stmt.get_type() or "").upper()
     if stmt_type and stmt_type not in {"SELECT", "UNKNOWN"}:
-        return False
-
-    if _has_side_effect_functions(raw_query):
-        return False
-
-    if first_keyword == "PRAGMA" and not _pragma_is_readonly(raw_query):
-        return False
-
-    return first_keyword in safe_starts
+        return None
+    return first_keyword if first_keyword in _SAFE_STARTS else None
 
 
 _READ_ONLY_REFUSAL = (
@@ -168,9 +205,12 @@ _READONLY_PRAGMAS = frozenset({
 
 
 def _pragma_is_readonly(sql: str) -> bool:
-    from services.sql_literals import sql_outside_literals
+    from services.sql_literals import sql_code_views
 
-    code = sql_outside_literals(sql or "")
+    return all(_pragma_view_is_readonly(code) for code in sql_code_views(sql or ""))
+
+
+def _pragma_view_is_readonly(code: str) -> bool:
     match = re.match(
         r"\s*PRAGMA\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)",
         code,
@@ -229,14 +269,15 @@ _FUNC_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 def _has_side_effect_functions(sql: str) -> bool:
     """True when a read query invokes a function with session/server side effects."""
-    scrubbed = re.sub(r"'(?:''|[^'])*'", " ", sql or "")
-    scrubbed = re.sub(r'"(?:""|[^"])*"', " ", scrubbed)
-    for match in _FUNC_CALL_RE.finditer(scrubbed):
-        name = match.group(1).lower()
-        if name in _SIDE_EFFECT_FUNCTIONS:
-            return True
-        if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
-            return True
+    from services.sql_literals import sql_call_views
+
+    for scrubbed in sql_call_views(sql or ""):
+        for match in _FUNC_CALL_RE.finditer(scrubbed):
+            name = match.group(1).lower()
+            if name in _SIDE_EFFECT_FUNCTIONS:
+                return True
+            if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
+                return True
     return False
 
 
@@ -247,61 +288,65 @@ def _is_safe_sql_flat(raw_query: str) -> bool:
     (a 250-column ``||`` concat is valid SQL — M19). The read-only policy —
     one statement, a safe head, no destructive keywords, no SELECT INTO, the
     existing side-effect/pragma checks — needs no nesting, so this walks the
-    lexer's flat token stream instead. ``sql_outside_literals`` keeps quoted
-    content out of the scan, so a ``;`` or DROP inside a string cannot spoof
-    a second statement (QA R2-001/002).
+    lexer's flat token stream of every ``sql_code_views`` lexing instead.
     """
+    from services.sql_literals import sql_code_views
+
+    if _raw_has_second_statement(raw_query):
+        return False
+    heads: set[str] = set()
+    for code in sql_code_views(raw_query):
+        head = _flat_read_only_head(code)
+        if head is None:
+            return False
+        heads.add(head)
+    if _has_side_effect_functions(raw_query):
+        return False
+    if "PRAGMA" in heads and not _pragma_is_readonly(raw_query):
+        return False
+    return bool(heads)
+
+
+def _flat_read_only_head(code: str) -> str | None:
     import sqlparse
     from sqlparse.tokens import Comment, Keyword, Newline, Punctuation, Whitespace
 
-    from services.sql_literals import sql_outside_literals
-
-    destructive = {
-        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-        "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
-        "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
-    }
-    safe_starts = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES"}
-
-    tokens = sqlparse.lexer.tokenize(sql_outside_literals(raw_query).strip())
     first_keyword = None
-    for ttype, value in tokens:
+    for ttype, value in sqlparse.lexer.tokenize(code.strip().rstrip(";")):
         if ttype in (Whitespace, Newline) or ttype in Comment:
             continue
         kw = str(value or "").upper()
         if ttype is Punctuation and kw == ";":
             # A real semicolon token means a second statement follows.
-            return False
-        if first_keyword is None and kw in safe_starts:
+            return None
+        if first_keyword is None and kw in _SAFE_STARTS:
             first_keyword = kw
         if ttype in Keyword or (
             hasattr(ttype, "parents") and Keyword in ttype.parents
         ):
-            if kw in destructive:
-                return False
+            if kw in _DESTRUCTIVE_KEYWORDS:
+                return None
             if kw == "INTO" and first_keyword in {"SELECT", "WITH"}:
-                return False
-    if _has_side_effect_functions(raw_query):
-        return False
-    if first_keyword == "PRAGMA" and not _pragma_is_readonly(raw_query):
-        return False
-    return first_keyword in safe_starts
+                return None
+    return first_keyword if first_keyword in _SAFE_STARTS else None
 
 
 def _is_safe_sql_fallback(raw_query: str) -> bool:
     """Conservative read-only gate when sqlparse is unavailable."""
-    import re
-
-    from services.sql_literals import mask_sql_string_literals
+    from services.sql_literals import sql_code_views
 
     text = (raw_query or "").strip()
     if not text:
         return False
-    # Reject multi-statement payloads. Literals are masked first so a
-    # semicolon or DROP inside quotes is not a second statement.
-    code, _literals = mask_sql_string_literals(text)
-    code = re.sub(r"--[^\n]*", " ", code)
-    code = re.sub(r"/\*.*?\*/", " ", code, flags=re.S)
+    views = sql_code_views(text)
+    if not all(_fallback_view_is_safe(code, text) for code in views):
+        return False
+    return not _has_side_effect_functions(text)
+
+
+def _fallback_view_is_safe(code: str, text: str) -> bool:
+    # Reject multi-statement payloads. Literals and comments are masked first
+    # so a semicolon or DROP inside quotes is not a second statement.
     if ";" in code.rstrip().rstrip(";"):
         return False
     upper = code.upper()
