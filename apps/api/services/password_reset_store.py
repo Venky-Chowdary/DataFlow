@@ -159,7 +159,7 @@ def status_by_id(token_id: str) -> str:
     before they burn a send."""
     db = _database()
     if db is not None:
-        row = db[COLLECTION].find_one({"_id": token_id})
+        row = db[COLLECTION].find_one({"id": token_id})
         doc = _to_doc(row) if row else None
     else:
         with _LOCK:

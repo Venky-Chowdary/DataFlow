@@ -1030,3 +1030,25 @@ def test_dead_otp_code_row_is_skipped(monkeypatch, tmp_path):
     assert len(ConsoleEmailSender.OUTBOX) == before
     cts = mail_outbox.counts()
     assert cts["superseded"] == len(rows), cts
+
+
+def test_status_by_id_mongo_looks_up_id_field_not_objectid(monkeypatch):
+    """Mongo docs keep the token id under ``id`` (the store sets no ``_id``),
+    so a ``{"_id": token_id}`` query misses every real row — which would mark
+    every live reset row 'invalid'/dead on the Mongo tier."""
+    captured = {}
+
+    class _Coll:
+        def find_one(self, filt, *a, **k):
+            captured["filter"] = filt
+            return None
+
+    class _Db:
+        name = "datatransfer"
+
+        def __getitem__(self, name):
+            return _Coll()
+
+    monkeypatch.setattr(password_reset_store, "_database", lambda: _Db())
+    assert password_reset_store.status_by_id("prt-abc") == "invalid"
+    assert captured["filter"] == {"id": "prt-abc"}
