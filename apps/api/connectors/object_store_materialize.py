@@ -36,6 +36,7 @@ from services.value_serializer import (
     SQL_NULL_SENTINEL,
     cell_to_string,
     json_dumps_exact_numbers,
+    wire_cell_text,
 )
 
 DEFAULT_MATERIALIZE_BATCH = 1024
@@ -212,7 +213,7 @@ class ObjectStoreEncoder:
                         csv_cell_encode(
                             None
                             if record.get(k) is None
-                            else cell_to_string(record.get(k))
+                            else wire_cell_text(record.get(k))
                         )
                         for k in self.target_cols
                     ],
@@ -322,7 +323,7 @@ class ObjectStoreEncoder:
             list(mapped_rows), self.target_cols, self.dest_types
         ):
             self._xlsx_ws.append(
-                [cell_to_string(record.get(c)) for c in self.target_cols]
+                [wire_cell_text(record.get(c)) for c in self.target_cols]
             )
 
     def finish(self):

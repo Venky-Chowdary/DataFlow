@@ -980,6 +980,134 @@ def _sibling_table(conn: dict[str, Any], wanted: str, table: str) -> str:
 # --------------------------------------------------------------------------
 
 
+def _group_total(
+    *,
+    saved: Any,
+    dialect: str,
+    table: str,
+    collection: str,
+    dim_col: str,
+    grain: str,
+    dim_expr: str,
+    quoted_table: str,
+    where_sql: str,
+    binds: dict[str, Any],
+    match_stage: dict[str, Any],
+) -> int | None:
+    """True number of groups under the same filters (D105)."""
+    from src.routers.query_router import QueryExecuteRequest, _run_query
+
+    if dialect == "mongodb":
+        group_id = _mongo_group_id(dim_col, grain)
+        pipeline = []
+        if match_stage:
+            pipeline.append({"$match": match_stage})
+        pipeline += [
+            {"$group": {"_id": group_id}},
+            {"$count": "n"},
+        ]
+        body = QueryExecuteRequest(
+            connector_id=str(getattr(saved, "id", "") or getattr(saved, "_id", "") or ""),
+            query=json.dumps(pipeline, default=str),
+            collection=collection,
+            limit=10,
+        )
+        rows, _cols, _schema, _tr = _run_query(saved, body)
+        if rows:
+            val = rows[0].get("n")
+            return int(val) if val is not None else None
+        return 0
+
+    count_sql = (
+        f"SELECT COUNT(*) AS n_groups FROM ("
+        f"SELECT {dim_expr} FROM {quoted_table}{where_sql} "
+        f"GROUP BY {dim_expr}) _df_grp"
+    )
+    body = QueryExecuteRequest(
+        connector_id=str(getattr(saved, "id", "") or getattr(saved, "_id", "") or ""),
+        query=count_sql,
+        limit=10,
+        params=dict(binds or {}),
+    )
+    rows, _cols, _schema, _tr = _run_query(saved, body)
+    if rows:
+        val = next(iter(rows[0].values()), None)
+        return int(val) if val is not None else None
+    return 0
+
+
+def _groups_at_metric(
+    *,
+    saved: Any,
+    dialect: str,
+    table: str,
+    dim_col: str,
+    grain: str,
+    dim_expr: str,
+    agg_expr: str,
+    metric_alias: str,
+    quoted_table: str,
+    where_sql: str,
+    binds: dict[str, Any],
+    match_stage: dict[str, Any],
+    metric: str,
+    measure_col: str,
+    cut_value: Any,
+) -> int:
+    """How many groups share the metric value shown at the LIMIT cut (D105)."""
+    from src.routers.query_router import QueryExecuteRequest, _run_query
+
+    if dialect == "mongodb":
+        group_id = _mongo_group_id(dim_col, grain)
+        acc = _MONGO_ACCUMULATORS.get(metric)
+        if metric == "count_distinct":
+            accum = {"$addToSet": f"${measure_col}"}
+            group_stage = {"_id": group_id, "m": accum}
+            project = {"$project": {"m": {"$size": "$m"}}}
+        elif acc:
+            group_stage = {"_id": group_id, "m": {acc: f"${measure_col}" if acc != "$sum" or measure_col else 1}}
+            project = None
+        else:
+            return 0
+        pipeline = []
+        if match_stage:
+            pipeline.append({"$match": match_stage})
+        pipeline.append({"$group": group_stage})
+        if project:
+            pipeline.append(project)
+        pipeline += [{"$match": {"m": cut_value}}, {"$count": "n"}]
+        body = QueryExecuteRequest(
+            connector_id=str(getattr(saved, "id", "") or getattr(saved, "_id", "") or ""),
+            query=json.dumps(pipeline, default=str),
+            collection=table,
+            limit=10,
+        )
+        rows, _cols, _schema, _tr = _run_query(saved, body)
+        if rows:
+            val = rows[0].get("n")
+            return int(val or 0)
+        return 0
+
+    cut_binds = dict(binds or {})
+    cut_binds["_df_cut"] = cut_value
+    count_sql = (
+        f"SELECT COUNT(*) AS n FROM ("
+        f"SELECT {agg_expr} AS m FROM {quoted_table}{where_sql} "
+        f"GROUP BY {dim_expr}) _df_cut_t WHERE _df_cut_t.m = :_df_cut"
+    )
+    body = QueryExecuteRequest(
+        connector_id=str(getattr(saved, "id", "") or getattr(saved, "_id", "") or ""),
+        query=count_sql,
+        limit=10,
+        params=cut_binds,
+    )
+    rows, _cols, _schema, _tr = _run_query(saved, body)
+    if rows:
+        val = next(iter(rows[0].values()), None)
+        return int(val or 0)
+    return 0
+
+
 def aggregate_connector_data(
     connector_id: str = "",
     connector_name: str = "",
@@ -991,6 +1119,7 @@ def aggregate_connector_data(
     limit: int = _DEFAULT_GROUP_LIMIT,
     session_id: str = "",
     where: str = "",
+    date_column: str = "",
 ):
     """Run an exact server-side aggregate on a saved connector's table."""
     tool = "aggregate_data"
@@ -1205,14 +1334,62 @@ def aggregate_connector_data(
                         "needs a date/timestamp column to bucket."
                     ),
                 )
-        if not grain_hint:
+        if not grain_hint and not dim_col and wanted not in names:
+            # "<col>:<grain>" / "<col> by <grain>" / "<col>_<grain>" — the
+            # answer path for "which date column?" (D105). The head must be a
+            # real column; a literal column named like "created_at_day" was
+            # already claimed by the `wanted not in names` guard above.
+            col_grain = re.match(
+                r"(?i)^(.+?)(?::|\s+(?:by|per)\s+|_)"
+                r"(day|daily|week|weekly|month|monthly|quarter|quarterly|"
+                r"year|yearly|annually)$",
+                wanted,
+            )
+            if col_grain:
+                candidate = col_grain.group(1).strip()
+                resolved = resolve_name(candidate, names)
+                if resolved:
+                    if not _is_temporal(_column_type(columns, resolved)):
+                        return _tool_result(
+                            tool,
+                            success=False,
+                            error=(
+                                f"'{resolved}' is not a date column — "
+                                f"'{wanted}' needs a date/timestamp column to bucket."
+                            ),
+                        )
+                    grain = _TEMPORAL_GRAINS.get(col_grain.group(2).lower(), "")
+                    dim_col = resolved
+        if not grain_hint and not dim_col:
             dim_col = resolve_name(wanted, names)
         if not dim_col:
             # "by month" is a time grain, not a column — find the date column.
             grain = _TEMPORAL_GRAINS.get(wanted.lower(), "")
             if grain:
                 temporal = [n for n in names if _is_temporal(_column_type(columns, n))]
-                if len(temporal) == 1:
+                if (date_column or "").strip():
+                    # date_column= answers the "which date column" question (D105).
+                    resolved_dc = resolve_name(date_column.strip(), names)
+                    if not resolved_dc:
+                        return _tool_result(
+                            tool,
+                            success=False,
+                            error=(
+                                f"date_column '{date_column.strip()}' is not in {table}. "
+                                f"Available columns: {', '.join(names[:20])}."
+                            ),
+                        )
+                    if not _is_temporal(_column_type(columns, resolved_dc)):
+                        return _tool_result(
+                            tool,
+                            success=False,
+                            error=(
+                                f"date_column '{resolved_dc}' is not a date column — "
+                                f"'{wanted}' needs a date/timestamp column to bucket."
+                            ),
+                        )
+                    dim_col = resolved_dc
+                elif len(temporal) == 1:
                     dim_col = temporal[0]
                 elif len(temporal) > 1:
                     return _tool_result(
@@ -1299,6 +1476,13 @@ def aggregate_connector_data(
     row_limit = max(1, min(int(limit or _DEFAULT_GROUP_LIMIT), _MAX_GROUP_LIMIT))
     descending = str(order or "desc").lower().startswith("d")
     binds: dict[str, Any] = {}
+    # SQL-side query fragments — mongo builds pipelines instead; the D105
+    # group-count probes read whichever shape applies.
+    dim_expr = ""
+    agg_expr = ""
+    quoted_table = ""
+    where_sql = ""
+    match_stage: dict[str, Any] = {}
 
     if dialect == "mongodb":
         for field_name in (measure_col, dim_col):
@@ -1393,6 +1577,59 @@ def aggregate_connector_data(
         _LOG.warning("aggregate_data failed: %s", detail, exc_info=True)
         return _tool_result(tool, success=False, error=f"Aggregation failed: {detail}")
 
+    # D105: when LIMIT may have cut groups, the answer must name the true
+    # group count and truncated=true — not present a partial top-N as exact.
+    total_groups: int | None = None
+    ties_at_cut = False
+    if dim_col and rows:
+        try:
+            total_groups = _group_total(
+                saved=saved,
+                dialect=dialect,
+                table=table,
+                collection=table if dialect == "mongodb" else "",
+                dim_col=dim_col,
+                grain=grain,
+                dim_expr=dim_expr if dialect != "mongodb" else "",
+                quoted_table=quoted_table if dialect != "mongodb" else "",
+                where_sql=where_sql if dialect != "mongodb" else "",
+                binds=binds,
+                match_stage=match_stage if dialect == "mongodb" else {},
+            )
+        except Exception:
+            _LOG.debug("aggregate group-count probe failed", exc_info=True)
+        if total_groups is not None and len(rows) < total_groups:
+            truncated = True
+            try:
+                cut_value = rows[-1].get(metric_alias)
+                if cut_value is not None:
+                    ties_at_cut = bool(
+                        _groups_at_metric(
+                            saved=saved,
+                            dialect=dialect,
+                            table=table,
+                            dim_col=dim_col,
+                            grain=grain,
+                            dim_expr=dim_expr if dialect != "mongodb" else "",
+                            agg_expr=agg_expr if dialect != "mongodb" else "",
+                            metric_alias=metric_alias,
+                            quoted_table=quoted_table if dialect != "mongodb" else "",
+                            where_sql=where_sql if dialect != "mongodb" else "",
+                            binds=binds,
+                            match_stage=match_stage if dialect == "mongodb" else {},
+                            metric=metric_key,
+                            measure_col=measure_col,
+                            cut_value=cut_value,
+                        )
+                        > sum(
+                            1 for r in rows if r.get(metric_alias) == cut_value
+                        )
+                    )
+            except Exception:
+                _LOG.debug("aggregate tie-at-cut probe failed", exc_info=True)
+        elif total_groups is not None:
+            truncated = False
+
     meta = {
         "connector_id": cid,
         "connector_name": conn.get("name"),
@@ -1432,7 +1669,12 @@ def aggregate_connector_data(
             "result_id": result_id,
             "columns": result_cols,
             "metric_alias": metric_alias,
-            "group_count": len(rows) if dim_col else 0,
+            # The true group count under the filters — not the LIMIT (D105).
+            "group_count": (
+                total_groups if total_groups is not None else (len(rows) if dim_col else 0)
+            ),
+            "shown_groups": len(rows) if dim_col else 0,
+            "ties_at_cut": ties_at_cut,
             "value": scalar,
             "rows": rows[: min(row_limit, 50)],
             "exact": True,

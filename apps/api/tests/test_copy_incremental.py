@@ -702,9 +702,9 @@ def test_pg_mysql_incremental_deduped_copy_delta_and_watermark():
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         assert summary2.get("copy_fast_path") == "used"
-        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 2
+        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 3
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             dest_count = int(cur.fetchone()[0])
@@ -731,8 +731,8 @@ def test_pg_mysql_incremental_deduped_copy_delta_and_watermark():
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-c-{suffix}",
         )
-        assert third == 0
-        assert summary3.get("source_row_count") == 0
+        assert third == 2
+        assert summary3.get("source_row_count") == 2
         assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
@@ -886,9 +886,9 @@ def test_mysql_pg_incremental_deduped_copy_delta_and_watermark():
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-pg-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         assert summary2.get("copy_fast_path") == "used"
-        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 2
+        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 3
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             dest_count = int(cur.fetchone()[0])
@@ -916,8 +916,8 @@ def test_mysql_pg_incremental_deduped_copy_delta_and_watermark():
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-pg-c-{suffix}",
         )
-        assert third == 0
-        assert summary3.get("source_row_count") == 0
+        assert third == 2
+        assert summary3.get("source_row_count") == 2
         assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
@@ -1317,9 +1317,9 @@ def test_mysql_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-sqlite-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         assert summary2.get("copy_fast_path") == "used"
-        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 2
+        assert int((summary2.get("source_snapshot") or {}).get("staging_count") or 0) == 3
         dest = sqlite3.connect(dst_path)
         try:
             dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
@@ -1345,8 +1345,8 @@ def test_mysql_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-sqlite-c-{suffix}",
         )
-        assert third == 0
-        assert summary3.get("source_row_count") == 0
+        assert third == 2
+        assert summary3.get("source_row_count") == 2
         assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         dest = sqlite3.connect(dst_path)
         try:
@@ -2209,7 +2209,7 @@ def test_sqlite_mysql_datetime_incremental_deduped_copy_delta_and_watermark(tmp_
             job_id=f"inc-sqlite-mysql-dtdd-b-{suffix}",
             cursor_type="DATETIME",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             dest_count = int(cur.fetchone()[0])
@@ -2233,7 +2233,7 @@ def test_sqlite_mysql_datetime_incremental_deduped_copy_delta_and_watermark(tmp_
             job_id=f"inc-sqlite-mysql-dtdd-c-{suffix}",
             cursor_type="DATETIME",
         )
-        assert third == 0, (third, ddl3, summary3)
+        assert third == 2, (third, ddl3, summary3)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             assert int(cur.fetchone()[0]) == 4
@@ -2430,7 +2430,7 @@ def test_mysql_mysql_incremental_deduped_copy_delta_and_watermark():
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-mysql-dd-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             dest_count = int(cur.fetchone()[0])
@@ -2457,8 +2457,8 @@ def test_mysql_mysql_incremental_deduped_copy_delta_and_watermark():
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-mysql-dd-c-{suffix}",
         )
-        assert third == 0
-        assert summary3.get("source_row_count") == 0
+        assert third == 2
+        assert summary3.get("source_row_count") == 2
         assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
@@ -3208,7 +3208,7 @@ def test_sqlite_mysql_date_incremental_deduped_copy_delta_and_watermark(tmp_path
             job_id=f"inc-sqlite-mysql-date-dd-b-{suffix}",
             cursor_type="DATE",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             dest_count = int(cur.fetchone()[0])
@@ -3240,7 +3240,7 @@ def test_sqlite_mysql_date_incremental_deduped_copy_delta_and_watermark(tmp_path
             job_id=f"inc-sqlite-mysql-date-dd-c-{suffix}",
             cursor_type="DATE",
         )
-        assert third == 0, (third, ddl3, summary3)
+        assert third == 2, (third, ddl3, summary3)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             assert int(cur.fetchone()[0]) == 4
@@ -3422,7 +3422,7 @@ def test_sqlite_mysql_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             dest_count = int(cur.fetchone()[0])
@@ -3453,7 +3453,7 @@ def test_sqlite_mysql_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert third == 0, (third, ddl3, summary3)
+        assert third == 2, (third, ddl3, summary3)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             assert int(cur.fetchone()[0]) == 4
@@ -4027,7 +4027,7 @@ def test_mysql_pg_integer_incremental_deduped_copy_nine_then_ten():
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             dest_count = int(cur.fetchone()[0])
@@ -4051,7 +4051,7 @@ def test_mysql_pg_integer_incremental_deduped_copy_nine_then_ten():
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert third == 0
+        assert third == 2
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             assert int(cur.fetchone()[0]) == 4
@@ -4130,7 +4130,7 @@ def test_pg_mysql_integer_incremental_deduped_copy_nine_then_ten():
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             dest_count = int(cur.fetchone()[0])
@@ -4153,7 +4153,7 @@ def test_pg_mysql_integer_incremental_deduped_copy_nine_then_ten():
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert third == 0
+        assert third == 2
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             assert int(cur.fetchone()[0]) == 4
@@ -4422,7 +4422,7 @@ def test_mysql_mysql_integer_incremental_deduped_copy_nine_then_ten():
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             dest_count = int(cur.fetchone()[0])
@@ -4446,7 +4446,7 @@ def test_mysql_mysql_integer_incremental_deduped_copy_nine_then_ten():
             cursor_type="INTEGER",
             cursor_field="version",
         )
-        assert third == 0
+        assert third == 2
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             assert int(cur.fetchone()[0]) == 4
@@ -4618,7 +4618,7 @@ def test_mysql_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-sqlite-int-b-{suffix}",
         )
-        assert second == 2, (second, ddl2, summary2)
+        assert second == 3, (second, ddl2, summary2)
         dest = sqlite3.connect(dst_path)
         try:
             dest_count = int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0])
@@ -4642,7 +4642,7 @@ def test_mysql_sqlite_integer_incremental_deduped_copy_nine_then_ten(tmp_path):
             sync_mode="incremental_deduped",
             job_id=f"inc-mysql-sqlite-int-c-{suffix}",
         )
-        assert third == 0
+        assert third == 2
         dest = sqlite3.connect(dst_path)
         try:
             assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4

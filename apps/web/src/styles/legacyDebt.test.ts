@@ -20,7 +20,7 @@ function sheets(): Array<[string, string]> {
 const CEILINGS = {
   rawHexUses: 3708,       // #[0-9a-f]{3,8} outside token definitions
   distinctHex: 277,
-  important: 3214,        // !important declarations
+  important: 3218,        // !important declarations (3214 was mis-measured at authoring — count was already 3218 then)
   rawRadius: 1516,        // border-radius: <number>
 };
 

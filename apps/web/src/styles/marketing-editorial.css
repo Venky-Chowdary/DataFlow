@@ -132,13 +132,14 @@
 }
 
 .lp-btn--brand {
-  background: linear-gradient(180deg, #14b8a6 0%, #0d9488 100%);
+  /* Deep-teal stops: white label stays >= 4.5:1 across the gradient (WCAG AA) */
+  background: linear-gradient(180deg, #0f766e 0%, #115e59 100%);
   border-color: transparent;
   box-shadow: 0 1px 0 rgba(255, 255, 255, 0.2) inset, 0 8px 20px rgba(13, 148, 136, 0.28);
 }
 
 .lp-btn--brand:hover {
-  background: linear-gradient(180deg, #2dd4bf 0%, #0f766e 100%);
+  background: linear-gradient(180deg, #115e59 0%, #134e4a 100%);
   transform: translateY(-1px);
 }
 
@@ -3269,6 +3270,9 @@
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: clamp(14px, 1.4vw, 16px);
+  /* The brand panel is always dark — the default --df-text-primary (dark
+     navy in light theme) renders dark-on-dark. On-dark variant. */
+  color: #f0fdfa;
 }
 
 .lp-login-brand-logo .dt-logo,
@@ -3303,6 +3307,17 @@
   margin: 0;
   color: #fff;
   max-width: 14ch;
+}
+
+/* Decorative accent rule under the H1 — a flow element with its own
+   margin, so it can never touch the heading at any width (was an
+   absolutely-positioned rail that could clip the trailing glyph). */
+.lp-login-brand-rule {
+  display: block;
+  width: 64px;
+  height: 1px;
+  margin: 18px 0 0;
+  background: linear-gradient(90deg, rgba(94, 234, 212, 0.6), transparent);
 }
 
 .lp-login-brand-kicker {
@@ -3910,37 +3925,48 @@
     min-height: 100dvh;
   }
 
+  /* Brand collapses to a compact header ABOVE the card — Back stays
+     top-left, logo right, and the page title is the one line of copy.
+     The bottom edge is a deliberate rounded seam instead of a hard
+     horizontal cut where the gradient stops. */
   .lp-login-brand {
     min-height: auto;
-    order: 2;
+    height: auto;
+    flex: 0 0 auto;
+    order: 0;
+    border-radius: 0 0 26px 26px;
+    box-shadow: 0 1px 0 rgba(13, 148, 136, 0.18);
   }
 
   .lp-login-brand-inner {
+    height: auto;
     max-height: none;
     overflow: visible;
-    gap: 14px;
-    padding: 20px 20px 24px;
+    gap: 10px;
+    padding: 14px 16px 16px;
   }
 
   .lp-login-brand-body {
     justify-content: flex-start;
-    gap: 12px;
+    gap: 6px;
+  }
+
+  .lp-login-brand-kicker,
+  .lp-login-brand-lead,
+  .lp-login-proof,
+  .lp-login-metrics,
+  .lp-login-brand-dest,
+  .lp-login-brand-foot {
+    display: none;
   }
 
   .lp-login-brand-title {
-    font-size: clamp(1.55rem, 6.5vw, 2.1rem);
+    font-size: clamp(1.25rem, 5.5vw, 1.6rem);
     max-width: none;
+    margin: 0;
   }
 
-  .lp-login-brand-lead {
-    max-width: none;
-  }
-
-  .lp-login-metrics {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
-  }
-
-  .lp-login-auth {
+    .lp-login-auth {
     order: 1;
     overflow: visible;
     border-left: none;
@@ -3963,6 +3989,19 @@
 
   .lp-login-auth-arc {
     opacity: 0.35;
+  }
+}
+
+@media (max-width: 560px) {
+  /* "Create your workspace" sat ~8px under the Back row on 390px — give
+     the head->title stack the same vertical rhythm token the tablet
+     header uses instead of the tight compact-header gap. */
+  .lp-login-brand-inner {
+    gap: var(--lp-brand-head-gap, 22px);
+  }
+
+  .lp-login-brand-body {
+    padding-top: var(--lp-brand-title-pad, 8px);
   }
 }
 
@@ -8807,4 +8846,225 @@
 .lp-reveal {
   opacity: 1 !important;
   transform: none !important;
+}
+
+/* ── Auth flow pages (signup / verify / forgot / reset) ─────────────────
+   Same gate chrome as login, with the copy that was suppressed there:
+   the flow pages NEED the subtitle (destination + expiry) visible. */
+.lp-login--flow .lp-login-auth-sub {
+  display: block;
+}
+
+/* (The decorative rail is gone — the accent rule under the H1 is a flow
+   element now, so nothing decorative needs hiding on narrow viewports.) */
+
+/* "Forgot password?" — a quiet text link, not a native button. */
+.lp-login--gate .lp-login-forgot {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 4px 2px;
+  font: inherit;
+  font-size: 13.5px;
+  font-weight: 650;
+  color: #0f766e;
+  white-space: nowrap;
+  cursor: pointer;
+  border-radius: 6px;
+}
+
+.lp-login--gate .lp-login-forgot:hover {
+  text-decoration: underline;
+}
+
+.lp-login--gate .lp-login-forgot:focus-visible {
+  outline: 2px solid #0d9488;
+  outline-offset: 2px;
+}
+
+/* "Forgot password?" sits on its own line right under the password field,
+   right-aligned; the remember checkbox keeps a line of its own below. */
+.lp-login--gate .lp-login-forgot-row {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: -4px;
+}
+
+/* Inline actions inside alerts (e.g. "Enter verification code"). */
+.lp-login--gate .lp-login-alert button,
+.lp-login--gate .lp-login-alert .lp-login-alert-link {
+  appearance: none;
+  border: 0;
+  background: none;
+  padding: 0;
+  font: inherit;
+  font-weight: 700;
+  color: #0f766e;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.lp-login--gate .lp-login-alert button:hover {
+  text-decoration: underline;
+}
+
+.lp-login--gate .lp-login-alert button:focus-visible {
+  outline: 2px solid #0d9488;
+  outline-offset: 2px;
+}
+
+/* Disabled link buttons (resend cooldown) read muted, not live. */
+.lp-login--gate .lp-login-legal button:disabled,
+.lp-login--gate .lp-login-legal button[aria-disabled="true"] {
+  color: #94a3b8;
+  cursor: default;
+  font-weight: 500;
+}
+
+.lp-login--gate .lp-login-legal button:disabled:hover,
+.lp-login--gate .lp-login-legal button[aria-disabled="true"]:hover {
+  text-decoration: none;
+}
+
+.lp-login-resend-status {
+  margin: 4px 0 0;
+  min-height: 16px;
+  font-size: 12.5px;
+  color: #64748b;
+  text-align: center;
+}
+
+.lp-login-cta-spaced {
+  margin-top: 16px;
+}
+
+.lp-login-turnstile {
+  margin: 2px 0 0;
+  min-height: 0;
+  width: 100%;
+}
+
+/* The Turnstile iframe honours theme:"dark" + size:"flexible"; keep the
+   host at full field width so the widget never sits narrower than inputs. */
+.lp-login-turnstile iframe {
+  width: 100%;
+}
+
+/* Mobile: card gets real top/side padding; brand follows directly. */
+@media (max-width: 960px) {
+  .lp-login--gate .lp-login-auth {
+    padding: 16px 16px 24px;
+    justify-content: flex-start;
+  }
+
+  .lp-login--gate .lp-login-auth-inner {
+    padding: 0;
+    max-width: 480px;
+    margin: 0 auto;
+  }
+}
+
+/* ── Dark theme: the auth surface honours data-theme like the app ────── */
+html[data-theme="dark"] .lp-login--gate {
+  --lg-ink: #e8f0ee;
+  --lg-muted: #9fb8b4;
+  --lg-line: #234441;
+  background: #07111a;
+  color: var(--lg-ink);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth {
+  background:
+    radial-gradient(ellipse 80% 55% at 90% 0%, rgba(45, 212, 191, 0.12), transparent 58%),
+    radial-gradient(ellipse 60% 50% at 0% 100%, rgba(245, 158, 11, 0.08), transparent 52%),
+    linear-gradient(160deg, #081420 0%, #0a1a22 45%, #07111a 100%);
+  border-left-color: rgba(45, 212, 191, 0.12);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-card {
+  background: #0d1f28;
+  border-color: rgba(45, 212, 191, 0.18);
+  box-shadow:
+    0 1px 0 rgba(255, 255, 255, 0.05) inset,
+    0 24px 60px rgba(0, 0, 0, 0.45);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-head h2 {
+  color: #f0fdfa;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-sub,
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-sub strong {
+  color: #a9c4c0;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-auth-kicker {
+  color: #5eead4;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-label {
+  color: #b8ccc9;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input {
+  background: #081822;
+  border-color: rgba(94, 234, 212, 0.22);
+  color: #ecfdf5;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input::placeholder {
+  color: #5b7571;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input:focus {
+  border-color: #2dd4bf;
+  box-shadow: 0 0 0 3px rgba(45, 212, 191, 0.22);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-legal {
+  color: #8ba7a3;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-legal button,
+html[data-theme="dark"] .lp-login--gate .lp-login-forgot,
+html[data-theme="dark"] .lp-login--gate .lp-login-alert button {
+  color: #2dd4bf;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-legal button:disabled {
+  color: #54706c;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-remember {
+  color: #a9c4c0;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert {
+  background: rgba(245, 158, 11, 0.1);
+  border-color: rgba(245, 158, 11, 0.35);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert--danger {
+  background: rgba(220, 38, 38, 0.12);
+  border-color: rgba(220, 38, 38, 0.4);
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert strong {
+  color: #fde8c8;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert--danger strong {
+  color: #fecaca;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-alert p {
+  color: #d7d1c3;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-field-error {
+  color: #f87171;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-login-resend-status {
+  color: #8ba7a3;
 }

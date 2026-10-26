@@ -18,7 +18,17 @@ from dataclasses import asdict, dataclass, field
 from typing import Any, Iterator
 
 _LOCK = threading.RLock()
-_DATA_DIR = os.path.join(os.path.dirname(__file__), "..", "data")
+
+
+def _default_data_dir() -> str:
+    # Bind through platform_config so test isolation and volume config are
+    # honored; tests rebind _DATA_DIR/_PATH directly when they need their own.
+    from services.platform_config import data_dir
+
+    return str(data_dir())
+
+
+_DATA_DIR = _default_data_dir()
 _PATH = os.path.join(_DATA_DIR, "cdc_incremental_snapshots.json")
 _MONGO_COLL = "cdc_incremental_snapshots"
 

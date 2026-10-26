@@ -5,6 +5,7 @@ warehouse claim. Catalog tiles stay not transfer-live.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 import os
@@ -77,7 +78,7 @@ def run_production_sku_emulator_honesty(*, timeout_s: int = 1800) -> dict[str, A
         "tail": out[-2500:],
     }
     text = json.dumps(payload, indent=2) + "\n"
-    proofs = api_root / "data" / "proofs"
+    proofs = data_dir() / "proofs"
     proofs.mkdir(parents=True, exist_ok=True)
     (proofs / "production_sku_emulator.json").write_text(text)
     artifacts = Path("/opt/cursor/artifacts")

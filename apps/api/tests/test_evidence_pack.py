@@ -1,12 +1,13 @@
 """Evidence pack CI — claims must not exceed measured floors."""
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
 
 API_ROOT = Path(__file__).resolve().parents[1]
-PROOF_DIR = API_ROOT / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 
 def test_evidence_catalog_meets_all_claim_floors(tmp_path: Path) -> None:

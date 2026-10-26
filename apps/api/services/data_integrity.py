@@ -16,7 +16,7 @@ from services.column_case import column_type_or_none, lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.mapping_constraints import write_mappings
 from services.validation_coverage import stamp_validation_coverage
-from services.value_serializer import cell_to_string, project_row_cells
+from services.value_serializer import project_row_cells, wire_cell_text
 
 # Validation mode → minimum confidence / null tolerance
 _MODE_THRESHOLDS = {
@@ -440,7 +440,7 @@ def _check_financial_precision(
         if transform not in {"decimal", "integer", "currency", "percentage"}:
             continue
         values = [
-            cell_to_string(lookup_row_value(row, src, "")).strip()
+            wire_cell_text(lookup_row_value(row, src, "")).strip()
             for row in rows
             if lookup_row_value(row, src, None) not in (None, "")
         ]
@@ -567,7 +567,7 @@ def _check_required_nulls(
         values = [lookup_row_value(row, src, None) for row in rows]
         if not values:
             continue
-        empty = sum(1 for v in values if cell_to_string(v) == "")
+        empty = sum(1 for v in values if wire_cell_text(v) == "")
         rate = empty / len(values)
         if rate > null_rate_max:
             issues.append(f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field)")
@@ -700,7 +700,7 @@ def _sample_unique_constraint_dupes(
         for dest_col, src, ddl, casefold, null_sentinel in col_specs:
             # Preserve trailing spaces for NO PAD engines — cell_to_string only.
             raw_cell = row.get(src, row.get(dest_col, ""))
-            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+            raw = wire_cell_text(raw_cell) if raw_cell is not None else ""
             key_part = unique_equality_key(
                 None if raw_cell is None else raw,
                 ddl,
@@ -1016,7 +1016,7 @@ def _inferred_identity_dup_warnings(
     """Non-blocking note for duplicates of a heuristically inferred identity."""
     counts: dict[tuple[str, ...], int] = {}
     for row in rows:
-        tup = tuple(cell_to_string(row.get(c)) for c in identity_cols)
+        tup = tuple(wire_cell_text(row.get(c)) for c in identity_cols)
         if all(v == "" for v in tup):
             continue
         counts[tup] = counts.get(tup, 0) + 1
@@ -1544,7 +1544,7 @@ def _check_duplicate_keys(
             ):
                 continue
             raw_cell = row.get(primary_key, "")
-            raw = cell_to_string(raw_cell) if raw_cell is not None else ""
+            raw = wire_cell_text(raw_cell) if raw_cell is not None else ""
             key = unique_equality_key(
                 None if raw_cell is None else raw,
                 dest_ddl,
@@ -1827,7 +1827,7 @@ def _check_encoding_anomalies(
                 continue
             if str(col).lower() in sanitized_cols:
                 continue
-            text = cell_to_string(val)
+            text = wire_cell_text(val)
             checked += 1
             if "\ufffd" in text:
                 findings.append({

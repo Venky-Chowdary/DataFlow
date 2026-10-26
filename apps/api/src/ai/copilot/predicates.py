@@ -124,8 +124,13 @@ _FILTER_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = (
     ),
     (
         re.compile(
-            rf"\b({_IDENT})\s*(>=|<=|!=|<>|>|=|<)\s*['\"]?"
-            rf"((?:[^'\"\n;]|'(?=[A-Za-z0-9])){{1,80}}?)['\"]?{_END}",
+            # Quoted literals match first — commas/periods inside quotes are
+            # data ("Central, HQ"), never the value boundary (D105 minor).
+            rf"\b({_IDENT})\s*(>=|<=|!=|<>|>|=|<)\s*"
+            rf"(?:'((?:[^'\n;]|'(?=[A-Za-z0-9])){{1,80}})'"
+            rf"|\"((?:[^\"\n;]){{1,80}})\""
+            rf"|((?:[^'\"\n;]|'(?=[A-Za-z0-9])){{1,80}}?))"
+            rf"{_END}",
             re.I,
         ),
         "cmp",
@@ -303,7 +308,10 @@ def _build_parsed(
         return ParsedFilter(column=column, op=op, raw_values=[value], text=phrase)
     if kind == "cmp":
         symbol = match.group(2)
-        value = (match.group(3) or "").strip()
+        # Quoted-literal branches win over the bare-value branch (groups 3/4/5).
+        value = (
+            match.group(3) or match.group(4) or match.group(5) or ""
+        ).strip()
         op = {
             "=": "eq", "!=": "ne", "<>": "ne",
             ">": "gt", ">=": "gte", "<": "lt", "<=": "lte",

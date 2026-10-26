@@ -6,13 +6,14 @@ drops below the floor (default 0.85). This is how we earn accuracy claims.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
 
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden.json"
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 ACCURACY_FLOOR = 1.0  # 75+ case fixture must be perfect; expand fixture before lowering.
 
 

@@ -223,6 +223,28 @@ _PUBLIC_PATHS = {
     "/api/v1/transfer/capabilities",
     "/api/v1/transfer/platform",
     "/api/v1/transfer/readiness",
+    # Unauthenticated self-serve signup surface (each 404s while
+    # DATAWRAP_SIGNUP_ENABLED is off — the router guards, not this list).
+    "/api/v1/auth/signup",
+    "/api/v1/auth/verify-email",
+    "/api/v1/auth/resend",
+    "/api/v1/auth/resend-webhook",
+    "/api/v1/auth/form-token",
+    "/api/v1/auth/signup/config",
+    "/api/v1/auth/password/forgot",
+    "/api/v1/auth/password/reset",
+    "/api/v1/auth/password/reset/inspect",
+    "/api/v1/auth/sso/route",
+    "/auth/signup",
+    "/auth/verify-email",
+    "/auth/resend",
+    "/auth/resend-webhook",
+    "/auth/form-token",
+    "/auth/signup/config",
+    "/auth/password/forgot",
+    "/auth/password/reset",
+    "/auth/password/reset/inspect",
+    "/auth/sso/route",
     "/api/v1/catalog",
     "/.well-known/oauth-protected-resource",
     "/.well-known/oauth-protected-resource/api/v1/mcp",
@@ -237,6 +259,20 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # Rotating your own password is not workspace administration.
     ("POST", "/api/v1/auth/change-password", Permission.ACCOUNT_SELF),
     ("POST", "/auth/change-password", Permission.ACCOUNT_SELF),
+    # Listing/revoking your own sessions is likewise account-self.
+    ("*", "/api/v1/auth/sessions", Permission.ACCOUNT_SELF),
+    ("*", "/auth/sessions", Permission.ACCOUNT_SELF),
+    # Changing your own sign-in email: both steps need your session — the
+    # mailed OTP proves the new address, the session binds it to this account.
+    ("POST", "/api/v1/auth/email/change", Permission.ACCOUNT_SELF),
+    ("POST", "/api/v1/auth/email/change/confirm", Permission.ACCOUNT_SELF),
+    ("POST", "/auth/email/change", Permission.ACCOUNT_SELF),
+    ("POST", "/auth/email/change/confirm", Permission.ACCOUNT_SELF),
+    # Onboarding answers belong to the caller's own account/org.
+    ("GET", "/api/v1/auth/admin/signup-metrics", Permission.IAM_MANAGE),
+    ("POST", "/api/v1/auth/onboarding", Permission.ACCOUNT_SELF),
+    ("GET", "/auth/admin/signup-metrics", Permission.IAM_MANAGE),
+    ("POST", "/auth/onboarding", Permission.ACCOUNT_SELF),
     # Accounts are deployment-level administration. Membership changes inside a
     # workspace are authorized by the *workspace* role in ``services.team_store``
     # (a workspace admin need not be a platform admin), so the middleware only

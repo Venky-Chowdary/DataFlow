@@ -108,7 +108,9 @@ def test_quarantine_wire_round_trip():
     wire = quarantine_cell_wire(ESCAPED)
     assert wire != SQL_NULL_SENTINEL  # not collapsed into NULL
     detail = _unwire_quarantine_detail({"row": {"c": wire}})
-    assert detail["row"]["c"] == ESCAPED
+    # Unwire yields the decoded literal (a WireLiteral) — binds as text, never
+    # re-decodes as NULL (D113 WireLiteral layer).
+    assert detail["row"]["c"] == LITERAL
     # Replay → binder materializes the literal.
     from connectors.sql_bind import normalize_sql_bind_value
 

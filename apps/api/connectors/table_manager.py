@@ -2145,8 +2145,49 @@ def restore_pg_route_backups(
                     if not cur.fetchone():
                         cur.execute("RELEASE SAVEPOINT route_backup_restore")
                         continue
+                    # D114: replaying the pre-run rows through user triggers
+                    # mutates them (a BEFORE INSERT amt:=amt+0.01 fired again
+                    # on restore). Suppress triggers for this transaction so
+                    # the restore lands the backup bytes, then verify the live
+                    # table against the backup before claiming "restored".
+                    # session_replication_role needs superuser/pg_owner — when
+                    # the role lacks it the failed statement aborts this txn,
+                    # so retry unsuppressed and let the verify below decide.
+                    try:
+                        cur.execute(
+                            "SET LOCAL session_replication_role = 'replica'"
+                        )
+                    except Exception:  # noqa: BLE001 - privilege varies by role
+                        logger.warning(
+                            "Route %s restore cannot suppress triggers "
+                            "(session_replication_role denied) — verifying "
+                            "against the backup instead",
+                            route,
+                        )
+                        cur.execute("ROLLBACK TO SAVEPOINT route_backup_restore")
+                        cur.execute("SAVEPOINT route_backup_restore")
                     cur.execute(f"DELETE FROM {tbl_ref}")
                     cur.execute(f"INSERT INTO {tbl_ref} SELECT * FROM {bak_ref}")
+                    # Verify restored content is byte-identical to the backup —
+                    # a trigger that still fired (replica role unavailable) or
+                    # any drift must not be reported as "restored".
+                    cur.execute(
+                        f"SELECT COUNT(*) FROM ("
+                        f"SELECT * FROM {tbl_ref} EXCEPT SELECT * FROM {bak_ref}"
+                        f" UNION ALL "
+                        f"SELECT * FROM {bak_ref} EXCEPT SELECT * FROM {tbl_ref}"
+                        f") _df_restore_diff"
+                    )
+                    diff = int((cur.fetchone() or [0])[0] or 0)
+                    if diff:
+                        logger.warning(
+                            "Route %s restore verify failed: %d differing row(s) "
+                            "vs backup %s — backup kept for inspection",
+                            route, diff, backup,
+                        )
+                        cur.execute("ROLLBACK TO SAVEPOINT route_backup_restore")
+                        cur.execute("RELEASE SAVEPOINT route_backup_restore")
+                        continue
                     cur.execute(f"DROP TABLE {bak_ref}")
                     cur.execute("RELEASE SAVEPOINT route_backup_restore")
                     restored.append(str(route))

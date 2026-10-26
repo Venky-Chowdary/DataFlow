@@ -52,6 +52,14 @@ from connectors.writer_common import writer_meta_with_source_rows
 
 logger = logging.getLogger(__name__)
 
+# MySQL can't index these without a prefix length (error 1170). TEXT-family
+# conflict columns get ``(191)`` — the utf8mb4-safe prefix under InnoDB's
+# 3072-byte key limit.
+_MYSQL_PREFIX_KEY_TYPES = frozenset(
+    {"text", "tinytext", "mediumtext", "longtext", "blob", "tinyblob",
+     "mediumblob", "longblob", "json"}
+)
+
 
 @dataclass
 class WriteResult(_WriteResult):
@@ -1006,8 +1014,21 @@ def write_mapped_rows(
                         index_name = sanitize_identifier(
                             f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                         )
+                        type_by_col = {
+                            c: str(t).lower()
+                            for c, t in zip(target_cols, target_types)
+                        }
                         cols = ", ".join(
-                            quote_sql_identifier(c, "`") for c in conflict_cols
+                            quote_sql_identifier(c, "`")
+                            + (
+                                "(191)"
+                                if any(
+                                    t in type_by_col.get(c, "")
+                                    for t in _MYSQL_PREFIX_KEY_TYPES
+                                )
+                                else ""
+                            )
+                            for c in conflict_cols
                         )
                         col_defs += (
                             f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
@@ -1022,7 +1043,11 @@ def write_mapped_rows(
                 # IF NOT EXISTS, so a bare VARCHAR Map stamp 1064s on replay
                 # into a live table (``near ' `age` BIGINT)'``).
                 if not table_existed:
-                    cursor.execute(create_sql)
+                    # 'dataflow:managed' — same marker as the fallback branch
+                    # below: without it the D101 gate treats a table this run
+                    # created as operator-owned and refuses the unique index a
+                    # later keyed upsert/quarantine replay needs.
+                    cursor.execute(f"{create_sql} COMMENT='dataflow:managed'")
                 _kwargs["_schema_fidelity_report"] = settle_create_new_on_destination(
                     fidelity_plan,
                     dest_dialect="mysql",
@@ -1053,8 +1078,21 @@ def write_mapped_rows(
                         index_name = sanitize_identifier(
                             f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                         )
+                        type_by_col = {
+                            c: str(t).lower()
+                            for c, t in zip(target_cols, target_types)
+                        }
                         cols = ", ".join(
-                            quote_sql_identifier(c, "`") for c in conflict_cols
+                            quote_sql_identifier(c, "`")
+                            + (
+                                "(191)"
+                                if any(
+                                    t in type_by_col.get(c, "")
+                                    for t in _MYSQL_PREFIX_KEY_TYPES
+                                )
+                                else ""
+                            )
+                            for c in conflict_cols
                         )
                         col_defs += (
                             f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
@@ -1132,9 +1170,28 @@ def write_mapped_rows(
                             f"yourself — CREATE UNIQUE INDEX {index_name} "
                             f"ON {table_name} ({', '.join(conflict_cols)});"
                         )
-                    cols = ", ".join(
-                        quote_sql_identifier(c, "`") for c in conflict_cols
+                    # TEXT/BLOB-family keys need a prefix length or MySQL
+                    # 1170s the index. A CSV/file source types ids as TEXT —
+                    # the unique index is still the correct conflict target,
+                    # it just has to index a prefix (191 chars is the classic
+                    # utf8mb4-safe prefix under the 3072-byte InnoDB limit).
+                    cursor.execute(
+                        "SELECT COLUMN_NAME, DATA_TYPE "
+                        "FROM INFORMATION_SCHEMA.COLUMNS "
+                        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+                        (table_name,),
                     )
+                    col_types = {
+                        str(name): str(dtype).lower()
+                        for name, dtype in cursor.fetchall()
+                    }
+                    key_parts = []
+                    for c in conflict_cols:
+                        part = quote_sql_identifier(c, "`")
+                        if col_types.get(c, "") in _MYSQL_PREFIX_KEY_TYPES:
+                            part = f"{part}(191)"
+                        key_parts.append(part)
+                    cols = ", ".join(key_parts)
                     cursor.execute(
                         f"CREATE UNIQUE INDEX "
                         f"{quote_sql_identifier(index_name, '`')} "

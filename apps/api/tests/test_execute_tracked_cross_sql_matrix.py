@@ -71,8 +71,13 @@ def _run(request: TransferRequest) -> None:
         # A server-side engine copy brings no row into this process, so the
         # row-count proof is destination COUNT(*) against the source snapshot
         # COUNT(*) — the scope says so — and the destination key census then
-        # re-reads both sides value-by-value.
-        assert recon.get("checksum_scope") == "dest_count_equals_source_snapshot_count", recon
+        # re-reads both sides value-by-value. A partitioned fast-path copy
+        # reports the partition variant of the same count proof; both are
+        # count scopes, never a value-digest match.
+        assert recon.get("checksum_scope") in {
+            "dest_count_equals_source_snapshot_count",
+            "partition_dest_count_equals_source_snapshot",
+        }, recon
         assert recon.get("checksum_match") is False
         assert recon.get("target_rows") == 2
         assert (recon.get("value_compare") or {}).get("ran") is True, recon

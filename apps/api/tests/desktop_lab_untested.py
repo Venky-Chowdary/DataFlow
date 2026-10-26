@@ -19,6 +19,7 @@ Honesty
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 import os
@@ -1921,7 +1922,7 @@ def run_desktop_lab_untested(*, persist: bool = True) -> dict[str, Any]:
     }
     if persist:
         text = json.dumps(payload, indent=2, default=str) + "\n"
-        proofs = Path(__file__).resolve().parents[1] / "data" / "proofs"
+        proofs = data_dir() / "proofs"
         proofs.mkdir(parents=True, exist_ok=True)
         (proofs / "desktop_lab_untested.json").write_text(text)
         artifacts = Path("/opt/cursor/artifacts")

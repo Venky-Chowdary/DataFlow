@@ -36,7 +36,7 @@ describe("z-index stays on the --df-z-* scale", () => {
 
   it("the scale defines every tier the sheets reference", () => {
     const tokens = sheet("tokens.css");
-    const defined = new Set([...tokens.matchAll(/--(df-z-[a-z-]+):\s*-?\d+/g)].map((m) => m[1]));
+    const defined = new Set([...tokens.matchAll(/(--df-z-[a-z-]+):\s*-?\d+/g)].map((m) => m[1]));
     assert.ok(defined.size >= 10, "expected the --df-z-* scale in tokens.css");
     const used = new Set<string>();
     for (const [, css] of sheets()) {

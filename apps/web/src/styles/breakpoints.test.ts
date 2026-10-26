@@ -37,7 +37,9 @@ describe("media query breakpoints", () => {
   it("no width:100vw declaration (full-bleed must not count the scrollbar)", () => {
     const offenders: string[] = [];
     for (const [name, css] of sheets()) {
-      for (const match of css.matchAll(/width:\s*100vw\b/g)) {
+      // `width:` only — `max-width: 100vw` is a harmless cap (the element can
+      // never exceed the viewport), not a full-bleed size declaration.
+      for (const match of css.matchAll(/(?<![-\w])width:\s*100vw\b/g)) {
         offenders.push(`${name}: ${match[0]}`);
       }
     }
