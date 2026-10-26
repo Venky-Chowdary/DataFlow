@@ -887,15 +887,15 @@ def test_stale_lease_is_reclaimed(monkeypatch, tmp_path):
     row = mail_outbox.enqueue(
         to="a@x.io", subject="s", text="t", html="h",
         idempotency_key="k", purpose="password.reset")
-    assert mail_outbox.claim(row["id"]) is True
+    assert mail_outbox.claim(row["id"]) is not None
     # Second immediate claim loses (live lease).
-    assert mail_outbox.claim(row["id"]) is False
+    assert mail_outbox.claim(row["id"]) is None
     # Expire the lease in place — simulates a dead replica.
     f = tmp_path / "mail_outbox.json"
     doc = json.loads(f.read_text())
     doc["rows"][row["id"]]["lease_until"] = "2000-01-01T00:00:00+00:00"
     f.write_text(json.dumps(doc))
-    assert mail_outbox.claim(row["id"]) is True
+    assert mail_outbox.claim(row["id"]) is not None
 
 
 def test_mongo_index_setup_runs_once_and_fails_loud(monkeypatch):
@@ -1093,3 +1093,105 @@ def test_resend_cooldown_handles_naive_bson_last_sent(monkeypatch):
         signup_service.resend_code(challenge_id="c-1")
     assert exc.value.status_code == 429
     assert exc.value.code == "resend_too_soon"
+
+
+def test_send_renews_lease_so_second_claim_never_wins(monkeypatch, tmp_path):
+    """Review-12 item 1: a provider call slower than the original 60s
+    claim window must not let a second replica reclaim and re-send the
+    row. The lane renews the lease under its fencing token immediately
+    before send(), so claim() loses for the whole send — and forever
+    after, because the row lands terminal."""
+    import threading
+    from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
+
+    row = mail_outbox.enqueue(
+        to="slow@x.io", subject="s", text="t", html="h",
+        idempotency_key="k", purpose="password.reset",
+        quota_counted=True)
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class _SlowSender:
+        name = "slow"
+
+        def send(self, email):
+            started.set()
+            release.wait(5)
+            return {"ok": True, "provider": "slow"}
+
+    monkeypatch.setattr(signup_service, "get_email_sender",
+                        lambda: _SlowSender())
+
+    t = threading.Thread(target=signup_service._deliver_outbox_row,
+                         args=(row,))
+    t.start()
+    try:
+        assert started.wait(5), "send never entered the provider call"
+        # The send is in flight under a renewed lease — a racing drain
+        # cannot take the row, no matter how long the provider stalls
+        # inside its own timeout.
+        assert mail_outbox.claim(row["id"]) is None
+    finally:
+        release.set()
+        t.join(10)
+    # Terminal now — never claimable again.
+    assert mail_outbox.claim(row["id"]) is None
+    assert mail_outbox.counts()["sent"] == 1
+
+
+def test_lease_fencing_blocks_a_stale_claimer(monkeypatch, tmp_path):
+    """The fencing token stops a stale claimer whose lease lapsed and was
+    reclaimed: its extend_lease/mark/reschedule writes must not apply to
+    the row the second replica now owns."""
+    import json
+    from datetime import datetime
+    from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+
+    row = mail_outbox.enqueue(
+        to="a@x.io", subject="s", text="t", html="h",
+        idempotency_key="k", purpose="password.reset")
+    stale = mail_outbox.claim(row["id"], lease_sec=60)
+    assert stale is not None
+
+    # Replica A's lease lapses; replica B claims and gets a new token.
+    f = tmp_path / "mail_outbox.json"
+    doc = json.loads(f.read_text())
+    doc["rows"][row["id"]]["lease_until"] = "2000-01-01T00:00:00+00:00"
+    f.write_text(json.dumps(doc))
+    live = mail_outbox.claim(row["id"])
+    assert live is not None and live != stale
+
+    # The stale claimer cannot extend its old claim…
+    assert mail_outbox.extend_lease(row["id"], stale) is False
+    # …nor stamp its outcome over B's in-flight claim.
+    mail_outbox.mark(row["id"], "failed", claim_token=stale)
+    mail_outbox.reschedule(row["id"], 5, "stale", claim_token=stale)
+    doc = json.loads(f.read_text())["rows"][row["id"]]
+    assert doc["status"] == "sending"
+    assert doc["claim_token"] == live
+    assert datetime.fromisoformat(doc["lease_until"]) > datetime.now(UTC)
+
+    # The live claimer can extend and complete normally.
+    assert mail_outbox.extend_lease(row["id"], live) is True
+    mail_outbox.mark(row["id"], "sent", claim_token=live)
+    doc = json.loads(f.read_text())["rows"][row["id"]]
+    assert doc["status"] == "sent"
+
+
+def test_provider_timeouts_stay_under_the_lease():
+    """Review-12 item 1: one provider call must fit inside the claim lease
+    with margin — otherwise a send could outlive its own claim. Covers
+    both transactional drivers; if a timeout is ever raised past the
+    lease this fails loudly instead of double-sending in production."""
+    from services import mail_outbox
+    from services.email_sender import _RESEND_TIMEOUT_SEC
+    from services.notification_service import _SMTP_TIMEOUT_SEC
+
+    assert _RESEND_TIMEOUT_SEC < mail_outbox._LEASE_SEC / 2
+    assert _SMTP_TIMEOUT_SEC < mail_outbox._LEASE_SEC

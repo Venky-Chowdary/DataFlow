@@ -188,7 +188,8 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
     mail.send_failed (all other purposes); terminal state also marks the
     row failed — silent loss is forbidden. A fresh link/code can always be
     requested (each new issue supersedes the last)."""
-    if not mail_outbox.claim(row["id"]):
+    token = mail_outbox.claim(row["id"])
+    if not token:
         # Another replica claimed this row first (concurrent drain) or it is
         # already terminal — exactly one send per row, no double send.
         return
@@ -196,11 +197,19 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
         if not row.get("quota_counted"):
             consume_send_slot()
         payload = mail_outbox.body(row)  # sealed at rest, decrypted on send
+        # Renew under our fencing token right before the provider call so
+        # the lease covers the whole send: a slow provider can never let a
+        # second replica reclaim and re-send this row mid-flight.
+        if not mail_outbox.extend_lease(row["id"], token):
+            logger.warning(
+                "mail outbox lease lost before send (%s); not sending",
+                row.get("purpose"))
+            return
         get_email_sender().send(OutboundEmail(
             to=row["to"], subject=row["subject"], text=payload["text"],
             html=payload["html"],
             idempotency_key=row["idempotency_key"]))
-        mail_outbox.mark(row["id"], "sent")
+        mail_outbox.mark(row["id"], "sent", claim_token=token)
         details = {"ip": actor_ip, "purpose": row.get("purpose")}
         # Literal event names: the security-event registry audit requires
         # every call site to name its event as a string constant.
@@ -213,7 +222,7 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
                                   actor=row["to"], session_id=row["id"],
                                   details=details)
     except Exception as exc:
-        _outbox_send_failed(row, exc, actor_ip=actor_ip)
+        _outbox_send_failed(row, exc, actor_ip=actor_ip, claim_token=token)
 
 
 _MAX_SEND_RETRIES = 3
@@ -234,7 +243,8 @@ def _retry_delay_sec(exc: Exception, attempt: int) -> float:
 
 
 def _outbox_send_failed(row: dict[str, Any], exc: Exception,
-                        *, actor_ip: str = "") -> None:
+                        *, actor_ip: str = "",
+                        claim_token: str | None = None) -> None:
     """One failed send: transient errors reschedule with bounded backoff
     (the row's attempts count survives restarts and replicas); permanent
     ones — and exhausted retries — mark the row failed for good. Every
@@ -243,7 +253,8 @@ def _outbox_send_failed(row: dict[str, Any], exc: Exception,
     attempts = int(row.get("attempts") or 0)
     if retryable and attempts < _MAX_SEND_RETRIES:
         delay = _retry_delay_sec(exc, attempts + 1)
-        mail_outbox.reschedule(row["id"], delay, type(exc).__name__)
+        mail_outbox.reschedule(row["id"], delay, type(exc).__name__,
+                               claim_token=claim_token)
         row["attempts"] = attempts + 1
         timer = threading.Timer(
             delay,
@@ -254,7 +265,7 @@ def _outbox_send_failed(row: dict[str, Any], exc: Exception,
         logger.warning("mail outbox transient failure (%s); retry %d in %.0fs",
                        type(exc).__name__, attempts + 1, delay)
     else:
-        mail_outbox.mark(row["id"], "failed")
+        mail_outbox.mark(row["id"], "failed", claim_token=claim_token)
         if isinstance(exc, EmailSendError):
             logger.warning("mail send failed terminally (%s)",
                            row.get("purpose"))

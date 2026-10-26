@@ -140,6 +140,11 @@ def _send_mailgun(recipients: list[str], subject: str, body: str, from_addr: str
         return {"ok": False, "error": str(exc)}
 
 
+# SMTP connect/read ceiling — must stay under the mail outbox claim lease
+# (mail_outbox._LEASE_SEC) so one send can never outlive its claim.
+_SMTP_TIMEOUT_SEC = 30.0
+
+
 def _smpt_send(
     recipients: list[str],
     subject: str,
@@ -176,7 +181,7 @@ def _smpt_send(
         if html:
             msg.add_alternative(html, subtype="html")
 
-        with smtplib.SMTP(host, port, timeout=30) as server:
+        with smtplib.SMTP(host, port, timeout=_SMTP_TIMEOUT_SEC) as server:
             if use_tls:
                 server.starttls()
             if user:

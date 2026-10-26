@@ -149,51 +149,70 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
     return row
 
 
-def mark(row_id: str, status: str) -> None:
+def mark(row_id: str, status: str, *, claim_token: str | None = None) -> None:
     """Record the terminal status (``sent`` | ``failed`` | ``expired`` |
-    ``superseded``) for a row; terminal rows lose the body entirely."""
+    ``superseded``) for a row; terminal rows lose the body entirely.
+    ``claim_token`` restricts the write to the lease we hold — a stale
+    claimer must not stamp its outcome over the replica that now owns
+    the row."""
     db = _database()
     if db is not None:
         update: dict[str, Any] = {
             "$set": {"status": status, "finished_at": _now_iso()}}
         if status in _TERMINAL:
             update["$unset"] = {k: "" for k in _BODY_KEYS}
-        db[COLLECTION].update_one({"_id": row_id}, update)
+        flt: dict[str, Any] = {"_id": row_id}
+        if claim_token is not None:
+            flt["claim_token"] = claim_token
+        db[COLLECTION].update_one(flt, update)
         return
     with json_doc_transaction(_path(), {"rows": {}}) as doc:
         row = doc.setdefault("rows", {}).get(row_id)
-        if row is not None:
-            row["status"] = status
-            row["finished_at"] = _now_iso()
-            if status in _TERMINAL:
-                for k in _BODY_KEYS:
-                    row.pop(k, None)
+        if row is None:
+            return
+        if claim_token is not None and row.get("claim_token") != claim_token:
+            return
+        row["status"] = status
+        row["finished_at"] = _now_iso()
+        if status in _TERMINAL:
+            for k in _BODY_KEYS:
+                row.pop(k, None)
 
 
-def reschedule(row_id: str, delay_sec: float, reason: str = "") -> None:
+def reschedule(row_id: str, delay_sec: float, reason: str = "",
+               *, claim_token: str | None = None) -> None:
     """Return a claimed row to 'queued' after a transient failure, gated by
     ``next_attempt_at`` — it is not claimable again until the backoff elapses.
     The attempt count lives on the row so retries are bounded across
-    replicas and restarts, not just within one process."""
+    replicas and restarts, not just within one process. ``claim_token``
+    restricts the write to the lease we hold."""
     next_at = (datetime.now(UTC)
                + timedelta(seconds=max(0.05, delay_sec))).isoformat()
     db = _database()
     if db is not None:
-        db[COLLECTION].update_one({"_id": row_id}, {
+        flt: dict[str, Any] = {"_id": row_id}
+        if claim_token is not None:
+            flt["claim_token"] = claim_token
+        db[COLLECTION].update_one(flt, {
             "$set": {"status": "queued", "next_attempt_at": next_at,
                      "last_error": reason},
             "$inc": {"attempts": 1},
-            "$unset": {"claimed_at": "", "lease_until": ""}})
+            "$unset": {"claimed_at": "", "lease_until": "",
+                       "claim_token": ""}})
         return
     with json_doc_transaction(_path(), {"rows": {}}) as doc:
         row = doc.setdefault("rows", {}).get(row_id)
-        if row is not None:
-            row["status"] = "queued"
-            row["next_attempt_at"] = next_at
-            row["last_error"] = reason
-            row["attempts"] = int(row.get("attempts") or 0) + 1
-            row.pop("claimed_at", None)
-            row.pop("lease_until", None)
+        if row is None:
+            return
+        if claim_token is not None and row.get("claim_token") != claim_token:
+            return
+        row["status"] = "queued"
+        row["next_attempt_at"] = next_at
+        row["last_error"] = reason
+        row["attempts"] = int(row.get("attempts") or 0) + 1
+        row.pop("claimed_at", None)
+        row.pop("lease_until", None)
+        row.pop("claim_token", None)
 
 
 def queued() -> list[dict[str, Any]]:
@@ -236,13 +255,17 @@ def _claimable() -> list[dict[str, Any]]:
     return out
 
 
-def claim(row_id: str, *, lease_sec: int = _LEASE_SEC) -> bool:
+def claim(row_id: str, *, lease_sec: int = _LEASE_SEC) -> str | None:
     """Atomically move a due 'queued' row (or an expired 'sending' lease)
-    to 'sending'. Exactly one caller across every replica wins — this is
-    what makes two concurrent drains produce one send per row."""
+    to 'sending' and return a fencing token for it — exactly one caller
+    across every replica wins, which is what makes two concurrent drains
+    produce one send per row. The token identifies this claimer so a
+    later :func:`extend_lease` / :func:`mark` / :func:`reschedule` cannot
+    be mis-attributed to a replica that reclaimed the row in between."""
     now = datetime.now(UTC)
     now_s = now.isoformat()
     until = (now + timedelta(seconds=lease_sec)).isoformat()
+    token = uuid.uuid4().hex
     db = _database()
     if db is not None:
         from pymongo import ReturnDocument
@@ -253,9 +276,9 @@ def claim(row_id: str, *, lease_sec: int = _LEASE_SEC) -> bool:
                 {"status": "sending", "lease_until": {"$lte": now_s}},
             ]},
             {"$set": {"status": "sending", "claimed_at": now_s,
-                      "lease_until": until}},
+                      "lease_until": until, "claim_token": token}},
             return_document=ReturnDocument.AFTER)
-        return doc is not None
+        return token if doc is not None else None
     claimed = False
     with json_doc_transaction(_path(), {"rows": {}}) as doc:
         row = doc.setdefault("rows", {}).get(row_id)
@@ -267,8 +290,36 @@ def claim(row_id: str, *, lease_sec: int = _LEASE_SEC) -> bool:
                 row["status"] = "sending"
                 row["claimed_at"] = now_s
                 row["lease_until"] = until
+                row["claim_token"] = token
                 claimed = True
-    return claimed
+    return token if claimed else None
+
+
+def extend_lease(row_id: str, claim_token: str,
+                 *, lease_sec: int = _LEASE_SEC) -> bool:
+    """Push ``lease_until`` out while we still own the claim. Called right
+    before the provider send so the lease always covers the whole call:
+    a send that runs long can never be reclaimed and duplicated by a
+    second replica mid-flight. False when the claim is already lost
+    (expired and reclaimed, or terminal) — the caller must not send."""
+    now = datetime.now(UTC)
+    now_s = now.isoformat()
+    until = (now + timedelta(seconds=lease_sec)).isoformat()
+    db = _database()
+    if db is not None:
+        res = db[COLLECTION].update_one(
+            {"_id": row_id, "status": "sending",
+             "claim_token": claim_token},
+            {"$set": {"lease_until": until}})
+        return res.modified_count == 1
+    ok = False
+    with json_doc_transaction(_path(), {"rows": {}}) as doc:
+        row = doc.setdefault("rows", {}).get(row_id)
+        if (row is not None and row.get("status") == "sending"
+                and row.get("claim_token") == claim_token):
+            row["lease_until"] = until
+            ok = True
+    return ok
 
 
 def counts() -> dict[str, int]:
