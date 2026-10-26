@@ -2525,3 +2525,40 @@ def seconds_until_next_schedule(
     if delta <= 0:
         return 1.0
     return float(min(cap, max(1.0, delta)))
+
+
+def conflicting_dest_writers(
+    dest_connector_id: str,
+    dest_table: str,
+    *,
+    exclude_schedule_id: str = "",
+) -> list[PipelineSchedule]:
+    """Enabled pipelines already writing the same destination table (D104).
+
+    Fivetran/Airbyte treat one destination table as owned by one pipeline —
+    a second writer is a conflict to surface at creation, not a runtime key
+    collision. The comparison folds case (Snowflake uppercases unquoted
+    identifiers) so ``hq1200_shared`` and ``HQ1200_SHARED`` are one table.
+    Disabled schedules hold no write claim and are not conflicts.
+    """
+    dst = str(dest_connector_id or "").strip()
+    tbl = str(dest_table or "").strip()
+    if not dst or not tbl:
+        return []
+    exclude = str(exclude_schedule_id or "").strip()
+    return [
+        s
+        for s in _load_all()
+        if getattr(s, "enabled", False)
+        and str(getattr(s, "id", "") or "") != exclude
+        and str(getattr(s, "dest_connector_id", "") or "").strip() == dst
+        and str(getattr(s, "dest_table", "") or "").strip().casefold() == tbl.casefold()
+    ]
+
+
+def describe_dest_conflict(schedule: PipelineSchedule) -> str:
+    """One-line conflict description naming the pipeline and its sync mode."""
+    name = str(getattr(schedule, "name", "") or "").strip() or "(unnamed)"
+    sid = str(getattr(schedule, "id", "") or "")
+    mode = str(getattr(schedule, "sync_mode", "") or "unknown mode")
+    return f"“{name}” ({sid}) — {mode}"

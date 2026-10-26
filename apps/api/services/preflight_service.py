@@ -704,6 +704,7 @@ def run_file_preflight(
     source_config: dict[str, Any] | None = None,
     source_table: str = "",
     destination_table: str = "",
+    destination_connector_id: str = "",
     source_filename: str = "",
     source_file_id: str = "",
     schema_policy: str = "manual_review",
@@ -1828,6 +1829,34 @@ def run_file_preflight(
     # refuses to move rows when any blocker remains (passed=False).
     engine = PreflightEngine(fail_fast=False)
     result = engine.run(ctx)
+
+    # D104: when a destination key collision is caused by another enabled
+    # pipeline owning this table, name that pipeline in the blocker so the
+    # refusal points at the cause, not just at the keys already at rest.
+    if destination_connector_id:
+        try:
+            from services.schedule_store import (
+                conflicting_dest_writers,
+                describe_dest_conflict,
+            )
+
+            _owners = conflicting_dest_writers(
+                destination_connector_id, destination_table
+            )
+            if _owners:
+                _names = [describe_dest_conflict(s) for s in _owners]
+                for _b in result.blockers or []:
+                    _d = (
+                        _b.get("details")
+                        if isinstance(_b, dict)
+                        else getattr(_b, "details", None)
+                    ) or {}
+                    if _d.get("sample_collisions") or _d.get(
+                        "collision_count"
+                    ) is not None:
+                        _d["conflicting_pipelines"] = list(_names)
+        except Exception:  # noqa: BLE001 — naming must never break preflight
+            pass
 
     from services.preflight_proof_bundle import build_preflight_proof_bundle
 
