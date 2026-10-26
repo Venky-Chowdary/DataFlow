@@ -786,9 +786,13 @@ def read_target_sample(
                 )
                 from google.cloud import bigquery as _bq
 
-                from services.copy_bigquery_common import bigquery_ident
+                from services.copy_bigquery_common import (
+                    bigquery_ident,
+                    bigquery_table_ref,
+                )
 
-                table_id = f"{project_id}.{dataset_id}.{table_name}"
+                table_ref = bigquery_table_ref(project_id, dataset_id, table_name)
+                table_id = ".".join(p for p in (project_id, dataset_id, table_name) if p)
                 col_sql = (
                     "*"
                     if cols == ["*"]
@@ -810,7 +814,7 @@ def read_target_sample(
                     widened_sorted = sorted(widened_keys)
                     placeholders = ",".join(["?"] * len(widened_sorted))
                     sql = (
-                        f"SELECT {col_sql} FROM `{table_id}` "  # nosec B608
+                        f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE CAST({key_col} AS STRING) IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {bq_order} LIMIT ?"
                     )
@@ -818,7 +822,7 @@ def read_target_sample(
                         _bq.ScalarQueryParameter(None, "STRING", v) for v in widened_sorted
                     ]
                 else:
-                    sql = f"SELECT {col_sql} FROM `{table_id}` ORDER BY {bq_order} LIMIT ?"  # nosec B608
+                    sql = f"SELECT {col_sql} FROM {table_ref} ORDER BY {bq_order} LIMIT ?"  # nosec B608
                 bq_params.append(_bq.ScalarQueryParameter(None, "INT64", int(limit)))
                 job_config = _bq.QueryJobConfig(query_parameters=bq_params)
                 try:
