@@ -241,7 +241,12 @@ def run_fidelity_proof() -> dict[str, Any]:
     PROOF_DIR.mkdir(parents=True, exist_ok=True)
     run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ") + "-" + uuid.uuid4().hex[:6]
 
-    with tempfile.TemporaryDirectory(prefix="df-fidelity-") as tmp:
+    from services.platform_config import upload_dir
+
+    # The engine only reads file sources from under the upload roots.
+    staging_root = upload_dir()
+    staging_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="df-fidelity-", dir=str(staging_root)) as tmp:
         tmp_path = Path(tmp)
         csv_path = tmp_path / "fidelity.csv"
         db_path = tmp_path / "fidelity.db"

@@ -3,6 +3,7 @@
 import logging
 import os
 import socket
+import tempfile
 import sys
 from pathlib import Path
 
@@ -31,6 +32,8 @@ import services as _canonical_services  # noqa: E402,F401
 
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
+# Engine fixtures stage file sources under pytest's tmp_path.
+os.environ.setdefault("DATAFLOW_SOURCE_PATH_ROOTS", tempfile.gettempdir())
 # Local proof dials Postgres and MySQL on loopback. Production deploy does
 # not set this. Metadata and link-local stay refused even when it is set.
 os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
