@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.acknowledgment_contract import (
     AcknowledgmentRefused,
@@ -40,6 +40,15 @@ class MappingItem(BaseModel):
     transform: str | None = None
     target_type: str | None = None
     source_type: str | None = None
+
+    @field_validator("target_type", "source_type")
+    @classmethod
+    def _type_stamp_is_a_type(cls, value: str | None) -> str | None:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        if value is not None and value.strip():
+            validate_mapping_type_stamps([{"target_type": value}], context="Map")
+        return value
     requires_review: bool = False
     score_gap: float = 1.0
     user_override: bool = False

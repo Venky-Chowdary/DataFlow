@@ -2472,6 +2472,9 @@ def render_create_column_defs(
     dialect: str,
 ) -> str:
     """Render `col type [NOT NULL] [DEFAULT …], … [, PRIMARY KEY …]` body."""
+    from services.type_stamp_grammar import require_safe_type_stamps
+
+    require_safe_type_stamps(types, context=f"{dialect} CREATE TABLE column")
     parts: list[str] = []
     suffixes = (plan.column_suffixes if plan else {}) or {}
     for col, typ in zip(columns, types):
