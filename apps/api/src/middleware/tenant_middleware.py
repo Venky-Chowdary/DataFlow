@@ -18,10 +18,15 @@ from services.tenant_store import (
     resolve_tenant_from_host,
 )
 
+# The bare root is public only as an exact match: as a prefix it would cover
+# every path and switch the tenant IP allowlist off.
+_PUBLIC_EXACT_PATHS = frozenset({"/"})
+
+# Matched on a path-segment boundary: "/health" covers "/health" and
+# "/health/ready", never "/healthz" or "/health-admin".
 _PUBLIC_PREFIXES = (
     "/health",
     "/api/v1/health",
-    "/",
     "/api/v1/auth/login",
     "/api/v1/auth/bootstrap",
     "/auth/login",
@@ -34,18 +39,25 @@ if docs_enabled():
     _PUBLIC_PREFIXES = _PUBLIC_PREFIXES + ("/docs", "/redoc", "/openapi.json")
 
 
+def _matches_segment_prefix(path: str, prefix: str) -> bool:
+    prefix = prefix.rstrip("/")
+    return path == prefix or path.startswith(prefix + "/")
+
+
 def _is_public_mcp_path(path: str) -> bool:
     if path in ("/api/v1/mcp", "/api/v1/mcp/"):
         return True
-    if path.startswith("/api/v1/mcp/manifest") or path.startswith("/api/v1/mcp/status"):
+    if _matches_segment_prefix(path, "/api/v1/mcp/manifest") or _matches_segment_prefix(
+        path, "/api/v1/mcp/status"
+    ):
         return True
-    if path.rstrip("/") == "/api/v1/mcp/tools":
-        return True
-    return False
+    return path.rstrip("/") == "/api/v1/mcp/tools"
 
 
 def _is_public_path(path: str) -> bool:
-    if any(path.startswith(p) for p in _PUBLIC_PREFIXES):
+    if path in _PUBLIC_EXACT_PATHS:
+        return True
+    if any(_matches_segment_prefix(path, p) for p in _PUBLIC_PREFIXES if p.strip("/")):
         return True
     return _is_public_mcp_path(path)
 
