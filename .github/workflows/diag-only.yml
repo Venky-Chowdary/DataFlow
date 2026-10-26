@@ -1,5 +1,7 @@
 name: diag-only
-on: [workflow_dispatch]
+on:
+  push:
+    branches: [devin/ci-trial-2026-10-25]
 
 jobs:
   diag:
