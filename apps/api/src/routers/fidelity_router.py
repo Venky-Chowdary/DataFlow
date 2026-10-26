@@ -17,8 +17,8 @@ from pydantic import BaseModel, Field
 
 from services.continuous_fidelity import run_and_record_campaign, run_fidelity_check
 from services.workspace_access import (
+    assert_resource_workspace,
     resolve_read_workspace,
-    workspace_resource_is_visible,
 )
 
 from ..transfer.models import EndpointConfig
@@ -53,6 +53,13 @@ def _deny_cross_workspace(request: Request) -> None:
     raise HTTPException(status_code=403, detail="Resource belongs to another workspace")
 
 
+def _assert_resource_visible(request: Request, resource_workspace_id: str) -> None:
+    try:
+        assert_resource_workspace(request, resource_workspace_id)
+    except HTTPException:
+        _deny_cross_workspace(request)
+
+
 def _assert_connector_workspace(
     connector_id: str,
     workspace_id: str,
@@ -62,10 +69,8 @@ def _assert_connector_workspace(
 
     scoped = get_connector(connector_id, workspace_id=workspace_id or None)
     connector = scoped or get_connector(connector_id)
-    if connector is not None and not workspace_resource_is_visible(
-        getattr(connector, "workspace_id", ""), workspace_id
-    ):
-        _deny_cross_workspace(request)
+    if connector is not None:
+        _assert_resource_visible(request, str(getattr(connector, "workspace_id", "") or ""))
 
 
 def _endpoints_from_schedule(
@@ -82,10 +87,7 @@ def _endpoints_from_schedule(
     sched = get_schedule(schedule_id)
     if sched is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    if not workspace_resource_is_visible(
-        getattr(sched, "workspace_id", ""), workspace_id
-    ):
-        _deny_cross_workspace(request)
+    _assert_resource_visible(request, str(getattr(sched, "workspace_id", "") or ""))
     _assert_connector_workspace(sched.source_connector_id, workspace_id, request)
     _assert_connector_workspace(sched.dest_connector_id, workspace_id, request)
     src = _resolve_connector(sched.source_connector_id)
