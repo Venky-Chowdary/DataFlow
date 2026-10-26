@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import base64
-import json
 import logging
 import sqlite3
 from dataclasses import dataclass
@@ -13,7 +12,6 @@ from typing import Any, Callable
 
 from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
-from services.value_serializer import json_default
 
 from connectors.sqlite_common import sqlite_file_path, tune_sqlite_connection
 from connectors.write_resilience import (
