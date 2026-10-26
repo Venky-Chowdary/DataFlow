@@ -76,6 +76,8 @@ SECURITY_EVENTS: dict[str, str] = {
     "password.reset.expired": "A password reset link was used after expiry.",
     "password.reset.failed": "A password reset attempt failed.",
     "password.reset.completed": "A password reset completed.",
+    "mail.sent": "An outbox mail was sent.",
+    "mail.send_failed": "An outbox mail send attempt failed.",
     "email_change.requested": "An email change was requested.",
     "email_change.completed": "An email change completed.",
     "email_change.rekey_flag_failed": "Flagging a half-moved account for rekey retry itself failed.",

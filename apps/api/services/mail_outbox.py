@@ -113,8 +113,12 @@ def _expiry_iso() -> str:
 
 
 def enqueue(*, to: str, subject: str, text: str, html: str,
-            idempotency_key: str, purpose: str) -> dict[str, Any]:
-    """Persist a queued outbox row and return it."""
+            idempotency_key: str, purpose: str,
+            quota_counted: bool = False) -> dict[str, Any]:
+    """Persist a queued outbox row and return it. ``quota_counted`` marks
+    rows whose send-quota slot was already consumed on the request path
+    (signup/OTP mails keep the synchronous 429), so the lane doesn't
+    count the same send twice."""
     row = {
         "id": f"mo_{uuid.uuid4().hex}",
         "purpose": purpose,
@@ -126,6 +130,7 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
         "idempotency_key": idempotency_key,
         "status": "queued",
         "attempts": 0,
+        "quota_counted": quota_counted,
         "created_at": _now_iso(),
         "expires_at": _expiry_iso(),
     }

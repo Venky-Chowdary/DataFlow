@@ -76,15 +76,41 @@ def _client() -> TestClient:
 
 
 def _verified_user(c: TestClient, email: str = "ada@example.com") -> dict:
+    baseline = len([m for m in ConsoleEmailSender.OUTBOX
+                    if re.search(r"\b\d{6}\b", m.text)])
     r = c.post("/api/v1/auth/signup", json={
         "email": email, "password": "a-very-long-password",
         "form_token": form_token_mod.issue("signup"), "device_id": "d1"})
-    code = re.search(r"\b(\d{6})\b", ConsoleEmailSender.OUTBOX[-1].text).group(1)
+    code = _code_mail(after=baseline)
     resp = c.post("/api/v1/auth/verify-email",
                   json={"challenge_id": r.json()["challenge_id"],
                         "code": code, "device_id": "d1"})
     assert resp.status_code == 200
     return resp.json()
+
+
+def _code_mail(after: int = 0) -> str:
+    """Wait for the (after+1)-th verification-code mail — signup_code rides
+    the same outbox lane now, so a previous user's code mail may be the
+    newest when we look."""
+    deadline = time.monotonic() + 5
+    while True:
+        mails = [m for m in ConsoleEmailSender.OUTBOX
+                 if re.search(r"\b\d{6}\b", m.text)]
+        if len(mails) > after:
+            return re.search(r"\b(\d{6})\b", mails[-1].text).group(1)
+        if time.monotonic() > deadline:
+            raise AssertionError("no verification-code mail in outbox")
+        time.sleep(0.05)
+
+
+def _reset_statuses(tmp_path) -> list:
+    """Outbox statuses for password.reset rows only — signup/OTP mails
+    share the outbox since item 7 and must not skew reset assertions."""
+    import json
+    doc = json.loads((tmp_path / "mail_outbox.json").read_text())
+    return sorted(r["status"] for r in doc.get("rows", {}).values()
+                  if r.get("purpose") == "password.reset")
 
 
 def _forgot(c: TestClient, email: str = "ada@example.com"):
@@ -583,7 +609,8 @@ def test_outbox_survives_restart_and_drains(monkeypatch, tmp_path):
     assert signup_service.recover_mail_outbox() == 1
     assert len(ConsoleEmailSender.OUTBOX) == before + 1
     cts = mail_outbox.counts()
-    assert cts["queued"] == 0 and cts["sent"] == 1, cts
+    assert cts["queued"] == 0, cts
+    assert _reset_statuses(tmp_path) == ["sent"]
     # 'queued but never sent' is visible in admin metrics.
     assert signup_service.signup_metrics()["mail_outbox"] == cts
 
@@ -678,7 +705,7 @@ def test_transient_retry_can_recover(monkeypatch, tmp_path):
     assert _forgot(c).status_code == 202
     time.sleep(0.3)
     assert len(calls) == 2, calls
-    assert mail_outbox.counts()["sent"] == 1
+    assert _reset_statuses(tmp_path) == ["sent"]
 
 
 def test_quota_error_honors_retry_after(monkeypatch, tmp_path):
@@ -766,14 +793,15 @@ def test_drain_never_sends_dead_reset_links(monkeypatch, tmp_path):
     from services import mail_outbox, password_reset_store
 
     monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
-    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
-
     c = _client()
     _verified_user(c)
+
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
     assert _forgot(c).status_code == 202   # row A queued, token A live
     assert _forgot(c).status_code == 202   # row B queued, token A superseded
 
-    rows = mail_outbox.queued()
+    rows = [r for r in mail_outbox.queued()
+            if r["purpose"] == "password.reset"]
     assert len(rows) == 2
 
     monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
@@ -781,8 +809,7 @@ def test_drain_never_sends_dead_reset_links(monkeypatch, tmp_path):
     assert signup_service.recover_mail_outbox() == 1   # only the live row sent
     assert len(ConsoleEmailSender.OUTBOX) == before + 1
 
-    cts = mail_outbox.counts()
-    assert cts["superseded"] == 1 and cts["sent"] == 1 and cts["queued"] == 0, cts
+    assert _reset_statuses(tmp_path) == ["sent", "superseded"]
 
 
 def test_drain_marks_expired_reset_links(monkeypatch, tmp_path):
@@ -791,10 +818,10 @@ def test_drain_marks_expired_reset_links(monkeypatch, tmp_path):
     from datetime import UTC, datetime, timedelta
 
     monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
-    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
-
     c = _client()
     _verified_user(c)
+
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
     assert _forgot(c).status_code == 202
     assert len(mail_outbox.queued()) == 1
 
@@ -807,8 +834,7 @@ def test_drain_marks_expired_reset_links(monkeypatch, tmp_path):
     before = len(ConsoleEmailSender.OUTBOX)
     assert signup_service.recover_mail_outbox() == 0
     assert len(ConsoleEmailSender.OUTBOX) == before  # nothing sent
-    cts = mail_outbox.counts()
-    assert cts["expired"] == 1 and cts["queued"] == 0, cts
+    assert _reset_statuses(tmp_path) == ["expired"]
 
 
 def test_concurrent_drains_send_each_row_once(monkeypatch, tmp_path):
@@ -818,13 +844,14 @@ def test_concurrent_drains_send_each_row_once(monkeypatch, tmp_path):
     from services import mail_outbox
 
     monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
-    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
     # Fresh send quota — earlier tests in this module already consumed slots.
     from services import email_quota
     email_quota._reset_backends()
 
     c = _client()
     _verified_user(c)
+
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
     assert _forgot(c).status_code == 202
     rows = mail_outbox.queued()
     assert len(rows) == 1
@@ -844,7 +871,8 @@ def test_concurrent_drains_send_each_row_once(monkeypatch, tmp_path):
     # Exactly one send total (both threads raced; claim admitted one).
     assert len(ConsoleEmailSender.OUTBOX) == before + 1
     cts = mail_outbox.counts()
-    assert cts["sent"] == 1 and cts["queued"] == 0 and cts["sending"] == 0, cts
+    assert cts["queued"] == 0 and cts["sending"] == 0, cts
+    assert _reset_statuses(tmp_path) == ["sent"]
 
 
 def test_stale_lease_is_reclaimed(monkeypatch, tmp_path):
@@ -936,3 +964,69 @@ def test_file_outbox_prunes_expired_rows_on_write(monkeypatch, tmp_path):
     assert "old-sent" not in ids and "old-queued" not in ids
     assert "live" in ids and "legacy" in ids
     assert len(ids) == 3  # live + legacy + the new row
+
+
+def test_signup_code_rides_the_outbox(monkeypatch, tmp_path):
+    """Item 7: every auth mail — not just reset links — is persisted sealed
+    and delivered through the outbox lane, so restart durability, atomic
+    claim and bounded retries are uniform."""
+    import json
+    from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+
+    events = []
+    monkeypatch.setattr(signup_service, "record_security_event",
+                        lambda event, **kw: events.append((event, kw)))
+
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
+    c = _client()
+    c.post("/api/v1/auth/signup", json={
+        "email": "be@example.com", "password": "a-very-long-password",
+        "form_token": form_token_mod.issue("signup"), "device_id": "d1"})
+
+    rows = mail_outbox.queued()
+    assert len(rows) == 1 and rows[0]["purpose"] == "signup_code", rows
+    assert rows[0]["quota_counted"] is True   # slot taken on request path
+    assert "text" not in rows[0] and rows[0]["enc"] == "secret_vault"
+    # the raw 6-digit code is sealed, never plaintext at rest
+    doc_text = (tmp_path / "mail_outbox.json").read_text()
+    assert not re.search(r"\b\d{6}\b", json.loads(doc_text)["rows"][rows[0]["id"]]["text_enc"])
+
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
+    assert signup_service.recover_mail_outbox() == 1
+    assert [e for e, _ in events].count("mail.sent") == 1
+    assert all("password.reset" not in e for e, _ in events)
+    assert _code_mail()  # the code actually delivered
+
+
+def test_dead_otp_code_row_is_skipped(monkeypatch, tmp_path):
+    """A queued OTP mail whose challenge was consumed or superseded by a
+    resend drains as superseded — the user never gets a dead code."""
+    from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
+
+    c = _client()
+    r = c.post("/api/v1/auth/signup", json={
+        "email": "bo@example.com", "password": "a-very-long-password",
+        "form_token": form_token_mod.issue("signup"), "device_id": "d1"})
+
+    rows = mail_outbox.queued()
+    assert len(rows) == 1 and rows[0]["purpose"] == "signup_code"
+    # Extract the code from the sealed row itself, then consume the
+    # challenge — the queued mail is now a dead code.
+    code = re.search(r"\b(\d{6})\b",
+                     mail_outbox.body(rows[0])["text"]).group(1)
+    resp = c.post("/api/v1/auth/verify-email",
+                  json={"challenge_id": r.json()["challenge_id"],
+                        "code": code, "device_id": "d1"})
+    assert resp.status_code == 200
+
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
+    before = len(ConsoleEmailSender.OUTBOX)
+    assert signup_service.recover_mail_outbox() == 0
+    assert len(ConsoleEmailSender.OUTBOX) == before
+    cts = mail_outbox.counts()
+    assert cts["superseded"] == len(rows), cts

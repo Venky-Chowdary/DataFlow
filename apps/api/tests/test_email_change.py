@@ -41,6 +41,9 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setattr(signup_service.mx_check, "check_domain",
                         lambda d: {"ok": True})
     monkeypatch.setattr(form_token_mod, "MIN_FILL_MS", 0)
+    # Auth mail rides the outbox lane since item 7 — run it inline so each
+    # test's sends land before the test ends (no cross-test stragglers).
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
     import src.services.auth_service as auth_mod
     monkeypatch.setattr(auth_mod, "_REQUIRE_AUTH", True)
     auth_mod._ADMIN_USER_CACHE = None
@@ -223,8 +226,12 @@ def test_concurrent_same_target_only_one_wins():
             results.append(resp.status_code)
             return
         cid = resp.json()["challenge_id"]
-        code = re.search(r"\b(\d{6})\b",
-                         ConsoleEmailSender.OUTBOX[-1].text).group(1)
+        # OUTBOX[-1] races under concurrency — match this challenge's mail
+        # by its idempotency key (otp:<cid>:1) instead.
+        code = re.search(
+            r"\b(\d{6})\b",
+            [m for m in ConsoleEmailSender.OUTBOX
+             if m.idempotency_key == f"otp:{cid}:1"][-1].text).group(1)
         r = client.post("/api/v1/auth/email/change/confirm",
                         json={"challenge_id": cid, "code": code},
                         headers={"x-csrf-token": client.cookies["dw_csrf"]})

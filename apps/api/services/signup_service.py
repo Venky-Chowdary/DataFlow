@@ -183,27 +183,28 @@ def _check_signup_velocity(*, ip: str, device_id: str, canonical: str) -> int:
 
 
 def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
-    """Send one persisted outbox row and mark it sent/failed. Every failure
-    leaves a password.reset.send_failed security event — a provider timeout
-    or transport error means the mail never went out, and silent loss is
-    forbidden. The reply never reveals it (enumeration parity); a fresh
-    link can be requested right away (each new issue supersedes the token).
-    """
+    """Send one persisted outbox row and mark it sent/failed. Every failed
+    attempt audits password.reset.send_failed (reset links) or
+    mail.send_failed (all other purposes); terminal state also marks the
+    row failed — silent loss is forbidden. A fresh link/code can always be
+    requested (each new issue supersedes the last)."""
     if not mail_outbox.claim(row["id"]):
         # Another replica claimed this row first (concurrent drain) or it is
         # already terminal — exactly one send per row, no double send.
         return
     try:
-        consume_send_slot()
+        if not row.get("quota_counted"):
+            consume_send_slot()
         payload = mail_outbox.body(row)  # sealed at rest, decrypted on send
         get_email_sender().send(OutboundEmail(
             to=row["to"], subject=row["subject"], text=payload["text"],
             html=payload["html"],
             idempotency_key=row["idempotency_key"]))
         mail_outbox.mark(row["id"], "sent")
-        record_security_event("password.reset.sent", outcome="succeeded",
+        record_security_event(_mail_event(row, ok=True), outcome="succeeded",
                               actor=row["to"], session_id=row["id"],
-                              details={"ip": actor_ip})
+                              details={"ip": actor_ip,
+                                       "purpose": row.get("purpose")})
     except Exception as exc:
         _outbox_send_failed(row, exc, actor_ip=actor_ip)
 
@@ -248,35 +249,62 @@ def _outbox_send_failed(row: dict[str, Any], exc: Exception,
     else:
         mail_outbox.mark(row["id"], "failed")
         if isinstance(exc, EmailSendError):
-            logger.warning("password-reset link send failed terminally")
+            logger.warning("mail send failed terminally (%s)",
+                           row.get("purpose"))
         else:
-            logger.error("password-reset link delivery failed", exc_info=True)
+            logger.error("mail delivery failed (%s)", row.get("purpose"),
+                         exc_info=True)
     try:
-        record_security_event("password.reset.send_failed",
+        record_security_event(_mail_event(row, ok=False),
                               outcome="failed", actor=row["to"],
                               session_id=row["id"],
                               details={"ip": actor_ip,
+                                       "purpose": row.get("purpose"),
                                        "attempt": attempts + 1})
     except Exception:
-        logger.error("password-reset send_failed audit event failed",
-                     exc_info=True)
+        logger.error("mail send_failed audit event failed", exc_info=True)
+
+
+def _mail_event(row: dict[str, Any], *, ok: bool) -> str:
+    """password.reset keeps its dedicated event names; every other outbox
+    purpose audits under the generic mail.* events with purpose detail."""
+    if row.get("purpose") == "password.reset":
+        return "password.reset.sent" if ok else "password.reset.send_failed"
+    return "mail.sent" if ok else "mail.send_failed"
 
 
 def _outbox_dead_link_status(row: dict[str, Any]) -> str | None:
     """Terminal status for a queued reset-mail row whose link is already
     dead — expired, consumed, superseded by a newer request, or the token
     doc is gone. The drain marks the row instead of sending a dead link."""
-    if row.get("purpose") != "password.reset":
-        return None
     key = str(row.get("idempotency_key") or "")
-    token_id = key.split("reset-link:", 1)[-1] if "reset-link:" in key else ""
-    if not token_id:
+    purpose = row.get("purpose")
+    if purpose == "password.reset":
+        token_id = (key.split("reset-link:", 1)[-1]
+                    if "reset-link:" in key else "")
+        if not token_id:
+            return None
+        status = password_reset_store.status_by_id(token_id)
+        if status == "expired":
+            return "expired"
+        if status in ("used", "superseded", "invalid"):
+            return "superseded"
         return None
-    status = password_reset_store.status_by_id(token_id)
-    if status == "expired":
-        return "expired"
-    if status in ("used", "superseded", "invalid"):
-        return "superseded"
+    if key.startswith("otp:"):
+        parts = key.split(":")
+        if len(parts) < 3:
+            return None
+        ch = signup_store.get_challenge(parts[1])
+        if ch is None:
+            return "expired"  # challenge TTL already deleted it
+        if ch.get("consumed_at"):
+            return "superseded"  # code already used
+        if int(ch.get("attempts") or 0) >= int(ch.get("max_attempts") or 1):
+            return "superseded"  # burned by wrong-code attempts
+        if int(ch.get("sent_count") or 1) > int(parts[2]):
+            return "superseded"  # a resend replaced this code
+        if str(ch.get("expires_at") or "") <= datetime.now(UTC).isoformat():
+            return "expired"
     return None
 
 
@@ -290,19 +318,20 @@ def recover_mail_outbox() -> int:
 
 
 def _send(template: str, to: str, context: dict[str, Any], *, idempotency_key: str) -> None:
-    """Quota check → render → send. Raises ApiError on quota (callers map it);
-    provider failures raise EmailSendError for the caller to decide on."""
+    """Sync quota check (raises → caller maps to the 429 envelope) → render
+    → persist a sealed outbox row → serialized-lane delivery. Every auth
+    mail — signup code, reset link, email-change code, notices — shares the
+    same restart durability, atomic claim, and bounded retries. The quota
+    slot is consumed here on the request path (the user-facing 429 contract
+    stays synchronous); the row is flagged so the lane doesn't count twice.
+    Provider failures never reach the request — they mark the row and audit."""
     consume_send_slot()  # raises EmailQuotaExceeded — caller maps to envelope
     mail = render_email(template, context)
-    get_email_sender().send(
-        OutboundEmail(
-            to=to,
-            subject=mail.subject,
-            text=mail.text,
-            html=mail.html,
-            idempotency_key=idempotency_key,
-        )
-    )
+    row = mail_outbox.enqueue(
+        to=to, subject=mail.subject, text=mail.text, html=mail.html,
+        idempotency_key=idempotency_key, purpose=template,
+        quota_counted=True)
+    _deliver_later(lambda: _deliver_outbox_row(row))
 
 
 def _decoy_challenge() -> str:
