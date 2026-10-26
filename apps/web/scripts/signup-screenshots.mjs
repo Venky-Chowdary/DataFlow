@@ -14,6 +14,7 @@ import { mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { execSync } from "node:child_process";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertScratchMongo } from "./screenshot-scratch-gate.mjs";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
@@ -25,6 +26,10 @@ const OUT = path.resolve(args.out || path.join(repoRoot, "docs/signup-screenshot
 const THEME = args.theme || "both";
 const VP = args.viewport || "all";
 const CDP = args.cdp || "http://localhost:29229";
+
+// Safety gate: the harness writes real rows into whatever store the API
+// resolves — refuse non-local/scratch Mongo (screenshot-scratch-gate.mjs).
+assertScratchMongo();
 
 const VIEWPORTS = {
   desktop: { width: 1440, height: 900 },
