@@ -10,6 +10,20 @@ from pydantic import BaseModel, Field
 router = APIRouter(prefix="/ops", tags=["Ops"])
 
 
+def _readable_workspace(request: Request, missing_detail: str) -> str:
+    """Workspace the caller names, only if they are a member of it (403 otherwise)."""
+    from services.audit_log import workspace_id_from_request
+    from services.team_store import can_read_workspace, require_workspace_isolation
+    from services.workspace_access import actor_email
+
+    workspace_id = workspace_id_from_request(request)
+    if require_workspace_isolation() and not workspace_id:
+        raise HTTPException(status_code=400, detail=missing_detail)
+    if workspace_id and not can_read_workspace(workspace_id, actor_email(request)):
+        raise HTTPException(status_code=403, detail="Access to workspace denied")
+    return workspace_id
+
+
 @router.get("/freshness")
 async def get_freshness(
     request: Request,
@@ -23,17 +37,12 @@ async def get_freshness(
     when ``X-Workspace-Id`` is set — never another tenant's CDC lag. Isolation
     on and no header is a 400 (same as audit export).
     """
-    from services.audit_log import workspace_id_from_request
     from services.ops_metrics import freshness_summary
-    from services.team_store import require_workspace_isolation
 
-    workspace_id = workspace_id_from_request(request)
-    if require_workspace_isolation() and not workspace_id:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Workspace-Id is required for freshness. "
-            "This SLO is a workspace sample, not a platform dump.",
-        )
+    workspace_id = _readable_workspace(
+        request,
+        "X-Workspace-Id is required for freshness. This SLO is a workspace sample, not a platform dump.",
+    )
 
     return freshness_summary(
         max_lag_warn_seconds=warn_seconds,
@@ -63,17 +72,12 @@ async def get_dlq(
     is set — never the platform dump, never the page length. ``returned`` is
     the page. Isolation on and no header is a 400 (same as audit export).
     """
-    from services.audit_log import workspace_id_from_request
     from services.quarantine_dlq import count_dlq_events, list_dlq_events
-    from services.team_store import require_workspace_isolation
 
-    workspace_id = workspace_id_from_request(request)
-    if require_workspace_isolation() and not workspace_id:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Workspace-Id is required for DLQ. "
-            "This count is a workspace sample, not a platform dump.",
-        )
+    workspace_id = _readable_workspace(
+        request,
+        "X-Workspace-Id is required for DLQ. This count is a workspace sample, not a platform dump.",
+    )
 
     events = list_dlq_events(job_id=job_id, workspace_id=workspace_id or None, limit=limit)
     total = count_dlq_events(job_id=job_id, workspace_id=workspace_id or None)
