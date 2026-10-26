@@ -526,3 +526,73 @@ def test_dedupe_preview_names_winners_and_losers(client):
     loser = prev["1"]["losers"][0]
     assert loser["row"] == 1 and loser["key"] == ["1"] and loser["winner_row"] == 3
     assert prev["1"]["winner_count"] == 2
+
+
+@pytest.fixture
+def draft_client(tmp_path, monkeypatch) -> TestClient:
+    import services.shape_draft_store as store
+    import services.workspace_access as access
+
+    monkeypatch.setattr(store, "STORE_PATH", tmp_path / "drafts.json")
+    monkeypatch.delenv("DATAWRAP_REQUIRE_WORKSPACE", raising=False)
+    monkeypatch.delenv("DATAFLOW_REQUIRE_WORKSPACE", raising=False)
+    members = {"ws-acme", "ws-mallory"}
+    monkeypatch.setattr(access, "can_read_workspace", lambda ws, _email: not ws or ws in members)
+    monkeypatch.setattr(access, "can_write_workspace", lambda ws, _email: not ws or ws in members)
+    app = FastAPI()
+    app.include_router(router, prefix="/api/v1")
+    return TestClient(app)
+
+
+def _put_draft(client: TestClient, workspace: str, column: str):
+    headers = {"X-Workspace-Id": workspace} if workspace else {}
+    return client.put(
+        "/api/v1/shape/drafts",
+        headers=headers,
+        json={
+            "route_key": "orders.csv→orders",
+            "recipe": {"steps": [{"op": "trim", "column": column}]},
+            "source_columns": [column],
+        },
+    )
+
+
+def _get_draft(client: TestClient, workspace: str):
+    headers = {"X-Workspace-Id": workspace} if workspace else {}
+    return client.get("/api/v1/shape/drafts", params={"route_key": "orders.csv→orders"}, headers=headers)
+
+
+def test_a_draft_is_invisible_and_untouchable_from_another_workspace(draft_client):
+    assert _put_draft(draft_client, "ws-acme", "email").status_code == 200
+
+    assert _get_draft(draft_client, "ws-mallory").json()["draft"] is None
+    assert _get_draft(draft_client, "").json()["draft"] is None
+
+    assert _put_draft(draft_client, "ws-mallory", "name").status_code == 200
+    assert _put_draft(draft_client, "", "name").status_code == 200
+    for headers in ({"X-Workspace-Id": "ws-mallory"}, {}):
+        res = draft_client.delete(
+            "/api/v1/shape/drafts", params={"route_key": "orders.csv→orders"}, headers=headers
+        )
+        assert res.status_code == 200
+
+    own = _get_draft(draft_client, "ws-acme").json()["draft"]
+    assert own["workspace_id"] == "ws-acme"
+    assert own["steps"][0]["column"] == "email"
+
+
+def test_a_draft_in_a_workspace_the_caller_is_not_in_is_refused(draft_client):
+    assert _put_draft(draft_client, "ws-other", "email").status_code == 403
+    assert _get_draft(draft_client, "ws-other").status_code == 403
+    res = draft_client.delete(
+        "/api/v1/shape/drafts",
+        params={"route_key": "orders.csv→orders"},
+        headers={"X-Workspace-Id": "ws-other"},
+    )
+    assert res.status_code == 403
+
+
+def test_an_unscoped_draft_request_is_refused_under_workspace_isolation(draft_client, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_REQUIRE_WORKSPACE", "1")
+    assert _put_draft(draft_client, "", "email").status_code == 400
+    assert _get_draft(draft_client, "").status_code == 400
