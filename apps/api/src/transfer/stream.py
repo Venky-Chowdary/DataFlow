@@ -963,6 +963,15 @@ def _stream_database_transfer_impl(
                     },
                 )
                 dest_summary["watermark"] = wm
+                # D110 — if verification removes this run's batch, the route
+                # watermark must roll back to this pre-run value.
+                dest_summary.setdefault(
+                    "watermark_restore_point",
+                    {
+                        "cursor_key": pre_copy_cursor_key,
+                        "watermark": pre_copy_watermark,
+                    },
+                )
             dest_summary["cursor_key"] = pre_copy_cursor_key
         return rows_copied, ddl_log, dest_summary, columns
     # Parallel/chunked resume is only safe with idempotent writes.
@@ -4116,6 +4125,12 @@ def _stream_database_transfer_impl(
                         "tiebreak_column": cursor_pk_source,
                     },
                 )
+                # D110 — batch undo restores the watermark to this pre-run
+                # value when it removes the rows this advance stood for.
+                dest_summary.setdefault(
+                    "watermark_restore_point",
+                    {"cursor_key": cursor_key, "watermark": watermark},
+                )
             except Exception as wm_exc:
                 raise RuntimeError(
                     "Cursor watermark persist failed after committed batch — "
@@ -4427,6 +4442,12 @@ def _stream_database_transfer_impl(
                 # The column a composite watermark is decodable on (QA ACC-02).
                 "tiebreak_column": cursor_pk_source,
             },
+        )
+        # D110 — batch undo restores the watermark to this pre-run value
+        # when it removes the rows this advance stood for.
+        dest_summary.setdefault(
+            "watermark_restore_point",
+            {"cursor_key": cursor_key, "watermark": watermark},
         )
 
     # Phase F1 — write-pass fingerprints hash the same remapped rows just written.

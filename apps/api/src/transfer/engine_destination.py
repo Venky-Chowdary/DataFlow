@@ -377,6 +377,11 @@ def _failed_batch_undo_note_impl(
                     "duplicate."
                 )
                 dest_summary["partial_batch_undo"] = "restored"
+                from services.batch_undo import restore_route_watermark_after_undo
+
+                wm_note = restore_route_watermark_after_undo(dest_summary)
+                if wm_note:
+                    note = f"{note}{wm_note}"
             else:
                 note = (
                     "The prior rows in every route table are intact, but "

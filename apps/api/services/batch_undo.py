@@ -27,6 +27,75 @@ logger = logging.getLogger(__name__)
 _HISTORY_MODES = frozenset({"cdc", "scd2", "mirror"})
 
 
+def restore_route_watermark_after_undo(dest_summary: dict[str, Any]) -> str:
+    """Roll the route watermark back when this run's batch was undone.
+
+    ACC-05 advances the route watermark as each batch commits because the rows
+    are durable at that moment. When verification later removes (or restores)
+    exactly those rows, the watermark advance is no longer true — leaving it
+    makes the next run skip every source row and report "nothing written"
+    while the destination holds stale or no data (D110).
+
+    The stream stamps ``watermark_restore_point = {cursor_key, watermark}``
+    with the pre-run value the first time it advances the route watermark.
+    A pre-run value of ``None`` means this route had never run: the cursor
+    record is deleted so the next run is a true first run.
+
+    Never raises — the undo must not hide the failure that triggered it.
+    """
+    removed = bool(dest_summary.get("partial_batch_removed"))
+    restored = str(dest_summary.get("partial_batch_undo") or "") == "restored"
+    if not (removed or restored):
+        return ""
+    restore = dest_summary.get("watermark_restore_point")
+    if not isinstance(restore, dict):
+        return ""
+    cursor_key = str(restore.get("cursor_key") or "").strip()
+    if not cursor_key:
+        return ""
+    prior = restore.get("watermark")
+    try:
+        from services.sync_cursor import clear_watermark, get_watermark, set_watermark
+
+        advanced = get_watermark(cursor_key)
+        if advanced in (None, "") and prior in (None, ""):
+            return ""
+        if prior in (None, ""):
+            result = clear_watermark(cursor_key)
+            if result.get("cleared"):
+                return (
+                    " The incremental watermark was rolled back to unset "
+                    "because this run's batch was removed — the next run "
+                    "re-reads the full source instead of skipping it."
+                )
+            return ""
+        set_watermark(
+            cursor_key,
+            str(prior),
+            metadata={
+                "watermark_restore": "batch_undo",
+                "job_id": str(dest_summary.get("job_id") or ""),
+            },
+        )
+        return (
+            " The incremental watermark was rolled back to its pre-run value "
+            "because this run's batch was removed — the next run re-reads "
+            "from that point instead of skipping source rows."
+        )
+    except Exception as exc:  # noqa: BLE001 — report, never hide the undo result
+        logger.warning(
+            "Watermark restore after batch undo failed for %s: %s",
+            cursor_key,
+            exc,
+            exc_info=True,
+        )
+        return (
+            " WARNING: this run's batch was removed but the incremental "
+            "watermark could not be rolled back — clear the route cursor "
+            "before re-running or the next run will skip source rows."
+        )
+
+
 def undo_failed_batch_if_dest_was_empty(
     *,
     destination: Any,
@@ -46,6 +115,9 @@ def undo_failed_batch_if_dest_was_empty(
             note = _clear(destination, dest_summary)
             decision = "cleared" if dest_summary.get("partial_batch_removed") else "retained"
         dest_summary["partial_batch_undo"] = decision
+        wm_note = restore_route_watermark_after_undo(dest_summary)
+        if wm_note:
+            note = f"{note}{wm_note}"
         dest_summary["partial_batch_undo_note"] = note
         return note
     except Exception as exc:  # noqa: BLE001 — undo must not hide the checksum failure
