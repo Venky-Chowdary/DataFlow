@@ -174,3 +174,69 @@ def test_fidelity_cannot_resolve_foreign_schedules_or_connectors(
         and event.get("reason_code") == "cross_workspace"
     ]
     assert denials
+
+
+def test_fidelity_without_workspace_header_cannot_reach_foreign_schedule(
+    fidelity_isolation, monkeypatch
+):
+    admin = _admin()
+    workspace_a = _workspace(admin, "Fidelity outsider A")
+    workspace_b = _workspace(admin, "Fidelity victim B")
+    outsider = _member(admin, workspace_a)
+    outsider.headers.pop("X-Workspace-Id", None)
+
+    def _connector(name: str, workspace_id: str):
+        return connector_store.create_connector(
+            {
+                "name": name,
+                "type": "postgresql",
+                "host": "B_CONNECTOR_HOST_SENTINEL",
+                "port": 5432,
+                "database": "B_CONNECTOR_DB_SENTINEL",
+                "workspace_id": workspace_id,
+            }
+        )
+
+    def _schedule(name: str, workspace_id: str, src, dst):
+        return schedule_store.create_schedule(
+            {
+                "name": name,
+                "source_connector_id": src.id,
+                "source_table": "orders",
+                "dest_connector_id": dst.id,
+                "dest_table": "orders_copy",
+                "interval": "daily",
+                "workspace_id": workspace_id,
+                "mappings": [{"source": "id", "target": "id"}],
+            }
+        )
+
+    b_src, b_dst = _connector("B_SRC", workspace_b), _connector("B_DST", workspace_b)
+    a_src, a_dst = _connector("A_SRC", workspace_a), _connector("A_DST", workspace_a)
+    victim = _schedule("victim-schedule", workspace_b, b_src, b_dst)
+    own = _schedule("own-schedule", workspace_a, a_src, a_dst)
+
+    monkeypatch.setattr(
+        fidelity_router,
+        "run_and_record_campaign",
+        lambda *args, **kwargs: (_Report(), {"run_count": 1}),
+    )
+    monkeypatch.setattr(fidelity_router, "run_fidelity_check", lambda **kwargs: _Report())
+    # The documented production default: isolation off, header optional.
+    monkeypatch.setenv("DATAFLOW_REQUIRE_WORKSPACE", "0")
+
+    scheduled = outsider.post("/api/v1/fidelity/check", json={"schedule_id": victim.id})
+    direct = outsider.post(
+        "/api/v1/fidelity/check",
+        json={
+            "source": {"kind": "database", "format": "postgresql", "connector_id": b_src.id},
+            "destination": {"kind": "database", "format": "postgresql", "connector_id": a_dst.id},
+        },
+    )
+    allowed = outsider.post("/api/v1/fidelity/check", json={"schedule_id": own.id})
+
+    assert scheduled.status_code == 403, scheduled.text
+    assert direct.status_code == 403, direct.text
+    assert "B_CONNECTOR_SENTINEL" not in scheduled.text + direct.text
+    assert not (schedule_store.get_schedule(victim.id).fidelity_campaign or {})
+    assert allowed.status_code == 200, allowed.text
