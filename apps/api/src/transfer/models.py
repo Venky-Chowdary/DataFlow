@@ -465,6 +465,28 @@ def _project_operator_quarantine(job: dict) -> None:
         )
 
 
+def _confined_source_path(raw: object) -> str:
+    """Keep a serialized ``source_path`` only when it lies under the upload roots.
+
+    A path outside them is dropped, so the request falls back to its stored
+    file id / object URI or reports that the file must be re-uploaded.
+    """
+    path = str(raw or "").strip()
+    if not path:
+        return ""
+    from services.dataset_file import confine_source_path
+
+    try:
+        return str(confine_source_path(path))
+    except ValueError:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "transfer request source_path refused: outside upload roots"
+        )
+        return ""
+
+
 def transfer_request_from_dict(data: dict) -> TransferRequest:
     src = _decrypt_endpoint_secrets(data.get("source") or {})
     dst = _decrypt_endpoint_secrets(data.get("destination") or {})
@@ -477,7 +499,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         skip_preflight=bool(data.get("skip_preflight")),
         source_filename=data.get("source_filename") or "",
         source_content=b"",
-        source_path=str(data.get("source_path") or "").strip(),
+        source_path=_confined_source_path(data.get("source_path")),
         source_object_uri=str(data.get("source_object_uri") or "").strip(),
         sync_mode=data.get("sync_mode") or "full_refresh_append",
         schema_policy=data.get("schema_policy") or "manual_review",
