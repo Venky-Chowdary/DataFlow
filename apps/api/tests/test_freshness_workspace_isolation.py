@@ -17,7 +17,7 @@ _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
-from services import ops_metrics
+from services import ops_metrics, team_store
 from src.main import app
 
 
@@ -37,8 +37,19 @@ def isolated_freshness():
 
 
 @pytest.fixture
-def client(isolated_freshness):
+def client(isolated_freshness, tmp_path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))
+    monkeypatch.setattr(team_store, "mongo_database", lambda: None)
     return TestClient(app)
+
+
+def _member_workspace(name: str) -> str:
+    """A workspace the unauthenticated test caller ("anonymous") belongs to."""
+    return team_store.create_workspace(name=name, created_by="anonymous").id
+
+
+def _foreign_workspace(name: str) -> str:
+    return team_store.create_workspace(name=name, created_by="owner@globex.example").id
 
 
 def test_freshness_summary_is_workspace_scoped(isolated_freshness):
@@ -102,34 +113,63 @@ def test_scoped_freshness_does_not_inherit_sibling_global_lag(isolated_freshness
 
 
 def test_http_freshness_does_not_name_sibling_workspace(client):
+    ws_a = _member_workspace("Alpha")
+    ws_b = _member_workspace("Beta")
     ops_metrics.record_cdc_poll(
         lag_seconds=400.0,
         job_id="job-a",
         stream="orders",
         schedule_id="sched-a",
-        workspace_id="ws-a",
+        workspace_id=ws_a,
     )
     ops_metrics.record_cdc_poll(
         lag_seconds=250.0,
         job_id="job-b",
         stream="users",
         schedule_id="sched-b",
-        workspace_id="ws-b",
+        workspace_id=ws_b,
     )
 
-    listed_a = client.get("/api/v1/ops/freshness?warn_seconds=60", headers={"X-Workspace-Id": "ws-a"})
+    listed_a = client.get("/api/v1/ops/freshness?warn_seconds=60", headers={"X-Workspace-Id": ws_a})
     assert listed_a.status_code == 200, listed_a.text
     body = listed_a.json()
-    assert body["workspace_id"] == "ws-a"
+    assert body["workspace_id"] == ws_a
     assert body["stale_count"] == 1
     assert [p["job_id"] for p in body["pipelines"]] == ["job-a"]
     assert "job-b" not in listed_a.text
     assert "sched-b" not in listed_a.text
 
-    listed_b = client.get("/api/v1/ops/freshness?warn_seconds=60", headers={"X-Workspace-Id": "ws-b"})
-    assert listed_b.json()["workspace_id"] == "ws-b"
+    listed_b = client.get("/api/v1/ops/freshness?warn_seconds=60", headers={"X-Workspace-Id": ws_b})
+    assert listed_b.json()["workspace_id"] == ws_b
     assert [p["job_id"] for p in listed_b.json()["pipelines"]] == ["job-b"]
     assert "job-a" not in listed_b.text
+
+
+def test_http_freshness_refuses_workspace_caller_is_not_member_of(client):
+    own = _member_workspace("Acme")
+    foreign = _foreign_workspace("Globex")
+    ops_metrics.record_cdc_poll(
+        lag_seconds=400.0,
+        job_id="job-globex",
+        stream="payroll",
+        schedule_id="sched-globex",
+        workspace_id=foreign,
+    )
+
+    denied = client.get(
+        "/api/v1/ops/freshness?warn_seconds=60", headers={"X-Workspace-Id": foreign}
+    )
+    assert denied.status_code == 403, denied.text
+    assert "job-globex" not in denied.text
+    assert "sched-globex" not in denied.text
+
+    unknown = client.get("/api/v1/ops/freshness", headers={"X-Workspace-Id": "ws-does-not-exist"})
+    assert unknown.status_code == 403
+
+    mine = client.get("/api/v1/ops/freshness?warn_seconds=60", headers={"X-Workspace-Id": own})
+    assert mine.status_code == 200, mine.text
+    assert mine.json()["pipelines"] == []
+    assert "job-globex" not in mine.text
 
 
 def test_isolation_on_without_header_is_400(client, monkeypatch):
