@@ -109,6 +109,7 @@ from services.reconciliation import (
     FingerprintAccumulator,
 )
 from services.tabular_window import header_and_rows, row_to_record
+from services.upload_limits import PayloadTooLarge, gunzip_capped, read_all_bounded
 
 try:
     from services.csv_profiler import (
@@ -371,7 +372,9 @@ def _decompress_bytes_if_gzip(data: bytes) -> bytes:
     """Decompress an in-memory gzip payload when applicable."""
     if _is_gzip_bytes(data):
         try:
-            return gzip.decompress(data)
+            return gunzip_capped(data)
+        except PayloadTooLarge:
+            raise
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
     return data
@@ -574,7 +577,7 @@ def peek_file_source(
             raw = content if isinstance(content, (bytes, bytearray)) else None
             if raw is None:
                 with _open_binary(content) as bio:
-                    raw = bio.read()
+                    raw = read_all_bounded(bio)
             records = load_json_records(bytes(raw))
             total = len(records)
             sample_objs = [r for r in records[:100] if isinstance(r, dict)]
