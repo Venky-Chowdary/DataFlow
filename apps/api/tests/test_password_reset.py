@@ -909,3 +909,30 @@ def test_mongo_index_setup_runs_once_and_fails_loud(monkeypatch):
         assert False, "expected raise, not silent file fallback"
     except RuntimeError:
         pass
+
+
+def test_file_outbox_prunes_expired_rows_on_write(monkeypatch, tmp_path):
+    """Item 6: the file tier never expired anything — the Mongo TTL was the
+    only bound. enqueue now prunes rows past expires_at on write."""
+    import json
+    from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+
+    f = tmp_path / "mail_outbox.json"
+    f.write_text(json.dumps({"rows": {
+        "old-sent": {"id": "old-sent", "status": "sent",
+                     "expires_at": "2020-01-01T00:00:00+00:00"},
+        "old-queued": {"id": "old-queued", "status": "queued",
+                       "expires_at": "2020-01-01T00:00:00+00:00"},
+        "live": {"id": "live", "status": "sent",
+                 "expires_at": "2999-01-01T00:00:00+00:00"},
+        "legacy": {"id": "legacy", "status": "sent"},  # no expires_at
+    }}))
+    mail_outbox.enqueue(to="a@x.io", subject="s", text="t", html="h",
+                        idempotency_key="k", purpose="password.reset")
+    doc = json.loads(f.read_text())
+    ids = set(doc["rows"])
+    assert "old-sent" not in ids and "old-queued" not in ids
+    assert "live" in ids and "legacy" in ids
+    assert len(ids) == 3  # live + legacy + the new row

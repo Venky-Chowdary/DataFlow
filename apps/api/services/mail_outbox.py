@@ -95,6 +95,17 @@ def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
+def _prune_expired(rows: dict[str, Any], now: str) -> int:
+    """Drop file-tier rows past expires_at — the Mongo TTL index does this
+    there, but nothing bounded the file otherwise. Only rows that carry an
+    expires_at are pruned (legacy rows without one are left alone)."""
+    dead = [k for k, r in rows.items()
+            if r.get("expires_at") and str(r["expires_at"]) <= now]
+    for k in dead:
+        rows.pop(k, None)
+    return len(dead)
+
+
 def _expiry_iso() -> str:
     """ISO string on the file/returned row; the Mongo copy stores a real
     datetime so the TTL index actually fires."""
@@ -127,7 +138,9 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
         return row
 
     with json_doc_transaction(_path(), {"rows": {}}) as doc:
-        doc.setdefault("rows", {})[row["id"]] = row
+        rows = doc.setdefault("rows", {})
+        _prune_expired(rows, _now_iso())
+        rows[row["id"]] = row
     return row
 
 
