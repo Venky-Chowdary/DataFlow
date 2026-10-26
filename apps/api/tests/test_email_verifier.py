@@ -11,6 +11,7 @@ import services.form_token as form_token_mod
 import services.signup_service as signup_service
 from services import signup_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
+from tests.helpers.mail_wait import await_outbox
 
 
 @pytest.fixture(autouse=True)
@@ -111,7 +112,7 @@ def test_risky_feeds_scorer_but_signup_proceeds(monkeypatch):
     assert pending is not None
     # 15 (no turnstile) + 20 (risky) = 35 → challenge → score persisted
     assert pending["risk_score"] >= 30
-    assert len(ConsoleEmailSender.OUTBOX) == 1
+    assert await_outbox("risky@example.com")
 
 
 def test_verifier_outage_never_blocks_signup(monkeypatch):

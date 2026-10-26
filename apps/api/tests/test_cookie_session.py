@@ -12,6 +12,7 @@ import services.form_token as form_token_mod
 import services.signup_service as signup_service
 from services import signup_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
+from tests.helpers.mail_wait import drain_mail_lane
 
 
 @pytest.fixture(autouse=True)
@@ -71,6 +72,7 @@ def _signup_and_verify(c: TestClient, email: str = "ada@example.com") -> dict:
         "form_token": form_token_mod.issue("signup"), "device_id": "d1"})
     assert r.status_code == 202
     challenge_id = r.json()["challenge_id"]
+    drain_mail_lane()
     code = re.search(r"\b(\d{6})\b", ConsoleEmailSender.OUTBOX[-1].text).group(1)
     resp = c.post("/api/v1/auth/verify-email",
                   json={"challenge_id": challenge_id, "code": code,

@@ -21,6 +21,7 @@ if str(_API_ROOT) not in sys.path:
 
 from services import signup_store, user_store  # noqa: E402
 from services.email_sender import ConsoleEmailSender, reset_email_sender  # noqa: E402
+from tests.helpers.mail_wait import await_outbox  # noqa: E402
 
 
 @pytest.fixture
@@ -96,8 +97,8 @@ def test_pending_signup_gets_403_email_unverified_and_fresh_code(
     assert err["code"] == "email_unverified"
     assert err["challenge_id"].startswith("otc_")
     # fresh code mailed, never a token
-    mail = ConsoleEmailSender.OUTBOX[-1]
-    assert re.search(r"\b\d{6}\b", mail.text)
+    hits = await_outbox("pending@example.com")
+    assert hits and re.search(r"\b\d{6}\b", hits[-1].text)
     assert "token" not in resp.json()
 
 

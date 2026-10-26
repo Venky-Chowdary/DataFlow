@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 import services.signup_service as signup_service
 from services import signup_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
+from tests.helpers.mail_wait import await_outbox
 
 
 @pytest.fixture(autouse=True)
@@ -41,21 +42,6 @@ def _isolate(monkeypatch, tmp_path):
     ConsoleEmailSender.OUTBOX.clear()
     yield
     reset_email_sender()
-
-
-def _await_mail(to: str, timeout: float = 5.0) -> list:
-    """Wait for the serialized mail lane to deliver mail to ``to``.
-    Delivery is async (``_MAIL_LANE``); asserting OUTBOX immediately races
-    the lane — and retry timers from earlier tests can land unrelated mail
-    in the shared capture, so filter by recipient rather than position."""
-    import time
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        hits = [m for m in ConsoleEmailSender.OUTBOX if m.to == to]
-        if hits:
-            return hits
-        time.sleep(0.02)
-    return [m for m in ConsoleEmailSender.OUTBOX if m.to == to]
 
 
 def _client() -> TestClient:
@@ -88,7 +74,7 @@ def test_new_signup_returns_202_with_challenge():
     assert body["resend_after_sec"] == 60
     assert body["expires_in_sec"] == 600
     # code mail captured, pending row stored
-    hits = _await_mail("ada@example.com")
+    hits = await_outbox("ada@example.com")
     subjects = [m.subject.lower() for m in hits]
     assert any("verification" in s for s in subjects), subjects
     assert not any("already have" in s for s in subjects), subjects
@@ -113,7 +99,7 @@ def test_existing_user_gets_same_202_and_notice_mail():
     body = resp.json()
     assert set(body) == {"challenge_id", "resend_after_sec", "expires_in_sec"}
     # owner gets the notice, no code mail, no pending row created
-    hits = _await_mail("ada@example.com")
+    hits = await_outbox("ada@example.com")
     subjects = [m.subject.lower() for m in hits]
     assert any("already have a datawrap account" in s for s in subjects), subjects
     assert not any("verification" in s for s in subjects), subjects
@@ -127,7 +113,7 @@ def test_canonical_alias_signup_hits_existing_account():
     resp = _client().post("/api/v1/auth/signup", json=_body(email="J.O.H.N+x@gmail.com"))
     assert resp.status_code == 202
     # The notice goes to the stored canonical address, not the typed variant.
-    hits = _await_mail("john@gmail.com")
+    hits = await_outbox("john@gmail.com")
     assert hits and "already have" in hits[0].subject.lower()
 
 

@@ -16,6 +16,7 @@ from fastapi.testclient import TestClient
 import services.signup_service as signup_service
 from services import signup_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
+from tests.helpers.mail_wait import await_outbox
 
 
 @pytest.fixture(autouse=True)
@@ -78,11 +79,12 @@ def test_resend_within_60s_refused_with_retry_after():
 def test_resend_after_cooldown_sends_new_code():
     c = _client()
     cid = _signup(c)
-    mails_before = len(ConsoleEmailSender.OUTBOX)
+    mails_before = len(await_outbox("ada@example.com"))
     _age_last_sent(cid, 61)
     resp = c.post("/api/v1/auth/resend", json={"challenge_id": cid})
     assert resp.status_code == 202
-    assert len(ConsoleEmailSender.OUTBOX) == mails_before + 1
+    hits = await_outbox("ada@example.com", min_count=mails_before + 1)
+    assert len(hits) == mails_before + 1
     row = signup_store.get_challenge(cid)
     assert row["sent_count"] == 2
 
@@ -90,10 +92,10 @@ def test_resend_after_cooldown_sends_new_code():
 def test_new_code_voids_old():
     c = _client()
     cid = _signup(c)
-    old_mail = ConsoleEmailSender.OUTBOX[-1]
+    old_mail = await_outbox("ada@example.com")[-1]
     _age_last_sent(cid, 61)
     c.post("/api/v1/auth/resend", json={"challenge_id": cid})
-    new_mail = ConsoleEmailSender.OUTBOX[-1]
+    new_mail = await_outbox("ada@example.com", min_count=2)[-1]
     import re
     old_code = re.search(r"\b(\d{6})\b", old_mail.text).group(1)
     # old code no longer verifies (hash was replaced)

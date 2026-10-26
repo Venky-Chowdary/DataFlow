@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 import services.signup_service as signup_service
 from services import otp_service, signup_store, team_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
+from tests.helpers.mail_wait import drain_mail_lane
 
 
 @pytest.fixture(autouse=True)
@@ -59,6 +60,7 @@ def _signup_and_code(client: TestClient, email="ada@example.com") -> tuple[str, 
         "form_token": form_token_mod.issue("signup"),
     })
     assert resp.status_code == 202
+    drain_mail_lane()
     mail = ConsoleEmailSender.OUTBOX[-1]
     import re
     m = re.search(r"\b(\d{6})\b", mail.text)

@@ -12,6 +12,7 @@ import services.form_token as form_token_mod
 import services.signup_service as signup_service
 from services import auth_state, email_quota, org_store, signup_store, team_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
+from tests.helpers.mail_wait import drain_mail_lane
 
 
 @pytest.fixture(autouse=True)
@@ -74,6 +75,7 @@ def _verified_user(c: TestClient, email: str = "ada@example.com") -> dict:
     r = c.post("/api/v1/auth/signup", json={
         "email": email, "password": "a-very-long-password",
         "form_token": form_token_mod.issue("signup"), "device_id": "d1"})
+    drain_mail_lane()
     code = re.search(r"\b(\d{6})\b", ConsoleEmailSender.OUTBOX[-1].text).group(1)
     resp = c.post("/api/v1/auth/verify-email",
                   json={"challenge_id": r.json()["challenge_id"],

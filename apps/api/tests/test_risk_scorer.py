@@ -12,6 +12,7 @@ import services.risk_scorer as risk_scorer
 import services.signup_service as signup_service
 from services import signup_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
+from tests.helpers.mail_wait import await_outbox
 
 
 @pytest.fixture(autouse=True)
@@ -157,4 +158,4 @@ def test_normal_signup_unaffected_without_license_key():
     assert resp.status_code == 202
     pending = signup_store.get_pending_signup(email="clean@example.com")
     assert pending is not None
-    assert len(ConsoleEmailSender.OUTBOX) == 1
+    assert await_outbox("clean@example.com")

@@ -14,6 +14,7 @@ import services.hibp as hibp
 import services.signup_service as signup_service
 from services import auth_state, email_quota, signup_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
+from tests.helpers.mail_wait import drain_mail_lane
 
 
 @pytest.fixture(autouse=True)
@@ -123,6 +124,7 @@ def test_reset_refuses_pwned_password(monkeypatch):
     r = c.post("/api/v1/auth/signup", json={
         "email": "ada@example.com", "password": "a-very-long-password",
         "form_token": form_token_mod.issue("signup"), "device_id": "d1"})
+    drain_mail_lane()
     code = re.search(r"\b(\d{6})\b",
                      ConsoleEmailSender.OUTBOX[-1].text).group(1)
     assert c.post("/api/v1/auth/verify-email",
@@ -131,6 +133,7 @@ def test_reset_refuses_pwned_password(monkeypatch):
     c.post("/api/v1/auth/password/forgot",
            json={"email": "ada@example.com",
                  "form_token": form_token_mod.issue("reset")})
+    drain_mail_lane()
     token = re.search(r"reset-password#token=([A-Za-z0-9_\-]+)",
                       ConsoleEmailSender.OUTBOX[-1].text).group(1)
     monkeypatch.setattr(hibp, "pwned_count", lambda p, **kw: 5)
