@@ -280,7 +280,7 @@ jobs:
   e2e:
     name: Playwright e2e (hermetic stubs)
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 70
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -294,22 +294,61 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Set up Python + API deps
+        # Vite proxies /api to 127.0.0.1:8001 — the specs stub some endpoints
+        # but NOT the shape catalog, so without the API the transform palette
+        # never mounts ("Shape catalog unavailable") and every studio-next
+        # spec times out clicking ops. Run the real API hermetically.
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install API deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -e packages/preflight
+
       - name: Install Playwright browsers
         working-directory: apps/web
         run: npx playwright install --with-deps chromium
 
-      - name: Serve the app
-        working-directory: apps/web
+      - name: Serve API (:8001) + app (:5173)
         run: |
-          npm run dev -- --host 127.0.0.1 --port 5173 > /tmp/vite.log 2>&1 &
-          for i in $(seq 1 60); do
-            curl -fsS http://127.0.0.1:5173/ >/dev/null && break
+          env DATAFLOW_JOB_STORE=memory DATAFLOW_DISABLE_OBJECT_STORE=1 \
+              PYTHONPATH=apps/api:packages/preflight/src:apps/api/src \
+              python -m uvicorn src.main:app --host 127.0.0.1 --port 8001 \
+              --app-dir apps/api > /tmp/api.log 2>&1 &
+          npm run dev --workspace=@dataflow/web -- --host 127.0.0.1 --port 5173 \
+              > /tmp/vite.log 2>&1 &
+          for i in $(seq 1 90); do
+            api=0; web=0
+            curl -fsS http://127.0.0.1:8001/api/v1/health >/dev/null && api=1
+            curl -fsS http://127.0.0.1:5173/ >/dev/null && web=1
+            [ "$api" = 1 ] && [ "$web" = 1 ] && break
             sleep 1
           done
+          curl -fsS http://127.0.0.1:8001/api/v1/health >/dev/null
           curl -fsS http://127.0.0.1:5173/ >/dev/null
 
       - name: Playwright specs (a11y suite lands with UI-4)
         working-directory: apps/web
-        run: npx playwright test
+        run: npx playwright test --grep-invert "production build loads"
         env:
           PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
+
+      - name: Build + preview for prod-smoke
+        # prod-smoke asserts the production bundle (/assets/vendor-*.js) —
+        # it must run against `vite preview` (4173), not the dev server.
+        working-directory: apps/web
+        run: |
+          npm run build
+          npm run preview -- --host 127.0.0.1 --port 4173 > /tmp/preview.log 2>&1 &
+          for i in $(seq 1 60); do
+            curl -fsS http://127.0.0.1:4173/ >/dev/null && break
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:4173/ >/dev/null
+          npx playwright test --grep "production build loads"
+        env:
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:4173
