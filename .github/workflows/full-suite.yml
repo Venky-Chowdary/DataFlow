@@ -140,7 +140,7 @@ jobs:
             -e MYSQL_ROOT_PASSWORD=root_ci -e MYSQL_DATABASE=dataflow \
             -e MYSQL_USER=dataflow -e MYSQL_PASSWORD=dataflow \
             mysql:8.0 --binlog-format=ROW --binlog-row-image=FULL \
-            --local-infile=1
+            --local-infile=1 --log-bin-trust-function-creators=1
           docker run -d --name mongo -p 27017:27017 mongo:7 \
             --replSet rs0 --bind_ip_all
 
