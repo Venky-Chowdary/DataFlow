@@ -395,7 +395,7 @@ def test_run_query_limit_1000_is_not_clamped_to_200(monkeypatch):
         lambda *_a, **_k: ({"id": "c1", "type": "postgresql", "name": "pg"}, None),
     )
     monkeypatch.setattr(tools, "_store_result", lambda **_k: "pr_test")
-    monkeypatch.setattr("services.connector_store.get_connector", lambda _cid: {"id": "c1"})
+    monkeypatch.setattr("services.connector_store.get_connector", lambda _cid, **_k: {"id": "c1"})
     monkeypatch.setattr("src.routers.query_router._is_safe_sql", lambda _sql: True)
     monkeypatch.setattr("src.routers.query_router._run_query", fake_run)
     result = tools.run_connector_query(connector_id="c1", query="SHOW TABLES", limit=1000)
