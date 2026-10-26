@@ -3126,6 +3126,49 @@ def _maybe_attach_verification_ladder(
                 if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
             ]
             batch_scoped = True
+    # D67/D95: rows the writer held out to quarantine are in the source
+    # re-read but never entered the destination. Hashing them in the L3
+    # source digest makes every correct quarantining run fail Gate-8 on its
+    # own quarantine (the report already passed on the quarantine_excluded
+    # basis — the ladder then vetoed it and the job undid the 39 good rows).
+    # Exclude the quarantined keys from the compared source population when
+    # the pk resolves; residual detail stays honest via rejected_rows.
+    _rej_keys: set[str] | None = None
+    if (
+        pk_column
+        and int(report.get("rejected_rows") or 0) > 0
+        and source_rows
+    ):
+        _rej_keys = set()
+        for _d in dest_summary.get("rejected_details") or []:
+            if not isinstance(_d, dict):
+                continue
+            _pk = _d.get("source_pk") or _d.get("destination_pk")
+            if _pk is not None:
+                _rej_keys.add(str(_pk))
+                continue
+            _row = _d.get("row")
+            if isinstance(_row, dict):
+                _v = _row.get(pk_column)
+            elif isinstance(_row, (str, int, float)):
+                _v = _row  # scalar row payload = the row's pk value
+            else:
+                _v = None
+            if _v is None:
+                for _vals_key in ("source_values", "values"):
+                    _vals = _d.get(_vals_key)
+                    if isinstance(_vals, dict) and _vals.get(pk_column) is not None:
+                        _v = _vals.get(pk_column)
+                        break
+            if _v is not None:
+                _rej_keys.add(str(_v))
+        if _rej_keys:
+            source_rows = [
+                r
+                for r in source_rows
+                if not isinstance(r, dict)
+                or str(r.get(pk_column)) not in _rej_keys
+            ]
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -3143,11 +3186,18 @@ def _maybe_attach_verification_ladder(
         # Report-level digests cover the whole table and use the engine's own
         # scheme; once the row lists are re-scoped to the batch keys neither is
         # comparable, so L3 recomputes both sides on the scoped populations.
+        # The same holds when quarantined keys were removed above: the source
+        # digest still hashes the held-out rows, so it can never equal the
+        # destination digest — recompute on the compared populations (D67/D95).
         source_checksum=(
-            "" if batch_scoped else str(report.get("source_checksum") or "")
+            ""
+            if (batch_scoped or _rej_keys)
+            else str(report.get("source_checksum") or "")
         ),
         target_checksum=(
-            "" if batch_scoped else str(report.get("target_checksum") or "")
+            ""
+            if (batch_scoped or _rej_keys)
+            else str(report.get("target_checksum") or "")
         ),
         dest_db_type=dest_type,
         dest_types=dest_types,
