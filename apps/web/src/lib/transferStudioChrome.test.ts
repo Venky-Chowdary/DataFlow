@@ -41,7 +41,7 @@ describe("Transfer Studio chrome contracts", () => {
 
   it("enterprise CSS keeps the compact short labels and the validate rail", () => {
     const css = readFileSync(join(webRoot, "styles/enterprise-ui.css"), "utf8");
-    assert.match(css, /@media \(max-width: 1440px\)/);
+    assert.match(css, /@media \(max-width: 1439px\)/);
     assert.match(css, /wizard-label-short \{\s*display: inline !important;/s);
     assert.match(css, /validate-rail-primary-fix[\s\S]*width: 100% !important/);
     assert.match(
@@ -536,7 +536,7 @@ describe("Transfer Studio chrome contracts", () => {
       lock,
       /\.df2-app \.df2-page-transfer-studio:not\(\.is-studio-next\) \.df2-source-step \.df2-transfer-step-split \{[\s\S]*grid-template-columns:\s*minmax\(0, 1fr\) minmax\(0, 1fr\)/,
     );
-    assert.match(lock, /@media \(max-width: 1100px\)/);
+    assert.match(lock, /@media \(max-width: 1099px\)/);
     assert.doesNotMatch(
       css,
       /@media \(max-width: 1280px\) \{[\s\S]{0,400}?\.df2-source-step \.df2-transfer-step-split \{[\s\S]{0,80}?grid-template-columns:\s*1fr/,
