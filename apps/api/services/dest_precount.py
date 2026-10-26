@@ -743,11 +743,14 @@ def destination_row_count(
 
         if db_type == "mongodb":
             from pymongo import MongoClient
+            from connectors.mongodb_common import guarded_mongo_client
 
             from src.transfer.adapters import mongodb_connection_string
 
-            client: MongoClient = MongoClient(
-                mongodb_connection_string(cfg), serverSelectionTimeoutMS=5000
+            client: MongoClient = guarded_mongo_client(
+                mongodb_connection_string(cfg),
+                workspace_id=str(cfg.get("workspace_id") or ""),
+                serverSelectionTimeoutMS=5000,
             )
             try:
                 database = str(cfg.get("database") or "")
@@ -1900,14 +1903,17 @@ def _mongodb_key_list(
 ) -> list[tuple[Any, ...]] | None:
     """Collection PK tuples. Exact find projection — never estimatedCount."""
     from pymongo import MongoClient
+    from connectors.mongodb_common import guarded_mongo_client
 
     from src.transfer.adapters import mongodb_connection_string
 
     database = str(cfg.get("database") or "")
     if not database or not table_name:
         return None
-    client: MongoClient = MongoClient(
-        mongodb_connection_string(dict(cfg)), serverSelectionTimeoutMS=5000
+    client: MongoClient = guarded_mongo_client(
+        mongodb_connection_string(dict(cfg)),
+        workspace_id=str(cfg.get("workspace_id") or ""),
+        serverSelectionTimeoutMS=5000,
     )
     try:
         coll = client[database][table_name]

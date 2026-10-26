@@ -228,6 +228,7 @@ def _mongo_existing_keys(
     limit: int,
 ) -> list[dict[str, Any]]:
     from pymongo import MongoClient
+    from connectors.mongodb_common import guarded_mongo_client
 
     from connectors.mongodb_common import normalize_mongodb_connection_string
 
@@ -241,7 +242,7 @@ def _mongo_existing_keys(
         ssl=bool(cfg.get("ssl")),
         auth_source=cfg.get("auth_source", ""),
     )
-    client: MongoClient = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    client: MongoClient = guarded_mongo_client(uri, serverSelectionTimeoutMS=5000)
     try:
         db = client[cfg.get("database") or cfg.get("auth_source") or "test"]
         cursor = db[collection].find(
@@ -696,6 +697,7 @@ def _mongo_existing_tuples(
     limit: int,
 ) -> list[dict[str, Any]]:
     from pymongo import MongoClient
+    from connectors.mongodb_common import guarded_mongo_client
 
     from connectors.mongodb_common import normalize_mongodb_connection_string
 
@@ -709,7 +711,7 @@ def _mongo_existing_tuples(
         ssl=bool(cfg.get("ssl")),
         auth_source=cfg.get("auth_source", ""),
     )
-    client: MongoClient = MongoClient(uri, serverSelectionTimeoutMS=5000)
+    client: MongoClient = guarded_mongo_client(uri, serverSelectionTimeoutMS=5000)
     try:
         db = client[cfg.get("database") or cfg.get("auth_source") or "test"]
         query = {

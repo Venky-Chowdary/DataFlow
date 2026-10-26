@@ -8,12 +8,13 @@ auth/scope errors fail closed.
 
 from __future__ import annotations
 
+import re
+
 import base64
 import hashlib
 from typing import Any, Callable
 
 from connectors.saas_common import (
-    base_url,
     humanize_http_error,
     is_auth_error,
     request,
@@ -219,11 +220,52 @@ def _singular(table: str) -> str:
     return t
 
 
+_ZENDESK_RESOURCE = re.compile(r"[a-z][a-z0-9_]{0,63}")
+
+
+def zendesk_origin(host: str) -> str:
+    """``https://<sub>.zendesk.com`` for ``host``, or ``""`` when it is anything else.
+
+    Exact host match: no other scheme, port, credentials, path, query or a
+    ``zendesk.com`` that only appears inside a path or a longer host.
+    """
+    from urllib.parse import urlparse
+
+    raw = (host or "").strip()
+    if not raw:
+        return ""
+    parsed = urlparse(raw if "://" in raw else f"https://{raw}")
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    hostname = (parsed.hostname or "").lower().rstrip(".")
+    if (
+        parsed.scheme != "https"
+        or port not in (None, 443)
+        or parsed.username
+        or parsed.password
+        or parsed.path not in ("", "/")
+        or parsed.query
+        or parsed.fragment
+        or not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.zendesk\.com", hostname)
+    ):
+        return ""
+    return f"https://{hostname}"
+
+
 def _make_url(host: str, table: str, record_id: str | None = None) -> str:
-    root = base_url(host, DEFAULT_HOST).rstrip("/")
-    base = f"{root}/api/v2/{table}"
+    from urllib.parse import quote
+
+    root = zendesk_origin(host)
+    if not root:
+        raise ValueError("Zendesk host must be https://<subdomain>.zendesk.com")
+    resource = str(table or "").strip().lower()
+    if not _ZENDESK_RESOURCE.fullmatch(resource):
+        raise ValueError(f"Unsupported Zendesk object: {table!r}")
+    base = f"{root}/api/v2/{resource}"
     if record_id:
-        return f"{base}/{record_id}.json"
+        return f"{base}/{quote(str(record_id), safe='')}.json"
     return f"{base}.json"
 
 
@@ -297,7 +339,7 @@ def write_mapped_rows(
         )
 
     shop_host = host or _kwargs.get("subdomain") or ""
-    if not shop_host or ".zendesk.com" not in shop_host.replace("://", ""):
+    if not zendesk_origin(shop_host):
         return WriteResult(
             ok=False,
             rows_written=0,

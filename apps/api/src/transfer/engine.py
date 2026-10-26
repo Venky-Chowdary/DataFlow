@@ -1531,6 +1531,15 @@ class UniversalTransferEngine:
     def execute_tracked(
         self, request: TransferRequest, job_id: str, resume: bool = False
     ) -> TransferResult:
+        """Run a tracked transfer under the workspace's connector egress policy."""
+        from services.egress_guard import egress_workspace
+
+        with egress_workspace(str(request.workspace_id or "")):
+            return self._execute_tracked_in_workspace(request, job_id, resume)
+
+    def _execute_tracked_in_workspace(
+        self, request: TransferRequest, job_id: str, resume: bool = False
+    ) -> TransferResult:
         """Timed wrapper around the core transfer engine.
 
         Also the OpenTelemetry root span for the transfer. Every phase span
