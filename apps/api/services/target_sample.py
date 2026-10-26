@@ -229,7 +229,8 @@ def read_target_sample(
                     conn.close()
                     return [dict(zip(names, row)) for row in rows]
                 except Exception as exc:
-                    last_exc = exc
+                    # Report the configured mode's failure, not the upgrade probe's.
+                    last_exc = last_exc or exc
                     continue
             tls_note = (
                 " (SSL is required by the connector; plaintext fallback is not attempted)"
