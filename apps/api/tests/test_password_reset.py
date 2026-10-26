@@ -662,3 +662,55 @@ def test_outbox_never_stores_the_raw_token(monkeypatch, tmp_path):
         assert q.get("enc") == "secret_vault"
         token_q = q.get("text") or q.get("html")
         assert token_q is None  # no plaintext body fields on the row
+
+
+def test_drain_never_sends_dead_reset_links(monkeypatch, tmp_path):
+    """Item 2: a queued reset mail whose token was superseded or expired
+    before the drain must be marked (not sent) and counted in metrics."""
+    import json
+    from services import mail_outbox, password_reset_store
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
+
+    c = _client()
+    _verified_user(c)
+    assert _forgot(c).status_code == 202   # row A queued, token A live
+    assert _forgot(c).status_code == 202   # row B queued, token A superseded
+
+    rows = mail_outbox.queued()
+    assert len(rows) == 2
+
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
+    before = len(ConsoleEmailSender.OUTBOX)
+    assert signup_service.recover_mail_outbox() == 1   # only the live row sent
+    assert len(ConsoleEmailSender.OUTBOX) == before + 1
+
+    cts = mail_outbox.counts()
+    assert cts["superseded"] == 1 and cts["sent"] == 1 and cts["queued"] == 0, cts
+
+
+def test_drain_marks_expired_reset_links(monkeypatch, tmp_path):
+    """An expired-token row drains as 'expired', never leaves the outbox."""
+    from services import mail_outbox, password_reset_store
+    from datetime import UTC, datetime, timedelta
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
+
+    c = _client()
+    _verified_user(c)
+    assert _forgot(c).status_code == 202
+    assert len(mail_outbox.queued()) == 1
+
+    real_now = password_reset_store._now
+    monkeypatch.setattr(
+        password_reset_store, "_now",
+        lambda: real_now() + password_reset_store.TOKEN_TTL + timedelta(seconds=1))
+
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
+    before = len(ConsoleEmailSender.OUTBOX)
+    assert signup_service.recover_mail_outbox() == 0
+    assert len(ConsoleEmailSender.OUTBOX) == before  # nothing sent
+    cts = mail_outbox.counts()
+    assert cts["expired"] == 1 and cts["queued"] == 0, cts

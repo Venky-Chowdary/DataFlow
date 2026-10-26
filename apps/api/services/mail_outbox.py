@@ -147,7 +147,8 @@ def queued() -> list[dict[str, Any]]:
 def counts() -> dict[str, int]:
     """Status histogram for admin metrics — surfaces 'queued but never
     sent' explicitly."""
-    out = {"queued": 0, "sent": 0, "failed": 0}
+    out = {"queued": 0, "sent": 0, "failed": 0,
+           "expired": 0, "superseded": 0}
     db = _database()
     if db is not None:
         for row in db[COLLECTION].aggregate(
@@ -163,17 +164,36 @@ def counts() -> dict[str, int]:
     return out
 
 
-def drain_queued(submit) -> int:
+def drain_queued(submit, *, skip_reason=None) -> int:
     """Re-submit every persisted 'queued' row through the lane. Called at
     startup so a restart cannot silently drop mail; returns the count
-    re-queued. ``submit(row)`` hands one row back to the send lane."""
-    rows = queued()
-    for row in rows:
+    re-queued. ``submit(row)`` hands one row back to the send lane.
+
+    ``skip_reason(row)`` may return a terminal status ('expired',
+    'superseded') for a row whose payload is already dead — e.g. a reset
+    link whose token expired, was consumed, or was superseded by a newer
+    request. Such rows are marked, never sent, and counted in metrics."""
+    submitted = 0
+    skipped = 0
+    for row in queued():
+        if skip_reason is not None:
+            try:
+                reason = skip_reason(row)
+            except Exception:
+                reason = None
+                logger.error("mail outbox skip check failed for %s",
+                             row.get("id"), exc_info=True)
+            if reason:
+                mark(row["id"], reason)
+                skipped += 1
+                continue
         try:
             submit(row)
+            submitted += 1
         except Exception:
             logger.error("mail outbox drain failed for %s",
                          row.get("id"), exc_info=True)
-    if rows:
-        logger.info("mail outbox: re-queued %d persisted row(s)", len(rows))
-    return len(rows)
+    if submitted or skipped:
+        logger.info("mail outbox: re-queued %d row(s), skipped %d dead",
+                    submitted, skipped)
+    return submitted

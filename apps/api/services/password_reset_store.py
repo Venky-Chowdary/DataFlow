@@ -153,6 +153,25 @@ def _find(token_hash: str) -> dict[str, Any] | None:
     return None
 
 
+def status_by_id(token_id: str) -> str:
+    """'ok' | 'expired' | 'used' | 'superseded' | 'invalid' for a stored
+    token id — the outbox drain uses this to skip rows whose link is dead
+    before they burn a send."""
+    db = _database()
+    if db is not None:
+        row = db[COLLECTION].find_one({"_id": token_id})
+        doc = _to_doc(row) if row else None
+    else:
+        with _LOCK:
+            store = _load()
+        doc = store.get("tokens", {}).get(token_id)
+    if doc is None:
+        return "invalid"
+    if doc.get("superseded"):
+        return "superseded"
+    return _active_doc(doc)
+
+
 def inspect(token: str) -> str:
     """Validate a token WITHOUT consuming it — 'ok' | 'expired' | 'used' | 'invalid'."""
     if not token:

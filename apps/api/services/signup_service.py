@@ -215,11 +215,31 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
                          exc_info=True)
 
 
+def _outbox_dead_link_status(row: dict[str, Any]) -> str | None:
+    """Terminal status for a queued reset-mail row whose link is already
+    dead — expired, consumed, superseded by a newer request, or the token
+    doc is gone. The drain marks the row instead of sending a dead link."""
+    if row.get("purpose") != "password.reset":
+        return None
+    key = str(row.get("idempotency_key") or "")
+    token_id = key.split("reset-link:", 1)[-1] if "reset-link:" in key else ""
+    if not token_id:
+        return None
+    status = password_reset_store.status_by_id(token_id)
+    if status == "expired":
+        return "expired"
+    if status in ("used", "superseded", "invalid"):
+        return "superseded"
+    return None
+
+
 def recover_mail_outbox() -> int:
     """Startup hook: re-queue persisted 'queued' rows so a restart cannot
-    silently drop mail. Returns how many rows were re-queued."""
+    silently drop mail. Rows whose reset link is already dead are marked
+    expired/superseded and never sent. Returns how many rows re-queued."""
     return mail_outbox.drain_queued(
-        lambda row: _deliver_later(lambda: _deliver_outbox_row(row)))
+        lambda row: _deliver_later(lambda: _deliver_outbox_row(row)),
+        skip_reason=_outbox_dead_link_status)
 
 
 def _send(template: str, to: str, context: dict[str, Any], *, idempotency_key: str) -> None:
