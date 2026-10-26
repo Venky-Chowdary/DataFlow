@@ -243,6 +243,40 @@ jobs:
           docker exec "$cid" mysql -uroot -proot_ci -e \
             "GRANT REPLICATION SLAVE, REPLICATION CLIENT, RELOAD ON *.* TO 'dataflow'@'%'; FLUSH PRIVILEGES;"
 
+      - name: Diag — PG ssl fallback
+        working-directory: apps/api
+        run: |
+          python - <<'PY'
+          import logging, traceback
+          logging.basicConfig(level=logging.WARNING)
+          import psycopg2
+          for host in ("127.0.0.1", "localhost"):
+              for mode in ("require", "prefer"):
+                  try:
+                      c = psycopg2.connect(host=host, port=5432, dbname="dataflow",
+                                           user="dataflow", password="dataflow",
+                                           connect_timeout=15, sslmode=mode,
+                                           keepalives=1)
+                      c.close()
+                      print(f"raw {host} sslmode={mode}: OK")
+                  except Exception as exc:
+                      print(f"raw {host} sslmode={mode}: FAIL {exc!r}")
+          from connectors.postgresql_conn import get_connection
+          for host in ("127.0.0.1", "localhost"):
+              try:
+                  conn = get_connection(
+                      host=host, port=5432, database="dataflow",
+                      username="dataflow", password="dataflow",
+                      connection_string="", ssl=True,
+                  )
+                  cur = conn.cursor(); cur.execute("select 1")
+                  print(f"get_connection {host}: OK {cur.fetchone()}")
+                  conn.close()
+              except Exception as exc:
+                  print(f"get_connection {host}: FAILED -> {exc!r}")
+                  traceback.print_exc()
+          PY
+
       - name: Full suite
         working-directory: apps/api
         run: |
