@@ -62,11 +62,13 @@ from services.type_system import instant_date_carrier, normalize_logical_type
 from services.value_serializer import (
     cell_to_string,
     is_missing_sentinel,
+    is_reader_null_cell,
     json_default,
     canonical_json_text,
     json_loads_exact,
     load_http_json,
     operator_binary_cell_text,
+    unescape_wire_text,
 )
 
 # Fingerprinting runs once per cell on both the write and the read-back pass, so
@@ -4381,6 +4383,20 @@ def fingerprint_for_reconcile(
         # fingerprint as ``''`` against a destination NULL, failing Gate-8 on a
         # correct transfer — and, in the other direction, matching a destination
         # that really did store an empty string.
+        wire = None
+        value = None
+    if isinstance(wire, str):
+        # Wire decode before any stage re-encodes: ``__DF_ESC__x`` is the
+        # literal ``x`` (one layer — the recursive escape stays provable), so
+        # a colliding literal fingerprints as itself on both sides.
+        wire = unescape_wire_text(wire)
+        value = wire
+    if is_reader_null_cell(wire):
+        # The NULL wire spellings (``__DF_SQL_NULL__`` / ``__df_ddb_null__``)
+        # are NULL, not a colliding literal — without this the transform stage
+        # below re-escapes the sentinel through ``cell_to_string`` and a
+        # transformed NULL fingerprints as ``"__DF_ESC____DF_SQL_NULL__"``
+        # against a destination NULL (duckdb JSON-column regression).
         wire = None
         value = None
     tname = (transform or "").strip().lower()

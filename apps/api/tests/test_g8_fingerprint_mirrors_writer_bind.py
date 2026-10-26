@@ -56,3 +56,35 @@ def test_fingerprint_strict_clearing_is_scoped_and_restored():
     finally:
         reset_strict_number_reading(token)
     assert err is not None
+
+
+def test_wire_null_sentinel_fingerprints_null_under_transform():
+    """``__DF_SQL_NULL__`` on the wire is NULL — never a literal to re-escape.
+
+    The transform stage re-encodes via ``cell_to_string`` which escapes any
+    sentinel-colliding string, so a transformed NULL fingerprinted as
+    ``"__DF_ESC____DF_SQL_NULL__"`` against a destination NULL (duckdb JSON
+    column regression). Both the wire NULL and the real NULL must collapse
+    to the same fingerprint, and the literal (which travels escaped) must
+    land back on ``"__DF_SQL_NULL__"``.
+    """
+    assert fingerprint_for_reconcile(
+        "__DF_SQL_NULL__", ddl_type="VARCHAR",
+        engine="generic_sql", transform="json",
+    ) == fingerprint_for_reconcile(
+        None, ddl_type="VARCHAR", engine="generic_sql", transform="json",
+    )
+    assert fingerprint_for_reconcile(
+        "__DF_ESC____DF_SQL_NULL__", ddl_type="VARCHAR",
+        engine="generic_sql", transform="json",
+    ) == fingerprint_for_reconcile(
+        "__DF_SQL_NULL__", ddl_type="VARCHAR",
+        engine="generic_sql", transform="json",
+    )
+    # ``__df_ddb_null__`` is the duckdb reader's own NULL spelling.
+    assert fingerprint_for_reconcile(
+        "__df_ddb_null__", ddl_type="VARCHAR",
+        engine="generic_sql", transform="json",
+    ) == fingerprint_for_reconcile(
+        None, ddl_type="VARCHAR", engine="generic_sql",
+    )
