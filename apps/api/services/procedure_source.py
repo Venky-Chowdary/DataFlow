@@ -1223,8 +1223,13 @@ def _row_after_cursor(row: list[Any], idx: int, cursor_after: Any) -> bool:
 
 def _row_from_spool_line(obj: Any, headers: list[str]) -> list[str]:
     if isinstance(obj, dict):
-        return [_cell(obj.get(h)) for h in headers]
-    return [_cell(v) for v in obj]
+        vals = [obj.get(h) for h in headers]
+    else:
+        vals = list(obj) if isinstance(obj, (list, tuple)) else [obj]
+    # The spool already stores wire cells — re-running _cell on them escapes
+    # the SQL-NULL sentinel a second time (NULL must stay distinct from "").
+    # Only normalize values that were never wire cells (e.g. JSON null).
+    return [v if isinstance(v, str) else _cell(v) for v in vals]
 
 
 def _read_spool_page(
