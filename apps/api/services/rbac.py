@@ -294,6 +294,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/schedules/", Permission.SCHEDULE_READ),
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
+    # The RAG corpus is shared by every workspace's Pilot and RAG answers, so
+    # writing to it is workspace administration, like /copilot/train below.
+    ("POST", "/api/v1/ai/rag/ingest", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/ai/", Permission.AI_USE),
     # Pilot. Talking to the assistant is ai.use for every role; what the turn is
     # allowed to *do* is decided per tool (src/ai/copilot/tool_permissions.py),
