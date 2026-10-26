@@ -301,6 +301,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # administration — which engine answers is read behind the same gate that
     # changes it (tests/test_byo_provider_keys.py).
     ("GET", "/api/v1/workspace/settings", Permission.WORKSPACE_READ),
+    # The key store is deployment-wide (every tenant's keys and service
+    # accounts), so listing, minting and revoking keys is IAM administration.
+    ("*", "/api/v1/workspace/api-keys", Permission.IAM_MANAGE),
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/resource-acls", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/audit/retention/purge", Permission.WORKSPACE_MANAGE),
@@ -446,8 +449,17 @@ def role_permissions(role: str) -> set[str]:
     return _ROLE_PERMISSIONS.get(normalize_role(role), _ROLE_PERMISSIONS["viewer"])
 
 
+# Deployment-wide administration: credentials (API keys, service accounts, SCIM
+# tokens) and SCIM provisioning act on every tenant, so only a principal whose
+# own role is ``admin`` holds them. A workspace membership that resolves to the
+# gate role ``admin`` administers that workspace, not the deployment.
+PLATFORM_ADMIN_PERMISSIONS = frozenset({Permission.IAM_MANAGE, Permission.SCIM_PROVISION})
+
+
 def principal_permissions(user: dict[str, Any] | None, role: str) -> set[str]:
     permissions = role_permissions(role)
+    if normalize_role((user or {}).get("role")) != "admin":
+        permissions = permissions - PLATFORM_ADMIN_PERMISSIONS
     scopes = user.get("scopes") if user else None
     if isinstance(scopes, list):
         return permissions & {scope for scope in scopes if isinstance(scope, str)}
