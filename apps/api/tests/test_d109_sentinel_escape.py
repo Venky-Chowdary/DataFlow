@@ -42,10 +42,19 @@ def test_wire_escapes_colliding_literal():
 
 
 def test_wire_escapes_case_and_whitespace_collisions():
-    for v in ["__df_sql_null__", " __DF_SQL_NULL__ ", "__DF_MISSING__", "__df_ddb_null__"]:
+    for v in ["__df_sql_null__", " __DF_SQL_NULL__ ", "__df_ddb_null__"]:
         out = cell_to_string(v, preserve_sql_null=True)
         assert out == _esc_prefix() + v, out
         assert not is_reader_null_cell(out)
+
+
+def test_missing_sentinel_stays_absent_on_the_wire():
+    # ``__DF_MISSING__`` is itself the missing sentinel string — escaping it
+    # turned absent fields into literal text and flipped inferred types
+    # (mongo→snowflake ``created`` DATE instead of TIMESTAMP_TZ, silencing the
+    # zoneless refusal). The sentinel must keep serializing as absent.
+    assert cell_to_string("__DF_MISSING__", preserve_sql_null=True) == ""
+    assert cell_to_string("__DF_MISSING__") == ""
 
 
 def test_wire_escapes_escape_prefix_recursively():

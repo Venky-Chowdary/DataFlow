@@ -784,9 +784,10 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
 
     # Sparse CDC / STOP_COLUMN / coerce omit — never serialize the sentinel into
     # CSV/JSON/export wires (would look like a real client value).
+    # The missing sentinel IS the string ``__DF_MISSING__`` — escaping it would
+    # turn every absent field into literal text on the wire and poison schema
+    # inference, so only the fallback path below escapes colliding literals.
     if is_missing_sentinel(value):
-        if preserve_sql_null and isinstance(value, str):
-            return escape_wire_text(value)
         return ""
 
     # IEEE NaN / Infinity are values. They are not SQL NULL.
