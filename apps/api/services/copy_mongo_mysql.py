@@ -66,20 +66,19 @@ def _load_tsv_into_mysql(
 ) -> None:
     from connectors.mysql_load_data import (
         blocking_load_data_warnings,
-        build_load_data_sql,
+        execute_load_data_local,
         mysql_load_data_session_ready,
-        quote_load_data_path,
     )
 
     ready, why = mysql_load_data_session_ready(dst_cur, dest_conn)
     if not ready:
         raise FastPathUnavailable(why)
-    load_sql = build_load_data_sql(
+    execute_load_data_local(
+        dst_cur,
+        path=path,
         table_q=table_q,
         columns=columns,
-        infile_sql=quote_load_data_path(path),
     )
-    dst_cur.execute(load_sql)
     dst_cur.execute("SHOW WARNINGS")
     blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
     if blocked:
