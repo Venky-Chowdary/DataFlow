@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+from services.type_stamp_grammar import require_safe_type_stamp, require_safe_type_stamps
 from services.value_serializer import cell_to_string
 
 from connectors.driver_guard import stub_writes_allowed
@@ -1204,6 +1205,7 @@ def _merge_batch_via_temp(
     temp = f"_DF_UPSERT_{uuid.uuid4().hex[:12]}"
     # Temp columns take the SAME resolved names as the target so the MERGE's
     # s."col" references line up (M5: resolved live-first / folded).
+    require_safe_type_stamps(target_types, context="snowflake MERGE staging column")
     col_defs = ", ".join(
         f"{_snowflake_column_ref(c, physical_names)} {t}"
         for c, t in zip(target_cols, target_types)
@@ -1682,6 +1684,7 @@ def write_mapped_rows(
             physical_names = _snowflake_physical_name_map(cur, schema, table_name)
 
             if create_table:
+                require_safe_type_stamps(target_types, context="snowflake CREATE TABLE column")
                 conflict_keys = {str(c).upper() for c in (conflict or [])}
                 col_defs = ", ".join(
                     f"{_snowflake_column_ref(c, physical_names)} {t}"
@@ -1761,6 +1764,9 @@ def write_mapped_rows(
                 for col, typ in zip(target_cols, target_types):
                     if col.upper() not in existing:
                         col_q = quote_sql_identifier(col)
+                        typ = require_safe_type_stamp(
+                            typ, context="snowflake ALTER TABLE ADD COLUMN"
+                        )
                         cur.execute(f"ALTER TABLE {tbl_q} ADD COLUMN {col_q} {typ}")
 
             physical = _fetch_snowflake_column_types(cur, schema, table_name)

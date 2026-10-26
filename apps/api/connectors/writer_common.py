@@ -2741,6 +2741,10 @@ def resolve_mapping_dest_types(
             continue
         m = by_tgt.get(col) or by_tgt.get(str(col).lower()) or {}
         mapped = str(m.get("target_type") or m.get("dest_type") or "").strip()
+        if mapped:
+            from services.type_stamp_grammar import validate_mapping_type_stamps
+
+            validate_mapping_type_stamps([m], context=f"{dest_db or 'destination'} mapping")
         src = str(m.get("source") or "")
         src_type = str(ctypes.get(src) or m.get("source_type") or "")
         chosen = (

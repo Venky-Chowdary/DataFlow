@@ -251,6 +251,14 @@ class ExecuteTransferRequest(BaseModel):
     mappings: list[dict] = Field(default_factory=list)
     column_types: dict[str, str] = Field(default_factory=dict)
     sync_mode: str = "full_refresh_overwrite"
+
+    @field_validator("mappings")
+    @classmethod
+    def _mapping_types_are_types(cls, value: list[dict]) -> list[dict]:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        validate_mapping_type_stamps(value, context="mapping")
+        return value
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
     skip_preflight: bool = False
@@ -597,6 +605,14 @@ class UpdatePlanRequest(BaseModel):
 
 class SyncMappingsRequest(BaseModel):
     mappings: list[dict] = Field(default_factory=list)
+
+    @field_validator("mappings")
+    @classmethod
+    def _mapping_types_are_types(cls, value: list[dict]) -> list[dict]:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        validate_mapping_type_stamps(value, context="mapping")
+        return value
 
 
 @router.get("/plans")
