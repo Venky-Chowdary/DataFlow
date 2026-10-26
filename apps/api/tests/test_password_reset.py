@@ -589,8 +589,8 @@ def test_outbox_survives_restart_and_drains(monkeypatch, tmp_path):
 
 
 def test_outbox_row_marked_failed_on_send_error(monkeypatch, tmp_path):
-    """A send failure marks the persisted row failed (not queued) and
-    audits send_failed — the admin surface can tell the difference."""
+    """A permanent send failure marks the persisted row failed (not queued)
+    and audits send_failed — the admin surface can tell the difference."""
     from services import mail_outbox
 
     monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
@@ -601,7 +601,7 @@ def test_outbox_row_marked_failed_on_send_error(monkeypatch, tmp_path):
 
     class _AlwaysBroke:
         def send(self, mail):
-            raise EmailProviderError("down", retryable=True)
+            raise EmailProviderError("permanent 4xx", retryable=False)
 
     from services.email_sender import EmailProviderError
 
@@ -614,6 +614,101 @@ def test_outbox_row_marked_failed_on_send_error(monkeypatch, tmp_path):
     cts = mail_outbox.counts()
     assert cts["queued"] == 0 and cts["failed"] == 1, cts
     assert any(e == "password.reset.send_failed" for e, _ in events)
+
+
+def test_transient_send_retries_then_terminal_failed(monkeypatch, tmp_path):
+    """Item 4: a transient provider error retries with backoff; once the
+    retry bound is hit the row goes terminal failed — never silently lost
+    and never retried forever."""
+    import time
+    from services import mail_outbox
+    from services.email_sender import EmailProviderError
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(signup_service, "_RETRY_BASE_SEC", 0.05)
+    monkeypatch.setattr(signup_service, "_MAX_SEND_RETRIES", 2)
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
+
+    events = []
+    monkeypatch.setattr(signup_service, "record_security_event",
+                        lambda event, **kw: events.append((event, kw)))
+    calls = []
+
+    class _AlwaysTransient:
+        def send(self, mail):
+            calls.append(mail.to)
+            raise EmailProviderError("timeout", retryable=True)
+
+    c = _client()
+    _verified_user(c)
+    monkeypatch.setattr(signup_service, "get_email_sender",
+                        lambda: _AlwaysTransient())
+    assert _forgot(c).status_code == 202
+    time.sleep(0.4)  # let the timer-driven retries run
+    # initial + 2 retries = 3 send attempts, then terminal failed
+    assert len(calls) == 3, calls
+    cts = mail_outbox.counts()
+    assert cts["failed"] == 1 and cts["queued"] == 0 and cts["sending"] == 0, cts
+    kinds = [e for e, _ in events]
+    assert kinds.count("password.reset.send_failed") == 3
+
+
+def test_transient_retry_can_recover(monkeypatch, tmp_path):
+    """A transient failure that clears on retry ends 'sent' — the whole
+    point of retrying instead of marking failed on the first timeout."""
+    import time
+    from services import mail_outbox
+    from services.email_sender import EmailProviderError
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(signup_service, "_RETRY_BASE_SEC", 0.05)
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: fn())
+
+    calls = []
+
+    class _FailOnce:
+        def send(self, mail):
+            calls.append(mail.to)
+            if len(calls) == 1:
+                raise EmailProviderError("timeout", retryable=True)
+
+    c = _client()
+    _verified_user(c)
+    monkeypatch.setattr(signup_service, "get_email_sender", lambda: _FailOnce())
+    assert _forgot(c).status_code == 202
+    time.sleep(0.3)
+    assert len(calls) == 2, calls
+    assert mail_outbox.counts()["sent"] == 1
+
+
+def test_quota_error_honors_retry_after(monkeypatch, tmp_path):
+    """EmailQuotaExceeded carries retry_after_sec; the backoff must honor
+    it (the row is gated by next_attempt_at, not retried immediately)."""
+    from services import mail_outbox
+    from services.email_sender import EmailQuotaExceeded
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+
+    c = _client()
+    _verified_user(c)
+    # Force the provider's own hint path: sender raises quota with a hint.
+    class _Quota:
+        def send(self, mail):
+            raise EmailQuotaExceeded("day cap", retry_after_sec=120)
+
+    monkeypatch.setattr(signup_service, "get_email_sender", lambda: _Quota())
+    # consume_send_slot runs before send; reset quota so the raise is the
+    # sender's, not the slot checker's.
+    from services import email_quota
+    email_quota._reset_backends()
+    assert _forgot(c).status_code == 202
+    row = mail_outbox.queued()[0]
+    import json
+    doc = json.loads((tmp_path / "mail_outbox.json").read_text())
+    stored = doc["rows"][row["id"]]
+    assert stored["status"] == "queued" and stored["attempts"] == 1
+    # next_attempt_at sits ~120s out — gated, not immediate
+    assert stored["next_attempt_at"] > stored["created_at"]
 
 
 def test_outbox_never_stores_the_raw_token(monkeypatch, tmp_path):

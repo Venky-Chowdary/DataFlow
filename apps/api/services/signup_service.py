@@ -19,6 +19,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import secrets
+import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -204,19 +205,61 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
                               actor=row["to"], session_id=row["id"],
                               details={"ip": actor_ip})
     except Exception as exc:
+        _outbox_send_failed(row, exc, actor_ip=actor_ip)
+
+
+_MAX_SEND_RETRIES = 3
+_RETRY_BASE_SEC = 30.0
+_RETRY_MAX_SEC = 3600.0
+
+
+def _retry_delay_sec(exc: Exception, attempt: int) -> float:
+    """Backoff for a transient failure: the provider's own retry_after when
+    it gives one (e.g. send-quota), else bounded exponential."""
+    hint = getattr(exc, "retry_after_sec", None)
+    if hint:
+        try:
+            return min(float(hint), _RETRY_MAX_SEC)
+        except (TypeError, ValueError):
+            pass
+    return min(_RETRY_BASE_SEC * (2 ** (attempt - 1)), _RETRY_MAX_SEC)
+
+
+def _outbox_send_failed(row: dict[str, Any], exc: Exception,
+                        *, actor_ip: str = "") -> None:
+    """One failed send: transient errors reschedule with bounded backoff
+    (the row's attempts count survives restarts and replicas); permanent
+    ones — and exhausted retries — mark the row failed for good. Every
+    failed attempt audits password.reset.send_failed."""
+    retryable = isinstance(exc, EmailSendError) and exc.retryable
+    attempts = int(row.get("attempts") or 0)
+    if retryable and attempts < _MAX_SEND_RETRIES:
+        delay = _retry_delay_sec(exc, attempts + 1)
+        mail_outbox.reschedule(row["id"], delay, type(exc).__name__)
+        row["attempts"] = attempts + 1
+        timer = threading.Timer(
+            delay,
+            lambda: _deliver_later(
+                lambda: _deliver_outbox_row(row, actor_ip=actor_ip)))
+        timer.daemon = True
+        timer.start()
+        logger.warning("mail outbox transient failure (%s); retry %d in %.0fs",
+                       type(exc).__name__, attempts + 1, delay)
+    else:
         mail_outbox.mark(row["id"], "failed")
         if isinstance(exc, EmailSendError):
-            logger.warning("password-reset link send failed")
+            logger.warning("password-reset link send failed terminally")
         else:
             logger.error("password-reset link delivery failed", exc_info=True)
-        try:
-            record_security_event("password.reset.send_failed",
-                                  outcome="failed", actor=row["to"],
-                                  session_id=row["id"],
-                                  details={"ip": actor_ip})
-        except Exception:
-            logger.error("password-reset send_failed audit event failed",
-                         exc_info=True)
+    try:
+        record_security_event("password.reset.send_failed",
+                              outcome="failed", actor=row["to"],
+                              session_id=row["id"],
+                              details={"ip": actor_ip,
+                                       "attempt": attempts + 1})
+    except Exception:
+        logger.error("password-reset send_failed audit event failed",
+                     exc_info=True)
 
 
 def _outbox_dead_link_status(row: dict[str, Any]) -> str | None:

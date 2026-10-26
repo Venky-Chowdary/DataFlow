@@ -100,6 +100,7 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
         "enc": "secret_vault",
         "idempotency_key": idempotency_key,
         "status": "queued",
+        "attempts": 0,
         "created_at": _now_iso(),
         "expires_at": _expiry_iso(),
     }
@@ -132,6 +133,32 @@ def mark(row_id: str, status: str) -> None:
             if status in _TERMINAL:
                 for k in _BODY_KEYS:
                     row.pop(k, None)
+
+
+def reschedule(row_id: str, delay_sec: float, reason: str = "") -> None:
+    """Return a claimed row to 'queued' after a transient failure, gated by
+    ``next_attempt_at`` — it is not claimable again until the backoff elapses.
+    The attempt count lives on the row so retries are bounded across
+    replicas and restarts, not just within one process."""
+    next_at = (datetime.now(UTC)
+               + timedelta(seconds=max(0.05, delay_sec))).isoformat()
+    db = _database()
+    if db is not None:
+        db[COLLECTION].update_one({"_id": row_id}, {
+            "$set": {"status": "queued", "next_attempt_at": next_at,
+                     "last_error": reason},
+            "$inc": {"attempts": 1},
+            "$unset": {"claimed_at": "", "lease_until": ""}})
+        return
+    with json_doc_transaction(_path(), {"rows": {}}) as doc:
+        row = doc.setdefault("rows", {}).get(row_id)
+        if row is not None:
+            row["status"] = "queued"
+            row["next_attempt_at"] = next_at
+            row["last_error"] = reason
+            row["attempts"] = int(row.get("attempts") or 0) + 1
+            row.pop("claimed_at", None)
+            row.pop("lease_until", None)
 
 
 def queued() -> list[dict[str, Any]]:
