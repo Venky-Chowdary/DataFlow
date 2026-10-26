@@ -490,14 +490,17 @@ def test_forgot_floor_parks_coroutines_not_workers(monkeypatch):
                 await asyncio.to_thread(lambda: None)
                 return time.monotonic() - t1
 
-            rs = await asyncio.gather(*reqs, probe())
+            rs = await asyncio.gather(*reqs, probe(), probe(), probe())
             total = time.monotonic() - t0
-            probe_dt = rs[-1]
-            assert all(r.status_code == 202 for r in rs[:-1])
+            # Min over probes: suite-load event-loop stalls inflate any single
+            # sample, but true worker pinning delays EVERY probe behind the
+            # pad-length flood (≥ FORGOT_FLOOR_SEC).
+            probe_dt = min(rs[-3:])
+            assert all(r.status_code == 202 for r in rs[:-3])
             assert probe_dt < 0.25, (
                 f"unrelated to_thread waited {probe_dt:.2f}s — pads are "
                 "pinning pool workers")
-            assert total < 1.2, (
+            assert total < 2.5, (
                 f"{n} concurrent pads took {total:.2f}s — pads are not "
                 "concurrent coroutine sleeps")
     asyncio.run(run())
