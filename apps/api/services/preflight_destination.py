@@ -256,6 +256,65 @@ def inspect_destination_for_preflight(
         ]
         matched = _object_name_match(names, str(stream))
         out["table_exists"] = bool(matched)
+
+    # D112: a route may declare no relationships while the existing destination
+    # table carries live foreign keys — G22 must report those, not "referential
+    # integrity was not asked". Generic introspect does not surface FKs, so
+    # probe the catalog directly (same _fetch_foreign_keys evidence shape the
+    # post-write RI check uses) when the destination table exists.
+    if (
+        out.get("connected")
+        and out.get("table_exists")
+        and stream
+        and not out["foreign_keys"]
+    ):
+        from services.foreign_key_metadata import _PROBES, _dialect_key
+
+        db_key = str(out.get("db_type") or "").lower()
+        if _dialect_key(db_key) in _PROBES:
+            try:
+                from src.transfer.adapters import resolve_connector_config
+                from services.dialect_profiles import normalize_schema
+                from services.schema_introspect import introspect_schema
+
+                fk_cfg = dict(resolve_connector_config(endpoint) or {})
+                live = introspect_schema(
+                    db_key,
+                    host=str(fk_cfg.get("host") or ""),
+                    port=int(fk_cfg.get("port") or 0),
+                    database=str(fk_cfg.get("database") or ""),
+                    username=str(fk_cfg.get("username") or ""),
+                    password=str(fk_cfg.get("password") or ""),
+                    schema=normalize_schema(
+                        db_key,
+                        fk_cfg.get("schema") or dest_schema,
+                        username=fk_cfg.get("username"),
+                    )
+                    or "",
+                    connection_string=str(fk_cfg.get("connection_string") or ""),
+                    ssl=bool(fk_cfg.get("ssl")),
+                    table=str(stream),
+                )
+                out["foreign_keys"] = list(live.get("foreign_keys") or [])
+                out["foreign_keys_meta"] = dict(
+                    live.get("foreign_keys_meta") or {}
+                )
+                check_constraints = list(
+                    live.get("check_constraints") or []
+                )
+                if check_constraints:
+                    out["check_constraints"] = check_constraints
+            except Exception as fk_exc:  # noqa: BLE001 — probe must not fail Validate
+                logger.debug(
+                    "destination FK introspect skipped: %s",
+                    fk_exc,
+                    exc_info=fk_exc,
+                )
+                out["foreign_keys_meta"] = {
+                    "measured": False,
+                    "detail": f"destination constraint probe failed: {type(fk_exc).__name__}",
+                }
+
     out["can_create_table"] = out["connected"]
     out["can_write"] = out["connected"]
 
