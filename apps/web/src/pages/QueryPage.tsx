@@ -772,7 +772,7 @@ export function QueryPage({ connectors, connectorsLoading = false }: QueryPagePr
                         className="df2-input df2-input-sm"
                         value={outputPath}
                         onChange={(e) => setOutputPath(e.target.value)}
-                        placeholder="Output path (optional)"
+                        placeholder="File name in exports/ (optional)"
                       />
                     </>
                   )}

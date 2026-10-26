@@ -425,3 +425,69 @@ def test_aggregate_stage_guard_blocks_writes():
     with pytest.raises(Exception) as exc:
         _validate_mongodb_aggregate([{"$match": {}}, {"$out": "stolen"}])
     assert "$out" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "output_path",
+    [
+        "../x.py",
+        "../src/routers/pwned.py",
+        "src/routers/pwned.py",
+        "../services/pwned.csv",
+        "/tmp/pwned.csv",
+        "../exports_evil/pwned.csv",
+    ],
+)
+def test_query_export_refuses_paths_outside_exports(test_client, tmp_path, monkeypatch, output_path):
+    """A client-chosen output_path must never land outside apps/api/exports."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    conn = connector_store.create_connector({
+        "name": "Export confinement",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    before = {p for p in _API_ROOT.rglob("pwned*")}
+    response = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": "SELECT 'import os' AS line",
+        "format": "csv",
+        "output_path": output_path,
+    })
+    assert response.status_code == 400, response.text
+    assert "exports" in response.json()["detail"].lower() or "extension" in response.json()["detail"].lower()
+    assert {p for p in _API_ROOT.rglob("pwned*")} == before
+    assert not Path("/tmp/pwned.csv").exists()
+
+
+def test_query_export_named_file_lands_in_exports(test_client, tmp_path, monkeypatch):
+    import uuid
+
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    conn = connector_store.create_connector({
+        "name": "Export named",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    name = f"q_{uuid.uuid4().hex[:10]}"
+    response = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": "SELECT * FROM users",
+        "format": "csv",
+        "output_path": name,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    target = _API_ROOT / "exports" / f"{name}.csv"
+    try:
+        assert data["success"] is True, data
+        assert Path(data["path"]) == target.resolve()
+        assert target.read_text().startswith("id,name")
+    finally:
+        if target.exists():
+            target.unlink()
