@@ -332,6 +332,59 @@ def test_missing_tenant_is_a_404_on_every_verb(admin):
     assert admin.delete("/api/v1/workspace/tenant/nope").status_code == 404
 
 
+def _unbind(tenant_id: str) -> None:
+    """Rewrite a stored tenant as a pre-scoping record (``workspace_id: ""``)."""
+    import json
+
+    import services.tenant_store as tenant_store
+
+    raw = json.loads(tenant_store.STORE_PATH.read_text(encoding="utf-8"))
+    for t in raw["tenants"]:
+        if t["id"] == tenant_id:
+            t["workspace_id"] = ""
+    tenant_store.STORE_PATH.write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_unbound_tenant_is_refused_to_a_workspace_admin_on_every_verb(admin):
+    """An empty ``workspace_id`` must fail closed, not skip the authority check."""
+    import services.tenant_store as tenant_store
+
+    ws_id = _workspace(admin, "Orphaned")
+    created = admin.post(
+        "/api/v1/workspace/tenant",
+        json={"workspace_id": ws_id, "name": "Legacy", "custom_domain": "legacy.example.com"},
+    )
+    assert created.status_code == 200, created.text
+    tenant_id = created.json()["id"]
+    _unbind(tenant_id)
+    lead = _signed_in(admin, email="orphan-lead@example.com", workspace_id=ws_id, workspace_role="admin")
+
+    patched = lead.patch(
+        f"/api/v1/workspace/tenant/{tenant_id}", json={"custom_domain": "evil.example.com"}
+    )
+    assert patched.status_code == 403, patched.text
+    removed = lead.delete(f"/api/v1/workspace/tenant/{tenant_id}")
+    assert removed.status_code == 403, removed.text
+
+    kept = tenant_store.get_tenant(tenant_id)
+    assert kept is not None and kept.custom_domain == "legacy.example.com"
+
+
+def test_unbound_tenant_is_amended_and_removed_by_a_platform_admin(admin):
+    import services.tenant_store as tenant_store
+
+    ws_id = _workspace(admin, "Orphaned-admin")
+    created = admin.post("/api/v1/workspace/tenant", json={"workspace_id": ws_id, "name": "Legacy"})
+    assert created.status_code == 200, created.text
+    tenant_id = created.json()["id"]
+    _unbind(tenant_id)
+
+    amended = admin.patch(f"/api/v1/workspace/tenant/{tenant_id}", json={"name": "Legacy Renamed"})
+    assert amended.status_code == 200, amended.text
+    assert admin.delete(f"/api/v1/workspace/tenant/{tenant_id}").status_code == 200
+    assert tenant_store.get_tenant(tenant_id) is None
+
+
 def test_store_missing_its_tenants_list_still_accepts_a_write(stores, monkeypatch):
     """A store file written in another shape must not fault the next create."""
     import services.tenant_store as tenant_store
