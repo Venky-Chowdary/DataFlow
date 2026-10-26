@@ -32,6 +32,9 @@ _TYPE_SAMPLE_ROWS = 200
 _READ_ONLY_SQL_PATTERN = re.compile(r"^\s*SELECT\s+", re.IGNORECASE)
 
 _MONGODB_WRITE_STAGES = {"$out", "$merge"}
+# Operators that run server-side JavaScript; read-only playground never needs them.
+_MONGODB_JS_OPERATORS = {"$where", "$function", "$accumulator", "$mapReduce"}
+_MONGODB_FORBIDDEN_OPERATORS = _MONGODB_WRITE_STAGES | _MONGODB_JS_OPERATORS
 
 
 def _is_safe_sql(raw_query: str) -> bool:
@@ -325,15 +328,45 @@ def _is_safe_sql_fallback(raw_query: str) -> bool:
     return True
 
 
+def _reject_mongodb_operator(key: str) -> None:
+    kind = "aggregation stage" if key in _MONGODB_WRITE_STAGES else "operator"
+    raise HTTPException(
+        status_code=400,
+        detail=f"MongoDB {kind} '{key}' is not allowed in the query playground",
+    )
+
+
+def _validate_mongodb_query_tree(node: Any) -> None:
+    """Reject write stages and server-side JavaScript anywhere in a filter/pipeline.
+
+    Walks every nested document and array, so sub-pipelines (``$lookup``,
+    ``$facet``, ``$unionWith``) and ``$expr`` bodies are covered too.
+    """
+    try:
+        from bson.code import Code
+    except ImportError:  # pragma: no cover - pymongo ships bson
+        Code = ()  # type: ignore[assignment]
+
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if Code and isinstance(current, Code):
+            _reject_mongodb_operator("$code")
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if isinstance(key, str) and key in _MONGODB_FORBIDDEN_OPERATORS:
+                    _reject_mongodb_operator(key)
+                stack.append(value)
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+
+
 def _validate_mongodb_aggregate(pipeline: list[dict]) -> None:
-    for stage in pipeline:
-        if isinstance(stage, dict):
-            for key in stage:
-                if key in _MONGODB_WRITE_STAGES:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"MongoDB aggregation stage '{key}' is not allowed in the query playground",
-                    )
+    _validate_mongodb_query_tree(pipeline)
+
+
+def _validate_mongodb_filter(query_filter: dict) -> None:
+    _validate_mongodb_query_tree(query_filter)
 
 
 class QueryExecuteRequest(BaseModel):
@@ -923,6 +956,7 @@ def _run_mongodb_query(connector, body):
         try:
             parsed = _parse_mongodb_json(body.query)
             if isinstance(parsed, dict):
+                _validate_mongodb_filter(parsed)
                 query_filter = parsed
             elif isinstance(parsed, list):
                 _validate_mongodb_aggregate(parsed)
