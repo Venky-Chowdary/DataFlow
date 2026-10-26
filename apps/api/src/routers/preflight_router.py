@@ -443,6 +443,7 @@ async def run_preflight(body: PreflightRequest):
             destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
             destination_unique_keys=dest_meta.get("unique_keys") or [],
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+            destination_check_constraints=dest_meta.get("check_constraints") or [],
             destination_config=dest_meta.get("_probe_cfg") or None,
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,

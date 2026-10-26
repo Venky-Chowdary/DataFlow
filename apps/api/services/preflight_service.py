@@ -721,6 +721,7 @@ def run_file_preflight(
     destination_dynamo_index_attributes: dict[str, str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
+    destination_check_constraints: list[Any] | None = None,
     destination_config: Mapping[str, Any] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     date_locale: str = "",
@@ -2685,6 +2686,79 @@ def run_file_preflight(
                 "error",
             )
             if k in pop_report
+        }
+
+        # D112 — destination CHECK constraints vs the source population.
+        # inspect_destination_for_preflight surfaces the live catalog; the
+        # probe evaluates it over the same bounded population walk g3f uses
+        # (posted sample when the source cannot re-read) and names offenders
+        # before Confirm instead of a raw driver error after it.
+        check_report: dict[str, Any] = {
+            "ran": False,
+            "note": "No destination CHECK constraints reported.",
+        }
+        if destination_check_constraints:
+            from services.dest_check_probe import probe_dest_check_constraints
+            from services.preflight_population import (
+                _iter_table_population_for_preflight,
+            )
+
+            check_rows = _iter_table_population_for_preflight(
+                source_kind=source_kind,
+                source_format=source_format,
+                source_connector_id=source_connector_id or "",
+                source_config=source_config,
+                source_table=source_table or "",
+                mappings=list(mappings or []),
+                column_types=dict(column_types or {}),
+                dest_types=dict(destination_column_types or {}),
+                dest_db=destination_db_type,
+                sync_mode=sync_mode,
+            )
+            check_report = probe_dest_check_constraints(
+                rows=check_rows if check_rows is not None else (sample_rows or []),
+                mappings=list(mappings or []),
+                check_constraints=list(destination_check_constraints),
+                coverage=(
+                    "population_check_probe"
+                    if check_rows is not None
+                    else "sample_check_probe"
+                ),
+            )
+            viol = int(check_report.get("violating_count") or 0)
+            if viol:
+                sev = "error" if validation_mode in {"strict", "maximum"} else "warning"
+                offenders = "; ".join(
+                    f"row {v.get('row_index')}: {v.get('constraint')} "
+                    f"{v.get('values')}"
+                    for v in (check_report.get("violations") or [])[:3]
+                )
+                findings.append(
+                    {
+                        "code": "dest_check_violation",
+                        "severity": sev,
+                        "coverage": check_report.get("coverage"),
+                        "population_proof": bool(
+                            check_report.get("population_proof")
+                        ),
+                        "violating_rows": viol,
+                        "message": (
+                            f"{viol} source row(s) violate destination CHECK "
+                            f"constraint(s) — {offenders}. "
+                            "Confirm writes them and the destination rejects "
+                            "them; map them out, fix the source, or let "
+                            "quarantine carry them."
+                        ),
+                    }
+                )
+        out["dest_check_probe"] = {
+            k: check_report.get(k)
+            for k in (
+                "ran", "coverage", "population_proof", "evaluated",
+                "not_evaluated", "violating_count", "violations",
+                "checks", "note",
+            )
+            if k in check_report
         }
 
         out["constraint_findings"] = findings
