@@ -284,6 +284,92 @@ def _has_side_effect_functions(sql: str) -> bool:
     return False
 
 
+# DuckDB reads host files and URLs from a plain SELECT: reader table
+# functions (read_csv, read_text, glob, *_scan), SQL-in-a-string runners
+# (query(), json_execute_serialized_sql) and replacement scans
+# (``FROM '/etc/passwd'``). A DuckDB file bind is exempt from the egress
+# guard, so the playground refuses these up front and, for local DuckDB,
+# also opens the connection with ``enable_external_access = false``.
+_DUCKDB_EXTERNAL_FUNCTIONS = frozenset({
+    "glob", "sniff_csv", "query", "query_table", "json_execute_serialized_sql",
+    "getenv", "load_aws_credentials", "duckdb_secrets", "which_secret",
+})
+_DUCKDB_EXTERNAL_PREFIXES = (
+    "read_", "parquet_", "iceberg_", "delta_", "ducklake_", "sqlite_",
+    "postgres_", "mysql_", "odbc_", "http", "s3_", "azure_", "gcs_",
+)
+_DUCKDB_EXTERNAL_SUFFIXES = ("_scan",)
+_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
+_SQL_QUOTED_IDENT_RE = re.compile(r'"((?:""|[^"])*)"')
+_DUCKDB_STRING_SCAN_RE = re.compile(r"\b(?:FROM|JOIN)[\s(]*'", re.I)
+_DUCKDB_PATHLIKE_IDENT_RE = re.compile(r'\b(?:FROM|JOIN)[\s(]*"((?:""|[^"])*)"', re.I)
+_DUCKDB_PATH_HINT_RE = re.compile(
+    r"[/\\:*?]|\.(?:csv|tsv|txt|parquet|json|jsonl|ndjson|arrow|xlsx|"
+    r"db|duckdb|sqlite|gz|zst)$",
+    re.I,
+)
+_DUCKDB_EXTERNAL_REFUSAL = (
+    "DuckDB file and network readers (read_csv, read_text, glob, *_scan, "
+    "FROM '<path>') are not allowed in the playground. Query tables in the "
+    "connected database."
+)
+
+
+def is_duckdb_engine(engine: Any) -> bool:
+    url = getattr(engine, "url", None)
+    return str(getattr(url, "drivername", "") or "").lower().startswith("duckdb")
+
+
+def _duckdb_reads_external(sql: str) -> bool:
+    """True when DuckDB SQL would read a host file/URL or run SQL from a string."""
+    code = _SQL_COMMENT_RE.sub(" ", sql or "")
+    for match in _DUCKDB_PATHLIKE_IDENT_RE.finditer(code):
+        if _DUCKDB_PATH_HINT_RE.search(match.group(1)):
+            return True
+    if _DUCKDB_STRING_SCAN_RE.search(code):
+        return True
+    # A quoted function name is still a call: ``"read_csv"('/x')``.
+    code = re.sub(r"'(?:''|[^'])*'", " ", code)
+    code = _SQL_QUOTED_IDENT_RE.sub(
+        lambda m: m.group(1) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", m.group(1)) else " ",
+        code,
+    )
+    for match in _FUNC_CALL_RE.finditer(code):
+        name = match.group(1).lower()
+        if (
+            name in _DUCKDB_EXTERNAL_FUNCTIONS
+            or name.startswith(_DUCKDB_EXTERNAL_PREFIXES)
+            or name.endswith(_DUCKDB_EXTERNAL_SUFFIXES)
+        ):
+            return True
+    return False
+
+
+def _duckdb_playground_engine(engine: Any) -> Any:
+    """Same DuckDB target, opened with external (file/network) access disabled.
+
+    ``SET enable_external_access = false`` at runtime is global to the
+    database instance and cannot be undone while it is open, so a shared
+    connection would be crippled for a concurrent transfer. A connect-time
+    config keeps it scoped to this playground connection. MotherDuck
+    (``md:``) loads its extension through external access, so it relies on
+    the SQL refusal alone.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+
+    database = str(getattr(engine.url, "database", "") or "")
+    if database.startswith("md:"):
+        return engine
+    guarded = create_engine(
+        engine.url,
+        poolclass=NullPool,
+        connect_args={"config": {"enable_external_access": False}},
+    )
+    guarded.dialect.supports_native_decimal = True
+    return guarded
+
+
 def _is_safe_sql_flat(raw_query: str) -> bool:
     """Keyword scan over the ungrouped token stream (deep-chain fallback).
 
@@ -1122,7 +1208,10 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
             # Transaction-scoped, not SESSION: a pooled connection must not
             # hand a stale read-only mode to the next write query.
             conn.execute(text("SET TRANSACTION READ ONLY"))
-        elif db in {"sqlite", "duckdb"}:
+        elif db == "sqlite":
+            # DuckDB has no query_only PRAGMA; the failed statement aborts the
+            # transaction. Its guard is the connect-time config in
+            # _duckdb_playground_engine.
             conn.execute(text("PRAGMA query_only = ON"))
     except Exception as exc:
         logging.getLogger(__name__).debug(
@@ -1288,6 +1377,11 @@ def _run_sql_query(connector, body):
                 auth_mode=str(getattr(connector, "auth_mode", "") or ""),
             ),
         ) from exc
+
+    if is_duckdb_engine(engine):
+        if _duckdb_reads_external(raw_query):
+            raise HTTPException(status_code=400, detail=_DUCKDB_EXTERNAL_REFUSAL)
+        engine = _duckdb_playground_engine(engine)
 
     from services.dialect_profiles import append_result_limit
 
