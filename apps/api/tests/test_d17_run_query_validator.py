@@ -165,3 +165,94 @@ def test_run_query_column_schema_uses_declared_types(tmp_path):
     rows, columns, schema, _t = _run_sql_query(connector, body)
     assert schema["c126"].upper() == "TEXT"
     assert schema["flag"].upper() == "BOOLEAN"
+
+
+def _allowed_with_user_tables() -> set[str]:
+    # A workspace whose own schema has ``user`` / ``db`` tables must not
+    # unlock the same-named MySQL grant tables.
+    return _allowed() | {"user", "db", "authentication_string", "rolpassword"}
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT rolpassword FROM pg_catalog.pg_authid",
+        'SELECT rolpassword FROM "pg_catalog"."pg_authid"',
+        "SELECT rolpassword FROM pg_catalog . /* x */ pg_authid",
+        "SELECT rolpassword FROM pg_authid",
+        "SELECT rolpassword FROM pg_authid AS pg_authid",
+        "SELECT usename, passwd FROM pg_catalog.pg_shadow",
+        "SELECT * FROM pg_catalog.pg_auth_members",
+        "SELECT query FROM pg_stat_activity",
+        "SELECT data FROM pg_catalog.pg_largeobject",
+        "SELECT umoptions FROM pg_catalog.pg_user_mappings",
+        "SELECT * FROM mysql.user",
+        "SELECT user, authentication_string FROM `mysql`.`user`",
+        "SELECT * FROM mysql.db",
+        "SELECT * FROM mysql.global_priv",
+        "SELECT * FROM orders o JOIN mysql.user u ON u.user = o.name",
+        "SELECT * FROM orders WHERE name IN (SELECT user FROM mysql.user)",
+        "WITH x AS (SELECT * FROM mysql.user) SELECT * FROM x",
+        "SELECT name, password_hash FROM master.sys.sql_logins",
+        "SELECT * FROM performance_schema.events_statements_history",
+        "SELECT * FROM information_schema.processlist",
+        "SELECT * FROM pg_catalog.pg_description",
+        "SELECT * FROM pg_catalog.pg_read_file('/etc/passwd')",
+    ],
+)
+def test_run_query_refuses_secret_and_unlisted_catalog_relations(sql):
+    from services.copilot_sql_guard import assert_identifiers_allowed
+
+    with pytest.raises(ValueError, match="identifiers not in introspected schema"):
+        assert_identifiers_allowed(sql, allowed=_allowed_with_user_tables())
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT rolpassword FROM pg_catalog.pg_authid",
+        "SELECT * FROM mysql.user",
+    ],
+)
+def test_run_query_refuses_secret_catalog_on_regex_fallback(sql, monkeypatch):
+    from services import copilot_sql_guard
+
+    monkeypatch.setattr(copilot_sql_guard, "_sqlglot_identifiers", lambda *_a: None)
+    with pytest.raises(ValueError, match="identifiers not in introspected schema"):
+        copilot_sql_guard.assert_identifiers_allowed(
+            sql, allowed=_allowed_with_user_tables()
+        )
+
+
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "SELECT count(*) FROM pg_catalog.pg_tables",
+        "SELECT * FROM information_schema.tables",
+        "SELECT relname FROM pg_catalog.pg_class",
+        "SELECT * FROM user",
+        "SELECT * FROM db",
+        "SELECT name FROM orders WHERE name = 'pg_authid'",
+        "SELECT name FROM orders -- mysql.user\n",
+    ],
+)
+def test_run_query_still_allows_safe_catalog_and_user_tables(sql):
+    from services.copilot_sql_guard import assert_identifiers_allowed
+
+    assert_identifiers_allowed(sql, allowed=_allowed_with_user_tables())
+
+
+def test_run_query_refuses_self_aliased_unlisted_relation():
+    from services.copilot_sql_guard import assert_identifiers_allowed
+
+    with pytest.raises(ValueError, match="identifiers not in introspected schema"):
+        assert_identifiers_allowed(
+            "SELECT * FROM other_table AS other_table", allowed=_allowed()
+        )
+
+
+def test_run_query_qualified_catalog_relation_can_be_allowlisted():
+    from services.copilot_sql_guard import assert_identifiers_allowed
+
+    allowed = _allowed() | {"pg_catalog.pg_description"}
+    assert_identifiers_allowed("SELECT * FROM pg_catalog.pg_description", allowed=allowed)
