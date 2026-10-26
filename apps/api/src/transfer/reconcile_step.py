@@ -2616,6 +2616,233 @@ def _maybe_engine_profile_ladder(
     return attach_ladder_to_reconcile_report(report, ladder)
 
 
+
+
+
+
+def _read_verify_rows(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table: str,
+    columns: list[str] | None,
+    postgres_default: bool = False,
+) -> list[dict[str, Any]]:
+    """Single owner for the per-engine whole-population read the Gate-8
+    ladder, its source re-read, and the keyed no-op re-verify share.
+    """
+    key = str(db_type or "").strip().lower()
+    cols = columns if columns is not None else []
+    # Resolve the readers through the module so tests patching
+    # services.verification_ladder.read_*_rows keep intercepting (the
+    # function-local imports this replaces did the same at call time).
+    from services import verification_ladder as _vl
+
+    if key == "sqlite":
+        return _vl.read_sqlite_rows(
+            database=str(cfg.get("database") or ""),
+            table=table,
+            columns=cols,
+            connection_string=str(cfg.get("connection_string") or ""),
+            host=str(cfg.get("host") or ""),
+        )
+    if key == "mysql":
+        return _vl.read_mysql_rows(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 3306),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            table=table,
+            columns=cols,
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+    if key == "snowflake":
+        return _vl.read_snowflake_rows(
+            host=str(cfg.get("host") or ""),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            schema=str(cfg.get("schema") or "PUBLIC"),
+            table=table,
+            columns=cols,
+            connection_string=str(cfg.get("connection_string") or ""),
+            warehouse=str(cfg.get("warehouse") or ""),
+        )
+    if key in {"sqlserver", "mssql", "azure_sql"}:
+        return _vl.read_sqlserver_rows(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 1433),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            schema=str(cfg.get("schema") or "dbo"),
+            table=table,
+            columns=cols,
+        )
+    if key in {"postgresql", "redshift"} or postgres_default:
+        return _vl.read_postgres_rows(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 5432),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            schema=str(cfg.get("schema") or "public"),
+            table=table,
+            columns=cols,
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+    return []
+
+
+def _covered_keyed_noop_verify(
+    *,
+    endpoint: EndpointConfig,
+    source_endpoint: EndpointConfig | None,
+    dest_summary: dict[str, Any],
+    mappings: list[dict] | None,
+    sync_mode: str,
+    rows_before: int | None,
+    target_rows: int,
+    pk_column: str,
+    db_type: str,
+) -> dict[str, Any] | None:
+    """Prove a quiet keyed poll: the destination's covered content, not just
+    its COUNT, still equals the source's.
+
+    ``target_rows == rows_before`` only proves the destination did not gain or
+    lose rows — an in-place UPDATE on a previously written row preserves COUNT,
+    so a tampered prior-batch row passed Gate-8 green (M3 regression: the
+    bounded window made the source re-read empty and the count-only no-op
+    proof accepted it). For a keyed route on a populated destination we
+    re-read both sides and compare cell-by-cell on the shared key space:
+    a destination key absent from the source is a ghost row, and a cell diff
+    on a shared key is a tamper. Source-only keys are tolerated — dedupe
+    collapse and rolled-back batches leave covered-but-unwritten keys.
+    """
+    if not pk_column or target_rows <= 0 or source_endpoint is None:
+        return None
+    try:
+        from services.row_conservation import KIND_KEYED, conservation_kind
+
+        if (
+            conservation_kind(sync_mode, dest_count_before=rows_before)
+            != KIND_KEYED
+        ):
+            return None
+    except Exception:
+        return None
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_endpoint):
+        return None
+    src_type = resolve_driver_type(source_endpoint.format)
+    src_cfg = resolve_connector_config(source_endpoint)
+    dest_cfg = resolve_connector_config(endpoint)
+    map_list = mappings or []
+    src_pk = next(
+        (
+            str(m.get("source") or "")
+            for m in map_list
+            if str(m.get("target") or "") == pk_column
+        ),
+        pk_column,
+    )
+    columns = [str(m.get("target") or "") for m in map_list if m.get("target")]
+    if pk_column not in columns:
+        columns.append(pk_column)
+    try:
+        dest_rows = _read_verify_rows(
+            db_type,
+            dest_cfg,
+            table=str(endpoint.table or dest_cfg.get("table") or ""),
+            columns=columns,
+            postgres_default=True,
+        )
+        src_rows = _read_verify_rows(
+            src_type,
+            src_cfg,
+            table=str(source_endpoint.table or src_cfg.get("table") or ""),
+            columns=[
+                str(m.get("source") or "") for m in map_list if m.get("source")
+            ] or None,
+        )
+    except PopulationTooLarge as exc:
+        return {
+            "passed": False,
+            "unproven": True,
+            "checksum_match": False,
+            "assurance_level": "none",
+            "message": (
+                "Keyed no-op poll could not re-verify covered content: "
+                f"population read exceeded budget ({exc.rows_read:,} rows). "
+                "Not migration_proven."
+            ),
+        }
+    except Exception as exc:
+        # A covered destination we cannot re-read has no tamper proof — the
+        # count-only green must not stamp verified (X-22 doctrine).
+        return {
+            "passed": False,
+            "unproven": True,
+            "checksum_match": False,
+            "assurance_level": "none",
+            "message": (
+                "Keyed no-op poll could not re-verify covered content "
+                f"({exc}). Count unchanged is not a value proof. "
+                "Not migration_proven."
+            ),
+        }
+    if src_rows is None or dest_rows is None:
+        return None
+    src_by_pk: dict[str, dict[str, Any]] = {}
+    for r in src_rows:
+        if isinstance(r, dict) and r.get(src_pk) is not None:
+            src_by_pk[str(r.get(src_pk))] = r
+    drifts: list[str] = []
+    ghosts = 0
+    for r in dest_rows:
+        if not isinstance(r, dict) or r.get(pk_column) is None:
+            continue
+        key = str(r.get(pk_column))
+        srow = src_by_pk.get(key)
+        if srow is None:
+            ghosts += 1
+            if len(drifts) < 5:
+                drifts.append(f"key {key} has no covered source row")
+            continue
+        for m in map_list:
+            scol, tcol = str(m.get("source") or ""), str(m.get("target") or "")
+            if not scol or not tcol:
+                continue
+            if srow.get(scol) != r.get(tcol):
+                if len(drifts) < 5:
+                    drifts.append(
+                        f"key {key} column {scol}->{tcol}: "
+                        f"source={srow.get(scol)!r} dest={r.get(tcol)!r}"
+                    )
+                break
+    if drifts:
+        detail = "; ".join(drifts[:3])
+        return {
+            "passed": False,
+            "checksum_match": False,
+            "assurance_level": "none",
+            "source_rows": len(src_rows),
+            "target_rows": len(dest_rows),
+            "message": (
+                "Quiet keyed poll found covered-content drift the COUNT "
+                f"proof could not see ({detail}"
+                + (f"; +{ghosts} ghost row(s)" if ghosts else "")
+                + "). Failing closed — the destination rows are left for "
+                "the operator."
+            ),
+        }
+    return None
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -2732,68 +2959,13 @@ def _maybe_attach_verification_ladder(
 
     # Prefer full SQL population over buffered records (streaming passes []).
     try:
-        if dest_type == "sqlite":
-            target_rows = read_sqlite_rows(
-                database=str(dest_cfg.get("database") or ""),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-                connection_string=str(dest_cfg.get("connection_string") or ""),
-                host=str(dest_cfg.get("host") or ""),
-            )
-        elif dest_type == "mysql":
-            # X-22: a non-sqlite dest used to take the PG reader unconditionally
-            # — MySQL/SQL Server throws made the whole ladder decline and the
-            # verdict stayed row_count-only on a tampered table.
-            target_rows = read_mysql_rows(
-                host=str(dest_cfg.get("host") or ""),
-                port=int(dest_cfg.get("port") or 3306),
-                database=str(dest_cfg.get("database") or ""),
-                username=str(dest_cfg.get("username") or ""),
-                password=str(dest_cfg.get("password") or ""),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-                connection_string=str(dest_cfg.get("connection_string") or ""),
-                ssl=bool(dest_cfg.get("ssl", False)),
-            )
-        elif dest_type == "snowflake":
-            # D3: without a Snowflake population read the cell ladder declined
-            # every sf dest (destination_engine_not_in_ladder) and a keyed
-            # incremental could never earn the independent re-read verdict.
-            target_rows = read_snowflake_rows(
-                host=str(dest_cfg.get("host") or ""),
-                database=str(dest_cfg.get("database") or ""),
-                username=str(dest_cfg.get("username") or ""),
-                password=str(dest_cfg.get("password") or ""),
-                schema=str(dest_cfg.get("schema") or "PUBLIC"),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-                connection_string=str(dest_cfg.get("connection_string") or ""),
-                warehouse=str(dest_cfg.get("warehouse") or ""),
-            )
-        elif dest_type in {"sqlserver", "mssql", "azure_sql"}:
-            target_rows = read_sqlserver_rows(
-                host=str(dest_cfg.get("host") or ""),
-                port=int(dest_cfg.get("port") or 1433),
-                database=str(dest_cfg.get("database") or ""),
-                username=str(dest_cfg.get("username") or ""),
-                password=str(dest_cfg.get("password") or ""),
-                schema=str(dest_cfg.get("schema") or "dbo"),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-            )
-        else:
-            target_rows = read_postgres_rows(
-                host=str(dest_cfg.get("host") or ""),
-                port=int(dest_cfg.get("port") or 5432),
-                database=str(dest_cfg.get("database") or ""),
-                username=str(dest_cfg.get("username") or ""),
-                password=str(dest_cfg.get("password") or ""),
-                schema=str(dest_cfg.get("schema") or "public"),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-                connection_string=str(dest_cfg.get("connection_string") or ""),
-                ssl=bool(dest_cfg.get("ssl", False)),
-            )
+        target_rows = _read_verify_rows(
+            dest_type,
+            dest_cfg,
+            table=str(endpoint.table or dest_cfg.get("table") or ""),
+            columns=target_cols,
+            postgres_default=True,
+        )
     except PopulationTooLarge as exc:
         return _return(
             _ladder_declined(report, exc.rows_read, exc.budget),
@@ -2832,64 +3004,12 @@ def _maybe_attach_verification_ladder(
             src_cfg = resolve_connector_config(source_endpoint)
             try:
                 source_reread = True
-                if src_type == "sqlite":
-                    source_rows = read_sqlite_rows(
-                        database=str(src_cfg.get("database") or ""),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                        connection_string=str(src_cfg.get("connection_string") or ""),
-                        host=str(src_cfg.get("host") or ""),
-                    )
-                elif src_type in {"postgresql", "redshift"}:
-                    source_rows = read_postgres_rows(
-                        host=str(src_cfg.get("host") or ""),
-                        port=int(src_cfg.get("port") or 5432),
-                        database=str(src_cfg.get("database") or ""),
-                        username=str(src_cfg.get("username") or ""),
-                        password=str(src_cfg.get("password") or ""),
-                        schema=str(src_cfg.get("schema") or "public"),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                        connection_string=str(src_cfg.get("connection_string") or ""),
-                        ssl=bool(src_cfg.get("ssl", False)),
-                    )
-                elif src_type == "snowflake":
-                    source_rows = read_snowflake_rows(
-                        host=str(src_cfg.get("host") or ""),
-                        database=str(src_cfg.get("database") or ""),
-                        username=str(src_cfg.get("username") or ""),
-                        password=str(src_cfg.get("password") or ""),
-                        schema=str(src_cfg.get("schema") or "PUBLIC"),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                        connection_string=str(src_cfg.get("connection_string") or ""),
-                        warehouse=str(src_cfg.get("warehouse") or ""),
-                    )
-                elif src_type == "mysql":
-                    # X-22: MySQL sources declined the ladder — the run stayed
-                    # count-only and reported verified on a tampered table.
-                    source_rows = read_mysql_rows(
-                        host=str(src_cfg.get("host") or ""),
-                        port=int(src_cfg.get("port") or 3306),
-                        database=str(src_cfg.get("database") or ""),
-                        username=str(src_cfg.get("username") or ""),
-                        password=str(src_cfg.get("password") or ""),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                        connection_string=str(src_cfg.get("connection_string") or ""),
-                        ssl=bool(src_cfg.get("ssl", False)),
-                    )
-                elif src_type in {"sqlserver", "mssql", "azure_sql"}:
-                    source_rows = read_sqlserver_rows(
-                        host=str(src_cfg.get("host") or ""),
-                        port=int(src_cfg.get("port") or 1433),
-                        database=str(src_cfg.get("database") or ""),
-                        username=str(src_cfg.get("username") or ""),
-                        password=str(src_cfg.get("password") or ""),
-                        schema=str(src_cfg.get("schema") or "dbo"),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                    )
+                source_rows = _read_verify_rows(
+                    src_type,
+                    src_cfg,
+                    table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                    columns=target_cols,
+                )
             except PopulationTooLarge as exc:
                 return _return(
                     _ladder_declined(report, exc.rows_read, exc.budget),
@@ -7123,6 +7243,26 @@ def _run_reconciliation_impl(
                 "assurance_level": "none",
             })
         if target_rows == rows_before:
+            _noop_verify = _covered_keyed_noop_verify(
+                endpoint=endpoint,
+                source_endpoint=source_endpoint,
+                dest_summary=dest_summary,
+                mappings=mappings,
+                sync_mode=sync_mode,
+                rows_before=rows_before,
+                target_rows=target_rows,
+                pk_column=pk_column,
+                db_type=str(db_type or ""),
+            )
+            if _noop_verify is not None:
+                _noop_verify.setdefault("source_rows", 0)
+                _noop_verify.setdefault("target_rows", target_rows)
+                _noop_verify.setdefault("source_checksum", source_checksum)
+                _noop_verify.setdefault("target_checksum", target_checksum)
+                _noop_verify.setdefault("rejected_rows", rejected_rows)
+                _noop_verify.setdefault("coerced_null_rows", coerced_null_rows)
+                _noop_verify.setdefault("rows_skipped", rows_skipped)
+                return _finalize(_noop_verify)
             return _finalize({
                 "passed": True,
                 "message": (
