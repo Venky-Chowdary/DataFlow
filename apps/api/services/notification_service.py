@@ -63,7 +63,12 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None = None) -> dict[str, Any]:
+def _http_post(
+    url: str,
+    payload: dict[str, Any],
+    headers: dict[str, str] | None = None,
+    timeout: float = 30.0,
+) -> dict[str, Any]:
     if not _allowed_url(url):
         return {"ok": False, "error": "Webhook URL is not allowed (private, loopback, or non-http(s))"}
     try:
@@ -75,9 +80,9 @@ def _http_post(url: str, payload: dict[str, Any], headers: dict[str, str] | None
             method="POST",
         )
         opener = urllib.request.build_opener(_NoRedirect)
-        with opener.open(req, timeout=30) as resp:  # nosec: B310 — scheme + host gated by egress_guard
+        with opener.open(req, timeout=timeout) as resp:  # nosec: B310 — scheme + host gated by egress_guard
             body = resp.read().decode("utf-8", errors="ignore")
-        return {"ok": True, "status": resp.status, "body": body[:500]}
+        return {"ok": True, "status": resp.status, "body": body[:2000]}
     except Exception as exc:
         # Slack/Teams webhook URLs carry their secret in the path; the error
         # text can echo it. The class name is enough to triage.
@@ -135,7 +140,20 @@ def _send_mailgun(recipients: list[str], subject: str, body: str, from_addr: str
         return {"ok": False, "error": str(exc)}
 
 
-def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+# SMTP connect/read ceiling — must stay under the mail outbox claim lease
+# (mail_outbox._LEASE_SEC) so one send can never outlive its claim.
+_SMTP_TIMEOUT_SEC = 30.0
+
+
+def _smpt_send(
+    recipients: list[str],
+    subject: str,
+    body: str,
+    smtp_cfg: dict[str, Any] | None = None,
+    *,
+    html: str | None = None,
+    reply_to: str | None = None,
+) -> dict[str, Any]:
     cfg = smtp_cfg or _env_smtp()
     host = cfg.get("host") or _env_smtp().get("host")
     port = int(cfg.get("port") or _env_smtp().get("port"))
@@ -157,9 +175,13 @@ def _smpt_send(recipients: list[str], subject: str, body: str, smtp_cfg: dict[st
         msg["From"] = from_addr
         msg["To"] = ", ".join(recipients)
         msg["Subject"] = subject
+        if reply_to:
+            msg["Reply-To"] = reply_to
         msg.set_content(body)
+        if html:
+            msg.add_alternative(html, subtype="html")
 
-        with smtplib.SMTP(host, port, timeout=30) as server:
+        with smtplib.SMTP(host, port, timeout=_SMTP_TIMEOUT_SEC) as server:
             if use_tls:
                 server.starttls()
             if user:

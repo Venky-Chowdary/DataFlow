@@ -40,10 +40,24 @@ const read = (file: string): string => readFileSync(join(STYLES_DIR, file), 'utf
 
 /** Declaration blocks as [selector, body] pairs. Nested at-rules are flattened. */
 function blocks(css: string): Array<[string, string]> {
-  return [...css.matchAll(/(^|\})([^{}]*)\{([^{}]*)\}/g)].map(([, , selector, body]) => [
-    selector.replace(/\/\*[\s\S]*?\*\//g, '').trim(),
-    body,
-  ]);
+  // Scan manually: a regex anchored on `}` can only match every OTHER block,
+  // because the previous match already consumed the `}` the next block's
+  // selector needs as its anchor — rule pairs were silently skipped.
+  const out: Array<[string, string]> = [];
+  let i = 0;
+  while (i < css.length) {
+    const open = css.indexOf('{', i);
+    if (open === -1) break;
+    const close = css.indexOf('}', open);
+    if (close === -1) break;
+    const selector = css
+      .slice(css.lastIndexOf('}', open - 1) + 1, open)
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .trim();
+    out.push([selector, css.slice(open + 1, close)]);
+    i = close + 1;
+  }
+  return out;
 }
 
 describe('workspace type ladder', () => {

@@ -177,11 +177,15 @@ def _is_type_widen(old_type: str, new_type: str, *, dest_db: str = "") -> bool:
     if old_logical == new_logical:
         old_len = _type_length(old_type)
         new_len = _type_length(new_type)
-        return (
-            old_len is not None
-            and new_len is not None
-            and new_len > old_len
-        )
+        if old_len is not None and new_len is not None:
+            return new_len > old_len
+        # Same logical family without ``(n)`` params — INT4→INT8 is a widen
+        # the parametric check cannot see. The canonical capacity lattice
+        # (connectors.schema_drift.is_wider_type) ranks integer widths,
+        # NUMERIC(p,s), temporal fsp, etc. — reuse it, never a second table.
+        from connectors.schema_drift import is_wider_type
+
+        return is_wider_type(old_type, new_type, dest_db=dest_db)
     # Differing logical types: safe (non-lossy) promotions count as widens.
     return not is_lossy_coercion(old_type, new_type, dest_db=dest_db)
 
@@ -845,6 +849,90 @@ def _evolution_summary(evolution: dict[str, Any]) -> str:
     return COMPATIBILITY_NOTES.get(compat, "")
 
 
+def propose_dest_widens(
+    mappings: list[dict[str, Any]] | None,
+    *,
+    source_schema: dict[str, str],
+    target_schema: dict[str, str],
+    dest_db: str = "",
+) -> list[dict[str, Any]]:
+    """D107: destination-side widen proposals for a live destination table.
+
+    A source that declared a strictly *wider* type than the destination
+    carrier can be ALTERed up losslessly — additive, never hard-breaking.
+    ``detect_schema_drift``'s live-contract loop emits these inline; the
+    engine's auto-propagate path (which never sets ``table_exists``) calls
+    this directly so the same lane fires on Run.
+    """
+    if not target_schema:
+        return []
+    from connectors.schema_drift import is_wider_type
+    from connectors.writer_common import stamp_is_operator_ceiling
+
+    out: list[dict[str, Any]] = []
+    for m in mappings or []:
+        src = str(m.get("source") or "")
+        tgt = str(m.get("target") or "")
+        if not src or not tgt:
+            continue
+        src_type = str(ci_get(source_schema, src) or "")
+        tgt_type = str(ci_get(target_schema, tgt) or "")
+        if not src_type or not tgt_type:
+            continue
+        # Same logical family only: TEXT is a universal carrier the lattice
+        # calls "wider" than NUMERIC, but retiping a numeric column to text
+        # is a family change — a true narrow stays fail-closed (D107).
+        if normalize_logical_type(src_type) != normalize_logical_type(tgt_type):
+            continue
+        if (
+            is_wider_type(tgt_type, src_type, dest_db=dest_db)
+            and not stamp_is_operator_ceiling(m)
+        ):
+            out.append({
+                "kind": "widen_type",
+                "column": src,
+                "target": tgt,
+                "old_type": tgt_type.upper(),
+                "new_type": src_type.upper(),
+                "reason": "dest_widen_available",
+            })
+    return out
+
+
+def stamp_approved_widens(
+    mappings: list[dict[str, Any]] | None,
+    widen_changes: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Stamp approved destination widens onto the existing mappings.
+
+    D107: an approved source/destination widen marks the mapping with
+    ``dest_widen`` + the new declared type — the writer's widen path reads it
+    and issues ALTER COLUMN before binding rows. ``target_type_origin`` is
+    ``drift_widen`` so the stamp is never mistaken for an operator ceiling.
+    Returns the applied widen entries.
+    """
+    applied: list[dict[str, Any]] = []
+    for change in widen_changes or []:
+        src_name = str(change.get("source") or change.get("column") or "")
+        new_type = str(change.get("new_type") or "")
+        if not src_name or not new_type:
+            continue
+        for m in mappings or []:
+            if str(m.get("source") or "").lower() != src_name.lower():
+                continue
+            m["dest_widen"] = True
+            m["target_type"] = new_type
+            m["target_type_origin"] = "drift_widen"
+            applied.append({
+                "source": src_name,
+                "target": m.get("target") or src_name,
+                "propagated": True,
+                "propagate_reason": "widen_type",
+                "new_type": new_type,
+            })
+    return applied
+
+
 def apply_propagate_mappings(
     mappings: list[dict[str, Any]] | None,
     *,
@@ -902,8 +990,11 @@ def apply_propagate_mappings(
         applied.append(entry)
 
     for change in list(evolution.get("additive") or []):
-        if str(change.get("kind")) == "add_column":
+        kind = str(change.get("kind"))
+        if kind == "add_column":
             _add(str(change.get("column") or ""), reason="add_column")
+        elif kind == "widen_type":
+            applied.extend(stamp_approved_widens(mappings, [change]))
 
     for change in list(evolution.get("soft_net_additive") or []):
         if str(change.get("kind")) == "rename":
@@ -1091,6 +1182,7 @@ def detect_schema_drift(
 
     type_mismatches: list[dict[str, str]] = []
     risk_acknowledged: list[dict[str, str]] = []
+    widen_proposals: list[dict[str, Any]] = []
     if live_ddl_contract:
         from services.coercion_probe import samples_coerce_mapping
         from services.migration_risk_contract import (
@@ -1166,6 +1258,32 @@ def detect_schema_drift(
                     "source_type": src_type.upper(),
                     "target_type": tgt_type.upper(),
                     "reason": "risk_contract_signed",
+                })
+                continue
+
+            # D107: a source that declared a strictly *wider* type than the
+            # destination column is not a hard narrow_type — the destination
+            # can be ALTERed up losslessly (Fivetran/Airbyte safe-change
+            # widening). Classify it as additive widen_type so the evolution
+            # policy can approve it and the writer's widen path carries it.
+            # An explicit operator Map stamp is a ceiling — that pair stays a
+            # real fidelity finding.
+            from connectors.schema_drift import is_wider_type
+            from connectors.writer_common import stamp_is_operator_ceiling
+
+            if (
+                is_wider_type(tgt_type, str(src_type), dest_db=dest_db)
+                and normalize_logical_type(str(src_type))
+                == normalize_logical_type(str(tgt_type))
+                and not stamp_is_operator_ceiling(m)
+            ):
+                widen_proposals.append({
+                    "kind": "widen_type",
+                    "column": src,
+                    "target": tgt,
+                    "old_type": str(tgt_type).upper(),
+                    "new_type": str(src_type).upper(),
+                    "reason": "dest_widen_available",
                 })
                 continue
 
@@ -1288,6 +1406,27 @@ def detect_schema_drift(
             added_type_breaking = True
         if added_type_breaking:
             classification["severity"] = "breaking"
+
+    # D107: destination-side widens approved by the ALTER path ride the same
+    # additive lane as source-side widens — the evolution policy decides
+    # (propagate auto-applies; manual_review asks; type_locked/pause_on_change
+    # still pause).
+    if widen_proposals:
+        if not isinstance(classification, dict):
+            classification = {
+                "additive": [],
+                "breaking": [],
+                "severity": "none",
+                "renamed": [],
+            }
+        additive = list(classification.get("additive") or [])
+        have = {str(a.get("column") or "").lower() for a in additive}
+        for prop in widen_proposals:
+            if str(prop.get("column") or "").lower() not in have:
+                additive.append(prop)
+        classification["additive"] = additive
+        if classification.get("severity") in (None, "", "none"):
+            classification["severity"] = "additive"
 
     # Intentional subset maps (operator omitted columns) are not schema drift.
     # Only columns that appeared since the previous revision drive evolution.

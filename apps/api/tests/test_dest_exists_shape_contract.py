@@ -9,6 +9,7 @@ Closes competitor holes this product must not copy:
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
@@ -27,7 +28,7 @@ from services.shape_contract import (
 
 
 FIXTURE = Path(__file__).resolve().parent / "fixtures" / "dest_exists_shape_matrix.json"
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 
 def _load_cases() -> list[dict]:

@@ -4,6 +4,9 @@
     "jsx": "react-jsx",
     "noEmit": true
   },
-  "include": ["src"],
+  "include": [
+    "src",
+    "../../packages/design-system/src"
+  ],
   "exclude": []
 }

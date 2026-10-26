@@ -99,6 +99,78 @@ _UUID_RE = re.compile(
     r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"
 )
 _NULL_SENTINEL = "\x00NULL\x00"
+
+_INTERVAL_DDL_RE = re.compile(r"interval", re.I)
+
+_PG_INTERVAL_PART_RE = re.compile(
+    r"([+-]?\d+(?:\.\d+)?)\s*(years?|mons?|months?|weeks?|days?|hours?|mins?|minutes?|secs?|seconds?)",
+    re.I,
+)
+_PG_INTERVAL_HMS_RE = re.compile(
+    r"([+-])?(\d+):(\d{1,2}):(\d{1,2}(?:\.\d+)?)"
+)
+
+
+def _interval_canonical_text(months: int, seconds: float) -> str:
+    """Canonical interval fingerprint: months distinct, days folded into seconds.
+
+    Matches PG comparison semantics: '1 day 02:00:00' == '26:00:00' (days are
+    24h) but '1 mon' != '30 days' (months are their own field).
+    """
+    if abs(seconds - round(seconds, 6)) < 1e-9:
+        seconds = round(seconds, 6)
+    return f"{months}M+{seconds}S"
+
+
+def _canonical_interval_text(value: str) -> str | None:
+    """Parse a PG-style interval literal to (months, seconds) canonical text.
+
+    Accepts verbose spans ('1 year 2 mons 3 days 04:05:06', '1 day 02:00:00'),
+    bare 'HH:MM:SS[.ffffff]', and python timedelta text ('1 day, 2:00:00').
+    Returns None when the value is not interval-shaped.
+    """
+    text = value.strip()
+    if not text:
+        return None
+    months = 0.0
+    seconds = 0.0
+    matched_any = False
+    for m in _PG_INTERVAL_PART_RE.finditer(text):
+        n = float(m.group(1))
+        unit = m.group(2).lower()
+        if unit.startswith("year"):
+            months += n * 12
+        elif unit.startswith("mon") or unit.startswith("month"):
+            months += n
+        elif unit.startswith("week"):
+            seconds += n * 7 * 86400
+        elif unit.startswith("day"):
+            seconds += n * 86400
+        elif unit.startswith("hour"):
+            seconds += n * 3600
+        elif unit.startswith("min"):
+            seconds += n * 60
+        elif unit.startswith("sec"):
+            seconds += n
+        matched_any = True
+    rest = _PG_INTERVAL_PART_RE.sub("", text).replace(",", " ").strip()
+    hms = _PG_INTERVAL_HMS_RE.search(rest)
+    if hms:
+        sign = -1.0 if hms.group(1) == "-" else 1.0
+        seconds += sign * (
+            int(hms.group(2)) * 3600
+            + int(hms.group(3)) * 60
+            + float(hms.group(4))
+        )
+        matched_any = True
+        rest = _PG_INTERVAL_HMS_RE.sub("", rest).strip()
+    if not matched_any:
+        return None
+    # Leftover 'ago' / stray words => not the forms we understand; stay raw.
+    leftover = re.sub(r"[\s.:-]+", "", rest)
+    if leftover and leftover not in {"ago"}:
+        return None
+    return _interval_canonical_text(int(months), seconds)
 # SQL / CSV scale padding: one dot, digits only. Not ``1,000`` and not ``1.000.000``.
 _PLAIN_SQL_DECIMAL_RE = re.compile(r"^[+-]?(?:\d+\.\d+|\d+\.|\.\d+)$")
 # Numeric-family DDL where two spellings of one value ('1.50E-8' vs
@@ -1909,7 +1981,7 @@ def verify_pg_route_key_uniqueness(
         try:
             selects = []
             for tbl, cols in parts:
-                col_list = ", ".join(f'"{c}"' for c in cols)
+                col_list = ", ".join(quote_sql_identifier(c, '"') for c in cols)
                 selects.append(
                     f"SELECT {col_list} FROM "
                     + quote_table_ref(tbl, schema or "public", dialect="postgresql")
@@ -4539,6 +4611,8 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             return value.strftime("%H:%M:%S.%f").rstrip("0").rstrip(".")
         return value.strftime("%H:%M:%S")
     if isinstance(value, timedelta):
+        if ddl_type and _INTERVAL_DDL_RE.search(str(ddl_type)):
+            return _interval_canonical_text(0, value.total_seconds())
         # MySQL TIME read-back is timedelta; normalize to the same wall-clock
         # form as datetime.time (TIME is a clock value, not an interval — the
         # carry can exceed 24h on interval semantics but DDL TIME is <=23:59:59).
@@ -4552,6 +4626,19 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         if abs(ss - round(ss)) > 1e-9:
             return f"{sign}{hh:02d}:{mm:02d}:{ss:09.6f}".rstrip("0").rstrip(".")
         return f"{sign}{hh:02d}:{mm:02d}:{int(ss):02d}"
+    if (
+        isinstance(value, str)
+        and ddl_type
+        and _INTERVAL_DDL_RE.search(str(ddl_type))
+    ):
+        # PG renders intervals as '1 day 02:00:00' while drivers/read-backs
+        # hand back '26:00:00' or timedelta — the same span must fingerprint
+        # identically. Canonical = (months, seconds): days fold into seconds
+        # (PG equates '1 day' = '24 hours') while months/years stay distinct
+        # (PG does NOT equate '1 mon' = '30 days').
+        canon = _canonical_interval_text(value)
+        if canon is not None:
+            return canon
     if (
         ddl_type
         and not isinstance(value, bool)

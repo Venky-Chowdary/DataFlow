@@ -218,7 +218,12 @@ def _now() -> str:
 
 def _store_path() -> Path:
     env = getenv_brand("TEAM_STORE", "").strip()
-    return Path(env) if env else STORE_PATH
+    if env:
+        return Path(env)
+    # Resolve data_dir() per call — the module-level STORE_PATH snapshot is
+    # bound at import time, before test isolation (DATAWRAP_DATA_DIR) or a
+    # reconfigured volume can take effect.
+    return data_dir() / "teams.json"
 
 
 def normalize_role(role: str) -> str:
@@ -238,6 +243,7 @@ class Workspace:
     name: str
     created_at: str = field(default_factory=_now)
     created_by: str = ""
+    org_id: str = ""  # owning organization (signup-created orgs; "" = pre-org era)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -249,6 +255,7 @@ class Workspace:
             name=data.get("name", ""),
             created_at=data.get("created_at", _now()),
             created_by=data.get("created_by", ""),
+            org_id=data.get("org_id", ""),
         )
 
 
@@ -385,6 +392,19 @@ def _write_membership(m: Membership) -> None:
         ] + [m.to_dict()]
 
 
+def rekey_memberships(old_email: str, new_email: str) -> int:
+    """Move every membership row from one account email to another
+    (email-change flow). Memberships are keyed ``ws:email`` so each row is
+    deleted and rewritten under the new key."""
+    moved = 0
+    for m in _read_memberships(email=old_email):
+        _delete_membership(m.workspace_id, m.email)
+        m.email = normalize_email(new_email)
+        _write_membership(m)
+        moved += 1
+    return moved
+
+
 def _delete_membership(workspace_id: str, email: str) -> bool:
     db = _database()
     if db is not None:
@@ -425,7 +445,7 @@ def _delete_workspace_rows(workspace_id: str) -> bool:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-def create_workspace(*, name: str, created_by: str) -> Workspace:
+def create_workspace(*, name: str, created_by: str, org_id: str = "") -> Workspace:
     """Create a workspace and make its creator the first admin, as one unit.
 
     The workspace row and its first membership are two documents, so writing them
@@ -438,6 +458,7 @@ def create_workspace(*, name: str, created_by: str) -> Workspace:
         id=str(uuid.uuid4()),
         name=name.strip()[:128] or "Workspace",
         created_by=normalize_email(created_by),
+        org_id=org_id,
     )
     first_admin = Membership(
         workspace_id=ws.id,

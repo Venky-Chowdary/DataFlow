@@ -396,16 +396,13 @@ def test_orphan_source_rows_are_an_ri_finding_not_a_green_checksum(tmp_path: Pat
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
-                cur.execute(
-                    f'SELECT id, customer_id FROM public."{child}" ORDER BY id'
+                # The child did not exist before the run — the overwrite undo
+                # must restore that pre-run state exactly (X-41 existence
+                # snapshot): no leftover table, no rows, no FK constraint.
+                cur.execute("SELECT to_regclass(%s)", (f"public.{child}",))
+                assert cur.fetchone()[0] is None, (
+                    "undo must restore the pre-run state: child did not exist"
                 )
-                assert cur.fetchall() == [], "child must equal its pre-run (empty) state"
-                cur.execute(
-                    f'SELECT COUNT(*) FROM public."{child}" c '
-                    f'LEFT JOIN public."{parent}" p ON c.customer_id = p.id '
-                    "WHERE c.customer_id IS NOT NULL AND p.id IS NULL"
-                )
-                assert cur.fetchone()[0] == 0
                 cur.execute(
                     """
                     SELECT 1 FROM information_schema.table_constraints

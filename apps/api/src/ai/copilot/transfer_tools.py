@@ -701,6 +701,7 @@ def plan_transfer(
     pii_acknowledgement: dict[str, Any] | None = None,
     column_transforms: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
+    shared_destination_acknowledged: bool = False,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -814,6 +815,38 @@ def plan_transfer(
             success=False,
             error="Source and destination are the same table — nothing to move.",
         )
+
+    # D104: one destination table, one writer. An enabled schedule already
+    # targeting this table is a conflict to surface at creation — discovered
+    # at run time it only shows as a key collision with misleading guidance.
+    if not shared_destination_acknowledged:
+        try:
+            from services.schedule_store import (
+                conflicting_dest_writers,
+                describe_dest_conflict,
+            )
+
+            _writers = conflicting_dest_writers(
+                str(dst_conn.get("id") or ""), dst_table
+            )
+        except Exception:  # noqa: BLE001 — a store outage must not block plans
+            _writers = []
+        if _writers:
+            listed = "; ".join(
+                describe_dest_conflict(s) for s in _writers[:3]
+            )
+            return _tool_result(
+                tool,
+                success=False,
+                error=(
+                    f"{len(_writers)} enabled pipeline(s) already write "
+                    f"“{dst_table}” on this destination: {listed}. Two writers "
+                    "on one table collide at run time — pause or remove the "
+                    "other pipeline, or pass "
+                    "shared_destination_acknowledged=true to confirm you "
+                    "accept the shared destination."
+                ),
+            )
 
     try:
         dst_info = _introspect(dst_conn, dst_table, purpose="destination")
@@ -1567,6 +1600,7 @@ def _run_preflight(
         table_exists = measured_exists if isinstance(measured_exists, bool) else dest_exists
 
         result = run_file_preflight(
+            destination_connector_id=str(dst_conn.get("id") or ""),
             columns=columns,
             column_types=column_types,
             column_nullability={r["name"]: bool(r.get("nullable", True)) for r in src_rows},
@@ -2002,6 +2036,7 @@ def start_transfer(
     pii_acknowledgement: dict[str, Any] | None = None,
     column_transforms: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
+    shared_destination_acknowledged: bool = False,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"

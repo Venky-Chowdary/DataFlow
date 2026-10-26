@@ -1554,6 +1554,16 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 f"in the destination on {key}. That table does not enforce the key, "
                 f"so a {sync_mode} insert would store a second copy"
             )
+        # D104: another enabled pipeline owns this destination — name it as
+        # the cause instead of leaving "the table already has the keys".
+        owner_names = [
+            str(n) for n in (details.get("conflicting_pipelines") or []) if n
+        ]
+        if owner_names:
+            summary += (
+                ". The destination is already written by enabled pipeline(s): "
+                + "; ".join(owner_names[:3])
+            )
         roots.append(
             MigrationRootCause(
                 root_id=_root_id("destination_key_collision", [key], absorbed),

@@ -384,6 +384,80 @@ html:has(.lp) {
   color: var(--lp-ink);
 }
 
+/* AuthButton shared variants — every auth-surface control routes here. */
+.lp-btn--link {
+  background: transparent;
+  color: var(--lp-accent-ink, var(--lp-accent));
+  border-color: transparent;
+  padding: 0 4px;
+  font-weight: 600;
+}
+
+.lp-btn--link:hover {
+  color: var(--lp-accent);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.lp-btn--danger {
+  background: var(--df-danger, #dc2626);
+  color: #fff;
+  border-color: var(--df-danger, #dc2626);
+}
+
+.lp-btn--danger:hover { filter: brightness(0.92); }
+
+.lp-btn--sm {
+  min-height: 32px;
+  padding: 0 10px;
+  font-size: 13px;
+}
+
+.lp-btn:disabled,
+.lp-btn[aria-disabled="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+  filter: saturate(0.7);
+}
+
+/* Disabled brand CTA: washed-out teal-on-white fails readability. A solid
+   muted fill + dark slate label keeps the label ~8:1 and the bordered edge
+   ~4.8:1 against the card — clearly disabled, still legible. */
+.lp-btn--brand:disabled,
+.lp-btn--brand[aria-disabled="true"] {
+  background: #e2e8f0;
+  color: #475569;
+  border-color: #64748b;
+  opacity: 1;
+  filter: none;
+  box-shadow: none;
+}
+
+.lp-btn--link:disabled,
+.lp-btn--link[aria-disabled="true"] {
+  color: var(--lp-muted);
+  text-decoration: none;
+  opacity: 0.8;
+}
+
+.lp-btn.is-loading { pointer-events: none; }
+
+.lp-btn-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid currentColor;
+  border-top-color: transparent;
+  animation: lp-btn-spin 0.7s linear infinite;
+  flex: none;
+}
+
+@keyframes lp-btn-spin { to { transform: rotate(360deg); } }
+
+@media (max-width: 640px) {
+  .lp-login-form .lp-btn { width: 100%; }
+}
+
 .lp-btn--lg {
   min-height: max(44px, calc(var(--df-btn-height, 36px) + 8px));
   padding: 0 18px;
@@ -1682,16 +1756,6 @@ html:has(.lp) {
   animation: lp-login-orb 14s ease-in-out infinite alternate-reverse;
 }
 
-.lp-login-brand-rail {
-  position: absolute;
-  left: 12%;
-  right: 12%;
-  top: 42%;
-  height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(94, 234, 212, 0.55), transparent);
-  opacity: 0.7;
-}
-
 @keyframes lp-login-orb {
   from { transform: translate3d(0, 0, 0) scale(1); }
   to { transform: translate3d(18px, 12px, 0) scale(1.06); }
@@ -2051,18 +2115,32 @@ html:has(.lp) {
 .lp-login--gate .lp-input-password-toggle {
   position: absolute;
   top: 50%;
-  right: 10px;
+  right: 2px;
   transform: translateY(-50%);
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
+  width: 44px;
+  height: 44px;
   border: none;
   border-radius: 10px;
   background: transparent;
   color: #64748b;
   cursor: pointer;
+}
+
+.lp-login--gate .lp-input-password-toggle:focus-visible {
+  outline: 2px solid #0d9488;
+  outline-offset: -2px;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle {
+  color: #94a3b8;
+}
+
+html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
+  background: rgba(148, 163, 184, 0.14);
+  color: #e2e8f0;
 }
 
 .lp-login--gate .lp-input-password-toggle:hover {
@@ -2128,8 +2206,9 @@ html:has(.lp) {
   min-height: 54px;
   margin-top: 4px;
   border-radius: 12px;
-  background: linear-gradient(180deg, #0d9488 0%, #0f766e 100%) !important;
-  border: 1px solid #0f766e !important;
+  /* Deep-teal stops: white label stays >= 4.5:1 across the gradient (WCAG AA) */
+  background: linear-gradient(180deg, #0f766e 0%, #115e59 100%) !important;
+  border: 1px solid #115e59 !important;
   color: #fff !important;
   font-family: var(--lp-font-display, "Plus Jakarta Sans", system-ui, sans-serif);
   font-size: 15.5px;
@@ -2190,6 +2269,12 @@ html:has(.lp) {
   gap: 8px;
   font-size: 12.5px;
   color: #64748b;
+}
+
+/* The resend hint is one short line — never let "Didn't get it?" orphan
+   onto a second line beside the countdown at mobile widths. */
+.lp-login-resend .lp-login-legal {
+  white-space: nowrap;
 }
 
 .lp-login-legal button {

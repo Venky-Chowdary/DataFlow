@@ -410,7 +410,7 @@
 }
 
 .df2-query-editor-snippet:hover:not(:disabled) {
-  background: var(--df-surface-3);
+  background: var(--df-bg-subtle);
 }
 
 .df2-query-editor-snippet:disabled {

@@ -97,9 +97,12 @@ def quarantine_cell_wire(value: Any) -> str:
     from services.value_serializer import (
         DF_MISSING_SENTINEL,
         SQL_NULL_SENTINEL,
+        WireLiteral,
         cell_to_string,
+        escape_wire_text,
         is_frame_missing,
         is_missing_sentinel,
+        is_reader_null_cell,
     )
 
     if value is None or is_frame_missing(value):
@@ -109,8 +112,18 @@ def quarantine_cell_wire(value: Any) -> str:
         return SQL_NULL_SENTINEL
     if is_missing_sentinel(value):
         return DF_MISSING_SENTINEL
-    if isinstance(value, str) and value.strip() == SQL_NULL_SENTINEL:
+    if is_reader_null_cell(value):
+        # Wire NULL stays the bare sentinel — escaping it would invent a
+        # sentinel-spelling literal that decodes to text, not NULL (D113).
         return SQL_NULL_SENTINEL
+    if isinstance(value, WireLiteral):
+        # A decoded sentinel-spelling literal re-wires escaped so _unwire
+        # returns the literal (never NULL).
+        return escape_wire_text(value)
+    if isinstance(value, str):
+        # Already wire-encoded (``__DF_ESC__`` literal): store verbatim —
+        # re-serializing would stack a second escape layer.
+        return value
     return cell_to_string(value, preserve_sql_null=True)
 
 
@@ -443,7 +456,9 @@ def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
     origin = str(mapping.get("target_type_origin") or "").strip().lower()
     # A sampled-profile origin is not a ceiling: the type was inferred from a
     # page of values, and the next wider page must be allowed to widen it (D1).
-    return origin not in {"destination_catalog", "sampled_profile"}
+    # ``drift_widen`` is stamped by schema-drift approval (D107), not by the
+    # operator drawing a type ceiling — a later wider drift must still widen.
+    return origin not in {"destination_catalog", "sampled_profile", "drift_widen"}
 
 
 def effective_dest_types_under_backfill(

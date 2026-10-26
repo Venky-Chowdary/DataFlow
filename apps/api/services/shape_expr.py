@@ -33,6 +33,7 @@ from services.value_serializer import (
     NULL_WIRE_SENTINELS,
     cell_to_string,
     is_null_evidence,
+    wire_cell_text,
 )
 
 __all__ = [
@@ -372,7 +373,9 @@ def _as_text(value: Any) -> str | None:
         return format(value, "f")
     if isinstance(value, (datetime, date)):
         return value.isoformat()
-    text = cell_to_string(value, preserve_sql_null=True)
+    # Wire-input re-serialize: a str already carries wire encoding (sentinel
+    # or ``__DF_ESC__`` literal) — pass it verbatim (D113).
+    text = wire_cell_text(value)
     if is_null_evidence(text):
         return None
     return text

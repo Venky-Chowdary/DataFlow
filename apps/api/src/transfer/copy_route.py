@@ -605,6 +605,18 @@ def _try_copy_fast_path(
         note_copy_decline("callable source is a result set, not a table")
         return None
 
+    # D107: an approved destination widen must ALTER the live carrier before
+    # rows land — the row path owns that. Server-to-server COPY binds into
+    # the pre-ALTER types and would just fail ("value too long") or, worse,
+    # be attempted without ever widening.
+    from services.batch_progress import mappings_require_dest_widen
+
+    if mappings_require_dest_widen(mappings):
+        note_copy_decline(
+            "approved destination widen is armed — row path must ALTER first"
+        )
+        return None
+
     src_n = (src_type or "").strip().lower()
     dest_n = (dest_type or "").strip().lower()
     mode = normalize_sync_mode(effective_sync, default="")

@@ -241,8 +241,8 @@ def test_snowflake_connection_error_uses_classifier_then_humanizer(monkeypatch):
     classified_inputs = []
     humanized_inputs = []
 
-    def classify(raw):
-        classified_inputs.append(raw)
+    def classify(raw, auth_mode=""):
+        classified_inputs.append((raw, auth_mode))
         return "classified Snowflake login failure"
 
     def humanize(driver, error):
@@ -284,7 +284,7 @@ def test_snowflake_connection_error_uses_classifier_then_humanizer(monkeypatch):
     assert caught.value.detail == (
         "Could not connect to Snowflake: humanized Snowflake login failure"
     )
-    assert classified_inputs and "S3NT1NEL-pw" not in classified_inputs[0]
+    assert classified_inputs and "S3NT1NEL-pw" not in classified_inputs[0][0]
     assert humanized_inputs == [
         ("snowflake", "classified Snowflake login failure")
     ]

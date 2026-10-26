@@ -299,9 +299,18 @@ def inspect_destination_for_preflight(
                 out["foreign_keys_meta"] = dict(
                     live.get("foreign_keys_meta") or {}
                 )
+                # D112-CHECK: introspect_schema reports them under
+                # check_constraints_meta.items — reading "check_constraints"
+                # directly was always empty, so the preflight CHECK probe
+                # never ran and pf showed no warning (prod pf_7a5786c90049).
                 check_constraints = list(
                     live.get("check_constraints") or []
                 )
+                if not check_constraints:
+                    check_constraints = list(
+                        (live.get("check_constraints_meta") or {}).get("items")
+                        or []
+                    )
                 if check_constraints:
                     out["check_constraints"] = check_constraints
             except Exception as fk_exc:  # noqa: BLE001 — probe must not fail Validate

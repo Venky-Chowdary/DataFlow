@@ -602,7 +602,7 @@
   justify-content: space-between;
   gap: 12px;
   padding: 10px 12px;
-  border: 1px solid var(--df-brand-border);
+  border: 1px solid var(--df-border-brand);
   border-radius: 8px;
   background: var(--df-brand-soft);
 }
@@ -1084,11 +1084,11 @@
 
 .df2-xform-vocab code {
   font-size: 11px;
-  color: var(--df-text-2);
+  color: var(--df-text-secondary);
 }
 
 .df2-xform-vocab span { font-size: 13px; color: var(--df-text); }
-.df2-xform-vocab small { font-size: 11px; color: var(--df-text-2); }
+.df2-xform-vocab small { font-size: 11px; color: var(--df-text-secondary); }
 
 .df2-xform-builder .df2-field {
   display: flex;

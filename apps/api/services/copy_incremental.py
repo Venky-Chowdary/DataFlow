@@ -350,21 +350,32 @@ def _sql_text_eq(dialect: str, ident: str, literal: str) -> str:
         + sqlite_normalize_cursor_watermark(str(literal)).replace("'", "''")
         + "'"
     )
+    # Try the engine's own typed equality first: it binds the literal in the
+    # column's domain, which a pure text compare cannot do — a MySQL
+    # ``datetime(6)`` column CAST AS CHAR renders ``...:00.000000`` and never
+    # equals a second-precision literal, so the boundary dedupe silently
+    # dropped no rows and the append INSERT hit Duplicate entry. For a TEXT
+    # staging cell in ``T`` form the typed compare misses instead, so the
+    # separator-normalized text form stays as the fallback.
+    typed = _sql_null_safe_eq(dialect, ident, lit)
     if dialect == "mysql":
-        return (
+        text_eq = (
             f"(CASE WHEN CAST({ident} AS CHAR) REGEXP "
             "'^[0-9]{4}-[0-9]{2}-[0-9]{2}T' THEN "
             f"CONCAT(SUBSTRING(CAST({ident} AS CHAR), 1, 10), ' ', "
             f"SUBSTRING(CAST({ident} AS CHAR), 12)) "
             f"ELSE CAST({ident} AS CHAR) END) = {lit}"
         )
+        return f"({typed} OR {text_eq})"
     if dialect == "sqlite":
-        return f"{sqlite_cursor_sort_expr(f'CAST({ident} AS TEXT)')} = {lit}"
-    return (
+        text_eq = f"{sqlite_cursor_sort_expr(f'CAST({ident} AS TEXT)')} = {lit}"
+        return f"({typed} OR {text_eq})"
+    text_eq = (
         f"(CASE WHEN {ident}::text ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T' THEN "
         f"substring({ident}::text from 1 for 10) || ' ' || "
         f"substring({ident}::text from 12) ELSE {ident}::text END) = {lit}"
     )
+    return f"({typed} OR {text_eq})"
 
 
 def boundary_append_insert_sql(

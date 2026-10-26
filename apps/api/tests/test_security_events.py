@@ -645,3 +645,12 @@ def test_real_main_app_route_template_includes_mounted_api_prefix(domain_securit
         and row["correlation_id"] == "route-template-prefix-check"
     )
     assert event["route_template"] == "/api/v1/audit/export"
+
+
+def test_rekey_flag_failed_event_stays_registered():
+    """Back-fill for 918326f0: email_change.rekey_flag_failed must stay in
+    the registry — it is emitted when flagging a half-moved account for
+    rekey retry itself fails."""
+    from services import audit_coverage, ops_events
+    assert "email_change.rekey_flag_failed" in audit_coverage.SECURITY_EVENTS
+    ops_events.validate_event("email_change.rekey_flag_failed", "succeeded")

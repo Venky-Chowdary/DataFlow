@@ -183,8 +183,14 @@ def parse_csv_preview(
 def _csv_iter_dicts_from_reader(
     reader_file: io.TextIOBase, delim: str, options: ReadOptions | None = None
 ) -> Any:
+    # Dest-engine read-back must keep the C04 quoting distinction: a plain
+    # csv.reader lands an unquoted empty cell (SQL NULL) as '' — Gate-8 then
+    # compared source NULL to dest '' and failed+deleted a correct file (D115).
+    # iter_csv_records yields None for unquoted empty, '' for quoted "".
+    from services.csv_codec import iter_csv_records
+
     header, rows = header_and_rows(
-        csv.reader(reader_file, delimiter=delim),
+        iter_csv_records(reader_file, delim),
         options or ReadOptions(),
         header_names=csv_header_names,
         source_label="CSV",

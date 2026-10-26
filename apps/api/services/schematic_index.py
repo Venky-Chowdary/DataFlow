@@ -16,11 +16,14 @@ from pathlib import Path
 # Bump when synonym / identity-kind rules change so stale pickles cannot
 # keep over-collapsed pairs (user_id→customer_id, sku→product_id).
 _CACHE_VERSION = 3
-_CACHE_PATH = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / f"schematic_index.v{_CACHE_VERSION}.cache.pkl"
-)
+
+
+def _cache_path() -> Path:
+    # Resolve per call — an import-time snapshot would pin the dev data dir
+    # before test isolation or a reconfigured volume can take effect.
+    from services.platform_config import data_dir
+
+    return data_dir() / f"schematic_index.v{_CACHE_VERSION}.cache.pkl"
 
 # Enterprise data-warehouse prefixes/suffixes seen in real schemas
 _PREFIXES = (
@@ -59,12 +62,13 @@ def _normalize(name: str) -> str:
 @lru_cache(maxsize=1)
 def _build_index() -> dict[str, str]:
     """Build inverted index variant → canonical. Target ~1M entries."""
-    if _CACHE_PATH.exists():
+    cache_path = _cache_path()
+    if cache_path.exists():
         try:
             from services.safe_pickle import load_restricted
 
             # Pure str→str dict cache — no class may be resolved out of it.
-            cached = load_restricted(_CACHE_PATH, allowed_modules=frozenset())
+            cached = load_restricted(cache_path, allowed_modules=frozenset())
             if isinstance(cached, dict) and len(cached) > 10_000:
                 return cached
         except Exception as exc:
@@ -72,8 +76,8 @@ def _build_index() -> dict[str, str]:
 
     index = _build_index_fresh()
     try:
-        _CACHE_PATH.parent.mkdir(parents=True, exist_ok=True)
-        with open(_CACHE_PATH, "wb") as f:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        with open(cache_path, "wb") as f:
             pickle.dump(index, f)
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)

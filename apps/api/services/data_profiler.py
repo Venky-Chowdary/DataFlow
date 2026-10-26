@@ -18,7 +18,7 @@ from services.transform_engine import (
     pin_settled_number_locale,
     reset_active_number_locale,
 )
-from services.value_serializer import cell_to_string
+from services.value_serializer import wire_cell_text
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 UUID_RE = re.compile(
@@ -41,7 +41,7 @@ def _as_str(value: Any) -> str | None:
 
     if value is None or is_reader_null_cell(value):
         return None
-    text = cell_to_string(value, preserve_sql_null=True)
+    text = wire_cell_text(value)
     if is_reader_null_cell(text):
         return None
     return text.strip()
