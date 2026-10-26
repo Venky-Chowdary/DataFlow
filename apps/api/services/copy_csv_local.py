@@ -1632,15 +1632,6 @@ def copy_csv_to_mysql_incremental(
                 result=result,
                 quote=_mysql_ident,
             )
-            if swap_at_end:
-                from services.dest_overwrite_swap import mysql_swap_staged_dest
-
-                mysql_swap_staged_dest(
-                    dst_cur,
-                    dest_q=swap_dest_q,
-                    staging_q=dest_q,
-                    trash_q=_mysql_ident(swap_trash_table),
-                )
             dest_conn.commit()
             return out
     except Exception:
