@@ -2912,6 +2912,14 @@ def _maybe_attach_verification_ladder(
                 for r in target_rows
                 if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
             ]
+            # Same scope on the source side: an incremental re-read covers the
+            # whole source table, and comparing it against the batch-keys-only
+            # destination subset flags every legitimately-skipped source row.
+            source_rows = [
+                r
+                for r in source_rows
+                if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
+            ]
             batch_scoped = True
     ladder = run_five_layer_verification(
         source_rows=source_rows,
@@ -2927,10 +2935,12 @@ def _maybe_attach_verification_ladder(
         rejected_rows=int(report.get("rejected_rows") or 0),
         coerced_null_rows=int(report.get("coerced_null_rows") or 0),
         rows_skipped=int(report.get("rows_skipped") or 0),
-        source_checksum=str(report.get("source_checksum") or ""),
-        # The report-level dest digest covers the whole table; when the row
-        # list was re-scoped to the batch keys it is not comparable, so let L3
-        # recompute on the scoped population.
+        # Report-level digests cover the whole table and use the engine's own
+        # scheme; once the row lists are re-scoped to the batch keys neither is
+        # comparable, so L3 recomputes both sides on the scoped populations.
+        source_checksum=(
+            "" if batch_scoped else str(report.get("source_checksum") or "")
+        ),
         target_checksum=(
             "" if batch_scoped else str(report.get("target_checksum") or "")
         ),
