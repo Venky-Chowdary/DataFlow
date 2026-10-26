@@ -93,9 +93,13 @@ def _run_balanced_check_job(sync_mode: str):
     return res, recon, dest_rows
 
 
-@pytest.mark.parametrize("sync_mode", ["incremental"])
+@pytest.mark.parametrize("sync_mode", ["incremental", "upsert"])
 def test_d95_balanced_quarantine_does_not_fail_job(sync_mode):
-    """1 CHECK violation quarantined; 39 rows must stay landed, job must pass."""
+    """1 CHECK violation quarantined; 39 rows must stay landed, job must pass.
+
+    The upsert leg also proves the COPY fast path declines when the
+    destination carries a CHECK constraint — one violating row previously
+    failed the whole INSERT…ON CONFLICT batch with no quarantine."""
     res, recon, dest_rows = _run_balanced_check_job(sync_mode)
     assert dest_rows == 39, (
         f"good rows were rolled back (dest={dest_rows}); "
