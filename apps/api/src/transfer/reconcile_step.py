@@ -7511,7 +7511,11 @@ def run_reconciliation(
             recon["source_checksum"] = _l3_src
             recon["target_checksum"] = _l3_dst
             recon["checksum_match"] = _l3_src == _l3_dst
-            recon["assurance_level"] = "full_checksum"
+            # full_checksum names the *matching* coverage — stamping it on a
+            # proven mismatch lets a failed job read as verified (the verdict
+            # field carries the failure; the label must not contradict it).
+            if recon["checksum_match"]:
+                recon["assurance_level"] = "full_checksum"
             recon["checksum_scope"] = "verify_time_population_digest"
             # X-41b: _finalize already stamped verification_verdict="partial"
             # before this promotion ran — a proven two-sided digest match
