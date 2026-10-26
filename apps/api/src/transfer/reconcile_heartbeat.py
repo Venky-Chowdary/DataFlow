@@ -181,3 +181,58 @@ def reconcile_phase_heartbeat(
             thread.join(timeout=1.0)
     finally:
         reset_reconcile_scan(token)
+
+
+@contextmanager
+def job_phase_heartbeat(
+    mongo: Any,
+    job_id: str,
+    *,
+    phase: str,
+    message: str,
+    interval_s: float = 15.0,
+    progress_pct: Any = None,
+    records_processed: int | None = None,
+    total_rows: int | None = None,
+) -> Iterator[None]:
+    """Pulse a long phase so the job does not look stalled (D19).
+
+    ``reconcile_phase_heartbeat`` owns the 98–99 band; this is the same
+    contract for any other phase — connect, destination create, slow source
+    reads — whose progress_pct/records_processed must not regress or claim
+    work it cannot measure. The pulse keeps the phase and stamps elapsed
+    seconds; the stored heartbeat timestamp itself proves liveness.
+    """
+    stop = threading.Event()
+    started = time.monotonic()
+
+    def _pulse() -> None:
+        while not stop.wait(interval_s):
+            elapsed = int(time.monotonic() - started)
+            kwargs: dict[str, Any] = {
+                "phase": phase,
+                "message": f"{message} ({elapsed}s elapsed — the job has not stalled)",
+            }
+            if progress_pct is not None:
+                kwargs["progress_pct"] = progress_pct
+            if records_processed is not None:
+                kwargs["records_processed"] = records_processed
+            if total_rows is not None:
+                kwargs["total_rows"] = total_rows
+            try:
+                mongo.update_job_status(job_id, "running", **kwargs)
+            except Exception:
+                return
+
+    thread = threading.Thread(
+        target=contextvars.copy_context().run,
+        args=(_pulse,),
+        name=f"job-heartbeat-{job_id[:8]}",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        yield
+    finally:
+        stop.set()
+        thread.join(timeout=1.0)

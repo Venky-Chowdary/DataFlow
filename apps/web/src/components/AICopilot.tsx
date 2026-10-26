@@ -323,7 +323,7 @@ export function AICopilot({ onNavigate, variant = "fab", onClose }: AICopilotPro
         <DtIcon name="sparkle" size={22} />
       </button>
       {open && (
-        <div style={{ position: "fixed", bottom: 88, right: 24, width: 380, maxHeight: 560, zIndex: 50, boxShadow: "0 12px 32px rgba(15,23,42,0.15)", borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0" }}>
+        <div style={{ position: "fixed", bottom: 88, right: 24, width: 380, maxHeight: 560, zIndex: "var(--df-z-elevated)", boxShadow: "0 12px 32px rgba(15,23,42,0.15)", borderRadius: 8, overflow: "hidden", border: "1px solid #e2e8f0" }}>
           {panel}
         </div>
       )}

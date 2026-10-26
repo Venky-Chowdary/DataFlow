@@ -73,11 +73,13 @@ def matrix_present_cell(val: Any) -> Any:
     extract wire token. Present cells use dest-canonical ``cell_to_string``.
     Empty string stays empty string (distinct from SQL NULL).
     """
+    from services.value_serializer import unescape_wire_text
+
     if is_missing_sentinel(val):
         return DF_MISSING_SENTINEL
     if is_reader_null_cell(val):
         return None
-    return cell_to_string(val)
+    return cell_to_string(unescape_wire_text(val))
 
 
 def matrix_cell_from_record(record: dict[str, Any], col: str) -> Any:

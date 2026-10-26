@@ -156,9 +156,21 @@ def copy_iceberg_to_sqlserver(
 
         exists = _ss_table_exists(dst_cur, dst_schema, dest_table)
         dest_occupied = False
+        swap_at_end = False
+        swap_schema = dst_schema
+        swap_dest_table = dest_table
         if replace_destination and exists:
-            dst_cur.execute(_ss_drop_sql(dest_ref))
-            dest_conn.commit()
+            # C03/X-OW2 — stage the overwrite, sp_rename swap inside the txn.
+            from services.dest_overwrite_swap import (
+                overwrite_trash_name,
+                staged_overwrite_name,
+            )
+
+            stage_table = staged_overwrite_name(dest_table)
+            swap_trash_table = overwrite_trash_name(dest_table)
+            dest_ref = _ss_table_ref(swap_schema, stage_table)
+            dest_table = stage_table
+            swap_at_end = True
             exists = False
         if exists:
             dest_count_before = _ss_count(dst_cur, dest_ref)
@@ -200,6 +212,19 @@ def copy_iceberg_to_sqlserver(
         set_wide_decimal_inputsizes(write_cur, sqlserver_ddls)
         try:
             copied = _arrow_into_sqlserver(write_cur, pa_table, insert_sql, batch_size)
+            if swap_at_end:
+                from services.dest_overwrite_swap import sqlserver_swap_staged_dest
+
+                sqlserver_swap_staged_dest(
+                    dst_cur,
+                    schema=swap_schema,
+                    dest_table=swap_dest_table,
+                    staging_table=dest_table,
+                    trash_table=swap_trash_table,
+                    quote=_ss_ident,
+                )
+                dest_ref = swap_dest_ref
+                dest_table = swap_dest_table
             dest_conn.commit()
         finally:
             try:

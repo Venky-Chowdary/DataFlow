@@ -50,7 +50,13 @@ def _is_safe_sql(raw_query: str) -> bool:
     from services.sql_literals import sql_outside_literals
 
     # A semicolon or DROP inside a quote is not a second statement (QA R2-001/002).
-    parsed = sqlparse.parse(sql_outside_literals(raw_query).strip())
+    try:
+        parsed = sqlparse.parse(sql_outside_literals(raw_query).strip())
+    except Exception:
+        # sqlparse's grouping pass refuses left-associative chains deeper than
+        # 100 (a 250-column ``||`` concat is valid SQL — M19). Re-validate on
+        # the ungrouped token stream: the keyword scan needs no nesting.
+        return _is_safe_sql_flat(raw_query)
     if not parsed or len(parsed) != 1:
         return False
 
@@ -232,6 +238,54 @@ def _has_side_effect_functions(sql: str) -> bool:
         if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
             return True
     return False
+
+
+def _is_safe_sql_flat(raw_query: str) -> bool:
+    """Keyword scan over the ungrouped token stream (deep-chain fallback).
+
+    sqlparse's grouping pass refuses left-associative chains deeper than 100
+    (a 250-column ``||`` concat is valid SQL — M19). The read-only policy —
+    one statement, a safe head, no destructive keywords, no SELECT INTO, the
+    existing side-effect/pragma checks — needs no nesting, so this walks the
+    lexer's flat token stream instead. ``sql_outside_literals`` keeps quoted
+    content out of the scan, so a ``;`` or DROP inside a string cannot spoof
+    a second statement (QA R2-001/002).
+    """
+    import sqlparse
+    from sqlparse.tokens import Comment, Keyword, Newline, Punctuation, Whitespace
+
+    from services.sql_literals import sql_outside_literals
+
+    destructive = {
+        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+        "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
+        "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
+    }
+    safe_starts = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES"}
+
+    tokens = sqlparse.lexer.tokenize(sql_outside_literals(raw_query).strip())
+    first_keyword = None
+    for ttype, value in tokens:
+        if ttype in (Whitespace, Newline) or ttype in Comment:
+            continue
+        kw = str(value or "").upper()
+        if ttype is Punctuation and kw == ";":
+            # A real semicolon token means a second statement follows.
+            return False
+        if first_keyword is None and kw in safe_starts:
+            first_keyword = kw
+        if ttype in Keyword or (
+            hasattr(ttype, "parents") and Keyword in ttype.parents
+        ):
+            if kw in destructive:
+                return False
+            if kw == "INTO" and first_keyword in {"SELECT", "WITH"}:
+                return False
+    if _has_side_effect_functions(raw_query):
+        return False
+    if first_keyword == "PRAGMA" and not _pragma_is_readonly(raw_query):
+        return False
+    return first_keyword in safe_starts
 
 
 def _is_safe_sql_fallback(raw_query: str) -> bool:
@@ -576,7 +630,7 @@ async def query_schema(
 
     from src.transfer.endpoint_intelligence import introspect_endpoint
 
-    endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source"}
+    endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
     try:
         info = introspect_endpoint(endpoint)
     except Exception as exc:
@@ -980,6 +1034,63 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
         )
 
 
+def _catalog_declared_columns(
+    conn: Any, sql: str, columns: list[str], dialect: str
+) -> dict[str, str]:
+    """Declared types of the base table's columns for single-table reads.
+
+    Value inference mislabels TEXT columns whose values look numeric
+    ('DECIMAL(8,4)' on a TEXT c126 — M20); the engine's own catalog is the
+    honest source. Multi-table/expression queries keep the inference labels.
+    """
+    try:
+        import sqlglot
+        from sqlglot import exp
+    except ImportError:
+        return {}
+    try:
+        tree = sqlglot.parse_one(sql)
+        tables = [
+            t.name for t in tree.find_all(exp.Table)
+            if not (t.catalog or t.db)
+        ]
+        if len(tables) != 1:
+            return {}
+        table = tables[0]
+        db = (dialect or "").lower()
+        declared: dict[str, str] = {}
+        from sqlalchemy import text as _text
+
+        if db in {"sqlite", "duckdb"}:
+            rows = conn.execute(
+                _text(f"PRAGMA table_info({_quote_sqlite_ident(table)})")
+            ).fetchall()
+            declared = {str(r[1]): str(r[2] or "unknown") for r in rows}
+        elif db in {"postgresql", "postgres", "mysql", "mariadb",
+                    "cockroachdb", "redshift", "greenplum", "yugabytedb",
+                    "singlestore", "tidb"}:
+            rows = conn.execute(
+                _text(
+                    "SELECT column_name, data_type FROM information_schema.columns "
+                    "WHERE table_name = :t"
+                ),
+                {"t": table},
+            ).fetchall()
+            declared = {str(r[0]): str(r[1] or "unknown") for r in rows}
+        else:
+            return {}
+        lower = {k.lower(): v for k, v in declared.items()}
+        return {
+            c: lower[c.lower()] for c in columns if c.lower() in lower
+        }
+    except Exception:
+        return {}
+
+
+def _quote_sqlite_ident(name: str) -> str:
+    return '"' + str(name or "").replace('"', '""') + '"'
+
+
 def _column_schema(columns: list[str], rows: list[dict[str, Any]]) -> dict[str, str]:
     """Infer a canonical logical type per result column from returned values.
 
@@ -1081,7 +1192,9 @@ def _run_sql_query(connector, body):
     # Oracle/DB2 reject LIMIT (ORA-03047). A query that already has FETCH or TOP
     # is left alone — that is why a hand-written Oracle extract succeeded while
     # a table sample did not.
-    clean_query = append_result_limit(connector.type, raw_query, body.limit)
+    # Fetch limit+1: one row past the cap is how we know rows were withheld —
+    # a LIMIT at exactly `limit` can never distinguish "capped" from "short".
+    clean_query = append_result_limit(connector.type, raw_query, body.limit + 1)
 
     try:
         from sqlalchemy import text
@@ -1101,9 +1214,11 @@ def _run_sql_query(connector, body):
                 if raw_desc
                 else None
             )
+            withheld = 0
             rows = []
             for i, row in enumerate(result):
                 if i >= body.limit:
+                    withheld += 1
                     break
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
             try:
@@ -1117,6 +1232,11 @@ def _run_sql_query(connector, body):
             description = annotate_unresolved_pg_types(
                 conn, description, dialect=str(connector.type or "")
             )
+            # No cursor types (SQLite) — the base table's catalog DDL is the
+            # honest source for single-table reads, not value-guessing (M20).
+            catalog_declared = _catalog_declared_columns(
+                conn, raw_query, columns, str(connector.type or "")
+            )
         schema = _column_schema(columns, rows)
         from services.decimal_observe import cursor_declared_carriers
 
@@ -1125,7 +1245,8 @@ def _run_sql_query(connector, body):
         )
         if declared:
             schema = {**schema, **declared}
-        return rows, columns, schema, False
+        schema = {**schema, **catalog_declared}
+        return rows, columns, schema, bool(withheld)
     except Exception as exc:
         raise user_query_error(
             exc,
@@ -1192,7 +1313,7 @@ def _run_snowflake_query(connector, body):
             and " LIMIT " not in upper
         )
         if append_limit:
-            clean_query = f"{clean_query} LIMIT {body.limit}"
+            clean_query = f"{clean_query} LIMIT {body.limit + 1}"
 
         params = dict(body.params or {})
         if params:
@@ -1205,12 +1326,25 @@ def _run_snowflake_query(connector, body):
             cur.execute(clean_query, params or None)
             description = cur.description or []
             columns = _unique_column_names([desc[0] for desc in description])
+            withheld = 0
             rows = []
             for i, row in enumerate(cur.fetchall()):
                 if i >= body.limit:
+                    withheld += 1
                     break
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
-        return rows, columns, _column_schema(columns, rows), False
+        schema = _column_schema(columns, rows)
+        # Snowflake's cursor description carries declared result types
+        # (VARCHAR for TO_VARCHAR, NUMBER for a SUM) — prefer it over
+        # value inference (M11/M20).
+        declared = {
+            columns[i]: str(desc[1])
+            for i, desc in enumerate(description)
+            if len(desc) > 1 and desc[1] is not None
+        }
+        if declared:
+            schema = {**schema, **declared}
+        return rows, columns, schema, bool(withheld)
     except Exception as exc:
         raise user_query_error(
             exc,

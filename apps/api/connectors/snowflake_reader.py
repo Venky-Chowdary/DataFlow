@@ -365,6 +365,7 @@ def read_table_cursor_batch(
     private_key: str = "",
     auth_mode: str = "",
     cursor_primary_key: str | None = None,
+    cursor_inclusive: bool = False,
 ) -> ReadBatch:
     """Read rows where cursor_column > watermark — incremental sync.
 
@@ -406,7 +407,17 @@ def read_table_cursor_batch(
                 else ""
             )
             bookmark = present_cursor_bookmark(cursor_after)
-            if bookmark is not None:
+            if bookmark is not None and cursor_inclusive:
+                # D60/D98 — run-seed watermark: re-read the whole tie group
+                # (cursor >= watermark); page edges still seek with > below.
+                bare, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+                order = f"{cursor_q}, {pk_q}" if pk_q else cursor_q
+                cur.execute(
+                    f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
+                    f"WHERE {cursor_q} >= %s ORDER BY {order} LIMIT %s",
+                    (bare, limit),
+                )
+            elif bookmark is not None:
                 if pk_q:
                     cur_val, pk_val = split_cursor_bookmark(
                         bookmark, has_tiebreak=True

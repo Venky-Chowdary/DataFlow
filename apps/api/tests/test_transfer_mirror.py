@@ -53,6 +53,15 @@ def test_file_to_sqlite_mirror_soft_deletes_and_reactivates(tmp_path: Path) -> N
         sync_mode="full_refresh_mirror",
         skip_preflight=True,
         validation_mode="strict",
+        # D38: soft delete is opt-in — declared on the stream contract.
+        stream_contracts=[
+            {
+                "selected": True,
+                "sync_mode": "full_refresh_mirror",
+                "primary_key": "id",
+                "delete_mode": "soft",
+            }
+        ],
     )
     result1 = engine.execute_tracked(request1, f"mirror_01_{os.getpid():06d}")
     assert result1.success, result1.error
@@ -76,6 +85,14 @@ def test_file_to_sqlite_mirror_soft_deletes_and_reactivates(tmp_path: Path) -> N
         sync_mode="full_refresh_mirror",
         skip_preflight=True,
         validation_mode="strict",
+        stream_contracts=[
+            {
+                "selected": True,
+                "sync_mode": "full_refresh_mirror",
+                "primary_key": "id",
+                "delete_mode": "soft",
+            }
+        ],
     )
     result2 = engine.execute_tracked(request2, f"mirror_02_{os.getpid():06d}")
     assert result2.success, result2.error
@@ -123,6 +140,14 @@ def test_file_to_sqlite_mirror_soft_deletes_and_reactivates(tmp_path: Path) -> N
         sync_mode="full_refresh_mirror",
         skip_preflight=True,
         validation_mode="strict",
+        stream_contracts=[
+            {
+                "selected": True,
+                "sync_mode": "full_refresh_mirror",
+                "primary_key": "id",
+                "delete_mode": "soft",
+            }
+        ],
     )
     result3 = engine.execute_tracked(request3, f"mirror_03_{os.getpid():06d}")
     assert result3.success, result3.error

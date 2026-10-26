@@ -55,7 +55,7 @@ def client() -> TestClient:
     return TestClient(app)
 
 
-def test_catalog_publishes_an_empty_set_engine_and_keeps_join_post_load(client):
+def test_catalog_publishes_an_empty_set_engine_and_runs_join_in_flight(client):
     body = client.get("/api/v1/shape/catalog").json()
     ops = {op["op"] for op in body["operations"]}
     assert body["set_operations"] == []
@@ -66,10 +66,13 @@ def test_catalog_publishes_an_empty_set_engine_and_keeps_join_post_load(client):
         "pushdown_dialects": [],
         "set_hash": "",
     }
+    # join graduated from post_load_only to a real in-flight canvas op
+    # (shape_join_union e2e executes it); only truly whole-population ops
+    # stay in the post-load list.
     assert any(node["op"] == "join" for node in body["canvas_nodes"])
     assert body["post_load_only"]["operations"] == list(POST_LOAD_ONLY_OPERATIONS)
-    assert "join" in body["post_load_only"]["operations"]
-    assert "join" not in ops
+    assert "join" not in body["post_load_only"]["operations"]
+    assert "join" in ops
     assert "join" not in body["set_operations"]
 
 

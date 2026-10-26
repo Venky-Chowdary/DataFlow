@@ -54,16 +54,21 @@ from services.transform_engine import (
     apply_transform,
     decimal_wire_value,
     reset_active_number_locale,
+    reset_strict_number_reading,
     set_active_number_locale,
+    set_strict_number_reading,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
 from services.value_serializer import (
     cell_to_string,
     is_missing_sentinel,
+    is_reader_null_cell,
     json_default,
+    canonical_json_text,
     json_loads_exact,
     load_http_json,
     operator_binary_cell_text,
+    unescape_wire_text,
 )
 
 # Fingerprinting runs once per cell on both the write and the read-back pass, so
@@ -2370,6 +2375,7 @@ def verify_bigquery_table(
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.bigquery_conn import get_client
@@ -2435,7 +2441,11 @@ def verify_bigquery_table(
 
         columns, projected = project_readback(field_names, target_columns, _row_iter())
         return int(count), canonical_checksum_from_iter(
-            projected, columns, limit=limit
+            projected,
+            columns,
+            limit=limit,
+            dest_db_type="bigquery",
+            dest_types=dest_types,
         )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -3509,6 +3519,8 @@ def verify_redis_prefix(
     limit: int = 0,
     written_ids: list[str] | None = None,
     pk_column: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile Redis keys under ``prefix:*`` (writer key layout).
 
@@ -3516,6 +3528,12 @@ def verify_redis_prefix(
     the SQL and warehouse read-backs do. An upsert into a keyspace that already
     holds other keys is otherwise incomparable: the whole-prefix digest includes
     rows the source never sent. Cardinality stays whole-prefix either way.
+
+    ``dest_db_type`` / ``dest_types`` must be the same ``gate8_digest_types``
+    basis the write pass fingerprinted on: a Redis doc stores ``"1000.00"`` as
+    a JSON *string*, and hashing the read-back without the declared carrier
+    type canonicalizes it to ``1000`` while the write pass hashed the bound
+    text ``1000.00`` — a silent-scheme digest mismatch on faithful data (X-132).
     """
     try:
         from connectors.redis_reader import (
@@ -3559,7 +3577,13 @@ def verify_redis_prefix(
         if not columns and keys:
             sample = next(_row_iter(), {})
             columns = sorted(sample.keys()) if sample else ["value"]
-        checksum = canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
+        checksum = canonical_checksum_from_iter(
+            _row_iter(),
+            columns,
+            limit=limit,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
         return total, checksum
     except Exception as exc:
         logger.warning("Redis reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -3948,6 +3972,8 @@ def verify_target(
             limit=limit,
             written_ids=ids,
             pk_column=pk,
+            dest_db_type=db_type,
+            dest_types=dest_types,
         )
     elif db_type in {"elasticsearch", "opensearch", "elastic"}:
         count, chk = _reconciliation.verify_elasticsearch_index(
@@ -4044,6 +4070,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "s3":
         count, chk = verify_s3_object(
@@ -4338,6 +4365,7 @@ def fingerprint_for_reconcile(
     ddl_type: str = "",
     engine: str = "",
     transform: str | None = None,
+    source_locale: str = "",
 ) -> str:
     """Canonical Gate-8 fingerprint: transform → destination bind → normalize_cell.
 
@@ -4357,15 +4385,49 @@ def fingerprint_for_reconcile(
         # that really did store an empty string.
         wire = None
         value = None
+    if isinstance(wire, str):
+        # Wire decode before any stage re-encodes: ``__DF_ESC__x`` is the
+        # literal ``x`` (one layer — the recursive escape stays provable), so
+        # a colliding literal fingerprints as itself on both sides.
+        wire = unescape_wire_text(wire)
+        value = wire
+    if is_reader_null_cell(wire):
+        # The NULL wire spellings (``__DF_SQL_NULL__`` / ``__df_ddb_null__``)
+        # are NULL, not a colliding literal — without this the transform stage
+        # below re-escapes the sentinel through ``cell_to_string`` and a
+        # transformed NULL fingerprints as ``"__DF_ESC____DF_SQL_NULL__"``
+        # against a destination NULL (duckdb JSON-column regression).
+        wire = None
+        value = None
     tname = (transform or "").strip().lower()
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
         if value is None:
             converted, err = None, None
         else:
-            converted, err = apply_transform(
-                cell if cell is not None else "", transform or "none"
+            # The writer ran this transform under the run's number locale,
+            # and a raw source cell ('1,234' text from a DB driver) must be
+            # fingerprinted the same way — ``source_locale`` carries it.
+            # A canonical cell (file-reader output: '1.234') must NOT be
+            # re-interpreted — its caller leaves source_locale unset and WIRE
+            # reads the canonical form as itself.
+            locale_token = set_active_number_locale(
+                source_locale or NUMBER_LOCALE_WIRE
             )
+            # The fingerprint reproduces what the writer *bound*, and the
+            # write-path bind is not strict-gated — the run-wide
+            # set_strict_number_reading(True) pin (strict validation with no
+            # declared locale) must not refuse a cell here that the writer
+            # already accepted ('2.000,50' -> 2000.5), or the source side
+            # fingerprints NULL against a faithful destination value.
+            strict_token = set_strict_number_reading(False)
+            try:
+                converted, err = apply_transform(
+                    cell if cell is not None else "", transform or "none"
+                )
+            finally:
+                reset_strict_number_reading(strict_token)
+                reset_active_number_locale(locale_token)
         if err:
             # Quarantine / coerce_null write path stores SQL NULL for failed cells.
             # Fingerprint must match that — not the raw bad wire — or Gate-8
@@ -4388,7 +4450,10 @@ def fingerprint_for_reconcile(
         # WIRE reads that canonical form as itself — ``20.500`` out of
         # ``NUMERIC(12,3)`` is 20.5, not a refusal that left one side of the
         # compare unquantized and reported a faithful row as corruption.
-        token = set_active_number_locale(NUMBER_LOCALE_WIRE)
+        # A *source* cell is the same shape: raw driver values get the run
+        # locale the writer bound under; canonical (reader-parsed) cells get
+        # WIRE so '1.234' stays '1.234' — ``source_locale or`` picks per caller.
+        token = set_active_number_locale(source_locale or NUMBER_LOCALE_WIRE)
         try:
             try:
                 wire = normalize_sql_bind_value(wire, ddl_type, engine=engine)
@@ -4487,6 +4552,15 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         if abs(ss - round(ss)) > 1e-9:
             return f"{sign}{hh:02d}:{mm:02d}:{ss:09.6f}".rstrip("0").rstrip(".")
         return f"{sign}{hh:02d}:{mm:02d}:{int(ss):02d}"
+    if (
+        ddl_type
+        and not isinstance(value, bool)
+        and isinstance(value, (float, int, Decimal, str))
+        and _single_precision_carrier(ddl_type, engine)
+    ):
+        _f32_text = _float32_cell_text(value)
+        if _f32_text is not None:
+            return _f32_text
     if isinstance(value, float):
         # Pass the float through — str(float) keeps IEEE residue and false-fails
         # Gate-8 vs DECIMAL sinks (106.60000000000001 vs 106.6).
@@ -4509,6 +4583,12 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             logger.debug("Raw bytes are not valid base64; encoding as base64 for checksum")
         return base64.b64encode(value).decode("ascii")
     if isinstance(value, (dict, list, tuple, set, frozenset)):
+        # Same canonical form as the string-JSON branch below — compact,
+        # key-sorted, numbers normalized — so a decoded dict fingerprints
+        # identically to its wire text.
+        canon = canonical_json_text(json.dumps(value, default=json_default))
+        if canon is not None:
+            return canon
         return json.dumps(value, sort_keys=True, default=json_default)
     raw_text = str(value)
     if ddl_type:
@@ -4565,9 +4645,9 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if ddl_type and _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip()):
         if text.startswith(("{", "[")):
             try:
-                parsed = json_loads_exact(text)
-                if isinstance(parsed, (dict, list)):
-                    return json.dumps(parsed, sort_keys=True, default=json_default)
+                canon = canonical_json_text(text)
+                if canon is not None and canon.startswith(("{", "[")):
+                    return canon
             except (json.JSONDecodeError, TypeError):
                 pass
         if (
@@ -4617,9 +4697,9 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
-            parsed = json_loads_exact(text)
-            if isinstance(parsed, (dict, list)):
-                return json.dumps(parsed, sort_keys=True, default=json_default)
+            canon = canonical_json_text(text)
+            if canon is not None and canon.startswith(("{", "[")):
+                return canon
         except (json.JSONDecodeError, TypeError):
             pass
     # Date/time normalization: cheap heuristic first to avoid running the date
@@ -4690,6 +4770,82 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
 def _checksum_datetime_utc_z(iso_text: str) -> str:
     """Backward-compatible alias — checksums use wall-clock UTC, not Z."""
     return _checksum_datetime_utc_wall(iso_text)
+
+
+def _single_precision_carrier(ddl_type: str, engine: str) -> bool:
+    """True when ``ddl_type`` is an IEEE-754 binary32 carrier on ``engine``.
+
+    ``float_mantissa_bits`` resolves the unambiguous single-precision tokens
+    (``REAL`` off the double-REAL dialects, ``FLOAT4``/``FLOAT32``/
+    ``BINARY_FLOAT``, ``FLOAT(p≤24)``) but reports bare ``FLOAT`` as
+    width-unknown. Bare ``FLOAT`` IS binary32 on MySQL/MariaDB and DuckDB,
+    so those engines resolve it here; everywhere else bare FLOAT stays
+    unknown and no float32 fold applies (PG ``float`` is float8, MSSQL
+    ``float`` is float8, Snowflake ``FLOAT`` is float8).
+    """
+    from services.numeric_fit import float_mantissa_bits
+
+    bits = float_mantissa_bits(ddl_type, dest_db=engine)
+    if bits is not None:
+        return bits == 24
+    eng = (engine or "").strip().lower()
+    raw = re.sub(r"\s+", "", str(ddl_type or "").upper())
+    raw = raw.replace("UNSIGNED", "")
+    return raw == "FLOAT" and eng in {"mysql", "mariadb", "duckdb"}
+
+
+def _float32_cell_text(value: Any) -> str | None:
+    """Canonical text of a cell at IEEE-754 binary32 granularity.
+
+    A single-precision carrier keeps 24 significand bits, so the same stored
+    value reads back as ``0.33333334`` from one driver and
+    ``0.3333333432674408`` (the float64 widening) from another. The fold
+    rounds through ``struct.pack('f')`` and emits the shortest decimal that
+    round-trips that float32 — the same contract
+    ``_decimal_from_ieee_float`` (.15g) gives doubles. ``-0.0`` folds to
+    ``"0"`` for parity with the double path's zero handling. Returns ``None``
+    for values that cannot take the float path so the caller falls through to
+    the generic branches.
+    """
+    import math
+    import struct
+
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return None
+        try:
+            f = float(text)
+        except ValueError:
+            return None
+    elif isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
+        try:
+            f = float(value)
+        except (OverflowError, ValueError, TypeError):
+            return None
+    else:
+        return None
+    if math.isnan(f):
+        return "nan"
+    if math.isinf(f):
+        return "Infinity" if f > 0 else "-Infinity"
+    try:
+        packed = struct.pack("f", f)
+    except (OverflowError, struct.error):
+        return None
+    v32 = struct.unpack("f", packed)[0]
+    if v32 == 0:
+        return "0"
+    # Shortest decimal that round-trips the float32 (9 significant digits is
+    # always enough for binary32).
+    for precision in range(1, 10):
+        candidate = format(v32, f".{precision}g")
+        try:
+            if struct.pack("f", float(candidate)) == packed:
+                return candidate
+        except (ValueError, OverflowError, struct.error):
+            continue
+    return format(v32, ".9g")
 
 
 def _decimal_from_ieee_float(value: float) -> Decimal | None:
@@ -4842,6 +4998,7 @@ def build_reconciliation_proof(
     primary_key: str | None = None,
     sample_size: int = 50,
     dest_db_type: str = "",
+    source_locale: str = "",
     dest_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Build a deterministic proof object for row-level transfer verification.
@@ -4922,6 +5079,7 @@ def build_reconciliation_proof(
             sort_key=None,
             dest_db_type=dest_db_type,
             dest_types=dest_types,
+            source_locale=source_locale,
         )
         sample_compare = {
             **sample_compare,
@@ -4955,6 +5113,7 @@ def build_reconciliation_proof(
         sort_key=key_col,
         dest_db_type=dest_db_type,
         dest_types=dest_types,
+        source_locale=source_locale,
     )
 
     matched_key_count = len(matched_keys)
@@ -5037,6 +5196,7 @@ def sample_compare_rows(
     rows_are_paired: bool = False,
     duplicate_policy: str = "",
     inserted_keys: set[str] | list[str] | None = None,
+    source_locale: str = "",
 ) -> dict[str, Any]:
     """
     Compare mapped column values between source records and destination read-back.
@@ -5133,7 +5293,9 @@ def sample_compare_rows(
             ),
         }
 
-    def _fingerprint(raw: Any, *, transform: str | None, tgt_col: str) -> str:
+    def _fingerprint(
+        raw: Any, *, transform: str | None, tgt_col: str, source_locale: str = ""
+    ) -> str:
         ddl = (
             dest_types.get(tgt_col)
             or dest_types.get(tgt_col.lower())
@@ -5179,7 +5341,11 @@ def sample_compare_rows(
         if eng and ddl:
             try:
                 return fingerprint_for_reconcile(
-                    raw, ddl_type=ddl, engine=eng, transform=transform
+                    raw,
+                    ddl_type=ddl,
+                    engine=eng,
+                    transform=transform,
+                    source_locale=source_locale,
                 )
             except Exception:
                 pass
@@ -5540,11 +5706,17 @@ def sample_compare_rows(
                             converted = None
                             break
                 src_val = _fingerprint(
-                    converted, transform=None, tgt_col=tgt_col
+                    converted,
+                    transform=None,
+                    tgt_col=tgt_col,
+                    source_locale=source_locale,
                 )
             else:
                 src_val = _fingerprint(
-                    raw_src, transform=transform, tgt_col=tgt_col
+                    raw_src,
+                    transform=transform,
+                    tgt_col=tgt_col,
+                    source_locale=source_locale,
                 )
             # Destination already applied bind at write — fingerprint without
             # re-transform so read-back bools/JSON match source write-path form.

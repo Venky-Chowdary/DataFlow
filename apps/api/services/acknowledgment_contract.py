@@ -28,12 +28,17 @@ class Acknowledgments:
     compliance: bool = False
     schema_drift: bool = False
     fk_risk: bool = False
+    # Operator approved destination DDL DataFlow disclosed for this run —
+    # e.g. the unique index an upsert needs on an existing table (D101).
+    ddl_changes: bool = False
     actor: str = ""
     reason: str = ""
 
     @property
     def any_claimed(self) -> bool:
-        return bool(self.compliance or self.schema_drift or self.fk_risk)
+        return bool(
+            self.compliance or self.schema_drift or self.fk_risk or self.ddl_changes
+        )
 
     def as_policies(self, *, mapping_version: int) -> dict[str, Any]:
         """Persistable form, stamped with the revision it was granted for."""
@@ -41,6 +46,7 @@ class Acknowledgments:
             "compliance_acknowledged": self.compliance,
             "schema_drift_acknowledged": self.schema_drift,
             "fk_risk_acknowledged": self.fk_risk,
+            "ddl_changes_acknowledged": self.ddl_changes,
             "acknowledgment_actor": self.actor,
             "acknowledgment_reason": self.reason,
             "acknowledgment_version": int(mapping_version),
@@ -53,6 +59,7 @@ def resolve_acknowledgments(
     compliance: object = False,
     schema_drift: object = False,
     fk_risk: object = False,
+    ddl_changes: object = False,
     actor: object = "",
     reason: object = "",
 ) -> Acknowledgments:
@@ -64,6 +71,7 @@ def resolve_acknowledgments(
         compliance=bool(compliance),
         schema_drift=bool(schema_drift),
         fk_risk=bool(fk_risk),
+        ddl_changes=bool(ddl_changes),
         actor=str(actor or "").strip(),
         reason=str(reason or "").strip(),
     )
@@ -72,7 +80,7 @@ def resolve_acknowledgments(
     if len(ack.actor) < MIN_ACTOR_LEN:
         raise AcknowledgmentRefused(
             "acknowledgment_actor is required when acknowledging compliance, "
-            "schema drift, or FK risk"
+            "schema drift, FK risk, or destination DDL"
         )
     if len(ack.reason) < MIN_REASON_LEN:
         raise AcknowledgmentRefused(
@@ -100,6 +108,7 @@ def acknowledgments_from_policies(
         compliance=bool(pol.get("compliance_acknowledged")),
         schema_drift=bool(pol.get("schema_drift_acknowledged")),
         fk_risk=bool(pol.get("fk_risk_acknowledged")),
+        ddl_changes=bool(pol.get("ddl_changes_acknowledged")),
         actor=str(pol.get("acknowledgment_actor") or "").strip(),
         reason=str(pol.get("acknowledgment_reason") or "").strip(),
     )
@@ -120,6 +129,7 @@ def audit_acknowledgments(
         "acknowledge_compliance": ack.compliance,
         "acknowledge_schema_drift": ack.schema_drift,
         "acknowledge_fk_risk": ack.fk_risk,
+        "acknowledge_ddl_changes": ack.ddl_changes,
     }
     # An FK acknowledgment covers declared destination FK metadata only — it is
     # never a proof that the destination population is orphan-free.

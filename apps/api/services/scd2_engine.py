@@ -23,7 +23,7 @@ from __future__ import annotations
 import hashlib
 import logging
 from collections.abc import Iterator
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from typing import Any
 
 from services.engine_pool import release_engine
@@ -47,6 +47,13 @@ def resolve_scd2_cols(opts: dict[str, Any] | None = None) -> dict[str, Any]:
     (None unless declared), tracked ([] = all attributes tracked),
     type1, close_missing. Recipe ``scd2`` steps pass their normalized
     options through :meth:`ShapeRecipe.scd2_column_names`.
+
+    ``change_column`` (D38 minor): a source column carrying the row's own
+    change time (``updated_at``, CDC commit ts). When declared, the
+    version's ``valid_from``/``valid_to`` stamp is that source instant —
+    not the load clock — so the history orders by when the row actually
+    changed. Rows whose change cell is missing/unparseable fall back to
+    the run stamp; the run never invents a change time.
     """
     o = opts or {}
     return {
@@ -58,6 +65,9 @@ def resolve_scd2_cols(opts: dict[str, Any] | None = None) -> dict[str, Any]:
         "tracked": [str(t) for t in (o.get("tracked") or [])],
         "type1": bool(o.get("type1")),
         "close_missing": bool(o.get("close_missing", True)),
+        "change_column": str(
+            o.get("change_column") or o.get("change_time_column") or ""
+        ) or None,
     }
 
 
@@ -102,6 +112,39 @@ def scd2_is_current_false_sql(dialect: str) -> str:
 
 def _now_utc() -> datetime:
     return datetime.now(timezone.utc)
+
+
+def _row_change_stamp(
+    row: dict[str, Any],
+    cols: dict[str, Any],
+    fallback: datetime,
+) -> datetime:
+    """Stamp for this row's valid_from/valid_to.
+
+    D38: when the recipe declares ``change_column`` the version edges come
+    from the row's own change time, not the load clock. A missing or
+    unparseable cell falls back to the run stamp — never a fabricated one.
+    The result is always timezone-aware (naive inputs are read as UTC).
+    """
+    col = cols.get("change_column")
+    if not col:
+        return fallback
+    raw = row.get(col)
+    if raw is None or (isinstance(raw, str) and not raw.strip()):
+        return fallback
+    if isinstance(raw, datetime):
+        dt = raw
+    elif isinstance(raw, date):
+        dt = datetime(raw.year, raw.month, raw.day)
+    else:
+        text = str(raw).strip()
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return fallback
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 
 def _compose_key(row: dict[str, Any], columns: list[str]) -> str:
@@ -331,9 +374,13 @@ def _ensure_scd_columns(
     from connectors.generic_sql import _sa_type_for_logical
     from connectors.writer_common import quote_sql_identifier
 
+    # timestamptz: stamps are tz-aware instants; engines with a zone
+    # carrier keep it (TIMESTAMPTZ / TIMESTAMP_TZ / DATETIMEOFFSET),
+    # zone-less engines degrade to their instant type — never a naive
+    # wall clock (D38 "no zone").
     wanted = [
-        (cols["valid_from"], "datetime"),
-        (cols["valid_to"], "datetime"),
+        (cols["valid_from"], "timestamptz"),
+        (cols["valid_to"], "timestamptz"),
         (cols["is_current"], "boolean"),
         (cols["row_hash"], "string"),
     ]
@@ -374,8 +421,8 @@ def _build_scd_table(
     all_cols = list(dict.fromkeys(list(target_cols) + list(_stamp_set(cols))))
     all_types = {**column_types}
     wanted_types = {
-        cols["valid_from"]: "datetime",
-        cols["valid_to"]: "datetime",
+        cols["valid_from"]: "timestamptz",
+        cols["valid_to"]: "timestamptz",
         cols["is_current"]: "boolean",
         cols["row_hash"]: "string",
     }
@@ -491,8 +538,15 @@ def _expire_rows(
     dialect_name: str,
     column_types: dict[str, Any] | None = None,
     cols: dict[str, Any] | None = None,
+    key_stamps: dict[str, datetime] | None = None,
 ) -> int:
-    """Mark the current versions of ``keys`` as historical."""
+    """Mark the current versions of ``keys`` as historical.
+
+    ``key_stamps`` (D38): when a change_column run gives each key its own
+    version edge, close at that key's stamp so the prior version's
+    ``valid_to`` equals the new version's ``valid_from`` — a gapless
+    chain instead of every close stamped at the load clock.
+    """
     import sqlalchemy as sa
     from connectors.writer_common import quote_sql_identifier
 
@@ -505,19 +559,25 @@ def _expire_rows(
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     false_lit = scd2_is_current_false_sql(dialect_name)
     expired = 0
-    for chunk in iter_pk_key_chunks(keys):
-        where_keys, params = _pk_or_clause(
-            pk_columns, chunk, prefix="e", dialect=dialect_name,
-            column_types=column_types,
-        )
-        params["ts"] = timestamp
-        sql = (
-            f"UPDATE {qualified} "  # nosec B608
-            f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
-            f"WHERE {where_keys} AND {current_pred}"
-        )
-        result = conn.execute(sa.text(sql), params)
-        expired += result.rowcount or 0
+    stamp_groups: dict[Any, list[str]] = {}
+    for k in keys:
+        stamp_groups.setdefault(
+            (key_stamps or {}).get(k, timestamp), []
+        ).append(k)
+    for stamp, stamp_keys in stamp_groups.items():
+        for chunk in iter_pk_key_chunks(stamp_keys):
+            where_keys, params = _pk_or_clause(
+                pk_columns, chunk, prefix="e", dialect=dialect_name,
+                column_types=column_types,
+            )
+            params["ts"] = stamp
+            sql = (
+                f"UPDATE {qualified} "  # nosec B608
+                f"SET {valid_to_quoted} = :ts, {current_quoted} = {false_lit} "
+                f"WHERE {where_keys} AND {current_pred}"
+            )
+            result = conn.execute(sa.text(sql), params)
+            expired += result.rowcount or 0
     return expired
 
 
@@ -1125,6 +1185,7 @@ def _merge_scd2_bundle(
 
     to_insert: list[dict[str, Any]] = []
     to_expire: set[str] = set()
+    expire_stamps: dict[str, datetime] = {}
     to_type1: list[tuple[str, dict[str, Any]]] = []
 
     # A key with no current version may still hold closed history (it was
@@ -1171,7 +1232,14 @@ def _merge_scd2_bundle(
             continue
         if key in current_hashes:
             to_expire.add(key)
-        hydrated[cols["valid_from"]] = timestamp
+        # D38: a declared change_column gives each version its own edge —
+        # the source change instant, not the load clock. The closing
+        # version's valid_to is the SAME stamp so the timeline is
+        # gapless (close == next open, never a wall-clock gap between them).
+        row_stamp = _row_change_stamp(hydrated, cols, timestamp)
+        if key in to_expire:
+            expire_stamps[key] = row_stamp
+        hydrated[cols["valid_from"]] = row_stamp
         hydrated[cols["valid_to"]] = None
         hydrated[cols["is_current"]] = True
         if cols.get("version"):
@@ -1184,6 +1252,7 @@ def _merge_scd2_bundle(
         expired = _expire_rows(
             conn, qualified, pk_columns, to_expire, timestamp, dialect_name,
             column_types=pk_types, cols=cols,
+            key_stamps=expire_stamps or None,
         )
     type1_updated = _type1_update_rows(
         conn, qualified, pk_columns, to_type1, dialect_name, cols,

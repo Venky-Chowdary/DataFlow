@@ -301,11 +301,19 @@ def probe_destination_privileges(
             engine = embedded
 
     if engine not in _SUPPORTED:
+        # Name the real gap: an engine with no privilege probe is not a
+        # supported destination at all (e.g. generic_sql is read-side only).
+        # "Probe not implemented" read like a missing feature and sent
+        # operators looking for a fix that does not exist.
         return PrivilegeProbeResult(
             can_write=None,
             can_create_table=None,
             status="unavailable",
-            detail=f"Privilege metadata probe not implemented for '{engine}'",
+            detail=(
+                f"'{engine}' is not a supported destination — no write "
+                "privilege probe exists for it. Choose a supported "
+                "destination engine."
+            ),
             engine=engine,
         )
 
@@ -568,11 +576,18 @@ def probe_destination_privileges(
             engine=engine,
         )
 
+    # In _SUPPORTED but no probe ran: a generic_sql DSN that did not resolve
+    # to an embedded engine (sqlite/duckdb) is not a writable destination at
+    # all — say so, not "probe not implemented" (which reads like a gap to
+    # fix instead of a wrong destination choice).
     return PrivilegeProbeResult(
         can_write=None,
         can_create_table=None,
         status="unavailable",
-        detail=f"Privilege metadata probe not implemented for '{engine}'",
+        detail=(
+            f"'{engine}' is not a supported destination — no write privilege "
+            "probe exists for it. Choose a supported destination engine."
+        ),
         engine=engine,
     )
 

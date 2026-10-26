@@ -124,10 +124,10 @@ def test_create_schedule_persists_new_fields(temp_store):
     assert reloaded.primary_key == "id"
     assert reloaded.max_retries == 2
     assert reloaded.notify_on_success is True
-    # next_run is computed from cron in the schedule timezone.
-    assert reloaded.next_run_at is not None
-    parsed = datetime.fromisoformat(reloaded.next_run_at)
-    assert parsed.tzinfo is not None
+    # Created without mappings → force-disabled by the empty-mapping park,
+    # and a disabled schedule has no next run (M24).
+    assert reloaded.enabled is False
+    assert reloaded.next_run_at is None
 
 
 def test_create_schedule_persists_studio_data_and_migration_rules(temp_store):
@@ -690,7 +690,7 @@ def test_paused_schedule_manual_run_starts_without_activating(temp_store, monkey
     sched = _make(store, enabled=False)
     monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
 
-    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode=""):
+    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode="", triggered_by=""):
         assert sid == sched.id
         assert resync_mode == ""
         return "job-manual" if allow_paused else None
@@ -707,15 +707,18 @@ def test_manual_run_forwards_resync_mode_without_activating(temp_store, monkeypa
     monkeypatch.setattr(runner, "_scheduler_instance_id", lambda: "test-instance")
     seen: dict[str, object] = {}
 
-    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode=""):
+    def fake_dispatch(sid, attempt=0, *, allow_paused=False, resync_mode="", triggered_by=""):
         seen["sid"] = sid
         seen["allow_paused"] = allow_paused
         seen["resync_mode"] = resync_mode
+        seen["triggered_by"] = triggered_by
         return "job-sync"
 
     monkeypatch.setattr(runner, "_dispatch_transfer", fake_dispatch)
     assert runner._run_schedule(sched.id, manual=True, resync_mode="full") == "job-sync"
-    assert seen == {"sid": sched.id, "allow_paused": True, "resync_mode": "full"}
+    assert seen["sid"] == sched.id
+    assert seen["allow_paused"] is True
+    assert seen["resync_mode"] == "full"
     assert store.get_schedule(sched.id).enabled is False
 
 
@@ -918,7 +921,7 @@ def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
     assert final is not None and last is not None
     assert final > datetime.now(timezone.utc)
     assert final.second == 0 and final.microsecond == 0
-    assert abs((final - last).total_seconds()) > 2
+    assert 0 < (final - last).total_seconds() <= 300
     assert done.id not in {item.id for item in store.due_schedules()}
 
 

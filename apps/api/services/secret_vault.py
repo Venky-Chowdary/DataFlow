@@ -174,12 +174,14 @@ _vault_instance: SecretVault | None = None
 
 def _get_vault() -> SecretVault:
     global _vault_instance
-    if _vault_instance is None:
-        backend = (getenv_brand("SECRETS_BACKEND") or "fernet").lower().strip()
-        if backend == "aws_secretsmanager":
-            _vault_instance = AwsSecretsManagerVault()
-        else:
-            _vault_instance = FernetVault()
+    backend = (getenv_brand("SECRETS_BACKEND") or "fernet").lower().strip()
+    want = AwsSecretsManagerVault if backend == "aws_secretsmanager" else FernetVault
+    # The cache must follow the configured backend, not the first-built one:
+    # an instance cached under a different backend keeps answering in the wrong
+    # scheme (an AwsSecretsManagerVault leaking past a monkeypatch's teardown
+    # stamped sm: references where enc: was configured — CI-1 order leak).
+    if not isinstance(_vault_instance, want):
+        _vault_instance = want()
     return _vault_instance
 
 

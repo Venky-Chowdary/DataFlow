@@ -69,23 +69,18 @@ def _run(request: TransferRequest) -> None:
         assert recon.get("checksum_match") is True
     else:
         # A server-side engine copy brings no row into this process, so the
-        # only digest it has is destination COUNT(*) against the source
-        # snapshot COUNT(*). Gate-8 must say so in its scope instead of
-        # comparing a count token to a hex digest (or claiming a match).
-        # Either the generic not-comparable label or the specific
-        # count-proof scope the copy path reported (X-22) satisfies this —
-        # both name a count proof, never a value-digest match.
-        scope = str(recon.get("checksum_scope") or "")
-        assert scope in {
-            "whole_table_not_comparable",
-            "dest_count_equals_source_snapshot",
+        # row-count proof is destination COUNT(*) against the source snapshot
+        # COUNT(*) — the scope says so — and the destination key census then
+        # re-reads both sides value-by-value. A partitioned fast-path copy
+        # reports the partition variant of the same count proof; both are
+        # count scopes, never a value-digest match.
+        assert recon.get("checksum_scope") in {
             "dest_count_equals_source_snapshot_count",
             "partition_dest_count_equals_source_snapshot",
-            "dest_pk_join_equals_staging",
         }, recon
         assert recon.get("checksum_match") is False
         assert recon.get("target_rows") == 2
-        assert "no source value digest" in str(recon.get("message") or "").lower()
+        assert (recon.get("value_compare") or {}).get("ran") is True, recon
 
 
 def _seed_postgresql(

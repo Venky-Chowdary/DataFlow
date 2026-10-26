@@ -171,6 +171,9 @@ class TransferRequest:
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
     fk_risk_acknowledged: bool = False
+    # Operator approved destination DDL disclosed at Validate — e.g. the
+    # unique index an upsert needs on an existing table (D101).
+    ddl_changes_acknowledged: bool = False
     # Sync now / full re-sync. Empty scope runs the full gate set.
     # ``drift_connectivity`` rechecks only drift and connectivity on a signed contract.
     preflight_scope: str = ""
@@ -351,6 +354,7 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "compliance_acknowledged": bool(request.compliance_acknowledged),
         "schema_drift_acknowledged": bool(request.schema_drift_acknowledged),
         "fk_risk_acknowledged": bool(request.fk_risk_acknowledged),
+        "ddl_changes_acknowledged": bool(request.ddl_changes_acknowledged),
         "preflight_scope": request.preflight_scope or "",
         "parent_job_id": request.parent_job_id or "",
         "historical_resync": bool(request.historical_resync),
@@ -501,6 +505,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         compliance_acknowledged=bool(data.get("compliance_acknowledged")),
         schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged")),
         fk_risk_acknowledged=bool(data.get("fk_risk_acknowledged")),
+        ddl_changes_acknowledged=bool(data.get("ddl_changes_acknowledged")),
         preflight_scope=str(data.get("preflight_scope") or "").strip(),
         parent_job_id=str(data.get("parent_job_id") or "").strip(),
         rerun_of=str(data.get("rerun_of") or "").strip(),

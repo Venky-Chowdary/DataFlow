@@ -48,6 +48,27 @@ def carrier_instant_digits(ddl_type: str | None, *, engine: str = "") -> int | N
     return destination_temporal_fractional_digits(ddl_type, dest_db=engine)
 
 
+def temporal_carrier_display_label(ddl_type: str, engine: str = "") -> str:
+    """Operator-facing label for a declared temporal carrier.
+
+    Document stores stamp their instant carrier ``date`` — the real BSON type
+    name — but a bare "date" in a verdict reads as a calendar DATE column, so
+    the same carrier flips between ``date`` and ``TIMESTAMPTZ(6)`` across
+    surfaces (X-138). On instant-only engines the token is rendered as the
+    instant it is; every other declared spelling stays verbatim.
+    """
+    token = str(ddl_type or "").strip()
+    if not token:
+        return token
+    from services.type_system import temporal_carrier_holds_time
+
+    if token.lower() == "date" and temporal_carrier_holds_time(engine):
+        digits = carrier_instant_digits(token, engine=engine)
+        suffix = f", {digits} fractional digits" if digits else ""
+        return f"date (BSON instant{suffix})"
+    return token
+
+
 def carrier_rounded_columns(
     mappings: list[dict] | None,
     *,
@@ -91,8 +112,12 @@ def carrier_rounded_columns(
         seen.add(target)
         out.append({
             "column": target,
-            "source_type": source_type,
-            "target_type": target_type,
+            "source_type": temporal_carrier_display_label(
+                source_type, dest_engine
+            ),
+            "target_type": temporal_carrier_display_label(
+                target_type, dest_engine
+            ),
             "kept_fractional_digits": carrier_instant_digits(
                 target_type, engine=dest_engine
             ),

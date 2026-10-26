@@ -609,7 +609,16 @@ def _iter_csv_source_records(
     )
     source_cols = [p[0] for p in pairs]
     with _csv_text(content, encoding=encoding) as handle:
-        reader = csv.reader(handle, delimiter=delim)
+        # C04: the codec decodes cells — an unquoted empty field is None
+        # (SQL NULL), a quoted "" is '', and legacy \N is NULL — so COPY and
+        # the row path bind the same values on every engine.
+        from services.csv_codec import iter_csv_records
+
+        reader = iter_csv_records(
+            handle,
+            delim,
+            empty_cell=str(getattr(read_options, "empty_cell", "null") or "null"),
+        )
         header = next(reader, None)
         if not header:
             raise FastPathUnavailable("CSV file has no header row")
@@ -626,12 +635,13 @@ def _iter_csv_source_records(
             raise FastPathUnavailable(f"CSV header missing mapped column {missing[0]!r}")
         positions = [index[c.lower()] for c in source_cols]
         for row in reader:
-            if not row or all(str(c).strip() == "" for c in row):
+            if not row or all(c is None or str(c).strip() == "" for c in row):
                 continue
             record: dict[str, str | None] = {}
             for col, pos in zip(source_cols, positions, strict=True):
-                cell = row[pos] if pos < len(row) else ""
-                record[col] = _empty_to_none(cell)
+                # Codec already decoded: None = NULL, '' = quoted "" — pass
+                # through untouched (an absent trailing field is absent → NULL).
+                record[col] = row[pos] if pos < len(row) else None
             yield record
 
 
@@ -670,6 +680,10 @@ def _write_mapped_csv(
     delim = "\t" if kind == "tsv" or (not kind and _csv_ext(filename) == "tsv") else ","
     source_cols = [p[0] for p in pairs]
     dest_cols = [p[1] for p in pairs]
+    try:
+        from transfer.file_stream import file_empty_cell_bind
+    except ImportError:  # pragma: no cover
+        from src.transfer.file_stream import file_empty_cell_bind
     carriers = list(declared_types or [""] * len(pairs))
     if len(carriers) != len(pairs):
         raise FastPathUnavailable("declared type list / column list mismatch")
@@ -724,18 +738,25 @@ def _write_mapped_csv(
     def _flush(rows: list[dict[str, str | None]], writer: Any) -> int:
         written = 0
         for rec in rows:
+            # C04: '' (a quoted "" or a JSON/Excel empty string) is not a
+            # number — NULL on a non-text carrier, on every engine, before
+            # the COPY-safe check sees the cell.
             copy_cells = {
-                col: (
-                    _sqlite_copy_cell_text(
-                        rec.get(col),
-                        carriers[index] if index < len(carriers) else "",
-                        column=col,
-                    )
-                    if sqlite_dest
-                    else rec.get(col)
+                col: file_empty_cell_bind(
+                    rec.get(col),
+                    carriers[index] if index < len(carriers) else "",
                 )
                 for index, col in enumerate(source_cols)
             }
+            if sqlite_dest:
+                copy_cells = {
+                    col: _sqlite_copy_cell_text(
+                        copy_cells.get(col),
+                        carriers[index] if index < len(carriers) else "",
+                        column=col,
+                    )
+                    for index, col in enumerate(source_cols)
+                }
             for col, logical, physical in census:
                 cell = copy_cells.get(col)
                 if not text_cell_copy_safe(
@@ -1073,10 +1094,6 @@ def copy_csv_to_postgres(
     dest_ref = _table_ref(dest_schema_n, dest_table)
     delim = "E'\\t'" if ext == "tsv" else "','"
     col_list = ", ".join(_quote(c) for c in target_cols)
-    copy_sql = (
-        f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
-        f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '\\N')"
-    )
 
     dest_conn = _pg_connect(dest_cfg)
     created_here = False
@@ -1095,9 +1112,22 @@ def copy_csv_to_postgres(
         )
         exists = dst_cur.fetchone() is not None
         dest_occupied = False
+        swap_at_end = False
+        swap_schema = dest_schema_n
+        swap_dest_ref = dest_ref
+        swap_dest_table = dest_table
         if replace_destination and exists:
-            dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
-            dest_conn.commit()
+            # C03/X-OW2 — stage the overwrite, rename-swap inside the txn.
+            from services.dest_overwrite_swap import (
+                overwrite_trash_name,
+                staged_overwrite_name,
+            )
+
+            stage_table = staged_overwrite_name(dest_table)
+            swap_trash_table = overwrite_trash_name(dest_table)
+            dest_ref = _table_ref(swap_schema, stage_table)
+            dest_table = stage_table
+            swap_at_end = True
             exists = False
         if exists:
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
@@ -1115,6 +1145,13 @@ def copy_csv_to_postgres(
             dest_conn.commit()
             created_here = True
 
+        # Built after the swap decision: an overwrite loads the staging table,
+        # not the live destination (C03/X-OW2 — writing the real table here
+        # appended the batch, then the staging COUNT(*) refused it).
+        copy_sql = (
+            f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
+            f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '\\N')"
+        )
         with open(mapped_path, "r", encoding="utf-8") as handle:
             dst_cur.copy_expert(copy_sql, handle)
         dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
@@ -1125,6 +1162,19 @@ def copy_csv_to_postgres(
                 "CSV→PG COPY refused: dest COUNT(*) "
                 f"{dest_count} != source COUNT {source_count}"
             )
+        if swap_at_end:
+            from services.dest_overwrite_swap import pg_swap_staged_dest
+
+            pg_swap_staged_dest(
+                dst_cur,
+                schema=swap_schema,
+                dest_table=swap_dest_table,
+                staging_table=dest_table,
+                trash_table=swap_trash_table,
+                quote=_quote,
+            )
+            dest_ref = swap_dest_ref
+            dest_table = swap_dest_table
         dest_conn.commit()
         return _count_result(source_count, dest_count)
     except Exception:
@@ -1178,9 +1228,20 @@ def copy_csv_to_mysql(
     try:
         exists = _mysql_table_exists(dst_cur, dest_table)
         dest_occupied = False
+        swap_at_end = False
+        swap_dest_q = dest_q
         if replace_destination and exists:
-            dst_cur.execute(f"DROP TABLE IF EXISTS {dest_q}")  # nosec B608
-            dest_conn.commit()
+            # C03/X-OW2 — stage the overwrite, one atomic RENAME swap at the end.
+            from services.dest_overwrite_swap import (
+                mysql_overwrite_trash_name,
+                mysql_staged_overwrite_name,
+            )
+
+            stage_table = mysql_staged_overwrite_name(dest_table)
+            swap_trash_table = mysql_overwrite_trash_name(dest_table)
+            dest_q = _mysql_ident(stage_table)
+            dest_table = stage_table
+            swap_at_end = True
             exists = False
         if exists:
             dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
@@ -1212,6 +1273,16 @@ def copy_csv_to_mysql(
                 "CSV→MySQL COPY refused: dest COUNT(*) "
                 f"{dest_count} != source COUNT {source_count}"
             )
+        if swap_at_end:
+            from services.dest_overwrite_swap import mysql_swap_staged_dest
+
+            mysql_swap_staged_dest(
+                dst_cur,
+                dest_q=swap_dest_q,
+                staging_q=dest_q,
+                trash_q=_mysql_ident(swap_trash_table),
+            )
+            dest_q = swap_dest_q
         dest_conn.commit()
         return _count_result(source_count, dest_count, {"mysql_write": "load_data"})
     except Exception:
@@ -1561,6 +1632,15 @@ def copy_csv_to_mysql_incremental(
                 result=result,
                 quote=_mysql_ident,
             )
+            if swap_at_end:
+                from services.dest_overwrite_swap import mysql_swap_staged_dest
+
+                mysql_swap_staged_dest(
+                    dst_cur,
+                    dest_q=swap_dest_q,
+                    staging_q=dest_q,
+                    trash_q=_mysql_ident(swap_trash_table),
+                )
             dest_conn.commit()
             return out
     except Exception:

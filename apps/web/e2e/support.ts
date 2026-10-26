@@ -1,5 +1,23 @@
 import { expect, type Page } from "@playwright/test";
 
+/**
+ * Resolve a CSS custom property to its computed colour, the way the browser
+ * paints it — so assertions track the token, not a hex literal (UI-11:
+ * a brand repaint must never leave a stale `rgb(...)` in the suite).
+ * var() chains (--df-brand-tile → --df-logo-tile) resolve on a probe element.
+ */
+export async function tokenColor(page: Page, token: string): Promise<string> {
+  return page.evaluate((name) => {
+    const probe = document.createElement("div");
+    probe.style.backgroundColor = `var(${name})`;
+    probe.style.display = "none";
+    document.body.appendChild(probe);
+    const color = getComputedStyle(probe).backgroundColor;
+    probe.remove();
+    return color;
+  }, token);
+}
+
 export async function openStudio(page: Page, hash = "/#/transfer"): Promise<void> {
   await page.goto(hash);
   // The dev preview control stays in the DOM and is hidden so Sign in remains

@@ -147,6 +147,10 @@ def _fifo_mysql_into_mysql(
             stream.execute(select_sql)
             with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
                 while True:
+                    # D102: stop mid-COPY when the job was cancelled.
+                    from services.cancel_check import cancel_checkpoint
+
+                    cancel_checkpoint()
                     batch = stream.fetchmany(_FETCH_BATCH)
                     if not batch:
                         break
@@ -250,9 +254,23 @@ def copy_mysql_to_mysql(
             exists = dst_cur.fetchone() is not None
             existed_before = bool(exists)
             dest_occupied = False
+            swap_at_end = False
+            swap_dest_local = dest_local
             if replace_destination and exists:
-                dst_cur.execute(f"DROP TABLE IF EXISTS {dest_local}")  # nosec B608
-                dest_conn.commit()
+                # C03/X-OW2 — stage the overwrite, one atomic RENAME swap at
+                # the commit boundary; a DROP-first left the destination
+                # absent for the whole run (MySQL auto-commits DDL).
+                from services.dest_overwrite_swap import (
+                mysql_overwrite_trash_name,
+                mysql_staged_overwrite_name,
+            )
+
+                stage_table = mysql_staged_overwrite_name(dest_table)
+                swap_trash_table = mysql_overwrite_trash_name(dest_table)
+                dest_local = _mysql_ident(stage_table)
+                dest_ref = _qual(dest_db, stage_table)
+                dest_table = stage_table
+                swap_at_end = True
                 exists = False
             if exists:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {dest_local}")  # nosec B608
@@ -396,6 +414,16 @@ def copy_mysql_to_mysql(
                                 f"{dest_part} != source {part['source_count']} "
                                 f"(lo={part['lo']!r} hi={part['hi']!r})"
                             )
+            if swap_at_end:
+                from services.dest_overwrite_swap import mysql_swap_staged_dest
+
+                with dest_conn.cursor() as swap_cur:
+                    mysql_swap_staged_dest(
+                        swap_cur,
+                        dest_q=swap_dest_local,
+                        staging_q=dest_local,
+                        trash_q=_mysql_ident(swap_trash_table),
+                    )
             dest_conn.commit()
             try:
                 source_conn.commit()

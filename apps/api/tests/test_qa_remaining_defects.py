@@ -306,10 +306,11 @@ def test_injection_tail_is_bound_and_or_tail_is_not() -> None:
 def test_column_transforms_stamp_an_override() -> None:
     from src.ai.copilot.transfer_tools import _apply_column_transforms
 
-    rows = _apply_column_transforms(
+    rows, refusal = _apply_column_transforms(
         [{"source": "email", "target": "email", "transform": "none"}],
         {"email": "hash_pii"},
     )
+    assert refusal == ""
     assert rows[0]["transform"] == "hash_pii"
     assert rows[0]["transform_override"] is True
 

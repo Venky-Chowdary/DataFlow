@@ -14,6 +14,9 @@ class ConnectResult:
     #: Callers that resolve a name against this list must not read absence from
     #: a truncated page as proof the object does not exist.
     tables_truncated: bool = False
+    #: Optional name -> object kind (``"table"``/``"view"``/…) for entries in
+    #: ``tables``. Empty when the engine does not distinguish object kinds.
+    table_types: dict[str, str] | None = None
 
 
 @dataclass

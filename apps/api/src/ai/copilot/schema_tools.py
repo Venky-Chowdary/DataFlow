@@ -587,7 +587,15 @@ def _normalize_columns(info: dict[str, Any]) -> list[dict[str, Any]]:
                     c["nullable"] if "nullable" in c else nullability.get(name, True)
                 ),
                 "data_type": str(
-                    c.get("data_type") or c.get("column_type") or schema_map.get(name) or ""
+                    c.get("data_type")
+                    or c.get("column_type")
+                    # Engine-declared type (PRAGMA/information_schema) is the
+                    # honest `data_type`; inference is not the declared type.
+                    or c.get("declared_type")
+                    or c.get("native_type")
+                    or c.get("type")
+                    or schema_map.get(name)
+                    or ""
                 ),
             })
             seen.add(name)
@@ -836,6 +844,47 @@ def diff_schemas(
         for col in shared
         if str(src_map[col]).upper() != str(dst_map[col]).upper()
     ]
+    # Type differences are judged in the direction of the load (D43): writing
+    # source into destination loses only when the DESTINATION is the narrower
+    # carrier. The schema-evolution classifier compares dest→src, so every
+    # type-mismatched column is re-evaluated source→destination here —
+    # DataFlow's own widening (dest INT4→BIGINT for a safe source) and
+    # documented carriers (SQLite DECIMAL-as-TEXT) stay compatible.
+    from services.schema_drift import _is_type_narrow
+
+    dest_db = str((dst.output or {}).get("type") or "")
+    breaking: list[dict] = [
+        item for item in (classification.get("breaking") or [])
+        if item.get("kind") not in {"narrow_type", "type_change", "widen_type"}
+    ]
+    load_widening: list[dict] = []
+    for m in type_mismatches:
+        col = m["column"]
+        src_t, dst_t = m["source_type"], m["dest_type"]
+        if _is_type_narrow(src_t, dst_t, dest_db=dest_db):
+            breaking.append({
+                "kind": "dest_narrower_than_source",
+                "column": col,
+                "source_type": src_t,
+                "dest_type": dst_t,
+            })
+        else:
+            load_widening.append({
+                "kind": "dest_carries_source",
+                "column": col,
+                "source_type": src_t,
+                "dest_type": dst_t,
+            })
+    additive = [
+        item for item in (classification.get("additive") or [])
+        if item.get("kind") != "widen_type"
+    ]
+    if breaking:
+        severity = "breaking"
+    elif additive or load_widening:
+        severity = "additive"
+    else:
+        severity = "none"
     return _tool_result(
         "diff_schemas",
         success=True,
@@ -854,9 +903,10 @@ def diff_schemas(
             "only_in_source": only_src,
             "only_in_destination": only_dst,
             "type_mismatches": type_mismatches,
-            "severity": classification.get("severity"),
-            "additive": classification.get("additive") or [],
-            "breaking": classification.get("breaking") or [],
+            "severity": severity,
+            "additive": additive,
+            "dest_carries_source": load_widening,
+            "breaking": breaking,
         },
     )
 

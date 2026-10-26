@@ -2020,6 +2020,63 @@ def _pg_route_backup_connection(cfg: dict[str, Any]) -> Any:
     return conn
 
 
+def create_pg_table_backup(
+    cfg: dict[str, Any],
+    *,
+    schema: str,
+    table: str,
+    job_id: str,
+) -> dict[str, str] | None:
+    """Row-copy a live table to ``<table>__dfbak_<job8>`` before a strict
+    keyed write on a populated destination (D111).
+
+    The live table object is never renamed (P0-G1 — DDL/indexes/grants stay
+    bound); a post-write verification failure restores by DELETE + INSERT
+    FROM the backup via :func:`restore_pg_route_backups`, the exact pre-run
+    state. Returns the ``{table, backup, schema}`` pair for the
+    ``route_backups`` stamp, or None when the backup could not be taken
+    (the run proceeds; undo then reports honestly that no rollback exists).
+    """
+    from connectors.sql_identifiers import quote_table_ref, split_qualified_table
+
+    schema, table = split_qualified_table(str(table or ""), str(schema or "public"))
+    if not table:
+        return None
+    backup = pg_route_backup_name(table, job_id)
+    conn = None
+    try:
+        conn = _pg_route_backup_connection(cfg)
+        live_ref = quote_table_ref(table, schema, dialect="postgresql")
+        bak_ref = quote_table_ref(backup, schema, dialect="postgresql")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT 1 FROM information_schema.tables "
+                "WHERE table_schema = %s AND table_name = %s",
+                (schema, table),
+            )
+            if not cur.fetchone():
+                return None
+            cur.execute(f"DROP TABLE IF EXISTS {bak_ref}")
+            cur.execute(f"CREATE TABLE {bak_ref} (LIKE {live_ref} INCLUDING ALL)")
+            cur.execute(f"INSERT INTO {bak_ref} SELECT * FROM {live_ref}")
+    except Exception as exc:  # noqa: BLE001 - a missing backup must not abort the write
+        logger.warning(
+            "Strict-run backup copy of %s.%s skipped (%s); a post-write "
+            "proof failure cannot restore prior rows",
+            schema,
+            table,
+            exc,
+        )
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception as exc:  # noqa: BLE001 - close is best-effort
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+    return {"table": table, "backup": backup, "schema": schema}
+
+
 def pg_route_backup_name(table_name: str, job_id: str) -> str:
     """Backup identifier for a routed run, at most 63 bytes (PostgreSQL limit)."""
     suffix = f"__dfbak_{str(job_id or '')[:8]}"

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from connectors.saas_common import token
-from tests.saas_desktop_stub import STORE, _row_identity, start_saas_stub
+from tests.saas_desktop_stub import _row_identity, start_saas_stub
 
 
 def test_token_accepts_password_only_private_app() -> None:
@@ -27,15 +27,15 @@ def test_saas_stub_describe_and_upsert() -> None:
             timeout=5,
         )
         assert posted.status_code == 200
-        assert len(STORE.rows["Account"]) == 1
+        assert len(server.df_store.rows["Account"]) == 1
         posted2 = requests.post(
             f"{url}/services/data/v58.0/composite/sobjects",
             json={"records": [{"id": "1", "Name": "Acme Updated"}]},
             timeout=5,
         )
         assert posted2.status_code == 200
-        assert len(STORE.rows["Account"]) == 1
-        assert STORE.rows["Account"][0]["Name"] == "Acme Updated"
+        assert len(server.df_store.rows["Account"]) == 1
+        assert server.df_store.rows["Account"][0]["Name"] == "Acme Updated"
     finally:
         server.shutdown()
         server.server_close()
@@ -47,7 +47,7 @@ def test_rest_api_uniqueness_scan_uses_batch_reader() -> None:
 
     server, url = start_saas_stub()
     try:
-        seed_tabular_fixture()
+        seed_tabular_fixture(server)
         result = probe_source_duplicate_keys_result(
             source_config={
                 "type": "rest_api",
@@ -73,8 +73,8 @@ def test_hubspot_stub_upserts_by_request_id() -> None:
         import requests
         from tests.saas_desktop_stub import seed_tabular_fixture
 
-        seed_tabular_fixture()
-        assert len(STORE.rows["contacts"]) == 2
+        seed_tabular_fixture(server)
+        assert len(server.df_store.rows["contacts"]) == 2
         posted = requests.post(
             f"{url}/crm/v3/objects/contacts/batch/upsert",
             json={"inputs": [
@@ -84,8 +84,8 @@ def test_hubspot_stub_upserts_by_request_id() -> None:
             timeout=5,
         )
         assert posted.status_code == 200
-        assert len(STORE.rows["contacts"]) == 2
-        by_id = {_row_identity(r): r for r in STORE.rows["contacts"]}
+        assert len(server.df_store.rows["contacts"]) == 2
+        by_id = {_row_identity(r): r for r in server.df_store.rows["contacts"]}
         assert by_id["1"]["amount"] == "9.00"
     finally:
         server.shutdown()

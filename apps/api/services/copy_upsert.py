@@ -143,6 +143,12 @@ def merge_staging_into_dest(
     """
     dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
     preexisting = int(dst_cur.fetchone()[0])
+    # D102: the staging COPY probes per batch, but this merge is one big
+    # statement — refuse to start it after a cancel so a cancelled job does
+    # not report more committed rows than it was allowed to land.
+    from services.cancel_check import cancel_checkpoint
+
+    cancel_checkpoint()
     dst_cur.execute(merge_sql)
     dst_cur.execute(pk_join_count_sql(dest_q, staging_q, pk_ident))
     join_count = int(dst_cur.fetchone()[0])

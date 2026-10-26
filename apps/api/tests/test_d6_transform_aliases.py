@@ -23,8 +23,9 @@ def test_alias_applies_the_real_transform():
 
     value, err = apply_transform("  MiXeD  ", "lowercase")
     assert err is None
-    # apply_transform trims cell input before the case transform runs.
-    assert value == "mixed"
+    # D13: SQL LOWER/UPPER do not trim — per-character casing only; the
+    # explicit `trim` op owns whitespace stripping.
+    assert value == "  mixed  "
 
 
 def test_unknown_transform_message_names_the_valid_list():

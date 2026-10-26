@@ -815,7 +815,7 @@
             "type": "text",
             "optional": false,
             "sensitive": false,
-            "placeholder": "noreply@datawrap.app"
+            "placeholder": "noreply@example.com"
           },
           {
             "key": "database",
@@ -861,7 +861,7 @@
             "optional": false,
             "sensitive": false,
             "hint": "smtp:// or smtps:// URL. Use query params from= and to= for sender/recipients.",
-            "placeholder": "smtp://user:pass@smtp.gmail.com:587/?from=noreply@datawrap.app&to=alice@example.com"
+            "placeholder": "smtp://user:pass@smtp.gmail.com:587/?from=noreply@example.com&to=alice@example.com"
           }
         ]
       }

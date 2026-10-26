@@ -38,7 +38,7 @@ def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:
     try:
         from src.transfer.endpoint_intelligence import introspect_endpoint
 
-        endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source"}
+        endpoint.extra = {**(endpoint.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
         info = introspect_endpoint(endpoint)
     except Exception:
         logger.debug("live source introspect failed for endpoint", exc_info=True)
@@ -62,6 +62,7 @@ def endpoint_primary_key_columns(endpoint: Any) -> list[str]:
 
         extra = dict(getattr(endpoint, "extra", None) or {})
         extra["introspect_purpose"] = "source"
+        extra["introspect_strict"] = True
         endpoint.extra = extra
         info = introspect_endpoint(endpoint)
     except Exception:  # noqa: BLE001 — unread catalog blocks CDC; it does not approve it

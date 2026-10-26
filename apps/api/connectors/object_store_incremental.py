@@ -217,11 +217,19 @@ def _delimited_concat(existing: bytes, new: bytes) -> bytes | None:
 
 
 def _first_line(body: bytes) -> tuple[bytes, bytes]:
-    text = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    nl = text.find(b"\n")
-    if nl < 0:
-        return text, b""
-    return text[:nl], text[nl + 1 :]
+    # Split at the first line terminator (LF, CRLF, or bare CR) WITHOUT
+    # rewriting the rest — the returned tail is appended to the object
+    # byte-for-byte, and a quoted CSV field may legally carry CR (D108).
+    n = len(body)
+    nl = body.find(b"\n")
+    cr = body.find(b"\r")
+    if nl < 0 and cr < 0:
+        return body, b""
+    if nl >= 0 and (cr < 0 or nl < cr):
+        return body[:nl], body[nl + 1 :]
+    if cr + 1 < n and body[cr + 1 : cr + 2] == b"\n":
+        return body[:cr], body[cr + 2 :]
+    return body[:cr], body[cr + 1 :]
 
 
 def _merge_by_key(
@@ -333,13 +341,31 @@ def _parse_jsonl(raw: bytes, key: str) -> list[dict[str, Any]]:
 
 
 def _parse_delimited(body: bytes, delimiter: str, key: str) -> list[dict[str, Any]]:
+    from services.csv_codec import iter_csv_records
+    from services.value_serializer import SQL_NULL_SENTINEL, unescape_wire_text
+
     text = body.decode("utf-8-sig")
-    reader = csv.DictReader(io.StringIO(text), delimiter=delimiter)
-    if not reader.fieldnames:
+    # newline="" — the csv module requires it; the default universal-newlines
+    # mode would fold CR/CRLF inside quoted fields to LF on read (D108).
+    reader = iter_csv_records(io.StringIO(text, newline=""), delimiter)
+    header = next(reader, None)
+    if not header:
         raise ObjectMergeRefused(
             f"Object {key!r} has no header row; the existing object was not replaced."
         )
-    return [dict(row) for row in reader]
+    # C04: codec cells — unquoted empty is None, quoted "" is ''. The legacy
+    # __DF_SQL_NULL__ sentinel in objects written by older builds still decodes
+    # to NULL on read.
+    rows: list[dict[str, Any]] = []
+    for row in reader:
+        rec = dict(zip(header, row, strict=False))
+        for name, value in rec.items():
+            if value == SQL_NULL_SENTINEL:
+                rec[name] = None
+            else:
+                rec[name] = unescape_wire_text(value)
+        rows.append(rec)
+    return rows
 
 
 def _parse_parquet(body: bytes, key: str) -> list[dict[str, Any]]:

@@ -26,9 +26,17 @@ except ImportError:  # slim API hosts — the pure-Python path below still answe
 
 _vector_store: Optional["DataTransferVectorStore"] = None
 
-DEFAULT_PERSIST_DIR = getenv_brand("VECTOR_STORE_DIR",
-    os.path.join(os.path.dirname(__file__), "..", "..", "..", "data", "vector_store"),
-)
+def _default_persist_dir() -> str:
+    """One resolver for every writer — DATAFLOW_DATA_DIR isolation (X-DD)."""
+    override = getenv_brand("VECTOR_STORE_DIR", "").strip()
+    if override:
+        return override
+    from services.platform_config import data_dir
+    return str(data_dir() / "vector_store")
+
+
+# Backward-compat name; prefer _default_persist_dir() at call time.
+DEFAULT_PERSIST_DIR = _default_persist_dir()
 
 
 @dataclass
@@ -46,7 +54,7 @@ class DataTransferVectorStore:
     COLLECTION_NAME = "datatransfer_knowledge"
 
     def __init__(self, persist_dir: str | None = None):
-        self.persist_dir = persist_dir or DEFAULT_PERSIST_DIR
+        self.persist_dir = persist_dir or _default_persist_dir()
         self._backend = "memory"
         self._collection = None
         self._memory_docs: list[dict] = []

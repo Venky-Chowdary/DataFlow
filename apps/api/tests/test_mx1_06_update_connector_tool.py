@@ -47,7 +47,7 @@ def staged(monkeypatch):
     monkeypatch.setattr(
         _egress,
         "metadata_endpoint_refusal",
-        lambda host="", endpoint_url="", connection_string="", workspace_id="": "",
+        lambda host="", endpoint_url="", connection_string="", workspace_id="", **_kw: "",
     )
     return acks
 

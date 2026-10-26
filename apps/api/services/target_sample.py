@@ -137,9 +137,30 @@ def read_target_sample(
     )
 
     cols = columns or ["*"]
-    keys = [k for k in (key_values or []) if k is not None and k != ""][
-        : max(1, int(limit or 50))
-    ]
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    _raw_keys = list(key_values or [])
+    # D86 — a NULL key is a first-class key: a destination NULL key must match
+    # a source NULL key. The sentinel string is metadata, never a bind value —
+    # strip it here so it can never reach an IN (...) clause.
+    _keys_has_null = any(
+        k is None or k == "" or str(k).lower() == SQL_NULL_SENTINEL.lower()
+        for k in _raw_keys
+    )
+    keys = [
+        k
+        for k in _raw_keys
+        if k is not None and k != "" and str(k).lower() != SQL_NULL_SENTINEL.lower()
+    ][: max(1, int(limit or 50))]
+    if _keys_has_null and not keys:
+        # IN (NULL) never matches; the OR IS NULL branch does the matching and
+        # the existing `if keys and sort_key` guards stay satisfied.
+        keys = [None]
+
+    def _nk(key_col: str) -> str:
+        # IN (...) never matches NULL — keyed reads need an explicit IS NULL
+        # branch so a destination NULL key matches a source NULL key (D86).
+        return f" OR {key_col} IS NULL" if _keys_has_null else ""
 
     def _row_names(description: Any) -> list[str]:
         # When explicit columns were requested, trust the caller's keys so
@@ -209,7 +230,7 @@ def read_target_sample(
                                 conn,
                                 cur,
                                 f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
-                                f"WHERE {{key}} IN ({placeholders}) "
+                                f"WHERE {{key}} IN ({placeholders}){_nk(key_col)} "
                                 f"ORDER BY {order_sql} LIMIT %s",
                                 key_col,
                                 keys,
@@ -272,7 +293,7 @@ def read_target_sample(
                     placeholders = ",".join(["%s"] * len(keys))
                     cur.execute(
                         f"SELECT {mysql_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {mysql_order} LIMIT %s",
                         (*keys, int(limit)),
                     )
@@ -322,7 +343,7 @@ def read_target_sample(
                     placeholders = ",".join(["%s"] * len(keys))
                     cur.execute(
                         f"SELECT TOP ({lim}) {ss_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {ss_order}",
                         tuple(keys),
                     )
@@ -415,7 +436,7 @@ def read_target_sample(
                     placeholders = ",".join(f":k{i}" for i in range(len(keys)))
                     sql = (
                         f"SELECT {duckdb_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {duckdb_order} LIMIT :lim"
                     )
                 else:
@@ -537,7 +558,7 @@ def read_target_sample(
                         require_safe_identifier(sort_key, preserve_case=True)
                     )
                     placeholders = ",".join(["?"] * len(keys))
-                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}) ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
+                    sql = f"SELECT {sqlite_col_sql} FROM {table_ref} WHERE {key_col} IN ({placeholders}){_nk(key_col)} ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
                     cur = conn.execute(sql, [*keys, int(limit)])
                 else:
                     sql = f"SELECT {sqlite_col_sql} FROM {table_ref} ORDER BY {sqlite_order} LIMIT ?"  # nosec B608
@@ -726,7 +747,7 @@ def read_target_sample(
                         placeholders = ",".join(["%s"] * len(widened))
                         cur.execute(
                             f"SELECT {sf_col_sql} FROM {qualified_name} "  # nosec B608
-                            f"WHERE {key_col} IN ({placeholders}) "
+                            f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                             f"ORDER BY {sf_order} LIMIT %s",
                             (*widened, int(limit)),
                         )
@@ -790,7 +811,7 @@ def read_target_sample(
                     placeholders = ",".join(["?"] * len(widened_sorted))
                     sql = (
                         f"SELECT {col_sql} FROM `{table_id}` "  # nosec B608
-                        f"WHERE CAST({key_col} AS STRING) IN ({placeholders}) "
+                        f"WHERE CAST({key_col} AS STRING) IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {bq_order} LIMIT ?"
                     )
                     bq_params = [
@@ -931,7 +952,7 @@ def read_target_sample(
                     placeholders = ",".join(f":k{i}" for i in range(len(keys)))
                     sql = (
                         f"SELECT {db_col_sql} FROM {table_ref} "  # nosec B608
-                        f"WHERE {key_col} IN ({placeholders}) "
+                        f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {db_order} LIMIT :lim"
                     )
                 else:
@@ -1445,7 +1466,7 @@ def read_target_sample(
                     result = conn.execute(
                         sa.text(
                             f"SELECT {col_sql} FROM {from_sql} "  # nosec B608
-                            f"WHERE {key_col} IN ({placeholders}) "
+                            f"WHERE {key_col} IN ({placeholders}){_nk(key_col)} "
                             f"LIMIT {int(limit or 50)}"
                         ),
                         params,

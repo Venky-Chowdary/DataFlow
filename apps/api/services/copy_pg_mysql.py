@@ -435,8 +435,22 @@ def _fifo_copy_into_mysql(
     )
 
     def _produce(path: str) -> None:
+        class _CancelAwareWriter:
+            """D102: poll the job's cancel probe on every COPY write block."""
+
+            __slots__ = ("_writer",)
+
+            def __init__(self, writer):
+                self._writer = writer
+
+            def write(self, data):
+                from services.cancel_check import cancel_checkpoint
+
+                cancel_checkpoint()
+                return self._writer.write(data)
+
         with open(path, "wb", buffering=_PIPE_CHUNK) as writer:
-            src_cur.copy_expert(copy_sql, writer)
+            src_cur.copy_expert(copy_sql, _CancelAwareWriter(writer))
 
     def _consume(path: str) -> None:
         load_sql = build_load_data_sql(
@@ -446,6 +460,10 @@ def _fifo_copy_into_mysql(
         )
         apply_mysql_bulk_load_session(dst_cur)
         try:
+            # D102: refuse to start the one-statement LOAD after a cancel.
+            from services.cancel_check import cancel_checkpoint
+
+            cancel_checkpoint()
             dst_cur.execute(load_sql)
             dst_cur.execute("SHOW WARNINGS")
         finally:
@@ -681,8 +699,22 @@ def copy_postgres_to_mysql(
             exists = dst_cur.fetchone() is not None
             existed_before = bool(exists)
             dest_occupied = False
+            swap_at_end = False
+            swap_dest_q = table_q
             if replace_destination and exists:
-                dst_cur.execute(f"DROP TABLE IF EXISTS {table_q}")  # nosec B608
+                # C03/X-OW2 — stage the overwrite, one atomic RENAME swap at
+                # the commit boundary; a DROP-first left the destination
+                # absent for the whole run (MySQL auto-commits DDL).
+                from services.dest_overwrite_swap import (
+                mysql_overwrite_trash_name,
+                mysql_staged_overwrite_name,
+            )
+
+                stage_table = mysql_staged_overwrite_name(dest_table)
+                swap_trash_table = mysql_overwrite_trash_name(dest_table)
+                table_q = _mysql_ident(stage_table)
+                dest_table = stage_table
+                swap_at_end = True
                 exists = False
             if exists:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
@@ -889,6 +921,15 @@ def copy_postgres_to_mysql(
                             f"{dest_part} != source {part['source_count']} "
                             f"(lo={part['lo']!r} hi={part['hi']!r})"
                         )
+            if swap_at_end:
+                from services.dest_overwrite_swap import mysql_swap_staged_dest
+
+                mysql_swap_staged_dest(
+                    dst_cur,
+                    dest_q=swap_dest_q,
+                    staging_q=table_q,
+                    trash_q=_mysql_ident(swap_trash_table),
+                )
             dest_conn.commit()
             source_conn.commit()
             proof = f"dest_count:{dest_count}"

@@ -11,6 +11,7 @@ Algorithms:
 
 from __future__ import annotations
 
+from services.sync_cursor import contract_cursor_field
 import hashlib
 import re
 from dataclasses import dataclass, field
@@ -308,7 +309,7 @@ def validate_sync_contract(contract: dict[str, Any]) -> list[str]:
     mode = (contract.get("sync_mode") or "").lower()
     if mode not in {"incremental_append", "incremental_deduped", "cdc"}:
         return issues
-    if not (contract.get("cursor_field") or contract.get("cursor")):
+    if not contract_cursor_field(contract):
         issues.append("Incremental sync requires cursor_field")
     if mode in {"incremental_deduped", "cdc"}:
         pk = contract.get("primary_key") or (

@@ -754,20 +754,41 @@ def read_postgres_rows(
     )
     cursor_name = f"df_ladder_{uuid.uuid4().hex}"
     try:
+        # Project json/jsonb as engine text — psycopg2 decodes jsonb into
+        # Python, after which JSON ``null`` is indistinguishable from SQL
+        # NULL (and ``"1"``/``1`` collapse). The transfer reader projects
+        # ``col::text`` for the same reason; the independent re-read must
+        # fingerprint the same values (D75).
+        # Introspection runs on a normal cursor: psycopg2 named cursors
+        # accept exactly one execute(), which must be the population SELECT.
+        from connectors.postgresql_reader import (
+            _json_column_names,
+            _ordered_column_names,
+        )
+
+        with conn.cursor() as probe:
+            json_cols = _json_column_names(probe, schema_n, table)
+            names = columns
+            if names is None:
+                names = _ordered_column_names(probe, schema_n, table)
         with conn.cursor(name=cursor_name) as cur:
             cur.itersize = _READ_BATCH
-            if columns:
-                col_sql = sql.SQL(", ").join(map(sql.Identifier, columns))
-                q = sql.SQL("SELECT {} FROM {}.{}").format(
-                    col_sql,
-                    sql.Identifier(schema_n),
-                    sql.Identifier(table),
+            if json_cols:
+                col_sql = sql.SQL(", ").join(
+                    sql.SQL(
+                        "CASE WHEN {c} IS NULL THEN NULL ELSE {c}::text END AS {c}"
+                    ).format(c=sql.Identifier(n))
+                    if n in json_cols
+                    else sql.Identifier(n)
+                    for n in names
                 )
             else:
-                q = sql.SQL("SELECT * FROM {}.{}").format(
-                    sql.Identifier(schema_n),
-                    sql.Identifier(table),
-                )
+                col_sql = sql.SQL(", ").join(map(sql.Identifier, names))
+            q = sql.SQL("SELECT {} FROM {}.{}").format(
+                col_sql,
+                sql.Identifier(schema_n),
+                sql.Identifier(table),
+            )
             cur.execute(q)
             rows: list[dict[str, Any]] = []
             names: list[str] = []
@@ -900,6 +921,91 @@ def read_sqlserver_rows(
             rows.extend(_row_cells(dict(zip(names, rec))) for rec in batch)
             if max_rows and len(rows) > max_rows:
                 raise PopulationTooLarge(len(rows), max_rows)
+    finally:
+        conn.close()
+
+
+def read_snowflake_rows(
+    *,
+    host: str,
+    database: str,
+    username: str,
+    password: str,
+    schema: str,
+    table: str,
+    columns: list[str] | None = None,
+    connection_string: str = "",
+    warehouse: str = "",
+    max_rows: int = MAX_LADDER_ROWS,
+) -> list[dict[str, Any]]:
+    """Population read of a Snowflake table, bounded by the ladder row budget.
+
+    Without it every Snowflake destination declined the cell-value ladder
+    (``destination_engine_not_in_ladder``) and a keyed incremental run could
+    never earn the independent re-read verdict (D3). The connector returns
+    VARIANT/OBJECT/ARRAY as their JSON text, so no ``TO_VARCHAR`` projection
+    is needed — the write-pass fingerprint sees the same shape.
+    """
+    from connectors.snowflake_conn import (
+        get_connection,
+        normalize_account,
+        resolve_or_fold_snowflake_table,
+        snowflake_qualified_table,
+    )
+    from connectors.sql_identifiers import (
+        quote_column_list,
+        quote_sql_identifier,
+        require_safe_identifier,
+        snowflake_fold_identifier,
+    )
+
+    conn = get_connection(
+        account=normalize_account(host),
+        username=username,
+        password=password,
+        database=database,
+        schema=snowflake_fold_identifier(schema or "PUBLIC"),
+        warehouse=warehouse,
+        connection_string=connection_string,
+    )
+    try:
+        with conn.cursor() as cur:
+            if warehouse:
+                try:
+                    wh = require_safe_identifier(warehouse, preserve_case=True)
+                    cur.execute(f"USE WAREHOUSE {quote_sql_identifier(wh)}")
+                except Exception:
+                    pass
+            resolved = resolve_or_fold_snowflake_table(
+                cur, snowflake_fold_identifier(schema or "PUBLIC"), table
+            )
+            qualified = snowflake_qualified_table(
+                snowflake_fold_identifier(schema or "PUBLIC"), resolved
+            )
+            col_sql = (
+                "*"
+                if not columns
+                else quote_column_list(
+                    [
+                        require_safe_identifier(c, preserve_case=True)
+                        for c in columns
+                    ]
+                )
+            )
+            cur.execute(f"SELECT {col_sql} FROM {qualified}")  # nosec B608
+            rows: list[dict[str, Any]] = []
+            names: list[str] = []
+            while True:
+                batch = cur.fetchmany(_fetch_size(max_rows, len(rows)))
+                if not batch:
+                    return rows
+                if not names:
+                    names = (
+                        [d[0] for d in cur.description] if cur.description else []
+                    )
+                rows.extend(_row_cells(dict(zip(names, rec))) for rec in batch)
+                if max_rows and len(rows) > max_rows:
+                    raise PopulationTooLarge(len(rows), max_rows)
     finally:
         conn.close()
 

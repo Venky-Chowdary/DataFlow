@@ -447,10 +447,12 @@ def _unwire_quarantine_detail(detail: dict[str, Any]) -> dict[str, Any]:
     Re-encoding a real None reproduces the sentinel downstream, so writers
     still land NULL.
     """
-    from services.value_serializer import SQL_NULL_SENTINEL
+    from services.value_serializer import SQL_NULL_SENTINEL, unescape_wire_text
 
     def _u(value: Any) -> Any:
-        return None if isinstance(value, str) and value.strip() == SQL_NULL_SENTINEL else value
+        if isinstance(value, str) and value.strip() == SQL_NULL_SENTINEL:
+            return None
+        return unescape_wire_text(value)
 
     changed = dict(detail)
     row = changed.get("row")

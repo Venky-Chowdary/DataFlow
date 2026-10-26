@@ -527,6 +527,11 @@ class _CopyExecutemanySink:
     def _flush_batch(self) -> None:
         if not self._batch:
             return
+        # D102: a cancel stops the next batch — without this probe the whole
+        # COPY ran to completion before the engine's checkpoint noticed it.
+        from services.cancel_check import cancel_checkpoint
+
+        cancel_checkpoint(self.rows)
         bulk_executemany(
             self._cur,
             self._insert_sql,
@@ -678,9 +683,23 @@ def copy_postgres_to_sqlserver(
             exists = _ss_table_exists(dst_cur, dst_schema, dest_table)
             existed_before = bool(exists)
             dest_occupied = False
+            swap_at_end = False
+            swap_schema = dst_schema
+            swap_dest_ref = dest_ref
+            swap_dest_table = dest_table
             if replace_destination and exists:
-                dst_cur.execute(_ss_drop_sql(dest_ref))
-                dest_conn.commit()
+                # C03/X-OW2 — stage the overwrite, sp_rename swap inside the run
+                # transaction: the old dest stays visible until COMMIT.
+                from services.dest_overwrite_swap import (
+                    overwrite_trash_name,
+                    staged_overwrite_name,
+                )
+
+                stage_table = staged_overwrite_name(dest_table)
+                swap_trash_table = overwrite_trash_name(dest_table)
+                dest_ref = _ss_table_ref(swap_schema, stage_table)
+                dest_table = stage_table
+                swap_at_end = True
                 exists = False
             if exists:
                 dest_occupied = _ss_count(dst_cur, dest_ref) > 0
@@ -876,6 +895,19 @@ def copy_postgres_to_sqlserver(
                             f"{dest_part} != source {part['source_count']} "
                             f"(lo={part['lo']!r} hi={part['hi']!r})"
                         )
+            if swap_at_end:
+                from services.dest_overwrite_swap import sqlserver_swap_staged_dest
+
+                sqlserver_swap_staged_dest(
+                    dst_cur,
+                    schema=swap_schema,
+                    dest_table=swap_dest_table,
+                    staging_table=dest_table,
+                    trash_table=swap_trash_table,
+                    quote=_ss_ident,
+                )
+            dest_ref = swap_dest_ref
+            dest_table = swap_dest_table
             dest_conn.commit()
             source_conn.commit()
             proof = f"dest_count:{dest_count}"

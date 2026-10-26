@@ -123,12 +123,20 @@ def opening_analysis_message(stream_contracts: list | None = None) -> str:
 def opening_batch_message(
     total_rows: int | None,
     stream_contracts: list | None = None,
+    *,
+    delta: bool = False,
 ) -> str:
     """Row count on the opening write line.
 
     For one table that count is the transfer. For several tables the peek is
     the restored endpoint, and each table is written on its own afterwards.
+    A bounded incremental run does not stream the whole table — quoting the
+    full-table count on a 6-row delta was a lie (M4); the delta size is only
+    known after the bound read, so the opening line says what it is without
+    a number.
     """
+    if delta:
+        return "Streaming new or updated rows in batches…"
     label = row_count_label(total_rows)
     count = len(selected_contract_names(stream_contracts))
     if count >= 2:
@@ -159,6 +167,11 @@ def batch_write_message(
     multi = len(selected_contract_names(stream_contracts)) >= 2 and bool(stream)
     if is_cdc:
         base = f"CDC applied {int(rows):,} change(s)"
+    elif int(chunk) > int(chunks):
+        # D102: the pre-loop chunk estimate bottoms out at 1 when the source
+        # cannot report a row count — printing "batch 7/1" claims a total we
+        # never knew. Name the batch without inventing a denominator.
+        base = f"Writing batch {int(chunk)} ({int(rows):,} rows)"
     else:
         base = f"Writing batch {int(chunk)}/{int(chunks)} ({int(rows):,} rows)"
     if multi:

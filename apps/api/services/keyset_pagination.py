@@ -212,6 +212,27 @@ def compare_keyset_bookmark(left: str, right: str) -> int | None:
     return 0
 
 
+def header_column_index(headers: Sequence[str], name: str) -> int | None:
+    """Index of ``name`` in ``headers``: exact match first, then a single
+    unambiguous case-folded match.
+
+    Engines that fold unquoted identifiers to upper case (Snowflake, Oracle)
+    return result headers in the folded case, so a contract-declared column
+    name (``seq``) is not a positional match for the read page (``SEQ``).
+    An ambiguous fold — two headers differing only by case — returns None:
+    picking one would compare or mark the wrong column.
+    """
+    try:
+        return list(headers).index(name)
+    except ValueError:
+        folded = [
+            i
+            for i, h in enumerate(headers)
+            if isinstance(h, str) and h.casefold() == name.casefold()
+        ]
+        return folded[0] if len(folded) == 1 else None
+
+
 def max_keyset_bookmark(
     rows: list[list[Any]],
     headers: list[str],
@@ -221,9 +242,8 @@ def max_keyset_bookmark(
     cols = [c for c in key_columns if c]
     if not cols or not rows:
         return None
-    try:
-        idxs = [headers.index(c) for c in cols]
-    except ValueError:
+    idxs = [header_column_index(headers, c) for c in cols]
+    if any(i is None for i in idxs):
         return None
 
     candidates: list[list[str]] = []

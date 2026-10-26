@@ -104,11 +104,15 @@ def get_connection(
                         ep["host"],
                         fallback_sslmode,
                     )
-            except psycopg2.Error:
+            except psycopg2.Error as second_exc:
+                # The retry's error is the truth — the first failure was for a
+                # *different* sslmode. Raising first_exc reports the stale
+                # "server does not support SSL" and hides the real reason the
+                # working-mode connection failed (CI-1 PG-SSL masking).
                 hint = private_cloud_host_hint(ep["host"], connection_string)
                 if hint:
-                    raise RuntimeError(f"{first_exc}{hint}") from first_exc
-                raise first_exc
+                    raise RuntimeError(f"{second_exc}{hint}") from second_exc
+                raise second_exc from first_exc
         else:
             hint = private_cloud_host_hint(ep["host"], connection_string)
             if hint:

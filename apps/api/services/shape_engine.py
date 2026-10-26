@@ -149,6 +149,12 @@ class ShapeEffect:
     rows_buffered: int = 0
     cells_changed: int = 0
     nulls_introduced: int = 0
+    # Rows a union step's secondary input appended at drain — also counted in
+    # rows_in (they enter the pipeline) but tracked separately so the write
+    # ledger can fold them into the expansion term: source_row_count covers
+    # reads only, so without this the appended rows read as unexplained
+    # extras on the destination.
+    rows_union_appended: int = 0
     steps: list[StepEffect] = field(default_factory=list)
     diverted_samples: list[DivertedRow] = field(default_factory=list)
     # Rows per named router output — the per-route conservation ledger.
@@ -758,6 +764,7 @@ class ShapeEngine:
                 if emitted:
                     tally.rows_in += emitted
                     self.effect.rows_in += emitted
+                    self.effect.rows_union_appended += emitted
             else:
                 materialized = self._drain_step(step, index, buffer)
                 held = self._held.pop(index, 0)
@@ -1819,8 +1826,11 @@ def _transform_value(step: ShapeStep, value: Any) -> Any:
             scale=options.get("scale"),
             timezone=options.get("timezone"),
         )
-    if op in ("hash_pii", "mask_pii"):
-        if is_blank(value):
+    if op in ("hash_pii", "mask_pii", "redact"):
+        # All three governance ops are deterministic — the proof re-applies
+        # them so a dropped step or a wrong token becomes a provable defect
+        # (D15), not a silently skipped fingerprint.
+        if op in ("hash_pii", "mask_pii") and is_blank(value):
             return None
         if op == "mask_pii" and options.get("pattern"):
             return _mask_pattern(str(value), str(options["pattern"]))

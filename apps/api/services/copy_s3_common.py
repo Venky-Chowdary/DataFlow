@@ -280,21 +280,16 @@ def s3_csv_cell(value: object) -> str:
 
 
 def s3_csv_quote(cell: str) -> str:
-    if cell == _CSV_NULL:
-        return ""
-    if cell == "":
-        return '""'
-    if cell == "\\N":
-        return "\\N"
-    if any(c in cell for c in ',\"\n\r'):
-        return '"' + cell.replace('"', '""') + '"'
-    return cell
+    from services.csv_codec import csv_quote_cell
+
+    return csv_quote_cell(cell)
 
 
 def s3_format_delimited_row(cells: Sequence[str], delimiter: str) -> str:
-    if delimiter == "\t":
-        return "\t".join("" if c == _CSV_NULL else c for c in cells)
-    return ",".join(s3_csv_quote(c) for c in cells)
+    # C04: one codec — NULL is an empty unquoted cell, '' is quoted "".
+    from services.csv_codec import format_csv_row
+
+    return format_csv_row(list(cells), delimiter)
 
 
 def s3_write_delimited(
@@ -334,9 +329,15 @@ def s3_iter_delimited_rows(
     path: str,
     delimiter: str,
 ) -> Iterator[list[str | None]]:
-    """Yield data rows (header skipped). ``\\N`` becomes None; ``""`` stays ``""``."""
+    """Yield data rows (header skipped) decoded by the C04 codec.
+
+    An unquoted empty field is ``None`` (SQL NULL), a quoted ``""`` is ``''``,
+    and the legacy ``\\N`` spelling still reads as NULL.
+    """
+    from services.csv_codec import iter_csv_records
+
     with open(path, encoding="utf-8", newline="") as handle:
-        reader = csv.reader(handle, delimiter=delimiter)
+        reader = iter_csv_records(handle, delimiter)
         header = next(reader, None)
         if header is None:
             return
@@ -346,4 +347,4 @@ def s3_iter_delimited_rows(
                 raise ValueError(
                     f"CSV row width {len(row)} != header {expected}"
                 )
-            yield [s3_parse_delimited_cell(c) for c in row]
+            yield row

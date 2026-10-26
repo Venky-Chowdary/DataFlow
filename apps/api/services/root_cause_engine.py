@@ -409,6 +409,13 @@ def _is_fidelity_signal(
         return False
     if _is_uniqueness_probe_signal(message, details, gate_id):
         return False
+    if _is_expectation_signal(message, details, gate_id):
+        # expect_column_not_null:order_id & friends are data-quality
+        # expectation findings on sampled values. The g9 summary still says
+        # "integrity failed", which used to absorb them into "Lossy /
+        # fidelity collapse" — pointing operators at a type-path remap when
+        # the failing gate is the expectation suite (M16).
+        return False
     if _FIDELITY_RE.search(blob):
         return True
     if _TYPE_ARROW_RE.search(blob) and gate_id in _FIDELITY_GATE_IDS:
@@ -447,6 +454,33 @@ def _is_uniqueness_probe_signal(
     if status == "error" and "probe" in blob:
         return True
     return False
+
+
+_EXPECTATION_ISSUE_RE = re.compile(r"^expect_[a-z0-9_]+", re.I)
+
+
+def _is_expectation_signal(
+    message: str,
+    details: dict[str, Any] | None,
+    gate_id: str,
+) -> bool:
+    """True when G9 blocked on expectation-suite findings only.
+
+    Issues read ``expect_column_not_null:order_id: 3 failures`` — sampled
+    data-quality findings, not a declared type-path collapse. Any real
+    fidelity stamp or a non-expectation issue keeps the gate a fidelity
+    signal.
+    """
+    details = details or {}
+    if details.get("fidelity_collapse") is True:
+        return False
+    if str(gate_id or "") != "g9_data_integrity":
+        return False
+    issues = details.get("issue_texts") or details.get("issues") or []
+    texts = [str(i) for i in issues[:20] if str(i).strip()]
+    return bool(texts) and all(
+        bool(_EXPECTATION_ISSUE_RE.match(t.lstrip())) for t in texts
+    )
 
 
 def _is_encoding_signal(
@@ -497,6 +531,14 @@ def _is_transform_error_signal(
         if "cannot coerce" in str(issue).lower():
             return True
     return False
+
+
+def _is_upsert_ddl_signal(details: dict[str, Any] | None) -> bool:
+    """D101 — upsert into an existing table that lacks a unique key on the
+    conflict columns. DataFlow disclosed the DDL it would run; it is not a
+    source-duplicate finding and must not fold into duplicate_identity."""
+    details = details or {}
+    return str(details.get("rule_id") or "") == "g_upsert_dest_key"
 
 
 def _is_destination_collision_signal(details: dict[str, Any] | None) -> bool:
@@ -1553,6 +1595,86 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             )
         )
 
+    upsert_ddl_findings = [
+        item
+        for item in (
+            *[g for g in gates if g.get("status") == "block"],
+            *blockers,
+        )
+        if _is_upsert_ddl_signal(item.get("details") or {})
+    ]
+    if upsert_ddl_findings:
+        absorbed = sorted(
+            {str(i.get("id")) for i in upsert_ddl_findings if i.get("id")}
+        )
+        details = upsert_ddl_findings[0].get("details") or {}
+        cols = list(details.get("upsert_key_columns") or [])
+        planned_ddl = str(details.get("planned_ddl") or "")
+        dup_keys = details.get("duplicate_key_count")
+        approved = bool(details.get("ddl_acknowledged"))
+        if dup_keys:
+            summary = (
+                f"Upsert into this existing table keys on "
+                f"({', '.join(cols)}), but the destination holds "
+                f"{dup_keys} duplicate key value(s) "
+                f"({details.get('duplicate_row_count') or 0} rows) and has no "
+                f"unique constraint — the merge cannot be keyed safely"
+            )
+        else:
+            summary = (
+                f"Upsert into this existing table keys on "
+                f"({', '.join(cols)}) but the destination has no unique "
+                f"constraint on those columns — DataFlow would need to run: "
+                f"{planned_ddl}"
+            )
+        roots.append(
+            MigrationRootCause(
+                root_id=_root_id("upsert_dest_ddl", cols, absorbed),
+                kind="upsert_dest_ddl",
+                title=(
+                    "Duplicate upsert keys in destination"
+                    if dup_keys
+                    else "Upsert needs destination unique key"
+                ),
+                summary=summary,
+                business_impact=(
+                    "Without the unique constraint the merge cannot land "
+                    "deterministically — the run fails, or rows land "
+                    "duplicated."
+                ),
+                affected_columns=cols,
+                affected_rows_sample=sample_n,
+                estimated_total_rows=est_n,
+                risk_level="high",
+                recommended_fix=(
+                    "Deduplicate the destination on the upsert key, then "
+                    "approve the disclosed DDL at Validate"
+                    if dup_keys
+                    else "Approve the disclosed destination DDL at Validate "
+                    "and re-run"
+                ),
+                alternative_fixes=[
+                    "Create a unique constraint on the upsert key yourself, then re-validate",
+                    "Pick different upsert key columns",
+                    "Run full refresh overwrite instead of upsert",
+                ],
+                recovery_strategy=(
+                    "Nothing was written, so no cleanup is needed — resolve "
+                    "the key and re-run Validate."
+                ),
+                expected_runtime_impact=(
+                    "Creating the disclosed unique index is a one-time DDL "
+                    "on the destination table"
+                ),
+                quarantine_policy="n/a — the batch is refused before any write",
+                rollback_policy="DOCUMENT_ONLY",
+                documentation="docs/MIGRATION_ROLLBACK.md",
+                impacted_gates=absorbed,
+                absorbed_blocker_ids=absorbed,
+                severity="block",
+            )
+        )
+
     probe_gates = [
         g
         for g in gates
@@ -1645,6 +1767,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         for g in gates
         if g.get("status") == "block"
         and not _is_destination_collision_signal(g.get("details") or {})
+        and not _is_upsert_ddl_signal(g.get("details") or {})
         and not _is_uniqueness_probe_signal(
             str(g.get("message") or ""), g.get("details") or {}, str(g.get("id") or "")
         )
@@ -1654,6 +1777,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         b
         for b in _raw_signal_blockers(blockers)
         if not _is_destination_collision_signal(b.get("details") or {})
+        and not _is_upsert_ddl_signal(b.get("details") or {})
         and not _is_uniqueness_probe_signal(
             str(b.get("message") or ""), b.get("details") or {}, str(b.get("id") or "")
         )

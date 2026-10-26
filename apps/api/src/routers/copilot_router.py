@@ -387,6 +387,69 @@ async def _run_lifecycle_confirm(
             "name": payload.get("name") or "",
             **outcome,
         }
+    if kind == "clear_cursor_resnapshot":
+        from services.sync_cursor import clear_watermark
+
+        cursor_key = str(payload.get("cursor_key") or "").strip()
+        if not cursor_key:
+            raise HTTPException(status_code=400, detail="cursor_key is required")
+        role, actor = _caller(http_request)
+        result = clear_watermark(cursor_key)
+        result["actor"] = actor or None
+        result["reason_note"] = (str(payload.get("reason") or "").strip() or None)
+        if result.get("reason") == "missing_cursor_key":
+            raise HTTPException(status_code=400, detail="cursor_key is required")
+        return result
+    if kind == "rebaseline_transfer":
+        from services.append_continuity import RebaselineError, rebaseline
+        from services.connector_store import get_connector, list_connectors
+        from ..transfer.adapters import resolve_endpoint
+        from ..transfer.models import EndpointConfig
+
+        reason = str(payload.get("reason") or "").strip()
+        if not reason:
+            raise HTTPException(
+                status_code=422, detail="A reason is required to rebaseline."
+            )
+        cid = str(payload.get("connector_id") or "").strip()
+        cname = str(payload.get("name") or "").strip()
+        conn = None
+        if cid:
+            conn = get_connector(cid, workspace_id=workspace_id or None)
+        elif cname:
+            conn = next(
+                (
+                    c
+                    for c in list_connectors(workspace_id=workspace_id or None)
+                    if str(getattr(c, "name", "") or "").strip() == cname
+                ),
+                None,
+            )
+        if not conn:
+            raise HTTPException(
+                status_code=404, detail="Destination connector not found"
+            )
+        cfg = {
+            key: getattr(conn, key)
+            for key in (
+                "type", "host", "port", "database", "username", "password",
+                "schema", "connection_string", "ssl", "warehouse", "auth_mode",
+                "auth_role", "api_key", "service_account", "private_key",
+                "endpoint_url", "path_style", "auth_source",
+            )
+        }
+        cfg.update(conn.extra or {})
+        table = str(payload.get("table") or "").strip()
+        if table:
+            cfg["table"] = table
+        role, actor = _caller(http_request)
+        dst = resolve_endpoint(EndpointConfig.from_dict("database", cfg))
+        try:
+            return await asyncio.to_thread(
+                rebaseline, dst, actor=actor or "", reason=reason
+            )
+        except RebaselineError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
     if kind == "update_schedule":
         # Cadence and name only. Connectors, tables, mappings, and sync mode
         # stay on the stored schedule — this patch must not re-plan the route.

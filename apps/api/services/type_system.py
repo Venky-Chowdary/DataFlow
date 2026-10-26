@@ -569,6 +569,26 @@ DDL_TYPES: Final[dict[str, dict[str, str]]] = {
         LOGICAL_ARRAY: "object",
         LOGICAL_BINARY: "binary",
     },
+    # Kafka is a JSON wire, not a DDL engine — carriers are the logical
+    # spellings ``to_json_value`` binds natively: numbers stay numbers,
+    # booleans stay booleans, decimals keep exact precision (JSON number when
+    # exactly representable, declared string otherwise), datetimes go out
+    # ISO-8601. Stamping TEXT here stringified every cell (D88).
+    "kafka": {
+        LOGICAL_STRING: "string",
+        LOGICAL_TEXT: "string",
+        LOGICAL_INTEGER: "integer",
+        LOGICAL_DECIMAL: "decimal",
+        LOGICAL_FLOAT: "float",
+        LOGICAL_BOOLEAN: "boolean",
+        LOGICAL_DATE: "date",
+        LOGICAL_DATETIME: "datetime",
+        LOGICAL_TIME: "time",
+        LOGICAL_UUID: "string",
+        LOGICAL_JSON: "json",
+        LOGICAL_ARRAY: "array",
+        LOGICAL_BINARY: "string",
+    },
     # Engines reached via generic_sql — keep DDL honest for preflight.
     "duckdb": {
         LOGICAL_STRING: "VARCHAR",
@@ -798,6 +818,7 @@ DEFAULT_DDL: Final[dict[str, str]] = {
     "databricks": "STRING",
     "iceberg": "string",
     "redis": "string",
+    "kafka": "string",
     "dynamodb": "S",
     "elasticsearch": "text",
     "duckdb": "VARCHAR",
@@ -1300,12 +1321,15 @@ def bare_decimal_is_unbounded(*, dest_db: str = "") -> bool:
 
     PostgreSQL: ``NUMERIC`` / ``DECIMAL`` without (p,s) stores arbitrary precision
     (implementation limits). Oracle bare ``NUMBER`` is likewise unconstrained.
+    Kafka's ``decimal`` is not a DDL type at all — it is the JSON carrier
+    ``to_json_value`` binds, keeping exact precision (JSON number when exactly
+    representable, declared string otherwise), so no (p,s) comparison applies.
     MySQL bare DECIMAL invents ``DECIMAL(10,0)``; Snowflake bare NUMBER invents
     ``NUMBER(38,0)``; SQL Server bare DECIMAL invents ``DECIMAL(18,0)``.
     Unknown dest stays conservative (not unbounded).
     """
     db = _normalize_dest_db(dest_db) if dest_db else ""
-    return db in {"postgresql", "oracle", "oracledb"}
+    return db in {"postgresql", "oracle", "oracledb", "kafka"}
 
 
 #: IEEE 754-2008 decimal128 carries 34 significant decimal digits (exponent
@@ -3073,6 +3097,7 @@ _TZ_NAIVE_DDL: Final[dict[str, str]] = {
     # Keep lakehouse NTZ spellings aligned with DDL_TYPES[LOGICAL_DATETIME].
     # Databricks TIMESTAMP is session-TZ aware; NTZ sources must stamp TIMESTAMP_NTZ.
     "databricks": "TIMESTAMP_NTZ",
+    "kafka": "datetime",
     "clickhouse": "DateTime64(3)",
     "trino": "timestamp(3)",
     "presto": "timestamp",
@@ -3199,6 +3224,7 @@ _TZ_LTZ_DDL: Final[dict[str, str]] = {
     "clickhouse": "DateTime64(6, 'UTC')",
     "trino": "timestamp(6) with time zone",
     "iceberg": "timestamptz",
+    "kafka": "timestamptz",
 }
 _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "snowflake": "TIMESTAMP_TZ",
@@ -3218,6 +3244,7 @@ _TZ_OFFSET_DDL: Final[dict[str, str]] = {
     "clickhouse": "DateTime64(6, 'UTC')",
     "trino": "timestamp(6) with time zone",
     "iceberg": "timestamptz",
+    "kafka": "timestamptz",
 }
 
 
@@ -6929,6 +6956,12 @@ def destination_temporal_fractional_digits(
             return 3
         # MySQL/Maria/unknown bare DATETIME is FSP 0 — fail closed.
         return 0
+    if bare == "DATE" and db in _INSTANT_ONLY_TEMPORAL_ENGINES:
+        # BSON ``date`` is epoch milliseconds — the document store's only
+        # temporal carrier holds three fractional digits; reading it as a
+        # calendar DATE is what made the verdict label flip between "date"
+        # and "TIMESTAMPTZ(6)".
+        return 3
     return None
 
 

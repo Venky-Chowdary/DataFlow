@@ -18,7 +18,9 @@ PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
     "phone": re.compile(r"\b(?:\+?\d{1,3}[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b"),
     "ssn": re.compile(r"\b\d{3}-\d{2}-\d{4}\b"),
-    "credit_card": re.compile(r"\b(?:\d{4}[-\s]?){3}\d{4}\b"),
+    # PAN candidate: 13-19 digits, space/dash separators. Luhn-validated in
+    # pii_findings / _redact_text — a bare 16-digit run is NOT a card number.
+    "pci_pan": re.compile(r"\b\d(?:[\d -]{11,22}\d)\b"),
     "ip_address": re.compile(r"\b(?:\d{1,3}\.){3}\d{1,3}\b"),
 }
 
@@ -108,6 +110,39 @@ def _is_decimal_literal(text: str) -> bool:
         return False
 
 
+def luhn_valid(digits: str) -> bool:
+    """Luhn check on a card-number-shaped string (13-19 digits = PCI PAN range).
+
+    The input must be *only* digits plus the space/dash separators a printed
+    card number uses. Hex/UUID/ObjectId-looking values also contain 13-19
+    extractable digits — without this check a Mongo ``_id`` or a hex key can
+    Luhn-validate by chance and read as a PAN (X-MG1)."""
+    raw = (digits or "").strip()
+    if not raw or re.search(r"[^\d -]", raw):
+        return False
+    d = re.sub(r"\D", "", raw)
+    if not (13 <= len(d) <= 19) or not d.isdigit():
+        return False
+    total = 0
+    for i, ch in enumerate(reversed(d)):
+        n = int(ch)
+        if i % 2 == 1:
+            n *= 2
+            if n > 9:
+                n -= 9
+        total += n
+    return total % 10 == 0
+
+
+def _pci_pan_matches(text: str) -> list[str]:
+    """Luhn-valid PAN candidates inside ``text``."""
+    return [
+        m.group(0)
+        for m in PII_PATTERNS["pci_pan"].finditer(text or "")
+        if luhn_valid(m.group(0))
+    ]
+
+
 def pii_findings(value: Any) -> dict[str, int]:
     """Pattern label → match count for one value; empty when nothing matched.
 
@@ -126,7 +161,18 @@ def pii_findings(value: Any) -> dict[str, int]:
     if _PII_UNION.search(text) is None:
         return {}
     findings: dict[str, int] = {}
+    # PCI PAN owns the precedence: a Luhn-valid card number also matches the
+    # phone shape, so blank out PAN spans before the other labels scan.
+    pan_matches = _pci_pan_matches(text)
+    if pan_matches:
+        findings["pci_pan"] = len(pan_matches)
+        text = PII_PATTERNS["pci_pan"].sub(
+            lambda m: " " * len(m.group(0)) if luhn_valid(m.group(0)) else m.group(0),
+            text,
+        )
     for label, pattern in PII_PATTERNS.items():
+        if label == "pci_pan":
+            continue
         matches = pattern.findall(text)
         if matches:
             findings[label] = len(matches)
@@ -215,7 +261,15 @@ def _redact_text(text: str) -> str:
     if not isinstance(text, str):
         return text
     for _label, pattern in PII_PATTERNS.items():
-        text = pattern.sub(lambda m: _mask_matched_token(m.group(0)), text)
+        if _label == "pci_pan":
+            text = pattern.sub(
+                lambda m: _mask_matched_token(m.group(0))
+                if luhn_valid(m.group(0))
+                else m.group(0),
+                text,
+            )
+        else:
+            text = pattern.sub(lambda m: _mask_matched_token(m.group(0)), text)
     return text
 
 

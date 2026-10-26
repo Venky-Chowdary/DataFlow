@@ -475,7 +475,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "What cursor_column means in the source: insert_only, "
                         "modification_timestamp, monotonic_sequence, cdc_position, "
-                        "or business_date. Required for incremental_upsert. "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
                         "Never inferred from the column name."
                     ),
                 },
@@ -486,8 +487,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
-                    "description": "Spoken schema posture only — never invent propagate_all",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
                 },
                 "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
                 "require_signed_contract": {"type": "boolean"},
@@ -555,7 +556,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "What cursor_column means in the source: insert_only, "
                         "modification_timestamp, monotonic_sequence, cdc_position, "
-                        "or business_date. Required for incremental_upsert. "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
                         "Never inferred from the column name."
                     ),
                 },
@@ -569,8 +571,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
-                    "description": "Spoken schema posture only — never invent propagate_all",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
                 },
                 "contract_id": {"type": "string", "description": "Data contract to preview on the plan (read-only)"},
                 "require_signed_contract": {"type": "boolean"},
@@ -666,7 +668,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "What cursor_column means in the source: insert_only, "
                         "modification_timestamp, monotonic_sequence, cdc_position, "
-                        "or business_date. Required for incremental_upsert. "
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert. "
                         "Never inferred from the column name."
                     ),
                 },
@@ -682,8 +685,8 @@ TOOL_DEFINITIONS: list[dict] = [
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
-                    "description": "Spoken schema posture only — never invent propagate_all",
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
+                    "description": "Schema posture — propagate_columns only when the operator explicitly asks to propagate additive columns; never invent propagate_all",
                 },
                 "contract_id": {"type": "string", "description": "Signed data contract to enforce on Confirm"},
                 "require_signed_contract": {"type": "boolean"},
@@ -774,6 +777,15 @@ TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "describe_pilot",
         "description": "Explain what Datawrap Pilot knows and can do locally — capabilities, not raw RAG dumps.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "describe_connector_transforms",
+        "description": (
+            "List every column transform the engine applies — exact semantics, "
+            "deterministic flag, and lossy flag per op, plus accepted aliases and "
+            "parameterized forms (replace:/concat:/default:/assume_timezone:)."
+        ),
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
     {
@@ -881,7 +893,8 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "What cursor_column means: insert_only, "
                         "modification_timestamp, monotonic_sequence, cdc_position, "
-                        "or business_date. Required for incremental_upsert."
+                        "or business_date (with cursor_lookback_days re-read "
+                        "window). Required for incremental_upsert."
                     ),
                 },
                 "name": {"type": "string", "description": "Schedule display name"},
@@ -912,7 +925,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 },
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
                 },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
@@ -968,7 +981,7 @@ TOOL_DEFINITIONS: list[dict] = [
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
-                    "enum": ["manual_review", "type_locked", "pause_on_change"],
+                    "enum": ["manual_review", "type_locked", "pause_on_change", "propagate_columns"],
                 },
                 "limit": {"type": "integer"},
                 "source_timezone": {
@@ -1324,6 +1337,7 @@ TOOL_FAMILIES: list[dict] = [
             "search_connectors",
             "search_knowledge",
             "describe_pilot",
+            "describe_connector_transforms",
             "brief_workspace",
         ],
     },
@@ -1546,6 +1560,7 @@ class DataPilotTools:
             "search_connectors": self._search_connectors,
             "search_knowledge": self._search_knowledge,
             "describe_pilot": self._describe_pilot,
+            "describe_connector_transforms": self._describe_connector_transforms,
             "explain_product": self._explain_product,
             "plan_transfer_route": self._plan_transfer_route,
             "plan_transfer": self._plan_transfer,
@@ -1581,6 +1596,8 @@ class DataPilotTools:
             "resume_job": self._resume_job,
             "replay_quarantine": self._replay_quarantine,
             "repair_cdc_drift": self._repair_cdc_drift,
+            "clear_cursor_resnapshot": self._clear_cursor_resnapshot,
+            "rebaseline_transfer": self._rebaseline_transfer,
             "prepare_cdc_source": self._prepare_cdc_source,
             "test_connector": self._test_connector,
             "delete_connector": self._delete_connector,
@@ -1955,6 +1972,7 @@ class DataPilotTools:
             str(draft.get("host") or ""),
             str(draft.get("connection_string") or ""),
             workspace_id=str(draft.get("workspace_id") or ""),
+            db_type=str(draft.get("type") or ""),
         )
         if refusal:
             from .ack_ledger import redact_payload
@@ -2167,6 +2185,40 @@ class DataPilotTools:
             },
         )
 
+    @staticmethod
+    def _offers_bad_data_fix(job: dict, quarantine: list, stored_rejected: int) -> bool:
+        """True only when row-level bad data is the plausible cause.
+
+        Held-out rows (quarantine / rejected_rows / rejected_details) always
+        qualify. A bare failure qualifies only when the error names a value-
+        level defect (cast, null, overflow, constraint on data) — structural
+        causes (missing destination, schema drift, pagination, array/struct
+        gaps, auth/network faults) get no Fix-bad-data CTA.
+        """
+        if quarantine or stored_rejected or job.get("rejected_details"):
+            return True
+        err = str(job.get("error") or job.get("message") or "").lower()
+        if not err:
+            return False
+        structural = (
+            "does not exist", "dropped", "destination reset", "schema drift",
+            "drifted", "pagination", "next page", "array", "struct",
+            "could not translate host", "authentication failed",
+            "permission denied", "connection refused", "timed out",
+            "no persisted column mappings", "not a supported destination",
+            "privilege", "decision artifact", "content_hash",
+        )
+        if any(k in err for k in structural):
+            return False
+        value_level = (
+            "invalid integer", "invalid number", "cannot cast", "could not cast",
+            "invalid literal", "not null", "null value", "violates",
+            "overflow", "too long", "do not fit", "does not fit",
+            "cannot fit", "invalid timestamp", "invalid boolean",
+            "quarantined cell", "rejected row",
+        )
+        return any(k in err for k in value_level)
+
     def _get_job(self, job_id: str = "") -> ToolResult:
         from services.quarantine_from_preflight import merge_job_quarantine
 
@@ -2214,7 +2266,12 @@ class DataPilotTools:
         remediations: list[dict[str, str]] = []
         status = str(job.get("status") or "").lower()
         if status in {"failed", "cancelled"} or job.get("rejected_rows") or quarantine:
-            remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
+            # "Fix bad data" only remediates row-level value failures — a
+            # dropped destination table, schema drift, REST pagination gaps
+            # or transport faults send operators to a screen that cannot
+            # help them. Filter by failure class (C23 / D81 / D82).
+            if self._offers_bad_data_fix(job, quarantine, stored_rejected):
+                remediations.append({"kind": "open_bad_data_fix", "label": "Fix bad data…"})
             remediations.append({"kind": "rerun_preflight", "label": "Re-run Validate in Transfer Studio"})
             remediations.append({"kind": "review_mappings", "label": "Review column mappings"})
         req = job.get("transfer_request") or {}
@@ -2230,32 +2287,11 @@ class DataPilotTools:
             "mappings_count": len(req.get("mappings") or []),
             "sync_mode": req.get("sync_mode") or job.get("operation"),
         }
-        live_schema: dict | None = None
-        # When job failed / quarantine, attach a live source schema snapshot if possible.
-        if (
-            route.get("source_connector_id")
-            and route.get("source_table")
-            and (status in {"failed", "cancelled"} or quarantine or job.get("rejected_rows"))
-        ):
-            try:
-                from .schema_tools import introspect_connector_schema
-
-                sch = introspect_connector_schema(
-                    connector_id=str(route["source_connector_id"]),
-                    table=str(route["source_table"]),
-                )
-                if sch.success and sch.output:
-                    live_schema = {
-                        "connector_name": sch.output.get("connector_name"),
-                        "table": sch.output.get("table"),
-                        "column_count": sch.output.get("column_count"),
-                        "columns": [
-                            {"name": c.get("name"), "inferred_type": c.get("inferred_type")}
-                            for c in (sch.output.get("columns") or [])[:40]
-                        ],
-                    }
-            except Exception:
-                live_schema = None
+        # D19: get_job reads only the stored record. A live source
+        # introspection here hung the whole call for minutes behind a slow or
+        # dead source (MCP -32001 timeouts after a cancel). The schema the run
+        # captured is on the record already.
+        live_schema = job.get("live_source_schema") or job.get("source_schema")
         return ToolResult(
             name="get_job",
             success=True,
@@ -2465,6 +2501,33 @@ class DataPilotTools:
         from ...services.catalog_service import search_catalog
         result = search_catalog(query, role, limit=20)
         return ToolResult(name="search_connectors", success=True, output=result)
+
+    def _describe_connector_transforms(self) -> ToolResult:
+        """One canonical catalog — the engine's own contract table (D14)."""
+        from services.transform_engine import (
+            TRANSFORM_SEMANTICS,
+            describe_transforms,
+        )
+
+        return ToolResult(
+            name="describe_connector_transforms",
+            success=True,
+            output={
+                "transforms": describe_transforms(),
+                "parameterized": [
+                    "replace:OLD:NEW — replace literal text",
+                    "concat:TEXT — append literal suffix",
+                    "default:TEXT — use literal when the cell is empty",
+                    "assume_timezone:ZONE — attach a timezone to naive instants",
+                ],
+                "alias_note": (
+                    "Common spellings resolve automatically (cast_integer, "
+                    "to_date, uppercase, strip, hash, normalize_email, "
+                    "date_to_iso, ...). Ambiguous argument strings are refused."
+                ),
+                "count": len(TRANSFORM_SEMANTICS),
+            },
+        )
 
     def _describe_pilot(self) -> ToolResult:
         """Local capability card — never dump raw semantic-type training shards."""
@@ -3135,8 +3198,16 @@ class DataPilotTools:
                 "updated in place without a full reload."
             )
         elif has_cursor and has_primary_key and needs_history:
-            mode = "incremental_deduped"
-            reason = "Cursor and key allow efficient updates while preserving change history."
+            # D37: history means every changed row keeps a version — upsert
+            # (incremental_deduped) collapses to one row per key and destroys
+            # it. SCD2 is the history-preserving mode.
+            mode = "scd2"
+            reason = (
+                "Change history needs every version of a row, not one row per "
+                "key. Incremental upsert would overwrite the old version and the "
+                "history is lost. SCD-2 closes the current version and inserts "
+                "the new one, keyed by the primary key."
+            )
         elif has_primary_key and mentions_update:
             mode = "incremental_deduped"
             reason = (
@@ -3195,6 +3266,7 @@ class DataPilotTools:
             ),
             "cdc_incremental": "Incremental CDC",
             "full_refresh_mirror": "Mirror",
+            "scd2": "SCD-2 Versioned History",
         }
         return ToolResult(name="recommend_sync_mode", success=True, output={
             "recommended_mode": mode,
@@ -3208,6 +3280,7 @@ class DataPilotTools:
                     "incremental_deduped",
                     "cdc_incremental",
                     "full_refresh_mirror",
+                    "scd2",
                 },
                 "cdc_log_access": mode == "cdc_incremental",
             },
@@ -3380,7 +3453,11 @@ class DataPilotTools:
         return None, None
 
     def _schedule_summary(self, s) -> dict:
-        from services.schedule_store import has_open_approval, schedule_bind_summary
+        from services.schedule_store import (
+            has_open_approval,
+            schedule_bind_summary,
+            visible_next_run_at,
+        )
 
         row = {
             "id": s.id,
@@ -3392,7 +3469,7 @@ class DataPilotTools:
             "source_table": s.source_table,
             "dest_table": s.dest_table,
             "sync_mode": getattr(s, "sync_mode", "") or "",
-            "next_run_at": s.next_run_at,
+            "next_run_at": visible_next_run_at(s),
             "last_run_at": s.last_run_at,
             "last_status": s.last_status,
             "run_count": s.run_count,
@@ -3555,6 +3632,24 @@ class DataPilotTools:
             selector,
             key_ids=key_ids or [],
         )
+
+    def _clear_cursor_resnapshot(
+        self, cursor_key: str = "", reason: str = ""
+    ) -> ToolResult:
+        from .lifecycle_tools import stage_clear_cursor_resnapshot
+
+        return stage_clear_cursor_resnapshot(cursor_key, reason)
+
+    def _rebaseline_transfer(
+        self,
+        connector_id: str = "",
+        name: str = "",
+        table: str = "",
+        reason: str = "",
+    ) -> ToolResult:
+        from .lifecycle_tools import stage_rebaseline_transfer
+
+        return stage_rebaseline_transfer(connector_id, name, table, reason)
 
     def _prepare_cdc_source(
         self,
@@ -3989,6 +4084,9 @@ class DataPilotTools:
         source_timezone: str = "",
         schema_drift_acknowledged: bool = False,
         pii_acknowledgement: dict | None = None,
+        upsert_key: str = "",
+        primary_key: str = "",
+        dedupe_key: str = "",
     ) -> ToolResult:
         from .dataset_transfer import stage_dataset_transfer
 
@@ -4006,6 +4104,9 @@ class DataPilotTools:
             source_timezone=source_timezone,
             schema_drift_acknowledged=schema_drift_acknowledged,
             pii_acknowledgement=pii_acknowledgement,
+            upsert_key=upsert_key,
+            primary_key=primary_key,
+            dedupe_key=dedupe_key,
         )
 
     def _create_schedule(
@@ -5433,6 +5534,7 @@ _TOOL_PRIORITY: dict[str, int] = {
     "analyze_dataset": 20,
     "search_data": 15,
     "describe_pilot": 5,
+    "describe_connector_transforms": 5,
     "explain_product": 6,
 }
 
@@ -5467,6 +5569,7 @@ _KNOWLEDGE_TOOLS = frozenset({
     "explain_product",
     "search_knowledge",
     "describe_pilot",
+    "describe_connector_transforms",
     "explain_mapping_assurance",
 })
 
@@ -5978,7 +6081,7 @@ def resolve_transfer_bind_kwargs(
     if mode in {"strict", "balanced", "lenient"}:
         out["validation_mode"] = mode
     policy = str(schema_policy or parsed.get("schema_policy") or "").strip()
-    if policy in {"manual_review", "type_locked", "pause_on_change"}:
+    if policy in {"manual_review", "type_locked", "pause_on_change", "propagate_columns"}:
         out["schema_policy"] = policy
     return out
 
@@ -6003,6 +6106,15 @@ def parse_transfer_schema_posture(lowered: str) -> dict[str, Any]:
         return {"schema_policy": "pause_on_change"}
     if any(w in lowered for w in ("type-locked", "type locked", "lock types", "lock type")):
         return {"schema_policy": "type_locked"}
+    # propagate_columns is opt-in by name: "propagate (the) columns",
+    # "accept additive drift", "auto-add new columns". propagate_all stays
+    # unreachable from chat — it silently rewrites dest types (D20 fix).
+    if any(w in lowered for w in (
+        "propagate column", "propagate the column", "propagate new column",
+        "propagate additive", "accept additive", "accept additive drift",
+        "auto-add column", "auto add column", "add new columns automatically",
+    )):
+        return {"schema_policy": "propagate_columns"}
     return {}
 
 

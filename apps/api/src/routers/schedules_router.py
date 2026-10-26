@@ -289,6 +289,10 @@ class ScheduleResponse(BaseModel):
         mappings = list(data.get("mappings") or [])
         data["mappings"] = mappings
         data["mapping_count"] = len(mappings)
+        # Paused / parked schedules do not fire — surface no next run (M24/D96).
+        from services.schedule_store import visible_next_run_at
+
+        data["next_run_at"] = visible_next_run_at(s)
         # run_history / running_instance stay on the history endpoint.
         allowed = set(cls.model_fields)
         return cls(**{k: v for k, v in data.items() if k in allowed})
@@ -1121,7 +1125,16 @@ async def run_pipeline_now(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     try:
-        job_id = _run_schedule(schedule_id, manual=True)
+        user = getattr(request.state, "user", None) or {}
+        actor = (
+            str(user.get("email") or user.get("name") or "").strip()
+            or str(request.headers.get("X-Actor") or "").strip()
+        )
+        job_id = _run_schedule(
+            schedule_id,
+            manual=True,
+            triggered_by=actor or "run-now",
+        )
     except ScheduleStartError as exc:
         raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
     if not job_id:

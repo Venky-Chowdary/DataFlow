@@ -254,14 +254,21 @@ def test_postgres_null_csv_readback_is_not_an_empty_string():
     body = mat.export.read_all()
     mat.export.close()
     text = body.decode("utf-8")
-    rows = list(iter_csv_dicts(body))
-    assert SQL_NULL_SENTINEL in text
+    # C04 codec contract: NULL is an empty *unquoted* cell, a real '' stays
+    # quoted "" — the distinction rides on quoting, no sentinel in the file.
+    assert SQL_NULL_SENTINEL not in text
     assert "\x00NULL\x00" not in text
-    assert rows[0]["name"] == SQL_NULL_SENTINEL
-    assert rows[1]["name"] == ""
+    assert '\n1,\n' in text and '\n2,""\n' in text
+    import io as _io
+    from services.csv_codec import iter_csv_records
+
+    recs = list(iter_csv_records(_io.StringIO(text)))
+    assert recs[1][1] is None
+    assert recs[2][1] == ""
+    rows = list(iter_csv_dicts(body))
     source_null = fingerprint_for_reconcile(None, ddl_type="TEXT", engine="postgresql")
-    dest_null = fingerprint_for_reconcile(rows[0]["name"], ddl_type="TEXT", engine="s3")
-    dest_empty = fingerprint_for_reconcile(rows[1]["name"], ddl_type="TEXT", engine="s3")
+    dest_null = fingerprint_for_reconcile(recs[1][1], ddl_type="TEXT", engine="s3")
+    dest_empty = fingerprint_for_reconcile(recs[2][1], ddl_type="TEXT", engine="s3")
     from services.reconciliation import operator_cell_text
 
     assert operator_cell_text(source_null) == "null"

@@ -102,8 +102,25 @@ def _primary_key_columns(cur, schema: str, table: str) -> list[str] | None:
     return None
 
 
-def _json_column_names(cur, schema: str, table: str) -> frozenset[str]:
-    """Columns whose catalog type is json/jsonb — they must travel as engine text."""
+def _text_carry_column_names(cur, schema: str, table: str) -> frozenset[str]:
+    """Columns psycopg2 would decode into a lossy Python type — carry engine text.
+
+    ``col::text`` gives the engine's own canonical spelling, so the wire keeps
+    exactly what Postgres stores and a same-family destination round-trips
+    verbatim (C08):
+
+    - json/jsonb — ``'null'::jsonb`` ≠ SQL NULL; ``"1"`` ≠ ``1`` (D75 class).
+    - interval — timedelta cannot hold months/years: ``1 mon 1 day`` decayed
+      to ``744:00:00`` and ``1 day 03:00:04.5`` re-labelled itself
+      ``27:00:04.5`` (D50).
+    - float4/real — Python float64 repr invents digits the float32 never had
+      (``0.33333334`` reads back ``0.3333333432674408``).
+    - inet/cidr/macaddr* — ipaddress objects re-render in a different form.
+    - bit/varbit — native decode reaches the binary route and quarantines a
+      legal ``B'1'`` (D79).
+    - ranges/multiranges — ``psycopg2`` Range renders ``(None, 5)`` instead of
+      the stored ``(,5)`` and the string cannot rebind (D80).
+    """
     cur.execute(
         """
         SELECT column_name, data_type, udt_name
@@ -113,14 +130,29 @@ def _json_column_names(cur, schema: str, table: str) -> frozenset[str]:
         """,
         (schema, table),
     )
-    def _json_row(row) -> bool:
+    def _text_carry_row(row) -> bool:
         if len(row) < 2:
             return False
-        data_type = str(row[1] or "")
-        udt_name = str(row[2] or "") if len(row) > 2 else ""
-        return is_json_catalog_type(data_type, udt_name)
+        data_type = str(row[1] or "").strip().lower()
+        udt_name = str(row[2] or "").strip().lower() if len(row) > 2 else ""
+        if is_json_catalog_type(data_type, udt_name):
+            return True
+        tokens = {data_type, udt_name}
+        if tokens & {
+            "interval", "real", "float4",
+            "inet", "cidr", "macaddr", "macaddr8",
+            "bit", "varbit", "bit varying",
+        }:
+            return True
+        # numrange/int4range/tsrange/… + their multiranges share udt suffixes.
+        return udt_name.endswith("range") or udt_name.endswith("multirange")
 
-    return frozenset(str(row[0]) for row in cur.fetchall() if _json_row(row))
+    return frozenset(str(row[0]) for row in cur.fetchall() if _text_carry_row(row))
+
+
+def _json_column_names(cur, schema: str, table: str) -> frozenset[str]:
+    """Back-compat alias — JSON is one of the text-carry families."""
+    return _text_carry_column_names(cur, schema, table)
 
 
 def _ordered_column_names(cur, schema: str, table: str) -> list[str]:
@@ -334,7 +366,7 @@ def read_table_scan_batch(
     schema, table = _bind(schema, table)
     filter_value = scan_filter_value(filter_column, filter_after)
     if filter_value is not None:
-        where_sql = sql.SQL(" WHERE {} > %s").format(sql.Identifier(filter_column))
+        where_sql = sql.SQL(" WHERE {} >= %s").format(sql.Identifier(filter_column))
         params: tuple[Any, ...] = (filter_value,)
     else:
         where_sql = sql.SQL("")
@@ -480,6 +512,7 @@ def read_table_cursor_batch(
     limit: int = 500,
     cursor_primary_key: str | None = None,
     conn: Any | None = None,
+    cursor_inclusive: bool = False,
 ) -> ReadBatch:
     """Read rows with cursor_column > watermark — for incremental sync.
 
@@ -531,7 +564,31 @@ def read_table_cursor_batch(
                 # Composite order: cursor then primary key when provided so tied
                 # watermarks do not skip peer rows (timestamp-cursor Airbyte trap).
                 pk = (cursor_primary_key or "").strip()
-                if pk and pk != cursor_column:
+                if cursor_inclusive:
+                    # D60/D98 — run-seed watermark: re-read the whole tie group
+                    # (cursor >= watermark). Key order inside a tie must never
+                    # decide what is skipped; page edges after this first seek
+                    # still use the composite > seek below.
+                    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+                    if pk and pk != cursor_column:
+                        query = sql.SQL(
+                            "{} WHERE {} >= %s ORDER BY {}, {} LIMIT %s"
+                        ).format(
+                            base,
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(pk),
+                        )
+                    else:
+                        query = sql.SQL(
+                            "{} WHERE {} >= %s ORDER BY {} LIMIT %s"
+                        ).format(
+                            base,
+                            sql.Identifier(cursor_column),
+                            sql.Identifier(cursor_column),
+                        )
+                    cur.execute(query, (cur_val, limit))
+                elif pk and pk != cursor_column:
                     cur_val, pk_val = split_cursor_bookmark(
                         bookmark, has_tiebreak=True
                     )

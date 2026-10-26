@@ -297,9 +297,11 @@ def test_generic_sql_filtered_scan_keeps_tied_rows_across_page_edges(tmp_path: P
         rows.extend(batch.rows)
         offset += len(batch.rows)
 
-    assert total == 20
-    assert len(rows) == 20
-    assert sorted(r[1] for r in rows) == sorted(f"r{i}" for i in range(20, 40))
+    # D60/D98: the filtered scan seeds at >= watermark, so the seq-2 tie group
+    # is re-read; offset paging keeps every row distinct.
+    assert total == 30
+    assert len(rows) == 30
+    assert sorted(r[1] for r in rows) == sorted(f"r{i}" for i in range(10, 40))
 
 
 def test_catalog_primary_key_is_the_tiebreak_both_owners_seek_on():

@@ -23,6 +23,7 @@ class ResumeKind(str, Enum):
     CHECKPOINT = "checkpoint_resume"
     FROM_ZERO_IDEMPOTENT = "from_zero_idempotent_sync"
     FROM_ZERO_NO_WRITES = "from_zero_no_writes"
+    FROM_CURSOR = "from_cursor_contract"
     REFUSED = "refused"
 
 
@@ -43,7 +44,7 @@ def is_idempotent_sync(sync_mode: str | None) -> bool:
         return False
     if sync in {"upsert", "overwrite", "mirror", "replace", "scd2", "scd-2"}:
         return True
-    if "upsert" in sync or "overwrite" in sync or sync.endswith("_mirror"):
+    if "upsert" in sync or "overwrite" in sync or "dedup" in sync or sync.endswith("_mirror"):
         return True
     return False
 
@@ -135,6 +136,14 @@ def decide_resume(
     }
 
 
+_INCREMENTAL_MODE_PREFIXES = ("incremental", "cdc")
+
+
+def _is_incremental_mode(sync_mode: str | None) -> bool:
+    sync = (sync_mode or "").strip().lower()
+    return any(sync.startswith(prefix) for prefix in _INCREMENTAL_MODE_PREFIXES)
+
+
 def decide_retry_from_start(
     *,
     status: str | None = None,
@@ -142,6 +151,10 @@ def decide_retry_from_start(
     rows_committed: int = 0,
     rows_committed_known: bool = True,
     operator_requested: bool = False,
+    has_key_contract: bool = False,
+    has_cursor_contract: bool = False,
+    destination_engine: str | None = None,
+    source_engine: str | None = None,
 ) -> dict[str, Any]:
     """Decide whether re-running a finished attempt from zero is safe.
 
@@ -178,14 +191,89 @@ def decide_retry_from_start(
             "reason": "Zero committed rows — restarting from zero cannot duplicate.",
             "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         }
-    if is_idempotent_sync(sync_mode):
+    # M15: a Kafka *source* does not re-read from zero on retry — the
+    # consumer resumes at the group's committed offset (D85: offsets commit
+    # only after acceptance), so a retry cannot re-publish already-consumed
+    # messages unless the previous attempt's offsets never committed, which
+    # is the at-least-once edge the run reports honestly.
+    from services.copy_kafka_common import kafka_family_name
+    if kafka_family_name(source_engine or "") == "kafka":
+        return {
+            "kind": ResumeKind.FROM_CURSOR.value,
+            "allowed": True,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                "Kafka source resumes at the consumer group's committed offset "
+                "— a retry does not re-read already-committed messages "
+                "(at-least-once: messages consumed but not yet committed are "
+                "re-read and the destination key collapses them)."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    # C26/D90: a Kafka topic cannot be rolled back — published messages are
+    # final, and a declared key only helps log compaction (lazy, per-topic),
+    # it does not make a second produce pass converge. The only honest retry
+    # is a cursor-continuing incremental read or Resume from the checkpoint.
+    if kafka_family_name(destination_engine or "") == "kafka":
+        if has_cursor_contract and _is_incremental_mode(sync_mode):
+            return {
+                "kind": ResumeKind.FROM_CURSOR.value,
+                "allowed": True,
+                "delivery": DEFAULT_DELIVERY_SEMANTICS,
+                "reason": (
+                    f"sync_mode={sync_mode} carries a cursor contract — the new "
+                    "attempt reads only rows after the persisted watermark, so "
+                    "already-published messages are not produced again. Note: "
+                    "messages already on the topic are final and cannot be "
+                    "rolled back."
+                ),
+                "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+            }
+        committed = (
+            f"{int(rows_committed or 0)} row(s)"
+            if rows_committed_known
+            else "an unknown number of rows"
+        )
+        return {
+            "kind": ResumeKind.REFUSED.value,
+            "allowed": False,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                f"This attempt already published {committed} to a Kafka topic, "
+                "which cannot be rolled back or merged — retrying from start "
+                "would produce a second copy downstream. Resume from the last "
+                "committed checkpoint instead."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    # C20/D5: the gate must check the contract, not the mode family. A declared
+    # merge/upsert key collapses a second copy onto the same rows.
+    if has_key_contract or is_idempotent_sync(sync_mode):
         return {
             "kind": ResumeKind.FROM_ZERO_IDEMPOTENT.value,
             "allowed": True,
             "delivery": DEFAULT_DELIVERY_SEMANTICS,
             "reason": (
-                f"sync_mode={sync_mode} converges — a second full pass lands the "
+                f"sync_mode={sync_mode} converges — a second full pass merges "
+                "onto the declared key rather than adding a second copy."
+                if has_key_contract
+                else f"sync_mode={sync_mode} converges — a second full pass lands the "
                 "same rows rather than adding them."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
+    # C20/D12: an incremental rerun does not re-read from zero — it continues
+    # from the persisted watermark cursor, so only new rows are read and no
+    # committed row can be written twice.
+    if has_cursor_contract and _is_incremental_mode(sync_mode):
+        return {
+            "kind": ResumeKind.FROM_CURSOR.value,
+            "allowed": True,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "reason": (
+                f"sync_mode={sync_mode} carries a cursor contract — the new "
+                "attempt continues from the persisted watermark and reads only "
+                "rows after it. The committed prefix cannot be duplicated."
             ),
             "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         }
@@ -257,6 +345,8 @@ def decide_job_rerun(
     sync_mode: str | None,
     rows_committed: int = 0,
     rows_committed_known: bool = True,
+    has_key_contract: bool = False,
+    has_cursor_contract: bool = False,
 ) -> dict[str, Any]:
     """Whether a finished or cancelled job may be started again as a new job.
 
@@ -286,6 +376,8 @@ def decide_job_rerun(
         rows_committed=rows_committed,
         rows_committed_known=rows_committed_known,
         operator_requested=True,
+        has_key_contract=has_key_contract,
+        has_cursor_contract=has_cursor_contract,
     )
 
 
@@ -295,6 +387,8 @@ def assert_retry_from_start_allowed(
     sync_mode: str | None,
     rows_committed: int = 0,
     rows_committed_known: bool = True,
+    has_key_contract: bool = False,
+    has_cursor_contract: bool = False,
 ) -> dict[str, Any]:
     """Fail closed when a from-zero retry would duplicate committed rows."""
     decision = decide_retry_from_start(
@@ -302,6 +396,8 @@ def assert_retry_from_start_allowed(
         sync_mode=sync_mode,
         rows_committed=rows_committed,
         rows_committed_known=rows_committed_known,
+        has_key_contract=has_key_contract,
+        has_cursor_contract=has_cursor_contract,
     )
     if not decision["allowed"]:
         raise ExecutionContractError(decision["reason"])
@@ -359,6 +455,12 @@ def committed_rows_of(job: dict | None) -> tuple[int, bool]:
 
     if not known:
         return 0, False
+    dest_for_undo = job.get("destination_summary")
+    if isinstance(dest_for_undo, dict) and dest_for_undo.get("partial_batch_undo") == "cleared":
+        return 0, True
+    details = job.get("error_details")
+    if isinstance(details, dict) and details.get("auto_create_rolled_back"):
+        return 0, True
     return best, True
 
 

@@ -27,10 +27,15 @@ _fakesnow_lock = threading.Lock()
 logger = logging.getLogger(__name__)
 _fakesnow_refcount = 0
 _fakesnow_patch_cm: Any | None = None
+# The catalog path the ACTIVE product patch was installed with. A later
+# connect asking for a different FAKESNOW_DB_PATH (per-test isolation) must
+# not share a patch pinned to the first catalog — re-install instead
+# (order-dependent state, CI-3).
+_fakesnow_installed_db_path: str | None = None
 
 
 def _fakesnow_exit_patch() -> None:
-    global _fakesnow_refcount, _fakesnow_patch_cm
+    global _fakesnow_refcount, _fakesnow_patch_cm, _fakesnow_installed_db_path
     with _fakesnow_lock:
         _fakesnow_refcount -= 1
         # Keep the fakesnow mock active for the rest of the process when requested
@@ -43,6 +48,7 @@ def _fakesnow_exit_patch() -> None:
             _fakesnow_patch_cm.__exit__(None, None, None)
             _fakesnow_patch_cm = None
             _fakesnow_refcount = 0
+            _fakesnow_installed_db_path = None
 
 
 def normalize_account(host: str) -> str:
@@ -684,7 +690,7 @@ def _reset_fakesnow_catalog(db_path: str) -> None:
 
 
 def _fakesnow_rollback_product_patch() -> None:
-    global _fakesnow_refcount, _fakesnow_patch_cm
+    global _fakesnow_refcount, _fakesnow_patch_cm, _fakesnow_installed_db_path
     with _fakesnow_lock:
         _fakesnow_refcount -= 1
         if _fakesnow_refcount <= 0 and _fakesnow_patch_cm is not None:
@@ -694,6 +700,7 @@ def _fakesnow_rollback_product_patch() -> None:
                 logger.debug("fakesnow patch exit during rollback: %s", exc)
             _fakesnow_patch_cm = None
             _fakesnow_refcount = 0
+            _fakesnow_installed_db_path = None
 
 
 def fakesnow_availability_error() -> str | None:
@@ -760,7 +767,7 @@ def get_connection(
     if _is_local_account(kwargs["account"]):
         import fakesnow
 
-        global _fakesnow_refcount, _fakesnow_patch_cm
+        global _fakesnow_refcount, _fakesnow_patch_cm, _fakesnow_installed_db_path
 
         db_path = _fakesnow_db_path()
         catalog_retry_done = False
@@ -768,6 +775,20 @@ def get_connection(
         while True:
             product_managed = False
             with _fakesnow_lock:
+                if (
+                    _fakesnow_refcount > 0
+                    and _fakesnow_patch_cm is not None
+                    and _fakesnow_installed_db_path != db_path
+                ):
+                    # The active patch is pinned to a different catalog —
+                    # drop it so this connect binds the right db_path.
+                    try:
+                        _fakesnow_patch_cm.__exit__(None, None, None)
+                    except Exception:
+                        pass
+                    _fakesnow_patch_cm = None
+                    _fakesnow_refcount = 0
+                    _fakesnow_installed_db_path = None
                 already_patched = isinstance(snowflake_connector.connect, unittest.mock.MagicMock)
                 connect_mod = getattr(snowflake_connector.connect, "__module__", "") or ""
                 if not already_patched and connect_mod.startswith("fakesnow"):
@@ -785,6 +806,7 @@ def get_connection(
                         )
                         _fakesnow_patch_cm.__enter__()
                         _fakesnow_refcount = 1
+                        _fakesnow_installed_db_path = db_path
                         product_managed = True
                     except (AssertionError, RuntimeError) as exc:
                         # Nested fakesnow.patch() raises when a test already patched.

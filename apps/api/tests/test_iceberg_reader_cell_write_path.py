@@ -19,7 +19,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from connectors.iceberg_reader import _stringify  # noqa: E402
-from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string  # noqa: E402
+from services.value_serializer import (  # noqa: E402
+    SQL_NULL_SENTINEL,
+    cell_to_string,
+    json_loads_exact,
+)
 
 LONG = "1.234567890123456789"
 BLOB = bytes([0xFF, 0xFE, 0x00])
@@ -58,10 +62,13 @@ def test_nested_bytes_are_base64_not_python_repr():
     invented = json.loads(_stock_nested(nested))
     assert invented["blob"] == str(BLOB)
     assert invented["blob"].startswith("b'")
-    wire = json.loads(_stringify(nested))
+    # Exact parse: the C07 document contract keeps a Decimal leaf a JSON
+    # *number* with every stated digit — stdlib json.loads would round it
+    # through binary64, so compare the exact-decimal form.
+    wire = json_loads_exact(_stringify(nested))
     assert wire["blob"] == cell_to_string(BLOB)
     assert wire["blob"] != str(BLOB)
-    assert wire["amt"] == LONG
+    assert wire["amt"] == Decimal(LONG)
 
 
 def test_nested_datetime_is_iso_not_default_str():
@@ -75,7 +82,7 @@ def test_nested_datetime_is_iso_not_default_str():
 
 def test_nested_list_keeps_long_fraction():
     wire = _stringify([Decimal(LONG), Decimal("1.5"), 1])
-    parsed = json.loads(wire)
-    assert parsed[0] == LONG
-    assert parsed[1] == "1.5"
+    parsed = json_loads_exact(wire)
+    assert parsed[0] == Decimal(LONG)
+    assert parsed[1] == Decimal("1.5")
     assert parsed[2] == 1

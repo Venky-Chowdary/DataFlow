@@ -951,7 +951,7 @@ def _sqlserver_cfg() -> dict[str, Any]:
         "database": "dataflow",
         "schema": "dbo",
         "username": "sa",
-        "password": "DataFlow_CDC_2022!",
+        "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         "trust_server_certificate": True,
         "encrypt": "yes",
     }
@@ -964,7 +964,7 @@ def _sqlserver_connect():
         server="127.0.0.1",
         port=1433,
         user="sa",
-        password="DataFlow_CDC_2022!",
+        password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         database="dataflow",
         login_timeout=10,
         autocommit=True,

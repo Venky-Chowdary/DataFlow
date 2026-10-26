@@ -327,7 +327,7 @@
   padding: clamp(24px, 3.5vh, 40px) 0 clamp(20px, 3vh, 32px) !important;
   gap: clamp(24px, 3.5vw, 40px) !important;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   align-items: center !important;
 }
 
@@ -450,7 +450,7 @@
 
 .lp-hero--home .lp-hero-flow-rail {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
@@ -487,7 +487,7 @@
 
 .lp-hero--home .lp-hero-flow-card header {
   color: #0f766e;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.06em;
   text-transform: uppercase;
   font-weight: 720;
@@ -529,7 +529,7 @@
 
 .lp-hero-flow-waveband {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   flex: 1 1 auto;
   min-height: 120px;
   border-radius: 14px;
@@ -551,14 +551,14 @@
   position: absolute;
   left: 12px;
   bottom: 10px;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   display: grid;
   gap: 1px;
   pointer-events: none;
 }
 
 .lp-hero-flow-waveband-label span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: rgba(94, 234, 212, 0.75);
@@ -573,7 +573,7 @@
 
 .lp-hero-flow-proof {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: flex;
   flex-wrap: wrap;
   gap: 8px 14px;
@@ -624,7 +624,7 @@
   border-block: 1px solid var(--lp-line);
   background: rgba(255, 255, 255, 0.72);
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-home-stack-label {
@@ -932,7 +932,7 @@
   position: static !important;
   transform: none !important;
   inset: auto !important;
-  z-index: 1;
+  z-index: var(--df-z-base);
   clear: both;
   grid-column: 1 / -1;
 }
@@ -1257,7 +1257,7 @@
 }
 
 .lp-home-trust-panel > header span {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 740;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -1557,8 +1557,8 @@
   margin: 28px 0 22px;
   display: grid;
   gap: 14px;
-  width: 100vw;
   margin-left: calc(50% - 50vw);
+  margin-right: calc(50% - 50vw);
   padding: 4px 0;
 }
 
@@ -1796,7 +1796,7 @@
 
 .lp-pricing-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   padding: clamp(56px, 8vh, 88px) 0 clamp(72px, 10vh, 110px);
@@ -1850,7 +1850,7 @@
   width: var(--lp-shell) !important;
   margin: 28px auto 0;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   padding-bottom: 48px;
 }
 
@@ -2128,7 +2128,7 @@
 
 .lp-cust-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -2194,7 +2194,7 @@
   line-height: 1.5;
   color: #fff;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-cust-hero-quote footer {
@@ -2218,7 +2218,7 @@
   margin: 0 auto;
   padding: clamp(28px, 4vh, 40px) 0 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
@@ -2488,7 +2488,7 @@
 
 .lp-sec-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -2571,7 +2571,7 @@
   margin: 0 auto;
   padding: clamp(28px, 4vh, 36px) 0 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-sec-badges .lp-mkt-compliance-badges {
@@ -2697,7 +2697,7 @@
 }
 
 .lp-sec-layer-tag {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -2849,7 +2849,7 @@
 
 .lp-int-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -2892,7 +2892,7 @@
 
 .lp-int-hero-tile em {
   font-style: normal;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 650;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -2904,7 +2904,7 @@
   margin: 0 auto;
   padding: clamp(28px, 4vh, 36px) 0 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 10px;
@@ -2986,7 +2986,7 @@
 }
 
 .lp-int-family-card header span {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -3227,7 +3227,7 @@
 
 .lp-login-brand-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   height: 100%;
   max-height: 100dvh;
   display: flex;
@@ -3548,7 +3548,7 @@
 
 .lp-login-auth-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: min(448px, 100%);
   /* Grow with the card — parent `.lp-login-auth` scrolls on short viewports.
      Flex + max-height previously shrunk the overflow:hidden card and hid Sign in. */
@@ -3610,7 +3610,7 @@
 
 .lp-login-auth-mark {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: fit-content;
   max-width: 100%;
   margin: clamp(18px, 3.2vh, 28px) 0 clamp(10px, 1.6vh, 16px);
@@ -3676,7 +3676,7 @@
 }
 
 .lp-login-auth-steps span {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 740;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -4028,7 +4028,7 @@
   }
 
   .lp-login-metric span {
-    font-size: 10px;
+    font-size: var(--df-fs-xs);
   }
 
   .lp-login-auth-banner {
@@ -4049,7 +4049,7 @@
 
   .lp-login-auth-steps span {
     padding: 4px 8px;
-    font-size: 10px;
+    font-size: var(--df-fs-xs);
   }
 
   .lp-login-trust {
@@ -4196,7 +4196,7 @@
 .docs-sidebar-group h3 {
   margin: 18px 0 6px;
   padding: 0 12px;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.1em;
   text-transform: uppercase;
@@ -4618,7 +4618,7 @@
 .docs-shot-marker {
   position: absolute;
   transform: translate(-50%, -50%);
-  z-index: 2;
+  z-index: var(--df-z-raised);
   display: flex;
   align-items: center;
   gap: 8px;
@@ -4713,7 +4713,7 @@
   color: #ecfdf5;
   background: linear-gradient(160deg, #0a3d3a, #0f766e);
   box-shadow: 0 8px 18px rgba(10, 61, 58, 0.22);
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .docs-workflow-arrow {
@@ -4774,7 +4774,7 @@
   margin-top: 12px;
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .docs-space {
     --docs-rail: 280px;
   }
@@ -4877,7 +4877,7 @@
 
 .lp-contact-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -5255,7 +5255,7 @@
 
 .lp-ct5-brand-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   height: 100%;
   box-sizing: border-box;
   padding: clamp(28px, 4.5vh, 48px) clamp(32px, 4.5vw, 64px) clamp(28px, 4vh, 40px);
@@ -6496,7 +6496,7 @@
   max-width: 62ch;
   font-size: 15.5px;
   line-height: 1.55;
-  color: var(--lp-muted, #475569);
+  color: var(--lp-muted);
 }
 
 .lp-cust3-story-stack {
@@ -6913,7 +6913,7 @@
 
 .lp-ent-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -7062,7 +7062,7 @@
 }
 
 .lp-ent-stage-pill {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -7088,7 +7088,7 @@
 
 .lp-ent-stage-cards span {
   display: block;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: #5eead4;
@@ -7160,7 +7160,7 @@
   width: var(--lp-shell) !important;
   margin: -28px auto 0;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
@@ -7453,7 +7453,7 @@
 
 .lp-sol-hero-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: var(--lp-shell) !important;
   margin: 0 auto;
   display: grid;
@@ -7496,7 +7496,7 @@
   margin: 0 auto;
   padding: clamp(28px, 4vh, 40px) 0 0;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 14px;
@@ -7804,7 +7804,7 @@
 }
 
 /* ── Responsive ─────────────────────────────────────────────────── */
-@media (max-width: 1024px) {
+@media (max-width: 1023px) {
   .lp-hero-home-grid {
     grid-template-columns: 1fr !important;
   }
@@ -8068,7 +8068,7 @@
   max-width: min(100%, 640px);
   width: 100%;
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-section-footer--center {
@@ -8082,7 +8082,7 @@
   max-width: 100%;
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .lp-mkt-next-cta.lp-section-footer,
   .lp .lp-mkt-next-cta.lp-section-footer {
     flex-direction: column;
@@ -8191,7 +8191,7 @@
 
 .lp-mkt-gap-badge {
   display: inline-block;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 750;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -8346,7 +8346,7 @@
   place-items: center;
   background: rgba(45, 212, 191, 0.12);
   color: #5eead4;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 750;
 }
 

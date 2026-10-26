@@ -241,6 +241,9 @@ def _producer(cfg: dict[str, Any], *, schema_id: int | None = None):
         "key_serializer": lambda v: v.encode("utf-8") if isinstance(v, str) else v,
         "acks": "all",
         "retries": 3,
+        # Idempotent producer: broker dedupes retried batches per partition, so
+        # a produce retry cannot publish the same record twice (C26/D90).
+        "enable_idempotence": True,
     }
     with kafka_classified_bootstrap(cfg):
         return KafkaProducer(**kwargs)
@@ -673,7 +676,12 @@ def write_mapped_rows(
 
     written = 0
     digest = hashlib.sha256()
-    key_col = (conflict_columns or [None])[0]
+    key_cols = (
+        list(conflict_columns or [])
+        or list(_kwargs.get("message_key_columns") or [])
+        or list(_kwargs.get("primary_key_columns") or [])
+    )
+    key_col = key_cols[0] if key_cols else None
     null_key_rejected = 0
     produced_sample: list[dict[str, Any]] = []
     try:

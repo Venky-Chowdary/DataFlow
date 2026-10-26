@@ -107,8 +107,10 @@ def _send_sendgrid(recipients: list[str], subject: str, body: str, from_addr: st
     return {"ok": False, "error": result.get("body") or result.get("error") or "SendGrid send failed"}
 
 
-def _send_resend(recipients: list[str], subject: str, body: str, from_addr: str, api_key: str) -> dict[str, Any]:
+def _send_resend(recipients: list[str], subject: str, body: str, from_addr: str, api_key: str, reply_to: str = "") -> dict[str, Any]:
     payload = {"from": from_addr, "to": recipients, "subject": subject, "text": body}
+    if reply_to:
+        payload["reply_to"] = reply_to
     result = _http_post(
         "https://api.resend.com/emails",
         payload,

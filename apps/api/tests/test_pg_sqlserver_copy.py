@@ -1,6 +1,7 @@
 """PostgreSQL → SQL Server COPY text + fast_executemany — dest COUNT(*), PK-range proof."""
 
 from __future__ import annotations
+import os
 
 import socket
 import sys
@@ -92,7 +93,7 @@ def _ss_cfg() -> dict:
         "port": 1433,
         "database": "dataflow",
         "username": "sa",
-        "password": "DataFlow_CDC_2022!",
+        "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
         "schema": "dbo",
         "trust_server_certificate": True,
         "encrypt": "yes",
@@ -121,7 +122,7 @@ def _ss_connect():
             server="127.0.0.1",
             port=1433,
             user="sa",
-            password="DataFlow_CDC_2022!",
+            password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             database="dataflow",
             login_timeout=3,
             autocommit=True,

@@ -1511,6 +1511,7 @@ def _write_destination_database(
     schema: dict[str, str],
     mappings: list[dict],
     on_checkpoint: Callable[[int, int, int], None] | None = None,
+    cancel_check: Callable[[int | None], None] | None = None,
     validation_mode: str = "strict",
     backfill_new_fields: bool = False,
     write_mode: str = "insert",
@@ -1523,6 +1524,7 @@ def _write_destination_database(
     allow_equal_lsn: bool = False,
     protect_landed_object: bool = False,
     empty_cells_as_null: bool = False,
+    upsert_ddl_approved: bool = False,
 ) -> tuple[int, list[str], dict]:
     """Write records to a SQL/NoSQL destination.
 
@@ -1598,6 +1600,9 @@ def _write_destination_database(
         "mappings": mappings,
         "column_types": column_types,
         "on_checkpoint": on_checkpoint,
+        # D102: writers call this BEFORE each batch commit so a cancel stops
+        # the next write instead of landing it and being noticed afterwards.
+        "cancel_check": cancel_check,
         "error_policy": error_policy,
         "backfill_new_fields": backfill_new_fields,
         "job_id": job_id,
@@ -1611,6 +1616,9 @@ def _write_destination_database(
         # File/object-store blanks into typed columns are SQL NULL (D1): the
         # buffered engine path dropped the flag before writers ever saw it.
         "empty_cells_as_null": empty_cells_as_null,
+        # D101: writers may not create undisclosed DDL (upsert unique index)
+        # on an operator's existing table unless Validate disclosed + approved.
+        "upsert_ddl_approved": upsert_ddl_approved,
         # Live dest nullability for write-time NOT NULL escalate (G3 parity).
         "destination_column_nullability": dict(
             (cfg.get("extra") or {}).get("schema_nullability")

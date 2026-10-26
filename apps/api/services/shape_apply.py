@@ -392,7 +392,13 @@ def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:
         "rows_shaped_out": effect.rows_shaped_out,
         "rows_shape_filtered": effect.rows_shaped_out,
         "rows_shape_diverted": effect.rows_diverted,
-        "rows_expanded": effect.rows_expanded,
+        # Union-appended rows are counted in effect.rows_in (they enter the
+        # pipeline) but they were never read from the source, so for the
+        # write ledger they are an expansion of the source population —
+        # without folding them in, Gate-8 reports the appended rows as
+        # unexplained extras on the destination (CI-4 shape_join_union).
+        "rows_expanded": effect.rows_expanded
+        + getattr(effect, "rows_union_appended", 0),
         "shape_cells_changed": effect.cells_changed,
         "shape_nulls_introduced": effect.nulls_introduced,
     }

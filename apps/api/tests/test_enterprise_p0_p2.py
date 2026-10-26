@@ -6,6 +6,7 @@ import pytest
 
 
 def test_secret_vault_rejects_v0_in_production(monkeypatch):
+    monkeypatch.delenv("DATAWRAP_ENV", raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.setenv("DATAFLOW_SECRETS_KEY", "test-production-key-for-unit-tests-only!!")
     from services.secret_vault import SecretVaultError, decrypt_secret, encrypt_secret

@@ -100,17 +100,18 @@
 
   --df-text-primary: #0f172a;
   --df-text-secondary: #475569;
-  /* #64748b = 4.76:1 on white — tertiary text carries real labels (OCR hint,
+  /* #5e6e85 clears AA on every surface: 4.58:1 on --df-bg-subtle (the worst
+     canvas), 5.19 on white. Tertiary text carries real labels (OCR hint,
      wizard captions), so it must meet AA, not act as a decorative ink. */
-  --df-text-tertiary: #64748b;
-  --df-text-muted: #64748b;
-  /* Alias used by leftover sheets (`var(--df-text, #0f172a)`). Must track primary so dark remaps. */
+  --df-text-tertiary: #5e6e85;
+  --df-text-muted: #5e6e85;
+  /* Alias used by leftover sheets (`var(--df-text)`). Must track primary so dark remaps. */
   --df-text: var(--df-text-primary);
   --df-surface-2: var(--df-surface-muted);
   /* Leftover sheets still read these undeclared names and fall back to paper. */
   --df-surface-subtle: var(--df-surface-muted);
   --df-surface-sunken: var(--df-surface-muted);
-  --df-focus-ring: var(--df-brand-ring);
+  --df-focus-ring: var(--df-brand);  /* solid logo primary, ~3.2:1 on light surfaces */
 
   /* Motion — shared easings / durations for landing + workspace */
   --df-ease: cubic-bezier(0.22, 1, 0.36, 1);
@@ -169,6 +170,7 @@
   --df-font-display: "Plus Jakarta Sans", "IBM Plex Sans", system-ui, sans-serif;
   --df-font-mono: "JetBrains Mono", "IBM Plex Mono", ui-monospace, monospace;
   --df-fs-xs: 11px;
+  --df-fs-body: 12px;
   --df-fs-sm: 12.5px;
   --df-fs-md: 13.5px;
   --df-fs-lg: 15px;
@@ -398,6 +400,7 @@
   --dt-transition-slow: var(--df-dur) var(--df-ease);
 
   /* Stacking — one scale. Each layer has one value. */
+  --df-z-under: -1;
   --df-z-floor: 0;
   --df-z-base: 1;
   --df-z-raised: 2;
@@ -411,11 +414,18 @@
   --df-z-action: 30;
   --df-z-topbar: 40;
   --df-z-sidebar: 45;
+  --df-z-elevated: 50;
+  --df-z-flyout: 60;
+  --df-z-drawer: 70;
   --df-z-dropdown: 80;
   --df-z-popover: 90;
+  --df-z-overlay: 200;
   --df-z-modal: 1000;
   --df-z-toast: 1100;
   --df-z-boot: 1200;
+  --df-z-alert: 9999;
+  --df-z-splash: 10000;
+  --df-z-max: 12000;
 }
 
 html,
@@ -426,6 +436,16 @@ body,
   color: var(--df-text-primary);
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+}
+
+/* Body runs the product's 12px base size. Set on body (not html) so rem keeps
+   its 16px UA root and nothing else silently rescales. */
+body {
+  font-size: var(--df-fs-body);
+  /* Full-bleed sections size against vw, which includes the scrollbar strip —
+     clip the residual overflow at the root instead of per-section. `clip`
+     (not `hidden`) keeps position:sticky working (no scroll container). */
+  overflow-x: clip;
 }
 
 /* Form controls do not inherit type from their container — without this the UA
@@ -505,7 +525,7 @@ body:has(.df2-app) #root {
 }
 
 /* ≤1680 CSS px — typical 14–16" laptop at 100% browser zoom */
-@media (max-width: 1680px) {
+@media (max-width: 1679px) {
   .df2-app {
     --df-btn-height: 32px;
     --df-btn-height-sm: 28px;
@@ -642,6 +662,7 @@ html.df2-theme-dark:has(.df2-app),
   --df-text-tertiary: #8a99ab;
   --df-text-muted: #8a97a8;
   --df-brand-strong: #5eead4;
+  --df-focus-ring: #2dd4bf;  /* ~7:1 on dark surfaces */
   --df-action-bg: #0f766e;
   --df-action-bg-hover: #115e59;
   --df-brand-hover: #2dd4bf;

@@ -507,7 +507,7 @@ def sample_connector_object(
                 "type": ctype,
                 "table": table,
                 "limit": limit,
-                "truncated": len(rows) >= limit,
+                "truncated": len(rows) >= limit or len(preview_rows) < len(rows),
                 "column_type_source": "reader",
             }
             if resolve_note:
@@ -718,7 +718,7 @@ def run_connector_query(
                                 exc,
                             )
                     allowed = schema_allowlist(columns, table_names)
-                    assert_identifiers_allowed(sql, allowed=allowed)
+                    assert_identifiers_allowed(sql, allowed=allowed, dialect=ctype)
                 except ValueError as exc:
                     return _tool_result(tool, success=False, error=str(exc))
             body = QueryExecuteRequest(connector_id=cid, query=sql, limit=limit)

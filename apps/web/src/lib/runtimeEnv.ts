@@ -18,8 +18,7 @@ export function isDeployedHost(): boolean {
   return (
     host.endsWith(".railway.app")
     || host.endsWith(".up.railway.app")
-    || host.endsWith(".datawrap.app")
-    || host.endsWith(".dataflow.app")
+    || host.endsWith(".datawrap.io")
     || Boolean(import.meta.env.PROD)
   );
 }

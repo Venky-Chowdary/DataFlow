@@ -13,6 +13,7 @@ import threading
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from collections.abc import Mapping
 from typing import Any
 
 from services.atomic_file import write_json_atomic
@@ -244,6 +245,24 @@ def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def contract_cursor_field(data: Mapping[str, Any] | None) -> str:
+    """The one canonical read of a contract's cursor column.
+
+    ``cursor_column`` is the vocabulary schedules, preflight, and Pilot
+    speak; ``cursor_field`` is what the engine consumes. Reading only the
+    engine name silently dropped the operator's declared cursor and the
+    run fell back to polling the primary key (D28).
+    """
+    if not isinstance(data, Mapping):
+        return ""
+    return str(
+        data.get("cursor_field")
+        or data.get("cursor_column")
+        or data.get("cursor")
+        or ""
+    ).strip()
+
+
 @dataclass
 class SyncContract:
     name: str
@@ -257,6 +276,12 @@ class SyncContract:
     #: a table whose rows are updated in place, and a business date is set from
     #: a calendar, not a clock. See :data:`CURSOR_SEMANTICS`.
     cursor_semantics: str = ""
+    #: Mirror delete behavior: ``hard`` (docs default — DELETE missing keys) or
+    #: ``soft`` (declared — keep them as ``_deleted`` tombstones).
+    delete_mode: str = ""
+    #: Days a declared ``business_date`` cursor re-reads behind the watermark
+    #: each run. 0 = no lookback (the cursor then stays refused — D48).
+    cursor_lookback_days: int = 0
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
@@ -275,17 +300,31 @@ class SyncContract:
             # Empty inherits request sync_mode via resolve_effective_sync_mode —
             # never hard-default to overwrite (that silently wiped append jobs).
             sync_mode=str(data.get("sync_mode") or "").strip(),
-            cursor_field=str(data.get("cursor_field") or data.get("cursor") or ""),
+            cursor_field=contract_cursor_field(data),
             primary_key=primary_key,
             schema_policy=str(data.get("schema_policy") or "manual_review"),
             validation_mode=str(data.get("validation_mode") or "strict"),
             cursor_semantics=str(data.get("cursor_semantics") or "").strip().lower(),
+            delete_mode=str(
+                data.get("delete_mode") or data.get("delete_strategy") or ""
+            ).strip().lower(),
+            cursor_lookback_days=_contract_lookback_days(data),
         )
 
     def primary_key_columns(self) -> list[str]:
         """Return PK columns; supports ``id`` or ``order_id,line_id`` / ``primary_keys``."""
         raw = (self.primary_key or "").replace(";", ",")
         return [p.strip() for p in raw.split(",") if p.strip()]
+
+
+def _contract_lookback_days(data: dict[str, Any]) -> int:
+    """Declared business-date re-read window (days); 0 when absent/invalid."""
+    raw = data.get("cursor_lookback_days", data.get("lookback_days", 0))
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return 0
+    return days if days > 0 else 0
 
 
 def resolve_sync_contract(stream_contracts: list[dict[str, Any]] | None) -> SyncContract | None:
@@ -454,6 +493,23 @@ class IncrementalReadScope:
     #: Tie-break column a composite watermark was written with ("" when the
     #: watermark is cursor-only or predates the record).
     watermark_tiebreak_column: str = ""
+    #: Declared business-date re-read window in days (0 = none). Only
+    #: ``business_date`` cursors may declare one — see evaluate_cursor_semantics.
+    lookback_days: int = 0
+
+    @property
+    def read_watermark(self) -> str | None:
+        """Seed a bounded read starts at: watermark minus the declared lookback.
+
+        The stored mark never moves — only the read seed does. An unparseable
+        watermark refuses rather than silently skipping the declared window.
+        """
+        if not self.lookback_days or self.watermark in (None, ""):
+            return self.watermark
+        text = str(self.watermark)
+        sep = "\u241f"
+        head, *tail = text.split(sep)
+        return sep.join([_shift_temporal_watermark(head, self.lookback_days)] + tail)
 
     @property
     def bounded(self) -> bool:
@@ -561,7 +617,37 @@ def resolve_incremental_read_scope(
         cursor_key=cursor_key,
         watermark_cursor_column=str(metadata.get("cursor_column") or ""),
         watermark_tiebreak_column=stored_tiebreak,
+        lookback_days=contract.cursor_lookback_days if contract else 0,
     )
+
+
+def _shift_temporal_watermark(value: str, days: int) -> str:
+    """``value - days`` rendered in the watermark's own shape, or refuse."""
+    from datetime import datetime, timedelta
+
+    text = str(value).strip()
+    for fmt, render in (
+        ("%Y-%m-%d", lambda d: d.strftime("%Y-%m-%d")),
+        ("%Y-%m-%dT%H:%M:%S", lambda d: d.strftime("%Y-%m-%dT%H:%M:%S")),
+        ("%Y-%m-%d %H:%M:%S", lambda d: d.strftime("%Y-%m-%d %H:%M:%S")),
+        ("%Y-%m-%dT%H:%M:%S.%f", lambda d: d.strftime("%Y-%m-%dT%H:%M:%S.%f")),
+        ("%Y-%m-%d %H:%M:%S.%f", lambda d: d.strftime("%Y-%m-%d %H:%M:%S.%f")),
+    ):
+        try:
+            parsed = datetime.strptime(text, fmt)
+        except ValueError:
+            continue
+        return render(parsed - timedelta(days=days))
+    # Fractional-second / tz-suffixed ISO falls back to fromisoformat.
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise ValueError(
+            f"A declared {days}-day cursor lookback cannot be applied to "
+            f"watermark {text!r} — it is not a date or timestamp. Clear the "
+            "cursor to re-snapshot, or remove the lookback declaration."
+        ) from exc
+    return (parsed - timedelta(days=days)).isoformat()
 
 
 def watermark_is_composite(watermark: Any) -> bool:
@@ -1014,7 +1100,7 @@ def iter_rows_after_watermark(
             verdict = row_after_watermark(
                 rec,
                 scope.cursor_column,
-                scope.watermark,
+                scope.read_watermark,
                 primary_key=scope.primary_key,
             )
             if verdict is False:
@@ -1080,17 +1166,15 @@ def max_cursor_value(
     """
     if not cursor_column or not rows:
         return None
-    try:
-        idx = headers.index(cursor_column)
-    except ValueError:
+    from services.keyset_pagination import header_column_index
+
+    idx = header_column_index(headers, cursor_column)
+    if idx is None:
         return None
     pk = (cursor_primary_key or "").strip()
     pk_idx: int | None = None
     if pk and pk != cursor_column:
-        try:
-            pk_idx = headers.index(pk)
-        except ValueError:
-            pk_idx = None
+        pk_idx = header_column_index(headers, pk)
 
     if pk_idx is None:
         values: list[str] = []
@@ -1462,3 +1546,49 @@ def map_source_to_target(column: str, mappings: list[dict[str, Any]]) -> str:
         if str(m.get("source") or "") == column:
             return str(m.get("target") or column)
     return column
+
+
+#: Field names operators use to declare a row identity. ``primary_key`` feeds
+#: the stream contract; the rest are recognized aliases the contract parser
+#: does not read — destinations like Kafka that want a *declared* identity
+#: (produce key) rather than a merge constraint can accept any of them.
+_DECLARED_KEY_FIELDS: tuple[str, ...] = (
+    "primary_key",
+    "primary_keys",
+    "upsert_key",
+    "dedupe_key",
+    "merge_key",
+)
+
+
+def declared_identity_columns(request: Any) -> list[str]:
+    """Source columns the operator declared as row identity, in order.
+
+    Reads ``stream_contracts`` entries first, then ``read_options`` and
+    ``source_filter``. Returns the first non-empty declaration found.
+    Unlike the stream contract's primary_key this is not a write contract —
+    callers use it only where a declared identity is wanted (e.g. the Kafka
+    message key), never to authorize upsert/merge semantics.
+    """
+    holders: list[Any] = list(getattr(request, "stream_contracts", None) or [])
+    holders.append(getattr(request, "read_options", None) or {})
+    holders.append(getattr(request, "source_filter", None) or {})
+    for holder in holders:
+        if not isinstance(holder, dict):
+            continue
+        cols: list[str] = []
+        for name in _DECLARED_KEY_FIELDS:
+            val = holder.get(name)
+            if isinstance(val, (list, tuple)):
+                pieces = val
+            elif val:
+                pieces = str(val).replace(";", ",").split(",")
+            else:
+                continue
+            for piece in pieces:
+                s = str(piece).strip()
+                if s and s not in cols:
+                    cols.append(s)
+            if cols:
+                return cols
+    return []

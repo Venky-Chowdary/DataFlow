@@ -28,6 +28,12 @@ from services.type_system import decimal_needs_scientific_wire
 # maps the sentinel back to Python None → destination SQL NULL.
 SQL_NULL_SENTINEL = "__DF_SQL_NULL__"
 
+# Escape prefix for *real string values* that would collide with a wire
+# sentinel (D109). ``cell_to_string(..., preserve_sql_null=True)`` emits
+# ``__DF_ESC__`` + the literal so the in-band sentinel stays a proof of
+# SQL NULL. ``unescape_wire_text`` strips one prefix at each decode layer.
+ESCAPED_WIRE_PREFIX = "__DF_ESC__"
+
 # Document field absent (Mongo/Dynamo schemaless) — distinct from explicit null.
 # Sparse CDC upsert: omit the key from SET (never wipe destination with NULL).
 # Dense INSERT/COPY/full-refresh / coerce_null: materialize as SQL NULL.
@@ -64,6 +70,25 @@ def is_missing_sentinel(value: Any) -> bool:
 NULL_WIRE_SENTINELS: frozenset[str] = frozenset(
     {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL, "__df_ddb_null__"}
 )
+
+# Decoders compare ``strip().lower()`` (apply_transform), so the collision
+# domain is the sentinel set under the same normalization.
+_NULL_WIRE_LOWER: frozenset[str] = frozenset(s.lower() for s in NULL_WIRE_SENTINELS)
+
+
+def escape_wire_text(text: str) -> str:
+    """Escape a wire-unsafe string: collides with a NULL/missing sentinel or
+    already carries the escape prefix (recursive, so decode stays total)."""
+    if text.strip().lower() in _NULL_WIRE_LOWER or text.startswith(ESCAPED_WIRE_PREFIX):
+        return f"{ESCAPED_WIRE_PREFIX}{text}"
+    return text
+
+
+def unescape_wire_text(value: Any) -> Any:
+    """Strip one ``__DF_ESC__`` layer from a wire string; non-strings pass."""
+    if isinstance(value, str) and value.startswith(ESCAPED_WIRE_PREFIX):
+        return value[len(ESCAPED_WIRE_PREFIX) :]
+    return value
 
 
 def is_null_evidence(value: Any) -> bool:
@@ -111,7 +136,7 @@ def present_cell_text(value: Any) -> str | None:
     if is_null_evidence(value) or is_frame_missing(value):
         return None
     if isinstance(value, str):
-        text = value.strip()
+        text = unescape_wire_text(value).strip()
         return None if is_null_evidence(text) else text
     text = cell_to_string(value, preserve_sql_null=True)
     if is_null_evidence(text):
@@ -510,6 +535,68 @@ def _document_text(value: Any, *, sort_keys: bool = False) -> str:
     return _document_text(_json_default(value), sort_keys=sort_keys)
 
 
+def _canonical_number_text(value: Any) -> str | None:
+    """One canonical spelling per real number — ``3.0`` ≡ ``3`` ≡ ``3e0``.
+
+    JSON has one numeric domain: engines that store documents as real numbers
+    (Snowflake VARIANT, Mongo, jsonb) read ``3.0`` back as ``3``. A semantic
+    compare must not call that a mismatch, and must not collapse ``3.0001``
+    into ``3`` either — only the spelling is folded, not the value (D73).
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        # Decimal.normalize() folds 3.0/3.00/3e0 to one digit string.
+        return format(value.normalize(), "f")
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            return None
+        if value.is_integer() and abs(value) < 2**63:
+            return str(int(value))
+        return repr(value)
+    return None
+
+
+def canonical_json_text(document_text: str) -> str | None:
+    """Canonical form of a JSON document for fingerprint/semantic compare.
+
+    Parses exactly (``json_loads_exact`` — no binary64 rounding), then renders
+    every number through ``_canonical_number_text`` and sorts object keys, so
+    ``{"n": 3.0}`` and ``{"n": 3}`` — the same JSON value — compare equal while
+    ``{"n": 3.0001}`` still differs. Returns ``None`` when the text is not a
+    JSON document a strict parser accepts.
+    """
+    try:
+        parsed = json_loads_exact(document_text)
+    except Exception:
+        return None
+
+    def render(v: Any) -> str:
+        num = _canonical_number_text(v)
+        if num is not None:
+            return num
+        if v is None or isinstance(v, JsonNullToken):
+            return "null"
+        if isinstance(v, bool):
+            return "true" if v else "false"
+        if isinstance(v, str):
+            return json.dumps(v, ensure_ascii=False)
+        if isinstance(v, (list, tuple)):
+            return "[" + ",".join(render(i) for i in v) + "]"
+        if isinstance(v, Mapping):
+            return "{" + ",".join(
+                f"{json.dumps(str(k), ensure_ascii=False)}:{render(val)}"
+                for k, val in sorted(v.items(), key=lambda kv: str(kv[0]))
+            ) + "}"
+        return render(_json_default(v))
+
+    return render(parsed)
+
+
 class JsonNullToken:
     """JSON null as engine text ``null``, distinct from SQL NULL.
 
@@ -662,6 +749,11 @@ def operator_binary_cell_text(text: str | None, ddl_type: str = "") -> str | Non
 
     if normalize_logical_type(ddl_type) != "binary":
         return text
+    # A NULL/absent cell must render as NULL, not as hex. JSON read-backs can
+    # hand the literal "null" to a binary column, and "null" is valid base64 —
+    # it decoded to \x9e\xe9\x65 and displayed as 0x9ee965 (X-131).
+    if text.strip() in NULL_WIRE_SENTINELS or text.strip().lower() == "null":
+        return "NULL"
     if text == "":
         return "0x"  # zero-length bytes — real value, distinct from NULL
     try:
@@ -692,6 +784,9 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
 
     # Sparse CDC / STOP_COLUMN / coerce omit — never serialize the sentinel into
     # CSV/JSON/export wires (would look like a real client value).
+    # The missing sentinel IS the string ``__DF_MISSING__`` — escaping it would
+    # turn every absent field into literal text on the wire and poison schema
+    # inference, so only the fallback path below escapes colliding literals.
     if is_missing_sentinel(value):
         return ""
 
@@ -761,17 +856,17 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
         return sanitize_json_value(value.value)
 
     if isinstance(value, (dict, list, tuple, set, frozenset)):
-        return json.dumps(
-            sanitize_json_value(value),
-            ensure_ascii=False,
-            separators=(",", ":"),
-            sort_keys=True,
-            default=json_default,
-            allow_nan=False,
-        )
+        # Numbers inside a document stay numbers — the string-wire policy for a
+        # DECIMAL column does not apply to a JSON document's leaves, so ``{"pi":
+        # 3.14}`` must not be rewritten as ``{"pi": "3.14"}`` (D74).
+        return json_document_text(value, sort_keys=True)
 
-    # Fallback to str() — never repr().
-    return str(value)
+    # Fallback to str() — never repr(). Escape wire-colliding spellings so the
+    # in-memory sentinel stays a proof of SQL NULL, not a literal (D109).
+    text = str(value)
+    if preserve_sql_null and isinstance(value, str):
+        return escape_wire_text(text)
+    return text
 
 
 def sanitize_json_value(value: Any, *, refuse_nonfinite: bool = True) -> Any:

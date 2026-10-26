@@ -1623,6 +1623,17 @@ def rank_connector_tables(
             skipped.append({"table": name, "error": f"non-numeric count {value!r}"})
 
     ranked.sort(key=lambda r: r["rows"], reverse=not ascending)
+    # ``exact`` means the ranking was computed over the full requested
+    # population — every count is a real COUNT(*), but a catalog-estimate
+    # shortlist can still omit a table from the ranking entirely (stale
+    # planner stats ranked qa_r8_big below the cutoff while it held 100k
+    # rows, D24). When any object went uncounted the answer is estimate-
+    # guided, not exact — say so.
+    full_population = (
+        len(considered) >= len(names[:_MAX_RANKED_TABLES])
+        and not bool(info.get("truncated"))
+        and len(names) <= _MAX_RANKED_TABLES
+    )
     return _tool_result(
         tool,
         success=True,
@@ -1641,7 +1652,7 @@ def rank_connector_tables(
             # The shortlist came from catalog estimates; every reported row
             # count is still an exact COUNT(*).
             "shortlisted_by": "catalog_estimate" if estimates else "all_tables",
-            "exact": True,
+            "exact": full_population,
             "read_only": True,
         },
     )

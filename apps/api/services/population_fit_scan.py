@@ -892,7 +892,10 @@ def _typed_predicate(
         if transform:
             out, err = apply_transform(value, transform)
             if err:
-                return err
+                # Prefix names the transform so the finding classes as a
+                # declared-transform failure, not a carrier-fit failure —
+                # "cast_integer: Invalid integer: '3O7'" names the real cause.
+                return f"{transform}: {err}"
             if out is None:
                 return None
             bound = out
@@ -1622,6 +1625,16 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
         }
 
     if aborting:
+        # Split the headline by failure class: a declared transform that cannot
+        # parse a source value (cast_integer on '3O7') is a different defect
+        # from a value that does not fit the carrier — the old lumped wording
+        # blamed the carrier for transform failures.
+        def _is_transform_failure(f: ColumnFitFinding) -> bool:
+            t = f.target.transform
+            return bool(t) and f.unfit_reason.startswith(f"{t}:")
+
+        transform_failures = [f for f in aborting if _is_transform_failure(f)]
+        carrier_failures = [f for f in aborting if not _is_transform_failure(f)]
         cols = ", ".join(f"{f.target.source} → {f.target.target_type}" for f in aborting)
         rows = sum(f.unfit_rows for f in aborting)
         scope = (
@@ -1656,7 +1669,30 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
             for f in aborting
             if f.suggested_target_type
         )
-        if create_new and widen_names:
+        if transform_failures:
+            tf_cols = ", ".join(
+                f"{f.target.source} ({f.target.transform})" for f in transform_failures
+            )
+            tf_rows = sum(f.unfit_rows for f in transform_failures)
+            first = transform_failures[0]
+            cf_suffix = (
+                f"; plus {sum(f.unfit_rows for f in carrier_failures)} value(s) "
+                f"in {len(carrier_failures)} column(s) that do not fit the "
+                "destination carrier"
+                if carrier_failures
+                else ""
+            )
+            message = (
+                f"{tf_rows} value(s) in {scope} fail the declared transform "
+                f"({tf_cols}) — {first.unfit_reason} — the load aborts on "
+                f"these values{cf_suffix}; Execute would commit nothing"
+            )
+            corrective = (
+                "Fix the source values, change or remove the declared "
+                "transform, or quarantine the offending rows via a "
+                "continue-policy Migration Risk Contract, then re-Validate."
+            )
+        elif create_new and widen_names:
             message = (
                 f"{rows} value(s) in {scope} cannot fit the peeked CREATE type "
                 f"({cols}). This table does not exist yet — widen Map to "

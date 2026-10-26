@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any
 
+from services.error_handling import TransferCancelled  # noqa: E402
 from services.schema_inference import infer_type
 from services.decision_kernel import materialize_dest_ddl
 from services.value_serializer import json_default
@@ -519,6 +520,8 @@ def _conflict_key_sql_predicates(
     Shared by Redshift LSN lookup and stage-delete so extract
     ``SQL_NULL_SENTINEL`` never binds as ``col = '__DF_SQL_NULL__'``.
     """
+    from services.value_serializer import unescape_wire_text
+
     predicates: list[Any] = []
     values: list[Any] = []
     for col, idx in zip(conflict_cols, conflict_idxs):
@@ -531,7 +534,7 @@ def _conflict_key_sql_predicates(
                     sql_mod.Identifier(col), sql_mod.Placeholder()
                 )
             )
-            values.append(val)
+            values.append(unescape_wire_text(val))
     return predicates, values
 
 
@@ -1200,7 +1203,11 @@ def _copy_text_value(value: Any) -> str:
         # escape and hand jsonb a different string — "C:\\temp" arrives as
         # "C:\temp", whose \t jsonb reads as a tab. Where the leftover escape is
         # not valid JSON at all the row is rejected outright.
-        raw = json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=json_default)
+        # Document numbers stay numbers — a Decimal leaf is not a string
+        # (``{"pi": 3.14}`` must not write ``{"pi": "3.14"}``, D74).
+        from services.value_serializer import json_document_text
+
+        raw = json_document_text(value)
     elif isinstance(value, (bytes, bytearray, memoryview)):
         # ``\x`` is COPY's hex character escape, so an unescaped
         # ``\x68656c6c6f`` is consumed as the byte 0x68 plus the literal text
@@ -1880,6 +1887,11 @@ def write_mapped_rows(
             )
         if use_ledger:
             ensure_raw_write_ledger(cursor, dialect="postgresql", schema=schema)
+        # None = existence never established; only a proven False allows the
+        # orphan-rollback registration below to drop the object. Declared at
+        # write scope: the upsert unique-key check below reads it on the
+        # create_table=False path too (operator's existing table).
+        pg_table_existed: bool | None = None
         if create_table:
             if engine not in {"redshift", "amazon_redshift", "redshift_serverless"}:
                 from services.type_system import collect_pg_enum_prerequisites
@@ -1887,9 +1899,6 @@ def write_mapped_rows(
                 for stmt in collect_pg_enum_prerequisites(logical_types):
                     cursor.execute(stmt)
             fidelity_plan = None
-            # None = existence never established; only a proven False allows the
-            # orphan-rollback registration below to drop the object.
-            pg_table_existed: bool | None = None
             from services.schema_fidelity import (
                 empty_unsupported_report,
                 render_create_column_defs,
@@ -2066,6 +2075,21 @@ def write_mapped_rows(
             # table, and registering that made a failed write (a NOT NULL
             # violation on row 1) drop a populated destination.
             if pg_table_existed is False:
+                # Durable ownership marker: a table this run created is ours —
+                # later upserts/replays may add the unique index without the
+                # operator-table disclosed-DDL gate (D101). Operator tables
+                # never carry this comment, so the gate stays fail-closed.
+                try:
+                    cursor.execute(
+                        sql.SQL(
+                            "COMMENT ON TABLE {}.{} IS 'dataflow:managed'"
+                        ).format(
+                            sql.Identifier(schema),
+                            sql.Identifier(table_name),
+                        )
+                    )
+                except Exception:
+                    logger.debug("managed-table comment skipped", exc_info=True)
                 try:
                     from services.auto_create_lifecycle import register_auto_create
 
@@ -2200,6 +2224,67 @@ def write_mapped_rows(
                 index_name = sanitize_identifier(
                     f"uidx_{table_name}_{'_'.join(conflict_cols)}"
                 )
+                if pg_table_existed is None:
+                    # create_table=False path never probed — establish whether
+                    # this is an operator's existing table honestly before the
+                    # disclosed-DDL gate below decides on it.
+                    cursor.execute(
+                        """
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (schema, table_name),
+                    )
+                    pg_table_existed = cursor.fetchone() is not None
+                pg_table_managed = False
+                if pg_table_existed:
+                    # A table a prior DataFlow run created carries the
+                    # 'dataflow:managed' comment — index DDL on it is ours to
+                    # make; only unmarked (operator-owned) tables gate.
+                    try:
+                        cursor.execute(
+                            "SELECT obj_description(to_regclass(%s), 'pg_class')",
+                            (f'"{schema}"."{table_name}"',),
+                        )
+                        _row = cursor.fetchone()
+                        pg_table_managed = bool(_row and _row[0] == "dataflow:managed")
+                    except Exception:
+                        logger.debug("managed-table probe skipped", exc_info=True)
+                if pg_table_existed and not pg_table_managed:
+                    # D101: DDL on an operator's existing table is disclosed
+                    # and approved at Validate — never created silently.
+                    cursor.execute(
+                        "SELECT 1 FROM pg_index i "
+                        "JOIN pg_class t ON t.oid = i.indrelid "
+                        "JOIN pg_namespace n ON n.oid = t.relnamespace "
+                        "WHERE i.indisunique AND t.relname = %s "
+                        "AND n.nspname = %s "
+                        "AND (SELECT array_agg(a.attname ORDER BY a.attname)::text[] "
+                        "     FROM pg_attribute a "
+                        "     WHERE a.attrelid = t.oid "
+                        "       AND a.attnum = ANY(i.indkey)) "
+                        "  = (SELECT array_agg(x ORDER BY x) "
+                        "     FROM unnest(%s::text[]) x) LIMIT 1",
+                        (table_name, schema, list(conflict_cols)),
+                    )
+                    if cursor.fetchone() is None and not bool(
+                        _kwargs.get("upsert_ddl_approved")
+                    ):
+                        raise ValueError(
+                            f"Upsert into existing table "
+                            f"'{schema}.{table_name}' needs unique index "
+                            f"{index_name} on ({', '.join(conflict_cols)}) — "
+                            "destination DDL must be disclosed and approved "
+                            "at Validate (ddl_changes_acknowledged); "
+                            "DataFlow does not silently alter a table it "
+                            "did not create. To proceed: re-run Validate and "
+                            "acknowledge the planned DDL change, or create "
+                            "the index yourself — "
+                            f"CREATE UNIQUE INDEX {index_name} "
+                            f"ON {schema}.{table_name} "
+                            f"({', '.join(conflict_cols)});"
+                        )
                 cursor.execute(
                     sql.SQL(
                         "CREATE UNIQUE INDEX IF NOT EXISTS {} ON {}.{} ({})"
@@ -2609,6 +2694,11 @@ def write_mapped_rows(
                 nonlocal written, rows_skipped, insert, rejected_details, transform_errors
                 if not batch:
                     return 0
+                # D102: stop the NEXT chunk when the job was cancelled — the
+                # post-commit on_checkpoint alone lets one in-flight batch land.
+                from services.cancel_check import cancel_checkpoint
+
+                cancel_checkpoint(written)
                 start = int(row_numbers[0]) if row_numbers else 1
                 attempt = 0
                 chunk_started = time.monotonic()
@@ -3124,6 +3214,9 @@ def write_mapped_rows(
             load_method=load_method,
             meta=meta_out,
         )
+    except TransferCancelled:
+        # D102: cancel is control flow, not a write failure.
+        raise
     except Exception as exc:
         if _held_overwrite() and _held_overwrite().active:
             from connectors.write_resilience import finish_held_overwrite

@@ -292,7 +292,9 @@ def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     return normalize_sync_mode(mode)
 
 
-def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""):
+def build_schedule_request(
+    sched, src: dict, dst: dict, *, resync_mode: str = "", triggered_by: str = ""
+):
     """Build a :class:`TransferRequest` from a persisted schedule.
 
     Threads the per-schedule sync mode, validation mode, mappings, and any
@@ -550,6 +552,12 @@ def build_schedule_request(sched, src: dict, dst: dict, *, resync_mode: str = ""
             acks.reason
             if acks.any_claimed
             else str(getattr(sched, "acknowledgment_reason", "") or "")
+        ),
+        # D6: every schedule-fired job names its trigger — a blank
+        # triggered_by erases the audit trail.
+        triggered_by=(
+            (triggered_by or "").strip()
+            or f"schedule:{str(getattr(sched, 'name', '') or getattr(sched, 'id', '') or 'unknown')}"
         ),
     )
     if resync_mode in {"sync", "full"}:
@@ -920,6 +928,8 @@ def _retry_decision(
         sync_mode=sync_mode,
         rows_committed=rows_committed,
         rows_committed_known=rows_committed_known,
+        source_engine=str((job_doc or {}).get("source_format") or ""),
+        destination_engine=str((job_doc or {}).get("destination_type") or ""),
     )
     if not decision["allowed"]:
         return {
@@ -1426,6 +1436,7 @@ def _dispatch_transfer(
     *,
     allow_paused: bool = False,
     resync_mode: str = "",
+    triggered_by: str = "",
 ) -> str | None:
     """Build and submit the transfer for a schedule attempt (used for retries too).
 
@@ -1466,7 +1477,13 @@ def _dispatch_transfer(
 
     authorized_drift = False
     try:
-        request = build_schedule_request(sched, src, dst, resync_mode=resync_mode)
+        request = build_schedule_request(
+            sched,
+            src,
+            dst,
+            resync_mode=resync_mode,
+            triggered_by=triggered_by,
+        )
         authorized_drift = _guard_source_schema_drift(sched, request)
     except ValueError as exc:
         emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)
@@ -1613,6 +1630,7 @@ def _run_schedule(
     *,
     manual: bool = False,
     resync_mode: str = "",
+    triggered_by: str = "",
 ) -> str | None:
     from services.schedule_store import (
         clear_schedule_running,
@@ -1713,6 +1731,7 @@ def _run_schedule(
                     attempt=sched.retry_attempt if sched.retry_at else 0,
                     allow_paused=manual,
                     resync_mode=resync_mode,
+                    triggered_by=triggered_by,
                 )
         except ScheduleStartError:
             raise

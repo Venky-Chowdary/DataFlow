@@ -128,6 +128,9 @@ def stage_dataset_transfer(
     source_timezone: str = "",
     pii_acknowledgement: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
+    upsert_key: str = "",
+    primary_key: str = "",
+    dedupe_key: str = "",
 ) -> Any:
     """Stage a file→connector transfer. Returns a tool result. Does not write."""
     tool = "start_dataset_transfer"
@@ -329,7 +332,22 @@ def stage_dataset_transfer(
         "validation_mode": validation_mode,
         "limit": max(0, int(limit or 0)),
         "source_filter": {},
-        "stream_contracts": [],
+        "stream_contracts": (
+            [
+                {
+                    "name": schema.name,
+                    "selected": True,
+                    "primary_key": [
+                        c.strip()
+                        for c in str(upsert_key or primary_key or dedupe_key)
+                        .split(",")
+                        if c.strip()
+                    ],
+                }
+            ]
+            if str(upsert_key or primary_key or dedupe_key).strip()
+            else []
+        ),
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
         "source_path": str(path),

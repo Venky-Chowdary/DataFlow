@@ -10,16 +10,16 @@
    * variable maps to a --df-* token where one exists, so shipping a new
    * brand hue in tokens.css automatically propagates to the marketing site.
    */
-  --lp-bg: var(--df-bg-canvas, #f3f5f7);
-  --lp-ink: var(--df-text-primary, #0f172a);
-  --lp-muted: var(--df-text-secondary, #475569);
-  --lp-muted-soft: var(--df-text-secondary, #475569);
-  --lp-line: var(--df-border, #e4e8ee);
-  --lp-soft: var(--df-surface-muted, #ffffff);
-  --lp-panel: var(--df-surface, #ffffff);
-  --lp-accent: var(--df-brand, #0d9488);
-  --lp-accent-soft: var(--df-brand-muted, #f0fdfa);
-  --lp-accent-ink: var(--df-brand-hover, #0f766e);
+  --lp-bg: var(--df-bg-canvas);
+  --lp-ink: var(--df-text-primary);
+  --lp-muted: var(--df-text-secondary);
+  --lp-muted-soft: var(--df-text-secondary);
+  --lp-line: var(--df-border);
+  --lp-soft: var(--df-surface-muted);
+  --lp-panel: var(--df-surface);
+  --lp-accent: var(--df-brand);
+  --lp-accent-soft: var(--df-brand-muted);
+  --lp-accent-ink: var(--df-brand-hover);
   --lp-radius: var(--df-radius-lg, 10px);
   --lp-radius-lg: var(--df-radius-xl, 14px);
   --lp-radius-xl: 18px;
@@ -108,7 +108,7 @@ html:has(.lp) {
 .lp-nav {
   position: sticky;
   top: 0;
-  z-index: 50;
+  z-index: var(--df-z-elevated);
   padding: 14px clamp(16px, 3vw, 32px) 10px;
   background: transparent;
   border-bottom: 0;
@@ -236,7 +236,7 @@ html:has(.lp) {
   border-radius: 12px;
   background: #fff;
   box-shadow: 0 16px 40px rgba(10, 10, 10, 0.1);
-  z-index: 60;
+  z-index: var(--df-z-flyout);
 }
 
 .lp-nav-item.is-open .lp-nav-dropdown {
@@ -535,7 +535,7 @@ html:has(.lp) {
   color: var(--lp-accent-ink);
 }
 
-@media (max-width: 768px) {
+@media (max-width: 767px) {
   .lp-hero-value-strip {
     grid-template-columns: 1fr;
   }
@@ -736,7 +736,7 @@ html:has(.lp) {
   color: #fff;
   display: grid;
   place-items: center;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   flex-shrink: 0;
 }
@@ -1493,7 +1493,7 @@ html:has(.lp) {
 
 .lp-footer-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: min(1200px, calc(100% - clamp(32px, 6vw, 80px)));
   margin: 0 auto;
   padding: clamp(40px, 6vh, 64px) 0 clamp(28px, 4vh, 40px);
@@ -1763,7 +1763,7 @@ html:has(.lp) {
 
 .lp-login-brand-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: flex;
   flex-direction: column;
   flex: 1;
@@ -2347,7 +2347,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .lp-login-metrics {
     grid-template-columns: 1fr;
   }
@@ -2419,7 +2419,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   }
 }
 
-@media (max-width: 1100px) {
+@media (max-width: 1099px) {
   .lp-nav-links {
     display: none;
   }
@@ -2442,7 +2442,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
     border: 1px solid var(--lp-line);
     border-radius: 16px;
     box-shadow: 0 16px 40px rgba(10, 10, 10, 0.12);
-    z-index: 70;
+    z-index: var(--df-z-drawer);
   }
 
   .lp-nav-end {
@@ -3228,7 +3228,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-mkt-mock-pass {
   font-style: normal;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -3298,7 +3298,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-size: clamp(1.25rem, 2vw, 1.5rem);
   font-weight: 700;
   letter-spacing: -0.02em;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
 }
 
 .lp-mkt-feature-grid {
@@ -3315,7 +3315,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 18px 20px;
   border: 1px solid var(--lp-line);
   border-radius: 14px;
-  background: var(--lp-grad-surface, #fff);
+  background: var(--lp-grad-surface);
   box-shadow: var(--lp-shadow-sm, 0 1px 2px rgba(15, 23, 42, 0.04));
   transition:
     transform var(--lp-dur-fast, 160ms) var(--lp-ease, ease),
@@ -3325,7 +3325,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-mkt-feature-card:hover {
   transform: translateY(-2px);
-  border-color: var(--lp-hairline, #cfd8e3);
+  border-color: var(--lp-hairline);
   box-shadow: var(--lp-shadow-md, 0 12px 32px rgba(15, 23, 42, 0.08));
 }
 
@@ -3418,7 +3418,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .lp-mkt-workflow {
     grid-template-columns: 1fr;
   }
@@ -3848,7 +3848,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   .lp-mkt-stats-strip {
     grid-template-columns: 1fr;
   }
@@ -3909,7 +3909,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   position: absolute;
   inset: -8% -10% auto -10%;
   height: 420px;
-  z-index: -1;
+  z-index: var(--df-z-under);
   pointer-events: none;
   background:
     radial-gradient(520px 240px at 28% 0%, rgba(13, 148, 136, 0.1), transparent 70%),
@@ -4075,7 +4075,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-flow-node-sub {
   font-family: var(--lp-font);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   fill: #64748b;
 }
 
@@ -4210,7 +4210,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-enterprise > * {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 /* ─── CTA band — solid, no aurora fade ─── */
@@ -4233,7 +4233,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-cta-band > * {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-cta-band h3 {
@@ -4370,7 +4370,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   border-radius: 999px;
   background: var(--lp-grad-brand);
   color: #fff;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -4430,7 +4430,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
-  color: var(--df-brand, #0d9488);
+  color: var(--df-brand);
 }
 
 .lp-outcomes-rail-list {
@@ -4823,7 +4823,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   transform: none;
   transform-style: flat;
   transition: box-shadow 200ms ease, border-color 200ms ease;
-  border: 1px solid var(--lp-line, #e6e9ee);
+  border: 1px solid var(--lp-line);
   border-radius: 16px;
   box-shadow:
     0 1px 2px rgba(15, 23, 42, 0.04),
@@ -4832,7 +4832,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-hero-mock:hover .lp-mock-shell {
   transform: none;
-  border-color: color-mix(in srgb, var(--lp-accent, #0d9488) 35%, var(--lp-line, #e6e9ee));
+  border-color: color-mix(in srgb, var(--lp-accent) 35%, var(--lp-line));
   box-shadow:
     0 1px 2px rgba(15, 23, 42, 0.04),
     0 20px 48px rgba(15, 23, 42, 0.1);
@@ -4851,9 +4851,9 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   gap: 6px;
   padding: 3px 8px;
   border-radius: 999px;
-  background: var(--df-success-bg, #ecfdf5);
-  color: var(--df-success, #059669);
-  font-size: 10.5px;
+  background: var(--df-success-bg);
+  color: var(--df-success);
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -4889,12 +4889,12 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-mock-gate.is-pass {
-  background: var(--df-success-bg, #ecfdf5);
+  background: var(--df-success-bg);
   border-color: rgba(5, 150, 105, 0.18);
 }
 
 .lp-mock-gate.is-pass em {
-  color: var(--df-success, #059669);
+  color: var(--df-success);
 }
 
 .lp-mock-gate.is-pending {
@@ -4902,7 +4902,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-mock-gate.is-pending em {
-  color: var(--lp-muted-soft, #64748b);
+  color: var(--lp-muted-soft);
 }
 
 .lp-login-alert {
@@ -4929,7 +4929,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-mkt-arch-panel {
   margin: 18px 0 8px;
   padding: 20px;
-  border: 1px solid var(--lp-line, #e6e9ee);
+  border: 1px solid var(--lp-line);
   border-radius: 18px;
   background:
     radial-gradient(120% 140% at 100% 0%, rgba(13, 148, 136, 0.1), transparent 55%),
@@ -4948,19 +4948,19 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   display: inline-flex;
   padding: 5px 10px;
   border-radius: 999px;
-  border: 1px solid var(--lp-line, #e6e9ee);
+  border: 1px solid var(--lp-line);
   background: #fff;
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
-  color: var(--lp-muted-soft, #64748b);
+  color: var(--lp-muted-soft);
 }
 
 .lp-mkt-arch-planes span.is-data {
-  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 35%, #e6e9ee);
-  background: var(--df-brand-muted, #f0fdfa);
-  color: var(--df-brand-hover, #0f766e);
+  border-color: color-mix(in srgb, var(--df-brand) 35%, #e6e9ee);
+  background: var(--df-brand-muted);
+  color: var(--df-brand-hover);
 }
 
 .lp-mkt-arch-flow {
@@ -4985,7 +4985,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   flex: 1 1 auto;
   padding: 14px 10px;
   border-radius: 12px;
-  border: 1px solid var(--lp-line, #e6e9ee);
+  border: 1px solid var(--lp-line);
   background: #fff;
   text-align: center;
   min-width: 0;
@@ -4994,7 +4994,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-mkt-arch-node:hover {
   transform: translateY(-2px);
-  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 35%, #e6e9ee);
+  border-color: color-mix(in srgb, var(--df-brand) 35%, #e6e9ee);
   box-shadow: 0 10px 24px rgba(13, 148, 136, 0.1);
 }
 
@@ -5002,7 +5002,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   display: block;
   font-size: 12.5px;
   font-weight: 700;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
   letter-spacing: -0.01em;
 }
 
@@ -5011,12 +5011,12 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin-top: 4px;
   font-size: 11px;
   line-height: 1.35;
-  color: var(--lp-muted-soft, #64748b);
+  color: var(--lp-muted-soft);
 }
 
 .lp-mkt-arch-node.is-gate {
-  border-color: color-mix(in srgb, var(--df-brand, #0d9488) 45%, #e6e9ee);
-  background: var(--df-brand-muted, #f0fdfa);
+  border-color: color-mix(in srgb, var(--df-brand) 45%, #e6e9ee);
+  background: var(--df-brand-muted);
   box-shadow: 0 0 0 3px rgba(13, 148, 136, 0.08);
 }
 
@@ -5047,7 +5047,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 16px 0 0;
   font-size: 12.5px;
   font-weight: 600;
-  color: var(--lp-muted-soft, #64748b);
+  color: var(--lp-muted-soft);
   letter-spacing: -0.01em;
 }
 
@@ -5190,7 +5190,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: -28px auto 0;
   padding: 0 clamp(16px, 4vw, 40px);
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 .lp-mkt-help-stat {
@@ -5501,7 +5501,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   margin: 0;
   font-size: 15px;
   line-height: 1.7;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
 }
 
 .lp-mkt-prose code {
@@ -5509,8 +5509,8 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-size: 0.9em;
   padding: 1px 6px;
   border-radius: 6px;
-  background: var(--lp-accent-soft, #f0fdfa);
-  color: var(--lp-accent-ink, #0f766e);
+  background: var(--lp-accent-soft);
+  color: var(--lp-accent-ink);
 }
 
 .lp-mkt-capability-grid {
@@ -5524,13 +5524,13 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 18px 18px 16px;
   border: 1px solid var(--lp-line);
   border-radius: 14px;
-  background: var(--lp-grad-surface, #fff);
+  background: var(--lp-grad-surface);
   transition: transform 160ms var(--lp-ease, ease), border-color 160ms ease, box-shadow 160ms ease;
 }
 
 .lp-mkt-capability-card:hover {
   transform: translateY(-2px);
-  border-color: var(--lp-hairline, #cfd8e3);
+  border-color: var(--lp-hairline);
   box-shadow: var(--lp-shadow-md);
 }
 
@@ -5591,7 +5591,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-mkt-scenario {
   padding: 20px 22px;
   border-radius: 14px;
-  border: 1px solid var(--lp-hairline, #cfd8e3);
+  border: 1px solid var(--lp-hairline);
   background:
     linear-gradient(180deg, #f0fdfa, #fff);
 }
@@ -5697,7 +5697,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   border-radius: 16px;
   border: 1px solid var(--lp-line);
   background: #fff;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
   box-shadow: var(--lp-shadow-lg, 0 24px 64px rgba(15, 23, 42, 0.12));
   overflow: hidden;
   max-width: none;
@@ -5705,7 +5705,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-mkt-hero-band--ink .lp-mkt-shot {
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
   box-shadow:
     0 0 0 1px rgba(45, 212, 191, 0.12),
     0 28px 64px rgba(0, 0, 0, 0.45);
@@ -5783,7 +5783,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-mkt-ui-map-row code {
   font-family: var(--df-font-mono, "JetBrains Mono", monospace);
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   padding: 4px 6px;
   border-radius: 6px;
   background: #fff;
@@ -5799,7 +5799,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-style: normal;
   font-weight: 700;
   color: var(--lp-accent-ink);
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
 }
 
 .lp-mkt-ui-progress {
@@ -5887,7 +5887,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-mkt-ui-metrics span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 600;
   color: var(--lp-muted-soft);
 }
@@ -5932,7 +5932,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-mkt-ui-table th {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -5946,7 +5946,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   display: inline-block;
   padding: 2px 8px;
   border-radius: 999px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -6136,7 +6136,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-section-band {
   background: #fff;
-  border-block: 1px solid var(--lp-line, #e6e9ee);
+  border-block: 1px solid var(--lp-line);
 }
 
 .lp-hero-value-icon,
@@ -6359,7 +6359,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-nav {
   position: sticky;
   top: 0;
-  z-index: 50;
+  z-index: var(--df-z-elevated);
   padding: 0 !important;
   background: transparent;
   border-bottom: 1px solid transparent;
@@ -6377,7 +6377,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 /* Scrolled pill state is owned by .lp-nav.is-pill — do not paint a full-bleed white bar behind it. */
 .lp-nav.is-solid:not(.is-pill) {
   background: rgba(255, 255, 255, 0.97) !important;
-  border-bottom-color: var(--lp-line, #e6e9ee);
+  border-bottom-color: var(--lp-line);
   box-shadow: 0 1px 0 rgba(15, 23, 42, 0.04), 0 12px 32px rgba(15, 23, 42, 0.07);
   backdrop-filter: blur(18px);
 }
@@ -6414,7 +6414,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-nav-jump.is-visible {
   max-height: 52px;
   opacity: 1;
-  border-top-color: var(--lp-line, #e6e9ee);
+  border-top-color: var(--lp-line);
 }
 
 .lp-nav-jump-inner {
@@ -6431,7 +6431,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   appearance: none;
   border: 0;
   background: transparent;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
   font: inherit;
   font-size: 13px;
   font-weight: 550;
@@ -6442,7 +6442,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-nav-jump-link:hover {
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
   background: rgba(15, 23, 42, 0.04);
 }
 
@@ -6455,14 +6455,14 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-main {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 /* Continuous ambient field — soft teal depth, not purple cubes */
 .lp-ambient {
   position: fixed;
   inset: 0;
-  z-index: 0;
+  z-index: var(--df-z-floor);
   pointer-events: none;
   overflow: hidden;
 }
@@ -6567,9 +6567,9 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 /* Full-bleed footer — edge to edge, Azure-weight CTA band */
 .lp-footer {
   position: relative;
-  z-index: 2;
-  width: 100vw !important;
-  max-width: 100vw !important;
+  z-index: var(--df-z-raised);
+  /* Negative margins already stretch the footer edge-to-edge — a declared
+     100vw also measures the scrollbar and caused the h-scroll (UI-8). */
   margin-left: calc(50% - 50vw) !important;
   margin-right: calc(50% - 50vw) !important;
   background: #07111f;
@@ -6671,7 +6671,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-nav.is-bar {
   padding: 0 !important;
   background: #fff !important;
-  border-bottom: 1px solid var(--lp-line, #e6e9ee) !important;
+  border-bottom: 1px solid var(--lp-line) !important;
   box-shadow:
     0 1px 0 rgba(255, 255, 255, 0.8) inset,
     0 8px 28px rgba(15, 23, 42, 0.1) !important;
@@ -6714,7 +6714,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   max-width: none !important;
   margin: 0 !important;
   padding: 6px 8px 6px 14px !important;
-  border: 1px solid var(--lp-line, #e6e9ee) !important;
+  border: 1px solid var(--lp-line) !important;
   border-radius: 999px !important;
   background: rgba(255, 255, 255, 0.96) !important;
   backdrop-filter: blur(16px) !important;
@@ -6731,7 +6731,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   border-radius: 0;
   max-height: 44px;
   border-top: 0;
-  border-bottom: 1px solid var(--lp-line, #e6e9ee);
+  border-bottom: 1px solid var(--lp-line);
   background: rgba(255, 255, 255, 0.94);
 }
 
@@ -6957,7 +6957,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 0;
   display: grid;
   gap: 0;
-  border-left: 2px solid color-mix(in srgb, var(--lp-accent, #0d9488) 45%, transparent);
+  border-left: 2px solid color-mix(in srgb, var(--lp-accent) 45%, transparent);
 }
 
 .lp-trust-step,
@@ -6978,7 +6978,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   width: 12px;
   height: 12px;
   border-radius: 50%;
-  background: var(--lp-accent, #0d9488);
+  background: var(--lp-accent);
   box-shadow: 0 0 0 4px rgba(13, 148, 136, 0.16);
 }
 
@@ -6988,7 +6988,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-size: 13px;
   font-weight: 700;
   letter-spacing: 0.06em;
-  color: var(--lp-accent-ink, #0f766e);
+  color: var(--lp-accent-ink);
   padding-top: 4px;
 }
 
@@ -7001,7 +7001,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-trust-step p,
 .lp-mkt-security-step p {
   margin: 0;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
   max-width: 54ch;
 }
 
@@ -7117,7 +7117,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   content: "";
   position: absolute;
   inset: 0;
-  z-index: 0;
+  z-index: var(--df-z-floor);
   pointer-events: none;
   background:
     radial-gradient(ellipse 70% 55% at 78% 42%, rgba(13, 148, 136, 0.16), transparent 62%),
@@ -7127,7 +7127,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-hero-immersive-grid {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   grid-template-columns: minmax(280px, 0.88fr) minmax(0, 1.22fr);
   gap: clamp(24px, 4vw, 56px);
@@ -7178,7 +7178,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding-left: 14px;
   font-size: 13.5px;
   font-weight: 600;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
 }
 
 .lp-hero-proof-line li::before {
@@ -7189,7 +7189,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   width: 6px;
   height: 6px;
   border-radius: 50%;
-  background: var(--lp-accent, #0d9488);
+  background: var(--lp-accent);
 }
 
 .lp-hero-visual--stage {
@@ -7343,7 +7343,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-d3-rack-label {
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--df-text-tertiary);
@@ -7442,7 +7442,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-d3-hub-face--front small {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   opacity: 0.75;
 }
 
@@ -7582,7 +7582,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-d3-monitor-body footer {
   margin-top: 8px;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: #64748b;
 }
 
@@ -7635,13 +7635,13 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   width: 100%;
   height: 100%;
   pointer-events: none;
-  z-index: 4;
+  z-index: var(--df-z-canvas-rail);
 }
 
 /* Studio band below fold */
 .lp-studio-band {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   padding: clamp(48px, 8vh, 96px) clamp(20px, 4vw, 48px);
   background:
     radial-gradient(900px 280px at 50% 0%, rgba(13, 148, 136, 0.08), transparent 60%),
@@ -7666,7 +7666,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-studio-band-copy p {
   margin: 0;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
   max-width: 48ch;
 }
 
@@ -7749,7 +7749,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-infra-node {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   display: grid;
   justify-items: center;
   gap: 10px;
@@ -7847,13 +7847,13 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   background: #ecfdf5;
   box-shadow: 0 0 18px rgba(94, 234, 212, 0.9);
   transition: left 700ms cubic-bezier(0.22, 1, 0.36, 1);
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 .lp-infra-caption {
   margin: 14px 0 0;
   text-align: center;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
   font-size: 14px;
 }
 
@@ -7986,7 +7986,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   grid-template-columns: 1fr 1.1fr 1fr;
   align-items: end;
   gap: clamp(8px, 2vw, 24px);
-  z-index: 2;
+  z-index: var(--df-z-raised);
   perspective: 1000px;
 }
 
@@ -8050,7 +8050,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-d3-server-title {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   letter-spacing: 0.1em;
   text-transform: uppercase;
   color: var(--df-text-tertiary);
@@ -8199,7 +8199,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-d3-hud {
   position: absolute;
-  z-index: 5;
+  z-index: var(--df-z-canvas-overview);
   width: min(210px, 42%);
   padding: 12px;
   border-radius: 14px;
@@ -8245,7 +8245,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-d3-hud footer {
   margin-top: 8px;
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   color: #64748b;
 }
 
@@ -8290,7 +8290,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-d3-packets {
   position: absolute;
   inset: 0;
-  z-index: 4;
+  z-index: var(--df-z-canvas-rail);
   pointer-events: none;
 }
 
@@ -8343,7 +8343,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   line-height: 1.12;
   letter-spacing: -0.03em;
   font-weight: 720;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
   max-width: 18ch;
 }
 
@@ -8354,7 +8354,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-hero-title-b {
   display: inline-block;
-  color: var(--lp-accent-ink, #0f766e);
+  color: var(--lp-accent-ink);
   background: linear-gradient(120deg, #0f766e 0%, #14b8a6 100%);
   -webkit-background-clip: text;
   background-clip: text;
@@ -8461,7 +8461,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-size: 13px;
   letter-spacing: 0.06em;
   text-transform: uppercase;
-  color: var(--lp-muted, #64748b);
+  color: var(--lp-muted);
   font-weight: 650;
 }
 
@@ -8986,7 +8986,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   width: min(1180px, calc(100% - 32px));
   margin: -28px auto 28px;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 .lp-mkt-help-showcase .lp-help-preview {
@@ -9248,7 +9248,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   border-color: rgba(13, 148, 136, 0.28);
   background: linear-gradient(180deg, #ffffff 0%, #f0fdfa 100%);
   animation-delay: 0.4s;
-  z-index: 2;
+  z-index: var(--df-z-raised);
 }
 
 .lp-hero-flow-card--dest {
@@ -9295,7 +9295,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   border-radius: 8px;
   background: #fff;
   border: 1px solid #e2e8f0;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   color: #334155;
   font-family: var(--df-font-mono, "JetBrains Mono", ui-monospace, monospace);
 }
@@ -9312,7 +9312,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-hero-flow-edges li em {
   margin-left: auto;
   font-style: normal;
-  font-size: 9px;
+  font-size: var(--df-fs-xs);
   font-weight: 720;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -9868,7 +9868,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-pricing-compare-head .lp-mkt-kicker {
   margin: 0 0 6px;
-  color: var(--df-brand, #0d9488);
+  color: var(--df-brand);
   font-size: 11.5px;
   font-weight: 700;
   letter-spacing: 0.14em;
@@ -9927,7 +9927,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   right: 12px;
   bottom: -1px;
   height: 2px;
-  background: var(--df-brand, #0d9488);
+  background: var(--df-brand);
   border-radius: 2px 2px 0 0;
 }
 
@@ -9937,8 +9937,8 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 2px 7px;
   border-radius: 999px;
   background: rgba(13, 148, 136, 0.1);
-  color: var(--df-brand, #0d9488);
-  font-size: 9.5px;
+  color: var(--df-brand);
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -9974,7 +9974,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-mkt-compare-table--team-emph tbody td.is-team-col {
   color: #0f172a;
   font-weight: 600;
-  box-shadow: inset 3px 0 0 var(--df-brand, #0d9488);
+  box-shadow: inset 3px 0 0 var(--df-brand);
 }
 
 .lp-mkt-compare-table--team-emph td[data-empty="true"] {
@@ -10023,11 +10023,11 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-price-plan-eyebrow {
-  font-size: 10.5px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.12em;
   text-transform: uppercase;
-  color: var(--df-brand, #0d9488);
+  color: var(--df-brand);
 }
 
 .lp-price-plan-name {
@@ -10091,7 +10091,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   position: absolute;
   inset: 0 auto 0 0;
   width: 3px;
-  background: var(--df-brand, #0d9488);
+  background: var(--df-brand);
 }
 
 .lp-price-plan-row--team {
@@ -10099,7 +10099,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-price-plan-row--team:hover {
-  border-color: var(--df-brand, #0d9488);
+  border-color: var(--df-brand);
   box-shadow: 0 8px 20px rgba(13, 148, 136, 0.1);
 }
 
@@ -10205,7 +10205,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   background: #fff;
   overflow: hidden;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   box-shadow: 0 16px 36px rgba(15, 23, 42, 0.07);
 }
 
@@ -10314,7 +10314,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-cust-industry,
 .lp-cust-metric-chip {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 750;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -10362,7 +10362,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   max-width: var(--lp-shell-max);
   margin: -20px auto 48px;
   position: relative;
-  z-index: 2;
+  z-index: var(--df-z-raised);
   padding: 0;
 }
 
@@ -10495,7 +10495,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-contact-form .lp-mkt-textarea:focus-visible,
 .lp-contact-form select.lp-mkt-input:focus-visible {
   outline: none;
-  border-color: var(--df-brand, #0d9488);
+  border-color: var(--df-brand);
   box-shadow: 0 0 0 3px var(--df-focus-ring, rgba(13, 148, 136, 0.28));
 }
 
@@ -10551,7 +10551,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   align-items: center;
   min-height: var(--df-btn-height, 36px);
   padding: 0 4px;
-  color: var(--lp-accent-ink, #0f766e);
+  color: var(--lp-accent-ink);
   font-size: 13px;
   font-weight: 600;
   text-decoration: none;
@@ -10560,8 +10560,8 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-contact-mailto:hover {
-  color: var(--df-brand-strong, #115e59);
-  border-bottom-color: var(--df-brand-hover, #0f766e);
+  color: var(--df-brand-strong);
+  border-bottom-color: var(--df-brand-hover);
 }
 
 .lp-contact-form-actions {
@@ -10685,7 +10685,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-cinema-band {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   padding: clamp(56px, 9vh, 108px) clamp(20px, 4vw, 48px);
   background:
     radial-gradient(1200px 320px at 15% 0%, rgba(13, 148, 136, 0.18), transparent 65%),
@@ -10721,7 +10721,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-cinema-band-inner {
   position: relative;
-  z-index: 1;
+  z-index: var(--df-z-base);
   width: min(1180px, 100%);
   margin: 0 auto;
 }
@@ -10930,7 +10930,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-cinema-field em {
   font-style: normal;
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.08em;
   color: #99f6e4;
@@ -11554,7 +11554,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   text-align: left;
   padding: 16px 18px;
   background: #ffffff;
-  color: var(--df-navy-900, #0b1220);
+  color: var(--df-navy-900);
   display: grid;
   gap: 4px;
   grid-template-rows: auto 1fr auto;
@@ -11568,7 +11568,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-cinema-strip-item:hover {
   background: color-mix(in srgb, var(--df-brand) 10%, #fff);
-  color: var(--df-brand-strong, #115e59);
+  color: var(--df-brand-strong);
 }
 
 .lp-cinema-band .lp-cinema-strip-item:hover {
@@ -11953,7 +11953,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-story-band-head p {
   margin: 0;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
   max-width: 60ch;
 }
 
@@ -11964,7 +11964,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   gap: clamp(16px, 2.5vw, 28px);
   padding: 22px 24px;
   border-radius: 14px;
-  border: 1px solid var(--df-border, #e2e8f0);
+  border: 1px solid var(--df-border);
   background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
   transition: border-color 0.2s ease, transform 0.2s ease, box-shadow 0.2s ease;
 }
@@ -11974,7 +11974,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 
 .lp-story-row:hover {
-  border-color: color-mix(in srgb, var(--df-brand) 45%, var(--df-border, #e2e8f0));
+  border-color: color-mix(in srgb, var(--df-brand) 45%, var(--df-border));
   box-shadow: 0 12px 32px -20px rgba(15, 23, 42, 0.18);
 }
 
@@ -11994,8 +11994,8 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-size: 11px;
   font-weight: 700;
   letter-spacing: 0.08em;
-  color: var(--df-brand-strong, #115e59);
-  background: var(--df-brand-muted, #f0fdfa);
+  color: var(--df-brand-strong);
+  background: var(--df-brand-muted);
   border: 1px solid color-mix(in srgb, var(--df-brand) 32%, transparent);
   align-self: start;
 }
@@ -12008,7 +12008,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-story-row-copy p {
   margin: 0;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
   line-height: 1.6;
 }
 
@@ -12053,7 +12053,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-surface-strip-copy p {
   margin: 0;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
 }
 
 /* Marquee callout — replaces .lp-tools-grid / .lp-tools-featured combo. */
@@ -12083,7 +12083,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-connectors-callout-copy p {
   margin: 0;
-  color: var(--lp-muted, #334155);
+  color: var(--lp-muted);
   line-height: 1.6;
 }
 
@@ -12092,7 +12092,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   color: color-mix(in srgb, var(--df-brand-strong) 90%, #334155);
   padding: 12px 14px;
   border-radius: 10px;
-  background: var(--df-brand-muted, #f0fdfa);
+  background: var(--df-brand-muted);
   border: 1px solid color-mix(in srgb, var(--df-brand) 20%, transparent);
 }
 
@@ -12115,7 +12115,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 .lp-connectors-narrative > p {
   margin: 0;
-  color: var(--lp-muted, #475569);
+  color: var(--lp-muted);
   line-height: 1.65;
   font-size: 15.5px;
 }
@@ -12128,10 +12128,10 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 }
 .lp-connectors-narrative-list li {
   padding: 12px 14px;
-  border-left: 3px solid var(--df-brand, #0d9488);
-  background: color-mix(in srgb, var(--df-brand-muted, #f0fdfa) 70%, #fff);
+  border-left: 3px solid var(--df-brand);
+  background: color-mix(in srgb, var(--df-brand-muted) 70%, #fff);
   border-radius: 0 10px 10px 0;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
   font-size: 14.5px;
   line-height: 1.5;
 }
@@ -12143,43 +12143,43 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   list-style: none;
   display: grid;
   gap: 0;
-  border-top: 1px solid var(--lp-line, #e2e8f0);
+  border-top: 1px solid var(--lp-line);
 }
 .lp-cust-sector-list li {
   display: grid;
   grid-template-columns: minmax(160px, 220px) 1fr;
   gap: 16px 28px;
   padding: 16px 0;
-  border-bottom: 1px solid var(--lp-line, #e2e8f0);
+  border-bottom: 1px solid var(--lp-line);
   align-items: baseline;
 }
 .lp-cust-sector-list strong {
   font-size: 14.5px;
   letter-spacing: -0.01em;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
 }
 .lp-cust-sector-list span {
   font-size: 14px;
-  color: var(--lp-muted, #475569);
+  color: var(--lp-muted);
   line-height: 1.5;
 }
 .lp-cust-story-stack {
   display: grid;
   gap: 0;
   margin-top: 20px;
-  border-top: 1px solid var(--lp-line, #e2e8f0);
+  border-top: 1px solid var(--lp-line);
 }
 .lp-cust-story-row {
   margin: 0;
   padding: 28px 0;
-  border-bottom: 1px solid var(--lp-line, #e2e8f0);
+  border-bottom: 1px solid var(--lp-line);
 }
 .lp-cust-story-row p {
   margin: 12px 0 14px;
   font-size: clamp(1.05rem, 1.6vw, 1.25rem);
   line-height: 1.55;
   letter-spacing: -0.015em;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
   max-width: 52ch;
 }
 .lp-cust-story-row footer {
@@ -12187,10 +12187,10 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   flex-wrap: wrap;
   gap: 8px 14px;
   font-size: 13px;
-  color: var(--lp-muted, #64748b);
+  color: var(--lp-muted);
 }
 .lp-cust-story-row footer strong {
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
 }
 @media (max-width: 720px) {
   .lp-cust-sector-list li {
@@ -12386,7 +12386,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-journey {
   display: grid;
   gap: 14px;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
 }
 
 .lp-journey-tabs {
@@ -12406,16 +12406,16 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   width: 100%;
   min-height: 64px;
   padding: 10px 12px;
-  border: 1px solid var(--lp-line, #e4e8ee);
+  border: 1px solid var(--lp-line);
   border-radius: 10px;
   background: #fff;
-  color: var(--lp-ink, #0f172a);
+  color: var(--lp-ink);
   text-align: left;
   cursor: pointer;
 }
 
 .lp-journey-tab span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 700;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -12647,7 +12647,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-journey-metrics div.is-ok strong { color: #059669; }
 
 .lp-journey-metrics span {
-  font-size: 10px;
+  font-size: var(--df-fs-xs);
   font-weight: 650;
   color: #475569;
 }
@@ -12684,7 +12684,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: var(--lp-section-y) 0;
 }
 
-.lp-home-market { background: #fff; border-top: 1px solid var(--lp-line, #e4e8ee); }
+.lp-home-market { background: #fff; border-top: 1px solid var(--lp-line); }
 .lp-home-depth { background: #f4f6f8; }
 
 .lp-home-market-inner,
@@ -12702,7 +12702,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-home-market-grid article {
   padding: 22px 22px 20px;
-  border: 1px solid var(--lp-line, #e4e8ee);
+  border: 1px solid var(--lp-line);
   border-radius: 14px;
   background: #fff;
   min-height: 220px;
@@ -12750,7 +12750,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   padding: 18px 18px 16px;
   border-radius: 12px;
   background: #fff;
-  border: 1px solid var(--lp-line, #e4e8ee);
+  border: 1px solid var(--lp-line);
 }
 
 .lp-home-depth-list strong {

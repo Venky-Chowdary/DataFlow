@@ -192,7 +192,7 @@ def _no_egress(monkeypatch):
     """Hermetic probe runs: no DNS / metadata-endpoint lookups."""
     monkeypatch.setattr(
         "services.egress_guard.metadata_endpoint_refusal",
-        lambda host="", endpoint_url="", connection_string="", workspace_id="": "",
+        lambda *values, allowlist=None, workspace_id="", db_type="": "",
     )
     monkeypatch.setattr(
         "services.egress_guard.pinned_egress",

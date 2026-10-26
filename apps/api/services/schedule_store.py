@@ -1388,7 +1388,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
             "enabled_note": enabled_note,
         })
         _guard_schedule_destination(sched.dest_connector_id, sched.dest_table)
-        sched.next_run_at = next_run_for(sched)
+        sched.next_run_at = next_run_for(sched) if sched.enabled else None
         schedules.append(sched)
         _save_all(schedules)
         return sched
@@ -1627,6 +1627,10 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         # Recompute the next due time when the cadence changed.
         if (interval, cron, tz) != (s.interval, s.cron, s.timezone):
             updated.next_run_at = next_run_for(updated)
+        # Pausing clears the stored slot — a disabled schedule has no next run,
+        # and a stale future stamp only pretends one is coming (M24).
+        if s.enabled and not bool(merged.get("enabled", s.enabled)):
+            updated.next_run_at = None
         # Enabling a paused schedule waits for the next cron slot. A past
         # next_run_at used to be left in place, so the beat fired immediately.
         if enabling:
@@ -2418,6 +2422,20 @@ def has_open_approval(sched: Any) -> bool:
     if not isinstance(req, dict) or not req:
         return False
     return str(req.get("status") or "open").strip().lower() == "open"
+
+
+def visible_next_run_at(sched: Any) -> str | None:
+    """The next fire time an operator should see.
+
+    A paused schedule does not fire, and a parked one (open approval) is held
+    out of the cadence — showing a future ``next_run_at`` on either claims a
+    run that will not happen. M24 / D96.
+    """
+    if not getattr(sched, "enabled", True):
+        return None
+    if has_open_approval(sched):
+        return None
+    return getattr(sched, "next_run_at", None) or None
 
 
 def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:

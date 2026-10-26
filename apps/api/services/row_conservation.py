@@ -902,10 +902,19 @@ def dest_count_from_recon(recon: Mapping[str, Any] | None) -> tuple[int | None, 
     msg = str(report.get("message") or "").lower()
     if report.get("skipped_readback") is True:
         return None, DEST_UNMEASURED
-    if is_unproven_export(report, msg):
-        return None, DEST_UNMEASURED
     raw = report.get("target_rows")
     if not isinstance(raw, int) or raw < 0:
+        return None, DEST_UNMEASURED
+    scope = str(report.get("checksum_scope") or "")
+    if (
+        "dest_pk_join_equals_staging" in scope
+        or "dest_count_equals_source_snapshot" in scope
+    ):
+        # An engine copy measured dest COUNT(*) / the dest key join itself.
+        # ``unproven`` on the report is about unproven VALUE fidelity — the
+        # cardinality measurement is real and closes the keyed ledger.
+        return raw, DEST_READBACK
+    if is_unproven_export(report, msg):
         return None, DEST_UNMEASURED
     dest_digest = str(report.get("target_checksum") or "").strip()
     if dest_digest:
@@ -1003,6 +1012,9 @@ def extract_mirror_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
             "active_checksum": data.get("active_checksum"),
             "soft_delete_column": data.get("soft_delete_column") or "_deleted",
             "soft_deleted": data.get("soft_deleted"),
+            "hard_deleted": data.get("hard_deleted"),
+            "mirror_delete_mode": data.get("mirror_delete_mode"),
+            "tombstone_rows": data.get("tombstone_rows"),
             "reactivated": data.get("reactivated"),
             "physical_rows": data.get("physical_rows"),
             "rows_scanned": data.get("rows_scanned"),
@@ -1317,7 +1329,12 @@ def _account_mirror(
     """Close active dest population, not physical COUNT(*) (which does not drop)."""
     payload = dict(mirror or {})
     active = _as_optional_int(payload.get("active_rows"))
+    # Inferred deletes count keys removed from the live view under either
+    # delete mode — D38: a hard-delete mirror reports hard_deleted.
     inferred = _as_optional_int(payload.get("soft_deleted"))
+    _hard = _as_optional_int(payload.get("hard_deleted"))
+    if _hard is not None:
+        inferred = _hard
     reactivated = _as_optional_int(payload.get("reactivated"))
     scanned = _as_optional_int(payload.get("rows_scanned"))
     physical = _as_optional_int(payload.get("physical_rows"))

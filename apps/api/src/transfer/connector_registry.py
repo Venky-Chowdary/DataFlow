@@ -752,6 +752,7 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         str(cfg.get("endpoint_url") or ""),
         str(cfg.get("connection_string") or ""),
         workspace_id=str(cfg.get("workspace_id") or ""),
+        db_type=str(cfg.get("type") or db_type or ""),
     )
     if refusal:
         return False, refusal

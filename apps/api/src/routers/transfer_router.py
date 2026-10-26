@@ -292,6 +292,9 @@ class ExecuteTransferRequest(BaseModel):
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
     fk_risk_acknowledged: bool = False
+    # Operator approved destination DDL disclosed at Validate (e.g. the
+    # unique index an upsert needs on an existing table — D101).
+    ddl_changes_acknowledged: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
@@ -438,7 +441,7 @@ async def introspect_endpoint_route(request: AnalyzeRequest):
     src = EndpointConfig.from_dict(request.source.kind, request.source.model_dump(by_alias=True))
     dst = EndpointConfig.from_dict(request.destination.kind, request.destination.model_dump(by_alias=True))
     # Role-tag so missing-table copy is correct (source ≠ create-on-write).
-    src.extra = {**(src.extra or {}), "introspect_purpose": "source"}
+    src.extra = {**(src.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
     dst.extra = {**(dst.extra or {}), "introspect_purpose": "destination"}
 
     def _probe() -> dict[str, Any]:
@@ -703,6 +706,8 @@ class PlanPreflightRequest(BaseModel):
     compliance_acknowledged: bool = False
     schema_drift_acknowledged: bool = False
     fk_risk_acknowledged: bool = False
+    # Operator approved destination DDL disclosed at Validate (D101).
+    ddl_changes_acknowledged: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     # Approved pre-load transform recipe. Execute shapes rows on the read, so the
@@ -743,6 +748,7 @@ async def preflight_transfer_plan(
             compliance=payload.compliance_acknowledged,
             schema_drift=payload.schema_drift_acknowledged,
             fk_risk=payload.fk_risk_acknowledged,
+            ddl_changes=payload.ddl_changes_acknowledged,
             actor=payload.acknowledgment_actor,
             reason=payload.acknowledgment_reason,
         )
@@ -957,6 +963,7 @@ async def execute_transfer_json(
         compliance_acknowledged=bool(body.compliance_acknowledged),
         schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
         fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
+        ddl_changes_acknowledged=bool(body.ddl_changes_acknowledged),
         acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
         acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=str(
@@ -1203,6 +1210,7 @@ async def run_universal_transfer(
     compliance_acknowledged: str = Form("false"),
     schema_drift_acknowledged: str = Form("false"),
     fk_risk_acknowledged: str = Form("false"),
+    ddl_changes_acknowledged: str = Form("false"),
     acknowledgment_actor: str = Form(""),
     acknowledgment_reason: str = Form(""),
     approved_decision_artifact_hash: str = Form(""),
@@ -1369,6 +1377,7 @@ async def run_universal_transfer(
         compliance_acknowledged=compliance_acknowledged.lower() in ("true", "1", "yes"),
         schema_drift_acknowledged=schema_drift_acknowledged.lower() in ("true", "1", "yes"),
         fk_risk_acknowledged=fk_risk_acknowledged.lower() in ("true", "1", "yes"),
+        ddl_changes_acknowledged=ddl_changes_acknowledged.lower() in ("true", "1", "yes"),
         acknowledgment_actor=(acknowledgment_actor or "").strip() or _actor_email(request),
         acknowledgment_reason=(acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=(approved_decision_artifact_hash or "").strip(),

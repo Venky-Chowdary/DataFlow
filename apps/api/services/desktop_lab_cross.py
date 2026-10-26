@@ -289,16 +289,17 @@ def bind_live_engine(engine: str, table: str, root: Path) -> EndpointConfig | st
             connection_string="mongodb://127.0.0.1:27017/dataflow",
         )
     if engine == "sqlserver":
-        if not _reachable("127.0.0.1", 1433):
-            return "SQL Server not reachable on 127.0.0.1:1433"
+        ss_host = os.environ.get("DATAFLOW_SQLSERVER_HOST") or os.environ.get("DATAFLOW_TEST_MSSQL_HOST", "127.0.0.1")
+        if not _reachable(ss_host, 1433):
+            return f"SQL Server not reachable on {ss_host}:1433"
         return EndpointConfig(
             kind="database",
             format="sqlserver",
-            host="127.0.0.1",
+            host=ss_host,
             port=1433,
             database="dataflow",
             username="sa",
-            password="DataFlow_CDC_2022!",
+            password=os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
             schema="dbo",
             table=table,
             extra={

@@ -170,6 +170,38 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.ai.training.training_scheduler import schedule_training_on_transfer
 
+def _bounded_incremental_read(request: "TransferRequest") -> bool:
+    """True when this run's read narrows to a delta — a stored watermark is
+    bound to the declared cursor, so the opening message must not quote the
+    full-table row count (M4)."""
+    try:
+        from services.sync_cursor import resolve_incremental_read_scope
+
+        scope = resolve_incremental_read_scope(
+            sync_mode=getattr(request, "sync_mode", "") or "",
+            stream_contracts=getattr(request, "stream_contracts", None),
+            source_type=getattr(request.source, "format", "") or "",
+            source_database=getattr(request.source, "database", "") or "",
+            source_object=(
+                getattr(request.source, "table", "")
+                or getattr(request.source, "collection", "")
+                or ""
+            ),
+            dest_type=getattr(request.destination, "format", "") or "",
+            dest_database=getattr(request.destination, "database", "") or "",
+            dest_object=(
+                getattr(request.destination, "table", "")
+                or getattr(request.destination, "collection", "")
+                or ""
+            ),
+            source=request.source,
+            destination=request.destination,
+        )
+        return bool(getattr(scope, "bounded", False))
+    except Exception:
+        return False
+
+
 from services.batch_progress import (
     ThrottledCheckpoint,
     batch_write_message,
@@ -201,6 +233,7 @@ logger = logging.getLogger("dataflow.transfer")
 from src.transfer.reconcile_heartbeat import (  # noqa: E402
     reconcile_heartbeat_scope as _reconcile_heartbeat_scope,
     reconcile_phase_heartbeat as _reconcile_phase_heartbeat,
+    job_phase_heartbeat as _job_phase_heartbeat,
 )
 
 
@@ -600,7 +633,7 @@ def _source_nullability_probe(source: EndpointConfig) -> dict[str, bool]:
     try:
         from .endpoint_intelligence import introspect_endpoint
 
-        source.extra = {**(source.extra or {}), "introspect_purpose": "source"}
+        source.extra = {**(source.extra or {}), "introspect_purpose": "source", "introspect_strict": True}
         info = introspect_endpoint(source)
         return {
             str(k): bool(v)
@@ -1014,17 +1047,9 @@ def _raise_if_job_cancelled(
     is whatever this chunk already committed, so the cancelled job does not
     report 0 rows for a table that now holds them.
     """
-    if mongo is None or not job_id:
-        return
-    try:
-        job = mongo.get_job(job_id)
-    except Exception as exc:  # noqa: BLE001 - a failed read must not hide the transfer
-        logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
-        return
-    if job and (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
-        raise TransferCancelled(
-            "Transfer cancelled by user", rows_written=rows_written
-        )
+    from services.cancel_check import raise_if_job_cancelled
+
+    raise_if_job_cancelled(mongo, job_id, rows_written=rows_written)
 
 
 def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
@@ -1035,6 +1060,41 @@ def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
             job_id,
             rows_written=update.get("records_processed"),
         )
+
+
+def _commit_kafka_offsets_on_accept(request: Any, dest_summary: dict) -> None:
+    """D85 — commit Kafka consumer-group offsets once, only on acceptance.
+
+    Called on the success path after reconcile passed and the destination
+    committed. During the run, ``stream`` accumulates the per-partition end
+    offsets in ``dest_summary['kafka_offsets']`` and never commits; a failed or
+    cancelled run leaves the broker position untouched so the next run
+    re-reads every uncommitted message (at-least-once).
+    """
+    kafka_commit = dest_summary.get("kafka_offsets") or {}
+    pending = kafka_commit.get("pending_offsets") or []
+    if (request.source.format or "") != "kafka" or not pending:
+        return
+    try:
+        from connectors.kafka_reader import commit_kafka_offsets
+
+        commit_kafka_offsets(
+            resolve_connector_config(request.source),
+            {
+                "group_id": kafka_commit.get("group_id"),
+                "topic": kafka_commit.get("topic"),
+                "pending_offsets": pending,
+            },
+        )
+    except Exception as exc:
+        from services.execution_engine_contract import (
+            kafka_offset_commit_must_fail_closed,
+        )
+
+        raise kafka_offset_commit_must_fail_closed(exc) from exc
+    kafka_commit["committed"] = True
+    kafka_commit["committed_offsets"] = [dict(item) for item in pending]
+    dest_summary["kafka_offsets"] = kafka_commit
 
 
 def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -> Any:
@@ -1205,6 +1265,9 @@ def _finish_verified_run(
                 progress_pct=100,
                 phase="completed",
                 message=message,
+                # Gate-8 already passed on this path — the verified 100, same
+                # as the normal success sites (M1).
+                reconcile_pct=100,
                 rejected_rows=int(summary.get("rejected_rows", 0) or 0),
                 coerced_null_rows=int(summary.get("coerced_null_rows", 0) or 0),
                 destination_summary=summary,
@@ -1545,6 +1608,19 @@ class UniversalTransferEngine:
         # (PostgreSQL VARCHAR → SQL Server NVARCHAR, not code-page VARCHAR).
         started = time.monotonic()
         fields = lifecycle_events.emit_run_started(logger, request, job_id, resume)
+        # D102: publish this job's cancel probe so every batch boundary —
+        # row writers and the COPY fast paths alike — stops on cancel even
+        # where no on_checkpoint plumbing reaches.
+        from services.cancel_check import cancel_check_for, set_cancel_probe
+
+        try:
+            # _job_store() resolves get_mongodb_service at module level — a
+            # local `from ... import` in this function would bypass the
+            # test seam every other engine lookup goes through.
+            _probe_mongo = _job_store()
+        except Exception:  # noqa: BLE001 - a store miss must not hide the transfer
+            _probe_mongo = None
+        set_cancel_probe(cancel_check_for(_probe_mongo, job_id))
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
@@ -1553,6 +1629,8 @@ class UniversalTransferEngine:
         except BaseException as exc:
             lifecycle_events.emit_run_exception(logger, fields, started, exc)
             raise
+        finally:
+            set_cancel_probe(None)
         try:
             record_after_run(request, job_id, result)
         except Exception:
@@ -1567,7 +1645,26 @@ class UniversalTransferEngine:
                 mark_auto_create_committed(job_id)
                 clear_auto_create_job(job_id)
             elif not getattr(result, "success", False) and written == 0:
-                dropped = rollback_uncommitted_auto_creates(job_id)
+                # D102/D42: a cancelled run whose chunks already committed to
+                # the auto-created table must keep it — dropping it deletes
+                # the committed prefix while the job report says the rows
+                # landed, and the write ledger would skip them on resume
+                # (silent data loss).
+                _cancelled_with_rows = False
+                try:
+                    _job = _job_store().get_job(job_id) or {}
+                    _cancelled_with_rows = (
+                        _job.get("cancel_requested")
+                        or str(_job.get("status") or "") == "cancelled"
+                    ) and int(_job.get("records_processed") or 0) > 0
+                except Exception:  # noqa: BLE001 - a store miss keeps the safe rollback
+                    _cancelled_with_rows = False
+                if _cancelled_with_rows:
+                    mark_auto_create_committed(job_id)
+                    clear_auto_create_job(job_id)
+                    dropped = []
+                else:
+                    dropped = rollback_uncommitted_auto_creates(job_id)
                 if dropped:
                     details = dict(getattr(result, "error_details", None) or {})
                     details["auto_create_rolled_back"] = dropped
@@ -2225,13 +2322,20 @@ class UniversalTransferEngine:
                 base_delay_seconds=0.5,
                 max_delay_seconds=5.0,
             )
-            records, columns, schema = with_retry(
-                lambda: self._read_source(request),
-                budget=read_budget,
-                on_transient=lifecycle_events.source_read_retry_callback(
-                    request, read_budget
-                ),
-            )
+            with _job_phase_heartbeat(
+                mongo,
+                job_id,
+                phase="reading",
+                message="Reading source data…",
+                progress_pct=5,
+            ):
+                records, columns, schema = with_retry(
+                    lambda: self._read_source(request),
+                    budget=read_budget,
+                    on_transient=lifecycle_events.source_read_retry_callback(
+                        request, read_budget
+                    ),
+                )
             schema = _authoritative_source_schema(request.source, schema, columns)
             if request.source_filter:
                 records = apply_row_filter(records, request.source_filter)
@@ -2355,6 +2459,15 @@ class UniversalTransferEngine:
                 inferred_pk = _infer_primary_key(columns, mappings)
                 if inferred_pk:
                     conflict_columns = [inferred_pk]
+            if not conflict_columns and dest_driver == "kafka":
+                # Kafka's key is partitioning/compaction identity, not a merge
+                # constraint — any declared identity is the right produce key
+                # (D88: keyed messages went out key=None).
+                from services.sync_cursor import declared_identity_columns
+                conflict_columns = [
+                    map_source_to_target(c, mappings)
+                    for c in declared_identity_columns(request)
+                ]
             if requires_upsert(effective_sync):
                 if not conflict_columns:
                     # The destination's own declared key is catalog evidence, not
@@ -2733,7 +2846,15 @@ class UniversalTransferEngine:
                     _promote_cdc_job_fields(checkpoint, update)
                 _progress_write_or_cancel(mongo, job_id, **update)
 
-            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+            _throttled_progress = ThrottledCheckpoint(on_checkpoint)
+
+            def throttled_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
+                # D102: check cancel on EVERY batch boundary; the throttled
+                # progress write below may drop intermediate calls.
+                _check_cancelled(rows)
+                _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
@@ -2784,23 +2905,37 @@ class UniversalTransferEngine:
                                     "note": "checkpoint ahead of or equal to source size",
                                 },
                             )
-                        if write_mode == "insert" and not conflict_columns:
+                        if dest_driver == "kafka" and write_mode == "insert":
+                            # No merge exists on a topic — resume is a
+                            # positional skip of the produced prefix, then
+                            # append the remainder (at-least-once).
+                            records = records[skip_n:]
+                            dest_summary_resume_note = (
+                                f"Resume after {skip_n:,} produced row(s) — "
+                                "publishing the remainder (Kafka append)."
+                            )
+                        elif write_mode == "insert" and not conflict_columns:
                             raise ValueError(
                                 "Cannot safely resume a buffered insert without primary key; "
                                 "use upsert sync mode or restart with full_refresh_overwrite"
                             )
-                        # Force upsert so re-applying prior rows is idempotent.
-                        if conflict_columns:
+                        elif conflict_columns:
+                            # Force upsert so re-applying prior rows is idempotent.
                             write_mode = "upsert"
-                        # Keep full population — no positional slice.
+                            dest_summary_resume_note = (
+                                f"Idempotent resume after {skip_n:,} prior row(s) — "
+                                "re-applying full population via upsert (key-addressed)."
+                            )
+                        else:
+                            dest_summary_resume_note = (
+                                f"Resume after {skip_n:,} prior row(s)."
+                            )
+                        # Keep full population — no positional slice (Kafka's
+                        # positional skip already applied above).
                         # Engine record spill owns the population; do not
                         # duplicate the dict list for resume.
                         resume_full_records = []
                         resume_skipped_rows = 0
-                        dest_summary_resume_note = (
-                            f"Idempotent resume after {skip_n:,} prior row(s) — "
-                            "re-applying full population via upsert (key-addressed)."
-                        )
                         total_rows = len(records)
                         mongo.update_job_status(
                             job_id,
@@ -2865,32 +3000,43 @@ class UniversalTransferEngine:
                         source_is_record_batch,
                     )
 
-                    return write_destination_database(
-                        request.destination,
-                        records,
-                        columns,
-                        schema,
-                        mappings,
-                        on_checkpoint=throttled_checkpoint,
-                        validation_mode=request.validation_mode,
-                        backfill_new_fields=backfill_fields,
-                        write_mode=write_mode,
-                        conflict_columns=conflict_columns,
-                        job_id=job_id,
-                        skip_preflight=request.skip_preflight,
-                        sync_mode=request.sync_mode,
-                        # File/object-store blanks into typed columns are SQL
-                        # NULL (D1): the buffered path dropped the flag, so
-                        # Execute rejected blanks preflight accepted.
-                        empty_cells_as_null=source_is_record_batch(
-                            getattr(request.source, "kind", "") or "database",
-                            request.source.format,
-                        ),
-                        release_records=True,
-                        retain_engine_spill=True,
-                        collect_mirror_keys=effective_sync_lower
-                        in ("full_refresh_mirror", "mirror"),
-                    )
+                    with _job_phase_heartbeat(
+                        mongo,
+                        job_id,
+                        phase="writing",
+                        message="Connecting to destination and writing…",
+                    ):
+                        return write_destination_database(
+                            request.destination,
+                            records,
+                            columns,
+                            schema,
+                            mappings,
+                            on_checkpoint=throttled_checkpoint,
+                            validation_mode=request.validation_mode,
+                            backfill_new_fields=backfill_fields,
+                            write_mode=write_mode,
+                            conflict_columns=conflict_columns,
+                            job_id=job_id,
+                            skip_preflight=request.skip_preflight,
+                            sync_mode=request.sync_mode,
+                            # File/object-store blanks into typed columns are SQL
+                            # NULL (D1): the buffered path dropped the flag, so
+                            # Execute rejected blanks preflight accepted.
+                            empty_cells_as_null=source_is_record_batch(
+                                getattr(request.source, "kind", "") or "database",
+                                request.source.format,
+                            ),
+                            upsert_ddl_approved=bool(
+                                getattr(
+                                    request, "ddl_changes_acknowledged", False
+                                )
+                            ),
+                            release_records=True,
+                            retain_engine_spill=True,
+                            collect_mirror_keys=effective_sync_lower
+                            in ("full_refresh_mirror", "mirror"),
+                        )
 
                 _scd2_opts = None
                 if effective_sync_lower == "scd2":
@@ -3126,6 +3272,19 @@ class UniversalTransferEngine:
                             if isinstance(dest_summary, dict)
                             else None
                         )
+                        from services.sync_cursor import (
+                            resolve_sync_contract as _resolve_mirror_contract,
+                        )
+
+                        _mirror_contract = _resolve_mirror_contract(
+                            list(getattr(request, "stream_contracts", None) or [])
+                        )
+                        # D38: docs default is a hard delete; ``_deleted``
+                        # tombstones only when the contract declares soft.
+                        _mirror_delete_mode = (
+                            (_mirror_contract.delete_mode if _mirror_contract else "")
+                            or "hard"
+                        )
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
                             records,
@@ -3133,6 +3292,7 @@ class UniversalTransferEngine:
                             schema,
                             mappings,
                             conflict_columns,
+                            delete_mode=_mirror_delete_mode,
                             source_spool=getattr(spill_holder, "spool", None),
                             source_key_spool=getattr(spill_holder, "key_spool", None),
                             pk_sources=getattr(spill_holder, "pk_sources", None),
@@ -3386,6 +3546,7 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
+            _commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,
                 job_id,
@@ -3396,6 +3557,9 @@ class UniversalTransferEngine:
                 message=recon.get(
                     "message", f"Transferred {rows_written:,} rows successfully"
                 ),
+                # The scan heartbeat paints 0–99 while rows hash; a passed
+                # Gate-8 is the 100 — verified jobs must not freeze at 99 (M1).
+                reconcile_pct=100,
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
@@ -4081,7 +4245,15 @@ class UniversalTransferEngine:
                     _promote_cdc_job_fields(checkpoint, update)
                 _progress_write_or_cancel(mongo, job_id, **update)
 
-            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+            _throttled_progress = ThrottledCheckpoint(on_checkpoint)
+
+            def throttled_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
+                # D102: check cancel on EVERY batch boundary; the throttled
+                # progress write below may drop intermediate calls.
+                _check_cancelled(rows)
+                _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
@@ -4096,7 +4268,11 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=opening_batch_message(total_rows, request.stream_contracts),
+                message=opening_batch_message(
+                    total_rows,
+                    request.stream_contracts,
+                    delta=_bounded_incremental_read(request),
+                ),
             )
 
             stream_contract = resolve_sync_contract(request.stream_contracts)
@@ -4320,6 +4496,12 @@ class UniversalTransferEngine:
                     dest_summary.setdefault("sync_mode", effective_sync)
                     dest_summary.setdefault("job_id", job_id)
                     dest_summary.setdefault("streaming", True)
+                    # The locale the run bound number text under — Gate-8's
+                    # source-side fingerprint interprets source cells under
+                    # the same locale (EU "1,234" → 1.234), never WIRE.
+                    dest_summary.setdefault(
+                        "number_locale", _run_number_locale(request)
+                    )
                     # Stamped before reconciliation: the ladder and the ledger
                     # read the recipe identity and the rows it removed off this
                     # summary, so a shaped run balances instead of reporting a
@@ -4527,6 +4709,9 @@ class UniversalTransferEngine:
                 message=recon.get(
                     "message", f"Transferred {rows_written:,} rows successfully"
                 ),
+                # The scan heartbeat paints 0–99 while rows hash; a passed
+                # Gate-8 is the 100 — verified jobs must not freeze at 99 (M1).
+                reconcile_pct=100,
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
@@ -5134,7 +5319,15 @@ class UniversalTransferEngine:
                     _promote_cdc_job_fields(checkpoint, update)
                 _progress_write_or_cancel(mongo, job_id, **update)
 
-            throttled_checkpoint = ThrottledCheckpoint(on_checkpoint)
+            _throttled_progress = ThrottledCheckpoint(on_checkpoint)
+
+            def throttled_checkpoint(
+                chunk: int, chunks: int, rows: int, checkpoint: dict | None = None
+            ) -> None:
+                # D102: check cancel on EVERY batch boundary; the throttled
+                # progress write below may drop intermediate calls.
+                _check_cancelled(rows)
+                _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
@@ -5149,7 +5342,11 @@ class UniversalTransferEngine:
                     phase="writing", rows_processed=0, total_rows=total_rows
                 )
                 or 5,
-                message=opening_batch_message(total_rows, request.stream_contracts),
+                message=opening_batch_message(
+                    total_rows,
+                    request.stream_contracts,
+                    delta=_bounded_incremental_read(request),
+                ),
             )
 
             stream_contract = resolve_sync_contract(request.stream_contracts)
@@ -5345,6 +5542,7 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
+            _commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,
                 job_id,
@@ -5355,6 +5553,9 @@ class UniversalTransferEngine:
                 message=recon.get(
                     "message", f"Transferred {rows_written:,} rows successfully"
                 ),
+                # The scan heartbeat paints 0–99 while rows hash; a passed
+                # Gate-8 is the 100 — verified jobs must not freeze at 99 (M1).
+                reconcile_pct=100,
                 destination_database=dest_summary.get(
                     "database", request.destination.database or ""
                 ),
@@ -5656,7 +5857,7 @@ class UniversalTransferEngine:
                 # that is a full extract. Only seek when a dest-owned mark exists.
                 if bound.active and bound.scope.watermark:
                     cursor_column = bound.scope.cursor_column
-                    cursor_after = bound.scope.watermark
+                    cursor_after = bound.scope.read_watermark
             except ValueError:
                 # Cursor-identity refusal is owned by execute_tracked after the
                 # read; do not turn it into a retried source error here.
@@ -5683,6 +5884,11 @@ class UniversalTransferEngine:
 
         from .endpoint_intelligence import build_transfer_plan, introspect_endpoint
 
+        source.extra = {
+            **(source.extra or {}),
+            "introspect_purpose": "source",
+            "introspect_strict": True,
+        }
         source_info = introspect_endpoint(source, sample_content, filename)
         if source_columns and not source_info.get("columns"):
             source_info["columns"] = source_columns

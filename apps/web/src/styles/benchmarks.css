@@ -1,7 +1,7 @@
 /* Benchmarks page — layered on existing design tokens */
 
 .df2-page-benchmarks {
-  background: var(--df-bg-canvas, #f4f6f8);
+  background: var(--df-bg-canvas);
 }
 
 .df2-page-benchmarks-workspace {
@@ -16,7 +16,7 @@
 
 .df2-page-benchmarks-intro {
   margin: 0 0 16px;
-  color: var(--df-ink-muted, #475569);
+  color: var(--df-ink-muted);
   font-size: 14px;
   line-height: 1.5;
 }
@@ -69,18 +69,18 @@
   margin: 0 0 8px;
   font-size: 15px;
   font-weight: 600;
-  color: var(--df-ink-primary, #0f172a);
+  color: var(--df-ink-primary);
 }
 
 .df2-page-benchmarks-note {
   margin: 0 0 12px;
-  color: var(--df-ink-muted, #475569);
+  color: var(--df-ink-muted);
   font-size: 12px;
 }
 
 .df2-page-benchmarks-table-wrap {
   overflow-x: auto;
-  border: 1px solid var(--df-line, #e2e8f0);
+  border: 1px solid var(--df-line);
   border-radius: 10px;
 }
 
@@ -95,14 +95,14 @@
 .df2-page-benchmarks-table td {
   padding: 10px 12px;
   text-align: left;
-  border-bottom: 1px solid var(--df-line, #e2e8f0);
+  border-bottom: 1px solid var(--df-line);
   white-space: nowrap;
 }
 
 .df2-page-benchmarks-table th {
-  background: var(--df-surface-2, #f8fafc);
+  background: var(--df-surface-2);
   font-weight: 600;
-  color: var(--df-ink-muted, #475569);
+  color: var(--df-ink-muted);
   font-size: 11px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -150,13 +150,13 @@
   display: inline-flex;
   align-items: center;
   gap: 6px;
-  color: var(--df-brand, #0f766e);
+  color: var(--df-brand);
 }
 
 .df2-page-benchmarks-list {
   margin: 0;
   padding-left: 18px;
-  color: var(--df-ink-secondary, #334155);
+  color: var(--df-ink-secondary);
   font-size: 13px;
   line-height: 1.6;
 }
@@ -171,7 +171,7 @@
   align-items: center;
   gap: 8px;
   padding: 40px 0;
-  color: var(--df-ink-muted, #475569);
+  color: var(--df-ink-muted);
   font-size: 13px;
 }
 

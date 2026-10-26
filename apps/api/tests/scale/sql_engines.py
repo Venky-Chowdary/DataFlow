@@ -15,6 +15,7 @@ test.
 """
 
 from __future__ import annotations
+import os
 
 import json
 import socket
@@ -445,7 +446,7 @@ class SQLServerEngine(Engine):
         self.port = int(getenv_brand_str("SQLSERVER_PORT", "1433"))
         self.database = getenv_brand_str("SQLSERVER_DATABASE", "dataflow")
         self.user = getenv_brand_str("SQLSERVER_USER", "sa")
-        self.password = getenv_brand_str("SQLSERVER_PASSWORD", "DataFlow_CDC_2022!")
+        self.password = getenv_brand_str("SQLSERVER_PASSWORD", os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""))
 
     def available(self) -> tuple[bool, str]:
         if not reachable(self.host, self.port):

@@ -87,8 +87,9 @@ def test_messy_csv_to_postgresql_preserves_types():
     # The column holds a present ``""`` next to JSON text, so it stays text.
     # Promoting it to JSON rejected the empty cell. A JSON file that spells
     # null still lands as jsonb; see test_json_to_postgresql_preserves_types.
-    assert rows[0] == (1, Decimal("1000.00"), "", datetime(2024, 1, 15), True, '{"k":"v"}', '["a","b"]')
-    assert rows[1] == (2, Decimal("2000.50"), "hello", datetime(2024, 2, 28, 14, 30), False, "", "")
+    # Unquoted empty CSV cells decode as NULL (C04 codec — '' needs `""`).
+    assert rows[0] == (1, Decimal("1000.00"), None, datetime(2024, 1, 15), True, '{"k":"v"}', '["a","b"]')
+    assert rows[1] == (2, Decimal("2000.50"), "hello", datetime(2024, 2, 28, 14, 30), False, None, None)
     assert rows[2] == (3, Decimal("3.14"), "null", datetime(2024, 3, 1), True, "{}", "[]")
 
 

@@ -137,8 +137,12 @@ def _is_absent_object_error(message: str) -> bool:
 _INTERNAL_OBJECT_PREFIXES = ("_df_mirrorkeys_", "_dataflow_stg_", "_df_dlq_")
 
 
-def _operator_visible_objects(names, type_label: str) -> list[dict]:
-    """Listing entries for objects the operator owns, in probe order."""
+def _operator_visible_objects(names, type_label: str, type_map: dict | None = None) -> list[dict]:
+    """Listing entries for objects the operator owns, in probe order.
+
+    ``type_map`` (probe ``table_types``) overrides ``type_label`` per name —
+    the PG listing now reports views as views (M18).
+    """
     out: list[dict] = []
     for raw in names or []:
         name = str(raw)
@@ -146,7 +150,7 @@ def _operator_visible_objects(names, type_label: str) -> list[dict]:
             continue
         if name.startswith(_INTERNAL_OBJECT_PREFIXES):
             continue
-        out.append({"name": name, "type": type_label})
+        out.append({"name": name, "type": (type_map or {}).get(name) or type_label})
     return out
 
 
@@ -404,7 +408,9 @@ def _introspect_endpoint_impl(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
@@ -412,8 +418,9 @@ def _introspect_endpoint_impl(
                 # Absence from a bounded page is a hint, not proof. The SQL path
                 # below re-checks the specific table and is what Validate trusts;
                 # create-on-write is CREATE IF NOT EXISTS, so guessing "new" here
-                # is recoverable where refusing to answer would strand the run.
-                out["table_exists"] = False
+                # is recoverable where refusing to answer would strand the run —
+                # but only when the page was complete (M7).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -515,11 +522,16 @@ def _introspect_endpoint_impl(
             **snowflake_session_kwargs(cfg),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
-                out["table_exists"] = False
+                # Absence from a bounded page is a hint, not proof: a truncated
+                # object list must say unknown, not "new table" (M7 — G15
+                # labeled an existing table CREATE-NEW).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -539,12 +551,17 @@ def _introspect_endpoint_impl(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["objects_truncated"] = bool(getattr(probe, "tables_truncated", False))
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
-                out["table_exists"] = False
+                # Absence from a bounded page is a hint, not proof: a truncated
+                # object list must say unknown, not "new table" (M7 — G15
+                # labeled an existing table CREATE-NEW).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -566,11 +583,16 @@ def _introspect_endpoint_impl(
             service_account=cfg.get("service_account", ""),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
-                out["table_exists"] = False
+                # Absence from a bounded page is a hint, not proof: a truncated
+                # object list must say unknown, not "new table" (M7 — G15
+                # labeled an existing table CREATE-NEW).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -586,11 +608,16 @@ def _introspect_endpoint_impl(
             ssl=cfg.get("ssl", False),
         )
         out["connected"] = probe.ok
-        out["objects"] = _operator_visible_objects(probe.tables, "table")
+        out["objects"] = _operator_visible_objects(
+            probe.tables, "table", getattr(probe, "table_types", None)
+        )
         out["message"] = probe.message if probe.ok else (probe.error or "Connection failed")
         if probe.ok and (endpoint.table or is_callable_source(endpoint)):
             if endpoint.table and not _mark_table_listed_if_present(out, endpoint.table):
-                out["table_exists"] = False
+                # Absence from a bounded page is a hint, not proof: a truncated
+                # object list must say unknown, not "new table" (M7 — G15
+                # labeled an existing table CREATE-NEW).
+                out["table_exists"] = None if out.get("objects_truncated") else False
             _attach_db_sample(out, endpoint)
         return out
 
@@ -1026,6 +1053,35 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 ).strip(" ·")
             # Empty collections still exist — never treat "no sample docs" as create-new.
             out["table_exists"] = True
+            # Unique-index catalog — every Mongo collection carries the unique
+            # `_id_` index, and DataFlow-created upsert targets get a unique
+            # index on the conflict key. The D101 upsert-DDL gate reads these;
+            # without it the gate saw Mongo destinations as keyless heaps and
+            # blocked second-run upserts with a SQL-shaped remediation.
+            try:
+                unique_keys: list[dict[str, Any]] = []
+                pk_cols: list[str] = []
+                for idx_name, idx in (coll.index_information() or {}).items():
+                    if not isinstance(idx, dict) or not idx.get("unique"):
+                        continue
+                    key_spec = idx.get("key")
+                    idx_cols = (
+                        [str(k) for k in key_spec.keys()]
+                        if hasattr(key_spec, "keys")
+                        else [str(k) for k, _dir in (key_spec or [])]
+                    )
+                    unique_keys.append(
+                        {"name": str(idx_name), "columns": idx_cols, "unique": True}
+                    )
+                    if idx_name == "_id_":
+                        pk_cols = idx_cols
+                out["unique_keys"] = unique_keys
+                if pk_cols:
+                    out["primary_key_columns"] = pk_cols
+            except PyMongoError as exc:
+                logger.debug(
+                    "mongodb index_information failed for %s: %s", coll_name, exc
+                )
             if not columns:
                 out["message"] = (
                     f"{out.get('message', '')} · collection `{coll_name}` exists "
@@ -1327,7 +1383,12 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
         purpose = str((endpoint.extra or {}).get("introspect_purpose") or "").lower()
         # Destination: stay in the operator-chosen DB/schema. Cross-namespace
         # "heal" invents Existing table when another DB on the host has the name.
-        strict_namespace = purpose == "destination"
+        # D91/D92: a transfer staging read (introspect_strict) resolves the
+        # canonical qualified name the operator named — fuzzy cross-schema
+        # search is reserved for interactive browsing.
+        strict_namespace = purpose == "destination" or bool(
+            (endpoint.extra or {}).get("introspect_strict")
+        )
         # Same role, different question: a destination is described by the
         # carrier its DDL declares, not by the shape of the rows already in it.
         physical_carriers = purpose == "destination"

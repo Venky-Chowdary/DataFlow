@@ -534,14 +534,34 @@ def get_file_chunks(file_id: str, chunk_size: int = 10000):
     delimiter = record["delimiter"]
 
     if fmt == "csv":
-        import csv
+        from services.csv_codec import iter_csv_records
+
+        # C04: unquoted empty is None, quoted "" is '' — the chunk path sees
+        # the same cells the stream path does; the carrier bind then lands
+        # '' as NULL on non-text columns.
+        try:
+            from transfer.file_stream import file_empty_cell_bind
+        except ImportError:  # pragma: no cover
+            from src.transfer.file_stream import file_empty_cell_bind
+
+        _carriers = {
+            str(c.get("name") or ""): str(c.get("inferred_type") or "")
+            for c in (record.get("columns") or [])
+            if isinstance(c, dict)
+        }
         with open(path, "r", encoding=encoding) as f:
-            reader = csv.reader(f, delimiter=delimiter)
+            reader = iter_csv_records(f, delimiter)
             headers = next(reader, [])
             chunk = []
             for row in reader:
-                if is_blank_row(row):
+                if not row or all(c is None or str(c).strip() == "" for c in row):
                     continue
+                row = [
+                    file_empty_cell_bind(v, _carriers.get(headers[i], ""))
+                    if i < len(headers)
+                    else v
+                    for i, v in enumerate(row)
+                ]
                 chunk.append(row)
                 if len(chunk) >= chunk_size:
                     yield headers, chunk
@@ -903,8 +923,17 @@ class FileParser:
                     file_type="csv",
                 )
             delim = opts.delimiter or detect_delimiter(text[:8192])
+            # C04: preview decodes with the one codec — an unquoted empty
+            # field is None and a quoted "" is '', so the preview shows the
+            # same values the transfer will write.
+            from services.csv_codec import iter_csv_records
+
             columns, windowed = header_and_rows(
-                csv.reader(io.StringIO(text), delimiter=delim),
+                iter_csv_records(
+                    io.StringIO(text),
+                    delim,
+                    empty_cell=str(getattr(opts, "empty_cell", "null") or "null"),
+                ),
                 opts,
                 header_names=csv_header_names,
                 source_label="CSV",

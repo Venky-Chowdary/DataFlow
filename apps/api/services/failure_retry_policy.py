@@ -80,6 +80,13 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
     (r"file not arrived:.*wait window elapsed",
      "The wait-for-file window ended with no new file. Check the drop path "
      "or widen file_wait_seconds, then run the schedule again."),
+    # D100: a watermark that outlived its destination can never self-heal —
+    # park on the first beat and name the recovery, don't re-fail every tick.
+    (r"destination reset since the last incremental run",
+     "The destination was reset or dropped after this cursor advanced — "
+     "clear the cursor to re-snapshot (POST /api/v1/ops/cdc-cursors/clear) "
+     "or rebaseline the route (POST /api/v1/transfer/continuity/rebaseline), "
+     "then re-run."),
 )
 
 # Failures whose cause is the moment, not the configuration.

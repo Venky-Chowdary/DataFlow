@@ -114,9 +114,14 @@ def _future_schedules(enabled: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Soonest next_run_at that is still in the future. A past stamp is not next."""
     from datetime import datetime, timezone
 
+    from services.schedule_store import has_open_approval
+
     now = datetime.now(timezone.utc)
     future: list[tuple[datetime, dict[str, Any]]] = []
     for sched in enabled:
+        if has_open_approval(sched):
+            # Parked pipelines are held out of the cadence — not a next run.
+            continue
         raw = sched.get("next_run_at")
         if not raw:
             continue

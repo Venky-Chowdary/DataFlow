@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from services import reflection_cache
+from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
 
 from connectors.mysql_conn import get_connection
@@ -1059,7 +1060,13 @@ def write_mapped_rows(
                             f", UNIQUE KEY {quote_sql_identifier(index_name, '`')} ({cols})"
                         )
                 if not table_existed:
-                    cursor.execute(f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs})")
+                    # 'dataflow:managed' marks a table this run created so the
+                    # D101 gate below can tell it from an operator's table on
+                    # later upserts/replays.
+                    cursor.execute(
+                        f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs}) "
+                        "COMMENT='dataflow:managed'"
+                    )
                 _kwargs.setdefault(
                     "_schema_fidelity_report",
                     empty_unsupported_report(
@@ -1074,6 +1081,65 @@ def write_mapped_rows(
             # Empty physical-type answers are never cached (see
             # ``_fetch_mysql_column_types``), so a just-created table has no
             # stale entry to drop — only real ALTER paths invalidate.
+
+        # D101: upsert into an EXISTING table needs a unique key on the
+        # conflict columns — without one, ON DUPLICATE KEY UPDATE never
+        # triggers and every row lands as a duplicate. DDL on an operator's
+        # table is disclosed and approved at Validate, never created silently.
+        if write_mode == "upsert" and conflict_columns and table_existed:
+            conflict_cols = [c for c in conflict_columns if c in target_cols]
+            if conflict_cols:
+                cursor.execute(
+                    "SELECT INDEX_NAME, COLUMN_NAME "
+                    "FROM INFORMATION_SCHEMA.STATISTICS "
+                    "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+                    "AND NON_UNIQUE = 0",
+                    (table_name,),
+                )
+                index_cols: dict[str, set[str]] = {}
+                for idx_name, col_name in cursor.fetchall():
+                    index_cols.setdefault(str(idx_name), set()).add(str(col_name))
+                want = {str(c) for c in conflict_cols}
+                covered = any(cols == want for cols in index_cols.values())
+                index_name = sanitize_identifier(
+                    f"uidx_{table_name}_{'_'.join(conflict_cols)}"
+                )
+                if not covered:
+                    # A table a prior DataFlow run created carries the
+                    # 'dataflow:managed' comment — index DDL on it is ours to
+                    # make; only unmarked (operator-owned) tables gate.
+                    managed = False
+                    try:
+                        cursor.execute(
+                            "SELECT TABLE_COMMENT FROM INFORMATION_SCHEMA.TABLES "
+                            "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+                            (table_name,),
+                        )
+                        _mrow = cursor.fetchone()
+                        managed = bool(_mrow and _mrow[0] == "dataflow:managed")
+                    except Exception:
+                        managed = False
+                    if not managed and not bool(_kwargs.get("upsert_ddl_approved")):
+                        raise ValueError(
+                            f"Upsert into existing table '{table_name}' needs "
+                            f"unique index {index_name} on "
+                            f"({', '.join(conflict_cols)}) — destination DDL "
+                            "must be disclosed and approved at Validate "
+                            "(ddl_changes_acknowledged); DataFlow does not "
+                            "silently alter a table it did not create. To "
+                            "proceed: re-run Validate and acknowledge the "
+                            "planned DDL change, or create the index "
+                            f"yourself — CREATE UNIQUE INDEX {index_name} "
+                            f"ON {table_name} ({', '.join(conflict_cols)});"
+                        )
+                    cols = ", ".join(
+                        quote_sql_identifier(c, "`") for c in conflict_cols
+                    )
+                    cursor.execute(
+                        f"CREATE UNIQUE INDEX "
+                        f"{quote_sql_identifier(index_name, '`')} "
+                        f"ON {table_q} ({cols})"
+                    )
 
         if backfill_new_fields:
             cursor.execute(
@@ -1488,6 +1554,10 @@ def write_mapped_rows(
                 nonlocal load_data_chunks, load_data_fallbacks
                 if not batch:
                     return 0
+                # D102: stop the NEXT chunk when the job was cancelled.
+                from services.cancel_check import cancel_checkpoint
+
+                cancel_checkpoint(written)
                 start = int(row_numbers[0]) if row_numbers else 1
                 attempt = 0
                 chunk_started = time.monotonic()
@@ -1857,6 +1927,9 @@ def write_mapped_rows(
                 source_row_count,
             ),
         )
+    except TransferCancelled:
+        # D102: cancel is control flow, not a write failure.
+        raise
     except Exception as exc:
         close_quietly(conn)
         return WriteResult(

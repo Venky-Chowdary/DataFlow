@@ -830,6 +830,37 @@ def analyze_coercion(
                                 })
                                 raw_failure_values.append(cell[:120])
                             continue
+                    # Declared-scale fit: a value that parses but carries more
+                    # fractional digits than NUMERIC(p,s) declares is quarantined
+                    # by the writer (PG would silently round at INSERT). Validate
+                    # must mirror write — M16: a TEXT → NUMERIC(15,7) plan with
+                    # 9-decimal samples cannot report "coerces cleanly".
+                    if tgt_logical in {"decimal", "number"}:
+                        from connectors.writer_common import (
+                            fits_decimal,
+                            parse_decimal_precision_scale,
+                        )
+
+                        _parsed = parse_decimal_precision_scale(
+                            tgt_type, dest_db=dest_l
+                        )
+                        if _parsed and not fits_decimal(
+                            converted, _parsed[0], _parsed[1], dest_db=dest_l
+                        ):
+                            failed += 1
+                            if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                                sample_failures.append({
+                                    "row": idx,
+                                    "value": cell[:120],
+                                    "reason": (
+                                        f"Value exceeds declared scale "
+                                        f"{tgt_type} — writer quarantines "
+                                        f"(never rounds silently); widen "
+                                        f"the destination type or remap"
+                                    ),
+                                })
+                                raw_failure_values.append(cell[:120])
+                            continue
                     ok += 1
         finally:
             if _date_token is not None:

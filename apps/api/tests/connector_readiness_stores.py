@@ -19,6 +19,7 @@ Reused by ``scripts/connector_readiness_live_proof.py`` and
 """
 
 from __future__ import annotations
+import os
 
 import json
 import socket
@@ -382,7 +383,7 @@ def _mongo_drop(collection: str) -> None:
 
 # ── SQL Server ───────────────────────────────────────────────────────────────
 
-SQLSERVER_PASSWORD = "DataFlow_CDC_2022!"
+SQLSERVER_PASSWORD = os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", "")
 
 
 def _sqlserver_endpoint(table: str) -> EndpointConfig:

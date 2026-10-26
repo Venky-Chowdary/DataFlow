@@ -109,7 +109,9 @@ def _decimal_overflow_issue(samples: list[str], tgt: str, tgt_type: str) -> str 
     for raw in samples[:50]:
         from services.transform_engine import decimal_wire_value
 
-        text = (raw or "").strip()
+        from services.value_serializer import unescape_wire_text
+
+        text = str(unescape_wire_text(raw) or "").strip()
         if not text or text.lower() in {"null", "none", "nan"}:
             continue
         value = decimal_wire_value(text)
@@ -136,11 +138,13 @@ def _sample_values(sample_rows: list[dict] | None, column: str) -> list[str]:
     if not sample_rows:
         return []
     out: list[str] = []
+    from services.value_serializer import is_reader_null_cell, unescape_wire_text
+
     for row in sample_rows:
         val = row.get(column)
-        if val is None:
+        if val is None or is_reader_null_cell(val):
             continue
-        out.append(str(val).strip())
+        out.append(str(unescape_wire_text(val)).strip())
     return out
 
 

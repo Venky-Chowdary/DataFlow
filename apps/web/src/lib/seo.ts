@@ -140,7 +140,7 @@ export function resolveSiteUrl(): string {
   if (typeof window !== "undefined" && window.location.origin) {
     return window.location.origin;
   }
-  return "https://datawrap.app";
+  return "https://www.datawrap.io";
 }
 
 export function formatDocumentTitle(pageTitle: string): string {

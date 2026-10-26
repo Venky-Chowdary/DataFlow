@@ -299,7 +299,11 @@ def test_one_column_does_not_lend_its_date_order_to_another():
     assert "dob" not in ambiguous, report
     assert report.get("decision") == "set_locale"
     blob = " ".join(str(g.get("message") or "") for g in result.get("gates") or [])
-    assert "11/03/1992" not in blob
+    # C23 names the offending value in the transform-failure message, so dob's
+    # '11/03/1992' may appear — dob IS legitimately flagged for failing its
+    # declared strict transform (it was flagged on the base wording too).
+    # The contract under test is the *ambiguity report*: dob must not be
+    # marked ambiguous and hired must be.
     assert "05/06/2024" in blob or "hired" in blob.lower()
 
 

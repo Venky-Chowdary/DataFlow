@@ -59,7 +59,7 @@ DESTS: dict[str, dict[str, Any]] = {
             "port": int(_env("DATAFLOW_BR_MSSQL_PORT", "21433")),
             "database": _env("DATAFLOW_BR_MSSQL_DB", "master"),
             "username": _env("DATAFLOW_BR_MSSQL_USER", "sa"),
-            "password": _env("DATAFLOW_BR_MSSQL_PASSWORD", "DataFlow_CDC_2022!"),
+            "password": _env("DATAFLOW_BR_MSSQL_PASSWORD", os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", "")),
             "table": TABLE,
         },
     },

@@ -316,10 +316,28 @@ def assert_connector_dial_allowed(
         raise EgressRefused(refusal)
 
 
+# Engines whose ``host`` field is a label, not a dial target: the connection
+# opens a file path, so a stored "localhost" must not read as a loopback dial
+# (D4 — the same exemption ``connectors.generic_sql._build_engine`` applies).
+FILE_ENGINE_TYPES = frozenset({
+    "duckdb",
+    "sqlite",
+    "file",
+    "local",
+    "csv",
+    "csv_local",
+    "json",
+    "parquet",
+    "excel",
+    "xlsx",
+})
+
+
 def metadata_endpoint_refusal(
     *values: str,
     allowlist: Sequence[str] | None = None,
     workspace_id: str = "",
+    db_type: str = "",
 ) -> str:
     """Why a connector host is refused before any socket, or ``""``.
 
@@ -328,7 +346,11 @@ def metadata_endpoint_refusal(
     name is not refused here — ``pinned_egress`` resolves again at dial time
     and fail-closes, which is what stops a rebind onto a metadata address.
     Pass ``allowlist=()`` to ignore the workspace list and the process env.
+    ``db_type`` of a file engine exempts the host fields entirely — those
+    engines never open a socket.
     """
+    if (db_type or "").strip().lower() in FILE_ENGINE_TYPES:
+        return ""
     for host in _hosts_from_values(*values):
         phrase = classify_host(
             host,

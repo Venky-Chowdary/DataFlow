@@ -14,17 +14,20 @@ and TIME stay unsafe as cursors. BOOLEAN 0/1 is COPY-safe as payload;
 as a cursor it would skip rows after watermark ``1``. DATE into
 PostgreSQL is an ISO calendar day.
 
-1. Build the same lexicographic ``(cursor, pk) > (watermark, pk)`` predicate
-   the engine reader uses (Airbyte timestamp-cursor trap).
+1. Build the run-seed ``cursor >= watermark`` predicate (D60/D98 re-reads the
+   whole tie group; Airbyte timestamp-cursor trap).
 2. COPY that filtered population into staging (one shard — do not PK-range a
    subset).
-3. ``incremental_append``: ``INSERT INTO dest SELECT FROM staging``. The
-   destination is not given a unique key, so a repeated key inserts.
+3. ``incremental_append``: ``INSERT INTO dest SELECT FROM staging``; the
+   run seed is ``cursor >= watermark`` (D60/D98), so staging can carry the
+   boundary tie group again — boundary rows are inserted only when absent
+   (dedupe by mapped PK, else full-row content). Rows past the watermark
+   always insert; a conflicting key there still fails closed.
    ``incremental_deduped`` still creates the key and MERGEs.
 4. ``incremental_deduped``: existing ``ON DUPLICATE`` / ``ON CONFLICT``.
 5. Proof: staging COUNT = filtered source COUNT. Append: dest_after =
-   dest_before + staging. Deduped: dest PK ⋈ staging = staging. Dest COUNT
-   independently reread.
+   dest_before + inserted (boundary replays excluded). Deduped: dest PK ⋈
+   staging = staging. Dest COUNT independently reread.
 6. High-water is MAX(cursor[, pk]) on staging *before* it is dropped — the
    same population the COPY moved, not dest MAX of older rows.
 
@@ -191,15 +194,11 @@ def pg_cursor_predicate_sql(
         return ""
     cursor_ident = _quote(cursor_column)
     pk = (pk_column or "").strip()
-    if pk and pk != cursor_column:
-        cur_val, pk_val = split_cursor_bookmark(bookmark, has_tiebreak=True)
-        pk_ident = _quote(pk)
-        return (
-            f"({cursor_ident}, {pk_ident}) > "
-            f"({_pg_quoted_literal(cur, cur_val)}, {_pg_quoted_literal(cur, pk_val)})"
-        )
-    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
-    return f"{cursor_ident} > {_pg_quoted_literal(cur, cur_val)}"
+    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+    # D60/D98 — the run watermark re-reads the whole tie group: rows sharing
+    # the watermark cursor value must be re-delivered regardless of their
+    # key order (at-least-once; append dedupes boundary rows).
+    return f"{cursor_ident} >= {_pg_quoted_literal(cur, cur_val)}"
 
 
 def mysql_cursor_predicate_sql(
@@ -221,15 +220,10 @@ def mysql_cursor_predicate_sql(
         return ""
     cursor_ident = _mysql_ident(cursor_column)
     pk = (pk_column or "").strip()
-    if pk and pk != cursor_column:
-        cur_val, pk_val = split_cursor_bookmark(bookmark, has_tiebreak=True)
-        pk_ident = _mysql_ident(pk)
-        clause = f"({cursor_ident}, {pk_ident}) > (%s, %s)"
-        params: tuple[Any, ...] = (cur_val, pk_val)
-    else:
-        cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
-        clause = f"{cursor_ident} > %s"
-        params = (cur_val,)
+    # D60/D98 — run watermark re-reads the whole tie group (>=).
+    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+    clause = f"{cursor_ident} >= %s"
+    params = (cur_val,)
     pred = cur.mogrify(clause, params)
     if isinstance(pred, bytes):
         pred = pred.decode()
@@ -316,19 +310,11 @@ def sqlite_cursor_predicate_sql(
         return ""
     cursor_ident = sqlite_ident(cursor_column)
     pk = (pk_column or "").strip()
-    if pk and pk != cursor_column:
-        cur_val, pk_val = split_cursor_bookmark(bookmark, has_tiebreak=True)
-        pk_ident = sqlite_ident(pk)
-        cursor_ident = sqlite_cursor_operand(cursor_ident, str(cur_val))
-        cur_val = sqlite_normalize_cursor_watermark(str(cur_val))
-        return (
-            f"({cursor_ident}, {pk_ident}) > "
-            f"({_sqlite_quoted_literal(cur_val)}, {_sqlite_quoted_literal(pk_val)})"
-        )
-    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
+    cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
     cursor_ident = sqlite_cursor_operand(cursor_ident, str(cur_val))
     cur_val = sqlite_normalize_cursor_watermark(str(cur_val))
-    return f"{cursor_ident} > {_sqlite_quoted_literal(cur_val)}"
+    # D60/D98 — run watermark re-reads the whole tie group (>=).
+    return f"{cursor_ident} >= {_sqlite_quoted_literal(cur_val)}"
 
 
 def mysql_insert_from_staging_sql(
@@ -344,6 +330,78 @@ def pg_insert_from_staging_sql(
 ) -> str:
     cols = ", ".join(quote(c) for c in columns)
     return f"INSERT INTO {dest_ref} ({cols}) SELECT {cols} FROM {staging_ref}"
+
+
+def _sql_null_safe_eq(dialect: str, left: str, right: str) -> str:
+    if dialect == "mysql":
+        return f"{left} <=> {right}"
+    if dialect == "sqlite":
+        return f"{left} IS {right}"
+    return f"{left} IS NOT DISTINCT FROM {right}"
+
+
+def _sql_text_eq(dialect: str, ident: str, literal: str) -> str:
+    # The bookmark literal comes from present_cell_text (ISO ``T``), while an
+    # engine's temporal text form renders space-separated — compare both sides
+    # in the same separator-normalized form (same rule as
+    # sqlite_cursor_sort_expr / sqlite_normalize_cursor_watermark, MX3-04).
+    lit = (
+        "'"
+        + sqlite_normalize_cursor_watermark(str(literal)).replace("'", "''")
+        + "'"
+    )
+    if dialect == "mysql":
+        return (
+            f"(CASE WHEN CAST({ident} AS CHAR) REGEXP "
+            "'^[0-9]{4}-[0-9]{2}-[0-9]{2}T' THEN "
+            f"CONCAT(SUBSTRING(CAST({ident} AS CHAR), 1, 10), ' ', "
+            f"SUBSTRING(CAST({ident} AS CHAR), 12)) "
+            f"ELSE CAST({ident} AS CHAR) END) = {lit}"
+        )
+    if dialect == "sqlite":
+        return f"{sqlite_cursor_sort_expr(f'CAST({ident} AS TEXT)')} = {lit}"
+    return (
+        f"(CASE WHEN {ident}::text ~ '^[0-9]{{4}}-[0-9]{{2}}-[0-9]{{2}}T' THEN "
+        f"substring({ident}::text from 1 for 10) || ' ' || "
+        f"substring({ident}::text from 12) ELSE {ident}::text END) = {lit}"
+    )
+
+
+def boundary_append_insert_sql(
+    dest_ref: str,
+    staging_ref: str,
+    columns: list[str],
+    quote,
+    *,
+    dialect: str,
+    cursor_col: str,
+    watermark: str | None,
+    pk_col: str = "",
+) -> str:
+    """Append INSERT FROM staging that re-reads the tie group at the watermark.
+
+    The source seed is ``cursor >= watermark``, so staging can carry rows the
+    destination already holds. Boundary rows (``cursor == watermark``) are
+    inserted only when absent: keyed loads match by the mapped primary key,
+    unkeyed loads by full-row content. Rows past the watermark always pass;
+    a conflicting key there still fails closed on the destination PK.
+    """
+    cols = ", ".join(quote(c) for c in columns)
+    if watermark is None or str(watermark) == "":
+        return f"INSERT INTO {dest_ref} ({cols}) SELECT {cols} FROM {staging_ref}"
+    cur_val, _tb = split_cursor_bookmark(str(watermark), has_tiebreak=True)
+    eq = lambda l, r: _sql_null_safe_eq(dialect, l, r)  # noqa: E731
+    s_cur = f"s.{quote(cursor_col)}"
+    match_cols = [pk_col] if pk_col else list(columns)
+    match = " AND ".join(eq(f"d.{quote(c)}", f"s.{quote(c)}") for c in match_cols)
+    return (
+        f"INSERT INTO {dest_ref} ({cols}) SELECT {cols} FROM {staging_ref} s "
+        f"WHERE NOT EXISTS ("
+        f"SELECT 1 FROM {dest_ref} d "
+        f"WHERE {eq(f'd.{quote(cursor_col)}', s_cur)} "
+        f"AND {_sql_text_eq(dialect, s_cur, cur_val)} "
+        f"AND {match})"
+    )
 
 
 def read_high_water_row(
@@ -567,6 +625,7 @@ def _apply_staging_to_mysql(
     mode: str,
     result: FastPathResult,
     quote,
+    watermark: str | None = None,
 ) -> FastPathResult:
     from services.copy_upsert import (
         UPSERT_PROOF_SCOPE,
@@ -621,17 +680,31 @@ def _apply_staging_to_mysql(
             proof_scope=UPSERT_PROOF_SCOPE,
         )
     dst_cur.execute(
-        mysql_insert_from_staging_sql(dest_q, staging_q, target_cols, quote)
+        boundary_append_insert_sql(
+            dest_q,
+            staging_q,
+            target_cols,
+            quote,
+            dialect="mysql",
+            cursor_col=dest_cursor,
+            watermark=watermark,
+            pk_col=dest_pk,
+        )
     )
+    inserted = int(dst_cur.rowcount or 0)
     dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
     dest_count = int(dst_cur.fetchone()[0])
-    expected = dest_count_before + staging_count
+    expected = dest_count_before + inserted
     if dest_count != expected:
         raise ValueError(
             "incremental append refused: dest COUNT(*) "
             f"{dest_count} != dest_before {dest_count_before} "
-            f"+ staging {staging_count}"
+            f"+ inserted {inserted}"
         )
+    if staging_count != inserted:
+        if isinstance(result.source_snapshot, dict):
+            result.source_snapshot["boundary_rows_replayed"] = staging_count - inserted
+        result = result._replace(rows_copied=inserted, source_rows=inserted)
     dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
     return _stamp_incremental(
         result,
@@ -658,6 +731,7 @@ def _apply_staging_to_pg(
     dest_count_before: int,
     mode: str,
     result: FastPathResult,
+    watermark: str | None = None,
 ) -> FastPathResult:
     from services.copy_upsert import (
         UPSERT_PROOF_SCOPE,
@@ -712,17 +786,31 @@ def _apply_staging_to_pg(
             proof_scope=UPSERT_PROOF_SCOPE,
         )
     dst_cur.execute(
-        pg_insert_from_staging_sql(dest_ref, staging_ref, target_cols, _quote)
+        boundary_append_insert_sql(
+            dest_ref,
+            staging_ref,
+            target_cols,
+            _quote,
+            dialect="pg",
+            cursor_col=dest_cursor,
+            watermark=watermark,
+            pk_col=dest_pk,
+        )
     )
+    inserted = int(dst_cur.rowcount or 0)
     dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
     dest_count = int(dst_cur.fetchone()[0])
-    expected = dest_count_before + staging_count
+    expected = dest_count_before + inserted
     if dest_count != expected:
         raise ValueError(
             "incremental append refused: dest COUNT(*) "
             f"{dest_count} != dest_before {dest_count_before} "
-            f"+ staging {staging_count}"
+            f"+ inserted {inserted}"
         )
+    if staging_count != inserted:
+        if isinstance(result.source_snapshot, dict):
+            result.source_snapshot["boundary_rows_replayed"] = staging_count - inserted
+        result = result._replace(rows_copied=inserted, source_rows=inserted)
     dst_cur.execute(f"DROP TABLE IF EXISTS {staging_ref}")  # nosec B608
     return _stamp_incremental(
         result,
@@ -749,6 +837,7 @@ def _apply_staging_to_sqlite(
     dest_count_before: int,
     mode: str,
     result: FastPathResult,
+    watermark: str | None = None,
 ) -> FastPathResult:
     from services.copy_sqlite_common import sqlite_ident
     from services.copy_upsert import (
@@ -805,18 +894,36 @@ def _apply_staging_to_sqlite(
             sync_mode=mode,
             proof_scope=UPSERT_PROOF_SCOPE,
         )
+    # D102: refuse to start the merge statement after a cancel.
+    from services.cancel_check import cancel_checkpoint
+
+    cancel_checkpoint()
     dst_cur.execute(
-        pg_insert_from_staging_sql(dest_q, staging_q, target_cols, sqlite_ident)
+        boundary_append_insert_sql(
+            dest_q,
+            staging_q,
+            target_cols,
+            sqlite_ident,
+            dialect="sqlite",
+            cursor_col=dest_cursor,
+            watermark=watermark,
+            pk_col=dest_pk,
+        )
     )
+    inserted = int(dst_cur.rowcount or 0)
     dst_cur.execute(f"SELECT COUNT(*) FROM {dest_q}")  # nosec B608
     dest_count = int(dst_cur.fetchone()[0])
-    expected = dest_count_before + staging_count
+    expected = dest_count_before + inserted
     if dest_count != expected:
         raise ValueError(
             "incremental append refused: dest COUNT(*) "
             f"{dest_count} != dest_before {dest_count_before} "
-            f"+ staging {staging_count}"
+            f"+ inserted {inserted}"
         )
+    if staging_count != inserted:
+        if isinstance(result.source_snapshot, dict):
+            result.source_snapshot["boundary_rows_replayed"] = staging_count - inserted
+        result = result._replace(rows_copied=inserted, source_rows=inserted)
     dst_cur.execute(f"DROP TABLE IF EXISTS {staging_q}")  # nosec B608
     return _stamp_incremental(
         result,
@@ -905,6 +1012,7 @@ def _finish_sqlite_incremental_staging(
     mode: str,
     result: FastPathResult,
     created_dest: bool,
+    watermark: str | None = None,
 ) -> FastPathResult:
     from services.copy_sqlite_common import sqlite_connect
 
@@ -927,6 +1035,7 @@ def _finish_sqlite_incremental_staging(
             dest_count_before=dest_count_before,
             mode=mode,
             result=result,
+            watermark=watermark,
         )
         dest_conn.commit()
         return out
@@ -1074,8 +1183,9 @@ def copy_postgres_to_mysql_incremental(
                 dest_cursor=dest_cursor,
                 dest_pk_col=dest_pk_col,
                 dest_count_before=dest_count_before,
-                mode=mode,
+            mode=mode,
                 result=result,
+                watermark=watermark,
                 quote=_mysql_ident,
             )
             dest_conn.commit()
@@ -1213,8 +1323,9 @@ def copy_between_postgres_incremental(
                 dest_cursor=dest_cursor,
                 dest_pk_col=dest_pk_col,
                 dest_count_before=dest_count_before,
-                mode=mode,
+            mode=mode,
                 result=result,
+                watermark=watermark,
             )
             dest_conn.commit()
             return out
@@ -1351,8 +1462,9 @@ def copy_mysql_to_postgres_incremental(
                 dest_cursor=dest_cursor,
                 dest_pk_col=dest_pk_col,
                 dest_count_before=dest_count_before,
-                mode=mode,
+            mode=mode,
                 result=result,
+                watermark=watermark,
             )
             dest_conn.commit()
             return out
@@ -1477,8 +1589,9 @@ def copy_mysql_to_mysql_incremental(
                 dest_cursor=dest_cursor,
                 dest_pk_col=dest_pk_col,
                 dest_count_before=dest_count_before,
-                mode=mode,
+            mode=mode,
                 result=result,
+                watermark=watermark,
                 quote=_mysql_ident,
             )
             dest_conn.commit()
@@ -1560,6 +1673,7 @@ def copy_sqlite_to_sqlite_incremental(
         mode=mode,
         result=result,
         created_dest=created_dest,
+        watermark=watermark,
     )
 
 
@@ -1641,6 +1755,7 @@ def copy_postgres_to_sqlite_incremental(
         mode=mode,
         result=result,
         created_dest=created_dest,
+        watermark=watermark,
     )
 
 
@@ -1715,6 +1830,7 @@ def copy_mysql_to_sqlite_incremental(
         mode=mode,
         result=result,
         created_dest=created_dest,
+        watermark=watermark,
     )
 
 
@@ -1812,8 +1928,9 @@ def copy_sqlite_to_postgres_incremental(
                 dest_cursor=dest_cursor,
                 dest_pk_col=dest_pk_col,
                 dest_count_before=dest_count_before,
-                mode=mode,
+            mode=mode,
                 result=result,
+                watermark=watermark,
             )
             dest_conn.commit()
             return out
@@ -1922,8 +2039,9 @@ def copy_sqlite_to_mysql_incremental(
                 dest_cursor=dest_cursor,
                 dest_pk_col=dest_pk_col,
                 dest_count_before=dest_count_before,
-                mode=mode,
+            mode=mode,
                 result=result,
+                watermark=watermark,
                 quote=_mysql_ident,
             )
             dest_conn.commit()

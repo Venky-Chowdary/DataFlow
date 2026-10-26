@@ -68,6 +68,17 @@ DELIVERY_SEMANTICS = (
 def transform_fidelity(transform: str | None) -> str:
     """Classify transform risk: preserve | mutate | lossy_cast."""
     t = (transform or "none").strip().lower()
+    # Aliases grade as their engine id — ``cast_integer``/``to_int`` land in
+    # _LOSSY_CAST_TRANSFORMS via ``integer`` instead of silently grading
+    # "mutate"/"preserve" next to an identical column (D40).
+    try:
+        from services.transform_engine import normalize_engine_transform
+
+        resolved = normalize_engine_transform(t)
+        if resolved:
+            t = str(resolved).lower()
+    except Exception:
+        pass
     if t in _PRESERVE_TRANSFORMS:
         return "preserve"
     if t in _LOSSY_CAST_TRANSFORMS:
@@ -301,6 +312,28 @@ def mapping_fidelity(
             "requires_risk_contract": False,
             "parse_guard": transform,
         }
+    src_tok = src_type.strip().lower().split("(")[0].strip()
+    tgt_tok = (stamp or tgt_type or "").strip().lower().split("(")[0].strip()
+    if src_tok != tgt_tok and {src_tok, tgt_tok} == {"json", "jsonb"}:
+        # jsonb stores the parsed document: whitespace, key order and duplicate
+        # keys normalize on write. The JSON *value* is equal; the bytes are not —
+        # "preserve" overclaims a verbatim round-trip (C07 minor).
+        from services.conversion_contract import ConversionClass
+
+        return {
+            "verdict": "normalizing",
+            "reason": (
+                f"{src_type} → {tgt_type}: jsonb re-serializes the document — "
+                "whitespace, key order and duplicate keys normalize on write; "
+                "the JSON value stays equal but the bytes do not round-trip."
+            ),
+            "type_narrowing": False,
+            "transform_fidelity": t_fidelity,
+            "conversion_class": ConversionClass.LOSSLESS.value,
+            "invents_capacity": False,
+            "requires_risk_contract": False,
+        }
+
     from services.conversion_contract import ConversionClass
 
     return {

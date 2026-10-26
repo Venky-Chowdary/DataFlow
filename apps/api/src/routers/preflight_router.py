@@ -134,6 +134,9 @@ class PreflightRequest(BaseModel):
     schema_drift_acknowledged: bool = False
     # Operator acknowledged destination FK mapping risk (schema coverage only).
     fk_risk_acknowledged: bool = False
+    # Operator approved destination DDL the plan discloses for this run —
+    # e.g. the unique index an upsert needs on an existing table (D101).
+    ddl_changes_acknowledged: bool = False
     # Module 11 — opt-in full-table population orphan scan (only path to RI proven).
     run_population_orphan_scan: bool = False
     # Optional acknowledgment trail (who / why). Timestamp is stamped server-side.
@@ -218,6 +221,7 @@ async def run_preflight(body: PreflightRequest):
             compliance=body.compliance_acknowledged,
             schema_drift=body.schema_drift_acknowledged,
             fk_risk=body.fk_risk_acknowledged,
+            ddl_changes=body.ddl_changes_acknowledged,
             actor=body.acknowledgment_actor,
             reason=body.acknowledgment_reason,
         )
@@ -439,6 +443,7 @@ async def run_preflight(body: PreflightRequest):
             destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
             destination_unique_keys=dest_meta.get("unique_keys") or [],
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+            destination_check_constraints=dest_meta.get("check_constraints") or [],
             destination_config=dest_meta.get("_probe_cfg") or None,
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
@@ -446,6 +451,7 @@ async def run_preflight(body: PreflightRequest):
             compliance_acknowledged=ack.compliance,
             schema_drift_acknowledged=ack.schema_drift,
             fk_risk_acknowledged=ack.fk_risk,
+            ddl_changes_acknowledged=ack.ddl_changes,
             run_population_orphan_scan=bool(body.run_population_orphan_scan),
             acknowledgment_actor=ack.actor,
             acknowledgment_reason=ack.reason,

@@ -512,6 +512,47 @@ def run_transfer_policy_gates(
             }
         )
 
+    # Kafka-family destinations are append-only topics. Any sync mode that
+    # promises destination-side semantics — overwrite replace, deduped/upsert
+    # merge, mirror delete, scd2 versioning, reverse_etl — would silently run
+    # as a plain produce, publishing duplicates that cannot be rolled back.
+    # Refuse at Validate instead of failing mid-run (C26/D90).
+    from services.copy_kafka_common import kafka_family_name
+    if kafka_family_name(dest) == "kafka":
+        kafka_append_modes = {"full_refresh_append", "incremental_append"}
+        if sync in kafka_append_modes:
+            gates.append(
+                {
+                    "id": "g_kafka_append_only",
+                    "status": GateStatus.PASS.value,
+                    "message": (
+                        "Kafka destination: append produce — published messages "
+                        "are final and cannot be rolled back"
+                    ),
+                    "duration_ms": 0,
+                    "details": {"dest_type": dest, "sync_mode": sync},
+                }
+            )
+        else:
+            gates.append(
+                {
+                    "id": "g_kafka_append_only",
+                    "status": GateStatus.BLOCK.value,
+                    "message": (
+                        f"Kafka destination supports append only — sync_mode "
+                        f"'{sync}' cannot replace, dedupe or merge a topic. "
+                        "Choose Append or Incremental append; published "
+                        "messages are final and cannot be rolled back."
+                    ),
+                    "duration_ms": 0,
+                    "details": {
+                        "dest_type": dest,
+                        "sync_mode": sync,
+                        "allowed_modes": sorted(kafka_append_modes),
+                    },
+                }
+            )
+
     from services.cdc_exactly_once import (
         preflight_delivery_gate, route_declares_log_position, route_has_cdc_pk)
 
@@ -680,6 +721,7 @@ def run_file_preflight(
     destination_dynamo_index_attributes: dict[str, str] | None = None,
     destination_unique_keys: list[dict[str, Any]] | None = None,
     destination_foreign_keys: list[dict[str, Any]] | None = None,
+    destination_check_constraints: list[Any] | None = None,
     destination_config: Mapping[str, Any] | None = None,
     stream_contracts: list[dict[str, Any]] | None = None,
     date_locale: str = "",
@@ -688,6 +730,9 @@ def run_file_preflight(
     compliance_acknowledged: bool = False,
     schema_drift_acknowledged: bool = False,
     fk_risk_acknowledged: bool = False,
+    # Operator approved the DDL DataFlow disclosed for this run (e.g. the
+    # unique index an upsert needs on an existing destination table — D101).
+    ddl_changes_acknowledged: bool = False,
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
@@ -1573,6 +1618,151 @@ def run_file_preflight(
         incremental_tiebreak_column=read_scope.primary_key,
     )
 
+    # D101: an upsert into an existing table needs a unique constraint on the
+    # upsert columns. If the destination lacks one, the writer would silently
+    # CREATE UNIQUE INDEX at run time — undisclosed DDL that fails raw on
+    # duplicates. Inspect, count duplicates, disclose the DDL, require approval.
+    upsert_ddl_gate: dict[str, Any] | None = None
+    try:
+        from services.sync_cursor import (
+            normalize_sync_mode as _nsm,
+            requires_upsert as _requires_upsert,
+        )
+
+        # scd2 is excluded: a type-2 history table holds many rows per business
+        # key by design — a unique constraint on the key would be wrong, and the
+        # writer keys current-row lookup on (key, is_current), never needing the
+        # index this gate exists to disclose.
+        _upsert_constraint_mode = _requires_upsert(sync_mode) and _nsm(
+            sync_mode, default=""
+        ) != "scd2"
+        if _upsert_constraint_mode and destination_table_exists is True:
+            from services.destination_key_collision_probe import _identity_pairs
+            from services.upsert_ddl_gate import (
+                count_dest_duplicate_keys,
+                dest_unique_covering_columns,
+            )
+
+            _uk_pairs = _identity_pairs(
+                mappings=mappings,
+                source_columns=columns,
+                dest_kind=dest_kind,
+                validation_mode=validation_mode,
+                destination_pk_columns=destination_pk_columns,
+                contract_primary_key=contract_primary_key,
+                stream_contracts=stream_contracts,
+                source_table=source_table,
+                destination_table=destination_table,
+            )
+            _uk_cols = [t for _s, t in _uk_pairs]
+            if _uk_cols and not dest_unique_covering_columns(
+                destination_pk_columns, destination_unique_keys, _uk_cols
+            ):
+                _planned_idx = (
+                    f"uidx_{destination_table}_{'_'.join(_uk_cols)}"
+                )
+                _planned_ddl = (
+                    f"CREATE UNIQUE INDEX {_planned_idx} ON "
+                    f"{destination_table} ({', '.join(_uk_cols)})"
+                )
+                _dup = {"ran": False, "duplicate_keys": 0, "duplicate_rows": 0,
+                        "samples": [], "message": "destination probe skipped"}
+                try:
+                    _dup = count_dest_duplicate_keys(
+                        dict(destination_config or {}),
+                        destination_table,
+                        _uk_cols,
+                    )
+                except Exception as _dexc:  # noqa: BLE001
+                    _dup = {
+                        "ran": False,
+                        "duplicate_keys": 0,
+                        "duplicate_rows": 0,
+                        "samples": [],
+                        "message": f"duplicate-key probe failed: {_dexc}"[:300],
+                    }
+                _details = {
+                    "rule_id": "g_upsert_dest_key",
+                    "remediation_kind": "approve_ddl_or_dedupe",
+                    "upsert_key_columns": list(_uk_cols),
+                    "planned_ddl": _planned_ddl,
+                    "duplicate_key_count": _dup.get("duplicate_keys"),
+                    "duplicate_row_count": _dup.get("duplicate_rows"),
+                    "duplicate_samples": _dup.get("samples") or [],
+                    "probe_ran": bool(_dup.get("ran")),
+                    "ddl_acknowledged": bool(ddl_changes_acknowledged),
+                }
+                if _dup.get("duplicate_keys"):
+                    upsert_ddl_gate = {
+                        "id": "g_upsert_dest_key",
+                        "status": "block",
+                        "message": (
+                            f"Destination '{destination_table}' holds "
+                            f"{_dup['duplicate_keys']} duplicate upsert-key "
+                            f"value(s) on ({', '.join(_uk_cols)}) and has no "
+                            "unique constraint — the merge cannot be keyed "
+                            "safely. Deduplicate the destination or choose "
+                            "different key columns, then re-validate."
+                        ),
+                        "duration_ms": 0,
+                        "details": _details,
+                        "suggested_actions": [
+                            "Remove the duplicate key values listed in the probe",
+                            "Pick different upsert key columns",
+                            "Run full refresh overwrite instead of upsert",
+                        ],
+                    }
+                elif ddl_changes_acknowledged:
+                    upsert_ddl_gate = {
+                        "id": "g_upsert_dest_key",
+                        "status": "pass",
+                        "message": (
+                            f"Approved destination DDL: {_planned_ddl} "
+                            "(operator acknowledged)"
+                        ),
+                        "duration_ms": 0,
+                        "details": {**_details, "acknowledged": True},
+                    }
+                else:
+                    upsert_ddl_gate = {
+                        "id": "g_upsert_dest_key",
+                        "status": "block",
+                        "message": (
+                            f"Upsert into existing '{destination_table}' needs "
+                            f"a unique constraint on ({', '.join(_uk_cols)}). "
+                            f"DataFlow would run: {_planned_ddl} — disclose "
+                            "and approve destination DDL before executing."
+                        ),
+                        "duration_ms": 0,
+                        "details": {**_details, "requires_approval": True},
+                        "suggested_actions": [
+                            "Approve the disclosed DDL and re-validate",
+                            "Create a unique constraint on the upsert key yourself",
+                        ],
+                    }
+            elif _uk_cols:
+                upsert_ddl_gate = {
+                    "id": "g_upsert_dest_key",
+                    "status": "pass",
+                    "message": (
+                        f"Destination enforces uniqueness on the upsert key "
+                        f"({', '.join(_uk_cols)}) — no new DDL required"
+                    ),
+                    "duration_ms": 0,
+                    "details": {"upsert_key_columns": list(_uk_cols)},
+                }
+    except Exception as _uexc:  # noqa: BLE001 — unmeasured, warn not pass
+        logger.warning("upsert dest-key gate skipped: %s", _uexc, exc_info=_uexc)
+        upsert_ddl_gate = {
+            "id": "g_upsert_dest_key",
+            "status": "warn",
+            "message": (
+                f"Upsert destination key inspection could not run: {_uexc}"
+            )[:400],
+            "duration_ms": 0,
+            "details": {},
+        }
+
     from services.preflight_source_kind import source_is_record_batch
 
     ctx = _ps.FilePreflightContext(
@@ -1939,7 +2129,123 @@ def run_file_preflight(
         confidence_threshold=confidence_threshold,
     )
 
-    extra_gates: list[dict[str, Any]] = [fit_gate] if fit_gate else []
+    # D99: an incremental run bounds the delta with ``cursor > watermark`` —
+    # and ``NULL > x`` is never true, so NULL-cursor rows are absent from
+    # every delta forever while the job reports verified. Warn (block under
+    # strict) with the live count; a probe that cannot measure skips honestly
+    # rather than fail-closing on unmeasured state.
+    null_cursor_gate: dict[str, Any] | None = None
+    try:
+        from services.sync_cursor import incremental_read_narrows
+
+        _nc_cursor = str(getattr(read_scope, "cursor_column", "") or "").strip()
+        if _nc_cursor and incremental_read_narrows(sync_mode):
+            _nc_nullable = (column_nullability or {}).get(_nc_cursor)
+            from services.null_cursor_probe import probe_null_cursor_count
+
+            _nc = probe_null_cursor_count(
+                source_connector_id=source_connector_id,
+                source_config=source_config,
+                source_table=source_table,
+                source_collection=str(
+                    (source_config or {}).get("collection") or ""
+                ),
+                cursor_column=_nc_cursor,
+            )
+            _nc_details: dict[str, Any] = {
+                "cursor_column": _nc_cursor,
+                "probe_status": _nc.status,
+                "null_count": _nc.null_count,
+                "column_nullable": _nc_nullable,
+            }
+            if _nc.ran and _nc.null_count:
+                _nc_strict = (validation_mode or "strict").lower() == "strict"
+                if _nc_strict:
+                    enriched_blockers.append(
+                        {
+                            "id": "g_nullable_cursor",
+                            "message": (
+                                f"{_nc.null_count} source row(s) carry a NULL "
+                                f"value in the incremental cursor column "
+                                f"'{_nc_cursor}' — an incremental read can "
+                                "never see them: they are absent from every "
+                                "delta and only arrive via a full refresh."
+                            ),
+                            "details": _nc_details,
+                            "suggested_actions": [
+                                "Fill the cursor column on the NULL rows and re-validate",
+                                "Add a COALESCE fallback cursor (e.g. created_at)",
+                                "Run as full refresh so every row is read",
+                            ],
+                        }
+                    )
+                null_cursor_gate = {
+                    "id": "g_nullable_cursor",
+                    "status": "block" if _nc_strict else "warn",
+                    "message": (
+                        f"{_nc.null_count} source row(s) carry a NULL value in "
+                        f"the incremental cursor column '{_nc_cursor}' — an "
+                        "incremental read can never see them: they are absent "
+                        "from every delta and only arrive via a full refresh. "
+                        "Fill the cursor column, add a COALESCE fallback "
+                        "cursor, or acknowledge the gap."
+                    ),
+                    "duration_ms": 0,
+                    "details": _nc_details,
+                }
+            elif _nc.ran:
+                null_cursor_gate = {
+                    "id": "g_nullable_cursor",
+                    "status": "warn" if _nc_nullable else "pass",
+                    "message": (
+                        f"Cursor column '{_nc_cursor}' holds no NULL values"
+                        + (
+                            " (the column is nullable — a future NULL row "
+                            "would be skipped by every incremental delta)"
+                            if _nc_nullable
+                            else ""
+                        )
+                    ),
+                    "duration_ms": 0,
+                    "details": _nc_details,
+                }
+            elif _nc_nullable:
+                null_cursor_gate = {
+                    "id": "g_nullable_cursor",
+                    "status": "warn",
+                    "message": (
+                        f"Cursor column '{_nc_cursor}' is nullable — NULL "
+                        "rows would be skipped by every incremental delta "
+                        f"({_nc.message})"
+                    ),
+                    "duration_ms": 0,
+                    "details": _nc_details,
+                }
+    except Exception as exc:  # noqa: BLE001 — unmeasured, never a false pass
+        logger.warning("NULL-cursor gate probe skipped: %s", exc, exc_info=exc)
+
+    null_cursor_blocked = bool(
+        null_cursor_gate and null_cursor_gate.get("status") == "block"
+    )
+    upsert_ddl_blocked = bool(
+        upsert_ddl_gate and upsert_ddl_gate.get("status") == "block"
+    )
+    if upsert_ddl_blocked:
+        enriched_blockers.append(
+            {
+                "id": "g_upsert_dest_key",
+                "message": str(upsert_ddl_gate.get("message") or ""),
+                "details": dict(upsert_ddl_gate.get("details") or {}),
+                "suggested_actions": list(
+                    upsert_ddl_gate.get("suggested_actions") or []
+                ),
+            }
+        )
+    extra_gates: list[dict[str, Any]] = (
+        ([fit_gate] if fit_gate else [])
+        + ([null_cursor_gate] if null_cursor_gate else [])
+        + ([upsert_ddl_gate] if upsert_ddl_gate else [])
+    )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)
     passed_count = result.passed_count + extra_passed
@@ -1949,7 +2255,8 @@ def run_file_preflight(
         # against travels with the verdict: a remediation resolved without it
         # would describe a different database's carriers.
         "destination_db_type": destination_db_type or "",
-        "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked,
+        "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
+        and not null_cursor_blocked and not upsert_ddl_blocked,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
@@ -2379,6 +2686,79 @@ def run_file_preflight(
                 "error",
             )
             if k in pop_report
+        }
+
+        # D112 — destination CHECK constraints vs the source population.
+        # inspect_destination_for_preflight surfaces the live catalog; the
+        # probe evaluates it over the same bounded population walk g3f uses
+        # (posted sample when the source cannot re-read) and names offenders
+        # before Confirm instead of a raw driver error after it.
+        check_report: dict[str, Any] = {
+            "ran": False,
+            "note": "No destination CHECK constraints reported.",
+        }
+        if destination_check_constraints:
+            from services.dest_check_probe import probe_dest_check_constraints
+            from services.preflight_population import (
+                _iter_table_population_for_preflight,
+            )
+
+            check_rows = _iter_table_population_for_preflight(
+                source_kind=source_kind,
+                source_format=source_format,
+                source_connector_id=source_connector_id or "",
+                source_config=source_config,
+                source_table=source_table or "",
+                mappings=list(mappings or []),
+                column_types=dict(column_types or {}),
+                dest_types=dict(destination_column_types or {}),
+                dest_db=destination_db_type,
+                sync_mode=sync_mode,
+            )
+            check_report = probe_dest_check_constraints(
+                rows=check_rows if check_rows is not None else (sample_rows or []),
+                mappings=list(mappings or []),
+                check_constraints=list(destination_check_constraints),
+                coverage=(
+                    "population_check_probe"
+                    if check_rows is not None
+                    else "sample_check_probe"
+                ),
+            )
+            viol = int(check_report.get("violating_count") or 0)
+            if viol:
+                sev = "error" if validation_mode in {"strict", "maximum"} else "warning"
+                offenders = "; ".join(
+                    f"row {v.get('row_index')}: {v.get('constraint')} "
+                    f"{v.get('values')}"
+                    for v in (check_report.get("violations") or [])[:3]
+                )
+                findings.append(
+                    {
+                        "code": "dest_check_violation",
+                        "severity": sev,
+                        "coverage": check_report.get("coverage"),
+                        "population_proof": bool(
+                            check_report.get("population_proof")
+                        ),
+                        "violating_rows": viol,
+                        "message": (
+                            f"{viol} source row(s) violate destination CHECK "
+                            f"constraint(s) — {offenders}. "
+                            "Confirm writes them and the destination rejects "
+                            "them; map them out, fix the source, or let "
+                            "quarantine carry them."
+                        ),
+                    }
+                )
+        out["dest_check_probe"] = {
+            k: check_report.get(k)
+            for k in (
+                "ran", "coverage", "population_proof", "evaluated",
+                "not_evaluated", "violating_count", "violations",
+                "checks", "note",
+            )
+            if k in check_report
         }
 
         out["constraint_findings"] = findings

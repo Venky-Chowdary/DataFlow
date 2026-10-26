@@ -82,14 +82,18 @@ def test_messy_csv_to_duckdb_preserves_types():
 
         # One cell carries 14:30, so the column joins to TIMESTAMP on the
         # type lattice. A DATE column would silently drop that time of day.
-        # A present CSV ``""`` stays text. Nulling it let inference forget the
-        # cell and reject the JSON-looking column at write time.
+        # C04: the fixture's empty cells are written UNQUOTED by csv.DictWriter
+        # (``note: ""`` serializes as ``,``), so they land SQL NULL — an
+        # unquoted empty field is NULL on every engine; only a quoted ``""``
+        # in the source text lands ''. The NULL does not confuse inference:
+        # the column still carries text values and the JSON-looking cells
+        # still write.
         assert _row(rows[0]) == (
-            1, Decimal("1000.0"), "", datetime(2024, 1, 15), True,
+            1, Decimal("1000.0"), None, datetime(2024, 1, 15), True,
             '{"k":"v"}', '["a","b"]',
         )
         assert _row(rows[1]) == (
-            2, Decimal("2000.5"), "hello", datetime(2024, 2, 28, 14, 30), False, "", "",
+            2, Decimal("2000.5"), "hello", datetime(2024, 2, 28, 14, 30), False, None, None,
         )
         assert _row(rows[2]) == (
             3, Decimal("3.14"), "null", datetime(2024, 3, 1), True, '{}', '[]',

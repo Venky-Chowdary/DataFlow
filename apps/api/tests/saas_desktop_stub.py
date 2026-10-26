@@ -79,9 +79,9 @@ def _row_identity(rec: dict[str, Any]) -> str:
     return str(rec.get("id") or rec.get("Id") or rec.get("hs_object_id") or "").strip()
 
 
-def _upsert_row(store_key: str, rec: dict[str, Any]) -> dict[str, Any]:
+def _upsert_row(store: "_Store", store_key: str, rec: dict[str, Any]) -> dict[str, Any]:
     """Identity replace — overwrite must not keep leftover extra dest keys."""
-    rows = STORE.rows.setdefault(store_key, [])
+    rows = store.rows.setdefault(store_key, [])
     rid = _row_identity(rec)
     if rid:
         for i, existing in enumerate(rows):
@@ -95,6 +95,12 @@ def _upsert_row(store_key: str, rec: dict[str, Any]) -> dict[str, Any]:
 class SaasStubHandler(BaseHTTPRequestHandler):
     def log_message(self, fmt: str, *args: Any) -> None:  # noqa: A003
         return
+
+    @property
+    def _store(self) -> "_Store":
+        # Per-server store — a second stub starting mid-suite must not wipe the
+        # rows another still-running server is seeded with (CI-1 isolation).
+        return getattr(self.server, "df_store", STORE)
 
     def _json(self, code: int, payload: Any) -> None:
         body = json.dumps(payload).encode("utf-8")
@@ -136,7 +142,7 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             self._json(200, {"DailyApiRequests": {"Remaining": 10000, "Max": 10000}})
             return
         if "/query" in path:
-            recs = STORE.rows.get("Account") or []
+            recs = self._store.rows.get("Account") or []
             self._json(200, {"totalSize": len(recs), "done": True, "records": recs})
             return
         if path.startswith("/crm/v3/properties/"):
@@ -145,7 +151,7 @@ class SaasStubHandler(BaseHTTPRequestHandler):
         if path.startswith("/crm/v3/objects/"):
             wrapped = [
                 {"id": _row_identity(r), "properties": dict(r)}
-                for r in (STORE.rows.get("contacts") or [])
+                for r in (self._store.rows.get("contacts") or [])
             ]
             self._json(200, {"results": wrapped})
             return
@@ -153,10 +159,10 @@ class SaasStubHandler(BaseHTTPRequestHandler):
             self._json(200, {"id": "acct_stub", "object": "account"})
             return
         if path.startswith("/v1/customers"):
-            self._json(200, {"object": "list", "data": STORE.rows.get("customers") or [], "has_more": False})
+            self._json(200, {"object": "list", "data": self._store.rows.get("customers") or [], "has_more": False})
             return
         if path.rstrip("/").endswith("/records") or path == "/records":
-            self._json(200, STORE.rows.get("records") or [])
+            self._json(200, self._store.rows.get("records") or [])
             return
         self._json(200, {"ok": True})
 
@@ -172,7 +178,7 @@ class SaasStubHandler(BaseHTTPRequestHandler):
                 if not rec.get("Id") and not rec.get("id"):
                     rec["Id"] = f"001STUB{i:03d}AAA"
                     rec["id"] = rec["Id"]
-                stored = _upsert_row("Account", rec)
+                stored = _upsert_row(self._store, "Account", rec)
                 results.append({"id": stored.get("Id") or stored.get("id"), "success": True, "errors": []})
             self._json(200, results)
             return
@@ -183,14 +189,14 @@ class SaasStubHandler(BaseHTTPRequestHandler):
                 props = dict(item.get("properties") or {})
                 rid = str(item.get("id") or props.get("id") or f"hs_{i}")
                 props["id"] = rid
-                stored = _upsert_row("contacts", props)
+                stored = _upsert_row(self._store, "contacts", props)
                 results.append({"id": stored["id"], "properties": stored})
             self._json(200, {"results": results, "errors": [], "status": "COMPLETE"})
             return
         if path.startswith("/v1/customers"):
             rec = dict(payload) if isinstance(payload, dict) else {}
-            rec["id"] = rec.get("id") or f"cus_stub_{len(STORE.rows['customers'])}"
-            stored = _upsert_row("customers", rec)
+            rec["id"] = rec.get("id") or f"cus_stub_{len(self._store.rows['customers'])}"
+            stored = _upsert_row(self._store, "customers", rec)
             self._json(200, stored)
             return
         self._json(200, {"ok": True})
@@ -200,27 +206,39 @@ class SaasStubHandler(BaseHTTPRequestHandler):
 
 
 def start_saas_stub(port: int = 0) -> tuple[HTTPServer, str]:
-    STORE.rows = {"Account": [], "contacts": [], "customers": [], "records": []}
     server = HTTPServer(("127.0.0.1", port), SaasStubHandler)
+    # Each server owns its store — a later start_saas_stub() call must not wipe
+    # the rows an already-running singleton server is serving (CI-1: ~52 SaaS
+    # legs read a wiped module-global STORE under pytest-randomly ordering).
+    server.df_store = _Store()
+    server.df_store.rows = {"Account": [], "contacts": [], "customers": [], "records": []}
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     assigned = server.server_address[1]
     return server, f"http://127.0.0.1:{assigned}"
 
 
-def seed_tabular_fixture() -> None:
-    """Two id/amount rows for PRODUCTION_SKU source reads against this stub."""
+def seed_tabular_fixture(target: Any = None) -> None:
+    """Two id/amount rows for PRODUCTION_SKU source reads against this stub.
+
+    ``target`` may be the HTTPServer returned by :func:`start_saas_stub` (its
+    ``df_store`` is seeded) or a bare ``_Store``.  Callers that pass nothing
+    seed the module-global ``STORE`` for backward compatibility.
+    """
+    store = getattr(target, "df_store", target)
+    if not isinstance(store, _Store):
+        store = STORE
     rows = [
         {"id": "1", "amount": "1000.00", "Name": "A", "email": "a@example.com"},
         {"id": "2", "amount": "2000.50", "Name": "B", "email": "b@example.com"},
     ]
-    STORE.rows["Account"] = [dict(r) for r in rows]
-    STORE.rows["contacts"] = [dict(r) for r in rows]
-    STORE.rows["customers"] = [
+    store.rows["Account"] = [dict(r) for r in rows]
+    store.rows["contacts"] = [dict(r) for r in rows]
+    store.rows["customers"] = [
         {"id": "1", "object": "customer", "amount": 100000, "email": "a@example.com"},
         {"id": "2", "object": "customer", "amount": 200050, "email": "b@example.com"},
     ]
-    STORE.rows["records"] = [
+    store.rows["records"] = [
         {"id": "1", "amount": "1000.00"},
         {"id": "2", "amount": "2000.50"},
     ]

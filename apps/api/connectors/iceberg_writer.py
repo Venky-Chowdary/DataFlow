@@ -1049,13 +1049,14 @@ def _pk_predicate_variants(value: Any) -> list[Any]:
         is_missing_sentinel,
         is_reader_null_cell,
         present_cell_text,
+        unescape_wire_text,
     )
 
     if is_missing_sentinel(value):
         return [value]
     if is_reader_null_cell(value):
         return [None]
-    variants: list[Any] = [value]
+    variants: list[Any] = [unescape_wire_text(value)]
     text = present_cell_text(value)
     if text is not None and text not in variants:
         variants.append(text)

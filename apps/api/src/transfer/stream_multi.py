@@ -8,6 +8,7 @@ remapped destination rather than the primary one.
 
 from __future__ import annotations
 
+from services.sync_cursor import contract_cursor_field
 import logging
 from typing import Any, Callable
 
@@ -249,7 +250,7 @@ def run_non_cdc_multi_stream_sequential(
                     "name": stream_name,
                     "selected": True,
                     "sync_mode": contract.sync_mode or sync_mode,
-                    "cursor_field": contract.cursor_field or raw.get("cursor_field") or "",
+                    "cursor_field": contract.cursor_field or contract_cursor_field(raw),
                     "primary_key": contract.primary_key or raw.get("primary_key") or "",
                     "schema_policy": contract.schema_policy or raw.get("schema_policy"),
                     "validation_mode": contract.validation_mode or validation_mode,

@@ -43,7 +43,7 @@ CFG = {
     "port": 1433,
     "database": "dataflow",
     "username": "sa",
-    "password": "DataFlow_CDC_2022!",
+    "password": os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", ""),
     "connection_string": "",
     "ssl": False,
 }

@@ -2715,6 +2715,41 @@ def _sample_raw_table(
     return headers, rows
 
 
+def _is_not_found_error(exc: BaseException) -> bool:
+    """'object does not exist' — an expected state, not a probe failure.
+
+    Cross-dialect: DuckDB ``CatalogException`` ("Table with name X does
+    not exist"), SQLAlchemy ``NoSuchTableError``, PostgreSQL
+    ``UndefinedTable``, Oracle ORA-00942, SQL Server "Invalid object name",
+    MySQL 1146. Walks ``__cause__``/``__context__`` so a SQLAlchemy
+    ``ProgrammingError`` wrapping the driver's own not-found still counts.
+    """
+    import re
+
+    if isinstance(exc, sa.exc.NoSuchTableError):
+        return True
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    cur: BaseException | None = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    names = {type(e).__name__ for e in chain}
+    if names & {"NoSuchTableError", "UndefinedTable", "CatalogException"}:
+        return True
+    blob = " ".join(str(e) for e in chain)[:4000]
+    return bool(
+        re.search(
+            r"does not exist|doesn't exist|invalid object name|"
+            r"ora-00942|sqlstate 42p01|\(1146\)|unknown table|"
+            r"catalog error: (table|schema|database)",
+            blob,
+            re.IGNORECASE,
+        )
+    )
+
+
 def introspect_table_schema(
     cfg: dict[str, Any],
     table: str,
@@ -2910,6 +2945,23 @@ def introspect_table_schema(
             "schema": schema or "",
         }
     except Exception as exc:
+        if _is_not_found_error(exc):
+            # A table that does not exist yet (first run, create-on-write)
+            # is an expected answer, not an error — one line, no traceback
+            # (D4: noisy CatalogException on the first DuckDB run).
+            logger.info(
+                "generic_sql introspect: %s.%s does not exist", schema, table
+            )
+            return {
+                "ok": False,
+                "error": (
+                    f"Table {schema + '.' if schema else ''}{table} "
+                    "does not exist"
+                ),
+                "not_found": True,
+                "columns": [],
+                "tables": [],
+            }
         logger.warning("generic_sql introspect failed", exc_info=True)
         # Surface the driver's own reason — an operator cannot fix
         # "OperationalError" with no message attached (QA sqlserver→* routes
@@ -3296,7 +3348,7 @@ def _count_table_raw(
         from connectors.sql_identifiers import require_safe_identifier
 
         col = quote_sql_identifier(require_safe_identifier(filter_column, preserve_case=True), q)
-        where = f" WHERE {col} > :df_after"
+        where = f" WHERE {col} >= :df_after"
         params = {"df_after": filter_value}
     try:
         return conn.execute(
@@ -3573,8 +3625,9 @@ def read_table_scan_batch(
                             f"Cursor column '{filter_column}' not found in table {table}"
                         )
                     filter_col_obj = table_obj.c[_fname]
+                    # D60/D98: run seed re-reads the boundary tie group.
                     stmt = stmt.where(
-                        filter_col_obj > sa.cast(sa.literal(filter_value), filter_col_obj.type)
+                        filter_col_obj >= sa.cast(sa.literal(filter_value), filter_col_obj.type)
                     )
                     order_cols = [filter_col_obj] + [
                         c for c in order_cols if c is not filter_col_obj
@@ -3693,6 +3746,7 @@ def read_table_cursor_batch(
     limit: int = 20_000,
     cursor_primary_key: str | None = None,
     cursor_key_columns: list[str] | None = None,
+    cursor_inclusive: bool = False,
     **extra: Any,
 ) -> ReadBatch:
     """Cursor/keyset pagination for incremental and streaming transfers.
@@ -3775,7 +3829,18 @@ def read_table_cursor_batch(
             key_cols = [table_obj.c[n] for n in key_names]
             stmt = sa.select(*_tz_safe_projection(cfg, selected_cols))
             bookmark = present_cursor_bookmark(cursor_after)
-            if bookmark is not None:
+            if bookmark is not None and cursor_inclusive:
+                # D60/D98 — run-seed watermark: re-read the whole tie group
+                # (cursor >= watermark); key order inside a tie must never
+                # decide what is skipped. Page edges still use the keyset
+                # > clause below.
+                from services.keyset_pagination import split_cursor_bookmark
+
+                cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
+                stmt = stmt.where(
+                    key_cols[0] >= sa.cast(sa.literal(cur_val), key_cols[0].type)
+                )
+            elif bookmark is not None:
                 seek_cols = key_cols
                 if (
                     not cursor_key_columns
@@ -5987,10 +6052,17 @@ def write_mapped_rows(
                                         append_write_quarantine_detail,
                                     )
 
+                                    _dense_nums = getattr(
+                                        finished, "dense_row_numbers", None
+                                    ) or []
                                     append_write_quarantine_detail(
                                         rejected_details,
                                         {
-                                            "row": start + row_i,
+                                            "row": (
+                                                int(_dense_nums[offset + row_i])
+                                                if offset + row_i < len(_dense_nums)
+                                                else start + row_i
+                                            ),
                                             "column": col_name,
                                             "value": sample_val,
                                             "reason": str(row_exc)[:300],

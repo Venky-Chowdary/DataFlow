@@ -54,6 +54,15 @@ os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 # not set this. Metadata and link-local stay refused even when it is set.
 os.environ.setdefault("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
 
+# Hermetic env: Railway markers exported by `railway run`, a linked dev
+# shell or CI agents with the CLI installed must not flip the suite into
+# production policy (test_verify_legacy_sha256_still_works failed on such
+# machines). Tests pin the environment to test and strip RAILWAY_*.
+for _k in [k for k in os.environ if k.startswith("RAILWAY_")]:
+    del os.environ[_k]
+os.environ["DATAWRAP_ENV"] = "test"
+os.environ["DATAFLOW_ENV"] = "test"
+
 
 def pytest_configure(config):
     config.addinivalue_line(

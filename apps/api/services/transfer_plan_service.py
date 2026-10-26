@@ -459,6 +459,7 @@ def run_plan_preflight(
         compliance_acknowledged=ack.compliance,
         schema_drift_acknowledged=ack.schema_drift,
         fk_risk_acknowledged=ack.fk_risk,
+        ddl_changes_acknowledged=ack.ddl_changes,
         acknowledgment_actor=ack.actor,
         acknowledgment_reason=ack.reason,
         fit_scan_seconds=STUDIO_FIT_SCAN_SECONDS,

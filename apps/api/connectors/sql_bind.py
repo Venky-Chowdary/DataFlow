@@ -21,6 +21,7 @@ from typing import Any
 from connectors.sql_bind_route import BindRoute, bind_route
 from connectors.sql_temporal import coerce_sql_temporal
 from services.value_serializer import absent_sql_bind as _absent_sql_bind
+from services.value_serializer import unescape_wire_text
 
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
 # Informal yes/on/y/no/n invents truth; quarantine or operator transform owns those.
@@ -1722,13 +1723,13 @@ def coerce_json_wire(value: Any, *, as_text: bool = True) -> Any:
     handled, bound = _absent_sql_bind(value)
     if handled:
         return bound
-    from services.value_serializer import json_default
+    from services.value_serializer import json_default, json_document_text
 
     if isinstance(value, (dict, list, tuple)):
         if as_text:
-            return json.dumps(
-                value, ensure_ascii=False, separators=(",", ":"), default=json_default
-            )
+            # Document leaves stay numbers — the DECIMAL string-wire policy
+            # must not rewrite ``{"pi": 3.14}`` as ``{"pi": "3.14"}`` (D74).
+            return json_document_text(value)
         return list(value) if isinstance(value, tuple) else value
     if isinstance(value, (bool, int, float)):
         return json.dumps(value, allow_nan=False) if as_text else value
@@ -2420,5 +2421,5 @@ def normalize_sql_bind_value(
             and getattr(value, "tzinfo", None) is not None
         ):
             return value.isoformat()
-        return value
-    return handler(value, route)
+        return unescape_wire_text(value)
+    return unescape_wire_text(handler(value, route))

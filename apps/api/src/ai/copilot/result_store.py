@@ -29,7 +29,6 @@ def _default_path() -> Path:
     if override:
         return Path(override)
     from services.platform_config import data_dir
-
     return data_dir() / "pilot_results.json"
 
 

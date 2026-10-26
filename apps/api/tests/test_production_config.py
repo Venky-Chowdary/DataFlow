@@ -14,6 +14,7 @@ def test_secret_vault_roundtrip(monkeypatch):
 
 
 def test_production_validation_fails_without_secrets(monkeypatch):
+    monkeypatch.delenv("DATAWRAP_ENV", raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.delenv("DATAFLOW_AUTH_SECRET", raising=False)
     monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "0")
@@ -35,7 +36,11 @@ def test_mongodb_uri_from_railway_mongo_url(monkeypatch):
 
 
 def test_railway_is_production_by_default(monkeypatch):
-    monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
+    # Deploy-time marker only — RAILWAY_ENVIRONMENT alone is a linked-shell var.
+    monkeypatch.setenv("RAILWAY_ENVIRONMENT_NAME", "production")
+    monkeypatch.delenv("RAILWAY_ENVIRONMENT", raising=False)
+    monkeypatch.delenv("RAILWAY_SERVICE_ID", raising=False)
+    monkeypatch.delenv("DATAWRAP_ENV", raising=False)
     monkeypatch.delenv("DATAFLOW_ENV", raising=False)
     from importlib import reload
 
@@ -69,6 +74,7 @@ def test_dev_mode_skips_production_validation(monkeypatch):
 
 
 def test_stub_writes_blocked_in_production(monkeypatch):
+    monkeypatch.delenv("DATAWRAP_ENV", raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.setenv("DATAFLOW_ALLOW_STUB_WRITES", "1")
     from importlib import reload

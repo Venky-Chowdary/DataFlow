@@ -2375,15 +2375,42 @@ def _source_key_values(
         if str(m.get("target") or "").lower() == sk and m.get("source"):
             source_sort_key = str(m["source"])
             break
+    from services.value_serializer import SQL_NULL_SENTINEL
+
     seen: set[str] = set()
     values: list[Any] = []
+    # Records keyed by engine-returned headers can carry the folded case
+    # (Snowflake/Oracle fold unquoted names to UPPER), so an exact lookup on
+    # the contract-declared key misses every row and the keyed scope stays
+    # empty — same fold handled by keyset_pagination.header_column_index.
+    from services.keyset_pagination import header_column_index
+
+    key_names = [source_sort_key]
+    if source_sort_key != sort_key:
+        key_names.append(sort_key)
+
+    def _key_raw(rec: dict) -> Any:
+        for name in key_names:
+            raw = rec.get(name)
+            if raw is not None:
+                return raw
+            idx = header_column_index(list(rec.keys()), name)
+            if idx is not None:
+                return rec[list(rec.keys())[idx]]
+        return None
+
     for rec in records:
         if not isinstance(rec, dict):
             continue
-        raw = rec.get(source_sort_key)
-        if raw is None and source_sort_key != sort_key:
-            raw = rec.get(sort_key)
+        raw = _key_raw(rec)
         if raw is None or raw == "":
+            continue
+        # D86 — the NULL sentinel is metadata, never a bind value. Keep real
+        # NULL keys out of the IN (...) list; read_target_sample's IS NULL
+        # branch matches destination NULL keys instead.
+        if str(raw).lower() == SQL_NULL_SENTINEL.lower():
+            if None not in values:
+                values.append(None)
             continue
         marker = str(raw)
         if marker in seen:
@@ -2589,6 +2616,235 @@ def _maybe_engine_profile_ladder(
     return attach_ladder_to_reconcile_report(report, ladder)
 
 
+
+
+
+
+def _read_verify_rows(
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table: str,
+    columns: list[str] | None,
+    postgres_default: bool = False,
+) -> list[dict[str, Any]]:
+    """Single owner for the per-engine whole-population read the Gate-8
+    ladder, its source re-read, and the keyed no-op re-verify share.
+    """
+    key = str(db_type or "").strip().lower()
+    cols = columns if columns is not None else []
+    # Resolve the readers through the module so tests patching
+    # services.verification_ladder.read_*_rows keep intercepting (the
+    # function-local imports this replaces did the same at call time).
+    from services import verification_ladder as _vl
+
+    if key == "sqlite":
+        return _vl.read_sqlite_rows(
+            database=str(cfg.get("database") or ""),
+            table=table,
+            columns=cols,
+            connection_string=str(cfg.get("connection_string") or ""),
+            host=str(cfg.get("host") or ""),
+        )
+    if key == "mysql":
+        return _vl.read_mysql_rows(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 3306),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            table=table,
+            columns=cols,
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+    if key == "snowflake":
+        return _vl.read_snowflake_rows(
+            host=str(cfg.get("host") or ""),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            schema=str(cfg.get("schema") or "PUBLIC"),
+            table=table,
+            columns=cols,
+            connection_string=str(cfg.get("connection_string") or ""),
+            warehouse=str(cfg.get("warehouse") or ""),
+        )
+    if key in {"sqlserver", "mssql", "azure_sql"}:
+        return _vl.read_sqlserver_rows(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 1433),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            schema=str(cfg.get("schema") or "dbo"),
+            table=table,
+            columns=cols,
+        )
+    if key in {"postgresql", "redshift"} or postgres_default:
+        return _vl.read_postgres_rows(
+            host=str(cfg.get("host") or ""),
+            port=int(cfg.get("port") or 5432),
+            database=str(cfg.get("database") or ""),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            schema=str(cfg.get("schema") or "public"),
+            table=table,
+            columns=cols,
+            connection_string=str(cfg.get("connection_string") or ""),
+            ssl=bool(cfg.get("ssl", False)),
+        )
+    return []
+
+
+def _covered_keyed_noop_verify(
+    *,
+    endpoint: EndpointConfig,
+    source_endpoint: EndpointConfig | None,
+    dest_summary: dict[str, Any],
+    mappings: list[dict] | None,
+    sync_mode: str,
+    rows_before: int | None,
+    target_rows: int,
+    pk_column: str,
+    db_type: str,
+) -> dict[str, Any] | None:
+    """Prove a quiet keyed poll: the destination's covered content, not just
+    its COUNT, still equals the source's.
+
+    ``target_rows == rows_before`` only proves the destination did not gain or
+    lose rows — an in-place UPDATE on a previously written row preserves COUNT,
+    so a tampered prior-batch row passed Gate-8 green (M3 regression: the
+    bounded window made the source re-read empty and the count-only no-op
+    proof accepted it). For a keyed route on a populated destination we
+    re-read both sides and compare cell-by-cell on the shared key space:
+    a destination key absent from the source is a ghost row, and a cell diff
+    on a shared key is a tamper. Source-only keys are tolerated — dedupe
+    collapse and rolled-back batches leave covered-but-unwritten keys.
+    """
+    if not pk_column or target_rows <= 0 or source_endpoint is None:
+        return None
+    try:
+        from services.row_conservation import KIND_KEYED, conservation_kind
+
+        if (
+            conservation_kind(sync_mode, dest_count_before=rows_before)
+            != KIND_KEYED
+        ):
+            return None
+    except Exception:
+        return None
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source_endpoint):
+        return None
+    from .connector_capabilities import resolve_driver_type
+
+    src_type = resolve_driver_type(source_endpoint.format)
+    src_cfg = resolve_connector_config(source_endpoint)
+    dest_cfg = resolve_connector_config(endpoint)
+    map_list = mappings or []
+    src_pk = next(
+        (
+            str(m.get("source") or "")
+            for m in map_list
+            if str(m.get("target") or "") == pk_column
+        ),
+        pk_column,
+    )
+    columns = [str(m.get("target") or "") for m in map_list if m.get("target")]
+    if pk_column not in columns:
+        columns.append(pk_column)
+    try:
+        dest_rows = _read_verify_rows(
+            db_type,
+            dest_cfg,
+            table=str(endpoint.table or dest_cfg.get("table") or ""),
+            columns=columns,
+            postgres_default=True,
+        )
+        src_rows = _read_verify_rows(
+            src_type,
+            src_cfg,
+            table=str(source_endpoint.table or src_cfg.get("table") or ""),
+            columns=[
+                str(m.get("source") or "") for m in map_list if m.get("source")
+            ] or None,
+        )
+    except PopulationTooLarge as exc:
+        return {
+            "passed": False,
+            "unproven": True,
+            "checksum_match": False,
+            "assurance_level": "none",
+            "message": (
+                "Keyed no-op poll could not re-verify covered content: "
+                f"population read exceeded budget ({exc.rows_read:,} rows). "
+                "Not migration_proven."
+            ),
+        }
+    except Exception as exc:
+        # A covered destination we cannot re-read has no tamper proof — the
+        # count-only green must not stamp verified (X-22 doctrine).
+        return {
+            "passed": False,
+            "unproven": True,
+            "checksum_match": False,
+            "assurance_level": "none",
+            "message": (
+                "Keyed no-op poll could not re-verify covered content "
+                f"({exc}). Count unchanged is not a value proof. "
+                "Not migration_proven."
+            ),
+        }
+    if src_rows is None or dest_rows is None:
+        return None
+    src_by_pk: dict[str, dict[str, Any]] = {}
+    for r in src_rows:
+        if isinstance(r, dict) and r.get(src_pk) is not None:
+            src_by_pk[str(r.get(src_pk))] = r
+    drifts: list[str] = []
+    ghosts = 0
+    for r in dest_rows:
+        if not isinstance(r, dict) or r.get(pk_column) is None:
+            continue
+        key = str(r.get(pk_column))
+        srow = src_by_pk.get(key)
+        if srow is None:
+            ghosts += 1
+            if len(drifts) < 5:
+                drifts.append(f"key {key} has no covered source row")
+            continue
+        for m in map_list:
+            scol, tcol = str(m.get("source") or ""), str(m.get("target") or "")
+            if not scol or not tcol:
+                continue
+            if srow.get(scol) != r.get(tcol):
+                if len(drifts) < 5:
+                    drifts.append(
+                        f"key {key} column {scol}->{tcol}: "
+                        f"source={srow.get(scol)!r} dest={r.get(tcol)!r}"
+                    )
+                break
+    if drifts:
+        detail = "; ".join(drifts[:3])
+        return {
+            "passed": False,
+            "checksum_match": False,
+            "assurance_level": "none",
+            "source_rows": len(src_rows),
+            "target_rows": len(dest_rows),
+            "message": (
+                "Quiet keyed poll found covered-content drift the COUNT "
+                f"proof could not see ({detail}"
+                + (f"; +{ghosts} ghost row(s)" if ghosts else "")
+                + "). Failing closed — the destination rows are left for "
+                "the operator."
+            ),
+        }
+    return None
+
+
 def _maybe_attach_verification_ladder(
     report: dict[str, Any],
     *,
@@ -2621,6 +2877,7 @@ def _maybe_attach_verification_ladder(
         read_mysql_rows,
         read_postgres_rows,
         read_sqlite_rows,
+        read_snowflake_rows,
         read_sqlserver_rows,
         run_five_layer_verification,
     )
@@ -2674,6 +2931,7 @@ def _maybe_attach_verification_ladder(
         "postgresql",
         "redshift",
         "mysql",
+        "snowflake",
         "sqlserver",
         "mssql",
         "azure_sql",
@@ -2703,53 +2961,13 @@ def _maybe_attach_verification_ladder(
 
     # Prefer full SQL population over buffered records (streaming passes []).
     try:
-        if dest_type == "sqlite":
-            target_rows = read_sqlite_rows(
-                database=str(dest_cfg.get("database") or ""),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-                connection_string=str(dest_cfg.get("connection_string") or ""),
-                host=str(dest_cfg.get("host") or ""),
-            )
-        elif dest_type == "mysql":
-            # X-22: a non-sqlite dest used to take the PG reader unconditionally
-            # — MySQL/SQL Server throws made the whole ladder decline and the
-            # verdict stayed row_count-only on a tampered table.
-            target_rows = read_mysql_rows(
-                host=str(dest_cfg.get("host") or ""),
-                port=int(dest_cfg.get("port") or 3306),
-                database=str(dest_cfg.get("database") or ""),
-                username=str(dest_cfg.get("username") or ""),
-                password=str(dest_cfg.get("password") or ""),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-                connection_string=str(dest_cfg.get("connection_string") or ""),
-                ssl=bool(dest_cfg.get("ssl", False)),
-            )
-        elif dest_type in {"sqlserver", "mssql", "azure_sql"}:
-            target_rows = read_sqlserver_rows(
-                host=str(dest_cfg.get("host") or ""),
-                port=int(dest_cfg.get("port") or 1433),
-                database=str(dest_cfg.get("database") or ""),
-                username=str(dest_cfg.get("username") or ""),
-                password=str(dest_cfg.get("password") or ""),
-                schema=str(dest_cfg.get("schema") or "dbo"),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-            )
-        else:
-            target_rows = read_postgres_rows(
-                host=str(dest_cfg.get("host") or ""),
-                port=int(dest_cfg.get("port") or 5432),
-                database=str(dest_cfg.get("database") or ""),
-                username=str(dest_cfg.get("username") or ""),
-                password=str(dest_cfg.get("password") or ""),
-                schema=str(dest_cfg.get("schema") or "public"),
-                table=str(endpoint.table or dest_cfg.get("table") or ""),
-                columns=target_cols,
-                connection_string=str(dest_cfg.get("connection_string") or ""),
-                ssl=bool(dest_cfg.get("ssl", False)),
-            )
+        target_rows = _read_verify_rows(
+            dest_type,
+            dest_cfg,
+            table=str(endpoint.table or dest_cfg.get("table") or ""),
+            columns=target_cols,
+            postgres_default=True,
+        )
     except PopulationTooLarge as exc:
         return _return(
             _ladder_declined(report, exc.rows_read, exc.budget),
@@ -2788,52 +3006,12 @@ def _maybe_attach_verification_ladder(
             src_cfg = resolve_connector_config(source_endpoint)
             try:
                 source_reread = True
-                if src_type == "sqlite":
-                    source_rows = read_sqlite_rows(
-                        database=str(src_cfg.get("database") or ""),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                        connection_string=str(src_cfg.get("connection_string") or ""),
-                        host=str(src_cfg.get("host") or ""),
-                    )
-                elif src_type in {"postgresql", "redshift"}:
-                    source_rows = read_postgres_rows(
-                        host=str(src_cfg.get("host") or ""),
-                        port=int(src_cfg.get("port") or 5432),
-                        database=str(src_cfg.get("database") or ""),
-                        username=str(src_cfg.get("username") or ""),
-                        password=str(src_cfg.get("password") or ""),
-                        schema=str(src_cfg.get("schema") or "public"),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                        connection_string=str(src_cfg.get("connection_string") or ""),
-                        ssl=bool(src_cfg.get("ssl", False)),
-                    )
-                elif src_type == "mysql":
-                    # X-22: MySQL sources declined the ladder — the run stayed
-                    # count-only and reported verified on a tampered table.
-                    source_rows = read_mysql_rows(
-                        host=str(src_cfg.get("host") or ""),
-                        port=int(src_cfg.get("port") or 3306),
-                        database=str(src_cfg.get("database") or ""),
-                        username=str(src_cfg.get("username") or ""),
-                        password=str(src_cfg.get("password") or ""),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                        connection_string=str(src_cfg.get("connection_string") or ""),
-                        ssl=bool(src_cfg.get("ssl", False)),
-                    )
-                elif src_type in {"sqlserver", "mssql", "azure_sql"}:
-                    source_rows = read_sqlserver_rows(
-                        host=str(src_cfg.get("host") or ""),
-                        port=int(src_cfg.get("port") or 1433),
-                        database=str(src_cfg.get("database") or ""),
-                        username=str(src_cfg.get("username") or ""),
-                        password=str(src_cfg.get("password") or ""),
-                        schema=str(src_cfg.get("schema") or "dbo"),
-                        table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                        columns=target_cols,
-                    )
+                source_rows = _read_verify_rows(
+                    src_type,
+                    src_cfg,
+                    table=str(source_endpoint.table or src_cfg.get("table") or ""),
+                    columns=target_cols,
+                )
             except PopulationTooLarge as exc:
                 return _return(
                     _ladder_declined(report, exc.rows_read, exc.budget),
@@ -2879,6 +3057,75 @@ def _maybe_attach_verification_ladder(
     kind = conservation_kind(sync_mode, dest_count_before=dest_before)
     census = KeyCensus.from_mapping(dest_summary.get(CENSUS_KEY))
     keyed = kind == KIND_KEYED
+    # M3: a bounded source re-read stamps the exact [seed, max_seen] window
+    # its digest covers. Every other population this ladder compares has to
+    # share that window — without it the unbounded source re-read feeds L1–L5
+    # whole-table rows while ``source_checksum`` describes only the window,
+    # and ``key_rows`` below degenerates to every key in the table.
+    _win_cursor = str(dest_summary.get("incremental_window_cursor") or "").strip()
+    if _win_cursor and source_rows:
+        from services.sync_cursor import compare_cursor_values, row_after_watermark
+
+        _win_seed = dest_summary.get("incremental_window_seed")
+        _win_max = dest_summary.get("incremental_window_max")
+        _win_pk = str(dest_summary.get("incremental_window_pk") or "").strip()
+        _in_window: list[dict[str, Any]] = []
+        for _wr in source_rows:
+            if not isinstance(_wr, dict):
+                continue
+            if _win_seed not in (None, "") and row_after_watermark(
+                _wr, _win_cursor, str(_win_seed), primary_key=_win_pk
+            ) is not True:
+                continue
+            if _win_max not in (None, ""):
+                _wrc = _wr.get(_win_cursor)
+                _candidate = str(_wrc) if _wrc is not None else ""
+                if _win_pk and _win_pk != _win_cursor:
+                    from services.keyset_pagination import encode_keyset_bookmark
+
+                    _candidate = encode_keyset_bookmark(
+                        [
+                            _candidate,
+                            str(_wr.get(_win_pk) or ""),
+                        ]
+                    )
+                if compare_cursor_values(_candidate, str(_win_max)) > 0:
+                    continue
+            _in_window.append(_wr)
+        source_rows = _in_window
+    # X-OW1: a keyed run into an occupied destination is only comparable on
+    # the written batch's keys — the destination legitimately holds rows this
+    # run never wrote. Restrict the re-read population to the batch keys so
+    # L2–L5 grade the batch, not pre-existing rows; cardinality still uses the
+    # whole-table count via target_row_count / target_rows_before.
+    batch_scoped = False
+    if (
+        census is not None
+        and dest_before
+        and pk_column
+        and source_rows
+    ):
+        key_rows = [r for r in (records or []) if isinstance(r, dict)] or source_rows
+        batch_keys = {
+            str(r.get(pk_column))
+            for r in key_rows
+            if isinstance(r, dict) and r.get(pk_column) is not None
+        }
+        if batch_keys:
+            target_rows = [
+                r
+                for r in target_rows
+                if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
+            ]
+            # Same scope on the source side: an incremental re-read covers the
+            # whole source table, and comparing it against the batch-keys-only
+            # destination subset flags every legitimately-skipped source row.
+            source_rows = [
+                r
+                for r in source_rows
+                if isinstance(r, dict) and str(r.get(pk_column)) in batch_keys
+            ]
+            batch_scoped = True
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -2893,8 +3140,15 @@ def _maybe_attach_verification_ladder(
         rejected_rows=int(report.get("rejected_rows") or 0),
         coerced_null_rows=int(report.get("coerced_null_rows") or 0),
         rows_skipped=int(report.get("rows_skipped") or 0),
-        source_checksum=str(report.get("source_checksum") or ""),
-        target_checksum=str(report.get("target_checksum") or ""),
+        # Report-level digests cover the whole table and use the engine's own
+        # scheme; once the row lists are re-scoped to the batch keys neither is
+        # comparable, so L3 recomputes both sides on the scoped populations.
+        source_checksum=(
+            "" if batch_scoped else str(report.get("source_checksum") or "")
+        ),
+        target_checksum=(
+            "" if batch_scoped else str(report.get("target_checksum") or "")
+        ),
         dest_db_type=dest_type,
         dest_types=dest_types,
         allow_extra_rows=allow_extra,
@@ -3385,6 +3639,28 @@ def _keyed_join_proof(dest_summary: dict[str, Any] | None) -> bool:
     return bool(_COUNT_PROOF_TOKEN.match(str(summary.get("checksum") or "").strip()))
 
 
+def _is_append_first_load(
+    sync_mode: str,
+    rows_before: int | None,
+    target_rows: int,
+    expected_rows: int,
+    dest_summary: dict[str, Any] | None,
+) -> bool:
+    """True when an append run's destination equals the staged population.
+
+    An append into a table this run created (or that was empty) has no
+    pre-existing rows — ``dest == staged`` exactly, so the key census is a
+    valid value compare. Only a later append run into an occupied table is
+    genuinely incomparable (dest = before + delta). X-134.
+    """
+    return (
+        sync_mode_appends_without_key_resolution(sync_mode)
+        and rows_before == 0
+        and target_rows == expected_rows
+        and (dest_summary or {}).get("dest_table_existed_before") is not True
+    )
+
+
 _FULL_KEYED_COMPARE_MAX_ROWS = 1_000_000
 
 
@@ -3486,6 +3762,7 @@ def _name_row_on_checksum_only_failure(
             dest_db_type=db_type,
             dest_types=ctx.get("dest_types"),
             duplicate_policy=str(ctx.get("duplicate_policy") or ""),
+            source_locale=str(ctx.get("source_locale") or ""),
         )
     except Exception as exc:  # noqa: BLE001 — naming never changes the verdict
         _logger.warning("Gate-8 full keyed compare unavailable: %s", exc)
@@ -3519,6 +3796,12 @@ def _localize_checksum_mismatch(
     The verdict itself does not move: a mismatch still fails Gate-8.
     """
     if report.get("checksum_match") is not False:
+        return report
+    if report.get("passed") is True:
+        # ``checksum_match=False`` also means "digest unproven" on runs where
+        # no digest comparison could run (count-only scopes, a source with no
+        # census driver). The run verified on its stated basis — appending a
+        # "Gate-8 still fails" clause would contradict the verdict.
         return report
     if (report.get("full_keyed_compare") or {}).get("passed") is False:
         return report
@@ -3798,6 +4081,19 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
         from services.copy_sqlserver_sqlserver import _ss_connect
 
         return eng, _ss_connect(cfg)
+    if eng == "snowflake":
+        from connectors.snowflake_conn import get_connection, normalize_account
+        from connectors.sql_identifiers import snowflake_fold_identifier
+
+        return eng, get_connection(
+            account=normalize_account(str(cfg.get("host") or "")),
+            username=str(cfg.get("username") or ""),
+            password=str(cfg.get("password") or ""),
+            database=str(cfg.get("database") or ""),
+            schema=snowflake_fold_identifier(str(cfg.get("schema") or "PUBLIC")),
+            warehouse=str(cfg.get("warehouse") or ""),
+            connection_string=str(cfg.get("connection_string") or ""),
+        )
     return None
 
 
@@ -6055,17 +6351,23 @@ def _run_reconciliation_impl(
         if isinstance(stashed, list):
             sample_records = [r for r in stashed if isinstance(r, dict)]
     pk_column = str(pk_cols[0]) if len(pk_cols) == 1 else None
-    if allow_extra_early and pk_column and not written_ids and sample_records:
-        written_ids = [
-            str(x)
-            for x in _source_key_values(
-                sample_records,
-                sort_key=pk_column,
-                mappings=mapping_dicts,
-                limit=500,
-            )
-            if x is not None and str(x) != ""
-        ] or None
+    # X-OW1: derive the batch key list from whichever row collection this path
+    # actually holds — engine-copy runs may carry full `records` without a
+    # writer-stashed sample, and without keys the verify pass cannot re-scope
+    # the destination digest to the written batch.
+    if allow_extra_early and pk_column and not written_ids:
+        key_source_rows = sample_records or records or []
+        if key_source_rows:
+            written_ids = [
+                str(x)
+                for x in _source_key_values(
+                    key_source_rows,
+                    sort_key=pk_column,
+                    mappings=mapping_dicts,
+                    limit=500,
+                )
+                if x is not None and str(x) != ""
+            ] or None
 
     # Both digests computed by the engines when they will render identically —
     # the same population coverage at a fraction of the cost, since neither side
@@ -6081,7 +6383,12 @@ def _run_reconciliation_impl(
     # are the only two comparable values for such a run: recomputing either side
     # here would compare two different algorithms and always disagree.
     paired = _writer_supplied_engine_digests(dest_summary)
-    if paired is not None and not source_checksum_scope_note:
+    # X-OW1: an append into an occupied destination is only comparable on the
+    # staged population's keys — the destination legitimately holds rows this
+    # run never wrote. Whole-table digests (writer-supplied or re-read) count
+    # those pre-existing rows as corruption; the keyed census owns this scope.
+    append_scope_occupied = bool(_keyed_join_proof(dest_summary) and rows_before)
+    if paired is not None and not source_checksum_scope_note and not append_scope_occupied:
         # G-1i: the writer's dest digest was computed inside the copy
         # transaction — post-write tampering is invisible to it. Re-digest
         # the destination at verify time (same engine digest, same column
@@ -6144,7 +6451,7 @@ def _run_reconciliation_impl(
                 and (records or source_spool is not None)
             )
         )
-    ):
+    ) and not append_scope_occupied:
         engine_digests = _engine_population_digests(
             source_endpoint=source_endpoint,
             dest_cfg=cfg,
@@ -6488,6 +6795,14 @@ def _run_reconciliation_impl(
                 "dest_pk_join_equals_staging",
             )
         )
+        # X-134: an append first load into a table this run created (or an
+        # empty one) has no pre-existing rows to excuse it — dest == staged
+        # population exactly, so the key census is a valid value compare.
+        # Only a later append run is incomparable (dest = before + delta).
+        if _is_append_first_load(
+            sync_mode_early, rows_before, target_rows, expected_rows, dest_summary
+        ):
+            _populations_comparable = True
         # X-68: a count-only engine copy proves counts, not values. When the
         # two populations are comparable and both sides are census engines,
         # run the (pk, row-hash) key census as the value compare — a
@@ -6673,12 +6988,14 @@ def _run_reconciliation_impl(
                 dest_types=dest_types,
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
                 inserted_keys=dest_summary.get("inserted_keys"),
+                source_locale=str(dest_summary.get("number_locale") or ""),
             )
             full_compare_ctx.update(
                 db_type=db_type, cfg=cfg, schema=schema, table_name=table_name,
                 target_cols=target_cols, sort_key=sort_key, mappings=mapping_dicts,
                 dest_types=dest_types, records=sample_records,
                 duplicate_policy=str(dest_summary.get("duplicate_policy") or ""),
+                source_locale=str(dest_summary.get("number_locale") or ""),
                 source_endpoint=source_endpoint,
             )
 
@@ -6928,6 +7245,26 @@ def _run_reconciliation_impl(
                 "assurance_level": "none",
             })
         if target_rows == rows_before:
+            _noop_verify = _covered_keyed_noop_verify(
+                endpoint=endpoint,
+                source_endpoint=source_endpoint,
+                dest_summary=dest_summary,
+                mappings=mappings,
+                sync_mode=sync_mode,
+                rows_before=rows_before,
+                target_rows=target_rows,
+                pk_column=pk_column,
+                db_type=str(db_type or ""),
+            )
+            if _noop_verify is not None:
+                _noop_verify.setdefault("source_rows", 0)
+                _noop_verify.setdefault("target_rows", target_rows)
+                _noop_verify.setdefault("source_checksum", source_checksum)
+                _noop_verify.setdefault("target_checksum", target_checksum)
+                _noop_verify.setdefault("rejected_rows", rejected_rows)
+                _noop_verify.setdefault("coerced_null_rows", coerced_null_rows)
+                _noop_verify.setdefault("rows_skipped", rows_skipped)
+                return _finalize(_noop_verify)
             return _finalize({
                 "passed": True,
                 "message": (
@@ -7249,6 +7586,7 @@ def _file_export_cell_readback(
         sort_key=pk[0] if len(pk) == 1 else None,
         dest_db_type=str(fmt or ""),
         dest_types=_dest_types_from_mappings(mapping_dicts),
+        source_locale=str(summary.get("number_locale") or ""),
     )
 
 def run_reconciliation(
@@ -7339,11 +7677,19 @@ def run_reconciliation(
                     why_txt = (
                         f"{steps_txt} did not apply as declared"
                         if steps_txt
-                        else str(proof.get("reason") or "the recipe output differs")
+                        else str(proof.get('reason') or "the recipe output differs")
                     )
+                head = "Transform-applied proof failed: the destination does not hold the approved recipe's output"
+                cell = recon.get("artifact_cell_compare")
+                if isinstance(cell, dict) and cell.get("passed") is False:
+                    # File/object destinations: the re-read artifact already
+                    # differs from what was sent — that tamper is the real
+                    # cause, not a recipe/transform defect. Lead with the
+                    # read-back wording so operators check the destination
+                    # file, not their declared transforms.
+                    head = "Read-back verification failed: the written file changed after send"
                 recon["message"] = (
-                    f"Transform-applied proof failed: the destination does not "
-                    f"hold the approved recipe's output — {why_txt} (recipe "
+                    f"{head} — {why_txt} (recipe "
                     f"{proof.get('recipe_hash')})."
                     f"{proof.get('key_note') or ''}"
                 )
@@ -7413,7 +7759,11 @@ def run_reconciliation(
             recon["source_checksum"] = _l3_src
             recon["target_checksum"] = _l3_dst
             recon["checksum_match"] = _l3_src == _l3_dst
-            recon["assurance_level"] = "full_checksum"
+            # full_checksum names the *matching* coverage — stamping it on a
+            # proven mismatch lets a failed job read as verified (the verdict
+            # field carries the failure; the label must not contradict it).
+            if recon["checksum_match"]:
+                recon["assurance_level"] = "full_checksum"
             recon["checksum_scope"] = "verify_time_population_digest"
             # X-41b: _finalize already stamped verification_verdict="partial"
             # before this promotion ran — a proven two-sided digest match
@@ -7464,9 +7814,14 @@ def run_reconciliation(
                     )
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
-    # src vs shaped dest here would flag every transformed row.
+    # src vs shaped dest here would flag every transformed row. And this is a
+    # failure-path namer — on a passing count-only run ``checksum_match=False``
+    # means "digest unproven", not "mismatch", so there is no culprit to name
+    # (and no "(source 'kafka' has no census driver)" clause on a completed
+    # job's message, M17).
     if (
         recon.get("checksum_match") is False
+        and recon.get("passed") is not True
         and not recon.get("culprit_keys")
         and not recon.get("transform_applied")
     ):
