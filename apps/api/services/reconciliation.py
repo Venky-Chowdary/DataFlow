@@ -2371,6 +2371,7 @@ def verify_bigquery_table(
     table_name: str,
     target_columns: list[str] | None = None,
     limit: int = 0,
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     try:
         from connectors.bigquery_conn import get_client
@@ -2436,7 +2437,11 @@ def verify_bigquery_table(
 
         columns, projected = project_readback(field_names, target_columns, _row_iter())
         return int(count), canonical_checksum_from_iter(
-            projected, columns, limit=limit
+            projected,
+            columns,
+            limit=limit,
+            dest_db_type="bigquery",
+            dest_types=dest_types,
         )
     except Exception as exc:
         logger.warning("Reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -3510,6 +3515,8 @@ def verify_redis_prefix(
     limit: int = 0,
     written_ids: list[str] | None = None,
     pk_column: str | None = None,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
 ) -> tuple[int, str]:
     """Reconcile Redis keys under ``prefix:*`` (writer key layout).
 
@@ -3517,6 +3524,12 @@ def verify_redis_prefix(
     the SQL and warehouse read-backs do. An upsert into a keyspace that already
     holds other keys is otherwise incomparable: the whole-prefix digest includes
     rows the source never sent. Cardinality stays whole-prefix either way.
+
+    ``dest_db_type`` / ``dest_types`` must be the same ``gate8_digest_types``
+    basis the write pass fingerprinted on: a Redis doc stores ``"1000.00"`` as
+    a JSON *string*, and hashing the read-back without the declared carrier
+    type canonicalizes it to ``1000`` while the write pass hashed the bound
+    text ``1000.00`` — a silent-scheme digest mismatch on faithful data (X-132).
     """
     try:
         from connectors.redis_reader import (
@@ -3560,7 +3573,13 @@ def verify_redis_prefix(
         if not columns and keys:
             sample = next(_row_iter(), {})
             columns = sorted(sample.keys()) if sample else ["value"]
-        checksum = canonical_checksum_from_iter(_row_iter(), columns, limit=limit)
+        checksum = canonical_checksum_from_iter(
+            _row_iter(),
+            columns,
+            limit=limit,
+            dest_db_type=dest_db_type,
+            dest_types=dest_types,
+        )
         return total, checksum
     except Exception as exc:
         logger.warning("Redis reconciliation read-back failed: %s", exc, exc_info=exc)
@@ -3949,6 +3968,8 @@ def verify_target(
             limit=limit,
             written_ids=ids,
             pk_column=pk,
+            dest_db_type=db_type,
+            dest_types=dest_types,
         )
     elif db_type in {"elasticsearch", "opensearch", "elastic"}:
         count, chk = _reconciliation.verify_elasticsearch_index(
@@ -4045,6 +4066,7 @@ def verify_target(
             table_name=table_name,
             target_columns=target_columns,
             limit=limit,
+            dest_types=dest_types,
         )
     elif db_type == "s3":
         count, chk = verify_s3_object(
