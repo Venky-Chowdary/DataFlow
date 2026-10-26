@@ -93,6 +93,9 @@ jobs:
       DATAFLOW_LIVE_KAFKA_SASL_MECHANISMS: PLAIN
       DATAFLOW_LIVE_KAFKA_SASL_USER_PLAIN: admin
       DATAFLOW_LIVE_KAFKA_SASL_PASSWORD_PLAIN: dataflow-ci-secret
+      # GH-hosted runners are slower than the dev box this budget was set on;
+      # the test reads the cap from env rather than hardcoding.
+      DATAFLOW_SCALE_MAX_SEC: "240"
 
     steps:
       - name: Checkout
@@ -114,6 +117,11 @@ jobs:
           # CI-3: nightly order shuffling so order-dependent tests surface.
           python -m pip install pytest-randomly
           python -m pip install hypothesis
+          # ODBC Driver 18 for live pyodbc SQL Server legs.
+          curl -sSL "https://packages.microsoft.com/config/ubuntu/$(. /etc/os-release && echo $VERSION_ID)/prod.list" | \
+            sudo tee /etc/apt/sources.list.d/mssql-release.list >/dev/null
+          sudo apt-get update -qq
+          sudo ACCEPT_EULA=Y apt-get install -y -qq msodbcsql18 unixodbc || true
 
       - name: Start Postgres / MySQL / Mongo (server args need docker run)
         # GH service 'options' go to docker create BEFORE the image — server
@@ -130,7 +138,8 @@ jobs:
           docker run -d --name mysql -p 3306:3306 \
             -e MYSQL_ROOT_PASSWORD=root_ci -e MYSQL_DATABASE=dataflow \
             -e MYSQL_USER=dataflow -e MYSQL_PASSWORD=dataflow \
-            mysql:8.0 --binlog-format=ROW --binlog-row-image=FULL
+            mysql:8.0 --binlog-format=ROW --binlog-row-image=FULL \
+            --local-infile=1
           docker run -d --name mongo -p 27017:27017 mongo:7 \
             --replSet rs0 --bind_ip_all
 
