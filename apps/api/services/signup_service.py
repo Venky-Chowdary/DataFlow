@@ -620,7 +620,11 @@ def resend_code(*, challenge_id: str) -> dict[str, Any]:
         from datetime import UTC, datetime
 
         try:
-            last_ts = datetime.fromisoformat(str(last)).timestamp()
+            last_dt = datetime.fromisoformat(str(last))
+            if last_dt.tzinfo is None:
+                # BSON datetimes read back naive — they are UTC, not local.
+                last_dt = last_dt.replace(tzinfo=UTC)
+            last_ts = last_dt.timestamp()
             import time as _t
 
             elapsed = _t.time() - last_ts

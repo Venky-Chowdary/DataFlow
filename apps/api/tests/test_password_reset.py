@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 import time
-from datetime import timedelta
+from datetime import timedelta, UTC
 from concurrent.futures import ThreadPoolExecutor
 
 import pytest
@@ -14,6 +14,7 @@ from fastapi.testclient import TestClient
 
 import services.form_token as form_token_mod
 import services.signup_service as signup_service
+from services.api_errors import ApiError
 from services import auth_state, email_quota, password_reset_store, signup_store, user_store
 from services.email_sender import ConsoleEmailSender, reset_email_sender
 
@@ -1052,3 +1053,43 @@ def test_status_by_id_mongo_looks_up_id_field_not_objectid(monkeypatch):
     monkeypatch.setattr(password_reset_store, "_database", lambda: _Db())
     assert password_reset_store.status_by_id("prt-abc") == "invalid"
     assert captured["filter"] == {"id": "prt-abc"}
+
+
+def test_mongo_naive_bson_expires_at_never_crashes_inspect(monkeypatch):
+    """pymongo returns BSON datetimes as naive (UTC by convention); the
+    active-doc compare used to raise TypeError: can't compare offset-naive
+    and offset-aware datetimes — the reset-inspect route 500'd on Mongo."""
+    from datetime import datetime, timedelta
+
+    naive_future = datetime.now(UTC).replace(tzinfo=None) + timedelta(days=1)
+    token, doc = password_reset_store.issue(
+        email="ada@example.com", ip="127.0.0.1", ua="pytest")
+    stored = dict(doc)
+    stored["expires_at"] = naive_future  # the shape pymongo hands back
+
+    monkeypatch.setattr(password_reset_store, "_find",
+                        lambda _h: stored)
+    assert password_reset_store.inspect(token) == "ok"
+    parsed = password_reset_store._parse_ts(naive_future)
+    assert parsed is not None and parsed.tzinfo is not None
+
+
+def test_resend_cooldown_handles_naive_bson_last_sent(monkeypatch):
+    """A challenge whose last_sent_at arrives as a naive BSON datetime
+    (Mongo tier) must not crash the resend cooldown and must still enforce
+    it — naive values are UTC, never host-local time."""
+    from datetime import datetime, timedelta
+
+    naive_recent = (datetime.now(UTC).replace(tzinfo=None)
+                    - timedelta(seconds=5))
+
+    # The file-level fixture zeroes the cooldown for speed — restore it so
+    # the naive-datetime path is exercised at the real threshold.
+    monkeypatch.setattr(signup_service, "RESEND_COOLDOWN_SEC", 60)
+    monkeypatch.setattr(signup_service.signup_store, "get_challenge",
+                        lambda _cid: {"subject_id": "s-1",
+                                      "last_sent_at": naive_recent})
+    with pytest.raises(ApiError) as exc:
+        signup_service.resend_code(challenge_id="c-1")
+    assert exc.value.status_code == 429
+    assert exc.value.code == "resend_too_soon"

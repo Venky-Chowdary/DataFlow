@@ -49,14 +49,22 @@ def _now() -> datetime:
 
 
 def _parse_ts(value: Any) -> datetime | None:
+    parsed: datetime | None = None
     if isinstance(value, datetime):
-        return value
-    if isinstance(value, str):
+        parsed = value
+    elif isinstance(value, str):
         try:
-            return datetime.fromisoformat(value)
+            parsed = datetime.fromisoformat(value)
         except ValueError:
             return None
-    return None
+    if parsed is None:
+        return None
+    # BSON datetimes read back naive (UTC by convention) and legacy rows may
+    # carry offset-less ISO stamps — comparisons against _now() must never
+    # raise "can't compare offset-naive and offset-aware datetimes".
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed
 
 
 def _database():
