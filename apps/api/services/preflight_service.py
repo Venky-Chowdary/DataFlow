@@ -64,7 +64,7 @@ from services.transform_engine import (
     set_active_number_locale,
 )
 from services.validation_plan import build_validation_plan
-from services.value_serializer import cell_to_string
+from services.value_serializer import wire_cell_text
 
 
 def _hydrate_risk_contract(
@@ -1801,7 +1801,7 @@ def run_file_preflight(
                 "name": c,
                 "inferred_type": column_types.get(c, "VARCHAR").upper(),
                 "samples": [
-                    cell_to_string(row.get(c, ""))
+                    wire_cell_text(row.get(c, ""))
                     for row in (sample_rows or [])[:20]
                     if row.get(c) is not None
                 ],

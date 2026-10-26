@@ -3598,10 +3598,12 @@ class UniversalTransferEngine:
                 "on",
             }:
                 try:
+                    from services.value_serializer import wire_cell_text
+
                     redacted_training = pii_guard.redact_records(records[:5], mappings)
                     samples = {
                         c: [
-                            cell_to_string(r.get(c, ""))
+                            wire_cell_text(r.get(c, ""))
                             for r in redacted_training
                             if r.get(c) is not None
                         ]

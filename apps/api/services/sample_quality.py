@@ -13,6 +13,7 @@ from services.value_serializer import (
     NULL_WIRE_SENTINELS,
     SQL_NULL_SENTINEL,
     cell_to_string,
+    wire_cell_text,
     is_reader_null_cell,
 )
 
@@ -62,7 +63,7 @@ def _sample_wire(value: Any) -> str:
     """
     if is_reader_null_cell(value):
         return SQL_NULL_SENTINEL
-    text = cell_to_string(value, preserve_sql_null=True)
+    text = wire_cell_text(value)
     if text.strip() in NULL_WIRE_SENTINELS:
         return SQL_NULL_SENTINEL
     return text

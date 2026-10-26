@@ -2364,7 +2364,10 @@ def apply_transform(
         base = raw if type(raw) is str else str(raw)
         search, _, repl = transform[len("replace:"):].partition(":")
         return base.replace(search, repl), None
-    if type(raw) is str:
+    if isinstance(raw, str):
+        # ``isinstance`` (not ``type(...) is str``) keeps ``WireLiteral`` intact —
+        # a decoded sentinel-spelling literal must survive to the sentinel check
+        # below, where it is treated as real text rather than decoded to NULL.
         raw_s = raw
     elif isinstance(raw, (bytes, bytearray, memoryview)):
         # Bytes must serialize through the canonical wire (base64), never
@@ -2389,22 +2392,34 @@ def apply_transform(
     # common transform on the widest tables — off ``strip().lower()`` of every
     # cell it carries through unchanged.
     if "_" in raw_s:
-        lowered = raw_s.strip().lower()
-        # Sparse CDC / schemaless absent field — never coerce to SQL NULL or identity text.
-        if lowered == "__df_missing__" or raw_s == "__DF_MISSING__":
-            from services.value_serializer import DF_MISSING_SENTINEL
+        from services.value_serializer import WireLiteral
 
-            return DF_MISSING_SENTINEL, None
-        # Explicit NULL sentinels must never land as literal strings in any dest.
-        if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
-            return None, None
+        if isinstance(raw_s, WireLiteral):
+            # Decoded sentinel-spelling literal — real text, never absence.
+            pass
+        else:
+            lowered = raw_s.strip().lower()
+            # Sparse CDC / schemaless absent field — never coerce to SQL NULL or identity text.
+            if lowered == "__df_missing__" or raw_s == "__DF_MISSING__":
+                from services.value_serializer import DF_MISSING_SENTINEL
+
+                return DF_MISSING_SENTINEL, None
+            # Explicit NULL sentinels must never land as literal strings in any dest.
+            if lowered in {"__df_sql_null__", "__df_ddb_null__"}:
+                return None, None
 
     transform_l = (transform or "none").strip().lower()
     # Identity aliases preserve the exact wire, so they need nothing below.
     if transform_l in _IDENTITY_TRANSFORMS:
         return raw_s, None
 
-    text = raw_s.strip()
+    # ``__DF_ESC__``-escaped literals decode to their literal text here — a
+    # user string colliding with a sentinel spells ``__DF_ESC__`` + sentinel on
+    # the wire; casts and error messages belong on the literal, not the wire
+    # encoding (D113/D109 sentinel layer).
+    from services.value_serializer import unescape_wire_text
+
+    text = unescape_wire_text(raw_s).strip()
     if transform_l in {"omit", "intentional_omit", "drop", "exclude"}:
         return None, "intentional omit — mapping should not project"
 
