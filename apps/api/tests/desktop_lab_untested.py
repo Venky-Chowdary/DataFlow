@@ -1691,7 +1691,7 @@ def _seed_saas_src(table: str) -> None:
 
 def _run_saas_stub() -> list[dict[str, Any]]:
     """Reverse-ETL against a local HTTP stub — not a customer org."""
-    from tests.saas_desktop_stub import STORE, start_saas_stub
+    from tests.saas_desktop_stub import start_saas_stub
 
     cells: list[dict[str, Any]] = []
     server, url = start_saas_stub()
@@ -1760,7 +1760,7 @@ def _run_saas_stub() -> list[dict[str, Any]]:
                     src, dest, sync_mode="reverse_etl", mappings=mappings,
                     validation_mode="balanced", timeout_s=60.0,
                 )
-                landed = list(STORE.rows.get(store_key) or [])
+                landed = list(server.df_store.rows.get(store_key) or [])
                 err = str(first.error or second.error or "")
                 sample_ok = "without value mismatches" in err
                 write_ok = len(landed) >= 2

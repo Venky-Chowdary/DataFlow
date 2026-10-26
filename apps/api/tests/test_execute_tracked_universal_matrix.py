@@ -60,7 +60,7 @@ def _saas_stub_url() -> str:
         from tests.saas_desktop_stub import seed_tabular_fixture, start_saas_stub
 
         _server, url = start_saas_stub()
-        seed_tabular_fixture()
+        seed_tabular_fixture(_server)
         _SAAS_STUB_URL = url
     return _SAAS_STUB_URL
 
