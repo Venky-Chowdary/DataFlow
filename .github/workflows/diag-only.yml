@@ -85,6 +85,28 @@ jobs:
                   print(f"introspect_schema {host}: ok={info.get('ok')} err={str(info.get('error'))[:200]}")
               except Exception as exc:
                   print(f"introspect_schema {host}: RAISED {exc!r}")
+          # Reproduce the exact connector config the failing tests build:
+          # create_connector stores ssl=True (store default), then start_transfer
+          # introspects via _introspect(execute_shape=True).
+          from services.connector_store import create_connector, delete_connector
+          saved = create_connector({"name": "diag_conn", "type": "postgresql",
+              "host": "127.0.0.1", "port": 5432, "database": "dataflow",
+              "username": "dataflow", "password": "dataflow", "schema": "public"})
+          print("stored ssl:", saved.config.get("ssl"))
+          try:
+              from src.ai.copilot.schema_tools import introspect_connector_table
+              info = introspect_connector_table(
+                  {"id": saved.id, "name": "diag_conn", "type": "postgresql",
+                   "host": "127.0.0.1", "port": 5432, "database": "dataflow",
+                   "username": "dataflow", "password": "dataflow", "schema": "public",
+                   "ssl": True},
+                  "pg_catalog.pg_class", purpose="source", execute_shape=True)
+              print("introspect_connector_table: ok=", info.get("ok"),
+                    "err=", str(info.get("error"))[:200])
+          except Exception as exc:
+              print("introspect_connector_table RAISED:", repr(exc)[:300])
+              traceback.print_exc()
+          delete_connector(saved.id)
           # And the engine read path (read_source_database -> postgresql_reader)
           import psycopg2 as _p
           _p.connect(host="127.0.0.1", port=5432, dbname="dataflow",
@@ -103,3 +125,8 @@ jobs:
               print(f"read_source_database ssl=True: FAILED -> {exc!r}")
               traceback.print_exc()
           PY
+      - name: Diag — run the failing mx3_10 legs
+        working-directory: apps/api
+        continue-on-error: true
+        run: |
+          python -m pytest "tests/test_mx3_10_continue_policy_g6.py" -q -p no:cacheprovider -x 2>&1 | tail -30
