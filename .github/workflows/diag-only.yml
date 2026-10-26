@@ -1,0 +1,103 @@
+name: diag-only
+on: [workflow_dispatch]
+
+jobs:
+  diag:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: apps/api:packages/preflight/src:apps/api/src:apps/api/tests
+      DATAFLOW_JOB_STORE: memory
+      DATAFLOW_DISABLE_OBJECT_STORE: 1
+      DATAFLOW_ENGINE_DIGEST: 1
+      DATAFLOW_EGRESS_ALLOWLIST: 127.0.0.0/8,::1/128
+      MSSQL_SA_PASSWORD: "Dataflow_CI_2026!"
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+      PGUSER: dataflow
+      PGPASSWORD: dataflow
+      PGDATABASE: dataflow
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r apps/api/requirements.txt
+          python -m pip install -e packages/preflight
+      - name: Start Postgres
+        run: |
+          docker run -d --name postgres -p 5432:5432 \
+            -e POSTGRES_USER=dataflow -e POSTGRES_PASSWORD=dataflow \
+            -e POSTGRES_DB=dataflow \
+            postgres:16 -c wal_level=logical -c max_wal_senders=8
+          for i in $(seq 1 30); do
+            docker exec postgres pg_isready -U dataflow >/dev/null 2>&1 && break
+            sleep 2
+          done
+      - name: Diag — PG ssl + introspect path
+        working-directory: apps/api
+        continue-on-error: true
+        run: |
+          python - <<'PY'
+          import logging, traceback
+          logging.basicConfig(level=logging.WARNING)
+          import psycopg2
+          for host in ("127.0.0.1", "localhost"):
+              for mode in ("require", "prefer"):
+                  try:
+                      c = psycopg2.connect(host=host, port=5432, dbname="dataflow",
+                                           user="dataflow", password="dataflow",
+                                           connect_timeout=15, sslmode=mode,
+                                           keepalives=1)
+                      c.close()
+                      print(f"raw {host} sslmode={mode}: OK")
+                  except Exception as exc:
+                      print(f"raw {host} sslmode={mode}: FAIL {exc!r}")
+          from connectors.postgresql_conn import get_connection
+          for host in ("127.0.0.1", "localhost"):
+              try:
+                  conn = get_connection(
+                      host=host, port=5432, database="dataflow",
+                      username="dataflow", password="dataflow",
+                      connection_string="", ssl=True,
+                  )
+                  cur = conn.cursor(); cur.execute("select 1")
+                  print(f"get_connection {host}: OK {cur.fetchone()}")
+                  conn.close()
+              except Exception as exc:
+                  print(f"get_connection {host}: FAILED -> {exc!r}")
+                  traceback.print_exc()
+          # Same call the failing tests take: introspect_schema -> _introspect_postgresql
+          from services.schema_introspect import introspect_schema
+          for host in ("127.0.0.1", "localhost"):
+              try:
+                  info = introspect_schema(
+                      "postgresql", host=host, port=5432, database="dataflow",
+                      username="dataflow", password="dataflow", schema="public",
+                      connection_string="", ssl=True, table="", catalog_type="postgresql",
+                  )
+                  print(f"introspect_schema {host}: ok={info.get('ok')} err={str(info.get('error'))[:200]}")
+              except Exception as exc:
+                  print(f"introspect_schema {host}: RAISED {exc!r}")
+          # And the engine read path (read_source_database -> postgresql_reader)
+          import psycopg2 as _p
+          _p.connect(host="127.0.0.1", port=5432, dbname="dataflow",
+                     user="dataflow", password="dataflow",
+                     sslmode="prefer").cursor().execute(
+                     "create table if not exists diag_t (id int, v text)")
+          try:
+              from src.transfer.adapters import read_source_database
+              from src.transfer.models import EndpointConfig
+              ep = EndpointConfig(kind="database", format="postgresql", host="127.0.0.1",
+                                  port=5432, database="dataflow", username="dataflow",
+                                  password="dataflow", table="diag_t", extra={"ssl": True})
+              recs, hdrs, sch = read_source_database(ep, limit=5, raise_on_truncate=False)
+              print(f"read_source_database ssl=True: OK rows={len(recs)}")
+          except Exception as exc:
+              print(f"read_source_database ssl=True: FAILED -> {exc!r}")
+              traceback.print_exc()
+          PY
