@@ -111,6 +111,7 @@ jobs:
           python -m pip install pymssql
           # CI-3: nightly order shuffling so order-dependent tests surface.
           python -m pip install pytest-randomly
+          python -m pip install hypothesis
 
       - name: Start Postgres / MySQL / Mongo (server args need docker run)
         # GH service 'options' go to docker create BEFORE the image — server
@@ -243,7 +244,16 @@ jobs:
       - name: Full suite
         working-directory: apps/api
         run: |
-          python -m pytest tests -q -rs -p no:cacheprovider -p randomly
+          python -m pytest tests -q -rfEs -p no:cacheprovider -p randomly \
+            --junitxml=/tmp/pytest-junit.xml
+
+      - name: Upload pytest junit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-junit-${{ github.run_id }}
+          path: /tmp/pytest-junit.xml
+          if-no-files-found: error
 
   web:
     name: Web lint + tests + build
