@@ -89,15 +89,27 @@ def workspace_resource_is_visible(
     return resource_scope == scope
 
 
-def assert_resource_workspace(request: Request, resource_workspace_id: str | None) -> None:
-    """Deny cross-workspace resource access when isolation is on or resource is scoped."""
+def assert_resource_workspace(
+    request: Request,
+    resource_workspace_id: str | None,
+    *,
+    write: bool = False,
+) -> None:
+    """Deny cross-workspace resource access when isolation is on or resource is scoped.
+
+    ``write=True`` is required on every route that mutates the resource: the
+    caller's RBAC permission comes from their effective role, which is
+    independent of the resource's workspace, so read membership in that
+    workspace must not be enough to delete or change what lives there.
+    """
     rid = (resource_workspace_id or "").strip()
     scope = (request.headers.get("X-Workspace-Id") or "").strip()
     if not rid:
         if require_workspace_isolation():
             raise HTTPException(status_code=404, detail="Not found")
         return
-    if not can_read_workspace(rid, actor_email(request)):
+    actor = actor_email(request)
+    if not can_read_workspace(rid, actor):
         raise HTTPException(status_code=404, detail="Not found")
     # The request's declared scope is the tenant boundary, not just the actor's
     # membership: a user who belongs to two workspaces must not see one
@@ -105,3 +117,5 @@ def assert_resource_workspace(request: Request, resource_workspace_id: str | Non
     # filter by scope, so an id-addressed read has to agree with them.
     if scope and not workspace_resource_is_visible(rid, scope):
         raise HTTPException(status_code=404, detail="Not found")
+    if write and not can_write_workspace(rid, actor):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")

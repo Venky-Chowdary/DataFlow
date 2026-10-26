@@ -286,7 +286,7 @@ def update_recipe(
     recipe = store.get(recipe_id, workspace_id=ws)
     if not recipe:
         raise HTTPException(status_code=404, detail="Transform recipe not found")
-    assert_resource_workspace(request, recipe.workspace_id or "")
+    assert_resource_workspace(request, recipe.workspace_id or "", write=True)
 
     if body.expected_version is not None and int(body.expected_version) != int(
         recipe.version or 0
@@ -330,7 +330,7 @@ def delete_recipe(
     recipe = store.get(recipe_id, workspace_id=ws)
     if not recipe:
         raise HTTPException(status_code=404, detail="Transform recipe not found")
-    assert_resource_workspace(request, recipe.workspace_id or "")
+    assert_resource_workspace(request, recipe.workspace_id or "", write=True)
     bound = _schedule_users(recipe_id, recipe.version)
     if bound:
         names = ", ".join(u["schedule_name"] for u in bound[:10])
