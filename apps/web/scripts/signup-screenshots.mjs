@@ -84,19 +84,30 @@ function plantOtpCode() {
   py(`
 import sys; sys.path.insert(0, ".")
 from services.platform_config import data_dir
-from services.metadata_backend import json_doc_transaction
-from services import otp_service
-p = data_dir() / "otp_challenges.json"
+from services.metadata_backend import json_doc_transaction, mongo_database
+from services import otp_service, signup_store
 patched = []
+# Patch every live signup challenge — concurrent runs and resends leave
+# several unconsumed rows, and the newest-by-created_at is not always the
+# challenge the UI is holding.
+def _hmac(row_id):
+    return otp_service.code_hmac(row_id, "signup", "${KNOWN_CODE}")
+p = data_dir() / "otp_challenges.json"
 with json_doc_transaction(p, {"otp_challenges": []}) as data:
-    # Patch every live signup challenge — concurrent runs and resends leave
-    # several unconsumed rows, and the newest-by-created_at is not always the
-    # challenge the UI is holding.
     for row in data["otp_challenges"]:
         if row.get("purpose") == "signup" and not row.get("consumed_at"):
-            row["code_hmac"] = otp_service.code_hmac(row["id"], "signup", "${KNOWN_CODE}")
+            row["code_hmac"] = _hmac(row["id"])
             patched.append(row["id"])
-    print("patched", len(patched), patched[-1] if patched else "")
+# The API resolves the Mongo tier whenever MONGODB_URI connects — the
+# challenge the UI verifies against lives there, not in the file.
+db = mongo_database()
+if db is not None:
+    coll = db[signup_store.CHALLENGES_COLLECTION]
+    for row in coll.find({"purpose": "signup", "consumed_at": None}):
+        coll.update_one({"_id": row["_id"]},
+                        {"$set": {"code_hmac": _hmac(row["id"])}})
+        patched.append(row["id"])
+print("patched", len(patched), patched[-1] if patched else "")
 `);
 }
 
