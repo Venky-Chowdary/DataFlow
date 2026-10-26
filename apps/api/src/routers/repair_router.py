@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 router = APIRouter(tags=["repair"])
@@ -23,8 +23,11 @@ class ProposeQuarantineBody(BaseModel):
 
 class DecideBody(BaseModel):
     approve: bool = True
-    actor: str = "user"
     mappings: list[dict[str, Any]] = Field(default_factory=list)
+
+
+def _actor_email(request: Request) -> str:
+    return getattr(request.state, "user_email", None) or "anonymous"
 
 
 class SnapshotBody(BaseModel):
@@ -73,7 +76,7 @@ async def get_repair_proposal(proposal_id: str) -> dict[str, Any]:
 
 
 @router.post("/repair/proposals/{proposal_id}/decide")
-async def decide_repair(proposal_id: str, body: DecideBody) -> dict[str, Any]:
+async def decide_repair(proposal_id: str, body: DecideBody, request: Request) -> dict[str, Any]:
     from services.agentic_repair import apply_actions_with_report, decide_proposal
 
     def _apply(actions: list[dict[str, Any]]) -> dict[str, Any]:
@@ -86,7 +89,7 @@ async def decide_repair(proposal_id: str, body: DecideBody) -> dict[str, Any]:
         p = decide_proposal(
             proposal_id,
             approve=body.approve,
-            actor=body.actor,
+            actor=_actor_email(request),
             apply_fn=apply_fn,
         )
     except KeyError:
