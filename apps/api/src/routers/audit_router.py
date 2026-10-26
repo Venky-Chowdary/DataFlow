@@ -36,10 +36,41 @@ def audit_export_honesty() -> dict[str, object]:
 
 
 def _scope(request: Request) -> tuple[str, str]:
-    from services.audit_log import requested_workspace_id_from_request
-    from services.tenant_store import get_tenant_for_workspace
+    """Authorize the audit scope the caller asked for.
 
-    workspace_id = requested_workspace_id_from_request(request)
+    A workspace scope needs membership (or the platform admin role); an
+    unscoped, platform-wide read is for platform admins only.
+    """
+    from services.audit_coverage import record_authz_denial
+    from services.tenant_store import get_tenant_for_workspace
+    from services.workspace_access import (
+        actor_email,
+        actor_is_platform_admin,
+        requested_workspace_id,
+    )
+    from services.team_store import can_read_workspace
+
+    workspace_id = requested_workspace_id(request)
+    is_platform_admin = actor_is_platform_admin(request)
+    if not workspace_id and not is_platform_admin:
+        raise HTTPException(
+            status_code=400,
+            detail="X-Workspace-Id is required. Only a platform administrator "
+            "may read the platform-wide audit log.",
+        )
+    if (
+        workspace_id
+        and not is_platform_admin
+        and not can_read_workspace(workspace_id, actor_email(request))
+    ):
+        request.state.workspace_header_rejected = True
+        record_authz_denial(
+            request,
+            required_permission="audit.read",
+            effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+            reason="cross_workspace",
+        )
+        raise HTTPException(status_code=403, detail="Access to workspace denied")
     tenant_id = ""
     if workspace_id:
         tenant = get_tenant_for_workspace(workspace_id)
