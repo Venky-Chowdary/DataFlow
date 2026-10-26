@@ -261,6 +261,21 @@ jobs:
                       print(f"raw {host} sslmode={mode}: OK")
                   except Exception as exc:
                       print(f"raw {host} sslmode={mode}: FAIL {exc!r}")
+          import os, subprocess
+          try:
+              import pymssql
+              print("pymssql", pymssql.__version__)
+              try:
+                  c = pymssql.connect(host="127.0.0.1", port=1433, user="sa",
+                                      password=os.environ["MSSQL_SA_PASSWORD"],
+                                      database="master", login_timeout=10)
+                  c.close(); print("pymssql connect: OK")
+              except Exception as exc:
+                  print("pymssql connect: FAIL", repr(exc)[:200])
+          except ImportError as exc:
+              print("pymssql import:", exc)
+          print("odbcinst:", subprocess.run(["odbcinst","-q","-d"],
+                  capture_output=True, text=True).stdout.strip())
           from connectors.postgresql_conn import get_connection
           for host in ("127.0.0.1", "localhost"):
               try:
