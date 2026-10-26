@@ -292,7 +292,27 @@ def introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
     return result
 
 
-def _introspect_schema(
+def _introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
+    """Introspect under the connector egress policy (pre-dial check + DNS pin)."""
+    from services.egress_guard import connector_dial_scope
+
+    reader_cfg = kwargs.get("reader_cfg") or {}
+    scope_cfg = {
+        "host": str(kwargs.get("host") or ""),
+        "connection_string": str(kwargs.get("connection_string") or ""),
+        "endpoint_url": str(kwargs.get("endpoint_url") or ""),
+        "type": db_type,
+        "workspace_id": str(
+            kwargs.get("workspace_id")
+            or (reader_cfg.get("workspace_id") if isinstance(reader_cfg, dict) else "")
+            or ""
+        ),
+    }
+    with connector_dial_scope(scope_cfg, db_type=db_type):
+        return _introspect_schema_unscoped(db_type, **kwargs)
+
+
+def _introspect_schema_unscoped(
     db_type: str,
     *,
     host: str = "",
@@ -3054,7 +3074,7 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:
         from connectors.mongodb_common import normalize_mongodb_connection_string
-        from pymongo import MongoClient
+        from connectors.mongodb_common import guarded_mongo_client
 
         conn_str = normalize_mongodb_connection_string(
             kwargs.get("connection_string", ""),
@@ -3066,7 +3086,7 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
             ssl=bool(kwargs.get("ssl")),
             auth_source=kwargs.get("auth_source", ""),
         )
-        client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
+        client = guarded_mongo_client(conn_str, serverSelectionTimeoutMS=10000)
         db_name = kwargs.get("database") or "test"
         db = client[db_name]
         tables = db.list_collection_names()[:100]

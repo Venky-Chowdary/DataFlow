@@ -294,6 +294,32 @@ def _s3_family_format(fmt: str) -> str:
     return key
 
 
+def _introspect_endpoint_guarded(
+    endpoint: EndpointConfig, sample_content: bytes | None, filename: str
+) -> dict:
+    from services.egress_guard import EgressRefused, connector_dial_scope
+
+    if endpoint.kind == "file" and sample_content:
+        return _introspect_endpoint_impl(endpoint, sample_content, filename)
+    scope_cfg = {
+        "host": str(endpoint.host or ""),
+        "connection_string": str(endpoint.connection_string or ""),
+        "endpoint_url": str((endpoint.extra or {}).get("endpoint_url") or ""),
+        "type": str(endpoint.format or endpoint.kind or ""),
+        "workspace_id": str((endpoint.extra or {}).get("workspace_id") or ""),
+    }
+    try:
+        with connector_dial_scope(scope_cfg):
+            return _introspect_endpoint_impl(endpoint, sample_content, filename)
+    except EgressRefused as exc:
+        return {
+            "connected": False,
+            "error": str(exc),
+            "objects": [],
+            "columns": [],
+        }
+
+
 def introspect_endpoint(
     endpoint: EndpointConfig,
     sample_content: bytes | None = None,
@@ -312,7 +338,7 @@ def introspect_endpoint(
         surface="introspect",
         connector_id=endpoint.connector_id,
     ) as op:
-        out = _introspect_endpoint_impl(endpoint, sample_content, filename)
+        out = _introspect_endpoint_guarded(endpoint, sample_content, filename)
         if out.get("connected"):
             op.succeeded(
                 object_count=len(out.get("objects") or []),

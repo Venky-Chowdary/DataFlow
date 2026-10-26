@@ -16,6 +16,7 @@ list for local proof runs; production deploy leaves it unset.
 
 from __future__ import annotations
 
+import contextvars
 import ipaddress
 import os
 import re
@@ -301,6 +302,7 @@ def assert_connector_dial_allowed(
     *values: str,
     allowlist: Sequence[str] | None = None,
     workspace_id: str = "",
+    db_type: str = "",
 ) -> None:
     """Raise ``EgressRefused`` before a driver dials a blocked address.
 
@@ -310,7 +312,10 @@ def assert_connector_dial_allowed(
     fail-closes at connect.
     """
     refusal = metadata_endpoint_refusal(
-        *values, allowlist=allowlist, workspace_id=workspace_id
+        *values,
+        allowlist=allowlist,
+        workspace_id=workspace_id or current_egress_workspace(),
+        db_type=db_type,
     )
     if refusal:
         raise EgressRefused(refusal)
@@ -466,79 +471,153 @@ def _hosts_from_values(*values: str) -> list[str]:
     return hosts
 
 
-@contextmanager
-def pinned_egress(
-    *,
-    allowlist: Sequence[str] | None = None,
-    workspace_id: str = "",
-) -> Iterator[None]:
-    """Re-check every DNS answer on this thread until the dial returns.
+_DIAL_POLICY: contextvars.ContextVar[tuple[Sequence[str] | None, str] | None] = (
+    contextvars.ContextVar("egress_dial_policy", default=None)
+)
+_EGRESS_WORKSPACE: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "egress_workspace", default=""
+)
+_INSTALL: dict[str, Any] = {"count": 0}
 
-    A name that was public at the first check and private on the lookup the
-    driver actually uses raises ``EgressRefused`` before that answer is returned
-    to the connector.
-    """
+# Control-plane stores the API itself dials (job store, CDC leases). A writer
+# callback can open a pooled socket to them while a connector scope is active;
+# those dials are not connector egress. Connector configs naming these hosts
+# are still refused before the dial by ``metadata_endpoint_refusal``.
+_CONTROL_PLANE_ENV = (
+    "MONGODB_URI",
+    "MONGODB_URL",
+    "MONGO_URI",
+    "MONGO_URL",
+    "MONGO_HOST",
+    "REDIS_URL",
+    "CDC_LEASE_REDIS_URL",
+)
+
+
+@contextmanager
+def egress_workspace(workspace_id: str) -> Iterator[None]:
+    """Record the workspace whose allowlist governs connector dials below."""
+    token = _EGRESS_WORKSPACE.set(str(workspace_id or ""))
+    try:
+        yield
+    finally:
+        _EGRESS_WORKSPACE.reset(token)
+
+
+def current_egress_workspace() -> str:
+    """Workspace of the innermost active egress scope, or ``""``."""
+    policy = _DIAL_POLICY.get()
+    if policy is not None and policy[1]:
+        return policy[1]
+    return _EGRESS_WORKSPACE.get()
+
+
+def _control_plane_names() -> frozenset[str]:
+    names: set[str] = set()
+    for key in _CONTROL_PLANE_ENV:
+        raw = (os.environ.get(key) or "").strip()
+        if not raw:
+            continue
+        for host in _hosts_from_values(raw) or [raw]:
+            shown = _normalize_host(host)
+            if shown:
+                names.add(shown)
+    return frozenset(names)
+
+
+def _control_plane_addresses(real_getaddrinfo: Any) -> frozenset[str]:
+    names = _control_plane_names()
+    cached = _INSTALL.get("control_plane")
+    if cached is not None and cached[0] == names:
+        return cached[1]
+    addresses: set[str] = set(names)
+    for name in names:
+        try:
+            for info in real_getaddrinfo(name, None):
+                addresses.add(_normalize_host(str(info[4][0])))
+        except (OSError, UnicodeError, IndexError, TypeError):
+            continue
+    result = frozenset(addresses)
+    _INSTALL["control_plane"] = (names, result)
+    return result
+
+
+def _refusal_for_target(host: str, policy: tuple[Sequence[str] | None, str], real: Any) -> str | None:
+    allowlist, workspace_id = policy
+    shown = _normalize_host(host)
+    if not shown or "://" in shown or shown.startswith(("/", "\\")):
+        return None
+    if _name_is_non_overridable(shown):
+        return _refusal_text(shown, "cloud metadata and link-local")
+    if shown in _control_plane_addresses(real):
+        return None
+    try:
+        literal = ipaddress.ip_address(shown)
+    except ValueError:
+        literal = None
+    if literal is not None:
+        phrase = _ip_refusal_phrase(literal, _configured_networks(allowlist, workspace_id))
+        return _refusal_text(shown, phrase) if phrase else None
+    try:
+        infos = real(shown, None)
+    except OSError:
+        return _refusal_text(shown, "DNS did not resolve to a public address")
+    phrase = _phrase_for_infos(infos, allowlist=allowlist, workspace_id=workspace_id)
+    return _refusal_text(shown, phrase) if phrase else None
+
+
+def _install_guards() -> None:
     with _PIN_LOCK:
+        _INSTALL["count"] += 1
+        if _INSTALL["count"] > 1:
+            return
         real = socket.getaddrinfo
         real_connect = socket.socket.connect
         real_connect_ex = socket.socket.connect_ex
+        _INSTALL.update(real=real, connect=real_connect, connect_ex=real_connect_ex)
 
-        def _refuse_sockaddr(address: Any) -> None:
-            host = ""
+        def _sockaddr_host(address: Any) -> str:
             if isinstance(address, tuple) and address:
-                host = str(address[0] or "")
-            elif isinstance(address, str):
-                host = address
-            shown = _normalize_host(host)
-            if not shown or "://" in shown or shown.startswith(("/", "\\")):
-                return
-            if _name_is_non_overridable(shown):
-                raise EgressRefused(_refusal_text(shown, "cloud metadata and link-local"))
-            try:
-                literal = ipaddress.ip_address(shown)
-            except ValueError:
-                literal = None
-            nets = _configured_networks(allowlist, workspace_id)
-            if literal is not None:
-                phrase = _ip_refusal_phrase(literal, nets)
-                if phrase:
-                    raise EgressRefused(_refusal_text(shown, phrase))
-                return
-            try:
-                infos = real(shown, None)
-            except OSError as exc:
-                raise EgressRefused(
-                    _refusal_text(shown, "DNS did not resolve to a public address")
-                ) from exc
-            phrase = _phrase_for_infos(infos, allowlist=allowlist, workspace_id=workspace_id)
-            if phrase:
-                raise EgressRefused(_refusal_text(shown, phrase))
+                return str(address[0] or "")
+            if isinstance(address, str):
+                return address
+            return ""
 
         def guarded_connect(self, address):
-            _refuse_sockaddr(address)
+            policy = _DIAL_POLICY.get()
+            if policy is not None:
+                refusal = _refusal_for_target(_sockaddr_host(address), policy, real)
+                if refusal:
+                    raise EgressRefused(refusal)
             return real_connect(self, address)
 
         def guarded_connect_ex(self, address):
-            _refuse_sockaddr(address)
+            policy = _DIAL_POLICY.get()
+            if policy is not None:
+                refusal = _refusal_for_target(_sockaddr_host(address), policy, real)
+                if refusal:
+                    raise EgressRefused(refusal)
             return real_connect_ex(self, address)
 
         def guarded(host, port, *args, **kwargs):
-            if host is None or str(host) == "":
+            policy = _DIAL_POLICY.get()
+            if policy is None or host is None or str(host) == "":
                 return real(host, port, *args, **kwargs)
             # A file URL is not a dial. Passing it to IDNA raises
-            # "label empty or too long" and the probe reports that as the
-            # driver error. Let the real resolver answer; file engines do
-            # not use this name as a host.
+            # "label empty or too long"; file engines do not use it as a host.
             raw_host = str(host)
             if "://" in raw_host or raw_host.startswith(("/", "\\")):
                 return real(host, port, *args, **kwargs)
-            shown = _normalize_host(str(host))
+            shown = _normalize_host(raw_host)
             if _name_is_non_overridable(shown):
                 raise EgressRefused(_refusal_text(shown, "cloud metadata and link-local"))
+            if shown in _control_plane_addresses(real):
+                return real(host, port, *args, **kwargs)
             try:
                 literal = ipaddress.ip_address(shown)
             except ValueError:
                 literal = None
+            allowlist, workspace_id = policy
             if literal is not None:
                 phrase = _ip_refusal_phrase(literal, _configured_networks(allowlist, workspace_id))
                 if phrase:
@@ -551,15 +630,120 @@ def pinned_egress(
                 ) from exc
             phrase = _phrase_for_infos(infos, allowlist=allowlist, workspace_id=workspace_id)
             if phrase:
-                raise EgressRefused(_refusal_text(shown or str(host), phrase))
+                raise EgressRefused(_refusal_text(shown or raw_host, phrase))
             return infos
 
         socket.getaddrinfo = guarded
         socket.socket.connect = guarded_connect
         socket.socket.connect_ex = guarded_connect_ex
+
+
+def _uninstall_guards() -> None:
+    with _PIN_LOCK:
+        _INSTALL["count"] -= 1
+        if _INSTALL["count"] > 0:
+            return
+        _INSTALL["count"] = 0
+        socket.getaddrinfo = _INSTALL.pop("real")
+        socket.socket.connect = _INSTALL.pop("connect")
+        socket.socket.connect_ex = _INSTALL.pop("connect_ex")
+
+
+@contextmanager
+def pinned_egress(
+    *,
+    allowlist: Sequence[str] | None = None,
+    workspace_id: str = "",
+) -> Iterator[None]:
+    """Re-check every DNS answer and connect target in this context.
+
+    A name that was public at the first check and private on the lookup the
+    driver actually uses raises ``EgressRefused`` before that answer is returned
+    to the connector. The policy is scoped to the current thread/task through a
+    context variable, so concurrent transfers and the API's own control-plane
+    dials on other threads are not affected and scopes never serialize.
+    """
+    policy = (allowlist, str(workspace_id or "") or current_egress_workspace())
+    token = _DIAL_POLICY.set(policy)
+    _install_guards()
+    try:
+        yield
+    finally:
+        _DIAL_POLICY.reset(token)
+        _uninstall_guards()
+
+
+def _cfg_dial_values(cfg: Any, extra: Sequence[str]) -> list[str]:
+    values: list[str] = []
+    if isinstance(cfg, dict):
+        for key in ("host", "endpoint_url", "connection_string", "base_url", "url"):
+            raw = cfg.get(key)
+            if isinstance(raw, str) and raw.strip():
+                values.append(raw)
+    values.extend(str(v) for v in extra if isinstance(v, str) and v.strip())
+    return values
+
+
+def assert_cfg_dial_allowed(cfg: Any, *extra: str, db_type: str = "") -> None:
+    """Refuse a connector config whose dial targets break the egress policy."""
+    cfg_map = cfg if isinstance(cfg, dict) else {}
+    assert_connector_dial_allowed(
+        *_cfg_dial_values(cfg_map, extra),
+        workspace_id=str(cfg_map.get("workspace_id") or ""),
+        db_type=str(db_type or cfg_map.get("type") or cfg_map.get("db_type") or ""),
+    )
+
+
+@contextmanager
+def connector_dial_scope(cfg: Any, *extra: str, db_type: str = "") -> Iterator[None]:
+    """Pre-dial check plus dial-time DNS pinning around one connector call."""
+    cfg_map = cfg if isinstance(cfg, dict) else {}
+    assert_cfg_dial_allowed(cfg_map, *extra, db_type=db_type)
+    with pinned_egress(workspace_id=str(cfg_map.get("workspace_id") or "")):
+        yield
+
+
+def follow_url_allowed(url: str, origin: str) -> bool:
+    """A server-supplied next/redirect URL may stay on ``origin`` or go public.
+
+    Same scheme+host+port as the configured origin keeps the policy that
+    already admitted that origin. Any other target must be a public http(s)
+    host; private, loopback and metadata targets are refused regardless of a
+    workspace allowlist.
+    """
+    target = urllib.parse.urlparse((url or "").strip())
+    if target.scheme not in _ALLOWED_SCHEMES or not target.hostname:
+        return False
+    base = urllib.parse.urlparse((origin or "").strip())
+    if base.scheme in _ALLOWED_SCHEMES and base.hostname:
         try:
-            yield
-        finally:
-            socket.getaddrinfo = real
-            socket.socket.connect = real_connect
-            socket.socket.connect_ex = real_connect_ex
+            same = (
+                target.scheme == base.scheme
+                and _normalize_host(target.hostname) == _normalize_host(base.hostname)
+                and (target.port or 0) == (base.port or 0)
+            )
+        except ValueError:
+            return False
+        if same:
+            return True
+    return redirect_target_allowed(url)
+
+
+def redirect_guard_hook(origin: str = ""):
+    """A ``requests`` response hook that refuses an unsafe redirect target.
+
+    ``requests`` copies hooks onto every redirected request, so the check runs
+    before each hop is followed.
+    """
+
+    def _hook(resp: Any, *args: Any, **kwargs: Any) -> Any:
+        if getattr(resp, "is_redirect", False):
+            location = str(resp.headers.get("Location") or "")
+            target = urllib.parse.urljoin(str(getattr(resp, "url", "") or origin), location)
+            if not follow_url_allowed(target, origin or str(getattr(resp, "url", "") or "")):
+                raise EgressRefused(
+                    _refusal_text(urllib.parse.urlparse(target).hostname or target, "redirect target")
+                )
+        return resp
+
+    return _hook

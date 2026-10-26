@@ -225,6 +225,21 @@ def _persist_form_test_status(connector_id: str, last_test_ok: bool | None) -> N
         mark_tested(connector_id, False)
 
 
+def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
+    """Refuse to persist a connector whose dial targets break the egress policy."""
+    from services.egress_guard import metadata_endpoint_refusal
+
+    refusal = metadata_endpoint_refusal(
+        str(data.get("host") or ""),
+        str(data.get("endpoint_url") or ""),
+        str(data.get("connection_string") or ""),
+        workspace_id=str(data.get("workspace_id") or ""),
+        db_type=str(data.get("type") or ""),
+    )
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+
+
 @router.post("")
 def save_connector(
     body: ConnectorSaveDTO,
@@ -244,6 +259,7 @@ def save_connector(
             break
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
+    _refuse_unsafe_egress(data)
     conn = create_connector(data)
     _persist_form_test_status(conn.id, form_test)
     refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
@@ -264,6 +280,7 @@ def update_saved_connector(
     _writable_connector_or_404(request, existing)
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
+    _refuse_unsafe_egress(data)
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")

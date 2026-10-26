@@ -529,14 +529,17 @@ def _delete_all_rows(
 
     if db_type in {"mongodb", "mongo"}:
         from pymongo import MongoClient
+        from connectors.mongodb_common import guarded_mongo_client
 
         from src.transfer.adapters import mongodb_connection_string
 
         database = str(cfg.get("database") or "")
         if not database:
             return False
-        client: MongoClient = MongoClient(
-            mongodb_connection_string(cfg), serverSelectionTimeoutMS=5000
+        client: MongoClient = guarded_mongo_client(
+            mongodb_connection_string(cfg),
+            workspace_id=str(cfg.get("workspace_id") or ""),
+            serverSelectionTimeoutMS=5000,
         )
         try:
             client[database][table_name].delete_many({})

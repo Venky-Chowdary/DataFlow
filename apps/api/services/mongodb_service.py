@@ -15,6 +15,7 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
+
 # Callers import the terminal-status set from this module (cancel-race guard).
 from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.ops_events import emit_event
@@ -463,7 +464,7 @@ class MongoDBService:
 
     def get_client_for_connector(self, connector_id: str):
         """Build MongoClient from saved connector config (file store or platform MongoDB)."""
-        from pymongo import MongoClient
+        from connectors.mongodb_common import guarded_mongo_client
         from src.transfer.adapters import (
             _lookup_saved_connector,
             mongodb_connection_string,
@@ -473,7 +474,11 @@ class MongoDBService:
         if not connector:
             return None, None
         conn_str = mongodb_connection_string(connector)
-        return MongoClient(conn_str, serverSelectionTimeoutMS=10000), connector
+        return guarded_mongo_client(
+            conn_str,
+            workspace_id=str(connector.get("workspace_id") or ""),
+            serverSelectionTimeoutMS=10000,
+        ), connector
 
     def create_collection_from_schema(self, database: str, collection: str, schema: dict, client=None) -> dict:
         """Create a collection with optional schema validation"""

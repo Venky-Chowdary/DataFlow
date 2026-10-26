@@ -118,8 +118,19 @@ def describe_fields(cfg: dict[str, Any], object_type: str = "") -> list[dict[str
                     }
                 )
         next_page = body.get("next_page")
-        next_url = str(next_page) if next_page else None
+        next_url = _same_origin_next(str(next_page), url) if next_page else None
     return fields
+
+
+def _same_origin_next(next_page: str, first_url: str) -> str | None:
+    """Follow ``next_page`` only on the origin the first request used."""
+    from urllib.parse import urljoin, urlparse
+
+    target = urljoin(first_url, next_page)
+    a, b = urlparse(target), urlparse(first_url)
+    if (a.scheme, (a.hostname or "").lower(), a.port) != (b.scheme, (b.hostname or "").lower(), b.port):
+        raise RuntimeError("Zendesk next_page left the configured Zendesk host; refusing to follow")
+    return target
 
 
 def read_object(
