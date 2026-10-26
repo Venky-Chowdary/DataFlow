@@ -137,7 +137,7 @@
 .df2-column-profile-strip {
   font-size: 11px;
   line-height: 1.25;
-  color: var(--df2-text-muted);
+  color: var(--df-text-muted);
   font-variant-numeric: tabular-nums;
   white-space: normal;
   word-break: break-word;
@@ -665,7 +665,7 @@
   flex-wrap: wrap;
   gap: 0.35rem;
   padding: 0.5rem 1.25rem 0;
-  border-bottom: 1px solid var(--df2-border);
+  border-bottom: 1px solid var(--df-border);
 }
 
 .df2-map-stream-tab {
@@ -677,14 +677,14 @@
   font: inherit;
   font-size: 14px;
   cursor: pointer;
-  color: var(--df2-muted);
+  color: var(--df-text-muted);
 }
 
 .df2-map-stream-tab.is-active {
-  color: var(--df2-fg);
-  border-color: var(--df2-border);
-  border-bottom-color: var(--df2-bg);
-  background: var(--df2-bg);
+  color: var(--df-text-primary);
+  border-color: var(--df-border);
+  border-bottom-color: var(--df-surface);
+  background: var(--df-surface);
   font-weight: 600;
 }
 
@@ -713,7 +713,7 @@
 
 .df2-map-stream-diverge p {
   margin: 0 0 0.5rem;
-  color: var(--df2-muted);
+  color: var(--df-text-muted);
 }
 
 .df2-vd-shape {
@@ -740,7 +740,7 @@
 
 .df2-vd-shape-copy p {
   margin: 0 0 0.35rem;
-  color: var(--df2-muted);
+  color: var(--df-text-muted);
 }
 
 .df2-vd-shape-copy p:last-child {
@@ -767,7 +767,7 @@
 
 .df2-vd-callable p {
   margin: 0;
-  color: var(--df2-muted);
+  color: var(--df-text-muted);
 }
 
 .df2-map-health-banner {
@@ -1792,9 +1792,9 @@
   gap: 8px 12px;
   padding: 8px 12px;
   margin: 0 0 8px;
-  border: 1px solid var(--df2-border);
+  border: 1px solid var(--df-border);
   border-radius: 8px;
-  background: var(--df2-surface-muted);
+  background: var(--df-surface-muted);
 }
 
 .df2-map-band-actions {
@@ -1815,7 +1815,7 @@
   font-weight: 600;
   line-height: 1.3;
   background: transparent;
-  color: var(--df2-text-secondary);
+  color: var(--df-text-secondary);
   cursor: default;
 }
 
@@ -7692,8 +7692,8 @@ th.df2-type-string .df2-type-badge {
   margin-top: 8px;
   padding: 10px 12px;
   border-radius: var(--df-radius-md, 8px);
-  border: 1px solid var(--df-brand-border);
-  background: var(--df-brand-bg);
+  border: 1px solid var(--df-border-brand);
+  background: var(--df-brand-muted);
 }
 .df2-vd-xform-head {
   display: flex;
@@ -7708,7 +7708,7 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-xform-hash {
   padding: 1px 6px;
   border-radius: 999px;
-  border: 1px solid var(--df-brand-border);
+  border: 1px solid var(--df-border-brand);
   background: var(--df-surface);
   font-size: 11px;
   font-weight: 600;
@@ -7918,9 +7918,9 @@ th.df2-type-string .df2-type-badge {
 .df2-vd-scope-chip.cov-pending { background: var(--df-warning-bg); color: var(--df-warning); }
 
 .df2-vd-coerce-frame.is-collapse {
-  color: var(--df2-danger);
-  background: color-mix(in srgb, var(--df2-danger) 12%, transparent);
-  border-color: color-mix(in srgb, var(--df2-danger) 35%, transparent);
+  color: var(--df-danger);
+  background: color-mix(in srgb, var(--df-danger) 12%, transparent);
+  border-color: color-mix(in srgb, var(--df-danger) 35%, transparent);
 }
 .df2-vd-coerce-frame {
   display: inline-block;
@@ -8627,7 +8627,7 @@ th.df2-type-string .df2-type-badge {
   background: var(--df-warning-bg);
 }
 .df2-vd-decision-path.is-ready {
-  border-color: var(--df-brand-border);
+  border-color: var(--df-border-brand);
   background: var(--df-brand-muted);
 }
 .df2-vd-decision-path-head {
@@ -9857,7 +9857,7 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-vd-chip .dt-nav-icon { display: inline-flex; color: var(--df-brand); }
 .df2-vd-chip:hover:not(:disabled) {
   background: var(--df-brand-muted);
-  border-color: var(--df-brand-border);
+  border-color: var(--df-border-brand);
   box-shadow: 0 2px 8px var(--df-brand-ring);
   transform: translateY(-1px);
 }
@@ -10131,9 +10131,9 @@ button.df2-vd-assist-toggle:focus-visible {
 .df2-load-history {
   margin: 12px 0 16px;
   padding: 14px 16px;
-  border: 1px solid var(--df2-border, rgba(15, 23, 42, 0.12));
+  border: 1px solid var(--df-border, rgba(15, 23, 42, 0.12));
   border-radius: 10px;
-  background: var(--df2-surface-muted, rgba(15, 23, 42, 0.02));
+  background: var(--df-surface-muted, rgba(15, 23, 42, 0.02));
 }
 .df2-load-history.has-findings {
   border-color: rgba(180, 83, 9, 0.35);
@@ -10178,7 +10178,7 @@ button.df2-vd-assist-toggle:focus-visible {
   opacity: 0.9;
 }
 .df2-load-history-warn {
-  color: var(--df2-warn);
+  color: var(--df-warning);
 }
 .df2-load-history-runs {
   margin-top: 10px;

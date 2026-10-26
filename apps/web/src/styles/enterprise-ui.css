@@ -2342,7 +2342,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-text-warn {
-  color: var(--df-warn);
+  color: var(--df-warning);
 }
 
 .df2-jobs-v3-timeline-block h3 {
@@ -8943,7 +8943,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   gap: 0.75rem;
   padding: 0.85rem 1rem;
   margin-bottom: 0.75rem;
-  border: 1px solid color-mix(in srgb, var(--df-warn) 35%, transparent);
+  border: 1px solid color-mix(in srgb, var(--df-warning) 35%, transparent);
   border-radius: 12px;
   background: var(--df-warning-bg);
   order: -2;
@@ -9003,18 +9003,18 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding: 0.85rem 1rem;
   border-radius: 12px;
   border: 1px solid var(--df-border);
-  background: color-mix(in srgb, var(--df-surface) 92%, var(--df-bg));
+  background: color-mix(in srgb, var(--df-surface) 92%, var(--df-bg-canvas));
   margin-bottom: 0.75rem;
   order: -1;
 }
 
 .df2-freshness-slo.is-ok {
-  border-color: color-mix(in srgb, var(--df-ok) 30%, transparent);
+  border-color: color-mix(in srgb, var(--df-success) 30%, transparent);
   background: var(--df-success-bg);
 }
 
 .df2-freshness-slo.is-warn {
-  border-color: color-mix(in srgb, var(--df-warn) 35%, transparent);
+  border-color: color-mix(in srgb, var(--df-warning) 35%, transparent);
   background: var(--df-warning-bg);
 }
 
@@ -9072,12 +9072,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-trust-score.is-ok {
-  border-color: color-mix(in srgb, var(--df-ok) 35%, transparent);
+  border-color: color-mix(in srgb, var(--df-success) 35%, transparent);
   background: var(--df-success-bg);
 }
 
 .df2-trust-score.is-warn {
-  border-color: color-mix(in srgb, var(--df-warn) 35%, transparent);
+  border-color: color-mix(in srgb, var(--df-warning) 35%, transparent);
   background: var(--df-warning-bg);
 }
 
@@ -9179,12 +9179,12 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-conservation-ledger.is-ok {
-  border-color: color-mix(in srgb, var(--df-ok) 35%, transparent);
+  border-color: color-mix(in srgb, var(--df-success) 35%, transparent);
   background: var(--df-success-bg);
 }
 
 .df2-conservation-ledger.is-warn {
-  border-color: color-mix(in srgb, var(--df-warn) 35%, transparent);
+  border-color: color-mix(in srgb, var(--df-warning) 35%, transparent);
   background: var(--df-warning-bg);
 }
 
@@ -9208,7 +9208,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-conservation-ledger.is-append.is-warn {
-  border-color: color-mix(in srgb, var(--df-warn) 28%, var(--df-border));
+  border-color: color-mix(in srgb, var(--df-warning) 28%, var(--df-border));
 }
 
 .df2-conservation-ledger-head {
@@ -9316,7 +9316,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-conservation-ledger-compare article.is-warn {
-  border-color: color-mix(in srgb, var(--df-warn) 40%, transparent);
+  border-color: color-mix(in srgb, var(--df-warning) 40%, transparent);
   background: var(--df-warning-bg);
 }
 
@@ -11051,7 +11051,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-sched-history-accepted {
-  color: var(--df2-success-fg);
+  color: var(--df-success-text);
 }
 
 @media (max-width: 720px) {
@@ -11218,9 +11218,9 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   flex-direction: column;
   gap: 12px;
   padding: 16px;
-  border: 1px solid var(--df2-border);
+  border: 1px solid var(--df-border);
   border-radius: 12px;
-  background: var(--df2-surface);
+  background: var(--df-surface);
 }
 
 .df2-contract-name {
@@ -11233,7 +11233,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-contract-meta {
   margin: 4px 0 0;
   font-size: 12px;
-  color: var(--df2-muted);
+  color: var(--df-text-muted);
 }
 
 .df2-contract-actions {
@@ -12516,7 +12516,7 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   font-size: var(--df-fs-xs);
   text-transform: uppercase;
   letter-spacing: 0.03em;
-  color: var(--df-muted);
+  color: var(--df-text-muted);
 }
 
 .df2-xform-ledger .is-warn {
