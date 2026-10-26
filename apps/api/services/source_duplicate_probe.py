@@ -166,6 +166,31 @@ def _finding_value(columns: list[str], values: tuple[Any, ...]) -> Any:
     return "(" + ", ".join(parts) + ")"
 
 
+def _pk_header_indexes(
+    pk_columns: list[str], headers: list[str]
+) -> tuple[list[int], list[str]]:
+    """(positions, missing) of each pk in the payload headers.
+
+    Exact match first; a case-folded match only when unambiguous — a
+    case-folding engine (Snowflake, Oracle) stores unquoted identifiers
+    uppercased while the declared mapping keeps the typed name. Two headers
+    that fold equal (``ID`` and ``"id"``) stay ambiguous and count missing:
+    resolving there would guess at which column is the key.
+    """
+    idx: list[int] = []
+    missing: list[str] = []
+    for c in pk_columns:
+        if c in headers:
+            idx.append(headers.index(c))
+            continue
+        folded = [i for i, h in enumerate(headers) if h.casefold() == c.casefold()]
+        if len(folded) == 1:
+            idx.append(folded[0])
+        else:
+            missing.append(c)
+    return idx, missing
+
+
 def _sql_duplicates(
     cfg: dict[str, Any],
     table: str,
@@ -407,7 +432,7 @@ def _paged_payload_duplicates(
                 total = getattr(batch, "total_rows", None)
             if not rows:
                 break
-            missing = [c for c in pk_columns if c not in headers]
+            idx, missing = _pk_header_indexes(pk_columns, headers)
             if missing:
                 # The key is not in the payload at all: that is a mapping question,
                 # not a duplicate one, and inventing "unique" here would green a
@@ -415,10 +440,11 @@ def _paged_payload_duplicates(
                 raise ValueError(
                     f"identity column(s) {', '.join(missing)} are not present in {key}"
                 )
-            idx = [headers.index(c) for c in pk_columns]
             for row in rows:
                 if isinstance(row, dict):
-                    vals = tuple(_normalize_key_cell(row.get(c)) for c in pk_columns)
+                    vals = tuple(
+                        _normalize_key_cell(row.get(headers[i])) for i in idx
+                    )
                 else:
                     vals = tuple(
                         _normalize_key_cell(row[i] if i < len(row) else None) for i in idx
@@ -602,12 +628,11 @@ def _dynamodb_duplicates(
 
     batch = read_all_paginated(cfg, table, limit=_PAYLOAD_SCAN_CAP)
     headers = [str(h) for h in (batch.headers or [])]
-    missing = [c for c in pk_columns if c not in headers]
+    idx, missing = _pk_header_indexes(pk_columns, headers)
     if missing:
         raise ValueError(
             f"identity column(s) {', '.join(missing)} are not present in {table}"
         )
-    idx = [headers.index(c) for c in pk_columns]
     counts: Counter[tuple[str, ...]] = Counter()
     for row in batch.rows or []:
         counts[
@@ -662,13 +687,12 @@ def _redis_duplicates(
         rows = list(batch.rows or [])
         if rows and not idx:
             headers = [str(h) for h in (batch.headers or [])]
-            missing = [c for c in pk_columns if c not in headers]
+            idx, missing = _pk_header_indexes(pk_columns, headers)
             if missing:
                 raise ValueError(
                     f"identity column(s) {', '.join(missing)} are not present "
                     f"in Redis keyspace {pattern}"
                 )
-            idx = [headers.index(c) for c in pk_columns]
         for row in rows:
             counts[
                 tuple(_normalize_key_cell(row[i] if i < len(row) else None) for i in idx)
