@@ -2738,6 +2738,8 @@ def _covered_keyed_noop_verify(
 
     if is_callable_source(source_endpoint):
         return None
+    from .connector_capabilities import resolve_driver_type
+
     src_type = resolve_driver_type(source_endpoint.format)
     src_cfg = resolve_connector_config(source_endpoint)
     dest_cfg = resolve_connector_config(endpoint)
