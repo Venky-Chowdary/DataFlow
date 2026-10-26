@@ -22,6 +22,7 @@ from services.team_store import (
     can_write_workspace,
     get_workspace,
 )
+from services.workspace_access import tenant_scope
 from services.tenant_store import (
     Tenant,
     create_tenant,
@@ -142,15 +143,12 @@ def _can_admin_workspace(request: Request, workspace_id: str) -> bool:
 
 
 def _is_platform_admin(request: Request) -> bool:
-    """Whether the caller holds the platform ``admin`` role (any workspace)."""
-    from src.services import auth_service
+    """Platform admin (or the single operator of an auth-disabled deployment):
+    the tenant scope's "unrestricted" actor, so an admin-role API key counts
+    only when an admin minted it."""
+    from services.tenant_scope import actor_is_unrestricted
 
-    if not auth_service.auth_required():
-        return True
-    from services.rbac import normalize_role
-
-    user = getattr(request.state, "user", None)
-    return isinstance(user, dict) and normalize_role(user.get("role")) == "admin"
+    return actor_is_unrestricted(getattr(request.state, "user", None))
 
 
 def _require_tenant_admin(request: Request, workspace_id: str) -> None:
@@ -164,6 +162,10 @@ def _require_tenant_admin(request: Request, workspace_id: str) -> None:
             status_code=403,
             detail="Platform admin required for a tenant not bound to a workspace",
         )
+
+
+def _named_workspace_id(request: Request) -> str:
+    return (request.headers.get("x-workspace-id") or "").strip()
 
 
 @router.get("/settings")
@@ -439,6 +441,8 @@ async def delete_api_key(key_id: str, request: Request):
 
 @router.get("/workspaces/{workspace_id}")
 async def get_workspace_by_id(workspace_id: str, request: Request):
+    if not _can_admin_workspace(request, workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
     ws = get_workspace(workspace_id)
     if not ws:
         raise HTTPException(status_code=404, detail="Workspace not found")
@@ -466,12 +470,21 @@ class NotificationChannelUpdate(BaseModel):
 
 @router.get("/notifications")
 async def get_notifications(workspace_id: str | None = None, request: Request = None):
-    actor = _actor(request) if request else "anonymous"
-    if workspace_id and not can_read_workspace(workspace_id, actor):
-        raise HTTPException(status_code=403, detail="Workspace access denied")
+    # The request's tenant scope decides which workspace this lists (D154): the
+    # named one (403 unless the caller is in it), else the header / own workspace.
+    # Unscoped channels are deployment-wide, so only an unrestricted actor reads them.
+    scope = tenant_scope(request)
+    if workspace_id and workspace_id.strip():
+        scope = scope.narrowed(workspace_id)
+    workspace_id = scope.workspace_id
+    if not workspace_id and not scope.unrestricted:
+        raise HTTPException(
+            status_code=403,
+            detail="Name a workspace to list its notification channels",
+        )
     from services.notification_store import list_channels
 
-    channels = list_channels(workspace_id=workspace_id or "")
+    channels = list_channels(workspace_id=workspace_id)
     return {"channels": [c.to_dict() for c in channels]}
 
 
@@ -567,9 +580,26 @@ def _resolve_request_tenant(request: Request, workspace_id: str | None = None):
     return get_tenant_for_workspace(ws) if ws else None
 
 
+def _authorized_request_tenant(request: Request):
+    """The request's tenant, only when the caller administers its workspace.
+
+    The tenant comes from the custom domain or the ``X-Workspace-Id`` header,
+    both caller-controlled, so the workspace it belongs to is checked here
+    rather than trusted. A tenant bound to no workspace is platform-admin only.
+    """
+    tenant = _resolve_request_tenant(request)
+    if tenant is not None:
+        _require_tenant_admin(request, tenant.workspace_id)
+    else:
+        named = _named_workspace_id(request)
+        if named and not _can_admin_workspace(request, named):
+            raise HTTPException(status_code=403, detail="Workspace admin required")
+    return tenant
+
+
 @router.get("/tenant")
 async def get_current_tenant(request: Request):
-    tenant = _resolve_request_tenant(request)
+    tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured for this workspace or domain")
     return tenant.to_dict()
@@ -703,7 +733,7 @@ async def delete_tenant_route(tenant_id: str, request: Request):
 
 @router.get("/tenant/byok-keys")
 async def get_tenant_byok_keys(request: Request):
-    tenant = _resolve_request_tenant(request)
+    tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
     return {"keys": [public_key_dict(k) for k in list_keys(tenant.id)]}
@@ -711,10 +741,9 @@ async def get_tenant_byok_keys(request: Request):
 
 @router.post("/tenant/byok-keys")
 async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
-    tenant = _resolve_request_tenant(request)
+    tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
-    _require_tenant_admin(request, tenant.workspace_id)
     try:
         key = create_key(
             tenant_id=tenant.id,
@@ -743,10 +772,9 @@ async def post_tenant_byok_key(request: Request, body: BYOKKeyCreateBody):
 
 @router.post("/tenant/byok-keys/{key_id}/rotate")
 async def rotate_tenant_byok_key(key_id: str, request: Request):
-    tenant = _resolve_request_tenant(request)
+    tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured")
-    _require_tenant_admin(request, tenant.workspace_id)
     key = get_key(key_id)
     if not key or key.tenant_id != tenant.id:
         raise HTTPException(status_code=404, detail="Key not found")
@@ -906,7 +934,7 @@ async def get_security_posture(request: Request):
     """
     from fastapi.encoders import jsonable_encoder
 
-    tenant = _resolve_request_tenant(request)
+    tenant = _authorized_request_tenant(request)
     body = _security_posture(tenant)
     named = (request.headers.get("x-workspace-id") or "").strip() or str(
         getattr(request.state, "tenant_workspace_id", "") or ""
@@ -923,7 +951,7 @@ async def get_security_posture(request: Request):
 @router.get("/security/report")
 async def get_security_report(request: Request):
     """Return a downloadable, human-readable compliance report for the tenant."""
-    tenant = _resolve_request_tenant(request)
+    tenant = _authorized_request_tenant(request)
     posture = _security_posture(tenant)
 
     lines = [
