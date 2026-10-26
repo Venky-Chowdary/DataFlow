@@ -217,11 +217,19 @@ def _delimited_concat(existing: bytes, new: bytes) -> bytes | None:
 
 
 def _first_line(body: bytes) -> tuple[bytes, bytes]:
-    text = body.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
-    nl = text.find(b"\n")
-    if nl < 0:
-        return text, b""
-    return text[:nl], text[nl + 1 :]
+    # Split at the first line terminator (LF, CRLF, or bare CR) WITHOUT
+    # rewriting the rest — the returned tail is appended to the object
+    # byte-for-byte, and a quoted CSV field may legally carry CR (D108).
+    n = len(body)
+    nl = body.find(b"\n")
+    cr = body.find(b"\r")
+    if nl < 0 and cr < 0:
+        return body, b""
+    if nl >= 0 and (cr < 0 or nl < cr):
+        return body[:nl], body[nl + 1 :]
+    if cr + 1 < n and body[cr + 1 : cr + 2] == b"\n":
+        return body[:cr], body[cr + 2 :]
+    return body[:cr], body[cr + 1 :]
 
 
 def _merge_by_key(
@@ -337,7 +345,9 @@ def _parse_delimited(body: bytes, delimiter: str, key: str) -> list[dict[str, An
     from services.value_serializer import SQL_NULL_SENTINEL, unescape_wire_text
 
     text = body.decode("utf-8-sig")
-    reader = iter_csv_records(io.StringIO(text), delimiter)
+    # newline="" — the csv module requires it; the default universal-newlines
+    # mode would fold CR/CRLF inside quoted fields to LF on read (D108).
+    reader = iter_csv_records(io.StringIO(text, newline=""), delimiter)
     header = next(reader, None)
     if not header:
         raise ObjectMergeRefused(
