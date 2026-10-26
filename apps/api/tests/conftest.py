@@ -369,6 +369,7 @@ _SUITE_DATA_DIR = Path(os.environ["DATAFLOW_DATA_DIR"]).resolve()
 _DEV_DATA_DIR = (_api_root / "data").resolve()
 _PATH_ATTR_HINTS = ("PATH", "DIR", "STORE", "FILE", "LEDGER", "REGISTRY", "DB")
 _TRACKED_ASSETS: set[Path] | None = None
+_MODULE_DATA_DIRS: dict[str, Path] = {}
 
 
 def _tracked_data_assets() -> set[Path]:
@@ -430,46 +431,71 @@ def _rebind_import_time_store_paths(monkeypatch, per_test_dir: Path) -> None:
                 break
 
 
+@pytest.fixture(scope="module", autouse=True)
+def _isolate_module_data_dir(tmp_path_factory, request):
+    """Keep module-scoped fixture state out of the developer's data dir.
+
+    Runs BEFORE any module-scoped fixture in the test file (autouse module
+    fixtures instantiate first), so a live seed like ``live_orders`` or the
+    studio/adls connector fixtures writes under the module's tmp dir — the
+    same dir the function-scoped fixture below points every test at.
+    """
+    stem = request.module.__name__.rsplit(".", 1)[-1]
+    module_dir = _MODULE_DATA_DIRS.get(stem)
+    if module_dir is None:
+        module_dir = tmp_path_factory.mktemp("dw-data-" + stem, numbered=False)
+        _MODULE_DATA_DIRS[stem] = module_dir
+    mp = pytest.MonkeyPatch()
+    mp.delenv("DATAWRAP_DATA_DIR", raising=False)
+    mp.setenv("DATAFLOW_DATA_DIR", str(module_dir))
+    _rebind_import_time_store_paths(mp, module_dir)
+    try:
+        yield module_dir
+    finally:
+        mp.undo()
+
+
 @pytest.fixture(autouse=True)
-def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
+def _isolate_file_backed_test_stores(monkeypatch, _isolate_module_data_dir, request):
     """Keep test persistence out of the developer's default data directory."""
     # The master dial: every store that resolves ``platform_config.data_dir()``
-    # (users, challenges, resets, workspaces, quota, ...) lands in a per-test
-    # tmp dir, so no test can touch apps/api/data or another test's state.
+    # (users, challenges, resets, workspaces, quota, ...) lands in a per-module
+    # tmp dir (set by _isolate_module_data_dir so module-scoped fixtures land
+    # there too), so no test can touch apps/api/data or another file's state.
     # Drop DATAWRAP_DATA_DIR (the higher-priority brand var) and set the
     # fallback DATAFLOW_DATA_DIR instead, so a test that monkeypatches either
     # variable to point at its own directory is never shadowed by this one.
+    module_dir = _isolate_module_data_dir
     monkeypatch.delenv("DATAWRAP_DATA_DIR", raising=False)
-    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "dw-data"))
-    _rebind_import_time_store_paths(monkeypatch, tmp_path / "dw-data")
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(module_dir))
     from services import audit_log, auth_sessions, mcp_invocation_log
 
     monkeypatch.setattr(
-        audit_log, "STORE_PATH", tmp_path / "audit_events.jsonl"
+        audit_log, "STORE_PATH", module_dir / "audit_events.jsonl"
     )
     monkeypatch.setattr(
-        auth_sessions, "_path", lambda: tmp_path / "auth_sessions.json"
+        auth_sessions, "_path", lambda: module_dir / "auth_sessions.json"
     )
     monkeypatch.setenv(
         "DATAFLOW_AUDIT_ANCHOR_STORE",
-        str(tmp_path / "audit_tip_anchors.jsonl"),
+        str(module_dir / "audit_tip_anchors.jsonl"),
     )
     monkeypatch.setattr(
-        mcp_invocation_log, "STORE_PATH", tmp_path / "mcp_invocations.jsonl"
+        mcp_invocation_log, "STORE_PATH", module_dir / "mcp_invocations.jsonl"
     )
     from services import append_continuity
 
-    monkeypatch.setattr(append_continuity, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(append_continuity, "data_dir", lambda: module_dir)
     monkeypatch.setattr(append_continuity, "_collection", lambda: None)
 
-    # Signup feature stores — file fallbacks land in tmp_path per test.
+    # Signup feature stores — file fallbacks land in module_dir (shared per file).
     from services import denylist_store, org_store, signup_store
 
-    monkeypatch.setattr(org_store, "_orgs_path", lambda: tmp_path / "organizations.json")
-    monkeypatch.setattr(org_store, "_plans_path", lambda: tmp_path / "plan_entitlements.json")
-    monkeypatch.setattr(signup_store, "_pending_path", lambda: tmp_path / "pending_signups.json")
-    monkeypatch.setattr(signup_store, "_challenges_path", lambda: tmp_path / "otp_challenges.json")
-    monkeypatch.setattr(denylist_store, "_path", lambda: tmp_path / "email_denylist.json")
+    monkeypatch.setattr(org_store, "_orgs_path", lambda: module_dir / "organizations.json")
+    monkeypatch.setattr(org_store, "_plans_path", lambda: module_dir / "plan_entitlements.json")
+    monkeypatch.setattr(signup_store, "_pending_path", lambda: module_dir / "pending_signups.json")
+    monkeypatch.setattr(signup_store, "_challenges_path", lambda: module_dir / "otp_challenges.json")
+    monkeypatch.setattr(denylist_store, "_path", lambda: module_dir / "email_denylist.json")
 
     test_name = request.node.path.name
     if test_name.startswith("test_mcp"):
@@ -477,34 +503,34 @@ def _isolate_file_backed_test_stores(monkeypatch, tmp_path, request):
         from src.ai.copilot import result_store
 
         monkeypatch.setenv(
-            "DATAFLOW_CONTRACTS_PATH", str(tmp_path / "contracts.json")
+            "DATAFLOW_CONTRACTS_PATH", str(module_dir / "contracts.json")
         )
         monkeypatch.setattr(contract_store, "_store_instance", None)
         monkeypatch.setenv(
-            "DATAFLOW_PILOT_RESULTS_PATH", str(tmp_path / "pilot_results.json")
+            "DATAFLOW_PILOT_RESULTS_PATH", str(module_dir / "pilot_results.json")
         )
         monkeypatch.setattr(result_store, "_store", None)
         monkeypatch.setattr(
-            preflight_run_store, "STORE_PATH", tmp_path / "preflight_runs.jsonl"
+            preflight_run_store, "STORE_PATH", module_dir / "preflight_runs.jsonl"
         )
         monkeypatch.setenv(
-            "DATAFLOW_QUALITY_PROFILES_DIR", str(tmp_path / "quality_profiles")
+            "DATAFLOW_QUALITY_PROFILES_DIR", str(module_dir / "quality_profiles")
         )
         monkeypatch.setattr(
             schema_registry,
             "_SCHEMAS_PATH",
-            tmp_path / "schema_registry_schemas.json",
+            module_dir / "schema_registry_schemas.json",
         )
         monkeypatch.setattr(
             schema_registry,
             "_LINEAGE_PATH",
-            tmp_path / "schema_registry_lineage.json",
+            module_dir / "schema_registry_lineage.json",
         )
 
     if test_name.startswith(("test_mcp", "test_scim")):
         from services import team_store
 
-        monkeypatch.setattr(team_store, "data_dir", lambda: tmp_path)
+        monkeypatch.setattr(team_store, "data_dir", lambda: module_dir)
 
 
 @pytest.fixture(autouse=True)
