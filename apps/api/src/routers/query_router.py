@@ -353,7 +353,10 @@ class QueryExecuteRequest(BaseModel):
 
 class QueryExportRequest(QueryExecuteRequest):
     format: str = Field("csv", description="csv, json, jsonl, tsv, excel, parquet")
-    output_path: str = Field("", description="Optional server-local path; empty uses exports folder")
+    output_path: str = Field(
+        "",
+        description="Optional file name inside the server exports folder; empty generates one",
+    )
     destination_connector_id: str = Field("", description="Optional saved connector to write results to instead of a file")
     destination: str = Field("", description="Target table, collection, or object name for destination_connector_id")
     sync_mode: str = Field(
@@ -558,20 +561,22 @@ async def query_export(
         import uuid
         from pathlib import Path
 
-        api_root = Path(__file__).resolve().parents[2]
+        from services.export_paths import (
+            ExportPathError,
+            generated_export_path,
+            resolve_export_path,
+        )
+
         ext = Path(export_name).suffix.lstrip(".") or body.format
-        if body.output_path:
-            out_path = (api_root / body.output_path).resolve()
-            if not str(out_path).startswith(str(api_root)):
-                raise HTTPException(status_code=400, detail="Output path must be inside the application workspace")
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            final_path = out_path
-            filename = out_path.name
-        else:
-            export_dir = api_root / "exports"
-            export_dir.mkdir(parents=True, exist_ok=True)
-            filename = f"query_{uuid.uuid4().hex[:16]}.{ext}"
-            final_path = export_dir / filename
+        try:
+            if body.output_path.strip():
+                final_path = resolve_export_path(body.output_path, default_ext=ext)
+            else:
+                final_path = generated_export_path(f"query_{uuid.uuid4().hex[:16]}.{ext}")
+        except ExportPathError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        filename = final_path.name
 
         final_path.write_bytes(export_bytes)
         return QueryExportResult(
@@ -582,6 +587,8 @@ async def query_export(
             row_count=len(rows),
             format=body.format,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         detail, _cid = public_error(
             exc,

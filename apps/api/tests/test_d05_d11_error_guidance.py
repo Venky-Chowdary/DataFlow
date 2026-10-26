@@ -29,14 +29,14 @@ def test_d06_unknown_schema_policy_names_valid_values():
     assert "propagate_columns" in issues
 
 
-def test_d09_export_error_names_workspace_root():
+def test_d09_export_error_names_exports_root():
     from services.file_export_append import land_export_bytes
 
     class _Dest:
         output_path = "/tmp/outside.csv"
         format = "csv"
 
-    with pytest.raises(ValueError, match="application workspace") as err:
+    with pytest.raises(ValueError, match="exports folder") as err:
         land_export_bytes(
             _Dest(),
             b"a,b\n",
@@ -44,9 +44,9 @@ def test_d09_export_error_names_workspace_root():
             sync_mode="full_refresh_overwrite",
             export_name="x.csv",
         )
-    # Names the allowed root (the API working directory), not just the rule.
-    assert "/" in str(err.value)
-    assert "inside the application workspace (" in str(err.value)
+    # Names the allowed root and an example, not just the rule.
+    assert "inside the server exports folder (exports/)" in str(err.value)
+    assert "orders.csv" in str(err.value)
 
 
 def test_d11_invalid_interval_names_cron_option():
