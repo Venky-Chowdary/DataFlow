@@ -179,7 +179,7 @@
   "POST /api/v1/ai/detect-pii": "ai.use",
   "POST /api/v1/ai/map": "ai.use",
   "POST /api/v1/ai/map/enhanced": "ai.use",
-  "POST /api/v1/ai/rag/ingest": "ai.use",
+  "POST /api/v1/ai/rag/ingest": "workspace.manage",
   "POST /api/v1/ai/rag/query": "ai.use",
   "POST /api/v1/ai/suggest/transforms": "ai.use",
   "POST /api/v1/ai/vector-routing": "ai.use",
