@@ -733,7 +733,7 @@ def test_pg_mysql_incremental_deduped_copy_delta_and_watermark():
         )
         assert third == 0
         assert summary3.get("source_row_count") == 0
-        assert get_watermark(cursor_key) == stored
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         with my.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             assert int(cur.fetchone()[0]) == 4
@@ -918,7 +918,7 @@ def test_mysql_pg_incremental_deduped_copy_delta_and_watermark():
         )
         assert third == 0
         assert summary3.get("source_row_count") == 0
-        assert get_watermark(cursor_key) == stored
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             assert int(cur.fetchone()[0]) == 4
@@ -1347,7 +1347,7 @@ def test_mysql_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
         )
         assert third == 0
         assert summary3.get("source_row_count") == 0
-        assert get_watermark(cursor_key) == stored
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         dest = sqlite3.connect(dst_path)
         try:
             assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
@@ -1544,7 +1544,7 @@ def test_pg_sqlite_incremental_deduped_copy_delta_and_watermark(tmp_path):
         # they merge back by key as no-ops — nothing new is written.
         assert third == 2
         assert summary3.get("source_row_count") == 2
-        assert get_watermark(cursor_key) == stored
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         dest = sqlite3.connect(dst_path)
         try:
             assert int(dest.execute(f'SELECT COUNT(*) FROM "{dst}"').fetchone()[0]) == 4
@@ -1740,7 +1740,7 @@ def test_sqlite_pg_incremental_deduped_copy_delta_and_watermark(tmp_path):
         # they merge back by key as no-ops — nothing new is written.
         assert third == 2
         assert summary3.get("source_row_count") == 2
-        assert get_watermark(cursor_key) == stored
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         with pg.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             assert int(cur.fetchone()[0]) == 4
@@ -2352,7 +2352,7 @@ def test_pg_pg_incremental_deduped_copy_delta_and_watermark():
         # they merge back by key as no-ops — nothing new is written.
         assert third == 2
         assert summary3.get("source_row_count") == 2
-        assert get_watermark(cursor_key) == stored
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         with conn.cursor() as cur:
             cur.execute(f'SELECT COUNT(*) FROM "{dst}"')
             assert int(cur.fetchone()[0]) == 4
@@ -2459,7 +2459,7 @@ def test_mysql_mysql_incremental_deduped_copy_delta_and_watermark():
         )
         assert third == 0
         assert summary3.get("source_row_count") == 0
-        assert get_watermark(cursor_key) == stored
+        assert get_watermark(str(summary2.get("cursor_key") or "")) == stored
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM `{dst}`")
             assert int(cur.fetchone()[0]) == 4
