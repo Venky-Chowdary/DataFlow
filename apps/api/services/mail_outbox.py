@@ -31,6 +31,7 @@ _KEEP_SENT_FOR = timedelta(days=7)
 # than the delivery needs it.
 _TERMINAL = ("sent", "failed", "expired", "superseded")
 _BODY_KEYS = ("text", "html", "text_enc", "html_enc", "enc")
+_LEASE_SEC = 60
 
 
 def _seal(plain: str) -> str:
@@ -144,10 +145,74 @@ def queued() -> list[dict[str, Any]]:
             if r.get("status") == "queued"]
 
 
+def _due_clause(now: str) -> dict[str, Any]:
+    """A queued row is due when it has no backoff gate, or it has passed."""
+    return {"$or": [{"next_attempt_at": {"$exists": False}},
+                    {"next_attempt_at": None},
+                    {"next_attempt_at": {"$lte": now}}]}
+
+
+def _claimable() -> list[dict[str, Any]]:
+    """queued-and-due rows plus 'sending' rows whose lease expired —
+    the only rows a drain or delivery may try to claim."""
+    now = _now_iso()
+    db = _database()
+    if db is not None:
+        docs = db[COLLECTION].find({"$or": [
+            {"status": "queued", **_due_clause(now)},
+            {"status": "sending", "lease_until": {"$lte": now}},
+        ]})
+        return [{k: v for k, v in r.items() if k != "_id"} for r in docs]
+    doc = load_json_doc(_path(), {"rows": {}})
+    out = []
+    for row in doc.get("rows", {}).values():
+        status = row.get("status")
+        due = str(row.get("next_attempt_at") or "") <= now
+        stale = status == "sending" and str(row.get("lease_until") or "") <= now
+        if (status == "queued" and due) or stale:
+            out.append(row)
+    return out
+
+
+def claim(row_id: str, *, lease_sec: int = _LEASE_SEC) -> bool:
+    """Atomically move a due 'queued' row (or an expired 'sending' lease)
+    to 'sending'. Exactly one caller across every replica wins — this is
+    what makes two concurrent drains produce one send per row."""
+    now = datetime.now(UTC)
+    now_s = now.isoformat()
+    until = (now + timedelta(seconds=lease_sec)).isoformat()
+    db = _database()
+    if db is not None:
+        from pymongo import ReturnDocument
+
+        doc = db[COLLECTION].find_one_and_update(
+            {"_id": row_id, "$or": [
+                {"status": "queued", **_due_clause(now_s)},
+                {"status": "sending", "lease_until": {"$lte": now_s}},
+            ]},
+            {"$set": {"status": "sending", "claimed_at": now_s,
+                      "lease_until": until}},
+            return_document=ReturnDocument.AFTER)
+        return doc is not None
+    claimed = False
+    with json_doc_transaction(_path(), {"rows": {}}) as doc:
+        row = doc.setdefault("rows", {}).get(row_id)
+        if row is not None:
+            due = str(row.get("next_attempt_at") or "") <= now_s
+            stale = (row.get("status") == "sending"
+                     and str(row.get("lease_until") or "") <= now_s)
+            if (row.get("status") == "queued" and due) or stale:
+                row["status"] = "sending"
+                row["claimed_at"] = now_s
+                row["lease_until"] = until
+                claimed = True
+    return claimed
+
+
 def counts() -> dict[str, int]:
     """Status histogram for admin metrics — surfaces 'queued but never
     sent' explicitly."""
-    out = {"queued": 0, "sent": 0, "failed": 0,
+    out = {"queued": 0, "sending": 0, "sent": 0, "failed": 0,
            "expired": 0, "superseded": 0}
     db = _database()
     if db is not None:
@@ -175,7 +240,7 @@ def drain_queued(submit, *, skip_reason=None) -> int:
     request. Such rows are marked, never sent, and counted in metrics."""
     submitted = 0
     skipped = 0
-    for row in queued():
+    for row in _claimable():
         if skip_reason is not None:
             try:
                 reason = skip_reason(row)

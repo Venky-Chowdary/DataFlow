@@ -188,6 +188,10 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
     forbidden. The reply never reveals it (enumeration parity); a fresh
     link can be requested right away (each new issue supersedes the token).
     """
+    if not mail_outbox.claim(row["id"]):
+        # Another replica claimed this row first (concurrent drain) or it is
+        # already terminal — exactly one send per row, no double send.
+        return
     try:
         consume_send_slot()
         payload = mail_outbox.body(row)  # sealed at rest, decrypted on send

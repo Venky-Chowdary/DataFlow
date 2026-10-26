@@ -714,3 +714,61 @@ def test_drain_marks_expired_reset_links(monkeypatch, tmp_path):
     assert len(ConsoleEmailSender.OUTBOX) == before  # nothing sent
     cts = mail_outbox.counts()
     assert cts["expired"] == 1 and cts["queued"] == 0, cts
+
+
+def test_concurrent_drains_send_each_row_once(monkeypatch, tmp_path):
+    """Item 3 (multi-replica): two drains racing the same queued row must
+    produce exactly one send — the queued->sending claim is atomic."""
+    import threading
+    from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
+    # Fresh send quota — earlier tests in this module already consumed slots.
+    from services import email_quota
+    email_quota._reset_backends()
+
+    c = _client()
+    _verified_user(c)
+    assert _forgot(c).status_code == 202
+    rows = mail_outbox.queued()
+    assert len(rows) == 1
+
+    sends = []
+    lock = threading.Lock()
+
+    def deliver(r):
+        signup_service._deliver_outbox_row(r)
+
+    # Two "replicas" racing the same row through the real claim path.
+    before = len(ConsoleEmailSender.OUTBOX)
+    t1 = threading.Thread(target=deliver, args=(rows[0],))
+    t2 = threading.Thread(target=deliver, args=(rows[0],))
+    t1.start(); t2.start(); t1.join(); t2.join()
+
+    # Exactly one send total (both threads raced; claim admitted one).
+    assert len(ConsoleEmailSender.OUTBOX) == before + 1
+    cts = mail_outbox.counts()
+    assert cts["sent"] == 1 and cts["queued"] == 0 and cts["sending"] == 0, cts
+
+
+def test_stale_lease_is_reclaimed(monkeypatch, tmp_path):
+    """A row stuck 'sending' past its lease (replica died mid-send) becomes
+    claimable again so the next drain can finish it."""
+    import json
+    from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+
+    row = mail_outbox.enqueue(
+        to="a@x.io", subject="s", text="t", html="h",
+        idempotency_key="k", purpose="password.reset")
+    assert mail_outbox.claim(row["id"]) is True
+    # Second immediate claim loses (live lease).
+    assert mail_outbox.claim(row["id"]) is False
+    # Expire the lease in place — simulates a dead replica.
+    f = tmp_path / "mail_outbox.json"
+    doc = json.loads(f.read_text())
+    doc["rows"][row["id"]]["lease_until"] = "2000-01-01T00:00:00+00:00"
+    f.write_text(json.dumps(doc))
+    assert mail_outbox.claim(row["id"]) is True
