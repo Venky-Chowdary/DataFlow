@@ -190,9 +190,10 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
     """
     try:
         consume_send_slot()
+        payload = mail_outbox.body(row)  # sealed at rest, decrypted on send
         get_email_sender().send(OutboundEmail(
-            to=row["to"], subject=row["subject"], text=row["text"],
-            html=row.get("html") or "",
+            to=row["to"], subject=row["subject"], text=payload["text"],
+            html=payload["html"],
             idempotency_key=row["idempotency_key"]))
         mail_outbox.mark(row["id"], "sent")
         record_security_event("password.reset.sent", outcome="succeeded",

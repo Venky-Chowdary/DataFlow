@@ -27,6 +27,39 @@ logger = logging.getLogger(__name__)
 COLLECTION = "mail_outbox"
 _FILE = "mail_outbox.json"
 _KEEP_SENT_FOR = timedelta(days=7)
+# Terminal statuses drop the body — nothing readable stays at rest longer
+# than the delivery needs it.
+_TERMINAL = ("sent", "failed", "expired", "superseded")
+_BODY_KEYS = ("text", "html", "text_enc", "html_enc", "enc")
+
+
+def _seal(plain: str) -> str:
+    """Encrypt a rendered body with the platform secret vault — reset links
+    and OTP codes must never sit at rest in plaintext (the reset store keeps
+    only the token's HMAC; the outbox must not undo that)."""
+    from services.secret_vault import _get_vault
+
+    return _get_vault().encrypt(plain or "")
+
+
+def _unseal(stored: str) -> str:
+    if not stored:
+        return ""
+    from services.secret_vault import _get_vault
+
+    return _get_vault().decrypt(stored)
+
+
+def body(row: dict[str, Any]) -> dict[str, str]:
+    """Decrypted ``{'text','html'}`` for delivery. Rows written before
+    sealing still carry plaintext ``text``/``html`` — read them so an
+    in-flight queue from the previous deploy still drains."""
+    if row.get("enc"):
+        return {
+            "text": _unseal(row.get("text_enc", "")),
+            "html": _unseal(row.get("html_enc", "")),
+        }
+    return {"text": row.get("text") or "", "html": row.get("html") or ""}
 
 
 def _database():
@@ -61,8 +94,9 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
         "purpose": purpose,
         "to": to,
         "subject": subject,
-        "text": text,
-        "html": html,
+        "text_enc": _seal(text),
+        "html_enc": _seal(html),
+        "enc": "secret_vault",
         "idempotency_key": idempotency_key,
         "status": "queued",
         "created_at": _now_iso(),
@@ -79,18 +113,24 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
 
 
 def mark(row_id: str, status: str) -> None:
-    """Record the terminal status (``sent`` | ``failed``) for a row."""
+    """Record the terminal status (``sent`` | ``failed`` | ``expired`` |
+    ``superseded``) for a row; terminal rows lose the body entirely."""
     db = _database()
     if db is not None:
-        db[COLLECTION].update_one(
-            {"_id": row_id},
-            {"$set": {"status": status, "finished_at": _now_iso()}})
+        update: dict[str, Any] = {
+            "$set": {"status": status, "finished_at": _now_iso()}}
+        if status in _TERMINAL:
+            update["$unset"] = {k: "" for k in _BODY_KEYS}
+        db[COLLECTION].update_one({"_id": row_id}, update)
         return
     with json_doc_transaction(_path(), {"rows": {}}) as doc:
         row = doc.setdefault("rows", {}).get(row_id)
         if row is not None:
             row["status"] = status
             row["finished_at"] = _now_iso()
+            if status in _TERMINAL:
+                for k in _BODY_KEYS:
+                    row.pop(k, None)
 
 
 def queued() -> list[dict[str, Any]]:

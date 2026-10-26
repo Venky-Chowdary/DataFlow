@@ -614,3 +614,51 @@ def test_outbox_row_marked_failed_on_send_error(monkeypatch, tmp_path):
     cts = mail_outbox.counts()
     assert cts["queued"] == 0 and cts["failed"] == 1, cts
     assert any(e == "password.reset.send_failed" for e, _ in events)
+
+
+def test_outbox_never_stores_the_raw_token(monkeypatch, tmp_path):
+    """Item 1 (security): the reset link contains the raw token; persisting the
+    rendered body in mail_outbox.json/Mongo would undo the HMAC-only design.
+    At rest the body is vault-sealed, and a terminal mark drops it entirely."""
+    import json
+    from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
+
+    c = _client()
+    _verified_user(c)
+    sent_before = len(ConsoleEmailSender.OUTBOX)
+    r = _forgot(c)
+    assert r.status_code == 202
+
+    # The delivered mail carries the link; the stored row must not.
+    assert len(ConsoleEmailSender.OUTBOX) == sent_before + 1
+    mail = ConsoleEmailSender.OUTBOX[-1]
+    token = mail.text.split("#token=", 1)[-1].split()[0].rstrip(".)")
+    assert len(token) >= 32
+
+    store_file = tmp_path / "mail_outbox.json"
+    raw = store_file.read_text() if store_file.exists() else ""
+    assert token not in raw
+    doc = json.loads(raw)
+    rows = doc.get("rows", {})
+    assert rows, "outbox row expected"
+    row = next(iter(rows.values()))
+    assert row["status"] == "sent"
+    # Terminal row: no body fields at all — nothing left at rest.
+    for key in ("text", "html", "text_enc", "html_enc", "enc"):
+        assert key not in row
+
+    # A still-queued row keeps only ciphertext.
+    monkeypatch.setattr(signup_service, "_deliver_later", lambda fn: None)
+    r2 = _forgot(c, email="ada@example.com")
+    assert r2.status_code == 202
+    raw2 = store_file.read_text()
+    assert token not in raw2
+    queued_rows = [v for v in json.loads(raw2)["rows"].values()
+                   if v.get("status") == "queued"]
+    assert queued_rows
+    for q in queued_rows:
+        assert q.get("enc") == "secret_vault"
+        token_q = q.get("text") or q.get("html")
+        assert token_q is None  # no plaintext body fields on the row
