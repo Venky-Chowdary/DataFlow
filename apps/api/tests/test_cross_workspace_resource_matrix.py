@@ -44,9 +44,6 @@ SKIPPED_WITH_REASON = {
     "filename": "Download filenames address generated artifacts, not owned resources.",
 }
 ALLOWLISTED_WITH_REASON = {
-    ("GET", "/api/v1/workspace/workspaces/{workspace_id}"): (
-        "Workspace detail is guarded by the global workspace.manage RBAC permission."
-    ),
     ("GET", "/api/v1/catalog/connectors/{connector_id}"): (
         "Global connector catalog metadata; this is not a saved workspace connector."
     ),
