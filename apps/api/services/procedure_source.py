@@ -146,10 +146,33 @@ def leading_statement_kind(text: str) -> str:
     return ""
 
 
+# Leaf-name prefixes of SQL Server system procedures that are admin calls or
+# run their own string arguments as SQL. String literals are masked before the
+# deny-token scan, so a procedure that evaluates its argument would otherwise
+# carry arbitrary SQL past it (``EXEC sp_msforeachtable @command1 = '…'``).
 _DENIED_NAME_PREFIXES = (
     "xp_",
     "sp_configure",
-    "sp_executesql",
+    "sp_execute",
+    "sp_sqlexec",
+    "sp_prepare",
+    "sp_prepexec",
+    "sp_cursoropen",
+    "sp_cursorprepare",
+    "sp_cursorprepexec",
+    "sp_msforeach",
+    "sp_oa",
+    "sp_send_dbmail",
+    "sp_invoke_external_rest_endpoint",
+    "sp_addextendedproc",
+    "sp_add_job",
+    "sp_start_job",
+    "sp_addlinkedserver",
+    "sp_addlinkedsrvlogin",
+    "sp_serveroption",
+    "sp_addsrvrolemember",
+    "sp_addrolemember",
+    "sp_setapprole",
     "sp_password",
     "sp_addlogin",
     "sp_droplogin",
@@ -884,14 +907,16 @@ def _query_is_safe(text: str) -> bool:
 
     Imported ``query_router._is_safe_sql`` pulls FastAPI via ``src.routers``
     package init; keep the extract path import-light and fail closed.
-    Keywords are judged on the code outside string literals.
+    Keywords are judged on the code outside string literals. ``PRAGMA`` and
+    bare ``ANALYZE`` are refused: both write state (pragma assignments,
+    planner statistics) and neither is a row extract.
     """
     return all(_query_view_is_safe(code) for code in _sql_code_views(text))
 
 
 def _query_view_is_safe(code: str) -> bool:
     if not re.match(
-        r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|ANALYZE|PRAGMA|VALUES)\b",
+        r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|VALUES)\b",
         code,
         re.IGNORECASE,
     ):

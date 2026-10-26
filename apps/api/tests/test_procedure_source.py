@@ -585,3 +585,28 @@ def test_create_procedure_script_names_next_action_not_semicolons():
     with pytest.raises(ProcedureSourceError) as exc:
         parse_callable_source("CREATE TABLE x (a INT)", dialect="mysql", mode="query")
     assert "CREATE TABLE statement" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "EXEC sp_msforeachtable @command1 = 'DROP TABLE ?'",
+        "EXEC [sp_msforeachtable] 'DROP TABLE ?'",
+        "EXEC dbo.sp_MSforeach_worker 'DELETE FROM ?'",
+        "EXEC sp_OAStop",
+    ],
+)
+def test_self_evaluating_system_procedures_refused_before_execution(text: str) -> None:
+    """A procedure that runs its own string argument hides DML inside a literal."""
+    with pytest.raises(ProcedureSourceError):
+        parse_callable_source(text, dialect="sqlserver", mode="procedure")
+
+
+@pytest.mark.parametrize("dialect", ["sqlite", "duckdb"])
+@pytest.mark.parametrize(
+    "text",
+    ["PRAGMA user_version=1", "pragma main.journal_mode = OFF", "  PRAGMA writable_schema = ON"],
+)
+def test_pragma_refused_in_query_source(dialect: str, text: str) -> None:
+    with pytest.raises(ProcedureSourceError):
+        parse_callable_source(text, dialect=dialect, mode="query")
