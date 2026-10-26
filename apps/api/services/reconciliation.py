@@ -54,7 +54,9 @@ from services.transform_engine import (
     apply_transform,
     decimal_wire_value,
     reset_active_number_locale,
+    reset_strict_number_reading,
     set_active_number_locale,
+    set_strict_number_reading,
 )
 from services.type_system import instant_date_carrier, normalize_logical_type
 from services.value_serializer import (
@@ -4396,11 +4398,19 @@ def fingerprint_for_reconcile(
             locale_token = set_active_number_locale(
                 source_locale or NUMBER_LOCALE_WIRE
             )
+            # The fingerprint reproduces what the writer *bound*, and the
+            # write-path bind is not strict-gated — the run-wide
+            # set_strict_number_reading(True) pin (strict validation with no
+            # declared locale) must not refuse a cell here that the writer
+            # already accepted ('2.000,50' -> 2000.5), or the source side
+            # fingerprints NULL against a faithful destination value.
+            strict_token = set_strict_number_reading(False)
             try:
                 converted, err = apply_transform(
                     cell if cell is not None else "", transform or "none"
                 )
             finally:
+                reset_strict_number_reading(strict_token)
                 reset_active_number_locale(locale_token)
         if err:
             # Quarantine / coerce_null write path stores SQL NULL for failed cells.
