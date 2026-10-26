@@ -9,6 +9,8 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
+from services.rbac import require_admin_connector_access, require_admin_for_endpoints
+
 router = APIRouter(prefix="/copilot", tags=["AI Copilot"])
 
 
@@ -129,6 +131,7 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     dst = dict(payload.get("destination") or {})
     if not src.get("connector_id") or not dst.get("connector_id"):
         raise HTTPException(status_code=400, detail="Transfer approval is missing its endpoints.")
+    require_admin_for_endpoints(None, src.get("workspace_id") or dst.get("workspace_id"), src, dst)
 
     request_obj = TransferRequest(
         source=EndpointConfig.from_dict("database", src),
@@ -212,6 +215,11 @@ async def copilot_confirm(request: ConfirmActionRequest):
 
     if kind == "create_connector":
         try:
+            require_admin_connector_access(None, payload.get("type"))
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
+        try:
             conn = create_connector(payload)
         except Exception as exc:
             ledger.release_claim(ack_id)
@@ -236,6 +244,7 @@ async def copilot_confirm(request: ConfirmActionRequest):
             raise HTTPException(status_code=400, detail="Approval is missing schedule_id")
         try:
             from services.schedule_store import get_schedule
+
             from ..services.schedule_runner import _run_schedule
 
             sched = get_schedule(schedule_id)

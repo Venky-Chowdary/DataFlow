@@ -16,6 +16,8 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field
 
+from services.rbac import require_admin_connector_access
+
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
@@ -202,6 +204,7 @@ def save_connector(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     workspace_id = _require_write_workspace(request, workspace_id)
+    require_admin_connector_access(request, body.type)
     data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     data["workspace_id"] = workspace_id
@@ -233,6 +236,7 @@ def update_saved_connector(
     existing = get_connector(connector_id, workspace_id=workspace_id)
     if not existing or not _can_access_connector(request, existing):
         raise HTTPException(status_code=404, detail="Connector not found")
+    require_admin_connector_access(request, body.type, existing.type)
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
@@ -357,6 +361,7 @@ def test_saved_connector(
     conn = get_connector(connector_id, workspace_id=workspace_id)
     if not conn or not _can_access_connector(request, conn):
         raise HTTPException(status_code=404, detail="Connector not found")
+    require_admin_connector_access(request, conn.type)
 
     from services.connector_probe import probe_saved_connector
 

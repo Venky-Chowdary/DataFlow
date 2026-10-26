@@ -20,6 +20,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, ConfigDict, Field
+from services.rbac import require_admin_for_endpoints
 from services.team_store import can_read_workspace, can_write_workspace
 from services.value_serializer import cell_to_string
 
@@ -646,6 +647,7 @@ async def execute_transfer_json(
     workspace_id = _resolve_write_workspace(request, workspace_id)
     src = EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True))
     dst = EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True))
+    require_admin_for_endpoints(request, workspace_id, src, dst)
     region = (
         (body.data_region or "").strip()
         or getattr(request.state, "data_region", "")
@@ -949,6 +951,7 @@ async def run_universal_transfer(
         auth_source=dest_auth_source,
         extra=dest_extra,
     )
+    require_admin_for_endpoints(request, workspace_id, source, destination)
 
     source_filter: dict = {}
     if source_filter_json.strip():
