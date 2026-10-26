@@ -454,6 +454,14 @@ def _run_schedule(schedule_id: str) -> str | None:
     if not sched or not sched.enabled:
         return None
 
+    from services.request_principal import assert_bound_principal_may_use_endpoints
+
+    assert_bound_principal_may_use_endpoints(
+        getattr(sched, "workspace_id", "") or None,
+        {"connector_id": sched.source_connector_id},
+        {"connector_id": sched.dest_connector_id},
+    )
+
     # Concurrency guard: refuse to start when this schedule (or another schedule
     # for the same source→dest connector pair) already has a live run in flight.
     if mark_schedule_running(schedule_id, _scheduler_instance_id()) is None:

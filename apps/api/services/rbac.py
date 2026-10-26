@@ -12,11 +12,25 @@ is not blocked, but production must still gate based on the actual role claim.
 
 from __future__ import annotations
 
+from typing import Any
+
+from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
 from services.auth_service import auth_required
+from services.request_principal import (  # noqa: F401 — re-exported RBAC surface
+    _REQUEST_ROLE,
+    ADMIN_ONLY_CONNECTOR_TYPES,
+    admin_only_message,
+    admin_only_types,
+    assert_bound_principal_may_use_connector,
+    assert_bound_principal_may_use_endpoints,
+    connector_type_aliases,
+    connector_type_requires_admin,
+    endpoint_connector_types,
+)
 
 
 class Permission:
@@ -166,6 +180,37 @@ def has_permission(user: dict[str, str] | None, permission: str) -> bool:
     return permission in role_permissions(role)
 
 
+def admin_connector_denial(user: dict[str, Any] | None, *connector_types: Any) -> str | None:
+    """Return a denial message when ``user`` may not use any of ``connector_types``."""
+    gated = admin_only_types(connector_types)
+    if not gated or not auth_required():
+        return None
+    if user and normalize_role(user.get("role")) == "admin":
+        return None
+    return admin_only_message(gated)
+
+
+def require_admin_connector_access(request: Request | None, *connector_types: Any) -> None:
+    """Raise 403 unless the request principal may use every given connector type.
+
+    Without a ``request`` the principal bound by :class:`RBACMiddleware` is used.
+    """
+    if request is not None:
+        user = getattr(getattr(request, "state", None), "user", None)
+    else:
+        role = _REQUEST_ROLE.get()
+        user = {"role": role} if role is not None else None
+    types = [alias for t in connector_types for alias in connector_type_aliases(t)]
+    denial = admin_connector_denial(user, *types)
+    if denial:
+        raise HTTPException(status_code=403, detail=denial)
+
+
+def require_admin_for_endpoints(request: Request | None, workspace_id: str | None, *endpoints: Any) -> None:
+    """Raise 403 when a non-admin principal would run an admin-only connector endpoint."""
+    require_admin_connector_access(request, *endpoint_connector_types(workspace_id, *endpoints))
+
+
 def _is_public_mcp_path(path: str) -> bool:
     """Discovery + Streamable handshake only — not ``/tools/call`` or ``/logs``."""
     if path in ("/api/v1/mcp", "/api/v1/mcp/"):
@@ -217,12 +262,13 @@ class RBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         permission = _required_permission(request.method, path)
-        if permission is None:
-            return await call_next(request)
-
         user = getattr(request.state, "user", None)
-        if has_permission(user, permission):
-            return await call_next(request)
+        if permission is None or has_permission(user, permission):
+            token = _REQUEST_ROLE.set(normalize_role((user or {}).get("role")))
+            try:
+                return await call_next(request)
+            finally:
+                _REQUEST_ROLE.reset(token)
 
         return JSONResponse(
             status_code=403,

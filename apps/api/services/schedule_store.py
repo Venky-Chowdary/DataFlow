@@ -356,7 +356,18 @@ def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
         )
 
 
+def _assert_schedule_connectors_allowed(data: dict[str, Any]) -> None:
+    from services.request_principal import assert_bound_principal_may_use_endpoints
+
+    assert_bound_principal_may_use_endpoints(
+        data.get("workspace_id") or None,
+        {"connector_id": data.get("source_connector_id")},
+        {"connector_id": data.get("dest_connector_id")},
+    )
+
+
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
+    _assert_schedule_connectors_allowed(data)
     schedules = _load_all()
     interval = data.get("interval", "daily")
     cron = (data.get("cron") or "").strip()
@@ -395,6 +406,7 @@ def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule 
         sync_mode = data.get("sync_mode", s.sync_mode) or "full_refresh_overwrite"
         _validate_cadence(interval, cron, tz, sync_mode)
         merged = {**s.to_dict(), **data, "id": schedule_id}
+        _assert_schedule_connectors_allowed(merged)
         contract_id = (merged.get("contract_id") or "").strip()
         require_signed = bool(
             merged.get("require_signed_contract", bool(contract_id))

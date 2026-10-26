@@ -295,6 +295,8 @@ async def create_pipeline_schedule(
         assert_resource_workspace(request, str(payload.get("workspace_id") or ""))
     try:
         sched = create_schedule(payload)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return ScheduleResponse.from_schedule(sched)
@@ -317,6 +319,8 @@ async def patch_pipeline_schedule(
         return ScheduleResponse.from_schedule(existing)
     try:
         updated = update_schedule(schedule_id, data)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
@@ -388,7 +392,10 @@ async def run_pipeline_now(schedule_id: str):
     sched = get_schedule(schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    job_id = _run_schedule(schedule_id)
+    try:
+        job_id = _run_schedule(schedule_id)
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     if not job_id:
         raise HTTPException(status_code=400, detail="Could not start pipeline — check connectors")
     updated = get_schedule(schedule_id)

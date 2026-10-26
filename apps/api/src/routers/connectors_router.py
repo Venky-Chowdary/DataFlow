@@ -27,6 +27,8 @@ from services.value_serializer import json_default
 
 from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
+from services.rbac import require_admin_connector_access
+
 from ..transfer.connector_capabilities import resolve_driver_type
 from ..transfer.connector_registry import run_probe
 
@@ -133,10 +135,11 @@ class TransferRequest(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/test")
-async def test_connection(request: TestConnectionRequest):
+async def test_connection(request: TestConnectionRequest, http_request: Request):
     """Test a connector configuration before saving"""
     from ..transfer.connector_registry import humanize_connection_error
 
+    require_admin_connector_access(http_request, request.type)
     try:
         if request.type in ("csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet"):
             path = (request.connection_string or request.host or "").strip()
@@ -272,6 +275,7 @@ async def create_connector(
 ):
     """Create and save a new connector configuration (file store + MongoDB when available)."""
     workspace_id = _require_write_workspace(request, workspace_id)
+    require_admin_connector_access(request, config.type)
     connector_data = {
         "name": config.name,
         "type": config.type,
