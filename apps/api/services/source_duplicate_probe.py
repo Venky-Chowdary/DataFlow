@@ -162,7 +162,7 @@ def _finding_value(columns: list[str], values: tuple[Any, ...]) -> Any:
     """Scalar for single-col (backward compat); joined label for composite."""
     if len(columns) == 1:
         return values[0] if values else None
-    parts = [_identity_cell(v) for v in values]
+    parts = [str(v) for v in values]
     return "(" + ", ".join(parts) + ")"
 
 
@@ -732,7 +732,10 @@ def _counter_findings(
             break
         if len(out) >= max(1, int(limit)):
             break
-        values = [_identity_cell(v) for v in vals]
+        # vals are already identity cells from _normalize_key_cell — passing
+        # them through cell_to_string again would escape the SQL-NULL sentinel
+        # a second time (NULL must stay distinct from "" in findings).
+        values = [str(v) for v in vals]
         out.append(
             {
                 "value": _finding_value(pk_columns, values),

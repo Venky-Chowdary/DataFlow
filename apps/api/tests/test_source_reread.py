@@ -50,12 +50,14 @@ def test_auto_reread_full_refresh_includes_same_engine(monkeypatch):
     assert should_reread_source(src_type="mssql", dest_type="postgresql") is True
     assert should_reread_source(src_type="s3", dest_type="postgresql") is False
     assert should_reread_source(src_type="snowflake", dest_type="kafka") is False
+    # M3: keyed incremental runs are re-read too — the caller bounds the
+    # second scan to the [watermark, max_seen] window this run covered.
     assert should_reread_source(
         src_type="postgresql", dest_type="postgresql", incremental=True
-    ) is False
+    ) is True
     assert should_reread_source(
         src_type="snowflake", dest_type="postgresql", incremental=True
-    ) is False
+    ) is True
 
 
 def test_env_off_cannot_suppress_partial_write_pass(monkeypatch):
