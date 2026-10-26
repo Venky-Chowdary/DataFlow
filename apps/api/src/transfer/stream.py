@@ -1961,7 +1961,7 @@ def _stream_database_transfer_impl(
         and not resumed_pass
         and str(validation_mode or "").strip().lower() in {"strict", "maximum", ""}
         and int(dest_summary.get(PRECOUNT_KEY) or 0) > 0
-        and shape_runner.recipe.router_step is None
+        and (shape_runner is None or shape_runner.recipe.router_step is None)
     ):
         try:
             from connectors.table_manager import create_pg_table_backup
