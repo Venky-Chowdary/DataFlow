@@ -177,13 +177,18 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
     return out
 
 
-def _can_access_connector(request: Request, conn: Any) -> bool:
-    """True if the actor may see or mutate this connector (workspace + optional ACL)."""
+def _can_access_connector(request: Request, conn: Any, *, write: bool = False) -> bool:
+    """True if the actor may see (or, with ``write``, mutate) this connector.
+
+    Mutations need write membership in the connector's own workspace and an
+    editor ACL grant: the caller's RBAC role is not tied to that workspace.
+    """
     actor = _actor_email(request)
     is_admin = _actor_is_platform_admin(request)
     # Platform admins bypass workspace membership (they administer all
     # workspaces); non-admins still need membership to see a scoped doc.
-    if conn.workspace_id and not is_admin and not can_read_workspace(conn.workspace_id, actor):
+    member_check = can_write_workspace if write else can_read_workspace
+    if conn.workspace_id and not is_admin and not member_check(conn.workspace_id, actor):
         return False
     try:
         from services.resource_acl import assert_resource_acl
@@ -193,7 +198,7 @@ def _can_access_connector(request: Request, conn: Any) -> bool:
             resource_type="connector",
             resource_id=str(getattr(conn, "id", "") or ""),
             principal=actor,
-            min_role="viewer",
+            min_role="editor" if write else "viewer",
             is_admin=is_admin,
         )
     except PermissionError:
@@ -280,7 +285,7 @@ def update_saved_connector(
     data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     existing = get_connector(connector_id, workspace_id=workspace_id)
-    if not existing or not _can_access_connector(request, existing):
+    if not existing or not _can_access_connector(request, existing, write=True):
         raise HTTPException(status_code=404, detail="Connector not found")
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
@@ -300,7 +305,7 @@ def remove_saved_connector(
 ):
     workspace_id = _require_write_workspace(request, workspace_id)
     conn = get_connector(connector_id, workspace_id=workspace_id)
-    if not conn or not _can_access_connector(request, conn):
+    if not conn or not _can_access_connector(request, conn, write=True):
         raise HTTPException(status_code=404, detail="Connector not found")
     if not delete_connector(connector_id, workspace_id=workspace_id):
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -335,7 +340,7 @@ def rotate_saved_connector_secrets(
 
     workspace_id = _require_write_workspace(request, workspace_id)
     existing = get_connector(connector_id, workspace_id=workspace_id)
-    if not existing or not _can_access_connector(request, existing):
+    if not existing or not _can_access_connector(request, existing, write=True):
         raise HTTPException(status_code=404, detail="Connector not found")
 
     payload = body.model_dump(exclude_none=True)

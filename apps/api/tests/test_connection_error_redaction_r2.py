@@ -70,7 +70,7 @@ def test_saved_connector_probe_response_and_logs_are_redacted(monkeypatch) -> No
         extra={},
     )
     monkeypatch.setattr(saved_connectors_router, "get_connector", lambda *_a, **_k: connector)
-    monkeypatch.setattr(saved_connectors_router, "_can_access_connector", lambda *_a: True)
+    monkeypatch.setattr(saved_connectors_router, "_can_access_connector", lambda *_a, **_k: True)
     monkeypatch.setattr(saved_connectors_router, "mark_tested", lambda *_a, **_k: None)
     monkeypatch.setattr(connector_store, "get_connector", lambda *_a, **_k: connector)
 

@@ -192,7 +192,7 @@ def update_project(
     project = store.get(project_id, workspace_id=ws)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
-    assert_resource_workspace(request, project.workspace_id or "")
+    assert_resource_workspace(request, project.workspace_id or "", write=True)
 
     if body.expected_version is not None and int(body.expected_version) != int(project.version or 0):
         raise HTTPException(
@@ -238,7 +238,7 @@ def delete_project(
     project = store.get(project_id, workspace_id=ws)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
-    assert_resource_workspace(request, project.workspace_id or "")
+    assert_resource_workspace(request, project.workspace_id or "", write=True)
     if not store.delete(project_id):
         raise HTTPException(status_code=404, detail="Transformation project not found")
     return Response(status_code=204)
@@ -343,7 +343,7 @@ def run_project(
     project = get_transform_store().get(project_id, workspace_id=ws)
     if not project:
         raise HTTPException(status_code=404, detail="Transformation project not found")
-    assert_resource_workspace(request, project.workspace_id or "")
+    assert_resource_workspace(request, project.workspace_id or "", write=True)
 
     from services.connector_store import get_connector
 

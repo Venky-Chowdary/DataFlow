@@ -39,10 +39,10 @@ def _schedule_or_404(schedule_id: str) -> PipelineSchedule:
     return sched
 
 
-def _bound_schedule(request: Request, schedule_id: str) -> PipelineSchedule:
+def _bound_schedule(request: Request, schedule_id: str, *, write: bool = False) -> PipelineSchedule:
     """Load a schedule and refuse cross-workspace access."""
     sched = _schedule_or_404(schedule_id)
-    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "")
+    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "", write=write)
     return sched
 
 SyncMode = Literal[
@@ -587,7 +587,7 @@ async def create_pipeline_schedule(
     if ws and not payload.get("workspace_id"):
         payload["workspace_id"] = ws
     elif payload.get("workspace_id"):
-        assert_resource_workspace(request, str(payload.get("workspace_id") or ""))
+        assert_resource_workspace(request, str(payload.get("workspace_id") or ""), write=True)
     try:
         sched = create_schedule(payload)
     except ValueError as exc:
@@ -623,7 +623,7 @@ async def patch_pipeline_schedule(
     existing = get_schedule(schedule_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "")
+    assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "", write=True)
     data = {k: v for k, v in body.model_dump().items() if v is not None}
     # A PATCH must not re-home a schedule into another workspace.
     data.pop("workspace_id", None)
@@ -703,7 +703,7 @@ async def import_pipeline_schedule(
     sched = get_schedule(str(sched_row.get("id") or ""))
     if not sched:
         raise HTTPException(status_code=500, detail="Schedule imported but not readable")
-    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "")
+    assert_resource_workspace(request, getattr(sched, "workspace_id", "") or "", write=True)
     record_security_event(
         "schedule.definition.import",
         outcome="succeeded",
@@ -729,7 +729,7 @@ async def remove_pipeline_schedule(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     resolve_write_workspace(request, workspace_id)
-    sched = _bound_schedule(request, schedule_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
     capture = release_schedule_cdc_capture(sched)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
@@ -831,7 +831,7 @@ async def accept_source_schema(
     from services.source_schema_memory import fingerprint_source
 
     resolve_write_workspace(request, workspace_id)
-    sched = _bound_schedule(request, schedule_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
     open_req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
     evidence = (
         dict(open_req.get("evidence") or {})
@@ -956,7 +956,7 @@ def upgrade_schedule_recipe(
     existing = get_schedule(schedule_id)
     if not existing:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "")
+    assert_resource_workspace(request, getattr(existing, "workspace_id", "") or "", write=True)
     recipe_id = str(getattr(existing, "transform_recipe_id", "") or "").strip()
     if not recipe_id:
         raise HTTPException(
@@ -1069,7 +1069,7 @@ async def sync_pipeline(
     from services.sync_now import SyncNowRefused, prepare_sync
 
     resolve_write_workspace(request, workspace_id)
-    sched = _bound_schedule(request, schedule_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
     try:
         assert_schedule_run_allowed(sched)
     except ValueError as exc:
@@ -1119,7 +1119,7 @@ async def run_pipeline_now(
     from ..services.schedule_runner import ScheduleStartError, _run_schedule
 
     resolve_write_workspace(request, workspace_id)
-    sched = _bound_schedule(request, schedule_id)
+    sched = _bound_schedule(request, schedule_id, write=True)
     try:
         assert_schedule_run_allowed(sched)
     except ValueError as exc:
@@ -1281,7 +1281,7 @@ async def approve_schedule_finding(
     sched = get_schedule(schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    assert_resource_workspace(request, sched.workspace_id or "")
+    assert_resource_workspace(request, sched.workspace_id or "", write=True)
     try:
         result = approve_request(
             schedule_id,
@@ -1325,7 +1325,7 @@ async def reject_schedule_finding(
     sched = get_schedule(schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    assert_resource_workspace(request, sched.workspace_id or "")
+    assert_resource_workspace(request, sched.workspace_id or "", write=True)
     try:
         result = reject_request(
             schedule_id,
@@ -1359,7 +1359,7 @@ async def grant_schedule_authorization(
     sched = get_schedule(schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    assert_resource_workspace(request, sched.workspace_id or "")
+    assert_resource_workspace(request, sched.workspace_id or "", write=True)
     try:
         result = set_standing_authorization(
             schedule_id,
@@ -1397,7 +1397,7 @@ async def revoke_schedule_authorization(
     sched = get_schedule(schedule_id)
     if not sched:
         raise HTTPException(status_code=404, detail="Schedule not found")
-    assert_resource_workspace(request, sched.workspace_id or "")
+    assert_resource_workspace(request, sched.workspace_id or "", write=True)
     try:
         result = revoke_standing_authorization(schedule_id, actor=actor, reason=reason)
     except LookupError as exc:

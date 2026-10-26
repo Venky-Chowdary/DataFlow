@@ -115,7 +115,7 @@ def _scoped_contract(
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
     meta = getattr(contract, "metadata", None) or {}
-    assert_resource_workspace(request, str(meta.get("workspace_id") or ""))
+    assert_resource_workspace(request, str(meta.get("workspace_id") or ""), write=write)
     return contract
 
 
