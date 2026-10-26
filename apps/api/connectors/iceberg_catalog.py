@@ -9,9 +9,12 @@ catalog.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+
+from services.brand_env import getenv_brand
 
 # pyiceberg is imported lazily inside functions so that optional installs are
 # picked up without requiring a process restart.
@@ -44,12 +47,104 @@ def _single_or_empty(values: list[str]) -> str:
     return values[0] if values else ""
 
 
+def iceberg_local_root() -> Path | None:
+    """Directory every local Iceberg warehouse / SQLite catalog must live under.
+
+    ``DATAFLOW_ICEBERG_ROOT`` wins. In production the jail defaults to
+    ``<data_dir>/iceberg`` so tenants cannot point warehouses at arbitrary
+    worker paths. Local development without the variable stays unjailed.
+    """
+    raw = (getenv_brand("ICEBERG_ROOT") or "").strip()
+    if raw:
+        return Path(raw).expanduser().resolve()
+    from services.platform_config import data_dir, is_production
+
+    if is_production():
+        return (data_dir() / "iceberg").resolve()
+    return None
+
+
+def _jail_local_path(path_str: str, label: str) -> Path:
+    if "\x00" in path_str:
+        raise ValueError(f"Invalid Iceberg {label} path")
+    candidate = Path(path_str or ".").expanduser()
+    root = iceberg_local_root()
+    if root is None:
+        return candidate.resolve()
+    if not candidate.is_absolute():
+        candidate = root / candidate
+    resolved = candidate.resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(
+            f"Iceberg {label} must be under the Iceberg warehouse root {root} (DATAFLOW_ICEBERG_ROOT)"
+        )
+    return resolved
+
+
+def resolve_local_warehouse(path_str: str, *, create: bool = True) -> Path:
+    """Resolve a local warehouse path, rejecting paths outside the Iceberg root."""
+    raw = (path_str or "").strip().removeprefix("file://")
+    resolved = _jail_local_path(raw, "warehouse")
+    if create:
+        resolved.mkdir(parents=True, exist_ok=True)
+    return resolved
+
+
+_PATH_SEPARATORS = re.compile(r"[\\/]")
+
+
+def safe_warehouse_child(base: Path, *parts: str, label: str) -> Path:
+    """Join name components under ``base``; reject absolute, ``..`` or escaping parts."""
+    target = base
+    for part in parts:
+        name = (part or "").strip()
+        if not name:
+            continue
+        if (
+            "\x00" in name
+            or Path(name).is_absolute()
+            or name.startswith(("/", "\\"))
+            or any(seg == ".." for seg in _PATH_SEPARATORS.split(name))
+        ):
+            raise ValueError(f"Iceberg {label} must be a relative name inside the warehouse: {part!r}")
+        target = target / name
+    if not target.resolve().is_relative_to(base.resolve()):
+        raise ValueError(f"Iceberg {label} escapes the warehouse directory: {target}")
+    return target
+
+
+def _validate_local_identifier(namespace: tuple[str, ...], table: str) -> None:
+    """Local catalogs map identifiers onto directories; keep them single path segments."""
+    for part in (*namespace, table):
+        if (
+            not part
+            or part in {".", ".."}
+            or "\x00" in part
+            or _PATH_SEPARATORS.search(part)
+        ):
+            raise ValueError(
+                f"Iceberg namespace/table name {part!r} is not a valid local identifier"
+            )
+
+
+def _jail_sqlite_uri(uri: str) -> str:
+    """Keep ``sqlite:///`` catalog files under the Iceberg root when one is set."""
+    if iceberg_local_root() is None or not uri.startswith("sqlite:///"):
+        return uri
+    rest, sep, query = uri[len("sqlite:///") :].partition("?")
+    if not rest or rest == ":memory:":
+        return uri
+    resolved = _jail_local_path(rest, "catalog_path")
+    return f"sqlite:///{resolved}{sep}{query}"
+
+
+def _is_remote_location(path_str: str) -> bool:
+    raw = (path_str or "").strip().lower()
+    return "://" in raw and not raw.startswith("file://")
+
+
 def _warehouse_root(path_str: str) -> Path:
-    if path_str.startswith("file://"):
-        path_str = path_str[7:]
-    p = Path(path_str or ".").expanduser().resolve()
-    p.mkdir(parents=True, exist_ok=True)
-    return p
+    return resolve_local_warehouse(path_str, create=True)
 
 
 def _infer_catalog_type(
@@ -106,13 +201,17 @@ def _sql_props(connection_string: str, warehouse: str, extra: dict[str, Any]) ->
 
     if cs.startswith(("sqlite://", "postgresql://", "postgres://", "mysql://", "mssql://", "sqlserver://")):
         if warehouse:
-            props["warehouse"] = str(_warehouse_root(warehouse))
+            props["warehouse"] = (
+                warehouse if _is_remote_location(warehouse) else str(_warehouse_root(warehouse))
+            )
+        if cs.startswith("sqlite://"):
+            cs = _jail_sqlite_uri(cs)
         return cs, props
 
     wh = _warehouse_root(warehouse or cs or ".")
     props["warehouse"] = str(wh)
-    catalog_db = extra.get("catalog_path") or ".dataflow_iceberg_catalog.db"
-    db_path = wh / catalog_db
+    catalog_db = str(extra.get("catalog_path") or ".dataflow_iceberg_catalog.db")
+    db_path = safe_warehouse_child(wh, catalog_db, label="catalog_path")
     return f"sqlite:///{db_path.resolve()}", props
 
 
@@ -235,6 +334,8 @@ def parse_iceberg_catalog_config(endpoint: Any) -> dict[str, Any]:
     if not schema:
         schema = "default"
     namespace = tuple(schema.split(".")) if schema else ("default",)
+    if catalog_type in {"filesystem", "sql", "sqlite", "hadoop"}:
+        _validate_local_identifier(namespace, table)
 
     return {
         "catalog_type": catalog_type,
