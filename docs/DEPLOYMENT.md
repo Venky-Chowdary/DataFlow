@@ -57,6 +57,8 @@ Optional:
 | `DATAFLOW_EXPOSE_ERROR_DETAIL` | `0` | Debug-only: add redacted, truncated exception detail to safe API errors. Never enable in production. |
 | `DATAFLOW_SEED_DEMO` | `0` | No demo connectors |
 | `DATAFLOW_RBAC_UNRULED_ROUTES` | `deny` | `deny` rejects authenticated requests without a reviewed public exception or explicit permission rule; `allow_and_log` temporarily restores method-based fallback permissions and warns/audits. Invalid values fail closed. |
+| `DATAFLOW_SQLITE_ROOT` | unset | Directory (or `os.pathsep`-separated list) SQLite connector files must live under. **Unset in production disables SQLite file connectors** (fail closed); the service data directory is always refused. |
+| `DATAFLOW_DUCKDB_ROOT` | `DATAFLOW_SQLITE_ROOT` | Same allowlist for local DuckDB files (MotherDuck `md:` is unaffected). |
 
 ### Multi-replica / enterprise coordination
 

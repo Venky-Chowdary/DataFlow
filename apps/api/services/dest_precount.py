@@ -294,6 +294,18 @@ _STREAMING_COUNT_KINDS = frozenset(
 _BYTE_IMAGE_KINDS = frozenset({"parquet", "orc", "excel"})
 
 
+def _sqlite_cfg_path(cfg: Mapping[str, Any]) -> str:
+    """Confined SQLite path for a dest config (see ``connectors.sqlite_common``)."""
+    from connectors.sqlite_common import sqlite_file_path
+
+    return sqlite_file_path(
+        str(cfg.get("database") or ""),
+        str(cfg.get("connection_string") or ""),
+        str(cfg.get("host") or ""),
+    )
+
+
+
 class UnmeasuredArtifact(Exception):
     """Dest population cannot be checksummed. Never hash a prefix or JSON ``[]``.
 
@@ -2150,7 +2162,7 @@ def _key_list_sql(
     if dialect == "sqlite":
         import sqlite3
 
-        database = str(cfg.get("database") or "")
+        database = _sqlite_cfg_path(cfg)
         if not database:
             return None
         with closing(sqlite3.connect(database)) as conn:
@@ -2230,7 +2242,7 @@ def _key_hits_sql(
     if dialect == "sqlite":
         import sqlite3
 
-        database = str(cfg.get("database") or "")
+        database = _sqlite_cfg_path(cfg)
         if not database:
             return None
         with closing(sqlite3.connect(database)) as conn:
@@ -5745,7 +5757,7 @@ def _sqlite_scd2_populations(
     is_current = (
         str(is_current_column or "").strip() or IS_CURRENT_COLUMN
     )
-    database = str(cfg.get("database") or "")
+    database = _sqlite_cfg_path(cfg)
     if not database:
         return None
     with closing(sqlite3.connect(database)) as conn:

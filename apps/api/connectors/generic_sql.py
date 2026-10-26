@@ -734,6 +734,34 @@ def with_connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
+    """Build a SQLAlchemy URL; embedded-file engines are path-confined."""
+    return _confine_embedded_file_url(_build_url_unconfined(cfg))
+
+
+def _confine_embedded_file_url(url: str | sa.URL) -> str | sa.URL:
+    """Apply ``connectors.sqlite_common`` path confinement to SQLite/DuckDB URLs."""
+    from connectors.sqlite_common import confine_duckdb_path, confine_sqlite_path
+
+    if not SQLALCHEMY_AVAILABLE:
+        return url
+    text = url.render_as_string(hide_password=False) if isinstance(url, sa.URL) else str(url)
+    lowered = text.lower()
+    if lowered.startswith("sqlite"):
+        confine = confine_sqlite_path
+    elif lowered.startswith("duckdb"):
+        confine = confine_duckdb_path
+    else:
+        return url
+    try:
+        database = sa.engine.url.make_url(text).database or ""
+    except Exception as exc:
+        raise ValueError(f"Invalid embedded database URL: {exc}") from exc
+    if database and database != ":memory:":
+        confine(database)
+    return url
+
+
+def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
     # EndpointConfig serialises the driver as ``format``. Procedure and query

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -84,6 +85,98 @@ def require_sqlite_source_file(path: str) -> None:
     )
 
 
+def _configured_roots(*env_names: str) -> list[Path]:
+    """Allowlisted directories from the first non-empty ``env_names`` value.
+
+    Several roots may be listed, separated by ``os.pathsep``.
+    """
+    for name in env_names:
+        raw = (getenv_brand(name) or "").strip()
+        if raw:
+            return [
+                Path(part).expanduser().resolve(strict=False)
+                for part in raw.split(os.pathsep)
+                if part.strip()
+            ]
+    return []
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    child_s = os.path.normcase(str(child))
+    parent_s = os.path.normcase(str(parent))
+    try:
+        return os.path.commonpath([child_s, parent_s]) == parent_s
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def _service_state_dirs() -> list[Path]:
+    from services import platform_config
+
+    return [platform_config.data_dir().resolve(strict=False)]
+
+
+def confine_local_database_path(
+    path: str, *, label: str, root_envs: tuple[str, ...]
+) -> str:
+    """Refuse an embedded-database file path the workspace must not open.
+
+    Connector ``database`` fields are operator input, so the API process never
+    opens an arbitrary host path for them:
+
+    * the service's own state directory (``platform_config.data_dir()``) is
+      always refused;
+    * when one of ``root_envs`` is set, the resolved path (symlinks followed)
+      must sit under one of its ``os.pathsep``-separated roots;
+    * when none is set, production refuses every file path (fail closed) and
+      development keeps the raw path for local UX.
+    """
+    if not path or path == ":memory:":
+        return path
+    if "\x00" in path:
+        raise ValueError(f"Invalid {label} path")
+    try:
+        resolved = Path(path).expanduser().resolve(strict=False)
+        roots = _configured_roots(*root_envs)
+        state_dirs = _service_state_dirs()
+    except OSError as exc:
+        raise ValueError(f"Invalid {label} path: {exc}") from exc
+    env_hint = f"DATAFLOW_{root_envs[0]}"
+    for state_dir in state_dirs:
+        if _is_within(resolved, state_dir):
+            raise ValueError(
+                f"{label} path is inside the Datawrap service data directory and cannot be "
+                f"opened as a connector; place the file under {env_hint}"
+            )
+    if roots:
+        if not any(_is_within(resolved, root) for root in roots):
+            shown = os.pathsep.join(str(r) for r in roots)
+            raise ValueError(f"{label} path must be under {env_hint} ({shown})")
+        return str(resolved)
+    from services.platform_config import is_production
+
+    if is_production():
+        raise ValueError(
+            f"{label} file connectors are disabled until {env_hint} is set to the "
+            "directory that holds workspace database files"
+        )
+    return path
+
+
+def confine_sqlite_path(path: str) -> str:
+    return confine_local_database_path(path, label="SQLite", root_envs=("SQLITE_ROOT",))
+
+
+def confine_duckdb_path(path: str) -> str:
+    """DuckDB uses ``DATAFLOW_DUCKDB_ROOT``, falling back to ``DATAFLOW_SQLITE_ROOT``."""
+    lowered = (path or "").lower()
+    if lowered.startswith(("md:", "motherduck:")):
+        return path
+    return confine_local_database_path(
+        path, label="DuckDB", root_envs=("DUCKDB_ROOT", "SQLITE_ROOT")
+    )
+
+
 def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
     """Resolve the filesystem path to a SQLite database.
 
@@ -91,8 +184,8 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
     looks like a SQLAlchemy ``sqlite://`` URL, strip the scheme so ``sqlite3``
     receives a filesystem path.
 
-    When ``DATAFLOW_SQLITE_ROOT`` is set, resolved paths must stay under that
-    directory (blocks ``..`` / absolute escapes outside the allowlist).
+    The result is confined by :func:`confine_sqlite_path` (``DATAFLOW_SQLITE_ROOT``
+    allowlist, service data directory refused, production fails closed).
     """
     path = (database or connection_string or "").strip()
     if not path:
@@ -107,21 +200,7 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
             path = path[1:]  # sqlite:///relative -> relative
     if "\x00" in path:
         raise ValueError("Invalid SQLite path")
-    root = (getenv_brand("SQLITE_ROOT") or "").strip()
-    if not root:
-        return path
-    try:
-        resolved = Path(path).expanduser().resolve(strict=False)
-        root_resolved = Path(root).expanduser().resolve(strict=False)
-    except OSError as exc:
-        raise ValueError(f"Invalid SQLite path: {exc}") from exc
-    try:
-        resolved.relative_to(root_resolved)
-    except ValueError as exc:
-        raise ValueError(
-            f"SQLite path must be under DATAFLOW_SQLITE_ROOT ({root_resolved})"
-        ) from exc
-    return str(resolved)
+    return confine_sqlite_path(path)
 
 
 def duckdb_file_path(database: str, connection_string: str, host: str = "") -> str:
@@ -149,4 +228,4 @@ def duckdb_file_path(database: str, connection_string: str, host: str = "") -> s
         return ":memory:" if raw else ""
     if "\x00" in raw:
         raise ValueError("Invalid DuckDB path")
-    return raw
+    return confine_duckdb_path(raw)
