@@ -1909,7 +1909,7 @@ def verify_pg_route_key_uniqueness(
         try:
             selects = []
             for tbl, cols in parts:
-                col_list = ", ".join(f'"{c}"' for c in cols)
+                col_list = ", ".join(quote_sql_identifier(c, '"') for c in cols)
                 selects.append(
                     f"SELECT {col_list} FROM "
                     + quote_table_ref(tbl, schema or "public", dialect="postgresql")
