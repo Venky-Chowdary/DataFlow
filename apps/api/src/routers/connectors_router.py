@@ -339,6 +339,21 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
         }
 
 
+def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
+    """Refuse to persist a connector whose dial targets break the egress policy."""
+    from services.egress_guard import metadata_endpoint_refusal
+
+    refusal = metadata_endpoint_refusal(
+        str(data.get("host") or ""),
+        str(data.get("endpoint_url") or ""),
+        str(data.get("connection_string") or ""),
+        workspace_id=str(data.get("workspace_id") or ""),
+        db_type=str(data.get("type") or ""),
+    )
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+
+
 @router.post("/", response_model=ConnectorResponse)
 async def create_connector(
     config: ConnectorConfig,
@@ -372,6 +387,7 @@ async def create_connector(
         "workspace_id": workspace_id,
         "status": "configured",
     }
+    _refuse_unsafe_egress(connector_data)
 
     # Canonical persistence: file-backed store (always works without MongoDB)
     try:
