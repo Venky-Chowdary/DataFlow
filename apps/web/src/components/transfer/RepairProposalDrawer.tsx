@@ -12,7 +12,6 @@ export interface RepairProposalDrawerProps {
   open: boolean;
   proposal: RepairProposal | null;
   mappings?: RepairMapping[];
-  actor?: string;
   onClose: () => void;
   /** Called after approve+apply with updated mappings (when mappings were supplied). */
   onApplied?: (updated: RepairMapping[], proposal: RepairProposal) => void;
@@ -48,7 +47,6 @@ export function RepairProposalDrawer({
   open,
   proposal,
   mappings = [],
-  actor = "operator",
   onClose,
   onApplied,
   onDecided,
@@ -108,7 +106,6 @@ export function RepairProposalDrawer({
     try {
       const decided = await decideRepairProposal(proposal.id, {
         approve,
-        actor,
         mappings: approve && canApplyMappings ? mappings : undefined,
       });
       if (
