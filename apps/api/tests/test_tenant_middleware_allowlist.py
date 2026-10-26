@@ -72,6 +72,11 @@ def client(monkeypatch):
         custom_domain="acme.example.com",
         ip_allowlist=[ALLOWED_IP],
     )
+    # Client-IP resolution has its own trust-boundary tests; pin it here so
+    # this suite only exercises public-path matching and the allowlist.
+    monkeypatch.setattr(
+        tm, "_client_ip", lambda request: request.headers.get("x-test-client-ip", "")
+    )
     monkeypatch.setattr(
         tm,
         "resolve_tenant_from_host",
@@ -97,7 +102,7 @@ def client(monkeypatch):
 
 
 def _get(client, path: str, ip: str, host: str = "acme.example.com"):
-    return client.get(path, headers={"host": host, "x-forwarded-for": ip})
+    return client.get(path, headers={"host": host, "x-test-client-ip": ip})
 
 
 def test_allowlist_blocks_disallowed_ip_on_api_path(client):
