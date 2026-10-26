@@ -11,6 +11,7 @@ from connectors.mongodb_common import (
     mongodb_database_from_uri,
     normalize_mongodb_connection_string,
 )
+from connectors.sql_identifiers import quote_sql_identifier
 
 logger = logging.getLogger(__name__)
 
@@ -563,7 +564,8 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
         with conn.cursor() as cur:
             if cfg.get("warehouse"):
                 try:
-                    cur.execute(f'USE WAREHOUSE "{cfg["warehouse"]}"')
+                    warehouse_q = quote_sql_identifier(cfg["warehouse"], '"')
+                    cur.execute(f"USE WAREHOUSE {warehouse_q}")
                 except Exception as exc:
                     logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             # A bare name is case-sensitive once quoted ("foo_df_quarantine" !=
@@ -575,7 +577,8 @@ def _drop_snowflake(cfg: dict[str, Any], table_name: str, schema: str | None) ->
                 cur, schema or cfg.get("schema", "PUBLIC"), table_name
             )
             target = resolved or table_name
-            cur.execute(f'DROP TABLE IF EXISTS "{target}"')
+            target_q = quote_sql_identifier(target, '"')
+            cur.execute(f"DROP TABLE IF EXISTS {target_q}")
         return True
     except Exception as exc:
         raise TableDropError(table_name, exc) from exc
@@ -776,7 +779,7 @@ def _drop_mysql(cfg: dict[str, Any], table_name: str, schema: str | None) -> boo
         )
         enable_autocommit(conn)
         with conn.cursor() as cur:
-            cur.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+            cur.execute(f"DROP TABLE IF EXISTS {quote_sql_identifier(table_name, '`')}")
         conn.close()
         return True
     except Exception as exc:
@@ -791,7 +794,7 @@ def _drop_sqlite(cfg: dict[str, Any], table_name: str, schema: str | None) -> bo
         if not database:
             return False
         conn = sqlite3.connect(database)
-        conn.execute(f"DROP TABLE IF EXISTS `{table_name}`")
+        conn.execute(f"DROP TABLE IF EXISTS {quote_sql_identifier(table_name, '`')}")
         conn.commit()
         conn.close()
         return True
@@ -1464,9 +1467,10 @@ def _fetch_composite_pk_lsn_map(
             col_sql = ", ".join(
                 quote_sql_identifier(c, '"') for c in [*pk_cols, lsn_column]
             )
+            table_q = quote_sql_identifier(table_name, '"')
             binds = [v for tup in tuples for v in tup]
             for row in conn.execute(
-                f'SELECT {col_sql} FROM "{table_name}" WHERE {where}',  # nosec B608
+                f"SELECT {col_sql} FROM {table_q} WHERE {where}",  # nosec B608
                 binds,
             ):
                 _absorb(tuple(row[: len(pk_cols)]), row[len(pk_cols)])
@@ -1647,7 +1651,7 @@ def _delete_mysql_composite(
         binds: list[Any] = [v for tup in tuples for v in tup]
         with conn.cursor() as cur:
             cur.execute(
-                f"DELETE FROM `{table_name}` WHERE {where}",  # nosec B608
+                f"DELETE FROM {quote_sql_identifier(table_name, '`')} WHERE {where}",  # nosec B608
                 binds,
             )
             deleted = cur.rowcount
@@ -1678,9 +1682,10 @@ def _delete_sqlite_composite(
         where, _ = _composite_or_and_clause(
             pk_cols, len(tuples), quote_char='"', placeholder="?"
         )
+        table_q = quote_sql_identifier(table_name, '"')
         binds: list[Any] = [v for tup in tuples for v in tup]
         cur = conn.execute(
-            f'DELETE FROM "{table_name}" WHERE {where}',  # nosec B608
+            f"DELETE FROM {table_q} WHERE {where}",  # nosec B608
             binds,
         )
         deleted = cur.rowcount
@@ -1780,7 +1785,9 @@ def _delete_mysql(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list[
         enable_autocommit(conn)
         placeholders = ",".join(["%s"] * len(keys))
         with conn.cursor() as cur:
-            cur.execute(f"DELETE FROM `{table_name}` WHERE `{pk_col}` IN ({placeholders})", keys)  # nosec B608
+            table_q = quote_sql_identifier(table_name, "`")
+            pk_q = quote_sql_identifier(pk_col, "`")
+            cur.execute(f"DELETE FROM {table_q} WHERE {pk_q} IN ({placeholders})", keys)  # nosec B608
             deleted = cur.rowcount
         conn.commit()
         conn.close()
@@ -1802,8 +1809,10 @@ def _delete_sqlite(cfg: dict[str, Any], table_name: str, pk_col: str, keys: list
             )
         conn = sqlite3.connect(database)
         placeholders = ",".join(["?"] * len(keys))
+        table_q = quote_sql_identifier(table_name, '"')
+        pk_q = quote_sql_identifier(pk_col, '"')
         cur = conn.execute(
-            f'DELETE FROM "{table_name}" WHERE "{pk_col}" IN ({placeholders})', keys  # nosec B608
+            f"DELETE FROM {table_q} WHERE {pk_q} IN ({placeholders})", keys  # nosec B608
         )
         deleted = cur.rowcount
         conn.commit()
