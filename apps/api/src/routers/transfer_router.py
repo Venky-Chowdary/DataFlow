@@ -10,6 +10,7 @@ from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
 from services.safe_errors import safe_http_exception
 from services.shape_preflight import ShapePreflightRefused
+from services.upload_limits import PayloadTooLarge, read_upload
 from pathlib import Path
 from typing import Any, Optional
 
@@ -858,13 +859,15 @@ async def analyze_file_transfer(
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig
 
-    content = await file.read()
+    content = await read_upload(file)
     from ..services.file_parser import FileParser
     src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
     if src_fmt == "unknown":
         src_fmt = "csv"
     try:
         columns, schema, row_count = parse_file_route_sample(content, file.filename or "upload.csv")
+    except PayloadTooLarge:
+        raise
     except ValueError as exc:
         raise safe_http_exception(
             exc,
@@ -1278,7 +1281,7 @@ async def run_universal_transfer(
 
     src_fmt = source_format
     if source_kind == "file" and file:
-        content = await file.read()
+        content = await read_upload(file)
         filename = file.filename or "upload.csv"
         if not src_fmt:
             from ..services.file_parser import FileParser

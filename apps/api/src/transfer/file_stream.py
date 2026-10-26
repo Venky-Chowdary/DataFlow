@@ -109,6 +109,7 @@ from services.reconciliation import (
     FingerprintAccumulator,
 )
 from services.tabular_window import header_and_rows, row_to_record
+from services.upload_limits import read_all_bounded
 from services.value_serializer import payload_record_wire
 
 try:
@@ -570,7 +571,7 @@ def _peek_parsed_file_source(
             raw = content if isinstance(content, (bytes, bytearray)) else None
             if raw is None:
                 with _open_binary(content) as bio:
-                    raw = bio.read()
+                    raw = read_all_bounded(bio)
             records = load_json_records(bytes(raw))
             total = len(records)
             sample_objs = [r for r in records[:100] if isinstance(r, dict)]

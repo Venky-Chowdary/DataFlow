@@ -42,6 +42,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from services.brand_env import getenv_brand
+from services.upload_limits import read_all_bounded, spool_capped
 from services.copy_fast_path import (
     FastPathResult,
     FastPathUnavailable,
@@ -416,7 +417,7 @@ def _iter_excel_records(
     try:
         require_xlsx(filename)
         with _open_binary(content) as handle:
-            raw = handle.read()
+            raw = read_all_bounded(handle)
         for rec in iter_excel_dicts(raw, read_options):
             if not isinstance(rec, dict):
                 continue
@@ -434,7 +435,7 @@ def _iter_xml_records(
 
     try:
         with _open_binary(content) as handle:
-            raw = handle.read()
+            raw = read_all_bounded(handle)
         for rec in iter_xml_dicts(raw):
             if not isinstance(rec, dict):
                 continue
@@ -453,19 +454,19 @@ def _project_pylist(records: Any, source_cols: list[str]) -> Iterator[dict[str, 
 
 
 def _seekable_columnar_source(content: bytes | str | os.PathLike) -> Any:
-    """Parquet/ORC footers need random access. Gzip is spooled, not streamed."""
+    """Parquet/ORC footers need random access. Gzip is spooled under the decompressed cap."""
     if isinstance(content, (bytes, bytearray)):
         raw = bytes(content)
         if raw[:2] == b"\x1f\x8b":
             with gzip.GzipFile(fileobj=io.BytesIO(raw)) as gz:
-                raw = gz.read()
+                return spool_capped(gz)
         return io.BytesIO(raw)
     path = os.fspath(content)
     with open(path, "rb") as handle:
         head = handle.read(2)
     if head == b"\x1f\x8b":
         with gzip.open(path, "rb") as gz:
-            return io.BytesIO(gz.read())
+            return spool_capped(gz)
     return path
 
 

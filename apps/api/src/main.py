@@ -18,6 +18,7 @@ from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.safe_errors import public_error
+from services.upload_limits import PayloadTooLarge
 from services.audit_coverage import AuditAccessMiddleware, http_route_template
 
 # Tests and callers historically import the route-template helper from the
@@ -835,6 +836,16 @@ async def connector_store_error_handler(request: Request, exc: ConnectorStoreErr
     return JSONResponse(
         status_code=503,
         content={"error": "connector_store_unavailable", "detail": str(exc)},
+    )
+
+
+@app.exception_handler(PayloadTooLarge)
+async def payload_too_large_handler(request: Request, exc: PayloadTooLarge):
+    """An upload or its gzip expansion crossed the configured byte ceiling."""
+    logger.warning("Payload refused on %s: %s", request.url.path, exc)
+    return JSONResponse(
+        status_code=413,
+        content={"error": "payload_too_large", "detail": str(exc), "limit_bytes": exc.limit},
     )
 
 
