@@ -213,7 +213,20 @@ def list_transfer_jobs(
         counts = mongo.count_jobs(workspace_id=workspace_id)
         summaries = [summarize_listed_job(j) for j in (raw or []) if isinstance(j, dict)]
         return summaries, counts or {"total": 0, "by_status": {}}, "mongo"
-    except Exception:
+    except Exception as exc:
+        # D104-minor: a transient Mongo read failure silently swaps list_jobs
+        # to the local job store, which cannot contain the durable jobs —
+        # the QA saw a just-completed schedule run missing for ~1 min, then
+        # appear. The fallback stays (it is the honest answer when Mongo is
+        # down), but the swap is logged so the "missing" window is explainable
+        # from ops logs, and callers already see store="job_store".
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "list_transfer_jobs: Mongo read failed (%s); answering from the "
+            "local job store — durable jobs may be temporarily absent",
+            type(exc).__name__,
+        )
         summaries, counts = _from_engine_store(limit)
         return summaries, counts, "job_store"
 
