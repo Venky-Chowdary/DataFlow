@@ -1283,6 +1283,44 @@ def _ensure_schedule_name_index(coll: Any) -> None:
     _NAME_INDEX_READY = True
 
 
+def _assert_dest_pipeline_ownership(
+    payload: dict[str, Any], *, exclude_id: str | None = None
+) -> None:
+    """D104: refuse a second enabled pipeline on a destination table another
+    enabled pipeline already writes — unless the operator explicitly
+    acknowledges the shared destination.
+
+    Silent acceptance surfaced only at run time as a key collision (pipeline
+    A's unique index rejects pipeline B's append) with misleading guidance.
+    Store-level enforcement delegates to ``conflicting_dest_writers`` — the
+    canonical conflict lookup the plan layer already runs — so paths that do
+    not plan (direct store writes, update_schedule retargets) get the same
+    one-table-one-writer contract.
+    """
+    if bool(payload.get("shared_destination_acknowledged")):
+        return
+    dst = str(payload.get("dest_connector_id") or "").strip()
+    table = str(payload.get("dest_table") or "").strip()
+    if not dst or not table or not bool(payload.get("enabled", True)):
+        return
+    owners = conflicting_dest_writers(
+        dst,
+        table,
+        exclude_schedule_id=str(exclude_id or ""),
+    )
+    if not owners:
+        return
+    names = ", ".join(describe_dest_conflict(s) for s in owners)
+    raise ValueError(
+        f"Destination table '{table}' is already written by enabled "
+        f"pipeline(s) {names}: a second pipeline on one destination "
+        "collides at run time (key conflicts, order-dependent overwrites). "
+        "Disable or retarget the other pipeline, or pass "
+        "shared_destination_acknowledged=true to accept the shared "
+        "destination explicitly."
+    )
+
+
 def _guard_schedule_destination(connector_id: str, table: str) -> None:
     """Refuse a destination name the writer would silently rename (R4-D10).
 
@@ -1388,6 +1426,7 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
             "enabled_note": enabled_note,
         })
         _guard_schedule_destination(sched.dest_connector_id, sched.dest_table)
+        _assert_dest_pipeline_ownership(payload)
         sched.next_run_at = next_run_for(sched) if sched.enabled else None
         schedules.append(sched)
         _save_all(schedules)
@@ -1575,6 +1614,8 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
                 str(merged.get("dest_connector_id") or ""),
                 str(merged.get("dest_table") or ""),
             )
+        if any(key in data for key in ("dest_table", "dest_connector_id", "enabled")):
+            _assert_dest_pipeline_ownership(merged, exclude_id=schedule_id)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
         if any(key in data for key in ("duplicate_policy", "in_file_dedupe", "primary_key")):
