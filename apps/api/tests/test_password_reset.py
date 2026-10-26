@@ -867,3 +867,45 @@ def test_stale_lease_is_reclaimed(monkeypatch, tmp_path):
     doc["rows"][row["id"]]["lease_until"] = "2000-01-01T00:00:00+00:00"
     f.write_text(json.dumps(doc))
     assert mail_outbox.claim(row["id"]) is True
+
+
+def test_mongo_index_setup_runs_once_and_fails_loud(monkeypatch):
+    """Item 5: create_index ran on EVERY outbox call (two round trips per
+    op) and a failure silently fell back to the file tier — splitting the
+    queue across replicas. Index setup is now one-time, and a failure
+    raises instead of quietly changing tiers."""
+    from services import mail_outbox
+
+    calls = []
+
+    class _Coll:
+        def create_index(self, *a, **kw):
+            calls.append((a, kw))
+
+    class _Db:
+        def __getitem__(self, name):
+            return _Coll()
+
+    monkeypatch.setattr(mail_outbox, "_INDEXES_READY", False)
+    monkeypatch.setattr(mail_outbox, "mongo_database", lambda: _Db())
+    mail_outbox._database()
+    mail_outbox._database()
+    mail_outbox._database()
+    # two indexes, created exactly once across the three calls
+    assert len(calls) == 2, calls
+
+    class _BadColl:
+        def create_index(self, *a, **kw):
+            raise RuntimeError("auth failed")
+
+    class _BadDb:
+        def __getitem__(self, name):
+            return _BadColl()
+
+    monkeypatch.setattr(mail_outbox, "_INDEXES_READY", False)
+    monkeypatch.setattr(mail_outbox, "mongo_database", lambda: _BadDb())
+    try:
+        mail_outbox._database()
+        assert False, "expected raise, not silent file fallback"
+    except RuntimeError:
+        pass

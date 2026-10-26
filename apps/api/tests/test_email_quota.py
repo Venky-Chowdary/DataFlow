@@ -170,3 +170,45 @@ def test_file_backend_survives_repeated_reads(tmp_path):
     s2 = quota_status()
     assert s1["day_used"] == s2["day_used"] == 1
     assert (q._file_path()).exists()
+
+
+def test_mongo_resets_at_is_datetime_and_ttl_ready(monkeypatch):
+    """Item 5: resets_at must be a BSON datetime (the TTL index on it only
+    fires on dates — an ISO string leaves expired counters forever), and
+    _resets_live must honor both the new datetime and legacy ISO docs."""
+    from datetime import UTC, datetime, timedelta
+    from services import email_quota
+
+    # datetime (new) and ISO string (legacy) both read correctly
+    future = datetime.now(UTC) + timedelta(hours=1)
+    assert email_quota._resets_live(future) is True
+    assert email_quota._resets_live(future - timedelta(hours=2)) is False
+    assert email_quota._resets_live(future.isoformat()) is True
+    assert email_quota._resets_live((future - timedelta(hours=2)).isoformat()) is False
+    assert email_quota._resets_live(None) is False
+
+    # The mongo writer passes the datetime itself to $setOnInsert.
+    captured = {}
+
+    class _Coll:
+        def find_one_and_update(self, flt, upd, **kw):
+            captured.update(upd["$setOnInsert"])
+            return {"count": 1}
+        def create_index(self, *a, **kw):
+            captured["index"] = (a, kw)
+
+    class _Db:
+        def __getitem__(self, name):
+            return _Coll()
+
+    monkeypatch.setattr(email_quota, "_MONGO_INDEXES_READY", False)
+    monkeypatch.setattr(email_quota, "mongo_database", lambda: _Db())
+    email_quota._incr_mongo("k", future)
+    assert isinstance(captured["resets_at"], datetime), captured
+    # TTL index was created once (expireAfterSeconds=0 on resets_at).
+    assert captured["index"][0] == ("resets_at",)
+    assert captured["index"][1] == {"expireAfterSeconds": 0}
+    # And a second call does not recreate it.
+    captured.clear()
+    email_quota._db()
+    assert "index" not in captured

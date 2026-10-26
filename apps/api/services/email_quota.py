@@ -76,10 +76,11 @@ def _windows(now: datetime | None = None) -> tuple[tuple[str, datetime], tuple[s
 # ---------------------------------------------------------------------------
 
 _REDIS_CLIENT: Any = None
-_REDIS_FAILED = False
+_BACKEND_FAILED = False  # set when ANY durable backend (redis/mongo/file) errors
 _REDIS_LOCK = threading.Lock()
 
 _COLLECTION = "email_quota"
+_MONGO_INDEXES_READY = False
 
 
 def _file_path() -> Path:
@@ -87,8 +88,34 @@ def _file_path() -> Path:
 
 
 def _db():
-    """The same durable store as users/challenges, when configured."""
-    return mongo_database()
+    """The same durable store as users/challenges, when configured. The
+    TTL index on resets_at is created once per process; a setup failure
+    raises — falling back to the file tier would split quota state
+    across replicas."""
+    global _MONGO_INDEXES_READY
+    db = mongo_database()
+    if db is None:
+        return None
+    if not _MONGO_INDEXES_READY:
+        try:
+            db[_COLLECTION].create_index("resets_at", expireAfterSeconds=0)
+        except Exception:
+            logger.error("email_quota: Mongo index setup failed; refusing "
+                         "the file fallback (quota state would split "
+                         "across replicas)", exc_info=True)
+            raise
+        _MONGO_INDEXES_READY = True
+    return db
+
+
+def _resets_live(value) -> bool:
+    """resets_at is a BSON datetime on new docs (TTL index self-deletes
+    expired counters) and an ISO string on docs written before the fix —
+    honor both."""
+    now = datetime.now(UTC)
+    if isinstance(value, datetime):
+        return (value if value.tzinfo else value.replace(tzinfo=UTC)) > now
+    return str(value or "") > now.isoformat()
 
 
 def _backend() -> str:
@@ -105,7 +132,7 @@ def _redis_url() -> str:
 
 def _get_redis():
     """Lazy client; raises on connect failure (caller fails closed)."""
-    global _REDIS_CLIENT, _REDIS_FAILED
+    global _REDIS_CLIENT, _BACKEND_FAILED
     with _REDIS_LOCK:
         if _REDIS_CLIENT is not None:
             return _REDIS_CLIENT
@@ -114,16 +141,16 @@ def _get_redis():
         client = redis.from_url(_redis_url(), socket_timeout=2, socket_connect_timeout=2)
         client.ping()
         _REDIS_CLIENT = client
-        _REDIS_FAILED = False
+        _BACKEND_FAILED = False
         return client
 
 
 def _reset_backends() -> None:
     """Test hook — clears counters on every backend (incl. the file)."""
-    global _REDIS_CLIENT, _REDIS_FAILED
+    global _REDIS_CLIENT, _BACKEND_FAILED
     with _REDIS_LOCK:
         _REDIS_CLIENT = None
-        _REDIS_FAILED = False
+        _BACKEND_FAILED = False
     try:
         _file_path().unlink(missing_ok=True)
     except OSError:
@@ -152,7 +179,7 @@ def _incr_mongo(key: str, reset_at: datetime) -> int:
     doc = db[_COLLECTION].find_one_and_update(
         {"_id": key},
         {"$inc": {"count": 1},
-         "$setOnInsert": {"resets_at": reset_at.isoformat()}},
+         "$setOnInsert": {"resets_at": reset_at}},
         upsert=True, return_document=ReturnDocument.AFTER)
     return int(doc["count"])
 
@@ -197,8 +224,7 @@ def _alert_once(kind: str, window_key: str, used: int, limit: int) -> None:
 
             _db()[_COLLECTION].insert_one(
                 {"_id": alert_key,
-                 "resets_at": (datetime.now(UTC)
-                               + timedelta(days=31)).isoformat()})
+                 "resets_at": datetime.now(UTC) + timedelta(days=31)})
             fired = True
         except DuplicateKeyError:
             fired = False
@@ -250,7 +276,7 @@ def consume_send_slot() -> dict[str, int]:
     except EmailQuotaExceeded:
         raise
     except Exception as exc:  # noqa: BLE001 — fail closed, sender retries later
-        _REDIS_FAILED = True
+        _BACKEND_FAILED = True
         logger.warning("email quota backend unavailable: %s", type(exc).__name__)
         raise EmailQuotaExceeded(
             "email quota backend unavailable; send refused", retry_after_sec=60
@@ -298,7 +324,7 @@ def quota_status() -> dict[str, Any]:
         elif backend == "mongo":
             for key, which in ((day_key, "day"), (month_key, "month")):
                 doc = _db()[_COLLECTION].find_one({"_id": key}) or {}
-                if str(doc.get("resets_at", "")) > datetime.now(UTC).isoformat():
+                if _resets_live(doc.get("resets_at")):
                     if which == "day":
                         day_used = int(doc.get("count", 0))
                     else:

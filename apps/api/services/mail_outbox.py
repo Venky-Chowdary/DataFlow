@@ -63,15 +63,27 @@ def body(row: dict[str, Any]) -> dict[str, str]:
     return {"text": row.get("text") or "", "html": row.get("html") or ""}
 
 
+_INDEXES_READY = False
+
+
 def _database():
+    """Mongo tier when configured. Index setup is one-time per process; a
+    failure raises — silently falling back to the file tier would split
+    the queue across replicas."""
+    global _INDEXES_READY
     db = mongo_database()
     if db is None:
         return None
-    try:
-        db[COLLECTION].create_index("status")
-        db[COLLECTION].create_index("expires_at", expireAfterSeconds=0)
-    except Exception:
-        return None
+    if not _INDEXES_READY:
+        try:
+            db[COLLECTION].create_index("status")
+            db[COLLECTION].create_index("expires_at", expireAfterSeconds=0)
+        except Exception:
+            logger.error("mail_outbox: Mongo index setup failed; refusing "
+                         "the file fallback (queue state would split "
+                         "across replicas)", exc_info=True)
+            raise
+        _INDEXES_READY = True
     return db
 
 
@@ -84,6 +96,8 @@ def _now_iso() -> str:
 
 
 def _expiry_iso() -> str:
+    """ISO string on the file/returned row; the Mongo copy stores a real
+    datetime so the TTL index actually fires."""
     return (datetime.now(UTC) + _KEEP_SENT_FOR).isoformat()
 
 
@@ -106,7 +120,10 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
     }
     db = _database()
     if db is not None:
-        db[COLLECTION].insert_one({**row, "_id": row["id"]})
+        # BSON datetime — the expires_at TTL index only fires on dates.
+        db[COLLECTION].insert_one(
+            {**row, "_id": row["id"],
+             "expires_at": datetime.now(UTC) + _KEEP_SENT_FOR})
         return row
 
     with json_doc_transaction(_path(), {"rows": {}}) as doc:
