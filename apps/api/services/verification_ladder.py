@@ -754,26 +754,25 @@ def read_postgres_rows(
     )
     cursor_name = f"df_ladder_{uuid.uuid4().hex}"
     try:
-        with conn.cursor(name=cursor_name) as cur:
-            cur.itersize = _READ_BATCH
-            # Project json/jsonb as engine text — psycopg2 decodes jsonb into
-            # Python, after which JSON ``null`` is indistinguishable from SQL
-            # NULL (and ``"1"``/``1`` collapse). The transfer reader projects
-            # ``col::text`` for the same reason; the independent re-read must
-            # fingerprint the same values (D75).
-            from connectors.postgresql_reader import _json_column_names
+        # Project json/jsonb as engine text — psycopg2 decodes jsonb into
+        # Python, after which JSON ``null`` is indistinguishable from SQL
+        # NULL (and ``"1"``/``1`` collapse). The transfer reader projects
+        # ``col::text`` for the same reason; the independent re-read must
+        # fingerprint the same values (D75).
+        # Introspection runs on a normal cursor: psycopg2 named cursors
+        # accept exactly one execute(), which must be the population SELECT.
+        from connectors.postgresql_reader import (
+            _json_column_names,
+            _ordered_column_names,
+        )
 
-            json_cols = _json_column_names(cur, schema_n, table)
+        with conn.cursor() as probe:
+            json_cols = _json_column_names(probe, schema_n, table)
             names = columns
             if names is None:
-                names = [d[0] for d in cur.description] if cur.description else []
-            if not names:
-                cur.execute(
-                    sql.SQL("SELECT * FROM {}.{} WHERE false").format(
-                        sql.Identifier(schema_n), sql.Identifier(table)
-                    )
-                )
-                names = [d[0] for d in cur.description] if cur.description else []
+                names = _ordered_column_names(probe, schema_n, table)
+        with conn.cursor(name=cursor_name) as cur:
+            cur.itersize = _READ_BATCH
             if json_cols:
                 col_sql = sql.SQL(", ").join(
                     sql.SQL(

@@ -205,3 +205,81 @@ def test_canonical_json_text_units():
     )
     assert canonical_json_text("null") == "null"
     assert canonical_json_text("not json") is None
+
+
+def test_pg_ladder_named_cursor_executes_once(monkeypatch):
+    """Regression: C07's json projection ran the introspection query on the
+    server-side cursor, then issued the population SELECT on it — psycopg2
+    named cursors accept exactly one execute() (ProgrammingError: can't call
+    .execute() on named cursors more than once). Introspection must use a
+    separate normal cursor."""
+    import services.verification_ladder as verification_ladder
+    from connectors import postgresql_reader as pg_reader
+
+    def _render(q):
+        try:
+            return q.as_string(None)  # psycopg2.sql.Composable
+        except Exception:
+            return str(q)
+
+    named_executes = []
+
+    class _Cur:
+        def __init__(self, name):
+            self.itersize = 0
+            self.description = None
+            self._name = name
+            self._data_rows = [(1, "null")]
+
+        def execute(self, q, params=None):
+            if self._name is not None:
+                named_executes.append(_render(q))
+                assert len(named_executes) == 1, (
+                    "named cursor must run exactly one execute — introspection "
+                    "belongs on a separate cursor"
+                )
+            text = _render(q)
+            if "information_schema" in text:
+                self.description = [("column_name",)]
+                self._cat_rows = [("id",), ("doc",)]
+            else:
+                self.description = [("id",), ("doc",)]
+
+        def fetchall(self):
+            return getattr(self, "_cat_rows", [])
+
+        def fetchmany(self, n):
+            rows, self._data_rows = self._data_rows, []
+            return rows
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    class _Conn:
+        def cursor(self, name=None):
+            return _Cur(name)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(
+        "connectors.postgresql_conn.get_connection", lambda **_: _Conn()
+    )
+    monkeypatch.setattr(
+        pg_reader, "_json_column_names", lambda cur, schema, table: {"doc"}
+    )
+
+    rows = verification_ladder.read_postgres_rows(
+        host="h",
+        port=5432,
+        database="d",
+        username="u",
+        password="p",
+        schema="public",
+        table="t",
+    )
+    assert rows == [{"id": "1", "doc": "null"}]
+    assert len(named_executes) == 1
