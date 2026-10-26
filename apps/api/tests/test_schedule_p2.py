@@ -921,7 +921,7 @@ def test_resume_catch_up_lands_on_the_next_boundary(temp_store):
     assert final is not None and last is not None
     assert final > datetime.now(timezone.utc)
     assert final.second == 0 and final.microsecond == 0
-    assert abs((final - last).total_seconds()) > 2
+    assert 0 < (final - last).total_seconds() <= 300
     assert done.id not in {item.id for item in store.due_schedules()}
 
 
