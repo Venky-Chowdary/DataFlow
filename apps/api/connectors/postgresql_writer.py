@@ -520,6 +520,8 @@ def _conflict_key_sql_predicates(
     Shared by Redshift LSN lookup and stage-delete so extract
     ``SQL_NULL_SENTINEL`` never binds as ``col = '__DF_SQL_NULL__'``.
     """
+    from services.value_serializer import unescape_wire_text
+
     predicates: list[Any] = []
     values: list[Any] = []
     for col, idx in zip(conflict_cols, conflict_idxs):
@@ -532,7 +534,7 @@ def _conflict_key_sql_predicates(
                     sql_mod.Identifier(col), sql_mod.Placeholder()
                 )
             )
-            values.append(val)
+            values.append(unescape_wire_text(val))
     return predicates, values
 
 

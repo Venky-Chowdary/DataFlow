@@ -182,6 +182,7 @@ def load_data_text_value(value: Any) -> str:
         is_missing_sentinel,
         is_reader_null_cell,
         safe_decimal_text,
+        unescape_wire_text,
     )
 
     if value is None or is_reader_null_cell(value) or is_missing_sentinel(value):
@@ -215,7 +216,7 @@ def load_data_text_value(value: Any) -> str:
     elif isinstance(value, (int, float)):
         return str(value)
     else:
-        raw = str(value)
+        raw = str(unescape_wire_text(value))
     return _escape_load_text(raw)
 
 

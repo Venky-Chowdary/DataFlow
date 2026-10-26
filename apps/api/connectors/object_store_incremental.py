@@ -334,7 +334,7 @@ def _parse_jsonl(raw: bytes, key: str) -> list[dict[str, Any]]:
 
 def _parse_delimited(body: bytes, delimiter: str, key: str) -> list[dict[str, Any]]:
     from services.csv_codec import iter_csv_records
-    from services.value_serializer import SQL_NULL_SENTINEL
+    from services.value_serializer import SQL_NULL_SENTINEL, unescape_wire_text
 
     text = body.decode("utf-8-sig")
     reader = iter_csv_records(io.StringIO(text), delimiter)
@@ -352,6 +352,8 @@ def _parse_delimited(body: bytes, delimiter: str, key: str) -> list[dict[str, An
         for name, value in rec.items():
             if value == SQL_NULL_SENTINEL:
                 rec[name] = None
+            else:
+                rec[name] = unescape_wire_text(value)
         rows.append(rec)
     return rows
 

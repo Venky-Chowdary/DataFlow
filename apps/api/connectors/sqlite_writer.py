@@ -99,7 +99,7 @@ def _sqlite_bind_carrier(map_carrier: str, physical_or_ddl: str = "") -> str:
 
 
 def _to_sqlite_value(value: Any, source_type: str) -> Any:
-    from services.value_serializer import absent_sql_bind, is_missing_sentinel
+    from services.value_serializer import absent_sql_bind, is_missing_sentinel, unescape_wire_text
 
     # Sparse CDC: never coerce DF_MISSING → NULL (would wipe present destination cols).
     if is_missing_sentinel(value):
@@ -207,7 +207,7 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
             return coerced.isoformat()
         if isinstance(coerced, time):
             return coerced.isoformat()
-        return value
+        return unescape_wire_text(value)
     if upper == "BOOLEAN":
         from connectors.sql_bind import coerce_boolean_wire
 
@@ -218,7 +218,7 @@ def _to_sqlite_value(value: Any, source_type: str) -> Any:
                 "(would invent non-canonical boolean integer)"
             )
         return coerced
-    return value
+    return unescape_wire_text(value)
 
 
 def _sqlite_polish_bound_rows(

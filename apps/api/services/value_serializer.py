@@ -28,6 +28,12 @@ from services.type_system import decimal_needs_scientific_wire
 # maps the sentinel back to Python None → destination SQL NULL.
 SQL_NULL_SENTINEL = "__DF_SQL_NULL__"
 
+# Escape prefix for *real string values* that would collide with a wire
+# sentinel (D109). ``cell_to_string(..., preserve_sql_null=True)`` emits
+# ``__DF_ESC__`` + the literal so the in-band sentinel stays a proof of
+# SQL NULL. ``unescape_wire_text`` strips one prefix at each decode layer.
+ESCAPED_WIRE_PREFIX = "__DF_ESC__"
+
 # Document field absent (Mongo/Dynamo schemaless) — distinct from explicit null.
 # Sparse CDC upsert: omit the key from SET (never wipe destination with NULL).
 # Dense INSERT/COPY/full-refresh / coerce_null: materialize as SQL NULL.
@@ -64,6 +70,25 @@ def is_missing_sentinel(value: Any) -> bool:
 NULL_WIRE_SENTINELS: frozenset[str] = frozenset(
     {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL, "__df_ddb_null__"}
 )
+
+# Decoders compare ``strip().lower()`` (apply_transform), so the collision
+# domain is the sentinel set under the same normalization.
+_NULL_WIRE_LOWER: frozenset[str] = frozenset(s.lower() for s in NULL_WIRE_SENTINELS)
+
+
+def escape_wire_text(text: str) -> str:
+    """Escape a wire-unsafe string: collides with a NULL/missing sentinel or
+    already carries the escape prefix (recursive, so decode stays total)."""
+    if text.strip().lower() in _NULL_WIRE_LOWER or text.startswith(ESCAPED_WIRE_PREFIX):
+        return f"{ESCAPED_WIRE_PREFIX}{text}"
+    return text
+
+
+def unescape_wire_text(value: Any) -> Any:
+    """Strip one ``__DF_ESC__`` layer from a wire string; non-strings pass."""
+    if isinstance(value, str) and value.startswith(ESCAPED_WIRE_PREFIX):
+        return value[len(ESCAPED_WIRE_PREFIX) :]
+    return value
 
 
 def is_null_evidence(value: Any) -> bool:
@@ -111,7 +136,7 @@ def present_cell_text(value: Any) -> str | None:
     if is_null_evidence(value) or is_frame_missing(value):
         return None
     if isinstance(value, str):
-        text = value.strip()
+        text = unescape_wire_text(value).strip()
         return None if is_null_evidence(text) else text
     text = cell_to_string(value, preserve_sql_null=True)
     if is_null_evidence(text):
@@ -760,6 +785,8 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     # Sparse CDC / STOP_COLUMN / coerce omit — never serialize the sentinel into
     # CSV/JSON/export wires (would look like a real client value).
     if is_missing_sentinel(value):
+        if preserve_sql_null and isinstance(value, str):
+            return escape_wire_text(value)
         return ""
 
     # IEEE NaN / Infinity are values. They are not SQL NULL.
@@ -833,8 +860,12 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
         # 3.14}`` must not be rewritten as ``{"pi": "3.14"}`` (D74).
         return json_document_text(value, sort_keys=True)
 
-    # Fallback to str() — never repr().
-    return str(value)
+    # Fallback to str() — never repr(). Escape wire-colliding spellings so the
+    # in-memory sentinel stays a proof of SQL NULL, not a literal (D109).
+    text = str(value)
+    if preserve_sql_null and isinstance(value, str):
+        return escape_wire_text(text)
+    return text
 
 
 def sanitize_json_value(value: Any, *, refuse_nonfinite: bool = True) -> Any:

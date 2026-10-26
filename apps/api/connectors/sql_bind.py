@@ -21,6 +21,7 @@ from typing import Any
 from connectors.sql_bind_route import BindRoute, bind_route
 from connectors.sql_temporal import coerce_sql_temporal
 from services.value_serializer import absent_sql_bind as _absent_sql_bind
+from services.value_serializer import unescape_wire_text
 
 # Canonical boolean wire only — SSOT with type_system / transform_engine.
 # Informal yes/on/y/no/n invents truth; quarantine or operator transform owns those.
@@ -2420,5 +2421,5 @@ def normalize_sql_bind_value(
             and getattr(value, "tzinfo", None) is not None
         ):
             return value.isoformat()
-        return value
-    return handler(value, route)
+        return unescape_wire_text(value)
+    return unescape_wire_text(handler(value, route))

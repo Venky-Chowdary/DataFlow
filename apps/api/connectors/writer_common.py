@@ -32,6 +32,7 @@ from services.value_serializer import (
     is_reader_null_cell,
     json_loads_exact,
     public_mapped_cell,
+    unescape_wire_text,
 )
 
 from connectors.array_wire import (  # noqa: F401 — re-export canonical helpers
@@ -164,7 +165,7 @@ def omit_missing_fields(
             continue
         if drop_empty and str(v) == "":
             continue
-        out[str(k)] = v
+        out[str(k)] = unescape_wire_text(v)
     return out
 
 
@@ -599,6 +600,7 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         pass
     if value is None:
         return None
+    value = unescape_wire_text(value)
     try:
         from services.type_system import normalize_logical_type
     except Exception:
@@ -697,7 +699,7 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         if ctype in {"text", "string", "varchar", "uuid", "binary", ""}:
             # Empty/unknown logical type: keep string — never invent int/bool/float
             # via json.loads (object-store export type invent).
-            return value
+            return unescape_wire_text(value)
         if ctype in {"boolean", "bool", "bit"}:
             from connectors.sql_bind import coerce_boolean_wire
 
@@ -1167,7 +1169,7 @@ def vector_prepare_cell(val: Any) -> Any:
         except Exception:
             return text
     if isinstance(val, (str, int, float, bool)):
-        return val
+        return unescape_wire_text(val)
     return present_cell_text(val)
 
 
@@ -3030,7 +3032,7 @@ def fits_decimal(
             # refused every scale-3 value as overflow.
             d = value
         else:
-            text = str(value).strip()
+            text = str(unescape_wire_text(value)).strip()
             if not text:
                 return True
             from services.transform_engine import decimal_wire_value
@@ -3210,7 +3212,7 @@ def string_storage_units(
         except UnicodeDecodeError:
             text = cell_to_string(value)
     else:
-        text = value if isinstance(value, str) else cell_to_string(value)
+        text = unescape_wire_text(value) if isinstance(value, str) else cell_to_string(value)
     unit = string_length_unit(type_str or "", dialect_label or "")
     if unit == _UNITS_CODE_POINTS or text.isascii():
         # ASCII spends one byte and one UTF-16 unit per code point, so every
@@ -3241,6 +3243,7 @@ def binary_storage_bytes(value: Any) -> bytes | None:
     if isinstance(value, (bytes, bytearray, memoryview)):
         return bytes(value)
     if isinstance(value, str):
+        value = unescape_wire_text(value)
         if not value:
             return b""
         try:
@@ -3761,7 +3764,7 @@ def integer_fit_failure(
     elif isinstance(value, int):
         dec = Decimal(value)
     else:
-        text = str(value).strip()
+        text = str(unescape_wire_text(value)).strip()
         if not text:
             # Empty ≠ natural NULL on INTEGER — bind must not invent NULL;
             # quarantine_unfit_integers / bind quarantine hold the row out.
@@ -5017,7 +5020,7 @@ def present_field_bindings(row: dict[str, Any]) -> dict[str, Any]:
     for key, val in row.items():
         if is_missing_sentinel(val):
             continue
-        out[key] = None if is_reader_null_cell(val) else val
+        out[key] = None if is_reader_null_cell(val) else unescape_wire_text(val)
     return out
 
 
@@ -5360,7 +5363,7 @@ def _conflict_key_identity(val: Any) -> Any:
     Reader-null and blank collapse to ``None`` so extract ``SQL_NULL_SENTINEL``
     matches a destination SQL NULL. 0 / false / present text stay themselves.
     """
-    return None if _is_nullish_conflict_key(val) else val
+    return None if _is_nullish_conflict_key(val) else unescape_wire_text(val)
 
 
 def conflict_key_wire(val: Any) -> str:

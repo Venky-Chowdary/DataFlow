@@ -2107,11 +2107,14 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         # reconcile_sample is operator-facing: records carry the
         # ``__DF_SQL_NULL__`` wire sentinel for the writer, but the sample
         # must show real NULL — the destination holds real NULL too (R4).
-        from services.value_serializer import SQL_NULL_SENTINEL as _SQL_NULL
+        from services.value_serializer import (
+            SQL_NULL_SENTINEL as _SQL_NULL,
+            unescape_wire_text as _unesc,
+        )
 
         dest_summary["reconcile_sample"] = [
             {
-                k: (None if isinstance(v, str) and v == _SQL_NULL else v)
+                k: (None if isinstance(v, str) and v == _SQL_NULL else _unesc(v))
                 for k, v in rec.items()
             }
             for rec in records[:50]

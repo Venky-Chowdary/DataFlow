@@ -231,10 +231,11 @@ def _normalize_redis_typed_doc(
 
     out = dict(doc)
     for col, typ in zip(target_cols, logical_types):
-        from services.value_serializer import is_reader_null_cell
+        from services.value_serializer import is_reader_null_cell, unescape_wire_text
 
         if col not in out or is_reader_null_cell(out[col]):
             continue
+        out[col] = unescape_wire_text(out[col])
         upper = (typ or "").upper()
         if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
             out[col] = coerce_uuid_wire(out[col])

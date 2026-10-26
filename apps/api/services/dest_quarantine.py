@@ -108,6 +108,7 @@ def operator_quarantine_json_cell(value: Any) -> Any:
         SQL_NULL_SENTINEL,
         cell_to_string,
         is_missing_sentinel,
+        unescape_wire_text,
     )
 
     if is_missing_sentinel(value):
@@ -117,7 +118,7 @@ def operator_quarantine_json_cell(value: Any) -> Any:
     if isinstance(value, str):
         if value.strip() == SQL_NULL_SENTINEL:
             return None
-        return value
+        return unescape_wire_text(value)
     text = cell_to_string(value, preserve_sql_null=True)
     if text == SQL_NULL_SENTINEL:
         return None
