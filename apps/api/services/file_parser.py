@@ -7,6 +7,7 @@ import gzip
 import io
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,36 @@ from services.value_serializer import cell_to_string, json_default, json_loads_e
 
 UPLOAD_DIR = upload_dir()
 REGISTRY_PATH = data_dir() / "upload_registry.json"
+
+
+_UNSAFE_FILENAME_CHARS = re.compile(r"[^A-Za-z0-9._-]")
+
+
+def display_upload_filename(name: str | None, default: str = "upload.bin") -> str:
+    """Client filename reduced to its final component; never carries a directory."""
+    raw = str(name or "").replace("\\", "/").replace("\x00", "").strip()
+    base = raw.rsplit("/", 1)[-1].strip()
+    if base in ("", ".", ".."):
+        return default
+    return base
+
+
+def safe_upload_filename(name: str | None, default: str = "upload.bin") -> str:
+    """Filesystem- and object-key-safe name for a client-supplied upload filename."""
+    base = _UNSAFE_FILENAME_CHARS.sub("_", display_upload_filename(name, default))
+    base = base.lstrip(".")[:160]
+    return base or default
+
+
+def upload_path_for(root: Path, file_id: str, filename: str | None) -> Path:
+    """``root/<file_id>_<safe name>``, refusing any result that resolves outside ``root``."""
+    safe_id = _UNSAFE_FILENAME_CHARS.sub("_", str(file_id or ""))
+    candidate = Path(root) / f"{safe_id}_{safe_upload_filename(filename)}"
+    root_resolved = Path(root).resolve()
+    resolved = candidate.resolve()
+    if resolved.parent != root_resolved:
+        raise ValueError("upload path escapes the upload directory")
+    return resolved
 
 _file_registry: dict[str, dict] = {}
 
@@ -330,6 +361,7 @@ def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[lis
 
 
 def store_upload(filename: str, content: bytes) -> dict:
+    filename = display_upload_filename(filename, "upload.csv")
     fmt = detect_format(filename, content)
     file_id = uuid.uuid4().hex[:16]
     encoding = "utf-8"
@@ -413,7 +445,7 @@ def store_upload(filename: str, content: bytes) -> dict:
     else:
         columns = infer_columns_from_rows(headers, rows)
     preview_rows = rows[:5]
-    path = UPLOAD_DIR / f"{file_id}_{filename}"
+    path = upload_path_for(UPLOAD_DIR, file_id, filename)
     path.write_bytes(content)
 
     validation_report: dict | None = None
@@ -425,7 +457,7 @@ def store_upload(filename: str, content: bytes) -> dict:
 
     from services.object_store import stage_bytes
 
-    object_uri = stage_bytes(f"uploads/{file_id}/{filename}", content)
+    object_uri = stage_bytes(f"uploads/{file_id}/{safe_upload_filename(filename)}", content)
 
     record = {
         "file_id": file_id,
@@ -472,9 +504,12 @@ def get_file(file_id: str) -> dict | None:
     uri = str(record.get("object_uri") or "")
     if uri.startswith("s3://"):
         from services.object_store import materialize_local
-        from services.platform_config import upload_dir
 
-        dest = upload_dir() / f"{file_id}_{record.get('filename') or 'upload.bin'}"
+        try:
+            dest = upload_path_for(upload_dir(), file_id, record.get("filename"))
+        except ValueError:
+            logging.getLogger(__name__).warning("Refused to materialize upload %s outside upload_dir", file_id)
+            return record
         if materialize_local(uri, dest):
             record = dict(record)
             record["path"] = str(dest)
