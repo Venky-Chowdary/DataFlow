@@ -74,6 +74,7 @@ jobs:
       DATAFLOW_TEST_MSSQL_PORT: "1433"
       DATAFLOW_TEST_MSSQL_USER: sa
       DATAFLOW_TEST_MSSQL_PASSWORD: Dataflow_CI_2026!
+      DATAFLOW_SQLSERVER_HOST: 127.0.0.1
       DATAFLOW_SQLSERVER_USER: sa
       DATAFLOW_SQLSERVER_PASSWORD: Dataflow_CI_2026!
       # Mongo — replica-set URI so sessions/change streams work
