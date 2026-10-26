@@ -209,6 +209,37 @@ def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(defa
     if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
     return workspace_id
+
+
+def _connector_id_of(endpoint: Any) -> str | None:
+    return endpoint if isinstance(endpoint, str) else getattr(endpoint, "connector_id", None)
+
+
+def _assert_endpoint_connectors(
+    request: Request,
+    *,
+    read: tuple[Any, ...] = (),
+    write: tuple[Any, ...] = (),
+) -> None:
+    """404 when a named saved connector lives outside the caller's workspaces.
+
+    A ``connector_id`` expands into stored host and credentials, so it is
+    authorized against the connector's own workspace before any resolve.
+    """
+    from services.workspace_access import assert_connector_accessible
+
+    for endpoint in read:
+        assert_connector_accessible(request, _connector_id_of(endpoint))
+    for endpoint in write:
+        assert_connector_accessible(request, _connector_id_of(endpoint), write=True)
+
+
+def _caller_workspace() -> str:
+    from services.connector_access import caller_workspace_id
+
+    return caller_workspace_id()
+
+
 class EndpointDTO(BaseModel):
     # Allow Studio flat keys (schema_types, table_exists, …) so EndpointConfig.from_dict
     # can fold them into extra — never silently strip live DDL / existence SSOT.
@@ -401,26 +432,29 @@ async def transfer_readiness():
 
 
 @router.post("/route")
-async def analyze_route(body: AnalyzeRequest):
+async def analyze_route(body: AnalyzeRequest, request: Request):
     """Score a source → destination route with conversion and driver hints."""
     from services.universal_router import analyze_route as score_route
 
     from ..transfer.adapters import resolve_endpoint
     from ..transfer.models import EndpointConfig
 
-    src = resolve_endpoint(EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True)))
-    dst = resolve_endpoint(EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True)))
+    _assert_endpoint_connectors(request, read=(body.source, body.destination))
+    ws = _caller_workspace() or None
+    src = resolve_endpoint(EndpointConfig.from_dict(body.source.kind, body.source.model_dump(by_alias=True)), workspace_id=ws)
+    dst = resolve_endpoint(EndpointConfig.from_dict(body.destination.kind, body.destination.model_dump(by_alias=True)), workspace_id=ws)
     src_fmt = src.format or ("csv" if src.kind == "file" else src.format or "")
     dst_fmt = dst.format or ("json" if dst.kind == "file_export" else dst.format or "")
     return score_route(src.kind, src_fmt, dst.kind, dst_fmt)
 
 
 @router.post("/analyze")
-async def analyze_transfer(request: AnalyzeRequest):
+async def analyze_transfer(request: AnalyzeRequest, http_request: Request):
     """Understand source/destination and show auto-creation plan."""
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig
 
+    _assert_endpoint_connectors(http_request, read=(request.source, request.destination))
     engine = get_transfer_engine()
     src_data = request.source.model_dump(by_alias=True)
     dst_data = request.destination.model_dump(by_alias=True)
@@ -433,11 +467,12 @@ async def analyze_transfer(request: AnalyzeRequest):
 
 
 @router.post("/introspect")
-async def introspect_endpoint_route(request: AnalyzeRequest):
+async def introspect_endpoint_route(request: AnalyzeRequest, http_request: Request):
     """Probe source or destination — list tables/collections, infer schema."""
     from ..transfer.endpoint_intelligence import introspect_endpoint
     from ..transfer.models import EndpointConfig
 
+    _assert_endpoint_connectors(http_request, read=(request.source, request.destination))
     src = EndpointConfig.from_dict(request.source.kind, request.source.model_dump(by_alias=True))
     dst = EndpointConfig.from_dict(request.destination.kind, request.destination.model_dump(by_alias=True))
     # Role-tag so missing-table copy is correct (source ≠ create-on-write).
@@ -924,6 +959,7 @@ async def execute_transfer_json(
         ) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(request, read=(body.source,), write=(body.destination,))
     src = src_preview
     dst = dst_preview
     region = (
@@ -1242,6 +1278,11 @@ async def run_universal_transfer(
         ) from exc
 
     workspace_id = _resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(
+        request,
+        read=tuple(c for c in (source_connector_id,) if c),
+        write=tuple(c for c in (dest_connector_id,) if c),
+    )
 
     src_fmt = source_format
     if source_kind == "file" and file:
@@ -2148,7 +2189,8 @@ async def rebaseline_append_continuity(
     from ..transfer.adapters import resolve_endpoint
     from ..transfer.models import EndpointConfig
 
-    _resolve_write_workspace(request, workspace_id)
+    write_workspace = _resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(request, write=(body.destination,))
     reason = (body.reason or "").strip()
     if not reason:
         raise HTTPException(
@@ -2158,7 +2200,8 @@ async def rebaseline_append_continuity(
     dst = resolve_endpoint(
         EndpointConfig.from_dict(
             body.destination.kind, body.destination.model_dump(by_alias=True)
-        )
+        ),
+        workspace_id=write_workspace or None,
     )
     try:
         return await asyncio.to_thread(

@@ -35,6 +35,7 @@ from services.platform_config import (
 )
 
 from .middleware.auth_middleware import AuthMiddleware
+from .middleware.connector_access_middleware import ConnectorAccessMiddleware
 from .middleware.production_config_middleware import ProductionConfigMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
 from .routers.ai_router import router as ai_router
@@ -382,6 +383,8 @@ _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
     _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
+# Innermost: binds the authenticated caller for saved-connector resolution.
+app.add_middleware(ConnectorAccessMiddleware)
 app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)

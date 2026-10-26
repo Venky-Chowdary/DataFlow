@@ -17,6 +17,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping
 
+from services import connector_access
 from services.platform_config import data_dir
 from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
@@ -568,13 +569,18 @@ def _workspace_scope(workspace_id: str | None) -> str | None:
 
 
 def list_connectors(role: str | None = None, workspace_id: str | None = None) -> list[SavedConnector]:
+    """Saved connectors, never beyond what the bound request caller may read.
+
+    ``workspace_id`` narrows the result; omitting it does not widen it past the
+    caller (``services.connector_access``). Only unbound system code sees all.
+    """
     workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
-            return _list_mongo(role, workspace_id)
+            return connector_access.visible_items(_list_mongo(role, workspace_id))
         except Exception as exc:
             logger.warning("MongoDB list_connectors failed, falling back to file: %s", exc)
-    return _list_file(role, workspace_id)
+    return connector_access.visible_items(_list_file(role, workspace_id))
 
 
 def _get_file(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
@@ -611,13 +617,33 @@ def _get_mongo(connector_id: str, workspace_id: str | None = None) -> SavedConne
 
 
 def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
+    """One saved connector, or ``None`` when it is outside the bound caller's reach."""
     workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
-            return _get_mongo(connector_id, workspace_id)
+            return connector_access.visible(_get_mongo(connector_id, workspace_id))
         except Exception as exc:
             logger.warning("MongoDB get_connector failed, falling back to file: %s", exc)
-    return _get_file(connector_id, workspace_id)
+    return connector_access.visible(_get_file(connector_id, workspace_id))
+
+
+def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
+    """``(exists, workspace_id)`` for an id, read without caller scope.
+
+    Only for authorization: a router asks who owns an id so it can refuse a
+    caller outside that workspace instead of silently treating it as missing.
+    """
+    with connector_access.system_connector_scope():
+        conn = get_connector(connector_id)
+    if conn is None:
+        return False, ""
+    return True, str(conn.workspace_id or "")
+
+
+def _caller_may_write(connector_id: str, workspace_id: str | None) -> bool:
+    if connector_access.current_caller() is None:
+        return True
+    return connector_access.writable(get_connector(connector_id, workspace_id))
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
@@ -715,6 +741,8 @@ def _coerce_secret_update(new: Any, existing: Any) -> Any:
 
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
     workspace_id = _workspace_scope(workspace_id)
+    if not _caller_may_write(connector_id, workspace_id):
+        return None
     def _merge(existing: SavedConnector) -> SavedConnector:
         merged = {**existing.to_dict(), **data, "id": connector_id}
         # Never let a masked UI payload overwrite a saved secret / connection string.
@@ -780,6 +808,8 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
 
 def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool:
     workspace_id = _workspace_scope(workspace_id)
+    if not _caller_may_write(connector_id, workspace_id):
+        return False
     if _use_mongo():
         try:
             coll = _mongo_collection()
