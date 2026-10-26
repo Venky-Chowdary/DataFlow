@@ -551,11 +551,15 @@ def test_provider_timeout_is_bounded_and_send_failed_audited(monkeypatch):
     assert kinds.count("password.reset.sent") == 1, events
 
 
-def test_outbox_survives_restart_and_drains(monkeypatch):
+def test_outbox_survives_restart_and_drains(monkeypatch, tmp_path):
     """Mail lost on restart is no longer silent: the row is persisted BEFORE
     the lane sees it, so a crash leaves status 'queued' and the startup drain
     re-sends it (idempotency key dedupes at the provider)."""
     from services import mail_outbox
+
+    # Per-test outbox: the module-scoped data dir is shared across this file,
+    # so rows queued by earlier tests would skew the absolute counts below.
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
 
     c = _client()
     _verified_user(c)
@@ -581,10 +585,12 @@ def test_outbox_survives_restart_and_drains(monkeypatch):
     assert signup_service.signup_metrics()["mail_outbox"] == cts
 
 
-def test_outbox_row_marked_failed_on_send_error(monkeypatch):
+def test_outbox_row_marked_failed_on_send_error(monkeypatch, tmp_path):
     """A send failure marks the persisted row failed (not queued) and
     audits send_failed — the admin surface can tell the difference."""
     from services import mail_outbox
+
+    monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
 
     events = []
     monkeypatch.setattr(signup_service, "record_security_event",
