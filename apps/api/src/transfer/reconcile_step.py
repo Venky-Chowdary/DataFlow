@@ -54,6 +54,7 @@ from services.reconciliation import (
     KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
     checksum_rows,
+    fingerprint_for_reconcile,
     overlay_physical_dest_types,
     read_target_sample,
     reconcile,
@@ -2819,7 +2820,13 @@ def _covered_keyed_noop_verify(
             scol, tcol = str(m.get("source") or ""), str(m.get("target") or "")
             if not scol or not tcol:
                 continue
-            if srow.get(scol) != r.get(tcol):
+            # Compare canonical fingerprints, not raw driver reprs — a tz-aware
+            # timestamptz ('...+00:00') and the naive wall-clock a tz-less
+            # carrier stores are the same instant, and '1 day 02:00:00' ==
+            # '26:00:00' interval text. Raw != flagged faithful rows as drift.
+            s_fp = fingerprint_for_reconcile(srow.get(scol), engine=db_type)
+            t_fp = fingerprint_for_reconcile(r.get(tcol), engine=db_type)
+            if s_fp != t_fp:
                 if len(drifts) < 5:
                     drifts.append(
                         f"key {key} column {scol}->{tcol}: "
