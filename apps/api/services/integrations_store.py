@@ -51,6 +51,8 @@ def _default_sso() -> dict[str, dict[str, Any]]:
             "sso_url": "",
             "x509_cert": "",
             "email_attribute": "email",
+            # Admin-claimed email domains routed to this IdP (P4-6).
+            "email_domains": [],
         },
         "oidc": {  # nosec B105
             "enabled": False,
@@ -59,6 +61,7 @@ def _default_sso() -> dict[str, dict[str, Any]]:
             "client_secret": "",
             "redirect_uri": "",
             "scopes": "openid email profile",
+            "email_domains": [],
         },
         "azure_ad": {  # nosec B105
             "enabled": False,
@@ -66,6 +69,7 @@ def _default_sso() -> dict[str, dict[str, Any]]:
             "client_id": "",
             "client_secret": "",
             "redirect_uri": "",
+            "email_domains": [],
         },
     }
 

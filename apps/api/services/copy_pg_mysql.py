@@ -406,7 +406,15 @@ def _mysql_create_sql(
         pk_sql = ", ".join(_mysql_ident(c) for c in create.primary_key)
         cols.append(f"PRIMARY KEY ({pk_sql})")
     suffix = f" {create.create_suffix}" if create.create_suffix else ""
-    return f"CREATE TABLE {_mysql_ident(table)} ({', '.join(cols)}){suffix}"
+    # 'dataflow:managed' matches the row-writer's marker on tables it creates
+    # (connectors/mysql_writer.py): the D101 upsert gate uses it to tell a
+    # DataFlow-created table — where index DDL is already disclosed — from an
+    # operator-owned one. COPY-path creates must stamp it too or a later
+    # keyed upsert/quarantine replay on a table we made fails the gate.
+    return (
+        f"CREATE TABLE {_mysql_ident(table)} ({', '.join(cols)}){suffix} "
+        "COMMENT='dataflow:managed'"
+    )
 
 
 def _copy_select_sql(select_list: str, source_ref: str, predicate: str) -> str:

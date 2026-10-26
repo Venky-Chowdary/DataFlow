@@ -6,12 +6,13 @@ because both end in ``id``. That is the hole this suite closes.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 from pathlib import Path
 
 
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 
 def test_rag_suggest_mapping_uses_map_columns_ssot() -> None:

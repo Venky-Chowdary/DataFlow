@@ -80,6 +80,45 @@ def test_dest_live_fks_surfaced_when_route_declares_none(monkeypatch):
     ]
 
 
+def test_dest_check_constraints_from_meta_items(monkeypatch):
+    """Real introspect_schema reports CHECKs under
+    check_constraints_meta.items (no top-level 'check_constraints' key).
+    Reading only the flat key left the preflight CHECK probe starved —
+    prod pf_7a5786c90049 showed safe_to_start with no warning although a
+    violating source row existed."""
+    monkeypatch.setattr(
+        ei, "introspect_endpoint", lambda *a, **k: _endpoint_info()
+    )
+    monkeypatch.setattr(
+        si,
+        "introspect_schema",
+        lambda db_type, **kw: {
+            "connected": True,
+            "foreign_keys": [],
+            "foreign_keys_meta": {"measured": True},
+            "check_constraints_meta": {
+                "dialect": "postgresql",
+                "status": "ok",
+                "items": [
+                    {
+                        "name": "hq1604_cd_amt_check",
+                        "predicate": "(amt >= 0)",
+                        "columns": ["amt"],
+                    }
+                ],
+            },
+        },
+    )
+    out = _call_preflight()
+    assert out["check_constraints"] == [
+        {
+            "name": "hq1604_cd_amt_check",
+            "predicate": "(amt >= 0)",
+            "columns": ["amt"],
+        }
+    ]
+
+
 def test_dest_probe_failure_never_fails_validate(monkeypatch):
     monkeypatch.setattr(
         ei, "introspect_endpoint", lambda *a, **k: _endpoint_info()

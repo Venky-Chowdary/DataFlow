@@ -26,11 +26,12 @@ import { useTheme } from "./lib/useTheme";
 import { loadTransferLiveCatalog, resolveCatalogIdToType } from "./lib/connectorTypes";
 import { Connector, PipelineSchedule, Screen, TransferJob } from "./lib/types";
 import { LoginPage } from "./pages/LoginPage";
+import { ForgotPasswordPage, ResetPasswordPage, SignupPage } from "./pages/SignupPage";
 import { MarketingSite } from "./pages/marketing/MarketingSite";
 import { AICopilot } from "./components/AICopilot";
 import { ConnectorModal } from "./components/ConnectorModal";
 import { LoadingBlock } from "./components/LoadingState";
-import { focusFromHash, isSignedInHelpHash, readAppHash, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
+import { focusFromHash, isResetLinkRoute, isSignedInHelpHash, readAppHash, resetLinkToken, signedInHelpArticleFromHash, signedInScreenFromHash, writeAppHash } from "./lib/appNavigation";
 import {
   PUBLIC_PAGE_META,
   publicRouteFromHash,
@@ -1040,7 +1041,15 @@ export function DataTransferApp() {
 }
 
 function DataTransferAppInner() {
-  const [stage, setStage] = useState<"landing" | "login" | "app">(() => {
+  const [signupSeed, setSignupSeed] = useState<{ challengeId: string; email: string } | null>(null);
+  // Emailed reset links land on /reset-password#token=... — capture the
+  // token once at boot; the page itself strips it from the URL.
+  const [resetToken] = useState<string>(() =>
+    resetLinkToken(window.location.pathname, window.location.hash));
+  const [stage, setStage] = useState<"landing" | "login" | "signup" | "forgot" | "reset-link" | "app">(() => {
+    if (resetToken) {
+      return "reset-link";
+    }
     if (readStoredUser()) return "app";
     return "landing";
   });
@@ -1050,6 +1059,7 @@ function DataTransferAppInner() {
 
   useEffect(() => {
     const syncFromHash = () => {
+      if (isResetLinkRoute(window.location.pathname, window.location.hash)) return;
       const hash = window.location.hash;
       const session = readStoredUser();
       const screen = session
@@ -1181,11 +1191,46 @@ function DataTransferAppInner() {
             writePublicHash("home", true);
             setStage("landing");
           }}
+          onSignup={() => { setSignupSeed(null); setStage("signup"); }}
+          onForgotPassword={() => setStage("forgot")}
+          onVerifyPending={(challengeId, email) => {
+            setSignupSeed({ challengeId, email });
+            setStage("signup");
+          }}
           onLegal={(route) => {
             setPublicRoute(route);
             writePublicHash(route);
             setStage("landing");
           }}
+        />
+      )}
+
+      {stage === "signup" && (
+        <SignupPage
+          initialEmail={signupSeed?.email ?? ""}
+          initialChallengeId={signupSeed?.challengeId ?? ""}
+          onAuthenticated={handleAuthenticated}
+          onSignIn={() => setStage("login")}
+          onBack={() => {
+            setPublicRoute("home");
+            writePublicHash("home", true);
+            setStage("landing");
+          }}
+        />
+      )}
+
+      {stage === "forgot" && (
+        <ForgotPasswordPage
+          onSignIn={() => setStage("login")}
+          onBack={() => setStage("login")}
+        />
+      )}
+
+      {stage === "reset-link" && (
+        <ResetPasswordPage
+          token={resetToken}
+          onSignIn={() => { window.history.replaceState({}, "", "/"); setStage("login"); }}
+          onSendNewLink={() => { window.history.replaceState({}, "", "/"); setStage("forgot"); }}
         />
       )}
 

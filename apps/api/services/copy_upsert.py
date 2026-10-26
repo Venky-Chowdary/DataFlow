@@ -384,6 +384,27 @@ def copy_between_postgres_upsert(
                     dst_cur, dest_schema, dest_table, pairs, shape
                 )
                 created_dest = True
+            else:
+                # D95/upsert: an existing destination's CHECK constraints are a
+                # per-row disposition — one violating row fails the whole
+                # INSERT…ON CONFLICT SELECT, not just that row. The row path's
+                # SAVEPOINT-per-row retry quarantines it and lands the rest;
+                # decline here instead of failing the job on a single row.
+                dst_cur.execute(
+                    """
+                    SELECT count(*)
+                    FROM pg_catalog.pg_constraint con
+                    JOIN pg_catalog.pg_class c ON c.oid = con.conrelid
+                    JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                    WHERE n.nspname = %s AND c.relname = %s AND con.contype = 'c'
+                    """,
+                    (dest_schema or "public", dest_table),
+                )
+                if int(dst_cur.fetchone()[0] or 0) > 0:
+                    raise FastPathUnavailable(
+                        "destination CHECK constraints need per-row "
+                        "quarantine disposition on the row path"
+                    )
     finally:
         try:
             source_conn.close()

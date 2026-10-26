@@ -17,6 +17,7 @@ from services.brand_env import getenv_brand
 from services.platform_config import is_production, web_url
 from pydantic import BaseModel, Field
 
+from services.signup_config import signup_enabled
 from services.user_store import get_user as get_stored_user
 from services.user_store import normalize_email, set_password
 from services.sso_authorization import require_sso_authorization
@@ -313,6 +314,20 @@ async def sso_providers():
     from services.integrations_store import list_sso_providers_public
 
     return {"providers": list_sso_providers_public()}
+
+
+@router.get("/signup/config")
+async def signup_config():
+    """Read-only capability probe: answers even when the flag is off so
+    login/signup surfaces don't have to mint a form token just to learn
+    whether self-serve signup exists on this deployment."""
+    from services.signup_config import signup_enabled, turnstile_site_key
+
+    enabled = signup_enabled()
+    return {
+        "enabled": enabled,
+        "turnstile_site_key": turnstile_site_key() if enabled else "",
+    }
 
 
 @router.get("/sso/{sso_type}/start")
@@ -920,7 +935,7 @@ async def login(body: LoginRequest, request: Request):
 
     actor = _login_audit_actor(body.email)
     stored_account = get_stored_user(actor)
-    if stored_account and stored_account.get("status") == "disabled":
+    if stored_account and stored_account.get("status") in ("disabled", "banned"):
         record_login_failure(ip=ip, email=body.email)
         _record_login_audit(
             request,
@@ -944,6 +959,20 @@ async def login(body: LoginRequest, request: Request):
     except RuntimeError as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     if not user:
+        # Flag-on: a pending (unverified) signup gets a fresh code and a 403 —
+        # never a session. Banned/disabled/unknown all keep the neutral 401.
+        if signup_enabled() and not stored_account:
+            from services.signup_service import challenge_for_pending_login
+
+            challenge_id = challenge_for_pending_login(body.email, request=request)
+            if challenge_id:
+                from services.api_errors import ApiError
+
+                raise ApiError(
+                    403, "email_unverified",
+                    "verify your email first — we sent a new code",
+                    extra={"challenge_id": challenge_id},
+                )
         record_login_failure(ip=ip, email=body.email)
         _record_login_audit(
             request,
@@ -958,6 +987,22 @@ async def login(body: LoginRequest, request: Request):
         # turned a stale password into "control plane unreachable".
         raise HTTPException(status_code=401, detail="Invalid email or password.")
     record_login_success(ip=ip, email=body.email)
+    try:
+        # Heal a flagged half-finished email rekey on successful sign-in;
+        # a failed retry keeps the flag for the next attempt.
+        from services.signup_service import finish_pending_rekeys
+
+        finish_pending_rekeys(email=user["email"])
+    except Exception:
+        logger.error("rekey_pending retry failed", exc_info=True)
+        try:
+            record_security_event(
+                "email_change.rekey_flag_failed",
+                outcome="failed", actor=user["email"],
+                reason_code="heal_retry_failed",
+            )
+        except Exception:
+            logger.error("rekey heal audit event failed", exc_info=True)
     try:
         token, expires_at = create_token(user["email"])
     except RuntimeError as exc:

@@ -6,7 +6,8 @@ public landing page) but defended:
 - **honeypot** — a filled ``website`` field means a bot; we accept-and-drop it
   silently so the bot learns nothing (no persistence, no mail).
 - **rate limits** — independent per-IP and per-email buckets via the canonical
-  ``TokenBucketStore`` (no second bucket implementation).
+  ``TokenBucketStore`` (no second bucket implementation). The IP key comes from
+  ``services.client_ip`` so a spoofed ``X-Forwarded-For`` cannot mint buckets.
 - **server-side validation** — pydantic field lengths + an email shape check;
   the client validation is UX, this is the gate.
 - **persist before mail** — the lead lands in ``contact_sales_leads`` (with a
@@ -24,6 +25,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from services.client_ip import client_ip_from_request
 from services.contact_leads import persist_lead
 from services.mcp_rate_limit import TokenBucketStore
 from services.notification_service import _send_resend
@@ -79,10 +81,7 @@ class ContactSalesIn(BaseModel):
 
 
 def _client_ip(request: Request) -> str:
-    forwarded = str(request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
-    if forwarded:
-        return forwarded[:64]
-    return str(getattr(request.client, "host", "") or "unknown")[:64]
+    return (client_ip_from_request(request) or "unknown")[:64]
 
 
 def _clean_list(values: list[str]) -> list[str]:

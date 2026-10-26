@@ -243,3 +243,78 @@ def test_subject_strips_crlf(client, monkeypatch):
     )
     assert res.status_code == 200
     assert sent and "\r" not in sent[0] and "\n" not in sent[0]
+
+
+def _flood_with_rotating_xff(client, contact_router, *, xff_prefix: str):
+    statuses = []
+    for i in range(int(contact_router._IP_CAPACITY) + 1):
+        r = client.post(
+            "/api/v1/contact-sales",
+            json=_payload(email=f"spoof{i}@example.com"),
+            headers={"X-Forwarded-For": f"{xff_prefix}.{i}"},
+        )
+        statuses.append(r.status_code)
+    return statuses
+
+
+def test_rate_limit_per_ip_ignores_spoofed_xff_without_trusted_proxy(client, monkeypatch):
+    monkeypatch.setattr(
+        "src.routers.contact_router.persist_lead",
+        lambda l: {**l, "lead_id": "x", "created_at": "t"},
+    )
+    monkeypatch.setattr("src.routers.contact_router.smtp_configured", lambda: False)
+    monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "0")
+    monkeypatch.delenv("DATAWRAP_TRUSTED_PROXY_COUNT", raising=False)
+    monkeypatch.delenv("TRUSTED_PROXY_COUNT", raising=False)
+    from src.routers import contact_router
+
+    statuses = _flood_with_rotating_xff(client, contact_router, xff_prefix="1.2.3")
+    assert statuses[:-1] == [200] * int(contact_router._IP_CAPACITY)
+    assert statuses[-1] == 429
+
+
+def test_rate_limit_per_ip_spoofed_leftmost_xff_shares_bucket_behind_proxy(
+    client, monkeypatch
+):
+    monkeypatch.setattr(
+        "src.routers.contact_router.persist_lead",
+        lambda l: {**l, "lead_id": "x", "created_at": "t"},
+    )
+    monkeypatch.setattr("src.routers.contact_router.smtp_configured", lambda: False)
+    monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "1")
+    monkeypatch.delenv("DATAWRAP_TRUSTED_PROXY_COUNT", raising=False)
+    monkeypatch.delenv("TRUSTED_PROXY_COUNT", raising=False)
+    from src.routers import contact_router
+
+    statuses = []
+    for i in range(int(contact_router._IP_CAPACITY) + 1):
+        r = client.post(
+            "/api/v1/contact-sales",
+            json=_payload(email=f"proxied{i}@example.com"),
+            # attacker-forged leftmost hop, real client appended by our edge proxy
+            headers={"X-Forwarded-For": f"9.9.9.{i}, 203.0.113.7, 10.0.0.1"},
+        )
+        statuses.append(r.status_code)
+    assert statuses[-1] == 429
+
+
+def test_client_ip_uses_trusted_proxy_resolution(monkeypatch):
+    from starlette.requests import Request
+
+    from src.routers import contact_router
+
+    def _req(xff: str):
+        return Request(
+            {
+                "type": "http",
+                "headers": [(b"x-forwarded-for", xff.encode())],
+                "client": ("198.51.100.4", 1234),
+            }
+        )
+
+    monkeypatch.delenv("DATAWRAP_TRUSTED_PROXY_COUNT", raising=False)
+    monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "0")
+    assert contact_router._client_ip(_req("1.2.3.4")) == "198.51.100.4"
+    monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "1")
+    assert contact_router._client_ip(_req("1.2.3.4, 203.0.113.7")) == "1.2.3.4"
+    assert contact_router._client_ip(_req("6.6.6.6, 1.2.3.4, 203.0.113.7")) == "1.2.3.4"

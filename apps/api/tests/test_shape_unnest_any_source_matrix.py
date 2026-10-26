@@ -15,6 +15,7 @@ Fixture (2 parent rows → 3 child rows):
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 import os
@@ -36,7 +37,7 @@ from tests.typed_fidelity_helpers import (
 
 ARTIFACT = Path(
     os.environ.get("DATAFLOW_PROOF_DIR")
-    or Path(__file__).resolve().parents[1] / "data" / "proofs"
+    or data_dir() / "proofs"
 ) / "transform_unnest_any_source_results.json"
 
 HEADERS = ["order_no", "customer", "line_items"]

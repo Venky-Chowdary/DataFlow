@@ -89,6 +89,7 @@ def create_schedule(
     duplicate_policy: str = "",
     in_file_dedupe: str = "block",
     file_wait_seconds: int = 0,
+    shared_destination_acknowledged: bool = False,
 ):
     """Stage a pipeline schedule for explicit Confirm. This creates nothing itself."""
     tool = "create_schedule"
@@ -154,6 +155,7 @@ def create_schedule(
         applied_rules=applied_rules,
         column_transforms=column_transforms,
         schema_drift_acknowledged=bool(schema_drift_acknowledged),
+        shared_destination_acknowledged=bool(shared_destination_acknowledged),
         pii_acknowledgement=pii_acknowledgement,
     )
     if not planned.success:

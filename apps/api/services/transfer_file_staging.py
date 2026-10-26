@@ -12,7 +12,6 @@ configured so multi-replica workers can materialize.
 from __future__ import annotations
 
 import logging
-import re
 import uuid
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,9 +23,9 @@ _logger = logging.getLogger(__name__)
 
 
 def _safe_filename(name: str) -> str:
-    raw = (name or "upload.bin").strip() or "upload.bin"
-    base = Path(raw).name
-    return re.sub(r"[^A-Za-z0-9._-]", "_", base)[:160] or "upload.bin"
+    from services.file_parser import safe_upload_filename
+
+    return safe_upload_filename(name)
 
 
 #: Filename prefix for per-job source spills in the shared upload directory.

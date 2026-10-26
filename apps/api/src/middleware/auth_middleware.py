@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import logging
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
+
+import hmac
 
 from services.platform_config import docs_enabled
 from services.tenant_bind import principal_allowed_for_tenant
 
 from ..services import auth_service as _auth_service
 from ..services.auth_service import lookup_user, verify_token
+
+logger = logging.getLogger(__name__)
 
 _PUBLIC_PREFIXES = (
     "/health",
@@ -17,6 +23,26 @@ _PUBLIC_PREFIXES = (
     "/api/v1/auth/logout",
     "/api/v1/auth/bootstrap",
     "/api/v1/auth/sso/providers",
+    # Unauthenticated self-serve signup paths (each 404s while
+    # DATAWRAP_SIGNUP_ENABLED is off — the router guards, not this list).
+    "/api/v1/auth/signup",
+    "/api/v1/auth/verify-email",
+    "/api/v1/auth/resend",
+    "/api/v1/auth/resend-webhook",
+    "/api/v1/auth/form-token",
+    "/api/v1/auth/password/forgot",
+    "/api/v1/auth/password/reset",
+    "/api/v1/public/form-token",
+    "/api/v1/public/email-events",
+    "/auth/signup",
+    "/auth/verify-email",
+    "/auth/resend",
+    "/auth/resend-webhook",
+    "/auth/form-token",
+    "/auth/password/forgot",
+    "/auth/password/reset",
+    "/public/form-token",
+    "/public/email-events",
     # Alias paths when the web client omits /api/v1 (mis-set VITE_API_BASE).
     "/auth/login",
     "/auth/logout",
@@ -34,7 +60,8 @@ if docs_enabled():
 
 def _is_public_sso_path(path: str) -> bool:
     if path.startswith("/api/v1/auth/sso/") or path.startswith("/auth/sso/"):
-        return path.endswith("/start") or path.endswith("/callback") or path.endswith("/providers")
+        return (path.endswith("/start") or path.endswith("/callback")
+                or path.endswith("/providers") or path.endswith("/route"))
     return False
 
 
@@ -90,14 +117,39 @@ def _is_public_mcp_path(path: str, method: str) -> bool:
     return False
 
 
+def _heal_rekey_if_pending(stored: dict | None, email: str) -> None:
+    """Finish a half-moved email rekey on the next authenticated request.
+
+    The flag comes from the already-loaded user doc (no second store read);
+    finish_pending_rekeys claims it single-flight, so parallel requests
+    cannot double-move memberships, and a failed retry frees the lease,
+    keeps the flag, and surfaces a security event."""
+    if not stored or not stored.get("rekey_pending"):
+        return
+    try:
+        from services.signup_service import finish_pending_rekeys
+        finish_pending_rekeys(email=email)
+    except Exception:
+        logger.error("rekey_pending retry failed", exc_info=True)
+        try:
+            from services.audit_coverage import record_security_event
+            record_security_event(
+                "email_change.rekey_flag_failed",
+                outcome="failed", reason_code="heal_retry_failed",
+            )
+        except Exception:
+            logger.error("rekey heal audit event failed", exc_info=True)
+
+
 def _attach_user_reason(request: Request, token: str) -> str | None:
     email = verify_token(token)
     if email:
-        from services.user_store import get_user as get_stored_user
+        from services.user_store import get_user_record as get_stored_user
 
         stored = get_stored_user(email)
         if stored and stored.get("status") == "disabled":
             return "disabled_user"
+        _heal_rekey_if_pending(stored, email)
         request.state.user_email = email
         user = lookup_user(email)
         if user:
@@ -149,6 +201,59 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
 
 def _attach_user(request: Request, token: str) -> bool:
     return _attach_user_reason(request, token) is None
+
+
+def _cookie_session(request: Request) -> dict | str | None:
+    """``__Host-dw_session`` -> active session doc (P3-1).
+
+    The CSRF check is done by the caller on non-public paths only, so a
+    stale cookie can't turn a public POST (signup/resend) into a 403.
+    """
+    try:
+        from services.signup_config import signup_enabled
+        if not signup_enabled():
+            return None
+    except Exception:  # noqa: BLE001 — flag read must never break auth
+        return None
+    try:
+        jti = (request.cookies or {}).get("__Host-dw_session", "")
+    except Exception:  # noqa: BLE001
+        jti = ""
+    if not jti:
+        return None
+    from services.auth_state import get_auth_state
+
+    doc = get_auth_state().get_session(jti)
+    if not doc or doc.get("revoked_at"):
+        return None
+    return doc
+
+
+def _attach_cookie_user(request: Request, doc: dict) -> str | None:
+    """Cookie-auth attach + CSRF double-submit for mutating methods."""
+    if request.method not in ("GET", "HEAD", "OPTIONS"):
+        supplied = request.headers.get("x-csrf-token", "")
+        expected = doc.get("csrf") or ""
+        if not supplied or not expected or not hmac.compare_digest(supplied, expected):
+            return "csrf_failed"
+    from services.user_store import get_user_record as get_stored_user
+
+    email = doc.get("user_id") or ""
+    stored = get_stored_user(email)
+    if stored and stored.get("status") in ("disabled", "banned"):
+        return "disabled_user"
+    # A flagged half-finished email rekey heals on the next authenticated
+    # request: retry the membership/org move; the flag stays set if the
+    # retry fails again, so this never swallows the failure.
+    _heal_rekey_if_pending(stored, email)
+    request.state.user_email = email
+    user = lookup_user(email)
+    request.state.user = user if user else {"email": email, "role": "viewer"}
+    request.state.cookie_session_jti = doc["jti"]
+    from services.auth_state import get_auth_state
+
+    get_auth_state().touch_session(doc["jti"])
+    return None
 
 
 def _tenant_bind_forbidden(request: Request) -> JSONResponse | None:
@@ -204,6 +309,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
         try:
             auth = request.headers.get("Authorization", "")
             token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+            cookie_doc = None
+            if not token:
+                cookie_doc = _cookie_session(request)
             # EventSource / SSE cannot send custom headers, so the token may be
             # passed as a query parameter.  Only allow this fallback on the SSE
             # stream paths to keep tokens out of general access logs.
@@ -266,9 +374,16 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
             reason_code = (
                 "missing_credentials"
-                if not token
+                if not (token or cookie_doc)
                 else _attach_user_reason(request, token)
+                if token
+                else _attach_cookie_user(request, cookie_doc)
             )
+            if reason_code == "csrf_failed":
+                return JSONResponse(
+                    status_code=403,
+                    content={"detail": "CSRF token required for cookie-authenticated requests"},
+                )
             if reason_code:
                 from services import audit_coverage
 

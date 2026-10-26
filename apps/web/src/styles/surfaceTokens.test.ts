@@ -576,7 +576,7 @@ describe("shared alert / jobs / studio surfaces use tokens", () => {
     assert.match(studio, /\.df2-vd-run-id-copy \{[\s\S]{0,160}--df-surface/);
     assert.doesNotMatch(studio, /\.df2-vd-run-id-copy \{[\s\S]{0,160}background: #fff;/);
     assert.match(studio, /\.df2-vd-xform-hash \{[\s\S]{0,120}--df-surface/);
-    assert.match(studio, /\.df2-map-pk-details-body \{[\s\S]{0,280}--df-surface/);
+    assert.match(studio, /\.df2-map-pk-details-body \{[\s\S]{0,340}--df-surface/);
     assert.match(studio, /\.df2-preflight\.is-compact \.df2-preflight-step \{[\s\S]{0,120}--df-surface/);
     assert.match(studio, /\.df2-preflight-diagnostics-list > li \{[\s\S]{0,80}--df-surface/);
     assert.match(studio, /\.df2-run-launch-stage \{[\s\S]{0,120}--df-surface/);

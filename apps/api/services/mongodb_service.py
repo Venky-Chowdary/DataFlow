@@ -1113,8 +1113,15 @@ class MongoDBService:
             return ""
         return str(doc.get("status") or "")
 
-    def update_job_fields(self, job_id: str, fields: dict) -> bool:
-        """Patch job metadata without changing status (e.g. rename)."""
+    def update_job_fields(
+        self, job_id: str, fields: dict, *, touch_updated_at: bool = True
+    ) -> bool:
+        """Patch job metadata without changing status (e.g. rename).
+
+        ``touch_updated_at=False`` is for bookkeeping writes that are not job
+        progress (e.g. the stall watchdog's flag) — bumping ``updated_at``
+        would reset the quiet clock the watchdog measures.
+        """
         if not fields:
             return False
         try:
@@ -1125,7 +1132,9 @@ class MongoDBService:
         key = job_key_filter(job_id)
         if not key:
             return False
-        updates = {**fields, "updated_at": datetime.now(timezone.utc)}
+        updates = dict(fields)
+        if touch_updated_at:
+            updates["updated_at"] = datetime.now(timezone.utc)
         result = collection.update_one(key, {"$set": updates})
         return result.matched_count > 0
 
@@ -1720,15 +1729,22 @@ class MemoryMongoDBService:
             return False
         return bool(rec.get("cancel_requested")) or rec.get("status") == "cancelled"
 
-    def update_job_fields(self, job_id: str, fields: dict) -> bool:
-        """Patch job metadata without changing status (e.g. rename)."""
+    def update_job_fields(
+        self, job_id: str, fields: dict, *, touch_updated_at: bool = True
+    ) -> bool:
+        """Patch job metadata without changing status (e.g. rename).
+
+        See ``MongoDBService.update_job_fields`` — ``touch_updated_at=False``
+        keeps bookkeeping writes from reading as job progress.
+        """
         if not fields:
             return False
         rec = self._jobs.get(job_id)
         if not rec:
             return False
         rec.update(fields)
-        rec["updated_at"] = datetime.now(timezone.utc)
+        if touch_updated_at:
+            rec["updated_at"] = datetime.now(timezone.utc)
         return True
 
     def is_job_name_taken(

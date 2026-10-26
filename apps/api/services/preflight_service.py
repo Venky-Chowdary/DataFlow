@@ -33,7 +33,13 @@ from services.connector_capability_registry import (
     recommended_batch_size,
 )
 from services.data_profiler import source_types_are_authoritative
-from services.db_type_utils import dest_declares_column_ddl, normalize_dest_kind
+from services.db_type_utils import (
+    DESTS_WITHOUT_SCHEMA_RECREATE,
+    NO_RELATIONAL_DDL_DESTS,
+    SCHEMALESS_DESTS,
+    dest_declares_column_ddl,
+    normalize_dest_kind,
+)
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.preflight_fk_gate import build_fk_block
 from services.preflight_file_plan import (
@@ -64,7 +70,7 @@ from services.transform_engine import (
     set_active_number_locale,
 )
 from services.validation_plan import build_validation_plan
-from services.value_serializer import cell_to_string
+from services.value_serializer import wire_cell_text
 
 
 def _hydrate_risk_contract(
@@ -704,6 +710,7 @@ def run_file_preflight(
     source_config: dict[str, Any] | None = None,
     source_table: str = "",
     destination_table: str = "",
+    destination_connector_id: str = "",
     source_filename: str = "",
     source_file_id: str = "",
     schema_policy: str = "manual_review",
@@ -1354,6 +1361,45 @@ def run_file_preflight(
         dest_db=dest_kind,
     )
 
+    # D107: when this run is armed to widen destination columns — a propagate
+    # schema policy, explicit backfill, or an acknowledged drift review — the
+    # DDL/fidelity checks must grade the source against the post-ALTER
+    # carrier. A VARCHAR(200) source landing in a VARCHAR(10) column that the
+    # write path will ALTER is not a collapse; grading it as one refused every
+    # later run of a pipeline whose source only ever drifted wider. Unarmed
+    # runs keep the strict contract (the drift gate owns the ack UX), and an
+    # explicit operator Map stamp stays a ceiling.
+    if ddl_dest_types and (
+        backfill_new_fields
+        or schema_drift_acknowledged
+        or (schema_policy or "").strip().lower()
+        in {"propagate_columns", "propagate_all"}
+    ):
+        from connectors.schema_drift import is_wider_type as _is_wider_dest
+        from connectors.writer_common import (
+            stamp_is_operator_ceiling as _widen_ceiling,
+        )
+        from services.type_system import (
+            normalize_logical_type as _norm_logical_widen,
+        )
+
+        _dest_lower = {str(k).lower(): k for k in ddl_dest_types}
+        for _m in write_maps:
+            _src = str(_m.get("source") or "")
+            _tgt = str(_m.get("target") or "")
+            _src_t = ci_get(column_types, _src)
+            _dst_key = _dest_lower.get(_tgt.lower())
+            _dst_t = str(ddl_dest_types.get(_dst_key) or "") if _dst_key else ""
+            if (
+                _src_t
+                and _dst_t
+                and _norm_logical_widen(str(_src_t))
+                == _norm_logical_widen(_dst_t)
+                and not _widen_ceiling(_m)
+                and _is_wider_dest(_dst_t, str(_src_t), dest_db=dest_kind)
+            ):
+                ddl_dest_types[_dst_key] = str(_src_t)
+
     target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
         mappings=write_maps,
@@ -1636,7 +1682,21 @@ def run_file_preflight(
         _upsert_constraint_mode = _requires_upsert(sync_mode) and _nsm(
             sync_mode, default=""
         ) != "scd2"
-        if _upsert_constraint_mode and destination_table_exists is True:
+        # Non-relational destinations (SaaS REST, object stores, schemaless,
+        # Kafka/vector) are natively keyed upserts — DataFlow never runs
+        # CREATE UNIQUE INDEX on them, so there is no DDL to disclose. Blocking
+        # them here false-blocks every reverse-ETL route with a pre-existing
+        # object (e.g. HubSpot 'contacts').
+        _dest_no_unique_ddl = (
+            dest_kind in DESTS_WITHOUT_SCHEMA_RECREATE
+            or dest_kind in NO_RELATIONAL_DDL_DESTS
+            or dest_kind in SCHEMALESS_DESTS
+        )
+        if (
+            _upsert_constraint_mode
+            and not _dest_no_unique_ddl
+            and destination_table_exists is True
+        ):
             from services.destination_key_collision_probe import _identity_pairs
             from services.upsert_ddl_gate import (
                 count_dest_duplicate_keys,
@@ -1790,6 +1850,34 @@ def run_file_preflight(
     engine = PreflightEngine(fail_fast=False)
     result = engine.run(ctx)
 
+    # D104: when a destination key collision is caused by another enabled
+    # pipeline owning this table, name that pipeline in the blocker so the
+    # refusal points at the cause, not just at the keys already at rest.
+    if destination_connector_id:
+        try:
+            from services.schedule_store import (
+                conflicting_dest_writers,
+                describe_dest_conflict,
+            )
+
+            _owners = conflicting_dest_writers(
+                destination_connector_id, destination_table
+            )
+            if _owners:
+                _names = [describe_dest_conflict(s) for s in _owners]
+                for _b in result.blockers or []:
+                    _d = (
+                        _b.get("details")
+                        if isinstance(_b, dict)
+                        else getattr(_b, "details", None)
+                    ) or {}
+                    if _d.get("sample_collisions") or _d.get(
+                        "collision_count"
+                    ) is not None:
+                        _d["conflicting_pipelines"] = list(_names)
+        except Exception:  # noqa: BLE001 — naming must never break preflight
+            pass
+
     from services.preflight_proof_bundle import build_preflight_proof_bundle
 
     proof_bundle = build_preflight_proof_bundle(
@@ -1801,7 +1889,7 @@ def run_file_preflight(
                 "name": c,
                 "inferred_type": column_types.get(c, "VARCHAR").upper(),
                 "samples": [
-                    cell_to_string(row.get(c, ""))
+                    wire_cell_text(row.get(c, ""))
                     for row in (sample_rows or [])[:20]
                     if row.get(c) is not None
                 ],

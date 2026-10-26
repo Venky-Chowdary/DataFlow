@@ -11,6 +11,7 @@ Live fixtures are optional — skip when LIVE_MAPPING_MATRIX=0 / unset.
 """
 
 from __future__ import annotations
+from services.platform_config import data_dir
 
 import json
 import os
@@ -19,7 +20,7 @@ from pathlib import Path
 import pytest
 
 FIXTURE = Path(__file__).parent / "fixtures" / "mapping_golden_enterprise.json"
-PROOF_DIR = Path(__file__).resolve().parents[1] / "data" / "proofs"
+PROOF_DIR = data_dir() / "proofs"
 
 # Top enterprise source × dest dialects (symmetric proof surface).
 SOURCES = (

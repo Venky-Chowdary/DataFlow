@@ -63,6 +63,9 @@ DF_MISSING_SENTINEL = "__DF_MISSING__"
 
 
 def is_missing_sentinel(value: Any) -> bool:
+    if isinstance(value, WireLiteral):
+        # Decoded "__DF_MISSING__" literal — present user text, never omit.
+        return False
     return value is Missing or value == DF_MISSING_SENTINEL
 
 
@@ -76,6 +79,21 @@ NULL_WIRE_SENTINELS: frozenset[str] = frozenset(
 _NULL_WIRE_LOWER: frozenset[str] = frozenset(s.lower() for s in NULL_WIRE_SENTINELS)
 
 
+class WireLiteral(str):
+    """A decoded wire literal that spells a sentinel — always a real value.
+
+    ``unescape_wire_text("__DF_ESC____DF_SQL_NULL__")`` yields the text
+    ``"__DF_SQL_NULL__"`` — a user literal, not absence. A bare ``str`` cannot
+    carry that fact, so every downstream sentinel check (``is_reader_null_cell``,
+    ``_copy_text_value``'s ``\\N``, ``apply_transform``'s sentinel decode)
+    re-classified the literal as NULL — the D109/D113 decode-order defect.
+    Carrying the decoded text as a ``str`` subclass keeps every consumer
+    working (psycopg2/sqlalchemy bind, COPY text, JSON) while the absence
+    classifiers below refuse to treat it as absence. ``str(x)`` / ``x.strip()``
+    degrade it to a plain str — only wire-decoding helpers preserve the marker.
+    """
+
+
 def escape_wire_text(text: str) -> str:
     """Escape a wire-unsafe string: collides with a NULL/missing sentinel or
     already carries the escape prefix (recursive, so decode stays total)."""
@@ -85,16 +103,46 @@ def escape_wire_text(text: str) -> str:
 
 
 def unescape_wire_text(value: Any) -> Any:
-    """Strip one ``__DF_ESC__`` layer from a wire string; non-strings pass."""
+    """Strip one ``__DF_ESC__`` layer from a wire string; non-strings pass.
+
+    When the decoded text itself spells a NULL/missing sentinel the result is
+    a :class:`WireLiteral` so no downstream check can re-read it as absence.
+    """
+    if isinstance(value, WireLiteral):
+        return value
     if isinstance(value, str) and value.startswith(ESCAPED_WIRE_PREFIX):
-        return value[len(ESCAPED_WIRE_PREFIX) :]
+        decoded = value[len(ESCAPED_WIRE_PREFIX) :]
+        if decoded.strip().lower() in _NULL_WIRE_LOWER:
+            return WireLiteral(decoded)
+        return decoded
     return value
+
+
+def wire_cell_text(value: Any) -> str:
+    """Re-serialize a cell that may already carry wire encoding.
+
+    ``cell_to_string(..., preserve_sql_null=True)`` is the RAW-source leaf: it
+    escapes a bare literal that collides with a sentinel so a database string
+    ``'__DF_SQL_NULL__'`` never decodes as NULL. Mid-wire passes (verify,
+    quarantine replay, shape materialize, dedupe probes, dry-run samples) see
+    cells that already crossed that boundary — a str is either a sentinel
+    spelling or an ``__DF_ESC__``-escaped literal, so re-serializing it
+    re-escapes the encoded NULL into ``__DF_ESC____DF_SQL_NULL__`` text, which
+    typed casts then refuse ("Invalid decimal: '__DF_ESC__...'"). A str input
+    is therefore returned verbatim; only typed values get canonical wire.
+    """
+    if isinstance(value, str):
+        return value
+    return cell_to_string(value, preserve_sql_null=True)
 
 
 def is_null_evidence(value: Any) -> bool:
     """True when a cell carries no type evidence (NULL / absent / blank)."""
     if value is None or value is Missing:
         return True
+    if isinstance(value, WireLiteral):
+        # Decoded sentinel-spelling literal — presence proven upstream.
+        return False
     text = str(value).strip()
     return not text or text in NULL_WIRE_SENTINELS
 
@@ -108,6 +156,9 @@ def is_reader_null_cell(value: Any) -> bool:
     """
     if value is None or is_missing_sentinel(value):
         return True
+    if isinstance(value, WireLiteral):
+        # Decoded sentinel-spelling literal — a real stored value, not NULL.
+        return False
     if not isinstance(value, str):
         return False
     return value.strip() in NULL_WIRE_SENTINELS
@@ -136,8 +187,12 @@ def present_cell_text(value: Any) -> str | None:
     if is_null_evidence(value) or is_frame_missing(value):
         return None
     if isinstance(value, str):
-        text = unescape_wire_text(value).strip()
-        return None if is_null_evidence(text) else text
+        # Decoded text is the user's literal — never re-test it: an escaped
+        # ``__DF_ESC__`` + sentinel spells ``__DF_SQL_NULL__`` after decode and
+        # a second ``is_null_evidence`` here silently turned it into absence
+        # (D109 literal → NULL). Real absence was already classified above on
+        # the wire spelling.
+        return unescape_wire_text(value).strip()
     text = cell_to_string(value, preserve_sql_null=True)
     if is_null_evidence(text):
         return None

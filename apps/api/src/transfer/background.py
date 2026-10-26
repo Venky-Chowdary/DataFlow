@@ -13,10 +13,23 @@ except ImportError:  # pragma: no cover - compatibility for tests with api root 
 
 from services.transfer_scheduler import submit as _submit_transfer
 
-from .engine import get_transfer_engine
 from .models import TransferRequest, transfer_request_from_dict
 
 logger = logging.getLogger(__name__)
+
+
+def get_transfer_engine():
+    """Resolve the engine factory at call time.
+
+    A module-level ``from .engine import get_transfer_engine`` binds whatever
+    the factory is at import time — if this module is first imported inside a
+    test's monkeypatch window, the stub stays bound for the whole process.
+    Keeping the name as a delegate preserves the patch contract for tests
+    that stub either this module's or the engine module's attribute.
+    """
+    from .engine import get_transfer_engine as _factory
+
+    return _factory()
 
 
 def _log_transfer_exception(fut: Any) -> None:

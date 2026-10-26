@@ -18,7 +18,7 @@ from typing import Any
 try:
     from services.pii_guard import is_sensitive_name, pii_findings
     from services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
-    from services.value_serializer import cell_to_string, is_null_evidence, present_cell_text
+    from services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell, present_cell_text
 except ImportError:  # pragma: no cover - compatibility for tests
     from src.services.pii_guard import is_sensitive_name, pii_findings
     from src.services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
@@ -575,7 +575,10 @@ def run_integrity_audit(
         idx = header_index[h]
         col_type = (column_types.get(h) or "string").upper()
         values = [row[idx] if idx < len(row) else "" for row in rows]
-        non_null = [v for v in values if not _is_null(v)]
+        # Real absence only for the rate: a stored '' is a value, not NULL —
+        # on engines where '' round-trips (SQLite keeps it, unlike Oracle)
+        # counting it as NULL inflated the reported rate (D81: 25.6% vs 11.6%).
+        non_null = [v for v in values if not is_reader_null_cell(v)]
         null_rate = (total - len(non_null)) / total if total else 0.0
         unique = set(non_null)
         cardinality = len(unique)

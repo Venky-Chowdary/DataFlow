@@ -701,8 +701,19 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
 
     routes: list[dict[str, Any]] = []
     payload_checked: set[str] = set()
-    progress_path = Path("/opt/cursor/artifacts/warehouse-emulator-lab/cross-progress.json")
-    progress_path.parent.mkdir(parents=True, exist_ok=True)
+    # The shared artifacts root is optional host state — only write progress
+    # into it when it already exists (and the caller asked to persist). Every
+    # other site guards with artifacts.is_dir(); mkdir(parents=True) here tried
+    # to create /opt/cursor and PermissionError-failed on hosts without it.
+    progress_path: Path | None = None
+    if persist:
+        _artifacts = Path("/opt/cursor/artifacts")
+        if _artifacts.is_dir():
+            try:
+                progress_path = _artifacts / "warehouse-emulator-lab" / "cross-progress.json"
+                progress_path.parent.mkdir(parents=True, exist_ok=True)
+            except OSError:
+                progress_path = None
     for src_id in engines:
         src = seeds.get(src_id)
         for dst_id in engines:
@@ -748,7 +759,9 @@ def run_live_engine_cross_matrix(*, persist: bool = True) -> dict[str, Any]:
                 else:
                     rec["integrity"] = "dest_count_pair_payload_sampled_on_engine"
             routes.append(rec)
-            if len(routes) % 7 == 0 or rec["status"] != "skipped":
+            if progress_path is not None and (
+                len(routes) % 7 == 0 or rec["status"] != "skipped"
+            ):
                 try:
                     progress_path.write_text(
                         json.dumps(

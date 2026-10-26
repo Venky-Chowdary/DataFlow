@@ -34,6 +34,8 @@ from services.platform_config import (
     vector_store_dir,
 )
 
+from services.api_errors import ApiError, api_error_handler
+
 from .middleware.auth_middleware import AuthMiddleware
 from .middleware.connector_access_middleware import ConnectorAccessMiddleware
 from .middleware.production_config_middleware import ProductionConfigMiddleware
@@ -61,6 +63,7 @@ from .routers.query_router import router as query_router
 from .routers.repair_router import router as repair_router
 from .routers.saved_connectors_router import router as saved_connectors_router
 from .routers.schedules_router import router as schedules_router
+from .routers.signup_router import router as signup_router
 from .routers.rule_compiler_router import router as rule_compiler_router
 from .routers.shape_router import router as shape_router
 from .routers.training_agent_router import router as training_agent_router
@@ -144,6 +147,14 @@ async def lifespan(app: FastAPI):
     from services.rbac import record_unruled_routes_allowed_startup
 
     record_unruled_routes_allowed_startup()
+    # Durable mail outbox: a restart can leave 'queued' rows behind —
+    # re-queue them through the send lane so no reset/OTP mail is lost.
+    try:
+        from services.signup_service import recover_mail_outbox
+
+        recover_mail_outbox()
+    except Exception as oe:  # pragma: no cover - recovery must not block boot
+        print(f"[!] Mail outbox drain warning: {oe}")
     os.environ.setdefault("DATAFLOW_VECTOR_STORE_DIR", str(vector_store_dir()))
     try:
         from services.integrations_store import apply_integrations_to_env
@@ -672,6 +683,9 @@ app.include_router(schedules_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 # Compatibility mount when VITE_API_BASE omits /api/v1 (hits /auth/login).
 app.include_router(auth_router)
+# Self-serve signup: every route 404s while DATAWRAP_SIGNUP_ENABLED is off.
+app.include_router(signup_router, prefix="/api/v1")
+app.include_router(signup_router)
 app.include_router(audit_router, prefix="/api/v1")
 app.include_router(iam_router, prefix="/api/v1")
 app.include_router(scim_router, prefix="/api/v1")
@@ -775,6 +789,11 @@ async def api_info():
         "deprecation": None,
         "honesty": "Public control-plane API is /api/v1 only until a documented /api/v2 exists.",
     }
+
+
+@app.exception_handler(ApiError)
+async def api_error_envelope(request: Request, exc: ApiError):
+    return await api_error_handler(request, exc)
 
 
 @app.exception_handler(DuplicateTransferSubmission)
