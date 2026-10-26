@@ -166,9 +166,36 @@ start_postgres() {
     || { docker logs dataflow-ci-postgres || true; exit 1; }
 }
 
+start_postgres_cdc() {
+  # wal_level=logical needs Dockerfile.postgres-cdc, and `docker build` pulls
+  # the FROM ref directly with no retry — a shared-quota 429 on
+  # public.ecr.aws killed api-and-web/cdc-sqlserver before tests ran.
+  # Pull through pull_image first (backoff + docker.io fallback), tag to the
+  # FROM ref so the build resolves it from the local daemon.
+  local base="public.ecr.aws/docker/library/postgres:16" pulled wal
+  pulled=$(pull_image "$base" "docker.io/library/postgres:16")
+  [ "$pulled" = "$base" ] || docker tag "$pulled" "$base"
+  docker build -t dataflow-postgres-cdc:ci \
+    -f apps/api/docker/Dockerfile.postgres-cdc apps/api/docker
+  docker rm -f dataflow-postgres-cdc >/dev/null 2>&1 || true
+  docker run -d --name dataflow-postgres-cdc \
+    -e POSTGRES_USER=dataflow \
+    -e POSTGRES_PASSWORD=dataflow \
+    -e POSTGRES_DB=dataflow \
+    -p 5432:5432 \
+    dataflow-postgres-cdc:ci
+  wait_for "Postgres CDC" 30 2 docker exec dataflow-postgres-cdc \
+    pg_isready -U dataflow \
+    || { docker logs dataflow-postgres-cdc || true; exit 1; }
+  wal=$(docker exec dataflow-postgres-cdc psql -U dataflow -d dataflow -Atc "SHOW wal_level")
+  echo "wal_level=${wal}"
+  [ "${wal}" = "logical" ]
+}
+
 for svc in "$@"; do
   case "$svc" in
     postgres) start_postgres ;;
+    postgres-cdc) start_postgres_cdc ;;
     mysql) start_mysql ;;
     mongo) start_mongo ;;
     gcs) start_gcs ;;
