@@ -14,7 +14,9 @@
     {"id": "exec_named", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC dbo.GetOrders @since = :since", "params": {"since": "2024-01-01"}},
     {"id": "bare_pg", "dialect": "postgresql", "mode": "procedure", "text": "public.get_orders"},
     {"id": "bare_mssql", "dialect": "sqlserver", "mode": "procedure", "text": "dbo.GetOrders"},
-    {"id": "query_select", "dialect": "postgresql", "mode": "query", "text": "SELECT id, email FROM customers"}
+    {"id": "query_select", "dialect": "postgresql", "mode": "query", "text": "SELECT id, email FROM customers"},
+    {"id": "query_literal_names_denied_proc", "dialect": "sqlserver", "mode": "query", "text": "SELECT 'sp_msforeachtable' AS note, id FROM dbo.orders"},
+    {"id": "exec_user_proc_named_like_admin", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC dbo.usp_GetOrders @since = :since", "params": {"since": "2024-01-01"}}
   ],
   "parse_reject": [
     {"id": "stacked", "dialect": "mysql", "mode": "procedure", "text": "CALL get_orders(); DROP TABLE t"},
@@ -23,7 +25,27 @@
     {"id": "sp_exec", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_executesql N'select 1'"},
     {"id": "sqlite_proc", "dialect": "sqlite", "mode": "procedure", "text": "CALL get_orders()"},
     {"id": "unbound", "dialect": "mysql", "mode": "procedure", "text": "CALL get_orders(:since)", "params": {}},
-    {"id": "query_exec", "dialect": "postgresql", "mode": "query", "text": "EXEC dbo.GetOrders"}
+    {"id": "query_exec", "dialect": "postgresql", "mode": "query", "text": "EXEC dbo.GetOrders"},
+    {"id": "msforeachtable", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_msforeachtable @command1 = 'UPDATE ? SET flag = 1'"},
+    {"id": "msforeachtable_qualified", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC master.dbo.sp_MSforeachtable @command1 = 'SELECT 1'"},
+    {"id": "msforeachdb", "dialect": "sqlserver", "mode": "procedure", "text": "EXECUTE sp_MSforeachdb 'DROP TABLE ?.dbo.t'"},
+    {"id": "msforeachdb_bare", "dialect": "sqlserver", "mode": "procedure", "text": "sp_msforeachdb"},
+    {"id": "oa_create", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_OACreate 'WScript.Shell', :obj", "params": {"obj": 0}},
+    {"id": "oa_method", "dialect": "mssql", "mode": "procedure", "text": "EXEC sp_OAMethod :obj, 'Run', NULL, 'cmd /c dir'", "params": {"obj": 1}},
+    {"id": "sp_execute", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_execute 1"},
+    {"id": "sp_sqlexec", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_sqlexec 'DELETE FROM t'"},
+    {"id": "sp_prepexec", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_prepexec :h, NULL, 'DELETE FROM t'", "params": {"h": 0}},
+    {"id": "sp_cursoropen", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_cursoropen :c, 'DELETE FROM t'", "params": {"c": 0}},
+    {"id": "send_dbmail", "dialect": "azure_sql_database", "mode": "procedure", "text": "EXEC msdb.dbo.sp_send_dbmail @recipients = 'x@example.com', @query = 'SELECT * FROM users'"},
+    {"id": "start_job", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC msdb.dbo.sp_start_job @job_name = 'nightly'"},
+    {"id": "add_srvrolemember", "dialect": "sqlserver", "mode": "procedure", "text": "EXEC sp_addsrvrolemember 'rita', 'sysadmin'"},
+    {"id": "select_func_msforeach", "dialect": "postgresql", "mode": "procedure", "text": "SELECT * FROM sp_msforeachtable('x')"},
+    {"id": "pragma_assign", "dialect": "sqlite", "mode": "query", "text": "PRAGMA user_version = 1"},
+    {"id": "pragma_writable_schema", "dialect": "sqlite", "mode": "query", "text": "PRAGMA writable_schema=ON"},
+    {"id": "pragma_journal_off", "dialect": "duckdb", "mode": "query", "text": "PRAGMA journal_mode=OFF"},
+    {"id": "pragma_read", "dialect": "sqlite", "mode": "query", "text": "PRAGMA table_info(customers)"},
+    {"id": "analyze_bare", "dialect": "postgresql", "mode": "query", "text": "ANALYZE customers"},
+    {"id": "analyze_table_mysql", "dialect": "mysql", "mode": "query", "text": "ANALYZE TABLE customers"}
   ],
   "map_cases": [
     {
