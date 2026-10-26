@@ -201,10 +201,17 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
             html=payload["html"],
             idempotency_key=row["idempotency_key"]))
         mail_outbox.mark(row["id"], "sent")
-        record_security_event(_mail_event(row, ok=True), outcome="succeeded",
-                              actor=row["to"], session_id=row["id"],
-                              details={"ip": actor_ip,
-                                       "purpose": row.get("purpose")})
+        details = {"ip": actor_ip, "purpose": row.get("purpose")}
+        # Literal event names: the security-event registry audit requires
+        # every call site to name its event as a string constant.
+        if row.get("purpose") == "password.reset":
+            record_security_event("password.reset.sent", outcome="succeeded",
+                                  actor=row["to"], session_id=row["id"],
+                                  details=details)
+        else:
+            record_security_event("mail.sent", outcome="succeeded",
+                                  actor=row["to"], session_id=row["id"],
+                                  details=details)
     except Exception as exc:
         _outbox_send_failed(row, exc, actor_ip=actor_ip)
 
@@ -255,22 +262,18 @@ def _outbox_send_failed(row: dict[str, Any], exc: Exception,
             logger.error("mail delivery failed (%s)", row.get("purpose"),
                          exc_info=True)
     try:
-        record_security_event(_mail_event(row, ok=False),
-                              outcome="failed", actor=row["to"],
-                              session_id=row["id"],
-                              details={"ip": actor_ip,
-                                       "purpose": row.get("purpose"),
-                                       "attempt": attempts + 1})
+        details = {"ip": actor_ip, "purpose": row.get("purpose"),
+                   "attempt": attempts + 1}
+        if row.get("purpose") == "password.reset":
+            record_security_event("password.reset.send_failed",
+                                  outcome="failed", actor=row["to"],
+                                  session_id=row["id"], details=details)
+        else:
+            record_security_event("mail.send_failed", outcome="failed",
+                                  actor=row["to"], session_id=row["id"],
+                                  details=details)
     except Exception:
         logger.error("mail send_failed audit event failed", exc_info=True)
-
-
-def _mail_event(row: dict[str, Any], *, ok: bool) -> str:
-    """password.reset keeps its dedicated event names; every other outbox
-    purpose audits under the generic mail.* events with purpose detail."""
-    if row.get("purpose") == "password.reset":
-        return "password.reset.sent" if ok else "password.reset.send_failed"
-    return "mail.sent" if ok else "mail.send_failed"
 
 
 def _outbox_dead_link_status(row: dict[str, Any]) -> str | None:
