@@ -456,7 +456,9 @@ def stamp_is_operator_ceiling(mapping: dict[str, Any] | None) -> bool:
     origin = str(mapping.get("target_type_origin") or "").strip().lower()
     # A sampled-profile origin is not a ceiling: the type was inferred from a
     # page of values, and the next wider page must be allowed to widen it (D1).
-    return origin not in {"destination_catalog", "sampled_profile"}
+    # ``drift_widen`` is stamped by schema-drift approval (D107), not by the
+    # operator drawing a type ceiling — a later wider drift must still widen.
+    return origin not in {"destination_catalog", "sampled_profile", "drift_widen"}
 
 
 def effective_dest_types_under_backfill(

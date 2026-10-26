@@ -1354,6 +1354,45 @@ def run_file_preflight(
         dest_db=dest_kind,
     )
 
+    # D107: when this run is armed to widen destination columns — a propagate
+    # schema policy, explicit backfill, or an acknowledged drift review — the
+    # DDL/fidelity checks must grade the source against the post-ALTER
+    # carrier. A VARCHAR(200) source landing in a VARCHAR(10) column that the
+    # write path will ALTER is not a collapse; grading it as one refused every
+    # later run of a pipeline whose source only ever drifted wider. Unarmed
+    # runs keep the strict contract (the drift gate owns the ack UX), and an
+    # explicit operator Map stamp stays a ceiling.
+    if ddl_dest_types and (
+        backfill_new_fields
+        or schema_drift_acknowledged
+        or (schema_policy or "").strip().lower()
+        in {"propagate_columns", "propagate_all"}
+    ):
+        from connectors.schema_drift import is_wider_type as _is_wider_dest
+        from connectors.writer_common import (
+            stamp_is_operator_ceiling as _widen_ceiling,
+        )
+        from services.type_system import (
+            normalize_logical_type as _norm_logical_widen,
+        )
+
+        _dest_lower = {str(k).lower(): k for k in ddl_dest_types}
+        for _m in write_maps:
+            _src = str(_m.get("source") or "")
+            _tgt = str(_m.get("target") or "")
+            _src_t = ci_get(column_types, _src)
+            _dst_key = _dest_lower.get(_tgt.lower())
+            _dst_t = str(ddl_dest_types.get(_dst_key) or "") if _dst_key else ""
+            if (
+                _src_t
+                and _dst_t
+                and _norm_logical_widen(str(_src_t))
+                == _norm_logical_widen(_dst_t)
+                and not _widen_ceiling(_m)
+                and _is_wider_dest(_dst_t, str(_src_t), dest_db=dest_kind)
+            ):
+                ddl_dest_types[_dst_key] = str(_src_t)
+
     target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
         mappings=write_maps,

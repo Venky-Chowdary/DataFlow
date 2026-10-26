@@ -187,6 +187,19 @@ def schema_policy_implies_backfill(schema_policy: str | None) -> bool:
     }
 
 
+def mappings_require_dest_widen(mappings: list | None) -> bool:
+    """True when any mapping carries an approved destination widen (D107).
+
+    A ``dest_widen`` stamp is placed by schema-drift approval (propagate
+    policy or an acknowledged review). The writer's widen path must run so
+    the ALTER lands before binding — it is not an ADD COLUMN signal.
+    """
+    for m in mappings or []:
+        if isinstance(m, dict) and m.get("dest_widen"):
+            return True
+    return False
+
+
 def mappings_require_new_columns(mappings: list | None) -> bool:
     """True when any mapping intentionally proposes ADD COLUMN / create-new DDL."""
     for m in mappings or []:
@@ -227,6 +240,7 @@ def effective_backfill_new_fields(
         bool(backfill_new_fields)
         or schema_policy_implies_backfill(schema_policy)
         or mappings_require_new_columns(mappings)
+        or mappings_require_dest_widen(mappings)
     )
 
 

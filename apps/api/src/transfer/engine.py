@@ -930,17 +930,49 @@ def _apply_schema_auto_propagate(
         dest_recreated=dest_recreated,
     )
     evolution = drift.get("schema_evolution") or {}
-    from services.schema_drift import execute_must_pause
+    from services.schema_drift import execute_must_pause, propose_dest_widens
 
-    if execute_must_pause(
-        evolution,
-        schema_drift_acknowledged=bool(
-            getattr(request, "schema_drift_acknowledged", False)
-        ),
-    ):
+    # D107: detect_schema_drift ran without table_exists above, so its
+    # live-contract lane never emitted destination-widen proposals. Emit them
+    # here against the introspected destination types — additive widen_type
+    # entries propagate/acknowledgement flows already understand.
+    _widen_props = propose_dest_widens(
+        mappings,
+        source_schema=schema,
+        target_schema=dest_schema_types or {},
+        dest_db=(getattr(request.destination, "format", "") or "").lower(),
+    )
+    if _widen_props:
+        _additive = list(evolution.get("additive") or [])
+        _have = {str(a.get("column") or "").lower() for a in _additive}
+        _additive.extend(
+            p for p in _widen_props
+            if str(p.get("column") or "").lower() not in _have
+        )
+        evolution["additive"] = _additive
+
+    acknowledged = bool(getattr(request, "schema_drift_acknowledged", False))
+    if execute_must_pause(evolution, schema_drift_acknowledged=acknowledged):
         raise ValueError(
             (drift.get("issues") or ["Breaking schema change — sync paused"])[0]
         )
+    if _widen_props:
+        from services.schema_drift import (
+            PROPAGATE_POLICIES,
+            normalize_schema_policy,
+            stamp_approved_widens,
+        )
+
+        _widen_policy = normalize_schema_policy(
+            getattr(request, "schema_policy", None) or "manual_review"
+        )
+        # Propagate policies widen automatically; manual_review widens only
+        # after the drift acknowledgement. type_locked / pause_on_change /
+        # block_all never ALTER here — the run fails closed on bind instead.
+        if _widen_policy in PROPAGATE_POLICIES or (
+            acknowledged and _widen_policy == "manual_review"
+        ):
+            stamp_approved_widens(mappings, _widen_props)
     if not evolution.get("should_propagate"):
         return mappings
     mappings, applied = apply_propagate_mappings(
