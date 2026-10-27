@@ -22,6 +22,26 @@ def _database_extract(ctx: FilePreflightContext) -> bool:
     return kind == "database" and not _source_is_record_batch(ctx)
 
 
+def _sample_headers(ctx: FilePreflightContext, rows: list[dict[str, Any]]) -> list[str]:
+    """Every column the sample can speak for, not just the first row's keys.
+
+    A sparse document omits the keys it does not carry. Taking the headers from
+    row 0 turned a field absent from *that* document into "Source column
+    missing" for the whole mapping, even after the risk contract was signed
+    (D150). A document source's declared fields join too: a field no sampled
+    document carries is NULL for those rows, which is what the writer stores.
+    """
+    from connectors.header_union import SCHEMALESS_SOURCE_TYPES, union_attribute_keys
+
+    source = ctx.plan.source
+    declared: list[str] = []
+    if str(getattr(source, "db_type", "") or "").strip().lower() in SCHEMALESS_SOURCE_TYPES:
+        declared = [c.name for c in getattr(source, "columns", None) or []]
+    return union_attribute_keys(
+        *(list(row) for row in rows if isinstance(row, dict)), declared
+    )
+
+
 def _sample_file_groups(rows: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
     """Split a peek sample on ``_df_file`` so keys shared only across files do not collide."""
     tagged = any(isinstance(row, dict) and "_df_file" in row for row in rows)
@@ -159,12 +179,12 @@ class FilePreflightContext(PreflightContext):
                 )
             ]
 
-        headers = list(self.sample_rows[0].keys()) if self.sample_rows else []
+        scanned = self.sample_rows[:sample_size]
+        headers = _sample_headers(self, scanned)
         # Nested lists/dicts from schemaless sources become valid JSON strings
         # instead of Python repr() artifacts; a key the document does not carry
         # stays the missing sentinel rather than an empty string the typed
         # transforms would reject as a cast failure.
-        scanned = self.sample_rows[:sample_size]
         # A database NULL is None or the reader sentinel. Flattening it to ""
         # made G5 report EMPTY_VALUE_NOT_NULLABLE on nullable amount/ts.
         database_extract = _database_extract(self)

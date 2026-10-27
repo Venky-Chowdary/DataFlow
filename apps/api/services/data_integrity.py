@@ -257,7 +257,13 @@ def _check_transform_dry_run(
     if not rows or not mappings:
         return {"check": "transform_dry_run", "passed": True, "blocks_transfer": False, "issues": []}
 
-    headers = source_columns or list(rows[0].keys())
+    if source_columns:
+        headers = source_columns
+    else:
+        from connectors.header_union import union_attribute_keys
+
+        # Sparse documents omit keys: row 0 alone is not the header (D150).
+        headers = union_attribute_keys(*(list(r) for r in rows if isinstance(r, dict)))
     sample_rows = [
         project_row_cells(row, headers, preserve_sql_null=database_extract)
         for row in rows[:200]
