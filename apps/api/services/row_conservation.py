@@ -223,6 +223,11 @@ class KeyCensus:
     tombstones: int = 0
     unique_tombstone_keys: int = 0
     events_read: int | None = None
+    #: Keys an earlier pass of this job already inserted (a resume after a
+    #: cancel: dest COUNT when resumed minus the job's pre-run COUNT). The
+    #: job-level delta Gate-8 compares includes them; this pass's probe sees
+    #: them as pre-existing (D134).
+    prior_pass_inserts: int = 0
 
     @property
     def inserts(self) -> int:
@@ -239,7 +244,7 @@ class KeyCensus:
     @property
     def expected_delta(self) -> int:
         """Net dest COUNT(*) change if every non-held-out key applies."""
-        return self.inserts - self.deletes
+        return self.inserts - self.deletes + max(int(self.prior_pass_inserts), 0)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -252,6 +257,7 @@ class KeyCensus:
             "updates": self.updates,
             "deletes": self.deletes,
             "expected_delta": self.expected_delta,
+            "prior_pass_inserts": self.prior_pass_inserts,
         }
 
     @classmethod
@@ -266,9 +272,10 @@ class KeyCensus:
             tomb_keys = int(data.get("unique_tombstone_keys") or 0)
             events_raw = data.get("events_read")
             events = int(events_raw) if events_raw is not None and events_raw != "" else None
+            prior = int(data.get("prior_pass_inserts") or 0)
         except (TypeError, ValueError):
             return None
-        if unique < 0 or preexisting < 0 or tombs < 0 or tomb_keys < 0:
+        if unique < 0 or preexisting < 0 or tombs < 0 or tomb_keys < 0 or prior < 0:
             return None
         if events is not None and events < 0:
             return None
@@ -282,6 +289,7 @@ class KeyCensus:
             tombstones=tombs,
             unique_tombstone_keys=max(tomb_keys, tombs),
             events_read=events,
+            prior_pass_inserts=prior,
         )
 
 

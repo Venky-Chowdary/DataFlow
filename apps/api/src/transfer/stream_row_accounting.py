@@ -104,6 +104,7 @@ def begin_table_population(checkpoint: Any) -> None:
     checkpoint.file_offset = 0
     checkpoint.cursor_value = None
     checkpoint.cursor_column = ""
+    checkpoint.incremental_seed = None
     checkpoint.dynamodb_cursor = None
     checkpoint.es_search_after = None
     checkpoint.redis_scan_state = None

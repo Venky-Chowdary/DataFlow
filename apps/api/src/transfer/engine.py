@@ -1331,6 +1331,19 @@ def _finish_verified_run(
 
 
 
+def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) -> bool:
+    """Settle the pre-run backup after a run ended on ``exc``.
+
+    D134 — a cancel is not a failed batch (D102): the committed prefix stays,
+    the job reports it, and the checkpoint and route watermark already point
+    past it. Restoring the pre-run backup removed those rows behind the
+    resume, which then skipped them as landed and still verified.
+    """
+    return _settle_overwrite_backup(
+        destination, restore=not isinstance(exc, TransferCancelled)
+    )
+
+
 def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> bool:
     """Drop a rename-aside backup after success, or put it back after failure.
 
@@ -3789,7 +3802,7 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_overwrite_backup(request.destination, restore=True)
+            _settle_backup_after_error(request.destination, e)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request
@@ -4924,7 +4937,7 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_overwrite_backup(request.destination, restore=True)
+            _settle_backup_after_error(request.destination, e)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request
@@ -5738,7 +5751,7 @@ class UniversalTransferEngine:
                     dest_summary=dest_summary,
                     recon=recon,
                 )
-            _settle_overwrite_backup(request.destination, restore=True)
+            _settle_backup_after_error(request.destination, e)
             finalize_contract(contract_id, success=False)
             display, error_details = _fail_runtime_job(
                 mongo, job_id, e, lineage=lineage, request=request

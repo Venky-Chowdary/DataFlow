@@ -147,6 +147,25 @@ def _decide(
             "retained",
             "This destination is not a SQL table, so the failed batch was not deleted.",
         )
+    if "resume_rows_before" in dest_summary:
+        # D134 — a resumed pass: the job-level "before" is not what this pass
+        # may undo. Rows an earlier pass committed stay, whatever the job's
+        # first-pass precount says.
+        held = dest_summary.get("resume_rows_before")
+        if not isinstance(held, int):
+            return (
+                "retained",
+                "The destination count when this job was resumed was not measured, "
+                "so the failed resumed batch was left in place.",
+            )
+        if held > 0:
+            return (
+                "retained",
+                f"The destination already held {held} row(s) when this job was "
+                "resumed, including rows an earlier pass of this job committed. "
+                "The failed resumed batch was left in place — deleting by a "
+                "partial key list would not be a rollback.",
+            )
     before = dest_summary.get(PRECOUNT_KEY)
     if not isinstance(before, int):
         # Worker-path failures reach this undo through the engine's job

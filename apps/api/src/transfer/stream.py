@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import logging
 import os
@@ -2010,6 +2011,15 @@ def _stream_database_transfer_impl(
         # Resume: restore the first-pass dest-before. A live COUNT now includes
         # rows this job already wrote and is not a pre-write cardinality.
         dest_summary[PRECOUNT_KEY] = int(checkpoint.target_rows_before)
+    if resumed_pass:
+        # D134 — but it is what a failed *resumed* pass may not undo: rows an
+        # earlier pass committed (reported as kept when it was cancelled) are
+        # not this pass's batch, so the undo must never clear or drop them.
+        try:
+            _resume_live = precount_table(dest_type, dest_cfg, str(dest_table))
+        except Exception:  # noqa: BLE001 - unknown stays unknown (undo retains)
+            _resume_live = None
+        dest_summary["resume_rows_before"] = _resume_live
     # A key-addressed destination replaces the value held at the key on every
     # write, so even an append needs the dest-engine census (new keys vs
     # replaced keys) to close conservation — COUNT(*) growth alone reads a
@@ -2224,6 +2234,23 @@ def _stream_database_transfer_impl(
         and watermark not in (None, "")
         and checkpoint.cursor_value in (None, "")
     )
+    # D134 — the window Gate-8 digests and the watermark a failed run rolls
+    # back to belong to the *job*, not to this pass. A resume after a cancel
+    # seeks from its committed page edge, and the route watermark has already
+    # advanced with every committed batch; digesting only the resumed tail
+    # against a destination holding the whole job's rows read as a checksum
+    # mismatch on a correct load. The first pass records the seed it started
+    # from ("" = the route had no watermark) and every resume reuses it.
+    window_seed_bookmark = incremental_seed_bookmark
+    window_seed_inclusive = seeded_from_watermark
+    job_start_watermark = watermark
+    if incremental and cursor_source_col:
+        if resumed_pass and checkpoint.incremental_seed is not None:
+            job_start_watermark = checkpoint.incremental_seed or None
+            window_seed_bookmark = job_start_watermark
+            window_seed_inclusive = job_start_watermark is not None
+        elif not resumed_pass:
+            checkpoint.incremental_seed = str(watermark or "")
     # D124/D60/D98 — every read seeded from the watermark re-reads its whole
     # tie group, whichever branch pages the source. Peers an earlier run
     # already delivered are dropped against the destination's pre-run rows at
@@ -4250,7 +4277,7 @@ def _stream_database_transfer_impl(
                 # value when it removes the rows this advance stood for.
                 dest_summary.setdefault(
                     "watermark_restore_point",
-                    {"cursor_key": cursor_key, "watermark": watermark},
+                    {"cursor_key": cursor_key, "watermark": job_start_watermark},
                 )
             except Exception as wm_exc:
                 raise RuntimeError(
@@ -4581,7 +4608,7 @@ def _stream_database_transfer_impl(
         # when it removes the rows this advance stood for.
         dest_summary.setdefault(
             "watermark_restore_point",
-            {"cursor_key": cursor_key, "watermark": watermark},
+            {"cursor_key": cursor_key, "watermark": job_start_watermark},
         )
 
     # Phase F1 — write-pass fingerprints hash the same remapped rows just written.
@@ -4669,7 +4696,7 @@ def _stream_database_transfer_impl(
         if incremental and cursor_source_col:
             cursor_type_for_read = normalize_inferred(schema.get(cursor_source_col, "string")).upper()
         checksum_cursor_col = cursor_source_col if incremental else ""
-        checksum_cursor_after = incremental_seed_bookmark if incremental else None
+        checksum_cursor_after = window_seed_bookmark if incremental else None
         checksum_cursor_max = running_cursor if incremental else None
         _seed_tiebreak = bool(
             cursor_pk_source and cursor_pk_source != checksum_cursor_col
@@ -4691,7 +4718,7 @@ def _stream_database_transfer_impl(
             dest_summary["incremental_window_pk"] = cursor_pk_source or ""
             if checksum_cursor_after not in (None, ""):
                 dest_summary["incremental_window_seed"] = str(checksum_cursor_after)
-                dest_summary["incremental_window_seed_inclusive"] = seeded_from_watermark
+                dest_summary["incremental_window_seed_inclusive"] = window_seed_inclusive
             if checksum_cursor_max not in (None, ""):
                 dest_summary["incremental_window_max"] = str(checksum_cursor_max)
         use_checksum_keyset = False
@@ -4701,7 +4728,7 @@ def _stream_database_transfer_impl(
         checksum_rows_read = 0
         # The re-read covers the population the write pass read: its first
         # page re-reads the seed's tie group exactly when the write pass did.
-        checksum_seed_read = seeded_from_watermark
+        checksum_seed_read = window_seed_inclusive
         # The digest has to describe the rows this run wrote, so the second scan
         # replays the same approved recipe. Its own runner: the run's shaping
         # effects were counted on the write pass and must not be counted twice.
@@ -5089,6 +5116,12 @@ def _stream_database_transfer_impl(
     if keyed_census_acc is not None:
         census = keyed_census_acc.to_census()
         if census is not None:
+            _resume_held = dest_summary.get("resume_rows_before")
+            _job_before = dest_summary.get(PRECOUNT_KEY)
+            if isinstance(_resume_held, int) and isinstance(_job_before, int):
+                census = dataclasses.replace(
+                    census, prior_pass_inserts=max(_resume_held - _job_before, 0)
+                )
             dest_summary[CENSUS_KEY] = census.to_dict()
     if pk_target_cols:
         dest_summary.setdefault("conflict_columns", list(pk_target_cols))

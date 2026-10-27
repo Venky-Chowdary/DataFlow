@@ -111,6 +111,10 @@ class Checkpoint:
     #: so resume must restore them or the population double-counts the pages a
     #: previous pass already bounded.
     rows_cursor_bounded: int = 0
+    #: Route watermark the job's first pass started from ("" = none, None =
+    #: not recorded). A resume digests the job's window from it and a failed
+    #: resume rolls the route watermark back to it (D134).
+    incremental_seed: str | None = None
     #: CDC stream this cursor belongs to. Empty on a legacy single-stream
     #: checkpoint. A sequential multi-table resume must not apply the cursor
     #: to every selected table.
@@ -180,6 +184,7 @@ class Checkpoint:
             "rows_removed_on_read": self.rows_removed_on_read,
             "rows_source_filtered": self.rows_source_filtered,
             "rows_cursor_bounded": self.rows_cursor_bounded,
+            "incremental_seed": self.incremental_seed,
             "rejected_details": self.rejected_details,
             "rejected_details_truncated": self.rejected_details_truncated,
             "target_rows_before": self.target_rows_before,
