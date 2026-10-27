@@ -97,6 +97,20 @@ def mongodb_database_from_uri(uri: str) -> str:
     return ""
 
 
+def explicit_mongodb_auth_source(connection_string: str = "", auth_source: str = "") -> str:
+    """The auth database the user chose: the form field, else the URL's ``authSource``."""
+    explicit = (auth_source or "").strip()
+    if explicit:
+        return explicit
+    uri = (connection_string or "").strip()
+    if not uri.startswith(("mongodb://", "mongodb+srv://")):
+        return ""
+    from connectors.url_authority import parse_url_authority
+
+    qs = parse_qs(parse_url_authority(uri).query, keep_blank_values=True)
+    return (qs.get("authSource") or qs.get("authsource") or [""])[0].strip()
+
+
 def normalize_mongodb_connection_string(
     connection_string: str = "",
     *,
@@ -112,10 +126,12 @@ def normalize_mongodb_connection_string(
 
     If a connection string is provided, it is used as the base.  When a database
     is supplied and the URI does not already include a database path, the
-    database is appended as the default database.  authSource is left as-is if
-    present in the URL; otherwise it defaults to the database name (or the
-    explicit `auth_source` argument).  This lets a user connect to `trueresume`
-    while the user lives in the `admin` database by adding `?authSource=admin`.
+    database is appended as the default database.  authSource is the explicit
+    `auth_source` argument, else the URL's `authSource`, else `admin` — never
+    the app database implicitly.  Every path (Test, list, introspect, read,
+    write, change streams, COPY) builds its URI here, so they all authenticate
+    against the same database (D135: Test probed admin while reads used the
+    app database and failed "Authentication failed").
 
     When the pasted URI has no userinfo but form username/password are set,
     credentials are injected into the netloc (common for Railway/Atlas pastes
@@ -158,16 +174,10 @@ def normalize_mongodb_connection_string(
         if not path or path == "/":
             path = f"/{database}"
 
-    # Determine authSource precedence:
-    # 1. explicit auth_source argument / form field
-    # 2. authSource query parameter already in the URL
-    # 3. the database name (most common when using Database field)
-    # 4. admin fallback when no database is provided
-    effective_auth_source = auth_source.strip()
-    if not effective_auth_source:
-        effective_auth_source = qs.get("authSource", qs.get("authsource", [""]))[0]
-    if not effective_auth_source:
-        effective_auth_source = database or "admin"
+    # authSource precedence: explicit argument / form field, then the URL's
+    # authSource, then admin (where managed Mongo defines users).
+    effective_auth_source = explicit_mongodb_auth_source(connection_string, auth_source) or "admin"
+    qs.pop("authsource", None)
     qs["authSource"] = [effective_auth_source]
 
     if ssl and "ssl" not in qs and "tls" not in qs:

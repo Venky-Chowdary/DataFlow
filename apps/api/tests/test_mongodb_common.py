@@ -13,14 +13,15 @@ from connectors.mongodb_common import normalize_mongodb_connection_string
 
 
 def test_appends_auth_source_and_database_from_form():
-    # Pasted connection strings with a separate Database field default authSource
-    # to the database name, and use the database as the default database path.
+    # Pasted connection strings with a separate Database field use the database
+    # as the default database path; authSource defaults to admin, never the app
+    # database (D135: Test and reads must authenticate the same way).
     uri = normalize_mongodb_connection_string(
         "mongodb://mongo:pass@mongodb.railway.internal:27017",
         database="trueresume",
     )
-    assert "trueresume" in uri
-    assert "authSource=trueresume" in uri
+    assert "/trueresume" in uri
+    assert "authSource=admin" in uri
 
 
 def test_preserves_existing_auth_source():
@@ -60,8 +61,8 @@ def test_builds_uri_from_host_port_user_pass():
         username="user",
         password="pass",
     )
-    assert uri.startswith("mongodb://user:pass@localhost:27017")
-    assert "authSource=dataflow" in uri
+    assert uri.startswith("mongodb://user:pass@localhost:27017/dataflow")
+    assert "authSource=admin" in uri
 
 
 def test_injects_form_credentials_into_host_only_uri():

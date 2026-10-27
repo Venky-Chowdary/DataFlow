@@ -322,42 +322,24 @@ def mongodb_connection_string(cfg: dict[str, Any]) -> str:
 
 
 def probe_mongodb(cfg: dict[str, Any]) -> tuple[bool, str]:
-    """Ping MongoDB and automatically resolve the correct authSource.
+    """Ping MongoDB and resolve the authSource every other path will use.
 
-    When auth_source is not supplied, the connection string may still work with
-    the default database (path) or admin. We try the candidates in order and
-    return the first one that succeeds, which keeps the UI connection-string
-    flow simple for users who do not know the authentication database.
+    An explicit auth source (form field or the URL's ``authSource``) is the
+    only candidate: Test must prove exactly what reads and writes will use
+    (D135). Without one we try ``admin`` — the default every URI is built
+    with — then the app database, and write the winner back into ``cfg`` so
+    callers persist it and later paths agree.
     """
-    from urllib.parse import parse_qs, urlparse
+    from connectors.mongodb_common import _mongo_client, explicit_mongodb_auth_source
 
-    from connectors.mongodb_common import _mongo_client
-
-    connection_string = (cfg.get("connection_string") or "").strip()
-    qs = parse_qs(urlparse(connection_string).query, keep_blank_values=True)
-    url_auth_source = qs.get("authSource", qs.get("authsource", [""]))[0]
+    explicit = explicit_mongodb_auth_source(
+        cfg.get("connection_string") or "", str(cfg.get("auth_source") or "")
+    )
     database = (cfg.get("database") or "").strip()
-
-    candidates: list[str] = []
-    if cfg.get("auth_source"):
-        candidates.append(str(cfg.get("auth_source")).strip())
-    if url_auth_source:
-        candidates.append(url_auth_source)
-    # Prefer admin before the app database — managed Mongo (Railway/Atlas)
-    # almost always defines the user in admin, while the app DB is the path.
-    candidates.append("admin")
-    if database and database != "admin":
-        candidates.append(database)
-
-    # Deduplicate while preserving order.
-    seen: set[str] = set()
-    ordered: list[str] = []
-    for auth_source in candidates:
-        key = (auth_source or "").strip()
-        if not key or key in seen:
-            continue
-        seen.add(key)
-        ordered.append(key)
+    if explicit:
+        ordered = [explicit]
+    else:
+        ordered = ["admin"] + ([database] if database and database != "admin" else [])
 
     last_error = ""
     for auth_source in ordered:
