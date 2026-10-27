@@ -1,10 +1,33 @@
-"""Shared workspace gating for control-plane routers (schedules, contracts, usage)."""
+"""Shared workspace gating for control-plane routers (schedules, contracts, usage).
+
+The tenant-scope resolver lives in ``services.tenant_scope``; this module is the
+router-facing surface over it.
+"""
 
 from __future__ import annotations
 
 from fastapi import Header, HTTPException, Request
 
-from services.team_store import can_read_workspace, can_write_workspace, require_workspace_isolation
+from services.team_store import can_read_workspace, require_workspace_isolation
+from services.tenant_scope import (
+    TenantScope,
+    WorkspaceFilter,
+    resolve_tenant_scope,
+)
+
+__all__ = [
+    "TenantScope",
+    "WorkspaceFilter",
+    "actor_email",
+    "assert_resource_workspace",
+    "authorized_workspace_id",
+    "requested_workspace_id",
+    "resolve_read_workspace",
+    "resolve_tenant_scope",
+    "resolve_write_workspace",
+    "tenant_scope",
+    "workspace_resource_is_visible",
+]
 
 
 def actor_email(request: Request) -> str:
@@ -51,35 +74,46 @@ def authorized_workspace_id(request: Request) -> str:
         return ""
 
 
+def tenant_scope(
+    request: Request,
+    x_workspace_id: str | None = None,
+) -> TenantScope:
+    """The request's tenant scope (D154); ``x_workspace_id`` defaults to the header."""
+    return resolve_tenant_scope(request, x_workspace_id)
+
+
 def resolve_read_workspace(
     request: Request,
     x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> str:
-    workspace_id = (x_workspace_id or "").strip()
-    if require_workspace_isolation() and not workspace_id:
-        raise HTTPException(status_code=400, detail="X-Workspace-Id required")
-    if workspace_id and not can_read_workspace(workspace_id, actor_email(request)):
-        raise HTTPException(status_code=403, detail="Access to workspace denied")
-    return workspace_id
+    """The one workspace a read acts in ("" = every workspace, admins only).
+
+    A restricted actor without a header reads their own workspace rather than
+    the old platform-wide default; with isolation enforced and no membership
+    at all there is nothing to read (403).
+    """
+    scope = resolve_tenant_scope(request, x_workspace_id)
+    if scope.enforced and not scope.unrestricted and not scope.workspace_id:
+        raise HTTPException(status_code=403, detail="No workspace membership")
+    return scope.workspace_id
 
 
 def resolve_write_workspace(
     request: Request,
     x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> str:
-    workspace_id = (x_workspace_id or "").strip()
-    if require_workspace_isolation() and not workspace_id:
-        raise HTTPException(status_code=400, detail="X-Workspace-Id required")
-    if workspace_id and not can_write_workspace(workspace_id, actor_email(request)):
-        raise HTTPException(status_code=403, detail="Write access to workspace denied")
-    return workspace_id
+    return resolve_tenant_scope(request, x_workspace_id).target_workspace_id(write=True)
 
 
 def workspace_resource_is_visible(
     resource_workspace_id: str | None,
     workspace_id: str,
 ) -> bool:
-    """Apply the same legacy-resource visibility rule across scoped reads."""
+    """Visibility inside one already-resolved workspace scope ("" = all).
+
+    For request-bound reads use ``tenant_scope(request).allows`` — it also
+    knows who is asking.
+    """
     scope = (workspace_id or "").strip()
     if not scope:
         return True
@@ -90,18 +124,11 @@ def workspace_resource_is_visible(
 
 
 def assert_resource_workspace(request: Request, resource_workspace_id: str | None) -> None:
-    """Deny cross-workspace resource access when isolation is on or resource is scoped."""
-    rid = (resource_workspace_id or "").strip()
-    scope = (request.headers.get("X-Workspace-Id") or "").strip()
-    if not rid:
-        if require_workspace_isolation():
-            raise HTTPException(status_code=404, detail="Not found")
-        return
-    if not can_read_workspace(rid, actor_email(request)):
-        raise HTTPException(status_code=404, detail="Not found")
-    # The request's declared scope is the tenant boundary, not just the actor's
-    # membership: a user who belongs to two workspaces must not see one
-    # workspace's resource while operating in the other. List endpoints already
-    # filter by scope, so an id-addressed read has to agree with them.
-    if scope and not workspace_resource_is_visible(rid, scope):
+    """404 an id-addressed resource the request's tenant scope does not cover.
+
+    Same rule as the lists: foreign workspaces, a workspace other than the
+    declared header scope, and (isolation enforced) unscoped legacy rows for
+    anyone but a platform admin.
+    """
+    if not resolve_tenant_scope(request).allows(resource_workspace_id):
         raise HTTPException(status_code=404, detail="Not found")

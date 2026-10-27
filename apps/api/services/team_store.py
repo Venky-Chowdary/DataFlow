@@ -3,8 +3,8 @@
 Workspaces are the tenant isolation boundary: connectors, jobs, schedules and API
 keys are scoped to one. Each workspace has members with a role — ``admin``,
 ``editor`` or ``viewer``. The global workspace (id ``""``) carries resources that
-were created before scoping existed and is always readable unless hard isolation
-is switched on.
+were created before scoping existed; once isolation is enforced (see
+``require_workspace_isolation``) only platform admins see it.
 
 Persistence is one document per workspace and one per membership, in the metadata
 database, related by ``workspace_id``. It used to be a single document holding two
@@ -38,6 +38,7 @@ from pymongo.errors import (
 from services.brand_env import getenv_brand
 from services.metadata_backend import json_doc_transaction, load_json_doc, mongo_database
 from services.platform_config import data_dir
+from services.signup_config import signup_enabled
 
 WORKSPACES_COLLECTION = "workspaces"
 MEMBERS_COLLECTION = "workspace_members"
@@ -672,13 +673,17 @@ def list_memberships_for_user(email: str) -> list[dict[str, Any]]:
 
 
 def require_workspace_isolation() -> bool:
-    """When True, an empty workspace_id is denied (hard multi-tenant isolation).
+    """When True, unscoped (``workspace_id ""``) resources are platform-admin only.
 
-    Opt-in via ``DATAFLOW_REQUIRE_WORKSPACE=1``. Production no longer defaults ON —
-    the web client historically omitted ``X-Workspace-Id``, which caused schedules /
-    contracts / usage to 400 and amplified false offline banners under load.
+    On with ``DATAWRAP_REQUIRE_WORKSPACE=1``, and always on while self-serve
+    signup is enabled: strangers share the deployment then, and an unscoped row
+    visible to every account was a cross-tenant leak (D154). A request without
+    ``X-Workspace-Id`` no longer 400s under isolation — ``services.tenant_scope``
+    defaults it to the actor's own workspace.
     """
-    return getenv_brand("REQUIRE_WORKSPACE", "").lower() in ("1", "true", "yes")
+    if getenv_brand("REQUIRE_WORKSPACE", "").lower() in ("1", "true", "yes"):
+        return True
+    return signup_enabled()
 
 
 def can_read_workspace(workspace_id: str, email: str) -> bool:

@@ -281,11 +281,16 @@ def test_forward_upgrade_not_labeled_rollback(monkeypatch):
 
 
 def _patch_ws_membership(monkeypatch):
-    """Actor is a member of workspace b only."""
-    import services.workspace_access as wa
-    monkeypatch.setattr(wa, "can_read_workspace", lambda ws, email: ws == "b")
-    monkeypatch.setattr(wa, "can_write_workspace", lambda ws, email: ws == "b")
-    monkeypatch.setattr(wa, "require_workspace_isolation", lambda: False)
+    """Actor is an editor of workspace b only (the tenant resolver's seam)."""
+    import services.tenant_scope as ts
+    monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "1")
+    monkeypatch.setattr(ts, "ordered_memberships", lambda email: (("b", "editor"),))
+    monkeypatch.setattr(ts, "require_workspace_isolation", lambda: False)
+
+
+def _member_of_b_request():
+    user = {"email": "editor@b.test", "role": "member"}
+    return Request({**_scope_ws("b"), "state": {"user_email": user["email"], "user": user}})
 
 
 def test_cross_workspace_preview_denied(monkeypatch):
@@ -300,7 +305,7 @@ def test_cross_workspace_preview_denied(monkeypatch):
     body = router.UpgradePreviewPayload(target_version=2)
     with pytest.raises(HTTPException) as exc:
         router.upgrade_preview(
-            "rec-1", body, Request(_scope_ws("b")), workspace_id="b"
+            "rec-1", body, _member_of_b_request(), workspace_id="b"
         )
     assert exc.value.status_code in (403, 404)
 
@@ -314,6 +319,6 @@ def test_cross_workspace_upgrade_denied(monkeypatch):
     body = sched_router.ScheduleRecipeUpgrade(target_version=2)
     with pytest.raises(HTTPException) as exc:
         sched_router.upgrade_schedule_recipe(
-            "sched-1", body, Request(_scope_ws("b")), workspace_id="b"
+            "sched-1", body, _member_of_b_request(), workspace_id="b"
         )
     assert exc.value.status_code in (403, 404)
