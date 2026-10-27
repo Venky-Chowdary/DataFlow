@@ -22,6 +22,13 @@ from datetime import date, datetime, time
 from typing import Any, Final
 
 from connectors.base import ReadBatch
+from connectors.oracle_tstz import (
+    ORACLE_TSTZ_READ_FORMAT,
+    is_oracle_tz_type_name,
+    oracle_tz_positions,
+    oracle_tz_select_list,
+    parse_oracle_tz_row,
+)
 from connectors.merge_dialects import (  # noqa: F401  (re-exported for callers)
     _clickhouse_replacing_upsert,
     _db2_merge_upsert,
@@ -2706,12 +2713,20 @@ def _sample_raw_table(
         stmt = f"SELECT TOP 200 * FROM {qualified}"  # nosec B608
     elif uses_fetch_first_pagination(dialect):
         # Oracle/DB2 reject LIMIT; FETCH FIRST needs no ORDER BY for a sample.
-        stmt = f"SELECT * FROM {qualified} FETCH FIRST 200 ROWS ONLY"  # nosec B608
+        select_list = _raw_select_list(conn, dialect, qualified)
+        stmt = f"SELECT {select_list} FROM {qualified} FETCH FIRST 200 ROWS ONLY"  # nosec B608
     else:
         stmt = f"SELECT * FROM {qualified} LIMIT 200"  # nosec B608
     result = conn.execute(sa.text(stmt))
     headers = _result_headers(dialect_l, result)
     rows = result.fetchall()
+    if _is_oracle_wire(dialect_l, dialect_l):
+        # The sample feeds type inference: an Oracle TSTZ must reach it as the
+        # aware instant it is, not the TO_CHAR text that carried it (D155).
+        positions = oracle_tz_positions(
+            getattr(getattr(result, "cursor", None), "description", None)
+        )
+        rows = [parse_oracle_tz_row(row, positions) for row in rows]
     return headers, rows
 
 
@@ -3154,34 +3169,60 @@ def fetch_pk_lsn_map(
         release_engine(engine)
 
 
-_ORACLE_TSTZ_READ_FORMAT: Final = 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'
-
-
 def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
     """Select list that keeps an Oracle TIMESTAMP WITH TIME ZONE offset.
 
     python-oracledb hands back a *naive* ``datetime`` for TIMESTAMP WITH
     [LOCAL] TIME ZONE — a ``08:31+05:30`` row arrives as bare ``08:31`` and the
     instant is silently rewritten. Rendering those columns server side with
-    ``TO_CHAR`` keeps the offset on the wire; every other dialect and column is
-    projected unchanged.
+    ``TO_CHAR`` keeps the offset on the wire (see :mod:`connectors.oracle_tstz`);
+    every other dialect and column is projected unchanged.
     """
     if not _is_oracle_wire(_dialect_key(cfg), str(cfg.get("type") or "")):
         return list(cols)
     out: list[Any] = []
     for col in cols:
-        col_type = getattr(col, "type", None)
-        tz_carrier = bool(
-            getattr(col_type, "timezone", False)
-            or getattr(col_type, "local_timezone", False)
-        )
-        if tz_carrier and isinstance(col_type, sa.DateTime):
+        if _is_oracle_tz_sa(getattr(col, "type", None)):
             out.append(
-                sa.func.to_char(col, _ORACLE_TSTZ_READ_FORMAT).label(col.name)
+                sa.func.to_char(col, ORACLE_TSTZ_READ_FORMAT).label(col.name)
             )
         else:
             out.append(col)
     return out
+
+
+def _is_oracle_tz_sa(col_type: Any) -> bool:
+    """True for a reflected Oracle TIMESTAMP WITH [LOCAL] TIME ZONE column.
+
+    The SQLAlchemy flags are one spelling; a type carried by its DDL name (a
+    native passthrough such as ``TIMESTAMP(6) WITH TIME ZONE``) is the other,
+    and missing it read the column naive (D155).
+    """
+    if col_type is None:
+        return False
+    if isinstance(col_type, sa.DateTime) and (
+        getattr(col_type, "timezone", False)
+        or getattr(col_type, "local_timezone", False)
+    ):
+        return True
+    return is_oracle_tz_type_name(getattr(col_type, "col_spec", ""))
+
+
+def _raw_select_list(conn: Any, dialect: str, qualified: str, probe: Any = None) -> str:
+    """Select list for a raw ``SELECT`` read: ``*``, except Oracle TSTZ columns.
+
+    The raw fallbacks bypass reflection, so the zero-row probe's driver type
+    names decide which columns need the offset-keeping ``TO_CHAR`` (D155).
+    """
+    if not _is_oracle_wire(dialect, dialect):
+        return "*"
+    if probe is None:
+        from services.dialect_profiles import zero_row_probe_sql
+
+        probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
+    return oracle_tz_select_list(
+        getattr(getattr(probe, "cursor", None), "description", None)
+    )
 
 
 def _is_mysql_timestamp_sa(col: Any) -> bool:
@@ -3242,13 +3283,13 @@ def _read_table_raw(
     )
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
-    base = f"SELECT * FROM {qualified}"  # nosec B608
     # Discover columns so we can ORDER BY the first one — bare LIMIT/OFFSET is
     # non-deterministic and silently duplicates/skips rows across pages.
     probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
     headers = _result_headers(dialect, probe)
     if not headers:
         return [], []
+    base = f"SELECT {_raw_select_list(conn, dialect, qualified, probe)} FROM {qualified}"  # nosec B608
     q = quote_char_for(dialect) or '"'
     # Oracle/DB2/Snowflake store case-insensitive names folded upper and the
     # driver hands them back lowercased; quoting that literal yields ORA-00904.
@@ -3707,11 +3748,11 @@ def _open_raw_table_scan(
     )
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
-    base = f"SELECT * FROM {qualified}"  # nosec B608
     probe = conn.execute(sa.text(zero_row_probe_sql(dialect, qualified)))
     headers = _result_headers(dialect, probe)
     if not headers:
         return [], None, []
+    base = f"SELECT {_raw_select_list(conn, dialect, qualified, probe)} FROM {qualified}"  # nosec B608
     q = quote_char_for(dialect) or '"'
     order_header = _orderable_header(dialect, headers, probe)
     if order_header is None:
