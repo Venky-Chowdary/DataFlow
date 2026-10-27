@@ -142,10 +142,6 @@ def copy_iceberg_to_sqlserver(
     dest_ref = _ss_table_ref(dst_schema, dest_table)
     col_sql = ", ".join(_ss_ident(c) for c in target_cols)
     placeholders = sqlserver_insert_placeholders(sqlserver_ddls)
-    insert_sql = (
-        f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
-        f"VALUES ({placeholders})"
-    )
     batch_size = pg_sqlserver_copy_batch()
 
     dest_conn = _ss_connect(dest_cfg)
@@ -158,6 +154,7 @@ def copy_iceberg_to_sqlserver(
         dest_occupied = False
         swap_at_end = False
         swap_schema = dst_schema
+        swap_dest_ref = dest_ref
         swap_dest_table = dest_table
         if replace_destination and exists:
             # C03/X-OW2 — stage the overwrite, sp_rename swap inside the txn.
@@ -201,6 +198,12 @@ def copy_iceberg_to_sqlserver(
             )
         pa_table = pa_table.rename_columns(target_cols)
 
+        # Built after the overwrite decision: a staged overwrite loads the
+        # staging table, never the live destination it later replaces.
+        insert_sql = (
+            f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
+            f"VALUES ({placeholders})"
+        )
         identity = _has_identity(dst_cur, dst_schema, dest_table)
         if identity:
             dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608

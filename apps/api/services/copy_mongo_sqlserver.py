@@ -109,10 +109,6 @@ def copy_mongo_to_sqlserver(
     dest_ref = _ss_table_ref(dst_schema, dest_table)
     col_sql = ", ".join(_ss_ident(c) for c in target_cols)
     placeholders = sqlserver_insert_placeholders(sqlserver_ddls)
-    insert_sql = (
-        f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
-        f"VALUES ({placeholders})"
-    )
     batch_size = pg_sqlserver_copy_batch()
 
     client, coll = mongo_collection(source_cfg, source_table)
@@ -171,6 +167,12 @@ def copy_mongo_to_sqlserver(
         cursor = coll.find({}, projection, session=session, no_cursor_timeout=False)
         copied = 0
         batch: list[tuple[Any, ...]] = []
+        # Built after the overwrite decision: a staged overwrite loads the
+        # staging table, never the live destination it later replaces.
+        insert_sql = (
+            f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
+            f"VALUES ({placeholders})"
+        )
         identity = _has_identity(dst_cur, dst_schema, dest_table)
         if identity:
             dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608

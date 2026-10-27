@@ -392,3 +392,53 @@ def test_live_pg_sqlserver_stream_load_method(monkeypatch):
         _drop_ss(ss.cursor(), dest)
         pg.close()
         ss.close()
+
+
+def test_live_pg_sqlserver_overwrite_replaces_existing_dest():
+    """A staged overwrite loads the staging table and swaps it in.
+
+    The INSERT used to be built before the staging branch rebound
+    ``dest_ref``, so rows went into the live table (duplicate key on its PK)
+    and the swap then promoted the empty staging table.
+    """
+    src_conn = _pg_connect()
+    ss = _ss_connect()
+    tag = uuid.uuid4().hex[:8]
+    src = f"pg_ss_ow_src_{tag}"
+    dest = f"pg_ss_ow_dst_{tag}"
+    try:
+        with src_conn.cursor() as cur:
+            _seed_pg(cur, src, 800)
+        ss_cur = ss.cursor()
+        _drop_ss(ss_cur, dest)
+        ss_cur.execute(
+            f"CREATE TABLE dbo.[{dest}] ("
+            "id BIGINT NOT NULL PRIMARY KEY, label NVARCHAR(32) NULL)"
+        )
+        ss_cur.execute(f"INSERT INTO dbo.[{dest}] (id, label) VALUES (1, N'ghost')")
+        result = copy_postgres_to_sqlserver(
+            source_cfg=_pg_cfg(),
+            source_schema="public",
+            source_table=src,
+            dest_cfg=_ss_cfg(),
+            dest_table=dest,
+            pairs=[("id", "id"), ("label", "label")],
+            sqlserver_ddls=["BIGINT", "NVARCHAR(32)"],
+            replace_destination=True,
+        )
+        assert result.target_rows == 800
+        ss_cur.execute(f"SELECT COUNT(*) FROM dbo.[{dest}]")
+        assert int(ss_cur.fetchone()[0]) == 800
+        ss_cur.execute(f"SELECT label FROM dbo.[{dest}] WHERE id = 1")
+        assert str(ss_cur.fetchone()[0]) == "r1"
+        ss_cur.execute(
+            "SELECT COUNT(*) FROM sys.tables WHERE name LIKE %s OR name LIKE %s",
+            (f"df_ow_{dest}%", f"df_trash_{dest}%"),
+        )
+        assert int(ss_cur.fetchone()[0]) == 0
+    finally:
+        with src_conn.cursor() as cur:
+            cur.execute(f'DROP TABLE IF EXISTS public."{src}"')
+        _drop_ss(ss.cursor(), dest)
+        src_conn.close()
+        ss.close()

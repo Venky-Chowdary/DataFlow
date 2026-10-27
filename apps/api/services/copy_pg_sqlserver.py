@@ -641,10 +641,6 @@ def copy_postgres_to_sqlserver(
     dest_ref = _ss_table_ref(dst_schema, dest_table)
     col_sql = ", ".join(_ss_ident(c) for c in target_cols)
     placeholders = sqlserver_insert_placeholders(sqlserver_ddls)
-    insert_sql = (
-        f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
-        f"VALUES ({placeholders})"
-    )
     converters = [converter_for_ddl(ddl) for ddl in sqlserver_ddls]
 
     source_conn = _pg_connect(source_cfg)
@@ -841,6 +837,12 @@ def copy_postgres_to_sqlserver(
                     )
                 copy_sqls = [_copy_select_sql(select_list, source_ref, "")]
 
+            # Built after the overwrite decision: a staged overwrite loads the
+            # staging table, never the live destination it later replaces.
+            insert_sql = (
+                f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
+                f"VALUES ({placeholders})"
+            )
             identity = _has_identity(dst_cur, dst_schema, dest_table)
             if identity:
                 dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608

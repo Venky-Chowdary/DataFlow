@@ -106,10 +106,6 @@ def copy_s3_to_sqlserver(
     dest_ref = _ss_table_ref(dst_schema, dest_table)
     col_sql = ", ".join(_ss_ident(c) for c in target_cols)
     placeholders = ", ".join(["%s"] * len(target_cols))
-    insert_sql = (
-        f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
-        f"VALUES ({placeholders})"
-    )
     batch_size = pg_sqlserver_copy_batch()
 
     dest_conn = _ss_connect(dest_cfg)
@@ -163,6 +159,12 @@ def copy_s3_to_sqlserver(
         bucket = s3_bucket(source_cfg)
         copied = 0
         batch: list[tuple[Any, ...]] = []
+        # Built after the overwrite decision: a staged overwrite loads the
+        # staging table, never the live destination it later replaces.
+        insert_sql = (
+            f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
+            f"VALUES ({placeholders})"
+        )
         identity = _has_identity(dst_cur, dst_schema, dest_table)
         if identity:
             dst_cur.execute(f"SET IDENTITY_INSERT {dest_ref} ON")  # nosec B608
