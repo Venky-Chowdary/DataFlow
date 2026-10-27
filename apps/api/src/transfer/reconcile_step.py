@@ -50,6 +50,7 @@ from services.destination_key_collision_probe import (
     sync_mode_appends_without_key_resolution,
 )
 from services.row_conservation import CENSUS_KEY, live_records_for_digest
+from services.verification_ladder import PopulationTooLarge
 from services.reconciliation import (
     KEYED_READBACK_ENGINES,
     TargetSampleUnavailable,
@@ -2878,7 +2879,6 @@ def _maybe_attach_verification_ladder(
         return report
     from services.verification_ladder import (
         MAX_LADDER_ROWS,
-        PopulationTooLarge,
         attach_ladder_to_reconcile_report,
         mappings_rewrite_written_cells,
         read_mysql_rows,
