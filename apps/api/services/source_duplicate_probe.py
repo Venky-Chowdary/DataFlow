@@ -127,6 +127,10 @@ class SourceDuplicateProbeResult:
     message: str = ""
     db_type: str = ""
     primary_key_columns: list[str] = field(default_factory=list)
+    #: Source rows with a NULL in any key column, counted on the population
+    #: (``None`` when this source kind was not counted). GROUP BY folds NULL
+    #: keys into one group, so a single NULL never shows up as a duplicate.
+    null_key_rows: int | None = None
 
     @property
     def ran(self) -> bool:
@@ -196,7 +200,10 @@ def _sql_duplicates(
     table: str,
     pk_columns: list[str],
     limit: int = 5,
+    *,
+    null_counts: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
+    """Duplicate key groups; fills ``null_counts["rows"]`` when a dict is passed."""
     import sqlalchemy as sa
 
     from connectors.generic_sql import _engine
@@ -230,6 +237,15 @@ def _sql_duplicates(
 
     with engine.connect() as conn:
         rows = conn.execute(stmt).fetchall()
+        if null_counts is not None:
+            # D46: a NULL key passed this probe (one NULL is no duplicate) and
+            # then failed the keyed write with a misleading error.
+            null_stmt = (
+                sa.select(sa.func.count())
+                .select_from(tbl)
+                .where(sa.or_(*[c.is_(None) for c in pk_cols]))
+            )
+            null_counts["rows"] = int(conn.execute(null_stmt).scalar() or 0)
 
     out: list[dict[str, Any]] = []
     n = len(pk_columns)
@@ -1003,8 +1019,11 @@ def probe_source_duplicate_keys_result(
                 db_type=db_type,
                 primary_key_columns=pk_columns,
             )
+        null_counts: dict[str, int] = {}
         try:
-            findings = _sql_duplicates(cfg, table, pk_columns, limit=limit)
+            findings = _sql_duplicates(
+                cfg, table, pk_columns, limit=limit, null_counts=null_counts
+            )
         except Exception as sql_exc:
             if db_type not in _SQL_INSPECT_FALLBACK_TYPES:
                 raise
@@ -1043,6 +1062,7 @@ def probe_source_duplicate_keys_result(
             message=f"SQL uniqueness probe on {table}.({pk_label})",
             db_type=db_type,
             primary_key_columns=pk_columns,
+            null_key_rows=null_counts.get("rows"),
         )
     except Exception as exc:
         logger.warning("Source duplicate-key probe failed: %s", exc, exc_info=exc)

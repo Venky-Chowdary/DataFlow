@@ -1582,6 +1582,7 @@ def run_file_preflight(
     source_duplicate_probe_pk = ""
     source_duplicate_probe_status = ""
     source_duplicate_probe_message = ""
+    source_null_key_rows: int | None = None
     from services.procedure_source import is_callable_source, source_read_mode_of
 
     callable_src = is_callable_source(source_config)
@@ -1625,6 +1626,7 @@ def run_file_preflight(
                 source_duplicate_probe_status = probe_result.status
                 source_duplicate_probe_message = probe_result.message
                 source_duplicate_probe_ran = bool(probe_result.ran)
+                source_null_key_rows = probe_result.null_key_rows
             else:
                 source_duplicate_probe_status = "skipped_no_pk"
                 source_duplicate_probe_message = (
@@ -1844,6 +1846,7 @@ def run_file_preflight(
         population_fit_report=pre_gate_fit_report,
     )
     ctx.sample_unavailable_reason = sample_unavailable_reason
+    ctx.source_null_key_rows = source_null_key_rows
     ctx.source_measured_empty = source_measured_empty
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still

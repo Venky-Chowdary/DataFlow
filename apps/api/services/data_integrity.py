@@ -1909,6 +1909,49 @@ def _check_encoding_anomalies(
     }
 
 
+def _check_null_keys(
+    key_columns: list[str],
+    null_rows: int,
+    *,
+    sync_mode: str,
+    dest_kind: str,
+) -> dict[str, Any]:
+    """D46: population rows whose identity key is NULL, from the source probe.
+
+    A keyed write matches on the key, and a NULL matches nothing: the row can
+    neither update nor insert. Found only at write time, it surfaced as an
+    unrelated "column not on the destination" failure after rows had landed.
+    """
+    from services.primary_key import sync_requires_unique_identity
+    from services.sync_cursor import normalize_sync_mode
+
+    label = " + ".join(key_columns) or "the key"
+    keyed = dest_kind in SCHEMALESS_DESTS or sync_requires_unique_identity(
+        normalize_sync_mode(sync_mode), dest_kind=dest_kind
+    )
+    message = (
+        f"{label}: {null_rows:,} source row(s) have a NULL upsert key — a keyed "
+        "write cannot match or insert a row without its key. Fill the key, "
+        "filter those rows out, or upsert on a key that is never NULL."
+    )
+    if not keyed:
+        return {
+            "check": "null_keys",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [message],
+        }
+    return {
+        "check": "null_keys",
+        "passed": False,
+        "blocks_transfer": True,
+        "issues": [message],
+        "null_key_rows": int(null_rows),
+        "primary_key_columns": list(key_columns),
+    }
+
+
 def run_integrity_audit(
     *,
     source_columns: list[str],
@@ -1932,6 +1975,7 @@ def run_integrity_audit(
     source_duplicate_probe_status: str = "",
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
+    source_null_key_rows: int | None = None,
     dest_table_exists: bool | None = None,
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
@@ -2106,6 +2150,15 @@ def run_integrity_audit(
                 duplicate_policy=duplicate_policy,
             )
         )
+        if source_null_key_rows:
+            checks.append(
+                _check_null_keys(
+                    pk_columns_uniqueness,
+                    int(source_null_key_rows),
+                    sync_mode=sync_mode,
+                    dest_kind=dest_kind,
+                )
+            )
         checks.append(
             _check_mapping_confidence(mappings, confidence_min=cfg["confidence"], validation_mode=validation_mode)
         )

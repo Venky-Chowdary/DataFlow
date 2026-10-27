@@ -457,6 +457,8 @@ def _is_uniqueness_probe_signal(
 
 
 _EXPECTATION_ISSUE_RE = re.compile(r"^expect_[a-z0-9_]+", re.I)
+#: G9 ``null_keys`` finding (D46): population rows with a NULL upsert key.
+_NULL_KEY_ISSUE_RE = re.compile(r"source row\(s\) have a NULL upsert key", re.I)
 
 
 def _is_expectation_signal(
@@ -467,9 +469,9 @@ def _is_expectation_signal(
     """True when G9 blocked on expectation-suite findings only.
 
     Issues read ``expect_column_not_null:order_id: 3 failures`` — sampled
-    data-quality findings, not a declared type-path collapse. Any real
-    fidelity stamp or a non-expectation issue keeps the gate a fidelity
-    signal.
+    data-quality findings, not a declared type-path collapse. The probe's
+    NULL-upsert-key count is the same kind of data finding. Any real
+    fidelity stamp or another issue keeps the gate a fidelity signal.
     """
     details = details or {}
     if details.get("fidelity_collapse") is True:
@@ -479,7 +481,8 @@ def _is_expectation_signal(
     issues = details.get("issue_texts") or details.get("issues") or []
     texts = [str(i) for i in issues[:20] if str(i).strip()]
     return bool(texts) and all(
-        bool(_EXPECTATION_ISSUE_RE.match(t.lstrip())) for t in texts
+        bool(_EXPECTATION_ISSUE_RE.match(t.lstrip()) or _NULL_KEY_ISSUE_RE.search(t))
+        for t in texts
     )
 
 
