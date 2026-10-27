@@ -879,10 +879,15 @@ def diff_schemas(
         item for item in (classification.get("additive") or [])
         if item.get("kind") != "widen_type"
     ]
+    # Severity is read off the lists it summarises. A destination that already
+    # carries every source type needs nothing added: calling that "additive"
+    # beside ``additive=[]`` contradicted itself (D43).
     if breaking:
         severity = "breaking"
-    elif additive or load_widening:
+    elif additive:
         severity = "additive"
+    elif load_widening:
+        severity = "compatible"
     else:
         severity = "none"
     return _tool_result(

@@ -111,6 +111,9 @@ def test_diff_schemas_load_direction(monkeypatch):
     assert body["severity"] != "breaking"
     assert not [b for b in body["breaking"] if b.get("column") == "id"]
     assert any(w["column"] == "id" for w in body["dest_carries_source"])
+    # Nothing to add: severity must agree with the empty additive list.
+    assert body["additive"] == []
+    assert body["severity"] == "compatible"
 
 
 def test_diff_schemas_dest_narrower_is_breaking(monkeypatch):
