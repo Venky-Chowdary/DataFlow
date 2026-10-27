@@ -325,19 +325,40 @@ def s3_parse_delimited_cell(cell: str) -> str | None:
     return cell
 
 
+def s3_file_has_legacy_null(path: str, *, chunk_size: int = 1 << 20) -> bool:
+    """True when the file may hold a ``\\N`` cell (legacy NULL spelling).
+
+    The C04 codec reads ``\\N`` as NULL; a bulk loader whose CSV NULL is the
+    empty field would land it as text. A byte scan is conservative — any
+    ``\\N`` declines — and cheap next to the GET that produced the file.
+    """
+    tail = b""
+    with open(path, "rb") as handle:
+        while True:
+            chunk = handle.read(chunk_size)
+            if not chunk:
+                return False
+            if b"\\N" in tail + chunk:
+                return True
+            tail = chunk[-1:]
+
+
 def s3_iter_delimited_rows(
     path: str,
     delimiter: str,
+    *,
+    empty_cell: str = "null",
 ) -> Iterator[list[str | None]]:
     """Yield data rows (header skipped) decoded by the C04 codec.
 
     An unquoted empty field is ``None`` (SQL NULL), a quoted ``""`` is ``''``,
-    and the legacy ``\\N`` spelling still reads as NULL.
+    and the legacy ``\\N`` spelling still reads as NULL. ``empty_cell='keep'``
+    reads a ``\\N``-NULL file, where an unquoted empty field is ``''``.
     """
     from services.csv_codec import iter_csv_records
 
     with open(path, encoding="utf-8", newline="") as handle:
-        reader = iter_csv_records(handle, delimiter)
+        reader = iter_csv_records(handle, delimiter, empty_cell=empty_cell)
         header = next(reader, None)
         if header is None:
             return

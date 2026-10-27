@@ -1014,7 +1014,10 @@ def copy_csv_to_sqlite(
 
         pending: list[tuple[Any, ...]] = []
         inserted = 0
-        for cells in s3_iter_delimited_rows(mapped_path, delim):
+        # The mapped file spells NULL ``\N`` (``_csv_cell``) and writes ''
+        # as a bare empty field, so an empty cell here is '' — not the
+        # operator-CSV unquoted-empty NULL (CR-D125).
+        for cells in s3_iter_delimited_rows(mapped_path, delim, empty_cell="keep"):
             if len(cells) != len(converters):
                 raise ValueError(
                     f"CSV width {len(cells)} != dest columns {len(converters)}"

@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from typing import Any, Callable, NamedTuple
 
-from services.value_serializer import cell_to_string
+from services.value_serializer import wire_cell_text
 
 try:
     from services.platform_config import data_dir
@@ -232,7 +232,13 @@ def download_object(
 
 
 def _records_to_matrix(records: list[dict[str, Any]], columns: list[str]) -> list[list[str]]:
-    return [[cell_to_string(record.get(c)) for c in columns] for record in records]
+    """Wire records → reader rows, as the SQL readers emit them.
+
+    NULL is the explicit sentinel, not ``''`` — a blank-string row would
+    land a Parquet NULL, or a CSV unquoted empty field, as text and lose the
+    quoted ``""`` distinction (D62, CR-D125).
+    """
+    return [[wire_cell_text(record.get(c)) for c in columns] for record in records]
 
 
 def _collect_records(

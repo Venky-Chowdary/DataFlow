@@ -112,19 +112,15 @@ from services.tabular_window import header_and_rows, row_to_record
 
 try:
     from services.csv_profiler import (
-        count_csv_rows,
         csv_header_names,
         detect_delimiter,
         detect_encoding,
-        parse_csv_preview,
     )
 except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.csv_profiler import (
-        count_csv_rows,
         csv_header_names,
         detect_delimiter,
         detect_encoding,
-        parse_csv_preview,
     )
 
 from .adapters import (
@@ -367,16 +363,6 @@ def supports_file_streaming(source_kind: str, filename: str, destination: Endpoi
     return FileParser.detect_file_type(filename) in STREAMABLE_TYPES
 
 
-def _decompress_bytes_if_gzip(data: bytes) -> bytes:
-    """Decompress an in-memory gzip payload when applicable."""
-    if _is_gzip_bytes(data):
-        try:
-            return gzip.decompress(data)
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-    return data
-
-
 def peek_file_source(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -399,21 +385,9 @@ def peek_file_source(
     file_type = FileParser.detect_file_type(filename, raw_bytes or None)
 
     if file_type in ("csv", "tsv"):
-        # Fast path for in-memory payloads that already fit in RAM.
-        if isinstance(content, bytes):
-            raw = _decompress_bytes_if_gzip(content)
-            headers, rows, _enc, _delim = parse_csv_preview(
-                raw, preview_rows=100, options=read_options
-            )
-            if not headers:
-                raise ValueError("CSV file has no header row")
-            total = count_csv_rows(raw, options=read_options)
-            sample = [dict(zip(headers, row)) for row in rows[:100]]
-            schema = FileParser.infer_schema(sample)
-            return headers, schema, total, sample
-
-        # Path-based streaming: read only the preview rows we need and count the
-        # rest in a single pass without materializing every cell.
+        # One codec pass for in-memory bytes and on-disk paths alike: a plain
+        # ``csv.reader`` preview landed an unquoted empty (NULL) as '' in the
+        # Gate-8 reconcile sample (CR-D125). Only the preview rows are kept.
         opts = read_options or ReadOptions()
         sample_bytes = _first_bytes(content)
         enc = opts.encoding or detect_encoding(sample_bytes)

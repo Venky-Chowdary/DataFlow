@@ -29,6 +29,7 @@ from services.copy_s3_common import (
     s3_client,
     s3_dest_count,
     s3_ext,
+    s3_file_has_legacy_null,
     s3_list_keys,
 )
 
@@ -144,9 +145,17 @@ def copy_s3_to_postgres(
             os.close(fd)
             tmp_paths.append(tmp_path)
             client.download_file(bucket, src_key, tmp_path)
+            if s3_file_has_legacy_null(tmp_path):
+                raise FastPathUnavailable(
+                    f"source object {src_key!r} spells NULL as \\N; the row "
+                    "path's CSV codec reads it (COPY's CSV NULL is the empty field)"
+                )
+            # C04 is PostgreSQL's own CSV rule: NULL '' makes an unquoted empty
+            # field NULL and a quoted "" the empty string. NULL '\N' landed
+            # every NULL as '' under a dest_count-only proof (CR-D125).
             copy_sql = (
                 f"COPY {dest_ref} ({col_list}) FROM STDIN WITH "  # nosec B608
-                f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '\\N')"
+                f"(FORMAT csv, HEADER true, DELIMITER {delim}, NULL '')"
             )
             with open(tmp_path, "r", encoding="utf-8") as handle:
                 dst_cur.copy_expert(copy_sql, handle)
