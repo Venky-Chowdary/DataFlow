@@ -3031,12 +3031,19 @@ def verify_kafka_topic(
     limit: int = 0,
     dest_types: dict[str, str] | None = None,
     schema_registry_url: str = "",
+    security_options: dict[str, str] | None = None,
 ) -> tuple[int, str]:
-    """Bounded Kafka consume for Gate-8 — sample proof, not topic cardinality."""
+    """Bounded Kafka consume for Gate-8 — sample proof, not topic cardinality.
+
+    ``security_options`` is the destination's declared protocol / mechanism
+    (``kafka_security_options``) — the read-back dials the listener the
+    producer wrote through (D83).
+    """
     try:
         from connectors.kafka_reader import read_topic_batch
 
         cfg = {
+            **(security_options or {}),
             "host": host,
             "port": port,
             "username": username,
@@ -4334,6 +4341,8 @@ def verify_target(
             dest_types=dest_types,
         )
     elif db_type == "kafka":
+        from services.copy_kafka_common import kafka_security_options
+
         count, chk = verify_kafka_topic(
             host=dest.get("host", ""),
             port=int(dest.get("port") or 9092),
@@ -4347,6 +4356,7 @@ def verify_target(
             schema_registry_url=str(
                 dest.get("schema_registry_url") or dest.get("registry_url") or ""
             ),
+            security_options=kafka_security_options(dest),
         )
     elif db_type == "pinecone":
         count, chk = verify_pinecone_namespace(

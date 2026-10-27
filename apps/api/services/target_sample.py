@@ -1165,9 +1165,12 @@ def _read_destination_sample(
 
         if db_type == "kafka":
             from connectors.kafka_reader import read_topic_batch
+            from services.copy_kafka_common import kafka_security_options
 
             batch, _ = read_topic_batch(
                 cfg={
+                    # The destination's SASL listener (D83).
+                    **kafka_security_options(dest),
                     "host": dest.get("host", ""),
                     "port": int(dest.get("port") or 9092),
                     "username": dest.get("username", ""),

@@ -129,12 +129,16 @@ def _driver_writer_kwargs(
         extra["private_key"] = str(cfg.get("private_key") or "")
         return extra
     if driver == "kafka":
+        from services.copy_kafka_common import kafka_security_options
+
         return {
             "schema_registry_url": str(
                 (getattr(dest, "extra", None) or {}).get("schema_registry_url")
                 or cfg.get("schema_registry_url")
                 or ""
-            )
+            ),
+            # The producer must dial the SASL listener Test verified (D83).
+            **kafka_security_options(cfg),
         }
     if driver == "iceberg":
         # Forward catalog properties (warehouse, region, catalog_type, token,

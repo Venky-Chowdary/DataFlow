@@ -133,25 +133,53 @@ def kafka_sasl_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
     when there is no username+password (plaintext / mTLS-less dev brokers).
     """
     extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    security = _configured_security_protocol(cfg)
     username = str(cfg.get("username") or extra.get("username") or "")
     password = str(cfg.get("password") or cfg.get("api_key") or extra.get("password") or "")
     if not (username and password):
         return {}
-    database = str(cfg.get("database") or "").strip().upper()
-    mechanism = str(
-        extra.get("sasl_mechanism")
-        or cfg.get("sasl_mechanism")
-        or (database if database in _SASL_MECHANISMS else "")
-    ).strip()
+    declared = kafka_security_options(cfg)
+    security = declared.get("security_protocol", "")
     out: dict[str, Any] = {
         "security_protocol": security if security in {"SASL_SSL", "SASL_PLAINTEXT"} else "SASL_SSL",
-        "sasl_mechanism": mechanism or "PLAIN",
+        "sasl_mechanism": declared.get("sasl_mechanism") or "PLAIN",
         "sasl_plain_username": username,
         "sasl_plain_password": password,
     }
     if out["security_protocol"] == "SASL_SSL":
         out["ssl_context"] = ssl.create_default_context()
+    return out
+
+
+def is_sasl_mechanism(name: Any) -> bool:
+    """True when a form's ``database`` slot holds a SASL mechanism, not a topic."""
+    return str(name or "").strip().upper() in _SASL_MECHANISMS
+
+
+_SECURITY_PROTOCOLS = frozenset({"PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"})
+
+
+def kafka_security_options(cfg: dict[str, Any]) -> dict[str, str]:
+    """The security protocol / SASL mechanism a Kafka connector declares.
+
+    Read from wherever the connector keeps them (top level, ``extra``, or the
+    form's ``schema`` / ``database`` slots) and returned as explicit keys. A
+    path that rebuilds a Kafka cfg from host/port/credentials splats this in;
+    leaving it out made SASL_PLAINTEXT connectors fall back to SASL_SSL on
+    introspect, write and Gate-8 read-back while Test passed (D83).
+    """
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    out: dict[str, str] = {}
+    protocol = _configured_security_protocol(cfg)
+    if protocol in _SECURITY_PROTOCOLS:
+        out["security_protocol"] = protocol
+    database = str(cfg.get("database") or "").strip().upper()
+    mechanism = str(
+        extra.get("sasl_mechanism")
+        or cfg.get("sasl_mechanism")
+        or (database if is_sasl_mechanism(database) else "")
+    ).strip()
+    if mechanism:
+        out["sasl_mechanism"] = mechanism
     return out
 
 

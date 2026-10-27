@@ -540,6 +540,8 @@ def _introspect_schema(
             connection_string=connection_string,
             username=username,
             password=password,
+            schema=schema,
+            **options,
         )
     if db_type == "qdrant":
         return _introspect_qdrant(
@@ -4294,10 +4296,16 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
     """Infer Kafka topic field types from a small poll of JSON/Debezium envelopes."""
     try:
         from connectors.kafka_reader import infer_topic_schema
+        from services.copy_kafka_common import is_sasl_mechanism, kafka_security_options
     except Exception as exc:
         return {"ok": False, "error": str(exc), "columns": [], "tables": []}
 
-    topic = (kwargs.get("table") or kwargs.get("database") or "").strip()
+    # The connector form keeps the SASL mechanism in ``database``; "PLAIN" is
+    # not a topic, so a topic list must not turn into a sample of it.
+    database = str(kwargs.get("database") or "")
+    topic = (
+        kwargs.get("table") or ("" if is_sasl_mechanism(database) else database) or ""
+    ).strip()
     registry = str(
         kwargs.get("schema_registry_url")
         or (
@@ -4325,6 +4333,8 @@ def _introspect_kafka(**kwargs: Any) -> dict[str, Any]:
         "username": kwargs.get("username") or "",
         "password": kwargs.get("password") or "",
         "schema_registry_url": registry,
+        # The same SASL listener Test dialed (D83).
+        **kafka_security_options(kwargs),
     }
     if not topic:
         try:

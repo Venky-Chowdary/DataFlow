@@ -188,6 +188,7 @@ def _introspect_table_schema_rich(
             logger.debug("table schema introspection failed: %s", exc, exc_info=exc)
 
     from connectors.generic_sql import connection_options
+    from services.copy_kafka_common import kafka_security_options
     from services.dialect_profiles import schema_from_cfg
     from services.schema_introspect import introspect_schema
 
@@ -229,6 +230,8 @@ def _introspect_table_schema_rich(
         strict_namespace=strict_namespace,
         # TLS / service-name / driver keywords the writer will use.
         **connection_options(cfg),
+        # A Kafka connector's SASL listener (D83).
+        **(kafka_security_options(cfg) if db_type == "kafka" else {}),
     )
     if info.get("ok") and info.get("columns"):
         types, nulls, defaults, ident, gen, coll = _columns_schema_meta(

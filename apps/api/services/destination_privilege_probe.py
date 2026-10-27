@@ -479,14 +479,22 @@ def probe_destination_privileges(
                 extra=extra or {},
             )
         if engine == "kafka":
+            from services.copy_kafka_common import kafka_security_options
+
+            # Protocol / mechanism from wherever the connector declares them —
+            # the form slots or ``extra`` (D83); a topic in ``database`` is
+            # not a mechanism.
+            security = kafka_security_options(
+                {"schema": sch, "database": database, "extra": extra or {}}
+            )
             return _probe_kafka(
                 host=host,
                 port=port or 9092,
                 connection_string=connection_string,
                 username=username,
                 password=password or api_key,
-                security_protocol=sch,
-                sasl_mechanism=database or "PLAIN",
+                security_protocol=security.get("security_protocol", ""),
+                sasl_mechanism=security.get("sasl_mechanism", "PLAIN"),
                 topic=tbl,
                 table_exists=table_exists,
             )

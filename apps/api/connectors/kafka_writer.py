@@ -652,6 +652,8 @@ def write_mapped_rows(
             rejected_details=rejected_details, driver="kafka",
         )
 
+    from services.copy_kafka_common import kafka_security_options
+
     try:
         producer = _producer(
             {
@@ -665,6 +667,8 @@ def write_mapped_rows(
                 "database": database if database and database.upper() in {
                     "PLAIN", "SCRAM-SHA-256", "SCRAM-SHA-512"
                 } else "PLAIN",
+                # Declared protocol / mechanism outrank the form slots (D83).
+                **kafka_security_options(_kwargs),
             },
             schema_id=registered_schema_id,
         )
