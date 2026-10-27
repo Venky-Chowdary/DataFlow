@@ -3694,6 +3694,11 @@ _SINGLE_AWARE_TIMESTAMP_DIALECTS: Final[frozenset[str]] = frozenset(
         "greenplum",
         "timescaledb",
         "duckdb",
+        # SQLite's only aware carrier is the TIMESTAMPTZ token create-new
+        # stamps; the writer binds the UTC instant. Calling tz → TIMESTAMPTZ a
+        # rewrite there blocked DATETIMEOFFSET → SQLite on DataFlow's own
+        # carrier, which has no alternative to offer (D141).
+        "sqlite",
     }
 )
 
@@ -4458,6 +4463,10 @@ _UNICODE_TEXT_SOURCES: frozenset[str] = frozenset(
         "elasticsearch",
         "opensearch",
         "cassandra",
+        # Kafka values decode as JSON/Avro text, both Unicode by definition, so
+        # a Kafka VARCHAR onto the NVARCHAR(MAX) DataFlow creates is a preserve,
+        # not an invented national charset (D141).
+        "kafka",
     }
 )
 
