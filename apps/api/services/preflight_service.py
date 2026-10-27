@@ -37,6 +37,7 @@ from services.db_type_utils import (
     DESTS_WITHOUT_SCHEMA_RECREATE,
     NO_RELATIONAL_DDL_DESTS,
     SCHEMALESS_DESTS,
+    ci_get,
     dest_declares_column_ddl,
     normalize_dest_kind,
 )
