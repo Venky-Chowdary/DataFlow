@@ -3071,17 +3071,28 @@ def _maybe_attach_verification_ladder(
     # and ``key_rows`` below degenerates to every key in the table.
     _win_cursor = str(dest_summary.get("incremental_window_cursor") or "").strip()
     if _win_cursor and source_rows:
-        from services.sync_cursor import compare_cursor_values, row_after_watermark
+        from services.sync_cursor import (
+            compare_cursor_values,
+            row_after_watermark,
+            row_in_run_window,
+        )
 
         _win_seed = dest_summary.get("incremental_window_seed")
         _win_max = dest_summary.get("incremental_window_max")
         _win_pk = str(dest_summary.get("incremental_window_pk") or "").strip()
+        # D124: a run seeded from the stored watermark re-read its whole tie
+        # group; a resume seeks strictly past its committed page edge.
+        _win_inclusive = bool(dest_summary.get("incremental_window_seed_inclusive"))
         _in_window: list[dict[str, Any]] = []
         for _wr in source_rows:
             if not isinstance(_wr, dict):
                 continue
-            if _win_seed not in (None, "") and row_after_watermark(
-                _wr, _win_cursor, str(_win_seed), primary_key=_win_pk
+            if _win_seed not in (None, "") and (
+                row_in_run_window(_wr, _win_cursor, str(_win_seed))
+                if _win_inclusive
+                else row_after_watermark(
+                    _wr, _win_cursor, str(_win_seed), primary_key=_win_pk
+                )
             ) is not True:
                 continue
             if _win_max not in (None, ""):

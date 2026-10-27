@@ -138,7 +138,7 @@ def read_table_scan_batch(
 ) -> ReadBatch:
     """Page one ``SELECT … ORDER BY <pk | rowid>`` with ``fetchmany`` — no OFFSET.
 
-    ``filter_column`` / ``filter_after`` bound the scan to ``cursor > watermark``
+    ``filter_column`` / ``filter_after`` bound the scan to ``cursor >= watermark``
     (COUNT and SELECT alike) and order it by the cursor first — the incremental
     read for a table with no unique tie-break to seek on.
     """
@@ -165,7 +165,9 @@ def read_table_scan_batch(
         filter_q = sqlite_cursor_operand(
             quote_sql_identifier(filter_column), str(filter_value)
         )
-        where_sql = f" WHERE {filter_q} > ?"
+        # D124/D60/D98: the run seed re-reads the tie group at the watermark,
+        # as the PostgreSQL / MySQL / generic filtered scans do.
+        where_sql = f" WHERE {filter_q} >= ?"
         params = (sqlite_normalize_cursor_watermark(str(filter_value)),)
     if not scan_state.get("started"):
         shared = conn if conn is not None else get_source_snapshot_conn()

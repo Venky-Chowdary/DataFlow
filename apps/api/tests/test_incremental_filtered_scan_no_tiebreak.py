@@ -201,7 +201,8 @@ def test_sqlite_filtered_scan_keeps_every_tied_row_across_page_edges(tmp_path: P
             [(1 + i // 10, f"r{i}") for i in range(40)],
         )
 
-    rows, total = _read_all(db, "1", page=7)
+    # D124/D60/D98: the seed re-reads the seq-2 tie group at the watermark.
+    rows, total = _read_all(db, "2", page=7)
     assert total == 30
     assert len(rows) == 30
     assert sorted(r[1] for r in rows) == sorted(f"r{i}" for i in range(10, 40))
@@ -219,15 +220,19 @@ def test_sqlite_filtered_scan_first_run_reads_everything(tmp_path: Path):
     assert len(rows) == 9
 
 
-def test_sqlite_filtered_scan_at_watermark_reads_nothing(tmp_path: Path):
+def test_sqlite_filtered_scan_at_watermark_rereads_the_tie_group(tmp_path: Path):
+    # D124/D60/D98: rows can be inserted at the watermark cursor after the
+    # run that stored it, so the seed re-reads that tie group (the append
+    # writer drops the peers already delivered) and nothing below it.
     db = tmp_path / "src.db"
     with sqlite3.connect(db) as conn:
         conn.execute("CREATE TABLE t (updated_seq INTEGER, name TEXT)")
         conn.executemany("INSERT INTO t VALUES (?, ?)", [(5, f"r{i}") for i in range(6)])
+        conn.execute("INSERT INTO t VALUES (4, 'old')")
 
     rows, total = _read_all(db, "5", page=4)
-    assert total == 0
-    assert rows == []
+    assert total == 6
+    assert sorted(r[1] for r in rows) == [f"r{i}" for i in range(6)]
 
 
 def test_dispatcher_refuses_filtered_scan_without_algorithm():

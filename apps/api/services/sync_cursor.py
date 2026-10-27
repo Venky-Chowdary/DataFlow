@@ -1078,6 +1078,28 @@ def row_after_watermark(
     return compare_cursor_values(candidate, watermark) > 0
 
 
+def row_in_run_window(
+    rec: Any, cursor_column: str, watermark: str | None
+) -> bool | None:
+    """True if ``rec`` belongs to a run seeded at ``watermark``; None if unreadable.
+
+    D124/D60/D98 — the run window is ``cursor >= watermark cursor``: the tie
+    part of a composite watermark orders one run's pages and says nothing about
+    rows inserted or restamped at that cursor value since, so the whole tie
+    group is re-read (append dedupes the peers it already delivered).
+    """
+    col = (cursor_column or "").strip()
+    if not col:
+        return True
+    text = present_cell_text(rec.get(col) if isinstance(rec, dict) else None)
+    if text is None:
+        return None
+    if watermark is None or str(watermark) == "":
+        return True
+    seed, _ = split_cursor_bookmark(str(watermark), has_tiebreak=_is_composite(str(watermark)))
+    return compare_cursor_values(text, seed) >= 0
+
+
 def iter_rows_after_watermark(
     rows: Any,
     scope: IncrementalReadScope | None,

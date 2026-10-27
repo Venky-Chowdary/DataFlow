@@ -32,10 +32,7 @@ from connectors.writer_common import (  # noqa: E402
     row_fingerprints,
     transform_error_policy_for_validation_mode,
 )
-from services.keyset_pagination import (
-    header_column_index,
-    max_keyset_bookmark,
-)  # noqa: E402
+from services.keyset_pagination import header_column_index  # noqa: E402
 
 # Keep resilient batch/quarantine path importable for streaming callers.
 from services.bounded_collections import BoundedStrings
@@ -674,7 +671,7 @@ def _stream_database_transfer_impl(
         resolve_effective_sync_mode,
         resolve_incremental_read_scope,
         resolve_sync_contract,
-        row_after_watermark,
+        row_in_run_window,
         set_watermark,
         source_bounds_cursor_reads,
     )
@@ -1393,19 +1390,28 @@ def _stream_database_transfer_impl(
     if _filtered_scan_reason:
         logger.info("%s.%s: %s", src_type, table, _filtered_scan_reason)
 
-    def _cursor_read_args(cursor_after: str | None) -> dict[str, Any]:
+    def _cursor_read_args(
+        cursor_after: str | None, *, run_seed: bool = False
+    ) -> dict[str, Any]:
         """The cursor arguments every read of this run must agree on.
 
         A watermark is composite when a tie-break primary key is in play, and
         only a read that also names that column can decode it. Reads that left
         ``cursor_primary_key`` out bound the whole composite against the cursor
         column instead, so every run after the first died on the sizing probe.
+
+        ``run_seed`` marks a read bounded by the stored watermark itself rather
+        than by a page edge this run advanced. D124/D60/D98: the stored
+        ``(cursor, last key)`` only orders *this* run's pages — between runs a
+        row can be inserted or restamped at the watermark cursor with a lower
+        key, so the seed re-reads the whole tie group (``cursor >= watermark``).
         """
         if not incremental or not cursor_source_col:
             return {}
         return {
             "cursor_column": cursor_source_col,
             "cursor_after": cursor_after,
+            "cursor_inclusive": bool(run_seed and cursor_after not in (None, "")),
             "cursor_type": (
                 normalize_inferred(schema.get(cursor_source_col, "string")).upper()
                 if schema
@@ -1428,7 +1434,7 @@ def _stream_database_transfer_impl(
         sample_probe, _ = _unwrap_read(
             _read_batch(
                 src_read_type, src_cfg, table, None, 0, sample_limit, database=src_db,
-                **_cursor_read_args(watermark),
+                **_cursor_read_args(watermark, run_seed=True),
             )
         )
         phase_profile.add(
@@ -1546,7 +1552,8 @@ def _stream_database_transfer_impl(
         _scan_kw["scan_filter"] = (cursor_source_col, watermark)
         _probe_cursor_kw: dict[str, Any] = {}
     else:
-        _probe_cursor_kw = _cursor_read_args(watermark)
+        # The probe page is the run's first written batch, read from the seed.
+        _probe_cursor_kw = _cursor_read_args(watermark, run_seed=True)
     if sdk_source and initial_batch is not None:
         probe, ddb_cursor = initial_batch, None
     else:
@@ -2204,54 +2211,54 @@ def _stream_database_transfer_impl(
         # inside the run keep the exclusive seek — only this seed is inclusive.
         keyset_after = watermark
         keyset_run_seed = True
-    _seed_inclusive = keyset_run_seed
     # The bookmark this run started from — the digest window's lower bound.
     # ``keyset_after`` itself advances per committed page, so it must be
     # captured here; the seed is checkpoint.resume or the stored watermark.
     incremental_seed_bookmark = keyset_after if keyset_after not in (None, "") else watermark
-    # D60/D98 — unkeyed append runs re-read the cursor tie group; keyed
-    # appends dedupe it in the writer (ON CONFLICT / dedupe-by-key) and
-    # upserts overwrite it. For an append with no declared key the only
-    # honest dedupe is full-row content, which needs the destination's
-    # boundary rows once (lazily, on the first qualifying batch).
+    # Captured once: ``checkpoint.cursor_value`` advances as batches commit. A
+    # run seeded from the stored watermark (not a resume from a committed page
+    # edge) owns the whole tie group at that watermark.
+    seeded_from_watermark = bool(
+        incremental
+        and cursor_source_col
+        and watermark not in (None, "")
+        and checkpoint.cursor_value in (None, "")
+    )
+    # D124/D60/D98 — every read seeded from the watermark re-reads its whole
+    # tie group, whichever branch pages the source. Peers an earlier run
+    # already delivered are dropped against the destination's pre-run rows at
+    # the watermark cursor. A keyed append matches by mapped key (a row
+    # restamped to the watermark from an older cursor is a new version and
+    # still lands — COPY's boundary_append_insert_sql rule). An upsert or an
+    # unkeyed append matches full-row content: an upsert still rewrites a peer
+    # whose content changed, and a quiet poll stays a no-op, so its covered-
+    # content proof still runs. The verify re-read drops the same rows.
+    _tie_dedupe = seeded_from_watermark
     _boundary_fps_state: dict[str, Any] = {"fps": None}
 
-    def _dedupe_run_seed_boundary(batch):
-        if batch is None or not getattr(batch, "rows", None):
-            return batch
-        if not (
-            _seed_inclusive
-            and incremental
-            and not requires_upsert(effective_sync)
-            and not pk_target_cols
-            and keyset_col
-            and header_column_index(batch.headers or [], keyset_col) is not None
-            and watermark
-        ):
-            return batch
+    def _boundary_rows_already_landed(headers: list[str], rows: list[list[str]]) -> set[int]:
+        """Indices of re-read tie-group rows the destination already holds."""
+        if not (_tie_dedupe and rows):
+            return set()
+        cidx = header_column_index(headers or [], cursor_source_col)
+        if cidx is None:
+            return set()
         try:
-            from services.keyset_pagination import (
-                present_cursor_bookmark,
-                split_cursor_bookmark,
-            )
+            from services.keyset_pagination import split_cursor_bookmark
             from services.target_sample import read_target_sample
             from services.value_serializer import present_cell_text
 
-            bookmark = present_cursor_bookmark(watermark)
-            if bookmark is None:
-                return batch
-            cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
-            cidx = header_column_index(batch.headers, keyset_col)
+            cur_val, _ = split_cursor_bookmark(str(watermark), has_tiebreak=True)
             boundary_idx = [
                 i
-                for i, row in enumerate(batch.rows)
+                for i, row in enumerate(rows)
                 if cidx < len(row) and present_cell_text(row[cidx]) == str(cur_val)
             ]
             if not boundary_idx:
-                return batch
-            if _boundary_fps_state["fps"] is None:
-                _boundary_fps_state["fps"] = set()
-                cursor_dest_col = next(
+                return set()
+            all_cols = list(target_cols or [])
+            cursor_dest_col = str(
+                next(
                     (
                         m.get("target")
                         for m in mappings
@@ -2259,52 +2266,66 @@ def _stream_database_transfer_impl(
                     ),
                     cursor_source_col,
                 )
+            )
+            match_cols = all_cols
+            if (
+                not requires_upsert(effective_sync)
+                and pk_target_cols
+                and all(c in all_cols for c in pk_target_cols)
+            ):
+                match_cols = [cursor_dest_col] + [
+                    c for c in pk_target_cols if c != cursor_dest_col
+                ]
+            if _boundary_fps_state["fps"] is None:
                 dest_rows = read_target_sample(
                     dest_bind_dialect or dest_type,
                     dest_cfg,
                     schema=str(dest_cfg.get("schema") or "public"),
                     table_name=dest_table,
-                    columns=list(target_cols or []),
+                    columns=all_cols,
                     limit=10_000,
-                    sort_key=str(cursor_dest_col or ""),
+                    sort_key=cursor_dest_col,
                     key_values=[cur_val],
                 )
                 dest_tups = []
                 for dr in dest_rows or []:
                     low = {str(k).lower(): v for k, v in dr.items()}
-                    dest_tups.append(
-                        tuple(low.get(str(c).lower()) for c in (target_cols or []))
-                    )
+                    dest_tups.append(tuple(low.get(str(c).lower()) for c in match_cols))
                 _boundary_fps_state["fps"] = {
                     fp
                     for _k, fp in row_fingerprints(
                         dest_tups,
-                        list(target_cols or []),
+                        match_cols,
                         dest_db_type=dest_bind_dialect,
                         dest_types=digest_dest_types,
                     )
                 }
             dest_fps = _boundary_fps_state["fps"]
             if not dest_fps:
-                return batch
-            return _boundary_append_dedupe(
-                batch,
-                boundary_idx,
+                return set()
+            drop = _boundary_append_dedupe(
+                list(headers or []),
+                [rows[i] for i in boundary_idx],
                 dest_fps,
+                match_cols=match_cols,
                 mappings=mappings,
-                target_cols=list(target_cols or []),
+                target_cols=all_cols,
                 column_types=column_types,
                 stream_error_policy=stream_error_policy,
                 digest_dest_types=digest_dest_types,
                 dest_bind_dialect=dest_bind_dialect,
-                keyset_order_cols=keyset_order_cols,
-                keyset_col=keyset_col,
-                keyset_tiebreak=keyset_tiebreak,
-                watermark_value=str(cur_val),
             )
+            if drop:
+                logger.info(
+                    "Boundary re-read dedupe dropped %d already-present row(s) "
+                    "at watermark %r.",
+                    len(drop),
+                    str(cur_val),
+                )
+            return {boundary_idx[i] for i in drop}
         except Exception as exc:  # fail open — dedupe must never lose a row
             logger.warning("Boundary dedupe skipped (fail-open): %s", exc)
-            return batch
+            return set()
 
     decision = decide_keyset_pagination(
         src_type=src_read_type,
@@ -2483,6 +2504,10 @@ def _stream_database_transfer_impl(
     # ahead in parallel while only persisting durable offsets after a batch is
     # successfully written.
     fetch_cursor = running_cursor
+    # True until the first page read from the stored watermark has been taken:
+    # that seed read re-reads the tie group (``>=``), every later page seeks
+    # strictly past the edge this run advanced to.
+    fetch_from_seed = seeded_from_watermark
     # `fetch_offset` doubles as the source-row budget counter (`limit` /
     # `total_rows`). A keyset resume seeks by bookmark, and that bookmark sits at
     # or behind the committed offset, so the rows it re-reads would be charged to
@@ -2661,7 +2686,7 @@ def _stream_database_transfer_impl(
                     batch_limit,
                     database=src_db,
                     known_total_rows=total_rows,
-                    **_cursor_read_args(watermark),
+                    **_cursor_read_args(watermark, run_seed=True),
                 )
             )
             return batch
@@ -2681,7 +2706,7 @@ def _stream_database_transfer_impl(
                     batch_limit,
                     database=src_db,
                     known_total_rows=total_rows,
-                    **_cursor_read_args(fetch_cursor),
+                    **_cursor_read_args(fetch_cursor, run_seed=fetch_from_seed),
                 )
             )
             return batch
@@ -2738,7 +2763,7 @@ def _stream_database_transfer_impl(
                 es_search_after = extra
             elif src_type == "redis":
                 redis_scan_state = extra
-            return _dedupe_run_seed_boundary(batch)
+            return batch
         elif src_type == "elasticsearch":
             batch, es_search_after = _unwrap_read(
                 _read_batch(
@@ -2836,33 +2861,24 @@ def _stream_database_transfer_impl(
     def _rows_after_watermark_matrix(
         headers: list[str], rows: list[list[str]]
     ) -> tuple[list[list[str]], int]:
-        """Bound a read page to the delta past the watermark.
+        """Bound a read page to this run's window past the watermark.
 
-        The comparison goes through the same typed comparator and composite
-        tie-break the SQL readers bound with, so a Redis or Dynamo delta means
-        the same thing a ``WHERE cursor > :watermark`` means. Returns the kept
-        rows and how many carried no cursor value at all.
+        The comparison goes through the same typed comparator the SQL readers
+        bound with, so a Redis or Dynamo delta means the same thing the seed's
+        ``WHERE cursor >= :watermark`` means — the tie group at the watermark
+        included (D124). Returns the kept rows and how many carried no cursor
+        value at all.
         """
         cursor_idx = header_column_index(headers, cursor_source_col)
         if cursor_idx is None:
             # The cursor column is not on the page: nothing here can be proven
             # historical, and dropping the page would lose rows.
             return list(rows), 0
-        pk_idx = -1
-        if cursor_pk_source:
-            _pki = header_column_index(headers, cursor_pk_source)
-            pk_idx = _pki if _pki is not None else -1
         kept: list[list[str]] = []
         unbounded = 0
         for row in rows:
-            rec = {cursor_source_col: row[cursor_idx]}
-            if pk_idx >= 0:
-                rec[cursor_pk_source] = row[pk_idx]
-            verdict = row_after_watermark(
-                rec,
-                cursor_source_col,
-                watermark,
-                primary_key=cursor_pk_source if pk_idx >= 0 else "",
+            verdict = row_in_run_window(
+                {cursor_source_col: row[cursor_idx]}, cursor_source_col, watermark
             )
             if verdict is None:
                 unbounded += 1
@@ -2898,6 +2914,7 @@ def _stream_database_transfer_impl(
             source_filter
             or shape_runner is not None
             or client_cursor_bound
+            or _tie_dedupe
             or fk_orphan_guard is not None
         ):
             # Pagination bookmarks belong to the rows the source handed over. A
@@ -2962,6 +2979,23 @@ def _stream_database_transfer_impl(
                         "incremental cursor bound excluded, so the run's source "
                         "population cannot be stated — refusing rather than "
                         "counting rows this run was never asked to move"
+                    ) from exc
+        if _tie_dedupe and batch.rows:
+            # Tie peers an earlier run already delivered are outside this
+            # run's scope, exactly like rows below the watermark.
+            landed = _boundary_rows_already_landed(batch.headers, batch.rows)
+            if landed:
+                batch.rows = [r for i, r in enumerate(batch.rows) if i not in landed]
+                try:
+                    batch.raw_page_cursor_bounded = (
+                        int(getattr(batch, "raw_page_cursor_bounded", 0) or 0)
+                        + len(landed)
+                    )
+                except AttributeError as exc:
+                    raise ValueError(
+                        "this source's read page cannot record the re-read tie "
+                        "rows it dropped, so the run's source population cannot "
+                        "be stated — refusing rather than miscounting them"
                     ) from exc
         if source_filter and batch.rows:
             before = len(batch.rows)
@@ -4242,13 +4276,29 @@ def _stream_database_transfer_impl(
 
     first_idx = chunk_idx + 1
 
+    def _advance_fetch_cursor(page: Any) -> None:
+        """Move the read edge to the page's high-water mark.
+
+        The seed page is taken whole: an inclusive tie-group read can end
+        *below* the stored ``(cursor, last key)``, and keeping the stored mark
+        then would skip the tie rows between the page edge and it.
+        """
+        nonlocal fetch_cursor, fetch_from_seed
+        if not (incremental and cursor_source_col and _raw_page_rows(page)):
+            return
+        batch_max = _page_cursor_max(page)
+        if batch_max and (
+            fetch_from_seed
+            or fetch_cursor is None
+            or compare_cursor_values(batch_max, fetch_cursor) > 0
+        ):
+            fetch_cursor = batch_max
+            fetch_from_seed = False
+
     def _prepare_batch(idx: int, raw_batch: Any) -> Any:
-        nonlocal fetch_cursor, fetch_offset
+        nonlocal fetch_offset
         prepared = _filter_batch(raw_batch)
-        if incremental and cursor_source_col and _raw_page_rows(prepared):
-            batch_max = _page_cursor_max(prepared)
-            if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
-                fetch_cursor = batch_max
+        _advance_fetch_cursor(prepared)
         fetch_offset += _raw_page_rows(prepared)
         return prepared
 
@@ -4262,10 +4312,7 @@ def _stream_database_transfer_impl(
         # committed before any parallel workers try to insert into the new table.
         while batch:
             batch = _filter_batch(batch)
-            if incremental and cursor_source_col and _raw_page_rows(batch):
-                batch_max = _page_cursor_max(batch)
-                if batch_max and (fetch_cursor is None or compare_cursor_values(batch_max, fetch_cursor) > 0):
-                    fetch_cursor = batch_max
+            _advance_fetch_cursor(batch)
             _apply_result(first_idx, _process_db_chunk(first_idx, batch))
             fetch_offset += _raw_page_rows(batch)
             if batch.rows:
@@ -4644,6 +4691,7 @@ def _stream_database_transfer_impl(
             dest_summary["incremental_window_pk"] = cursor_pk_source or ""
             if checksum_cursor_after not in (None, ""):
                 dest_summary["incremental_window_seed"] = str(checksum_cursor_after)
+                dest_summary["incremental_window_seed_inclusive"] = seeded_from_watermark
             if checksum_cursor_max not in (None, ""):
                 dest_summary["incremental_window_max"] = str(checksum_cursor_max)
         use_checksum_keyset = False
@@ -4651,6 +4699,9 @@ def _stream_database_transfer_impl(
             use_checksum_keyset = True
         read_offset = 0
         checksum_rows_read = 0
+        # The re-read covers the population the write pass read: its first
+        # page re-reads the seed's tie group exactly when the write pass did.
+        checksum_seed_read = seeded_from_watermark
         # The digest has to describe the rows this run wrote, so the second scan
         # replays the same approved recipe. Its own runner: the run's shaping
         # effects were counted on the write pass and must not be counted twice.
@@ -4679,6 +4730,7 @@ def _stream_database_transfer_impl(
                         database=src_db,
                         cursor_column=checksum_cursor_col,
                         cursor_after=checksum_cursor_after,
+                        cursor_inclusive=checksum_seed_read,
                         cursor_type=cursor_type_for_read,
                         # A tie-broken incremental watermark is composite
                         # (cursor + pk). Every read of this run has to name
@@ -4732,6 +4784,15 @@ def _stream_database_transfer_impl(
                     # No early break: OFFSET pages do not guarantee cursor
                     # ordering, so a straddling page does not end the window.
                     digest_rows = _win_rows
+                if _boundary_fps_state["fps"] is not None and digest_rows:
+                    # The write pass dropped these tie peers as already at the
+                    # destination (judged against its pre-run rows, cached):
+                    # the digest covers what was written, not re-delivered.
+                    _landed = _boundary_rows_already_landed(batch.headers, digest_rows)
+                    if _landed:
+                        digest_rows = [
+                            r for i, r in enumerate(digest_rows) if i not in _landed
+                        ]
                 if keyed_upsert_scope:
                     digest_rows, _excluded_now = live_rows_for_digest(
                         batch.headers,
@@ -4803,6 +4864,7 @@ def _stream_database_transfer_impl(
                         checksum_cursor_col,
                         cursor_pk_source or None,
                     )
+                    checksum_seed_read = False
                 elif use_reread_offset:
                     read_offset += len(batch.rows)
         finally:
@@ -5356,36 +5418,33 @@ class _StepRawLedger:
 
 
 def _boundary_append_dedupe(
-    batch: Any,
-    boundary_idx: list[int],
+    headers: list[str],
+    boundary_rows: list[list[str]],
     dest_fps: set,
     *,
+    match_cols: list[str],
     mappings: list[dict],
     target_cols: list[str],
     column_types: dict | None,
     stream_error_policy: str | None,
     digest_dest_types: dict | None,
     dest_bind_dialect: str,
-    keyset_order_cols: list[str] | None,
-    keyset_col: str,
-    keyset_tiebreak: str,
-    watermark_value: str,
-) -> Any:
-    """Drop re-read boundary rows already present in the destination.
+) -> set[int]:
+    """Indices of re-read boundary rows whose ``match_cols`` the destination holds.
 
-    D60/D98 — the inclusive run seed (``cursor >= watermark``) re-reads the
-    whole tie group. Upsert overwrites the re-read rows by key and keyed
-    append dedupes by key in the writer; an unkeyed append must dedupe by
-    full-row content or every rerun duplicates the boundary population.
+    D60/D98/D124 — the inclusive run seed (``cursor >= watermark``) re-reads
+    the whole tie group. Upsert overwrites the re-read rows by key; an append
+    drops the ones already delivered. ``dest_fps`` fingerprints the
+    destination's boundary rows on ``match_cols`` — (cursor, key) for a keyed
+    route, every column for an unkeyed one.
 
     Fail-open by construction: a quarantine mapping that changes row count, a
     fingerprint that does not match, or any missing fingerprint keeps the row —
     a duplicate is recoverable, a silently dropped row is not.
     """
-    brows = [batch.rows[i] for i in boundary_idx]
     mapped, _rejected = map_rows_for_fingerprint(
-        headers=list(batch.headers or []),
-        data_rows=brows,
+        headers=list(headers or []),
+        data_rows=boundary_rows,
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
@@ -5393,51 +5452,23 @@ def _boundary_append_dedupe(
         dest_types=digest_dest_types,
         dest_kind=dest_bind_dialect,
     )
-    if len(mapped) != len(brows):
-        return batch
+    if len(mapped) != len(boundary_rows):
+        return set()
+    try:
+        positions = [target_cols.index(c) for c in match_cols]
+    except ValueError:
+        return set()
+    projected = [tuple(row[i] for i in positions) for row in mapped]
     fps = [
         fp
         for _k, fp in row_fingerprints(
-            mapped,
-            target_cols,
+            projected,
+            list(match_cols),
             dest_db_type=dest_bind_dialect,
             dest_types=digest_dest_types,
         )
     ]
-    drop = {boundary_idx[i] for i, fp in enumerate(fps) if fp in dest_fps}
-    if not drop:
-        return batch
-    kept = [r for i, r in enumerate(batch.rows) if i not in drop]
-    logger.info(
-        "Boundary re-read dedupe dropped %d already-present row(s) at "
-        "watermark %r (unkeyed append).",
-        len(drop),
-        watermark_value,
-    )
-    # Deduped rows were still read: the rebuilt page must carry the original
-    # edge so the keyset seek advances past them instead of stopping early on
-    # a page that survived smaller (or empty).
-    raw_keyset = _raw_page_keyset(batch)
-    if not raw_keyset:
-        edge_cols = keyset_order_cols or (
-            [keyset_col] + ([keyset_tiebreak] if keyset_tiebreak else [])
-        )
-        raw_keyset = (
-            max_keyset_bookmark(batch.rows, list(batch.headers or []), edge_cols)
-            or ""
-        )
-    return batch.__class__(
-        headers=list(batch.headers or []),
-        rows=kept,
-        offset=getattr(batch, "offset", 0),
-        total_rows=getattr(batch, "total_rows", None),
-        meta=getattr(batch, "meta", None),
-        raw_page_rows=_raw_page_rows(batch) or len(batch.rows),
-        raw_page_cursor=_raw_page_cursor(batch),
-        raw_page_keyset=raw_keyset,
-        raw_page_filtered=getattr(batch, "raw_page_filtered", 0),
-        raw_page_cursor_bounded=getattr(batch, "raw_page_cursor_bounded", 0),
-    )
+    return {i for i, fp in enumerate(fps) if fp in dest_fps}
 
 
 def _kafka_accumulate_offsets(

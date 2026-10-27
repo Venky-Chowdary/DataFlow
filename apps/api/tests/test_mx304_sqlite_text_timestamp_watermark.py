@@ -120,5 +120,7 @@ def test_sqlite_filtered_scan_reads_space_form_rows_past_a_t_form_watermark(tmp_
         )
         return sorted(row[0] for row in batch.rows)
 
-    assert scan("updated_at", "2025-01-01T01:40:00") == ["3"]
-    assert scan("seq", "10") == ["3", "4"]
+    # The run seed re-reads the tie group at the watermark (D124/D60/D98):
+    # row 2 sits exactly on it, row 4 (01:00 < 01:40) stays out.
+    assert scan("updated_at", "2025-01-01T01:40:00") == ["2", "3"]
+    assert scan("seq", "10") == ["2", "3", "4"]

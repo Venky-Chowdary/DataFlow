@@ -309,81 +309,72 @@ def test_snowflake_keyset_seed_inclusive_vs_edge(monkeypatch, inclusive, op):
 # --- append boundary dedupe -------------------------------------------------
 
 
-def _batch(headers, rows):
-    from connectors.base import ReadBatch
-
-    return ReadBatch(headers=list(headers), rows=[list(r) for r in rows])
-
-
 def _fps_of(rows, cols):
     from connectors.writer_common import row_fingerprints
 
     return {fp for _k, fp in row_fingerprints(rows, cols)}
 
 
-def _dedupe(batch, idx, dest_fps, **kw):
+def _dedupe(headers, rows, dest_fps, match_cols=None):
+    """Indices of ``rows`` (the page's boundary rows) already at the destination.
+
+    Page-edge preservation is ``_filter_batch``'s job: it marks the page as the
+    source handed it over before any rewrite, so dropped tie rows still advance
+    the seek (see test_d124_watermark_tie_group_e2e).
+    """
     from src.transfer.stream import _boundary_append_dedupe
 
-    defaults = dict(
-        mappings=[{"source": c, "target": c} for c in batch.headers],
-        target_cols=list(batch.headers),
+    return _boundary_append_dedupe(
+        list(headers),
+        [list(r) for r in rows],
+        dest_fps,
+        match_cols=list(match_cols or headers),
+        mappings=[{"source": c, "target": c} for c in headers],
+        target_cols=list(headers),
         column_types={},
         stream_error_policy=None,
         digest_dest_types={},
         dest_bind_dialect="",
-        keyset_order_cols=["ts", "id"],
-        keyset_col="ts",
-        keyset_tiebreak="id",
-        watermark_value="5",
     )
-    defaults.update(kw)
-    return _boundary_append_dedupe(batch, idx, dest_fps, **defaults)
 
 
 def test_append_boundary_no_dupes():
     headers = ["id", "ts", "name"]
     # dest already holds (id=1, ts=5, name='a') from run 1.
     dest_fps = _fps_of([("1", "5", "a")], headers)
-    batch = _batch(
-        headers,
-        [
-            ["1", "5", "a"],  # identical boundary row -> dropped
-            ["2", "5", "CHANGED"],  # same cursor, new content -> kept
-            ["3", "6", "z"],  # non-boundary -> kept
-        ],
-    )
-    out = _dedupe(batch, [0, 1], dest_fps)
-    assert [r[0] for r in out.rows] == ["2", "3"]
-    # the source page's edge is preserved so the next seek advances
-    assert out.raw_page_rows == 3
-    assert out.raw_page_keyset
+    rows = [
+        ["1", "5", "a"],  # identical boundary row -> dropped
+        ["2", "5", "CHANGED"],  # same cursor, new content -> kept
+    ]
+    assert _dedupe(headers, rows, dest_fps) == {0}
 
 
-def test_append_boundary_full_page_dropped_keeps_edge():
-    # Whole page was a re-read tie group: rows empty but the edge survives —
-    # the next seek must advance instead of ending the run early.
+def test_append_boundary_keyed_matches_cursor_and_key():
+    headers = ["id", "ts", "name"]
+    # Keyed route: the destination holds key 1 at the watermark cursor.
+    dest_fps = _fps_of([("5", "1")], ["ts", "id"])
+    rows = [
+        ["1", "5", "a"],  # delivered peer -> dropped
+        ["2", "5", "new"],  # new key inside the tie -> kept
+    ]
+    assert _dedupe(headers, rows, dest_fps, match_cols=["ts", "id"]) == {0}
+
+
+def test_append_boundary_full_tie_group_dropped():
     headers = ["id", "ts"]
     dest_fps = _fps_of([("1", "5"), ("2", "5")], headers)
-    batch = _batch(headers, [["1", "5"], ["2", "5"]])
-    out = _dedupe(batch, [0, 1], dest_fps)
-    assert out.rows == []
-    assert out.raw_page_rows == 2
-    assert out.raw_page_keyset
+    assert _dedupe(headers, [["1", "5"], ["2", "5"]], dest_fps) == {0, 1}
 
 
 def test_append_boundary_missing_fp_match_keeps_row():
     headers = ["id", "ts"]
     dest_fps = _fps_of([("9", "5")], headers)
-    batch = _batch(headers, [["1", "5"]])
-    out = _dedupe(batch, [0], dest_fps)
-    assert len(out.rows) == 1
+    assert _dedupe(headers, [["1", "5"]], dest_fps) == set()
 
 
 def test_append_boundary_empty_dest_set_noop():
     headers = ["id", "ts"]
-    batch = _batch(headers, [["1", "5"]])
-    out = _dedupe(batch, [0], set())
-    assert len(out.rows) == 1
+    assert _dedupe(headers, [["1", "5"]], set()) == set()
 
 
 # --- plumbing ----------------------------------------------------------------

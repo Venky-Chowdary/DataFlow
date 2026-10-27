@@ -177,8 +177,9 @@ def test_sqlite_filtered_scan_publishes_cursor_first_then_key(tmp_path: Path):
             'INSERT INTO "t" VALUES (?, ?)', [(i, 1 + i // 10) for i in _rotated_ids(40, 10)]
         )
 
-    rows, state = _scan_pages(db, "t", page=7, filter_column="updated_seq", filter_after="1")
+    rows, state = _scan_pages(db, "t", page=7, filter_column="updated_seq", filter_after="2")
     assert state["order_cols"] == ["updated_seq", "id"]
+    # The seed re-reads the seq-2 tie group (D124/D60/D98).
     assert sorted(int(r[0]) for r in rows) == list(range(10, 41))
     assert [(int(r[1]), int(r[0])) for r in rows] == sorted((int(r[1]), int(r[0])) for r in rows)
 
