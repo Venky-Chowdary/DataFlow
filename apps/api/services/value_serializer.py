@@ -94,6 +94,20 @@ class WireLiteral(str):
     """
 
 
+def driver_bind_value(value: Any) -> Any:
+    """The value a database driver binds: a :class:`WireLiteral` leaves as ``str``.
+
+    The marker must survive binding — writers classify bound rows again (dense
+    NULL materialize, COPY ``\\N``, checksums), and a plain ``str`` spelling a
+    sentinel would turn back into NULL there. A driver is past every classifier,
+    and one that dispatches on the exact class name (Snowflake's converter looks
+    up ``_wireliteral_to_snowflake``) refuses the subclass outright (D120b).
+    """
+    if isinstance(value, WireLiteral):
+        return str(value)
+    return value
+
+
 def escape_wire_text(text: str) -> str:
     """Escape a wire-unsafe string: collides with a NULL/missing sentinel or
     already carries the escape prefix (recursive, so decode stays total)."""

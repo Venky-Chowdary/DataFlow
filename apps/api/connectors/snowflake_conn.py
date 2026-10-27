@@ -732,6 +732,40 @@ def _snowflake_connector_module() -> Any:
     return snowflake.connector
 
 
+_converter_class: type | None = None
+
+
+def snowflake_converter_class() -> type:
+    """``converter_class`` for every DataFlow Snowflake connection.
+
+    The connector picks a bind method by the value's exact class name, so a
+    ``WireLiteral`` (a decoded sentinel-spelling literal) failed with "Binding
+    data in type (wireliteral) is not supported" (D120b). Every Snowflake bind —
+    writer, SQLAlchemy (SCD2/mirror) and verification reads — goes through
+    this connection, so its converter is the one driver boundary to normalize.
+    """
+    global _converter_class
+    if _converter_class is None:
+        from snowflake.connector.converter import SnowflakeConverter
+
+        from services.value_serializer import driver_bind_value
+
+        class _DataflowSnowflakeConverter(SnowflakeConverter):
+            def to_snowflake(self, value: Any) -> Any:
+                return super().to_snowflake(driver_bind_value(value))
+
+            def snowflake_type(self, value: Any) -> str | None:
+                return super().snowflake_type(driver_bind_value(value))
+
+            def to_snowflake_bindings(self, snowflake_type: str, value: Any) -> str:
+                return super().to_snowflake_bindings(
+                    snowflake_type, driver_bind_value(value)
+                )
+
+        _converter_class = _DataflowSnowflakeConverter
+    return _converter_class
+
+
 def get_connection(
     *,
     account: str,
@@ -761,6 +795,7 @@ def get_connection(
     )
 
     snowflake_connector = _snowflake_connector_module()
+    kwargs["converter_class"] = snowflake_converter_class()
 
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.
@@ -845,6 +880,17 @@ def get_connection(
                         _fakesnow_exit_patch()
 
             conn.close = _close  # type: ignore[assignment]
+            # fakesnow binds client-side with a stock converter of its own and
+            # ignores ``converter_class``; its cursors get the product one too.
+            orig_cursor = conn.cursor
+            converter_class = kwargs["converter_class"]
+
+            def _cursor(*args: Any, **cursor_kwargs: Any) -> Any:
+                cur = orig_cursor(*args, **cursor_kwargs)
+                cur._converter = converter_class()
+                return cur
+
+            conn.cursor = _cursor  # type: ignore[assignment]
             return conn
 
     return snowflake_connector.connect(**kwargs)

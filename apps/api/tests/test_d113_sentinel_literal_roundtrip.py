@@ -204,11 +204,71 @@ def test_d113_snowflake_bind_literal_and_null():
     assert bound[1][1] == "__DF_SQL_NULL__"
     assert WireLiteral is not None and isinstance(bound[1][1], WireLiteral)
     assert not is_reader_null_cell(bound[1][1])
+    # D120b: the real connector picks its bind method by exact class name and
+    # refused the subclass ("Binding data in type (wireliteral)"); the product
+    # converter hands every bind leaf an exact str, client- and server-side.
+    from snowflake.connector.converter import SnowflakeConverter
+
+    from connectors.snowflake_conn import snowflake_converter_class
+
+    with pytest.raises(Exception, match="wireliteral"):
+        SnowflakeConverter().to_snowflake(bound[1][1])
+    converter = snowflake_converter_class()()
+    assert issubclass(snowflake_converter_class(), SnowflakeConverter)
+    client_side = converter.to_snowflake(bound[1][1])
+    assert type(client_side) is str and client_side == "__DF_SQL_NULL__"
+    sf_type = converter.snowflake_type(bound[1][1])
+    assert sf_type == "TEXT"
+    server_side = converter.to_snowflake_bindings(sf_type, bound[1][1])
+    assert type(server_side) is str and server_side == "__DF_SQL_NULL__"
+    assert converter.to_csv_bindings(bound[1][1]) == "__DF_SQL_NULL__"
     # numeric sentinel decodes to NULL — not the escaped-text error of D113
     converted, err = apply_transform(SQL_NULL_SENTINEL, "decimal")
     assert converted is None and err is None
     converted, err = apply_transform("__DF_ESC____DF_SQL_NULL__", "text")
     assert converted == "__DF_ESC____DF_SQL_NULL__"  # identity keeps the wire
+
+
+def test_d120b_every_snowflake_connection_uses_the_wire_converter(monkeypatch):
+    """The writer, SQLAlchemy (SCD2/mirror) and verification reads all connect
+    through ``get_connection``, so it must install the converter (D120b)."""
+    from connectors import snowflake_conn
+
+    seen: dict = {}
+
+    class _Connector:
+        @staticmethod
+        def connect(**kwargs):
+            seen.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(snowflake_conn, "_snowflake_connector_module", lambda: _Connector)
+    snowflake_conn.get_connection(
+        account="acme-prod", username="u", password="p",
+        database="DB", schema="PUBLIC", warehouse="WH", connection_string="",
+    )
+    assert seen["converter_class"] is snowflake_conn.snowflake_converter_class()
+
+
+def test_d120b_local_snowflake_binds_wire_literal(tmp_path, monkeypatch):
+    """fakesnow (the local Snowflake target) binds client-side with its own
+    stock converter, so it refused the literal exactly like the real one."""
+    pytest.importorskip("fakesnow")
+    from connectors.snowflake_conn import get_connection
+
+    monkeypatch.setenv("FAKESNOW_DB_PATH", str(tmp_path / "fakesnow"))
+    literal = unescape_wire_text("__DF_ESC____DF_SQL_NULL__")
+    assert WireLiteral is not None and isinstance(literal, WireLiteral)
+    conn = get_connection(
+        account="localhost", username="test", password="test",
+        database="dataflow", schema="PUBLIC", warehouse="", connection_string="",
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute("SELECT %s", (literal,))
+            assert cur.fetchone()[0] == "__DF_SQL_NULL__"
+    finally:
+        conn.close()
 
 
 def test_d113_sentinel_layer_unit():
