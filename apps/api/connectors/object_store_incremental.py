@@ -290,16 +290,7 @@ def _parse_records(key: str, body: bytes) -> list[dict[str, Any]]:
     if not raw:
         return []
     try:
-        if fmt == "json":
-            return _parse_json(raw, key)
-        if fmt == "jsonl":
-            return _parse_jsonl(raw, key)
-        if fmt in {"csv", "tsv"}:
-            return _parse_delimited(body, "\t" if fmt == "tsv" else ",", key)
-        if fmt == "parquet":
-            return _parse_parquet(body, key)
-        if fmt == "excel":
-            return _parse_xlsx(body, key)
+        records = _parse_records_as_stored(fmt, key, raw, body)
     except ObjectMergeRefused:
         raise
     except Exception as exc:
@@ -307,10 +298,32 @@ def _parse_records(key: str, body: bytes) -> list[dict[str, Any]]:
             f"Object {key!r} could not be parsed for incremental merge ({exc}); "
             "the existing object was not replaced."
         ) from exc
-    raise ObjectMergeRefused(
-        f"Object {key!r} format {fmt!r} cannot be merged; "
-        "the existing object was not replaced."
-    )
+    if records is None:
+        raise ObjectMergeRefused(
+            f"Object {key!r} format {fmt!r} cannot be merged; "
+            "the existing object was not replaced."
+        )
+    from services.value_serializer import payload_record_wire
+
+    # The merged rows re-enter the export encoder, which decodes the wire: a
+    # stored text that spells a sentinel must stay that text (D121).
+    return [payload_record_wire(rec) for rec in records]
+
+
+def _parse_records_as_stored(
+    fmt: str, key: str, raw: bytes, body: bytes
+) -> list[dict[str, Any]] | None:
+    if fmt == "json":
+        return _parse_json(raw, key)
+    if fmt == "jsonl":
+        return _parse_jsonl(raw, key)
+    if fmt in {"csv", "tsv"}:
+        return _parse_delimited(body, "\t" if fmt == "tsv" else ",", key)
+    if fmt == "parquet":
+        return _parse_parquet(body, key)
+    if fmt == "excel":
+        return _parse_xlsx(body, key)
+    return None
 
 
 def _parse_json(raw: bytes, key: str) -> list[dict[str, Any]]:
@@ -342,7 +355,6 @@ def _parse_jsonl(raw: bytes, key: str) -> list[dict[str, Any]]:
 
 def _parse_delimited(body: bytes, delimiter: str, key: str) -> list[dict[str, Any]]:
     from services.csv_codec import iter_csv_records
-    from services.value_serializer import SQL_NULL_SENTINEL, unescape_wire_text
 
     text = body.decode("utf-8-sig")
     # newline="" — the csv module requires it; the default universal-newlines
@@ -353,19 +365,10 @@ def _parse_delimited(body: bytes, delimiter: str, key: str) -> list[dict[str, An
         raise ObjectMergeRefused(
             f"Object {key!r} has no header row; the existing object was not replaced."
         )
-    # C04: codec cells — unquoted empty is None, quoted "" is ''. The legacy
-    # __DF_SQL_NULL__ sentinel in objects written by older builds still decodes
-    # to NULL on read.
-    rows: list[dict[str, Any]] = []
-    for row in reader:
-        rec = dict(zip(header, row, strict=False))
-        for name, value in rec.items():
-            if value == SQL_NULL_SENTINEL:
-                rec[name] = None
-            else:
-                rec[name] = unescape_wire_text(value)
-        rows.append(rec)
-    return rows
+    # C04: codec cells — unquoted empty is None, quoted "" is ''. Every other
+    # cell is the text the object holds: the encoder writes NULL as an empty
+    # unquoted cell and a literal verbatim, never a wire spelling (D121).
+    return [dict(zip(header, row, strict=False)) for row in reader]
 
 
 def _parse_parquet(body: bytes, key: str) -> list[dict[str, Any]]:

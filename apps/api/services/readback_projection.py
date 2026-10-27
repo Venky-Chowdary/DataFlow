@@ -17,13 +17,32 @@ from __future__ import annotations
 
 from typing import Any, Iterable, Iterator
 
+from services.value_serializer import payload_cell_wire
+
+
+def _wire_rows(rows: Iterable[Any]) -> Iterator[Any]:
+    """Stored cells → the transfer wire the Gate-8 fingerprint decodes.
+
+    The destination holds text, never wire; a stored ``__DF_ESC__x`` read
+    back bare would decode to ``x`` against a faithful source (D121).
+    """
+    for row in rows:
+        if isinstance(row, dict):
+            yield {k: payload_cell_wire(v) for k, v in row.items()}
+        else:
+            yield tuple(payload_cell_wire(v) for v in row)
+
 
 def project_readback(
     names: list[str] | None,
     target_columns: list[str] | None,
     rows: Iterable[Any],
 ) -> tuple[list[str], Iterable[Any]]:
-    """Return ``(columns, rows)`` narrowed to ``target_columns`` when possible."""
+    """Return ``(columns, rows)`` narrowed to ``target_columns`` when possible.
+
+    Rows are put on the transfer wire (``_wire_rows``).
+    """
+    rows = _wire_rows(rows)
     cols = [str(c) for c in (names or []) if str(c).strip()]
     wanted = [str(c) for c in (target_columns or []) if str(c).strip()]
     if not cols:

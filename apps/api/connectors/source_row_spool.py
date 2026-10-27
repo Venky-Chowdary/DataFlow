@@ -32,11 +32,14 @@ from typing import Any
 from services.brand_env import getenv_brand
 from services.value_serializer import (
     DF_MISSING_SENTINEL,
+    WireLiteral,
     cell_to_string,
+    escape_wire_text,
     is_missing_sentinel,
     is_reader_null_cell,
     json_default,
     json_loads_exact,
+    unescape_wire_text,
 )
 
 DEFAULT_SOURCE_SPILL_MAX = 8 * 1024 * 1024
@@ -73,13 +76,16 @@ def matrix_present_cell(val: Any) -> Any:
     extract wire token. Present cells use dest-canonical ``cell_to_string``.
     Empty string stays empty string (distinct from SQL NULL).
     """
-    from services.value_serializer import unescape_wire_text
-
     if is_missing_sentinel(val):
         return DF_MISSING_SENTINEL
     if is_reader_null_cell(val):
         return None
-    return cell_to_string(unescape_wire_text(val))
+    cell = unescape_wire_text(val)
+    if isinstance(cell, WireLiteral):
+        # ``cell_to_string`` degrades the marker to a bare str, which the
+        # writer's own decode then re-reads as NULL / strips again (D121).
+        return cell
+    return cell_to_string(cell)
 
 
 def matrix_cell_from_record(record: dict[str, Any], col: str) -> Any:
@@ -104,6 +110,10 @@ def iter_matrix_rows(
 def _spool_cell(value: Any) -> Any:
     if is_missing_sentinel(value):
         return DF_MISSING_SENTINEL
+    if isinstance(value, WireLiteral):
+        # JSON keeps no str subclass: spool the literal wire-escaped, so the
+        # writer's one decode still yields the text, not NULL (D121).
+        return escape_wire_text(value)
     return value
 
 

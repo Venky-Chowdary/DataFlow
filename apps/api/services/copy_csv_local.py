@@ -68,6 +68,7 @@ from services.sync_cursor import (
     records_after_watermark,
     requires_incremental,
 )
+from services.value_serializer import payload_cell_wire
 
 logger = logging.getLogger(__name__)
 
@@ -319,7 +320,9 @@ def _sqlite_copy_cell_text(
     value: Any, logical_type: str, *, column: str = ""
 ) -> str | None:
     try:
-        serialized = _sqlite_copy_value(value, logical_type)
+        # The row writer's serializer decodes the transfer wire; a parsed
+        # cell enters it escaped so ``__DF_SQL_NULL__`` text stays text (D121).
+        serialized = _sqlite_copy_value(payload_cell_wire(value), logical_type)
     except (TypeError, ValueError) as exc:
         raise FastPathUnavailable(
             f"{(column or 'cell')!r} cannot be encoded by the SQLite row serializer: "
@@ -721,7 +724,7 @@ def _write_mapped_csv(
             digest.add_many(
                 _iter_fingerprints(
                     (
-                        {dest: rec.get(src) for src, dest in pairs}
+                        {dest: payload_cell_wire(rec.get(src)) for src, dest in pairs}
                         for rec in rows
                     ),
                     dest_cols,

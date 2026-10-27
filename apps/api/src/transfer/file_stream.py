@@ -109,6 +109,7 @@ from services.reconciliation import (
     FingerprintAccumulator,
 )
 from services.tabular_window import header_and_rows, row_to_record
+from services.value_serializer import payload_record_wire
 
 try:
     from services.csv_profiler import (
@@ -375,7 +376,23 @@ def peek_file_source(
     decompressed on the fly.  ``read_options`` narrows the source window and
     must be the same window the batch iterator uses, or the profiled schema
     describes rows the writer never sends.
+
+    The sample is on the transfer wire, like the batches: it is the Gate-8
+    reconcile sample and the preflight sample of the rows the writer sends.
     """
+    headers, schema, total, sample = _peek_parsed_file_source(
+        content, filename, read_options
+    )
+    return headers, schema, total, [
+        payload_record_wire(row) if isinstance(row, dict) else row for row in sample
+    ]
+
+
+def _peek_parsed_file_source(
+    content: bytes | str | os.PathLike,
+    filename: str,
+    read_options: ReadOptions | None = None,
+) -> tuple[list[str], dict[str, str], int, list[dict]]:
     try:
         from services.file_parser import FileParser
     except ImportError:  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
@@ -776,7 +793,33 @@ def _batch_iterator_for_type(
     ``declared_name`` is the operator/remote filename — object-store spill is
     ``.tmp``. Excel reads the bytes, so a BIFF workbook and a renamed
     ``.xlsx`` both load; the cache suffix does not choose the format.
+
+    Records come out on the transfer wire: parsed text that spells a wire
+    sentinel is escaped here, once, as the SQL readers do (D121).
     """
+    batches = _parsed_batches_for_type(
+        file_type,
+        content,
+        batch_size,
+        read_options,
+        declared_name,
+        nulled=nulled,
+    )
+    return (
+        [payload_record_wire(r) if isinstance(r, dict) else r for r in batch]
+        for batch in batches
+    )
+
+
+def _parsed_batches_for_type(
+    file_type: str,
+    content: bytes | str | os.PathLike,
+    batch_size: int,
+    read_options: ReadOptions | None = None,
+    declared_name: str | None = None,
+    *,
+    nulled: list[int] | None = None,
+):
     if file_type in ("csv", "tsv"):
         return _iter_csv_batches(
             content, batch_size, read_options=read_options, nulled=nulled

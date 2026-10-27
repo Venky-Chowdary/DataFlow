@@ -236,7 +236,13 @@ def parse_file_content(
         if writer_schema
         else FileParser.infer_schema(result.data)
     )
-    return result.data, result.columns, schema
+    from services.value_serializer import payload_record_wire
+
+    # The engine reads records as wire, as the streaming path's batches are (D121).
+    records = [
+        payload_record_wire(r) if isinstance(r, dict) else r for r in result.data
+    ]
+    return records, result.columns, schema
 
 
 def parse_file_route_sample(

@@ -20,7 +20,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from typing import Any, Callable, NamedTuple
 
-from services.value_serializer import wire_cell_text
+from services.value_serializer import payload_record_wire, wire_cell_text
 
 try:
     from services.platform_config import data_dir
@@ -236,7 +236,7 @@ def _records_to_matrix(records: list[dict[str, Any]], columns: list[str]) -> lis
 
     NULL is the explicit sentinel, not ``''`` — a blank-string row would
     land a Parquet NULL, or a CSV unquoted empty field, as text and lose the
-    quoted ``""`` distinction (D62, CR-D125).
+    quoted ``""`` distinction (D62, CR-D125). Text is already wire-escaped.
     """
     return [[wire_cell_text(record.get(c)) for c in columns] for record in records]
 
@@ -307,7 +307,10 @@ def read_rows_from_spill(
     if not result.success:
         raise ValueError(result.error or f"Cannot parse object `{filename}`")
     headers = result.columns
-    records = result.data[offset : offset + limit]
+    records = [
+        payload_record_wire(dict(r)) if isinstance(r, dict) else r
+        for r in result.data[offset : offset + limit]
+    ]
     rows = _records_to_matrix(records, headers)
     return headers, rows, known_total if known_total is not None else len(result.data)
 

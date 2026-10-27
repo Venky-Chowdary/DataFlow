@@ -108,25 +108,58 @@ def driver_bind_value(value: Any) -> Any:
     return value
 
 
+def _wire_unsafe(text: str) -> bool:
+    return text.strip().lower() in _NULL_WIRE_LOWER or text.startswith(ESCAPED_WIRE_PREFIX)
+
+
 def escape_wire_text(text: str) -> str:
     """Escape a wire-unsafe string: collides with a NULL/missing sentinel or
     already carries the escape prefix (recursive, so decode stays total)."""
-    if text.strip().lower() in _NULL_WIRE_LOWER or text.startswith(ESCAPED_WIRE_PREFIX):
+    if _wire_unsafe(text):
         return f"{ESCAPED_WIRE_PREFIX}{text}"
     return text
+
+
+def payload_cell_wire(value: Any) -> Any:
+    """A parsed file/object payload cell → its transfer-wire form.
+
+    File parsers return what the payload spells; the engine reads every
+    source cell as wire, the way SQL readers emit it with
+    ``cell_to_string(..., preserve_sql_null=True)``. A CSV/JSON text cell
+    that really says ``__DF_SQL_NULL__`` therefore decoded as NULL and a
+    ``__DF_ESC__`` prefix was stripped, on both Gate-8 sides alike (D121).
+    Only text is escaped: ``None`` already is NULL on the wire, and typed
+    values (JSON numbers, Parquet decimals) never collide.
+    """
+    # Every wire spelling contains ``__`` — the cheap test keeps the
+    # strip/lower in ``escape_wire_text`` off the per-cell hot path.
+    if isinstance(value, str) and "__" in value:
+        return escape_wire_text(value)
+    return value
+
+
+def payload_record_wire(record: dict[str, Any]) -> dict[str, Any]:
+    """Escape a parsed payload record's text cells in place (see above)."""
+    for key, value in record.items():
+        wired = payload_cell_wire(value)
+        if wired is not value:
+            record[key] = wired
+    return record
 
 
 def unescape_wire_text(value: Any) -> Any:
     """Strip one ``__DF_ESC__`` layer from a wire string; non-strings pass.
 
-    When the decoded text itself spells a NULL/missing sentinel the result is
-    a :class:`WireLiteral` so no downstream check can re-read it as absence.
+    When the decoded text is itself wire-unsafe — it spells a NULL/missing
+    sentinel or carries the escape prefix — the result is a
+    :class:`WireLiteral`, so no downstream check re-reads it as absence and no
+    later decode strips the literal's own ``__DF_ESC__`` prefix (D121).
     """
     if isinstance(value, WireLiteral):
         return value
     if isinstance(value, str) and value.startswith(ESCAPED_WIRE_PREFIX):
         decoded = value[len(ESCAPED_WIRE_PREFIX) :]
-        if decoded.strip().lower() in _NULL_WIRE_LOWER:
+        if _wire_unsafe(decoded):
             return WireLiteral(decoded)
         return decoded
     return value

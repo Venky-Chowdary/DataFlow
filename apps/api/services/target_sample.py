@@ -128,7 +128,37 @@ def read_target_sample(
     Returns an empty list only when the destination is genuinely empty (or the
     keyed ``IN`` matched nothing). Read failures raise
     :class:`TargetSampleUnavailable` — never ``[]``.
+
+    Rows come back on the transfer wire, as a source reader's do: the Gate-8
+    fingerprint decodes wire, so a stored ``__DF_ESC__x`` text must reach it
+    escaped or it compares as ``x`` (D121).
     """
+    from services.value_serializer import payload_record_wire
+
+    rows = _read_destination_sample(
+        db_type,
+        dest,
+        schema=schema,
+        table_name=table_name,
+        columns=columns,
+        limit=limit,
+        sort_key=sort_key,
+        key_values=key_values,
+    )
+    return [payload_record_wire(row) if isinstance(row, dict) else row for row in rows]
+
+
+def _read_destination_sample(
+    db_type: str,
+    dest: dict[str, Any],
+    *,
+    schema: str,
+    table_name: str,
+    columns: list[str] | None = None,
+    limit: int = 50,
+    sort_key: str | None = None,
+    key_values: list[Any] | None = None,
+) -> list[dict[str, Any]]:
     from connectors.sql_identifiers import (
         quote_column_list,
         quote_sql_identifier,
