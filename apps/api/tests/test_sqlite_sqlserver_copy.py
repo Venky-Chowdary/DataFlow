@@ -315,6 +315,15 @@ def test_live_sqlite_sqlserver_overwrite_replaces_dest(tmp_path):
         )
         assert result.source_snapshot.get("sqlserver_write") == "overwrite"
         assert _dest_count(dest) == 800
+        # The staged load replaced the live table: the pre-run row is gone and
+        # neither the staging nor the parked table is left behind.
+        cur.execute(f"SELECT COUNT(*) FROM dbo.[{dest}] WHERE label = N'ghost'")
+        assert cur.fetchone()[0] == 0
+        cur.execute(
+            "SELECT COUNT(*) FROM sys.tables WHERE name LIKE %s OR name LIKE %s",
+            (f"df_ow_{dest}%", f"df_trash_{dest}%"),
+        )
+        assert cur.fetchone()[0] == 0
     finally:
         ss.close()
         _drop_ss(dest)

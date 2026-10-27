@@ -148,10 +148,6 @@ def copy_sqlite_to_sqlserver(
     dest_ref = _ss_table_ref(dst_schema, dest_table)
     col_sql = ", ".join(_ss_ident(c) for c in target_cols)
     placeholders = ", ".join(["%s"] * len(target_cols))
-    insert_sql = (
-        f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
-        f"VALUES ({placeholders})"
-    )
     batch_size = pg_sqlserver_copy_batch()
 
     source_conn = sqlite_connect(source_cfg)
@@ -193,22 +189,6 @@ def copy_sqlite_to_sqlserver(
                 except Exception:
                     logger.debug("SQLite source commit skipped", exc_info=True)
                 try:
-                    if swap_at_end:
-                        from services.dest_overwrite_swap import sqlserver_swap_staged_dest
-
-                        sqlserver_swap_staged_dest(
-                            dst_cur,
-                            schema=swap_schema,
-                            dest_table=swap_dest_table,
-                            staging_table=dest_table,
-                            trash_table=swap_trash_table,
-                            quote=_ss_ident,
-                        )
-
-                    dest_ref = swap_dest_ref
-
-                    dest_table = swap_dest_table
-
                     dest_conn.commit()
                 except Exception:
                     logger.debug("SQL Server dest commit skipped", exc_info=True)
@@ -266,6 +246,12 @@ def copy_sqlite_to_sqlserver(
             dest_conn.commit()
             created_here = True
 
+        # Built after the overwrite decision: a staged overwrite loads the
+        # staging table, never the live destination it later replaces.
+        insert_sql = (
+            f"INSERT INTO {dest_ref} WITH (TABLOCK) ({col_sql}) "  # nosec B608
+            f"VALUES ({placeholders})"
+        )
         copied = 0
         batch: list[tuple[Any, ...]] = []
         identity = _has_identity(dst_cur, dst_schema, dest_table)
@@ -315,6 +301,20 @@ def copy_sqlite_to_sqlserver(
                 "SQLite→SQL Server COPY refused: dest COUNT(*) "
                 f"{dest_count} != source COUNT {source_count}"
             )
+        if swap_at_end:
+            from services.dest_overwrite_swap import sqlserver_swap_staged_dest
+
+            sqlserver_swap_staged_dest(
+                dst_cur,
+                schema=swap_schema,
+                dest_table=swap_dest_table,
+                staging_table=dest_table,
+                trash_table=swap_trash_table,
+                quote=_ss_ident,
+            )
+            dest_ref = swap_dest_ref
+            dest_table = swap_dest_table
+            dest_conn.commit()
         try:
             source_conn.commit()
         except Exception:
