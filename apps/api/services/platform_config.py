@@ -243,7 +243,12 @@ def validate_production_config() -> list[str]:
             "DATAWRAP_SECRETS_KEY (or DATAFLOW_SECRETS_KEY) must be set for "
             "Fernet encryption of connector credentials in production"
         )
-    if not (getenv_brand("OTP_PEPPER") or "").strip():
+    # D117: only self-serve signup (OTP codes, reset tokens) uses the pepper,
+    # and otp_service fails closed without it. Requiring it with signup off
+    # took every route down for a feature that was not even mounted.
+    from services.signup_config import signup_enabled
+
+    if signup_enabled() and not (getenv_brand("OTP_PEPPER") or "").strip():
         errors.append(
             "DATAWRAP_OTP_PEPPER must be set in production — OTP codes and "
             "password-reset tokens must not fall back to the dev pepper"
