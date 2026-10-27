@@ -18,6 +18,7 @@ import {
 import { changeEmailRequestError, codeEntryError, mailSendError } from "../lib/authFlowCopy";
 import { focusFirstInvalid, PasswordToggle, ResendRow } from "../components/AuthFlow";
 import { AuthButton } from "../components/AuthButton";
+import { TurnstileWidget } from "../components/TurnstileWidget";
 import { writeSession } from "../lib/session";
 
 function isValidEmail(value: string) {
@@ -51,58 +52,7 @@ function AuthShell({ title, sub, onBack, children }: { title: string; sub: strin
   );
 }
 
-/** Render options handed to Turnstile — theme follows the app theme and the
- * widget stretches to the field width (`size: "flexible"`). Pure so tests can
- * pin the contract the widget renders with. */
-export function turnstileRenderOptions(
-  siteKey: string,
-  appTheme: "light" | "dark",
-  onToken: (token: string) => void,
-): Record<string, unknown> {
-  return {
-    sitekey: siteKey,
-    theme: appTheme,
-    size: "flexible",
-    callback: (token: string) => onToken(token),
-    "expired-callback": () => onToken(""),
-  };
-}
-
-/** Cloudflare Turnstile — renders only when the deployment publishes a
- *  site key; no-ops to invisible otherwise. */
-function TurnstileWidget({ siteKey, onToken }: { siteKey: string; onToken: (token: string) => void }) {
-  const hostRef = useRef<HTMLDivElement | null>(null);
-  const tokenRef = useRef(onToken);
-  tokenRef.current = onToken;
-
-  useEffect(() => {
-    if (!siteKey) return;
-    const render = () => {
-      const turnstile = (window as unknown as { turnstile?: { render: (el: HTMLElement, opts: Record<string, unknown>) => void } }).turnstile;
-      if (hostRef.current && turnstile) {
-        const appTheme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
-        turnstile.render(hostRef.current,
-          turnstileRenderOptions(siteKey, appTheme, (t) => tokenRef.current(t)));
-      }
-    };
-    const existing = document.querySelector<HTMLScriptElement>('script[data-df-turnstile="1"]');
-    if (existing) {
-      if ((window as unknown as { turnstile?: unknown }).turnstile) render();
-      else existing.addEventListener("load", render, { once: true });
-      return;
-    }
-    const script = document.createElement("script");
-    script.src = "https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit";
-    script.async = true;
-    script.defer = true;
-    script.dataset.dfTurnstile = "1";
-    script.addEventListener("load", render, { once: true });
-    document.head.appendChild(script);
-  }, [siteKey]);
-
-  if (!siteKey) return null;
-  return <div ref={hostRef} className="lp-login-turnstile" data-testid="turnstile-widget" />;
-}
+export { turnstileRenderOptions } from "../components/TurnstileWidget";
 
 /** Six-digit code entry. */
 function CodeStep({
@@ -372,7 +322,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
             {passwordError && <small id="signup-password-error" className="lp-field-error">{passwordError}</small>}
           </div>
 
-          <TurnstileWidget siteKey={turnstileSiteKey} onToken={setTurnstileToken} />
+          <TurnstileWidget siteKey={turnstileSiteKey} onToken={setTurnstileToken} action="signup" />
 
           <AuthButton type="submit" size="lg" block className="lp-login-submit"
             loading={busy} loadingLabel="Sending code…"

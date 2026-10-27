@@ -10,32 +10,36 @@ public landing page) but defended:
   ``services.client_ip`` so a spoofed ``X-Forwarded-For`` cannot mint buckets.
 - **server-side validation** — pydantic field lengths + an email shape check;
   the client validation is UX, this is the gate.
+- **Turnstile** — when the deployment configures both the Turnstile secret
+  and the public site key (so the form can render the widget), a missing or
+  refused token is a 400 ``turnstile_required``.
 - **persist before mail** — the lead lands in ``contact_sales_leads`` (with a
-  JSONL fallback) before SMTP is touched; a mail outage records
-  ``mail_error`` on the lead but still returns the lead id.
+  JSONL fallback) before any mail is queued. The mail to sales@ goes through
+  the same durable outbox and ``DATAWRAP_EMAIL_PROVIDER`` driver as every
+  auth mail (bounded retries, failure audited as ``mail.send_failed``); the
+  outbox row's idempotency key ``sales-lead:<lead_id>`` ties the two.
 """
 
 from __future__ import annotations
 
 import logging
 import re
-from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from services import turnstile
 from services.client_ip import client_ip_from_request
 from services.contact_leads import persist_lead
 from services.mcp_rate_limit import TokenBucketStore
-from services.notification_service import _send_resend
-from services.smtp_mailer import send_mail, smtp_configured
+from services.signup_config import turnstile_site_key
 
 LOG = logging.getLogger(__name__)
 
 router = APIRouter()
 
-_SALES_ADDRESS = "sales@datawrap.io"
+_TURNSTILE_ACTION = "contact_sales"
 _EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 _MAX_LIST = 12
 _MAX_ITEM_LEN = 120
@@ -78,6 +82,7 @@ class ContactSalesIn(BaseModel):
     timeframe: str = Field(default="", max_length=_MAX_ITEM_LEN)
     # Honeypot: real users never fill it (it is invisible in the UI).
     website: str = Field(default="", max_length=200)
+    turnstile_token: str = Field(default="", max_length=4096)
 
 
 def _client_ip(request: Request) -> str:
@@ -90,73 +95,24 @@ def _clean_list(values: list[str]) -> list[str]:
     ]
 
 
-def _send_lead_mail(lead: dict[str, Any]) -> dict[str, Any]:
-    """Deliver the lead email: Resend first (DATAWRAP_RESEND_API_KEY, the
-    provider Datawrap uses in prod), Zoho SMTP as a dev fallback, or a
-    recorded "not configured" outcome. Never raises."""
-    from services.brand_env import getenv_brand
-
-    api_key = str(getenv_brand("RESEND_API_KEY", "") or "").strip()
-    subject = _safe_subject(
-        f"Datawrap pilot request — {lead.get('company') or '-'} ({lead.get('name') or '-'})"
-    )
-    if api_key:
-        from_addr = (
-            str(getenv_brand("EMAIL_FROM", "") or "").strip() or "noreply@datawrap.io"
-        )
-        res = _send_resend(
-            [_SALES_ADDRESS],
-            subject,
-            _lead_text(lead),
-            from_addr,
-            api_key,
-            reply_to=str(lead.get("email") or "").strip(),
-        )
-        # notification_service._send_resend reports {"ok": ...}; normalize to
-        # the {"sent": ...} contract this router uses.
-        return {
-            "sent": bool(res.get("ok")),
-            "error": str(res.get("error") or "") if not res.get("ok") else "",
-        }
-    if smtp_configured():
-        return send_mail(
-            to=_SALES_ADDRESS,
-            subject=subject,
-            text_body=_lead_text(lead),
-            reply_to=str(lead.get("email") or "").strip(),
-        )
-    return {"sent": False, "error": "mail_not_configured"}
+def _single_line(text: str) -> str:
+    # Header-injection guard: lead fields end up in the Subject header, so
+    # they must never carry CR/LF.
+    return " ".join(str(text or "").split())
 
 
-def _safe_subject(text: str) -> str:
-    # Header-injection guard: a lead field must never carry CR/LF into the
-    # Subject header.
-    return " ".join(str(text or "").split())[:200]
+def _turnstile_enforced() -> str:
+    """The site key when the form must carry a Turnstile token, else "".
+
+    Enforced only when the widget can actually be rendered: a secret without
+    a published site key would refuse every visitor."""
+    site_key = turnstile_site_key()
+    return site_key if site_key and turnstile.configured() else ""
 
 
-def _lead_text(lead: dict[str, Any]) -> str:
-    lines = [
-        "New Datawrap sales lead",
-        "",
-        f"Name:    {lead['name']}",
-        f"Email:   {lead['email']}",
-        f"Company: {lead['company']}",
-        f"Role:    {lead.get('role') or '-'}",
-        f"Phone:   {lead.get('phone') or '-'}",
-        f"Sources: {', '.join(lead.get('sources') or []) or '-'}",
-        f"Destinations: {', '.join(lead.get('destinations') or []) or '-'}",
-        f"Volume:  {lead.get('volume') or '-'}",
-        f"Region:  {lead.get('region') or '-'}",
-        f"Timeframe: {lead.get('timeframe') or '-'}",
-        "",
-        "Message:",
-        lead.get("message") or "-",
-        "",
-        f"Lead ID: {lead['lead_id']}",
-        f"Received: {lead['created_at']}",
-        f"Client IP: {lead.get('client_ip') or '-'}",
-    ]
-    return "\n".join(lines)
+@router.get("/contact-sales/config")
+async def contact_sales_config():
+    return {"turnstile_site_key": _turnstile_enforced()}
 
 
 @router.post("/contact-sales")
@@ -166,9 +122,9 @@ async def contact_sales(body: ContactSalesIn, request: Request):
         return JSONResponse({"ok": True, "lead_id": None, "delivered": False})
 
     email = body.email.strip().lower()
-    first = body.first_name.strip()
-    last = body.last_name.strip()
-    company = body.company.strip()
+    first = _single_line(body.first_name)
+    last = _single_line(body.last_name)
+    company = _single_line(body.company)
     if not first or not last or not company or not email:
         return JSONResponse(
             {"ok": False, "error": "name, work email and company are required"},
@@ -180,6 +136,15 @@ async def contact_sales(body: ContactSalesIn, request: Request):
         )
 
     client_ip = _client_ip(request)
+    if _turnstile_enforced():
+        verdict = turnstile.verify(
+            body.turnstile_token, remote_ip=client_ip,
+            expected_action=_TURNSTILE_ACTION)
+        if not verdict["ok"]:
+            LOG.info("contact lead refused: turnstile %s", verdict["reason"])
+            return JSONResponse(
+                {"ok": False, "error": "turnstile_required"}, status_code=400
+            )
     for key, cap, refill in (
         (f"ip:{client_ip}", _IP_CAPACITY, _IP_REFILL),
         (f"email:{email}", _EMAIL_CAPACITY, _EMAIL_REFILL),
@@ -201,8 +166,8 @@ async def contact_sales(body: ContactSalesIn, request: Request):
         "last_name": last,
         "email": email,
         "company": company,
-        "role": body.role.strip(),
-        "phone": body.phone.strip(),
+        "role": _single_line(body.role),
+        "phone": _single_line(body.phone),
         "message": body.message.strip(),
         "sources": _clean_list(body.sources),
         "destinations": _clean_list(body.destinations),
@@ -213,28 +178,15 @@ async def contact_sales(body: ContactSalesIn, request: Request):
         "user_agent": str(request.headers.get("user-agent") or "")[:300],
     }
     stored = persist_lead(lead)
+    try:
+        from services.signup_service import send_sales_lead
 
-    mail_result = _send_lead_mail(stored)
-    if mail_result.get("sent"):
-        stored["mail_sent"] = True
-    else:
-        stored["mail_sent"] = False
-        stored["mail_error"] = str(mail_result.get("error") or "")[:300]
-        LOG.warning("contact lead %s: mail not sent: %s", stored["lead_id"], stored["mail_error"])
-        try:
-            from services.mongodb_service import get_mongodb_service
-
-            get_mongodb_service().get_database()["contact_sales_leads"].update_one(
-                {"lead_id": stored["lead_id"]},
-                {"$set": {"mail_sent": False, "mail_error": stored["mail_error"]}},
-            )
-        except Exception:
-            pass
+        send_sales_lead(stored)
+        queued = True
+    except Exception:  # noqa: BLE001 — the lead is persisted; never fail the visitor
+        LOG.error("contact lead %s: mail not queued", stored["lead_id"], exc_info=True)
+        queued = False
 
     return JSONResponse(
-        {
-            "ok": True,
-            "lead_id": stored["lead_id"],
-            "delivered": bool(mail_result.get("sent")),
-        }
+        {"ok": True, "lead_id": stored["lead_id"], "queued": queued}
     )

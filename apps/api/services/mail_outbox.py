@@ -114,7 +114,8 @@ def _expiry_iso() -> str:
 
 def enqueue(*, to: str, subject: str, text: str, html: str,
             idempotency_key: str, purpose: str,
-            quota_counted: bool = False) -> dict[str, Any]:
+            quota_counted: bool = False,
+            reply_to: str = "") -> dict[str, Any]:
     """Persist a queued outbox row and return it. ``quota_counted`` marks
     rows whose send-quota slot was already consumed on the request path
     (signup/OTP mails keep the synchronous 429), so the lane doesn't
@@ -131,6 +132,7 @@ def enqueue(*, to: str, subject: str, text: str, html: str,
         "status": "queued",
         "attempts": 0,
         "quota_counted": quota_counted,
+        "reply_to": reply_to,
         "created_at": _now_iso(),
         "expires_at": _expiry_iso(),
     }

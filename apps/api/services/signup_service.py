@@ -208,6 +208,7 @@ def _deliver_outbox_row(row: dict[str, Any], *, actor_ip: str = "") -> None:
         get_email_sender().send(OutboundEmail(
             to=row["to"], subject=row["subject"], text=payload["text"],
             html=payload["html"],
+            reply_to=row.get("reply_to") or None,
             idempotency_key=row["idempotency_key"]))
         mail_outbox.mark(row["id"], "sent", claim_token=token)
         details = {"ip": actor_ip, "purpose": row.get("purpose")}
@@ -346,6 +347,41 @@ def _send(template: str, to: str, context: dict[str, Any], *, idempotency_key: s
         idempotency_key=idempotency_key, purpose=template,
         quota_counted=True)
     _deliver_later(lambda: _deliver_outbox_row(row))
+
+
+SALES_ADDRESS = "sales@datawrap.io"
+
+
+def send_sales_lead(lead: dict[str, Any]) -> str:
+    """Queue the internal Contact Sales lead mail to sales@ on the same
+    durable outbox + provider as every auth mail (D103) and return the
+    outbox row id. Reply-To is the prospect, so sales answers them directly.
+    The send-quota slot is taken on the lane, not the request: the lead is
+    already persisted, and a quota refusal reschedules instead of failing
+    the visitor's submission."""
+    context = {
+        "name": lead.get("name"),
+        "email": lead.get("email"),
+        "company": lead.get("company"),
+        "role": lead.get("role"),
+        "phone": lead.get("phone"),
+        "sources": ", ".join(lead.get("sources") or []),
+        "destinations": ", ".join(lead.get("destinations") or []),
+        "volume": lead.get("volume"),
+        "region": lead.get("region"),
+        "timeframe": lead.get("timeframe"),
+        "message": lead.get("message"),
+        "lead_id": lead.get("lead_id"),
+        "received": lead.get("created_at"),
+    }
+    mail = render_email("sales_lead_internal", context)
+    row = mail_outbox.enqueue(
+        to=SALES_ADDRESS, subject=mail.subject, text=mail.text, html=mail.html,
+        idempotency_key=f"sales-lead:{lead['lead_id']}",
+        purpose="sales_lead_internal",
+        reply_to=str(lead.get("email") or ""))
+    _deliver_later(lambda: _deliver_outbox_row(row))
+    return row["id"]
 
 
 def _decoy_challenge() -> str:

@@ -50,6 +50,8 @@ _PUBLIC_PREFIXES = (
     "/auth/sso/providers",
     # Marketing / docs / landing need catalog stats without a session.
     "/api/v1/catalog",
+    # Contact Sales lead form (D103) — visitors have no session.
+    "/api/v1/contact-sales",
     "/catalog",
     "/.well-known/oauth-protected-resource",
 )

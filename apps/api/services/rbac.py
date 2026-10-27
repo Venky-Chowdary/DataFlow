@@ -246,6 +246,10 @@ _PUBLIC_PATHS = {
     "/auth/password/reset/inspect",
     "/auth/sso/route",
     "/api/v1/catalog",
+    # Public marketing lead form (D103): Turnstile + per-IP/email buckets
+    # in contact_router defend it; a session can never be required.
+    "/api/v1/contact-sales",
+    "/api/v1/contact-sales/config",
     "/.well-known/oauth-protected-resource",
     "/.well-known/oauth-protected-resource/api/v1/mcp",
 }

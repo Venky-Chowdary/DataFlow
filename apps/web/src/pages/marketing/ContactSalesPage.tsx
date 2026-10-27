@@ -1,5 +1,6 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { DtIcon } from "../../components/DtIcon";
+import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
 import { PilotRouteArt } from "../../components/marketing/hero-art/contactArt";
 import { TRANSFER_READY_DRIVERS } from "../../lib/provenEvidence";
@@ -100,6 +101,34 @@ function ChipGrid({
   );
 }
 
+/** What the visitor is told when the lead was not accepted. Every branch
+ * names the direct address, so a refused form never strands a prospect. */
+export function contactSalesError(status: number, data: { error?: string } | null): string {
+  const code = data?.error ?? "";
+  if (code === "rate_limited" || status === 429) {
+    return "Too many submissions — please email sales@datawrap.io directly.";
+  }
+  if (code === "turnstile_required") {
+    return "We couldn't verify this browser. Complete the check and send again, or email sales@datawrap.io.";
+  }
+  if (status === 422 && code) {
+    return `Check the form: ${code}.`;
+  }
+  return "We could not send your request. Please email sales@datawrap.io directly.";
+}
+
+/** Turnstile site key the API enforces for this form ("" when it doesn't). */
+async function fetchContactSalesTurnstileKey(): Promise<string> {
+  try {
+    const res = await fetch(`${API_BASE}/contact-sales/config`);
+    if (!res.ok) return "";
+    const data = (await res.json()) as { turnstile_site_key?: unknown };
+    return typeof data.turnstile_site_key === "string" ? data.turnstile_site_key : "";
+  } catch {
+    return "";
+  }
+}
+
 export function ContactSalesPage({
   onNavigate,
 }: {
@@ -120,7 +149,16 @@ export function ContactSalesPage({
   const [message, setMessage] = useState("");
   const [honeypot, setHoneypot] = useState("");
 
-  const canSubmit = Boolean(firstName.trim() && lastName.trim() && email.trim() && company.trim());
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
+  const [turnstileToken, setTurnstileToken] = useState("");
+  useEffect(() => {
+    void fetchContactSalesTurnstileKey().then(setTurnstileSiteKey);
+  }, []);
+
+  const canSubmit = Boolean(
+    firstName.trim() && lastName.trim() && email.trim() && company.trim()
+      && (!turnstileSiteKey || turnstileToken),
+  );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
 
@@ -151,15 +189,12 @@ export function ContactSalesPage({
           region,
           timeframe,
           website: honeypot,
+          turnstile_token: turnstileToken || undefined,
         }),
       });
       const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
       if (!res.ok || !data?.ok) {
-        setError(
-          data?.error === "rate_limited"
-            ? "Too many submissions — please email sales@datawrap.io directly."
-            : "We could not send your request. Please email sales@datawrap.io directly.",
-        );
+        setError(contactSalesError(res.status, data));
         return;
       }
       setSent(true);
@@ -367,6 +402,8 @@ export function ContactSalesPage({
                 Do not fill
                 <input tabIndex={-1} autoComplete="off" value={honeypot} onChange={(e) => setHoneypot(e.target.value)} />
               </label>
+
+              <TurnstileWidget siteKey={turnstileSiteKey} onToken={setTurnstileToken} action="contact_sales" />
 
               <div className="lp-sales-form-foot">
                 <p>
