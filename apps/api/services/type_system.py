@@ -2527,6 +2527,11 @@ def ddl_carrier_type(inferred: str | None) -> str:
             return f"TIMESTAMP_NTZ{suffix}"
         return f"TIMESTAMP{suffix}"
     if logical == LOGICAL_TIME:
+        # Keep the offset polarity, as for TIMESTAMPTZ: a bare TIME carrier
+        # turned PG->PG timetz into TIME and dropped every offset (D50).
+        if time_timezone_polarity(raw) == "tz":
+            digits = re.search(r"\((\d+)\)", raw)
+            return f"TIMETZ({digits.group(1)})" if digits else "TIMETZ"
         return "TIME"
     if logical == LOGICAL_UUID:
         return "UUID"
