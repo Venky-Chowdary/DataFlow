@@ -12,7 +12,7 @@ import logging
 import uuid
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Callable
 
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
@@ -202,3 +202,35 @@ def summarize_usage(
             "event_count": totals["event_count"],
         },
     }
+
+
+def assign_unscoped_workspaces(
+    workspace_for: Callable[[dict[str, Any]], str], *, apply: bool
+) -> dict[str, int]:
+    """Stamp legacy unscoped usage events with ``workspace_for(event)`` (D154 backfill).
+
+    Scoped events are never touched; an event that cannot be placed is skipped.
+    """
+    unscoped = WorkspaceFilter.only("")
+    counts = {"assigned": 0, "skipped": 0}
+    coll = _mongo()
+    if coll is not None:
+        for doc in list(coll.find(unscoped.mongo_query())):
+            ws = (workspace_for(doc) or "").strip()
+            counts["assigned" if ws else "skipped"] += 1
+            if ws and apply:
+                coll.update_one({"_id": doc["_id"]}, {"$set": {"workspace_id": ws}})
+        return counts
+    if not STORE_PATH.exists():
+        return counts
+    data = json.loads(STORE_PATH.read_text(encoding="utf-8"))
+    for event in data.get("events") or []:
+        if not unscoped.matches(event.get("workspace_id")):
+            continue
+        ws = (workspace_for(event) or "").strip()
+        counts["assigned" if ws else "skipped"] += 1
+        if ws:
+            event["workspace_id"] = ws
+    if apply and counts["assigned"]:
+        write_json_atomic(STORE_PATH, data, indent=2, default=json_default)
+    return counts

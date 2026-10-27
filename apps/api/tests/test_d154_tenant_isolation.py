@@ -8,7 +8,8 @@ holds legacy unscoped rows created by A before workspaces existed.
 
 B — with no header, with B's own header, and with A's workspace forced into
 the header — sees none of it and gets 403/404 on A's ids and the legacy ids.
-A sees their own workspace; the admin sees everything.
+A sees their own workspace; the admin sees everything. After the backfill the
+legacy rows belong to A's personal workspace and A sees them.
 """
 
 from __future__ import annotations
@@ -247,3 +248,26 @@ def test_owner_sees_own_workspace_and_admin_sees_everything(tenants):
     # An admin's header narrows to that workspace instead of 403ing.
     narrowed = _views(t["admin"], {"X-Workspace-Id": t["ws_a"]})
     assert narrowed["jobs"] == {t["a_job"]}
+
+
+def test_backfill_assigns_legacy_rows_to_their_owner(tenants):
+    from services.legacy_workspace_backfill import backfill_legacy_workspaces
+
+    t = tenants
+    dry = backfill_legacy_workspaces()
+    assert dry.counts["jobs"]["assigned"] == 1 and dry.counts["connectors"]["assigned"] == 1
+    assert t["legacy_job"] not in _views(t["a"], {})["jobs"]  # dry run wrote nothing
+
+    applied = backfill_legacy_workspaces(apply=True)
+    assert applied.counts["jobs"] == {"assigned": 1, "skipped": 0}
+    assert applied.counts["usage_events"]["assigned"] == 1
+    assert applied.counts["quarantine_dlq"]["assigned"] == 1
+    mine = _views(t["a"], {})
+    assert t["legacy_connector"] in mine["saved"]
+    assert t["legacy_job"] in mine["jobs"] and mine["job_total"] == 2
+    assert mine["usage_rows"] == 18 and mine["dlq"] == 2
+    assert t["a"].get(f"/api/v1/connectors/jobs/{t['legacy_job']}").status_code == 200
+    _sees_nothing_of_a(_views(t["b"], {}), t)
+
+    again = backfill_legacy_workspaces(apply=True)
+    assert all(c["assigned"] == 0 for c in again.counts.values()), again.counts

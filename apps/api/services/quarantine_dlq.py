@@ -28,7 +28,7 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from services.platform_config import data_dir
 from services.value_serializer import json_default, json_loads_exact
@@ -594,6 +594,50 @@ def list_dlq_events(
         if len(events) >= limit:
             break
     return events
+
+
+def assign_unscoped_workspaces(
+    workspace_for: Callable[[dict[str, Any]], str], *, apply: bool
+) -> dict[str, int]:
+    """Stamp legacy unscoped DLQ events with ``workspace_for(event)`` (D154 backfill).
+
+    Scoped events are never touched; an event ``workspace_for`` cannot place
+    ("") is skipped. The JSONL fallback is rewritten atomically, so run it in a
+    maintenance window (appends are not locked against a rewrite).
+    """
+    unscoped = WorkspaceFilter.only("")
+    counts = {"assigned": 0, "skipped": 0}
+
+    def _place(ev: dict[str, Any]) -> str:
+        ws = (workspace_for(ev) or "").strip()
+        counts["assigned" if ws else "skipped"] += 1
+        return ws
+
+    coll = _dlq_coll()
+    if coll is not None:
+        for doc in list(coll.find(unscoped.mongo_query())):
+            ws = _place(doc)
+            if ws and apply:
+                coll.update_one({"_id": doc["_id"]}, {"$set": {"workspace_id": ws}})
+        return counts
+    if not DLQ_PATH.exists():
+        return counts
+    out: list[str] = []
+    changed = False
+    for line in DLQ_PATH.read_text(encoding="utf-8").splitlines():
+        ev = load_dlq_event(line) if line.strip() else None
+        if ev is not None and unscoped.matches(ev.get("workspace_id")):
+            ws = _place(ev)
+            if ws:
+                ev["workspace_id"] = ws
+                line = json.dumps(ev, default=json_default)
+                changed = True
+        out.append(line)
+    if apply and changed:
+        tmp = DLQ_PATH.with_suffix(DLQ_PATH.suffix + ".tmp")
+        tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+        tmp.replace(DLQ_PATH)
+    return counts
 
 
 # ---------------------------------------------------------------------------

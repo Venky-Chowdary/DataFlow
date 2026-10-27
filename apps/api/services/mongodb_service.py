@@ -1145,6 +1145,29 @@ class MongoDBService:
         result = collection.update_one(key, {"$set": updates})
         return result.matched_count > 0
 
+    def list_unscoped_jobs(self) -> list[dict]:
+        """Every job with no workspace — the legacy rows the D154 backfill assigns.
+
+        Only the fields that name an owner or a connector, never the page cap
+        ``list_jobs`` applies.
+        """
+        db = self.get_database()
+        projection = {
+            "_id": 1,
+            "triggered_by": 1,
+            "created_by": 1,
+            "schedule_id": 1,
+            "transfer_request.triggered_by": 1,
+            "transfer_request.schedule_id": 1,
+            "transfer_request.source.connector_id": 1,
+            "transfer_request.destination.connector_id": 1,
+        }
+        rows = []
+        for doc in db["transfer_jobs"].find(WorkspaceFilter.only("").mongo_query(), projection):
+            doc["_id"] = str(doc["_id"])
+            rows.append(doc)
+        return rows
+
     def is_job_name_taken(
         self,
         name: str,
@@ -1751,6 +1774,15 @@ class MemoryMongoDBService:
         if touch_updated_at:
             rec["updated_at"] = datetime.now(timezone.utc)
         return True
+
+    def list_unscoped_jobs(self) -> list[dict]:
+        """Every job with no workspace (see ``MongoDBService.list_unscoped_jobs``)."""
+        unscoped = WorkspaceFilter.only("")
+        return [
+            {**rec, "_id": str(rec["_id"])}
+            for rec in self._jobs.values()
+            if unscoped.matches(rec.get("workspace_id"))
+        ]
 
     def is_job_name_taken(
         self,
