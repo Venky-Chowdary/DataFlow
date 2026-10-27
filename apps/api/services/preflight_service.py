@@ -2829,12 +2829,18 @@ def run_file_preflight(
             "note": "No destination CHECK constraints reported.",
         }
         if destination_check_constraints:
-            from services.dest_check_probe import probe_dest_check_constraints
+            from services.dest_check_probe import (
+                check_constraint_source_fields,
+                probe_dest_check_constraints,
+            )
             from services.preflight_population import (
                 _iter_table_population_for_preflight,
             )
 
             check_rows = _iter_table_population_for_preflight(
+                source_columns=check_constraint_source_fields(
+                    list(destination_check_constraints), list(mappings or [])
+                ),
                 source_kind=source_kind,
                 source_format=source_format,
                 source_connector_id=source_connector_id or "",
@@ -2864,6 +2870,13 @@ def run_file_preflight(
                     f"{v.get('values')}"
                     for v in (check_report.get("violations") or [])[:3]
                 )
+                check_msg = (
+                    f"{viol} source row(s) violate destination CHECK "
+                    f"constraint(s) — {offenders}. "
+                    "Confirm writes them and the destination rejects "
+                    "them; map them out, fix the source, or let "
+                    "quarantine carry them."
+                )
                 findings.append(
                     {
                         "code": "dest_check_violation",
@@ -2873,15 +2886,43 @@ def run_file_preflight(
                             check_report.get("population_proof")
                         ),
                         "violating_rows": viol,
-                        "message": (
-                            f"{viol} source row(s) violate destination CHECK "
-                            f"constraint(s) — {offenders}. "
-                            "Confirm writes them and the destination rejects "
-                            "them; map them out, fix the source, or let "
-                            "quarantine carry them."
-                        ),
+                        "message": check_msg,
                     }
                 )
+                if sev == "error":
+                    # A finding alone refused nothing: strict runs wrote the
+                    # rows and failed on the driver's raw CheckViolation
+                    # after Confirm (D112-CHECK).
+                    check_details = {
+                        "coverage": check_report.get("coverage"),
+                        "violating_count": viol,
+                        "violations": list(check_report.get("violations") or [])[:3],
+                    }
+                    out["gates"] = [
+                        *out["gates"],
+                        {
+                            "id": "constraint_check",
+                            "status": "block",
+                            "message": check_msg,
+                            "duration_ms": 0,
+                            "details": check_details,
+                        },
+                    ]
+                    out["blockers"] = [
+                        *out["blockers"],
+                        *enrich_blockers(
+                            [
+                                {
+                                    "id": "constraint_check",
+                                    "message": check_msg,
+                                    "details": check_details,
+                                }
+                            ],
+                            dest_kind=dest_kind,
+                            validation_mode=validation_mode,
+                        ),
+                    ]
+                    out["passed"] = False
         out["dest_check_probe"] = {
             k: check_report.get(k)
             for k in (

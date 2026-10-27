@@ -368,6 +368,32 @@ def _dest_to_source_fields(mappings: list[dict[str, Any]]) -> dict[str, str]:
     return out
 
 
+def check_constraint_source_fields(
+    check_constraints: list[Any], mappings: list[dict[str, Any]]
+) -> list[str]:
+    """Source fields the evaluable CHECK predicates read, via the mappings.
+
+    The population walk has to read exactly these: the bounded-carrier walk
+    g3f uses skips a BIGINT -> BIGINT column, and an empty walk read as "every
+    CHECK holds" (D112-CHECK).
+    """
+    field_map = _dest_to_source_fields(mappings)
+    fields: set[str] = set()
+    for item in check_constraints or []:
+        _name, pred = _constraint_predicate(item)
+        if not pred:
+            continue
+        try:
+            ast = _compile(pred)
+        except _ParseFail:
+            continue
+        for node in _walk_cols(ast):
+            src = field_map.get(str(node[1]).lower())
+            if src:
+                fields.add(src)
+    return sorted(fields)
+
+
 def probe_dest_check_constraints(
     *,
     rows: Iterable[Mapping[str, Any]],

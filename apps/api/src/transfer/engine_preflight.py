@@ -142,6 +142,9 @@ def _execute_preflight_parity_kwargs(
         "destination_pk_columns": pk_cols,
         "destination_unique_keys": unique_keys,
         "destination_foreign_keys": foreign_keys,
+        # D112 — the live CHECK constraints, so Execute names offending rows
+        # before the write instead of surfacing the driver's raw violation.
+        "destination_check_constraints": list(dest_meta.get("check_constraints") or []),
         "destination_config": dest_meta.get("_probe_cfg") or None,
         "contract_primary_key": contract_pk,
         "stream_contracts": stream_contracts,

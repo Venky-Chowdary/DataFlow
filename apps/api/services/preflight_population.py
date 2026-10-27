@@ -107,6 +107,7 @@ def _iter_table_population_for_preflight(
     sync_mode: str = "",
     read_scope: Any = None,
     source_filter: dict[str, Any] | None = None,
+    source_columns: list[str] | None = None,
 ):
     """Same projected table walk Execute uses — or None when it cannot run.
 
@@ -165,6 +166,7 @@ def _iter_table_population_for_preflight(
         source_filter=source_filter
         or (cfg.get("source_filter") if isinstance(cfg.get("source_filter"), dict) else None)
         or (extra.get("source_filter") if isinstance(extra.get("source_filter"), dict) else None),
+        source_columns=source_columns,
     )
 
 

@@ -452,6 +452,7 @@ def run_plan_preflight(
         destination_dynamo_index_attributes=dest_meta.get("dynamo_index_attributes") or {},
         destination_unique_keys=dest_meta.get("unique_keys") or [],
         destination_foreign_keys=dest_meta.get("foreign_keys") or [],
+        destination_check_constraints=dest_meta.get("check_constraints") or [],
         # Without the destination connection the append key-collision probe cannot
         # run, and Validate greens a batch Execute then refuses on the same key.
         destination_config=dest_meta.get("_probe_cfg") or None,

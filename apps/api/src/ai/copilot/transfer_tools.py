@@ -1649,6 +1649,7 @@ def _run_preflight(
             ),
             destination_unique_keys=list(dest_probe.get("unique_keys") or []),
             destination_foreign_keys=list(dest_probe.get("foreign_keys") or []),
+            destination_check_constraints=list(dest_probe.get("check_constraints") or []),
             destination_config=dest_probe.get("_probe_cfg") or None,
             source_kind=source_kind or "database",
             source_format=src_db_type,

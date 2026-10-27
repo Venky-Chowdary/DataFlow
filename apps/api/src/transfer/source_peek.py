@@ -297,6 +297,7 @@ def iter_bounded_table_population_rows(
     shape_runner: Any = None,
     read_scope: Any = None,
     source_filter: Mapping[str, Any] | None = None,
+    source_columns: list[str] | None = None,
 ) -> Iterator[dict[str, Any]] | None:
     """Projected table walk for the same population-fit scan Execute uses.
 
@@ -308,20 +309,27 @@ def iter_bounded_table_population_rows(
     or the table name is missing — callers must then use the preview, never
     claim an empty population. An empty iterator is a real empty table.
     Exceptions propagate so Validate can fall back instead of going silent.
+
+    ``source_columns`` names the columns to walk for a probe that is not the
+    bounded-carrier fit (the destination CHECK probe); by default the walk
+    reads the source side of every bounded target.
     """
     from .connector_capabilities import resolve_driver_type
     from .stream import _source_name
     from services.population_fit_scan import bounded_targets
 
-    targets, _undecidable, _safe = bounded_targets(
-        mappings,
-        dest_types=dest_types,
-        source_types=column_types,
-        dest_db=dest_db,
-        source_kind=source_kind or getattr(source, "kind", "") or "",
-        source_format=source_format or getattr(source, "format", "") or "",
-    )
-    wanted = sorted({t.source for t in targets if t.source})
+    if source_columns is not None:
+        wanted = sorted({str(c) for c in source_columns if str(c)})
+    else:
+        targets, _undecidable, _safe = bounded_targets(
+            mappings,
+            dest_types=dest_types,
+            source_types=column_types,
+            dest_db=dest_db,
+            source_kind=source_kind or getattr(source, "kind", "") or "",
+            source_format=source_format or getattr(source, "format", "") or "",
+        )
+        wanted = sorted({t.source for t in targets if t.source})
     if not wanted:
         return iter(())
     src_type = resolve_driver_type(source.format or "")
