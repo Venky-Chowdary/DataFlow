@@ -26,10 +26,11 @@ RESET_MESSAGE = (
     "Destination reset since the last incremental run: the stored watermark "
     "'2024-01-01T00:00:00' on 'updated_at' claims those rows are already at "
     "rest, but the destination table is missing — resuming would skip the "
-    "whole history and report success. Clear the cursor (POST "
-    "/api/v1/ops/cdc-cursors/clear with cursor_key "
-    "'t:public.orders:updated_at') to re-snapshot, or rebaseline the route "
-    "(POST /api/v1/transfer/continuity/rebaseline), or point the run at the "
+    "whole history and report success. Clear the cursor (MCP tool "
+    "clear_cursor_resnapshot with cursor_key 't:public.orders:updated_at', "
+    "or POST /api/v1/ops/cdc-cursors/clear) to re-snapshot, or rebaseline the "
+    "route (MCP tool rebaseline_transfer, or POST "
+    "/api/v1/transfer/continuity/rebaseline), or point the run at the "
     "destination that holds the history."
 )
 
@@ -51,6 +52,8 @@ def test_dest_missing_message_names_missing_not_empty_and_recovery_actions():
     # Both recovery actions named (MCP tools + REST endpoints).
     assert "cdc-cursors/clear" in msg
     assert "continuity/rebaseline" in msg
+    assert "clear_cursor_resnapshot" in msg
+    assert "rebaseline_transfer" in msg
     assert "t:public.orders:updated_at" in msg
     assert msg == RESET_MESSAGE
 
@@ -100,7 +103,8 @@ def test_dest_reset_classifies_deterministic_first_fire():
     verdict = classify_failure(error=RESET_MESSAGE, phase="read", rows_written=0)
     assert verdict.kind == DETERMINISTIC
     assert "cdc-cursors/clear" in verdict.corrective_action
-    assert "rebaseline" in verdict.corrective_action
+    assert "clear_cursor_resnapshot" in verdict.corrective_action
+    assert "rebaseline_transfer" in verdict.corrective_action
 
 
 def test_schedule_parks_on_first_dest_reset_failure():

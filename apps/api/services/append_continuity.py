@@ -31,9 +31,12 @@ logger = logging.getLogger(__name__)
 
 STORE_FILENAME = "append_continuity.json"
 REBASELINE_ENDPOINT = "POST /api/v1/transfer/continuity/rebaseline"
+#: Both doors to the same audited action — the Pilot/MCP tool and the REST
+#: route. Naming only the route left MCP operators hand-crafting HTTP (D100).
+REBASELINE_REMEDY = f"MCP tool rebaseline_transfer, or {REBASELINE_ENDPOINT}"
 RECOVERY_HINT = (
     "To recover: investigate the change. If the current destination is "
-    f"correct, accept it as the new baseline with {REBASELINE_ENDPOINT} "
+    f"correct, accept it as the new baseline ({REBASELINE_REMEDY}) "
     "(audited; a reason is required), or re-run with full_refresh_overwrite "
     "to rebuild it from the source."
 )

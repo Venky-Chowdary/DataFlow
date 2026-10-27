@@ -12,6 +12,7 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
+from services.append_continuity import REBASELINE_REMEDY
 from services.cursor_semantics import evaluate_cursor_semantics
 from services.sync_cursor import contract_cursor_field
 from services.sync_cursor import IncrementalReadScope, resolve_incremental_read_scope
@@ -281,6 +282,15 @@ def evaluate_stream_cursor_semantics(
     return verdicts, issues
 
 
+CLEAR_CURSOR_ENDPOINT = "POST /api/v1/ops/cdc-cursors/clear"
+
+
+def clear_cursor_remedy(cursor_key: str = "") -> str:
+    """The cursor-reset action by both doors: MCP tool and REST route (D100)."""
+    key = f" with cursor_key '{cursor_key}'" if cursor_key else ""
+    return f"MCP tool clear_cursor_resnapshot{key}, or {CLEAR_CURSOR_ENDPOINT}"
+
+
 def cursor_identity_issue(scope: IncrementalReadScope | None) -> str:
     """Refusal text when the stored watermark belongs to a different column.
 
@@ -297,8 +307,8 @@ def cursor_identity_issue(scope: IncrementalReadScope | None) -> str:
         f"Cursor changed for this route: the stored watermark "
         f"'{scope.watermark}' was measured on '{scope.watermark_cursor_column}', "
         f"not on '{scope.cursor_column}' — it cannot bound a read on a different "
-        f"column. Reset the cursor (POST /api/v1/ops/cdc-cursors/clear with "
-        f"cursor_key '{scope.cursor_key}') to re-snapshot, or restore "
+        f"column. Reset the cursor ({clear_cursor_remedy(scope.cursor_key)}) "
+        f"to re-snapshot, or restore "
         f"'{scope.watermark_cursor_column}' as the cursor field."
     )
 
@@ -358,10 +368,9 @@ def cursor_destination_reset_issue(
         f"Destination reset since the last incremental run: the stored watermark "
         f"'{scope.watermark}' on '{scope.cursor_column}' claims those rows are "
         f"already at rest, but {_dest_state_text(dest_missing)} — resuming would skip "
-        f"the whole history and report success. Clear the cursor (POST "
-        f"/api/v1/ops/cdc-cursors/clear with cursor_key '{scope.cursor_key}') to "
-        f"re-snapshot, or rebaseline the route (POST "
-        f"/api/v1/transfer/continuity/rebaseline), or point the run at the "
+        f"the whole history and report success. Clear the cursor "
+        f"({clear_cursor_remedy(scope.cursor_key)}) to re-snapshot, or "
+        f"rebaseline the route ({REBASELINE_REMEDY}), or point the run at the "
         f"destination that holds the history."
     )
 

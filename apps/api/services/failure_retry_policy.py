@@ -23,6 +23,9 @@ import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
+from services.append_continuity import REBASELINE_REMEDY
+from services.preflight_cursor_gate import clear_cursor_remedy
+
 TRANSIENT = "transient"
 DETERMINISTIC = "deterministic"
 UNKNOWN = "unknown"
@@ -84,8 +87,8 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
     # park on the first beat and name the recovery, don't re-fail every tick.
     (r"destination reset since the last incremental run",
      "The destination was reset or dropped after this cursor advanced — "
-     "clear the cursor to re-snapshot (POST /api/v1/ops/cdc-cursors/clear) "
-     "or rebaseline the route (POST /api/v1/transfer/continuity/rebaseline), "
+     f"clear the cursor to re-snapshot ({clear_cursor_remedy()}) "
+     f"or rebaseline the route ({REBASELINE_REMEDY}), "
      "then re-run."),
 )
 
