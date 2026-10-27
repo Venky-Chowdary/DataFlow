@@ -3920,7 +3920,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 
 .df2-toolbar .df2-btn:focus-visible,
 .df2-toolbar .df2-btn.df2-btn-sm:focus-visible {
-  outline: none !important;
   border-color: var(--df-brand) !important;
   outline: 2px solid var(--df-focus-ring) !important;
   outline-offset: 2px;
@@ -4390,7 +4389,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .df2-app select.df2-select:focus-visible,
 .df2-app textarea.df2-input:focus,
 .df2-app textarea.df2-input:focus-visible {
-  outline: none !important;
   border-color: var(--df-brand) !important;
   outline: 2px solid var(--df-focus-ring) !important;
   outline-offset: 2px;
@@ -4432,7 +4430,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 }
 
 .df2-app .df2-btn:focus-visible {
-  outline: none !important;
   border-color: var(--df-brand) !important;
   outline: 2px solid var(--df-focus-ring) !important;
   outline-offset: 2px;
@@ -4465,7 +4462,6 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
 .dt-modal-body .df2-input:focus-visible,
 .dt-modal-body .df2-select:focus,
 .dt-modal-body .df2-select:focus-visible {
-  outline: none !important;
   border-color: var(--df-brand) !important;
   outline: 2px solid var(--df-focus-ring) !important;
   outline-offset: 2px;

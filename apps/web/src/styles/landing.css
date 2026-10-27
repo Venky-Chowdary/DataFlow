@@ -8857,7 +8857,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   line-height: 1.02 !important;
   letter-spacing: -0.045em;
   margin: 0 0 18px;
-  max-width: none !important;
   width: max-content;
   max-width: 100% !important;
   text-wrap: unset !important;
