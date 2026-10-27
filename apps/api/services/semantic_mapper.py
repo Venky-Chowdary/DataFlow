@@ -1222,6 +1222,7 @@ def map_columns(
                 source_db_type=source_db_type,
             )
     from services.semantic_analyzer import analyze_column
+    from services.value_serializer import cell_to_string
     from services.conversion_contract import classify_conversion, create_new_mapping_reason
     from services.decision_kernel import (
         create_new_mapping_target_type,
@@ -1245,7 +1246,10 @@ def map_columns(
             src_roles[s["name"]] = analyzed["semantic_role"]
             src_types[s["name"]] = s.get("inferred_type", "VARCHAR")
             if s.get("samples"):
-                src_samples[s["name"]] = [str(x) for x in s["samples"][:8]]
+                # A jsonb/json sample arrives as a dict: ``str()`` rendered the
+                # Python repr ``{'k': 1}``, which no JSON parse accepts, and the
+                # sample demotion pushed ``payload`` off its own column (D158).
+                src_samples[s["name"]] = [cell_to_string(x) for x in s["samples"][:8]]
     if target_schemas:
         for t in target_schemas:
             analyzed = analyze_column(t.get("name", ""), t.get("inferred_type", "VARCHAR"), t.get("samples", []))
@@ -1643,6 +1647,56 @@ def map_columns(
                         "requires_review": True,
                         "source_type": src_type,
                         "target_type": near_tgt_type,
+                    }
+                )
+                continue
+            # A destination column carrying the source's own name is the column
+            # run 1 created for it (or the operator's). Inventing ``<col>_text``
+            # beside it ADDed a phantom column on every rerun and blocked the
+            # load (D158 ``payload_text``, D45 ``doc_text``): bind it and let
+            # the type grade carry the risk.
+            same_name = next(
+                (
+                    t
+                    for t in target_columns
+                    if t not in used_targets and t.strip().lower() == source.strip().lower()
+                ),
+                "",
+            )
+            if same_name:
+                greedy_patched = True
+                used_targets.add(same_name)
+                same_type = _scored_dest_type(
+                    src_type, tgt_types.get(same_name, "VARCHAR"), dest_db
+                )
+                try:
+                    from services.decision_kernel import is_lossy_coercion
+
+                    same_lossy = is_lossy_coercion(src_type, same_type, dest_db=dest_db)
+                except Exception:
+                    same_lossy = True
+                mappings.append(
+                    {
+                        "source": source,
+                        "target": same_name,
+                        "confidence": _calibrated_confidence(
+                            0.90,
+                            score_gap=0.0,
+                            requires_review=same_lossy,
+                            hard_cap=0.97,
+                        ),
+                        "reasoning": (
+                            "Exact name match to existing destination column; "
+                            "sample/type score below the floor — bound, not re-created"
+                            + (" · lossy type pair" if same_lossy else "")
+                        ),
+                        "user_override": False,
+                        "assignment_strategy": "same_name_existing",
+                        "alternatives": alternatives,
+                        "score_gap": 0.0,
+                        "requires_review": same_lossy,
+                        "source_type": src_type,
+                        "target_type": same_type,
                     }
                 )
                 continue

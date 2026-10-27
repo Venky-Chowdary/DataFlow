@@ -1688,6 +1688,8 @@ _DOCUMENT_TEXT_WIRE_TOKENS: Final[frozenset[str]] = frozenset(
     {
         "NVARCHAR(MAX)",
         "VARCHAR(MAX)",
+        # SQL Server's legacy national LOB: unbounded like NVARCHAR(MAX) (D158).
+        "NTEXT",
         "CLOB",
         "NCLOB",
         "LONGTEXT",
