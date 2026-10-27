@@ -427,20 +427,25 @@ def classify_mapping_confidence(
         str(mapping.get("target_type") or mapping.get("dest_type") or mapping.get("source_type") or "")
     )
     transform = str(mapping.get("transform") or "").strip().lower()
-    has_custom_xf = not _is_passthrough_transform(transform, src_logical, tgt_logical)
+    sanctioned_carrier = _is_dialect_sanctioned_carrier(
+        str(mapping.get("source_type") or mapping.get("inferred_type") or ""),
+        str(mapping.get("target_type") or mapping.get("dest_type") or ""),
+        destination_db_type,
+    )
+    # The cast onto the carrier DataFlow's own DDL creates (SQLite BOOLEAN →
+    # INTEGER) is the create-new write path, not an operator's custom
+    # transform. Grading it "custom · sparse" (0.70) blocked run 2 into the
+    # table run 1 created at 0.95 (D78).
+    has_custom_xf = not sanctioned_carrier and not _is_passthrough_transform(
+        transform, src_logical, tgt_logical
+    )
     samples = [str(x) for x in (profile.get("samples") or []) if str(x).strip()]
     if not samples and mapping.get("samples"):
         samples = [str(x) for x in mapping["samples"] if str(x).strip()]
     sparse = len(samples) < 3
     name_exact = src_l == tgt_l or src_l.replace("_", "") == tgt_l.replace("_", "")
     type_same = src_logical == tgt_logical
-    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS or (
-        _is_dialect_sanctioned_carrier(
-            str(mapping.get("source_type") or mapping.get("inferred_type") or ""),
-            str(mapping.get("target_type") or mapping.get("dest_type") or ""),
-            destination_db_type,
-        )
-    )
+    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS or sanctioned_carrier
     structural = src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
     pattern = float(profile.get("semantic_pattern_score") or 0.0)
     null_rate = float(profile.get("null_rate") or 0.0)

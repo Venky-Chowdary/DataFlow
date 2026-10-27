@@ -265,10 +265,20 @@ def _reported_source_carrier(declared: str, invent_carrier: str) -> str:
     ``preserve``. Only the ambiguous-width integer widening is undone; every
     other carrier (DECIMAL(p,s), specialty, temporal) keeps its canonical form.
     """
-    from services.type_system import integer_bit_width, strip_identity_qualifier
+    from services.type_system import (
+        integer_bit_width,
+        is_bitstring_carrier,
+        strip_identity_qualifier,
+    )
 
     if not declared or not invent_carrier:
         return invent_carrier
+    if is_bitstring_carrier(declared) and not is_bitstring_carrier(invent_carrier):
+        # BIT(8) canonicalises to bare BINARY, but the writer creates the
+        # bitstring's own text carrier (SQLite VARCHAR(8)). Reporting BINARY
+        # graded run 2's BINARY → VARCHAR(8) on DataFlow's own column as a lossy
+        # pair (D78).
+        return strip_identity_qualifier(declared).strip() or invent_carrier
     if normalize_logical_type(declared) != normalize_logical_type(invent_carrier):
         return invent_carrier
     if normalize_logical_type(declared) != "integer":
