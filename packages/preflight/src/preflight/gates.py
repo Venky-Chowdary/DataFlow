@@ -2722,9 +2722,40 @@ def _dry_run_transform(value: str, transform: str | None) -> str | None:
 
 _NON_DETERMINISTIC = {
     # Deterministic UUID *parse* stays comparable — only generators/one-way.
+    # Standalone fallback only: with the engine importable, its C05 transform
+    # contract decides (see ``_skips_fingerprint``).
     "hash", "md5", "sha256", "mask", "redact", "pii_mask", "anonymize", "encrypt",
     "hash_pii", "mask_pii",
 }
+
+
+def _skips_fingerprint(transform: str | None) -> bool:
+    """True when G8 cannot reproduce the written cell for this transform.
+
+    The engine's transform contract (``TRANSFORM_SEMANTICS``) declares
+    hash_pii (keyed HMAC), mask_pii and redact deterministic, and G8 already
+    replays the real write-path ``apply_transform`` — skipping them left PII
+    columns unfingerprinted and labelled them non-deterministic (D15). Names
+    the engine does not know keep the legacy one-way list.
+    """
+    if not transform:
+        return False
+    t = str(transform).lower().strip()
+    try:
+        from services.transform_engine import (
+            TRANSFORM_SEMANTICS,
+            normalize_engine_transform,
+        )
+    except Exception:
+        return t in _NON_DETERMINISTIC
+    name = normalize_engine_transform(t)
+    if name is None:
+        return t in _NON_DETERMINISTIC
+    meta = TRANSFORM_SEMANTICS.get(name) or next(
+        (m for key, m in TRANSFORM_SEMANTICS.items() if key.endswith(":") and name.startswith(key)),
+        None,
+    )
+    return bool(meta) and meta.get("deterministic") is False
 
 
 def _continue_policy_disposition(mapping: Any) -> str:
@@ -2931,7 +2962,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
     nondeterministic = [
         m.target
         for m in ctx.plan.mappings
-        if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC
+        if _skips_fingerprint(m.transform)
     ]
     dest_by_name = {
         str(c.name or "").lower(): c
@@ -2973,7 +3004,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 continue
             if _risk_cleared(probe) or _mapping_contract_present(probe):
                 continue
-            if probe.transform and str(probe.transform).lower().strip() in _NON_DETERMINISTIC:
+            if _skips_fingerprint(probe.transform):
                 continue
             ok_cells = 0
             cast_bad = 0
@@ -3012,7 +3043,7 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
                 continue
             raw = _row_cell(row, m.source, "")
             raw_s = _serialize_for_write(raw)
-            if m.transform and str(m.transform).lower().strip() in _NON_DETERMINISTIC:
+            if _skips_fingerprint(m.transform):
                 mapped[m.target] = None
                 continue
             transformed, err = _apply_write_path_transform(raw_s, m.transform)
