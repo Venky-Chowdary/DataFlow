@@ -570,6 +570,12 @@ def run_integrity_audit(
     # 2. Per-column checks
     null_spike_threshold = 0.90
     low_cardinality_threshold = 0.01
+    # A stored '' is a value a NOT NULL column accepts — except where the
+    # destination itself stores '' as NULL (Oracle VARCHAR2), so there it is a
+    # required-null violation the write would hit anyway.
+    from services.reconciliation import destination_empty_string_is_null
+
+    empty_is_null = destination_empty_string_is_null(dest_kind)
 
     for h in headers:
         idx = header_index[h]
@@ -594,9 +600,17 @@ def run_integrity_audit(
         is_required = target.lower() in required_targets or _is_required_target(target)
 
         # Required nulls (hard)
-        if is_required and null_rate > 0.0:
+        null_cells = total - len(non_null)
+        empty_cells = sum(1 for v in non_null if v == "") if empty_is_null else 0
+        if is_required and (null_cells or empty_cells):
+            stored_as_null = (
+                f" ({empty_cells} empty strings the destination stores as NULL)"
+                if empty_cells
+                else ""
+            )
             _hard(
-                f"Required column '{h}' (target '{target}') has {int(null_rate * total)} null/empty values"
+                f"Required column '{h}' (target '{target}') has "
+                f"{null_cells + empty_cells} null/empty values{stored_as_null}"
             )
         else:
             report.checks_passed += 1

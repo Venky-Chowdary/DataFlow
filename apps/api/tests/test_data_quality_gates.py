@@ -11,6 +11,7 @@ if str(_API_ROOT) not in sys.path:
     sys.path.insert(0, str(_API_ROOT))
 
 from services.data_quality import run_integrity_audit  # noqa: E402
+from services.value_serializer import SQL_NULL_SENTINEL  # noqa: E402
 
 
 def test_duplicate_primary_key_is_blocked():
@@ -29,7 +30,7 @@ def test_required_column_null_is_blocked():
     headers = ["id", "email"]
     rows = [
         ["1", "alice@example.com"],
-        ["2", ""],  # required target 'email' cannot be null
+        ["2", SQL_NULL_SENTINEL],  # required target 'email' cannot be null
     ]
     report = run_integrity_audit(headers, rows, required_targets=["email"])
     assert not report.passed
@@ -84,7 +85,7 @@ def test_maximum_mode_turns_warnings_into_blockers():
 
 def test_null_rate_spike_warns():
     headers = ["id", "amount"]
-    rows = [[str(i), "" if i < 9 else str(i)] for i in range(10)]
+    rows = [[str(i), SQL_NULL_SENTINEL if i < 9 else str(i)] for i in range(10)]
     report = run_integrity_audit(headers, rows, validation_mode="strict")
     assert report.passed
     assert any("null" in warning.lower() for warning in report.warnings)

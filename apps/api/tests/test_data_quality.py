@@ -16,6 +16,7 @@ from services.data_quality import (  # noqa: E402
     _to_decimal,
     run_integrity_audit,
 )
+from services.value_serializer import SQL_NULL_SENTINEL  # noqa: E402
 
 
 def test_detects_duplicate_primary_keys():
@@ -151,12 +152,32 @@ def test_never_falls_back_to_first_header_as_pk():
 def test_detects_required_nulls():
     report = run_integrity_audit(
         headers=["id", "email"],
-        rows=[["1", "a@b.com"], ["2", ""]],
+        rows=[["1", "a@b.com"], ["2", SQL_NULL_SENTINEL]],
         column_types={"id": "INTEGER", "email": "STRING"},
         required_targets=["email"],
     )
     assert not report.passed
     assert "email" in report.issues[0]
+
+
+def test_required_empty_string_is_a_value_except_where_destination_stores_null():
+    """A stored '' satisfies NOT NULL on Postgres/MySQL/SQLite/SQL Server;
+    Oracle stores '' as NULL, so there it is a required-null violation."""
+    rows = [["1", "a@b.com"], ["2", ""]]
+    kept = run_integrity_audit(
+        headers=["id", "email"], rows=rows,
+        column_types={"id": "INTEGER", "email": "STRING"},
+        required_targets=["email"], dest_kind="postgresql",
+    )
+    assert not any("Required column 'email'" in i for i in kept.issues), kept.issues
+
+    oracle = run_integrity_audit(
+        headers=["id", "email"], rows=rows,
+        column_types={"id": "INTEGER", "email": "STRING"},
+        required_targets=["email"], dest_kind="oracle",
+    )
+    assert not oracle.passed
+    assert any("Required column 'email'" in i and "empty strings" in i for i in oracle.issues)
 
 
 def test_parses_locale_and_currency_as_decimals():
