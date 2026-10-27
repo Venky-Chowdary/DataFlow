@@ -3411,6 +3411,47 @@ def run_file_preflight(
             }
         )
 
+    # D40: a numeric cast written into a text column re-spells the value —
+    # '00042' lands as '42' — although the text column could hold the original.
+    # Name the sampled values it rewrites; the operator may want it, so warn.
+    from services.transform_engine import apply_transform
+    from services.type_system import normalize_logical_type
+    from services.value_serializer import is_reader_null_cell
+
+    rewritten: list[dict[str, Any]] = []
+    for pm in plan_mappings:
+        if pm.transform not in {"integer", "decimal"}:
+            continue
+        if normalize_logical_type(pm.target_type) not in {"string", "text"}:
+            continue
+        examples: list[str] = []
+        for row in sample_rows or []:
+            cell = row.get(pm.source)
+            if is_reader_null_cell(cell):
+                continue
+            before = wire_cell_text(cell)
+            after, err = apply_transform(before, pm.transform)
+            if err is None and after is not None and str(after) != before.strip():
+                examples.append(f"'{before}' → '{after}'")
+                if len(examples) >= 3:
+                    break
+        if examples:
+            rewritten.append({"column": pm.source, "transform": pm.transform, "examples": examples})
+    if rewritten:
+        out.setdefault("warnings", []).append(
+            {
+                "id": "numeric_cast_into_text",
+                "message": "; ".join(
+                    f"{r['column']}: {r['transform']} cast into a text column rewrites "
+                    f"{', '.join(r['examples'])}"
+                    for r in rewritten[:6]
+                )
+                + ". Leading zeros and formatting are lost. Remove the cast to keep "
+                "the source text, or keep it if the normalised number is intended.",
+                "details": {"columns": rewritten},
+            }
+        )
+
     # One cast type for the plan column and the transform that will run.
     # A live INTEGER and a DECIMAL stamp used to both appear (R14).
     out["plan"] = {
