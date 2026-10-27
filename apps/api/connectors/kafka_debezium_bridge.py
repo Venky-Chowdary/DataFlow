@@ -107,7 +107,27 @@ def kafka_value_to_row(
     return _kafka_row({"_kafka_value": str(parsed)}, meta=meta, poison="non-JSON Kafka message")
 
 
-_KAFKA_META_COLS = ("_kafka_topic", "_kafka_partition", "_kafka_offset", "_kafka_key")
+#: Broker provenance every consumed row carries, with its declared type. The
+#: set and the types are fixed, not sampled: the plan and the run must show
+#: the same columns whether or not the sampled messages had a key, and a key
+#: is text even when it looks like a number (D151).
+KAFKA_ENVELOPE_TYPES = {
+    "_kafka_topic": "VARCHAR",
+    "_kafka_partition": "INTEGER",
+    "_kafka_offset": "BIGINT",
+    "_kafka_key": "VARCHAR",
+}
+
+
+def kafka_message_meta(msg: Any) -> dict[str, Any]:
+    """Broker coordinates of one consumed message, for :func:`kafka_value_to_row`."""
+    key = msg.key
+    return {
+        "topic": msg.topic,
+        "partition": int(msg.partition),
+        "offset": int(msg.offset),
+        "key": key.decode("utf-8", "replace") if isinstance(key, (bytes, bytearray)) else key,
+    }
 
 
 def _kafka_row(
@@ -128,7 +148,9 @@ def _kafka_row(
         ("offset", "_kafka_offset"),
         ("key", "_kafka_key"),
     ):
-        if meta.get(_k) is not None:
+        # A message without a key still has the column (NULL): the row shape
+        # must not depend on whether the producer set one.
+        if _k in meta:
             row[_col] = meta[_k]
     if poison:
         row["_kafka_poison"] = poison
@@ -287,16 +309,7 @@ class KafkaDebeziumConsumer:
                 row = kafka_value_to_row(
                     msg.value,
                     registry_url=registry_url,
-                    meta={
-                        "topic": msg.topic,
-                        "partition": int(msg.partition),
-                        "offset": int(msg.offset),
-                        "key": (
-                            msg.key.decode("utf-8", "replace")
-                            if isinstance(msg.key, (bytes, bytearray))
-                            else msg.key
-                        ),
-                    },
+                    meta=kafka_message_meta(msg),
                 )
                 if row:
                     yield row

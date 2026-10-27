@@ -34,6 +34,8 @@ def test_valid_json_row_still_decodes_and_carries_coordinates():
         "_kafka_topic": "t",
         "_kafka_partition": 0,
         "_kafka_offset": 9,
+        # D151: an unkeyed message still carries the key column, as NULL.
+        "_kafka_key": None,
     }
     assert "_kafka_poison" not in row
 

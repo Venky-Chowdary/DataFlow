@@ -21,7 +21,7 @@ from typing import Any
 
 from connectors.base import ReadBatch
 from connectors.header_union import union_attribute_keys
-from connectors.kafka_debezium_bridge import KafkaDebeziumConsumer
+from connectors.kafka_debezium_bridge import KAFKA_ENVELOPE_TYPES, KafkaDebeziumConsumer
 
 _api_root = Path(__file__).resolve().parents[1]
 
@@ -312,6 +312,11 @@ def _records_to_batch(
                     native_types[key] = "DECIMAL" if "DECIMAL" in {prev, logical} else "FLOAT"
                 elif prev != logical:
                     native_types[key] = "TEXT"
+        native_types.update(
+            (col, logical)
+            for col, logical in KAFKA_ENVELOPE_TYPES.items()
+            if col in headers
+        )
         batch.meta = {"native_types": native_types}
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
@@ -340,7 +345,7 @@ def sample_topic_batch(
     except ImportError as exc:
         raise ImportError("kafka-python is required to sample a Kafka topic") from exc
 
-    from connectors.kafka_debezium_bridge import kafka_value_to_row
+    from connectors.kafka_debezium_bridge import kafka_message_meta, kafka_value_to_row
 
     registry_url = str(
         cfg.get("schema_registry_url") or cfg.get("registry_url") or ""
@@ -385,7 +390,11 @@ def sample_topic_batch(
             polled = consumer.poll(timeout_ms=800, max_records=window) or {}
             for messages in polled.values():
                 for msg in messages:
-                    row = kafka_value_to_row(msg.value, registry_url=registry_url)
+                    # Same envelope as the transfer consumer, so the plan
+                    # built from this sample shows every column the run emits.
+                    row = kafka_value_to_row(
+                        msg.value, registry_url=registry_url, meta=kafka_message_meta(msg)
+                    )
                     if not row:
                         continue
                     records.append(row)
@@ -428,6 +437,9 @@ def infer_topic_schema(
                 doc = fetch_latest_subject_schema(registry, subject)
                 schema_map = schema_map_from_registry_doc(doc)
                 if schema_map:
+                    # The registry describes the value only; the reader also
+                    # emits the broker envelope, which the plan must show.
+                    schema_map = {**schema_map, **KAFKA_ENVELOPE_TYPES}
                     return (
                         schema_map,
                         dict(schema_map),

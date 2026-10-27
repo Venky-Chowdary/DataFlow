@@ -35,6 +35,9 @@ class _Message:
         self.offset = offset
         self.topic = "orders"
         self.partition = 0
+        # A real ConsumerRecord always has a key (None when unkeyed); the
+        # sample now carries it as ``_kafka_key`` like the transfer read (D151).
+        self.key = None
 
 
 class _Consumer:
@@ -116,8 +119,14 @@ def test_sample_seeks_the_tail_and_does_not_join_the_group(monkeypatch) -> None:
     assert consumer.seeks[0][1] == 7
     assert consumer.committed is False
     assert consumer.closed is True
-    assert batch.headers == ["id", "name"]
-    assert batch.rows == [["7", "ada"]]
+    # D151: the sample carries the same broker envelope the transfer read
+    # emits, so a plan built from it shows every column the run produces.
+    assert batch.headers == [
+        "id", "name", "_kafka_topic", "_kafka_partition", "_kafka_offset", "_kafka_key",
+    ]
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    assert batch.rows == [["7", "ada", "orders", "0", "7", SQL_NULL_SENTINEL]]
     assert batch.meta["native_types"]["id"] == "INTEGER"
 
 
