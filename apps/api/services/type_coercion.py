@@ -2,6 +2,7 @@ from __future__ import annotations
 from typing import Any, Mapping
 
 from services import type_system as _ts
+from services.dest_dialect_facts import dest_has_no_uuid_type
 from services.document_instant import document_instant_wire_preserved
 from services.type_system import (
     LOGICAL_ARRAY,
@@ -605,13 +606,22 @@ def assess_create_new_type_risk(
     ):
         # Exact CHAR/VARCHAR(36) wire preserves values but invents no UUID type —
         # Accept risk so Map never looks UUID→UUID while CREATE emits string DDL.
+        # An engine with no UUID type at all leaves the operator nothing to
+        # remap to, so there the chip is stated, not held (D72).
+        typeless = dest_has_no_uuid_type(db)
         risks.append({
-            "kind": "uuid_domain",
+            "kind": "uuid_carrier_equivalent" if typeless else "uuid_domain",
             "severity": "warn",
             "message": (
                 f"Create-new stores UUID as {tgt}"
                 + (f" on {db}" if db else "")
-                + " — exact 36-char wire; UUID domain is not enforced at destination."
+                + (
+                    " — the engine has no UUID type, so this exact 36-char wire is "
+                    "its strictest carrier; values round-trip exactly but the UUID "
+                    "domain is not enforced."
+                    if typeless
+                    else " — exact 36-char wire; UUID domain is not enforced at destination."
+                )
             ),
         })
     if objectid_would_collapse(src, tgt):

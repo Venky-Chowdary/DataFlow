@@ -215,6 +215,17 @@ def dest_char_is_unpadded(db_type: str | None) -> bool:
     return _normalize_dest_db(db_type) in _UNPADDED_CHAR_ENGINES
 
 
+# Engines verified to have no UUID type (nor a typed binary UUID form) for
+# any column to declare: the exact 36-char text wire is the strictest UUID
+# carrier they can spell. Add an engine only with a test that pins it.
+_UUID_TYPELESS_ENGINES = frozenset({"snowflake"})
+
+
+def dest_has_no_uuid_type(db_type: str | None) -> bool:
+    """True when no carrier on the engine can enforce a UUID domain."""
+    return _normalize_dest_db(db_type) in _UUID_TYPELESS_ENGINES
+
+
 def _collation_compatible_with_dest(db: str, collation: str) -> bool:
     """Refuse cross-engine invent (MySQL utf8mb4_* on PG, etc.)."""
     coll = (collation or "").strip()
