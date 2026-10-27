@@ -97,23 +97,24 @@ def create_pending_job(engine: Any, request: Any) -> str:
             engine_module.logger, request_fields
         )
         raise engine_module.DuplicateTransferSubmission(claim)
+    held = [c for c in (claim,) if c is not None]
+    dest_claim = engine._claim_destination(request, job_doc)
+    if dest_claim is not None and dest_claim.duplicate:
+        _release_pending(mongo, engine_module, held)
+        engine_module.lifecycle_events.emit_job_requested_skipped(
+            engine_module.logger, request_fields
+        )
+        raise engine_module.DestinationBusy(dest_claim, dest_label)
+    if dest_claim is not None:
+        held.append(dest_claim)
 
     try:
         job_id = mongo.create_transfer_job(job_doc)
     except Exception:
-        if claim is not None:
-            try:
-                release = getattr(mongo, "release_job_idempotency", None)
-                if callable(release):
-                    release(claim.key, engine_module._PENDING_CLAIM_ID)
-            except Exception as release_exc:
-                engine_module.logger.debug(
-                    "idempotency release after create failure skipped: %s",
-                    release_exc,
-                )
+        _release_pending(mongo, engine_module, held)
         raise
-    if claim is not None:
-        engine._bind_idempotency_claim(claim.key, job_id)
+    for held_claim in held:
+        engine._bind_idempotency_claim(held_claim.key, job_id)
     try:
         from services.connector_store import mark_used
 
@@ -129,3 +130,18 @@ def create_pending_job(engine: Any, request: Any) -> str:
         request_fields,
     )
     return job_id
+
+
+def _release_pending(mongo: Any, engine_module: Any, claims: list[Any]) -> None:
+    """Free claims still held by the placeholder id — no job was created."""
+    release = getattr(mongo, "release_job_idempotency", None)
+    if not callable(release):
+        return
+    for claim in claims:
+        try:
+            release(claim.key, engine_module._PENDING_CLAIM_ID)
+        except Exception as release_exc:
+            engine_module.logger.debug(
+                "idempotency release after create failure skipped: %s",
+                release_exc,
+            )

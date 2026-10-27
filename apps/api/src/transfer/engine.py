@@ -1462,6 +1462,24 @@ class DuplicateTransferSubmission(Exception):
         )
 
 
+class DestinationBusy(DuplicateTransferSubmission):
+    """Another live job is already writing this destination object (D36).
+
+    A subclass so every submit path answers it as the same 409 conflict that
+    names the job holding the write.
+    """
+
+    def __init__(self, claim: Any, destination: str) -> None:
+        super().__init__(claim)
+        self.args = (
+            f"Destination {destination!r} is already being written by job "
+            f"{self.existing_job_id or '(unknown)'} "
+            f"({self.existing_status or 'in progress'}). Two jobs writing one "
+            "table interleave their rows — one writer at a time. Wait for that "
+            "job to finish or cancel it, then run this transfer.",
+        )
+
+
 def _job_destination_name(dest_summary: dict[str, Any], destination: Any) -> str:
     """The object a run wrote, as the job record names it.
 
@@ -5779,13 +5797,38 @@ class UniversalTransferEngine:
             key=explicit or request_fingerprint(request),
         )
 
+    def _destination_claim_key(self, request: TransferRequest) -> str:
+        """Claim key for the destination object, or '' when not claimable."""
+        if not self._idempotency_key(request):
+            return ""
+        from services.job_idempotency import claim_key, destination_fingerprint
+
+        dest = destination_fingerprint(request)
+        if not dest:
+            return ""
+        return claim_key(workspace_id=request.workspace_id or "", key=dest)
+
     def _claim_idempotency(
         self, request: TransferRequest, job_doc: dict[str, Any]
     ) -> Any | None:
         """Reserve this transfer's slot. Returns the claim, or None if unavailable."""
+        return self._claim_slot(
+            self._idempotency_key(request), job_doc, field="idempotency_key"
+        )
+
+    def _claim_destination(
+        self, request: TransferRequest, job_doc: dict[str, Any]
+    ) -> Any | None:
+        """Reserve the destination object for this job (D36: one writer at a time)."""
+        return self._claim_slot(
+            self._destination_claim_key(request), job_doc, field="destination_claim_key"
+        )
+
+    def _claim_slot(
+        self, key: str, job_doc: dict[str, Any], *, field: str
+    ) -> Any | None:
         from services.job_idempotency import JobClaim
 
-        key = self._idempotency_key(request)
         if not key:
             return None
         mongo = get_mongodb_service()
@@ -5801,7 +5844,7 @@ class UniversalTransferEngine:
             # run the transfer rather than refusing all work.
             logger.warning("idempotency claim unavailable: %s", exc)
             return None
-        job_doc["idempotency_key"] = key
+        job_doc[field] = key
         created_at = ""
         if not acquired and existing_id and existing_id != _PENDING_CLAIM_ID:
             try:
@@ -5848,12 +5891,13 @@ class UniversalTransferEngine:
         mongo = get_mongodb_service()
         try:
             job = mongo.get_job(job_id) or {}
-            key = str(job.get("idempotency_key") or "")
-            if not key:
-                return
             release = getattr(mongo, "release_job_idempotency", None)
-            if callable(release):
-                release(key, job_id)
+            if not callable(release):
+                return
+            for field in ("idempotency_key", "destination_claim_key"):
+                key = str(job.get(field) or "")
+                if key:
+                    release(key, job_id)
         except Exception as exc:
             logger.debug("idempotency release skipped for %s: %s", job_id, exc)
 

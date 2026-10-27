@@ -43,6 +43,7 @@ __all__ = [
     "JobClaim",
     "claim_key",
     "claim_still_blocks",
+    "destination_fingerprint",
     "normalize_client_key",
     "request_fingerprint",
 ]
@@ -178,6 +179,34 @@ def request_fingerprint(request: Any) -> str:
 
     encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str)
     return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+
+
+def destination_fingerprint(request: Any) -> str:
+    """Fingerprint of the destination object a transfer writes, or ``""``.
+
+    The request fingerprint only catches a resubmit of the same transfer. Two
+    *different* one-shot jobs writing one table still ran together and left it
+    an interleaving of both (D36) — the one-destination-one-writer rule D104
+    enforces between pipelines. Claimed in the same claim store, this key holds
+    that rule for every job. What is read, and with which login, is not part of
+    it: the same table reached two ways is still one table.
+    """
+    identity = _endpoint_identity(getattr(request, "destination", None))
+    identity.pop("credential_digest", None)
+    identity.pop("connector_id", None)
+    obj = next(
+        (identity.get(f) for f in ("table", "collection", "index", "topic", "path") if identity.get(f)),
+        "",
+    )
+    if not obj:
+        return ""
+    # Snowflake folds unquoted names, so ``orders`` and ``ORDERS`` are one table
+    # (the same fold :func:`schedule_store.conflicting_dest_writers` applies).
+    for field in ("table", "collection"):
+        if identity.get(field):
+            identity[field] = identity[field].casefold()
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return "dest:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
 def claim_key(*, workspace_id: str, key: str) -> str:

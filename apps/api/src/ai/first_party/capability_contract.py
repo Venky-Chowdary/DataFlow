@@ -611,7 +611,12 @@ def full_refresh_modes_are_canonical() -> bool:
 
 
 def destination_table_lock_claimed() -> bool:
-    return False
+    """Job submit claims the destination object — job_idempotency (D36)."""
+    try:
+        from services.job_idempotency import destination_fingerprint
+    except Exception:
+        return False
+    return callable(destination_fingerprint)
 
 
 def transfer_workers_default() -> int:
@@ -1029,7 +1034,19 @@ def parallel_transfers_card() -> CapabilityCard:
 
 def two_jobs_same_table_card() -> CapabilityCard | None:
     if destination_table_lock_claimed():
-        return None
+        return CapabilityCard(
+            title="What happens if two jobs write the same table",
+            text=(
+                "Two jobs cannot write the same destination table at once; "
+                "Datawrap takes an exclusive destination lock per table. A job "
+                "submitted while another live job holds it is refused (409), "
+                "naming the job holding the write. The lock frees "
+                "when that job finishes, fails or is cancelled. Different "
+                "tables on one destination run concurrently."
+            ),
+            source_module="services/job_idempotency.py · destination_fingerprint",
+            category="transfer",
+        )
     return CapabilityCard(
         title="What happens if two jobs write the same table",
         text=(
