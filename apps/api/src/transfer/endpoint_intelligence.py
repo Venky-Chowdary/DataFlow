@@ -731,6 +731,11 @@ def _introspect_endpoint_impl(
             username=cfg.get("username", ""), password=cfg.get("password", ""),
             schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            # The table is the object, not the database field (often the
+            # region). Probing database-only refused every destination whose
+            # table sat in ``table`` — existence unknown, every column a
+            # "collapse" (D139). The sample branch already prefers it.
+            table=endpoint.table or endpoint.collection or "",
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "table"} for t in probe.tables]
