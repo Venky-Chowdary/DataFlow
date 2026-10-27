@@ -19,7 +19,7 @@ import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
 import { EMPTY_JOB_HISTORY, type JobHistory } from "./lib/jobHistory";
 import { clearSession, readSession, writeSession } from "./lib/session";
-import { WORKSPACE_CHANGED_EVENT, clearActiveWorkspaceId, getActiveWorkspaceId } from "./lib/workspace";
+import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId } from "./lib/workspace";
 import { WORKSPACE_HYDRATE_FALLBACK_MS, isStaleGeneration } from "./lib/workspaceHydrate";
 import { loadSidebarNavCompact, saveSidebarNavCompact } from "./lib/pilotChatStore";
 import { useTheme } from "./lib/useTheme";
@@ -1139,7 +1139,6 @@ function DataTransferAppInner() {
 
   const signOut = () => {
     clearSession();
-    clearActiveWorkspaceId();
     setUserEmail("");
     setEntryScreen("dashboard");
     setPublicRoute("home");

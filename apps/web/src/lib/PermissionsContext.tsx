@@ -1,8 +1,13 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { ApiError, fetchEffectiveIdentity, fetchWorkspaces, type EffectiveIdentity } from "./api";
 import { refusalSentence } from "./permissionCopy";
-import { WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "./workspace";
+import {
+  WORKSPACE_CHANGED_EVENT,
+  clearActiveWorkspaceId,
+  getActiveWorkspaceId,
+  setActiveWorkspaceId,
+} from "./workspace";
 
 /**
  * The authority the API stated, so a control can refuse before it is pressed.
@@ -59,14 +64,29 @@ export function PermissionsProvider({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  // Whether this sign-in already checked the stored workspace id.
+  const workspaceValidated = useRef(false);
+
   const refresh = useCallback(async () => {
     if (!signedIn) {
+      workspaceValidated.current = false;
       setIdentity(null);
       setError("");
       return;
     }
     setLoading(true);
     try {
+      if (!workspaceValidated.current) {
+        workspaceValidated.current = true;
+        // A stored id the account is not a member of (left over from another
+        // account, or a workspace it was removed from) must not be sent as
+        // X-Workspace-Id — the API would refuse every read (D154).
+        const stored = getActiveWorkspaceId();
+        if (stored) {
+          const listed = await fetchWorkspaces().catch(() => null);
+          if (listed && !listed.workspaces.some((w) => w.id === stored)) clearActiveWorkspaceId();
+        }
+      }
       const next = await fetchEffectiveIdentity();
       setIdentity(next);
       setError("");

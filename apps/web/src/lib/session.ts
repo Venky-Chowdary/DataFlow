@@ -1,3 +1,5 @@
+import { clearActiveWorkspaceId } from "./workspace";
+
 export interface WorkspaceSession {
   email: string;
   name: string;
@@ -50,6 +52,12 @@ export function readSession(): WorkspaceSession | null {
 }
 
 export function writeSession(session: WorkspaceSession, remember: boolean) {
+  // Another account signing in on this browser must not inherit the previous
+  // account's workspace id: it would be sent as X-Workspace-Id (D154).
+  const previous = readSession();
+  if (!previous || previous.email.trim().toLowerCase() !== session.email.trim().toLowerCase()) {
+    clearActiveWorkspaceId();
+  }
   const raw = JSON.stringify(session);
   try {
     if (remember) {
@@ -64,6 +72,10 @@ export function writeSession(session: WorkspaceSession, remember: boolean) {
   }
 }
 
+/**
+ * End the session — sign-out, a 401, or expiry. The active workspace id goes
+ * with it, so the next account in this browser never sends it (D154).
+ */
 export function clearSession() {
   try {
     localStorage.removeItem(SESSION_KEY);
@@ -71,6 +83,7 @@ export function clearSession() {
   } catch {
     /* ignore */
   }
+  clearActiveWorkspaceId();
 }
 
 /**
