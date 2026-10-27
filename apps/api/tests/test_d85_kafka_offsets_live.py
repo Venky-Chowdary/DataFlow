@@ -42,7 +42,7 @@ def topic():
     admin = kafka_admin(_BROKER)
     try:
         admin.delete_topics([name])
-        admin.delete_consumer_groups([f"g_{name}"])
+        admin.delete_groups([f"g_{name}"])
     except Exception:
         pass
     finally:

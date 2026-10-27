@@ -1094,6 +1094,30 @@ def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
         )
 
 
+def _stamp_kafka_route_group(request: Any) -> None:
+    """D84 — a Kafka source without a configured group reads under its route's.
+
+    Stamped once on the resolved source endpoint, so the peek, the stream and
+    the accept-time commit all name the same group, and two pipelines on one
+    connector never share (and rebalance) one group (D87).
+    """
+    from connectors.kafka_reader import (
+        KAFKA_ROUTE_GROUP_KEY,
+        configured_kafka_group_id,
+        kafka_route_group_id,
+    )
+    from services.copy_kafka_common import kafka_family_name
+
+    source = request.source
+    if kafka_family_name(str(source.format or "")) != "kafka":
+        return
+    extra = dict(source.extra or {})
+    if configured_kafka_group_id(extra):
+        return
+    extra[KAFKA_ROUTE_GROUP_KEY] = kafka_route_group_id(source, request.destination)
+    source.extra = extra
+
+
 def _commit_kafka_offsets_on_accept(request: Any, dest_summary: dict) -> None:
     """D85 — commit Kafka consumer-group offsets once, only on acceptance.
 
@@ -1616,6 +1640,7 @@ class UniversalTransferEngine:
         # Resolve first: a connector_id reference carries the engine id that
         # create-new invention needs, and an inline format may be empty.
         self._resolve_saved_connectors(request)
+        _stamp_kafka_route_group(request)
         from connectors.sql_identifiers import unsafe_destination_identifier_reason
 
         ident_err = unsafe_destination_identifier_reason(

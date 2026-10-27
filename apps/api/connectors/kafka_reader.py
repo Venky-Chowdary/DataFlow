@@ -12,10 +12,12 @@ Crash mid-write redelivers — at-least-once.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import re
 import time
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -105,6 +107,51 @@ def _bootstrap(cfg: dict[str, Any]) -> str:
     return f"{host}:{port}"
 
 
+#: Endpoint extra the engine stamps with the route's derived consumer group.
+KAFKA_ROUTE_GROUP_KEY = "kafka_route_group_id"
+
+
+def configured_kafka_group_id(cfg: dict[str, Any]) -> str:
+    """The consumer group a Kafka source reads and commits under (D84).
+
+    The connector's (or endpoint's) explicit ``group_id`` wins; otherwise the
+    group the engine derived for this route. Empty when neither is set. There
+    is deliberately no shared default and no username fallback: every
+    connector without one used to share "dataflow-kafka-source", so pipelines
+    rebalanced each other and committed over each other's position.
+    """
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    for key in ("group_id", KAFKA_ROUTE_GROUP_KEY):
+        value = str(cfg.get(key) or extra.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
+def kafka_route_group_id(source: Any, destination: Any) -> str:
+    """A stable consumer group per route: source endpoint + topic → destination."""
+    from services.sync_cursor import build_cursor_key, route_endpoint_identity
+
+    route = build_cursor_key(
+        source_type="kafka",
+        source_database=route_endpoint_identity(source),
+        source_object=str(
+            getattr(source, "table", "")
+            or getattr(source, "database", "")
+            or getattr(source, "collection", "")
+            or ""
+        ),
+        dest_type=str(getattr(destination, "format", "") or ""),
+        dest_database=str(getattr(destination, "database", "") or ""),
+        dest_object=str(
+            getattr(destination, "table", "") or getattr(destination, "collection", "") or ""
+        ),
+        stream_name="kafka",
+        dest_identity=route_endpoint_identity(destination),
+    )
+    return "dataflow-kafka-" + hashlib.sha256(route.encode("utf-8")).hexdigest()[:16]
+
+
 def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> None:
     """Commit previously applied offsets (call after durable checkpoint).
 
@@ -120,13 +167,9 @@ def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> 
     pending = cursor.get("pending_offsets") or cursor.get("offsets")
     if not pending:
         return
-    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    group_id = str(
-        cursor.get("group_id")
-        or cfg.get("group_id")
-        or extra.get("group_id")
-        or "dataflow-kafka-source"
-    )
+    group_id = str(cursor.get("group_id") or configured_kafka_group_id(cfg)).strip()
+    if not group_id:
+        raise ValueError("Kafka offset commit needs the consumer group the run read under")
     try:
         from kafka import KafkaConsumer, OffsetAndMetadata, TopicPartition
     except ImportError as exc:
@@ -193,11 +236,13 @@ def read_topic_batch(
     if not topic_name:
         raise ValueError("Kafka source topic name required")
 
+    # Not configured and not a transfer run (a preview or Validate sample):
+    # a group of its own, which never commits, so it cannot rebalance a
+    # running pipeline's consumer away from its partitions (D87).
     group_id = str(
         (kafka_cursor or {}).get("group_id")
-        or cfg.get("group_id")
-        or cfg.get("username")
-        or "dataflow-kafka-source"
+        or configured_kafka_group_id(cfg)
+        or f"dataflow-kafka-probe-{uuid.uuid4().hex[:12]}"
     )
     # Durable commits happen only once the job is accepted (engine
     # _commit_kafka_offsets_on_accept). Never commit prior pending offsets

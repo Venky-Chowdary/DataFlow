@@ -68,6 +68,8 @@ class ConnectorSaveDTO(BaseModel):
     # SQL Server (generic_sql/ODBC): operator-declared skip of chain
     # verification for self-signed / private-CA servers. None = unchanged.
     trust_server_certificate: bool | None = None
+    # Kafka source consumer group (D84). Empty = a group per route.
+    group_id: str = ""
     # Optional: persist an in-form Test result so the list matches on first save.
     last_test_ok: bool | None = None
 

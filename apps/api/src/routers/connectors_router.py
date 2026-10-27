@@ -117,6 +117,10 @@ class ConnectorConfig(BaseModel):
     auth_source: Optional[str] = None
     private_key: Optional[str] = Field(default=None, description="PEM private key (Snowflake key-pair / SFTP)")
     role: Optional[str] = Field(default="both", description="Connector role: source | destination | both")
+    group_id: Optional[str] = Field(
+        default=None,
+        description="Kafka source consumer group (empty: a group per pipeline route)",
+    )
 
     @model_validator(mode="after")
     def _request_bounds(self) -> "ConnectorConfig":
@@ -353,6 +357,7 @@ async def create_connector(
         "endpoint_url": config.endpoint_url,
         "path_style": config.path_style,
         "options": config.options,
+        "group_id": config.group_id,
         "workspace_id": workspace_id,
         "status": "configured",
     }

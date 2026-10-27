@@ -261,8 +261,9 @@ _SFTP_TRUST_KEYS = ("host_key", "known_hosts", "host_key_policy")
 
 #: Other connector options saved under ``extra`` — SQL Server's operator-
 #: declared ``trust_server_certificate`` (generic_sql merges ``extra`` into the
-#: driver cfg for connection_options).
-_EXTRA_LIFT_KEYS = _SFTP_TRUST_KEYS + ("trust_server_certificate",)
+#: driver cfg for connection_options) and a Kafka source's consumer
+#: ``group_id`` (D84; without one each route derives its own).
+_EXTRA_LIFT_KEYS = _SFTP_TRUST_KEYS + ("trust_server_certificate", "group_id")
 
 
 def connector_extra_from_payload(data: Mapping[str, Any] | None) -> dict[str, Any]:
