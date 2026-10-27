@@ -61,7 +61,15 @@ def _staging_endpoint(destination: EndpointConfig, job_id: str) -> EndpointConfi
 
     suffix = re.sub(r"[^a-zA-Z0-9]", "", job_id)[:16] or "stg"
     name = staging_table_name(SCD2_STAGING_PREFIX, suffix)
-    return replace(destination, table=name, collection=name)
+    # The duplicate policy governs the merge into the target, not the keyless
+    # overwrite spool. Inheriting a keyed schedule's ``upsert`` failed every
+    # scheduled mirror/SCD2 stage with "Upsert needs a business key" (D96).
+    extra = {
+        k: v
+        for k, v in (destination.extra or {}).items()
+        if k not in {"duplicate_policy", "allow_duplicates"}
+    }
+    return replace(destination, table=name, collection=name, extra=extra)
 
 
 def _reap_orphan_spools(
