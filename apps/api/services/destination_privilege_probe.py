@@ -2480,8 +2480,13 @@ def _probe_elasticsearch(
             method="security.has_privileges",
         )
 
+    # elasticsearch-py 8 returns an ``ObjectApiResponse``, not a dict. Reading
+    # only dicts discarded every grant, so even the ``elastic`` superuser
+    # "lacked create_index on 'elasticsearch'" (D138) — the engine name stood
+    # in for the index the probe was about.
+    body = getattr(resp, "body", resp)
     can_write, can_create = evaluate_elasticsearch_privileges(
-        resp if isinstance(resp, dict) else {},
+        body if isinstance(body, dict) else {},
         index=index,
         table_exists=bool(exists),
     )
@@ -2491,7 +2496,7 @@ def _probe_elasticsearch(
         can_create=can_create,
         table_exists=bool(exists),
         table=index,
-        schema="elasticsearch",
+        schema="",
         need_update=False,
         method="security.has_privileges",
         write_action="index/write",
@@ -2505,13 +2510,27 @@ def evaluate_elasticsearch_privileges(
     index: str,
     table_exists: bool,
 ) -> tuple[bool, bool]:
-    """Parse has_privileges response → (can_write, can_create). Public for tests."""
+    """Parse has_privileges response → (can_write, can_create). Public for tests.
+
+    The API answers ``"index": {"<name>": {"<privilege>": bool}}``; only the
+    entry for the probed index counts. A list of ``{"index", "privileges"}``
+    entries is also read.
+    """
     if response.get("has_all_requested") is True:
         return True, True
 
     can_write = False
     can_create = False
-    for entry in response.get("index") or []:
+    per_index = response.get("index") or {}
+    if isinstance(per_index, dict):
+        entries = [
+            {"index": name, "privileges": privs}
+            for name, privs in per_index.items()
+            if not index or str(name) == index
+        ]
+    else:
+        entries = list(per_index)
+    for entry in entries:
         if not isinstance(entry, dict):
             continue
         privs = entry.get("privileges") or {}
