@@ -68,6 +68,10 @@ def _zwsp(s: str) -> str:
     return s.replace("|Z|", "\u200b")
 
 
+def _nul(s: str) -> str:
+    return s.replace("|C|", "\x00")
+
+
 def build_scenarios() -> list[Scenario]:
     """Generate the offline scenario catalog (target ≥2000 cells)."""
     out: list[Scenario] = []
@@ -137,11 +141,10 @@ def build_scenarios() -> list[Scenario]:
                     )
                 )
 
-    # ── 2. Encoding / format-control (U+200B) ────────────────────────────────
+    # ── 2. Encoding / format-control (U+200B) and control bytes (NUL) ───────
     for dest in all_dests:
         fam = _family(dest)
         for mode in MODES:
-            expect_enc: Expect = "warn" if mode == "balanced" else "block"
             out.append(
                 Scenario(
                     id=f"encoding.zwsp.{dest}.{mode}",
@@ -149,8 +152,20 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=fam,
                     mode=mode,
-                    expect=expect_enc,
-                    note="U+200B in description — warehouses reject; balanced softens",
+                    expect="warn",
+                    note="U+200B is valid Unicode the destination keeps — warn, never block (D69)",
+                    runner="integrity",
+                )
+            )
+            out.append(
+                Scenario(
+                    id=f"encoding.nul.{dest}.{mode}",
+                    rule_class="encoding_anomalies",
+                    dest=dest,
+                    dest_family=fam,
+                    mode=mode,
+                    expect="warn" if mode == "balanced" else "block",
+                    note="NUL control byte in description — destinations reject; balanced softens",
                     runner="integrity",
                 )
             )
@@ -667,7 +682,12 @@ def _run_integrity(sc: Scenario) -> tuple[bool, bool, list[str]]:
     if sc.rule_class == "encoding_anomalies":
         cols = ["_id", "description"] if sc.dest_family == "schemaless" else ["id", "description"]
         rows = [
-            {cols[0]: "1", "description": _zwsp("hello|Z|world")},
+            {
+                cols[0]: "1",
+                "description": (
+                    _nul("hello|C|world") if ".nul." in sc.id else _zwsp("hello|Z|world")
+                ),
+            },
             {cols[0]: "2", "description": "clean"},
         ]
         types = {c: "VARCHAR" for c in cols}
@@ -1394,6 +1414,7 @@ def test_scenario_catalog_scale_and_write_proof():
         "identity.biz_id_dup.postgresql.strict",
         "encoding.zwsp.snowflake.strict",
         "encoding.zwsp.snowflake.balanced",
+        "encoding.nul.snowflake.strict",
         "ddl.schemaless_no_sql_rules.redis.strict",
         "preflight.schemaless_drift_noise.mongodb.strict",
         "types.bit1_boolean.postgresql.strict",

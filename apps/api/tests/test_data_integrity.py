@@ -554,11 +554,12 @@ def test_integrity_audit_returns_structured_report():
 # ── Encoding / format-control characters ─────────────────────────────────────
 
 def test_encoding_blocks_strict_mode():
-    zwsp = "hello\u200bworld"
+    # A control byte blocks strict; a bare U+200B only warns (D69).
+    nul = "hello\x00world"
     report = run_integrity_audit(
         source_columns=["title"],
         mappings=[{"source": "title", "target": "title", "confidence": 0.99}],
-        sample_rows=[{"title": zwsp}],
+        sample_rows=[{"title": nul}],
         validation_mode="strict",
     )
     enc = next((c for c in report["checks"] if c["check"] == "encoding_anomalies"), None)

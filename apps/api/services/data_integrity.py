@@ -1782,18 +1782,30 @@ def _check_mapping_confidence(
     }
 
 
-def _format_control_chars(text: str) -> list[str]:
-    """Return U+XXXX codes for format/control chars that warehouses often reject."""
-    found: list[str] = []
+def _format_control_chars(text: str) -> tuple[list[str], list[str]]:
+    """U+XXXX codes of ``(control, format)`` characters in ``text``.
+
+    Controls (Cc, minus tab/newline/CR — NUL, BEL, ESC …) are rejected or
+    corrupted by destinations. Format characters (Cf — U+200B, ZWJ/ZWNJ,
+    soft hyphen, BOM, bidi marks) are valid Unicode every UTF-8 destination
+    stores verbatim; they only make visually equal text compare unequal.
+    """
+    controls: list[str] = []
+    formats: list[str] = []
     for ch in text:
         cat = unicodedata.category(ch)
-        if cat == "Cf" or (cat == "Cc" and ch not in "\t\n\r"):
-            code = f"U+{ord(ch):04X}"
-            if code not in found:
-                found.append(code)
-            if len(found) >= 6:
-                break
-    return found
+        if cat == "Cc" and ch not in "\t\n\r":
+            bucket = controls
+        elif cat == "Cf":
+            bucket = formats
+        else:
+            continue
+        code = f"U+{ord(ch):04X}"
+        if code not in bucket:
+            bucket.append(code)
+        if len(controls) + len(formats) >= 6:
+            break
+    return controls, formats
 
 
 def _check_encoding_anomalies(
@@ -1804,9 +1816,11 @@ def _check_encoding_anomalies(
 ) -> dict[str, Any]:
     """Flag replacement / format-control chars that break warehouse loads.
 
-    Strict/maximum: block at Validate. Balanced: warn + strip_controls path
-    (never silent-pass). Columns already mapped with ``strip_controls`` /
-    ``normalize_unicode`` are skipped.
+    Strict/maximum: U+FFFD and control characters block at Validate; format
+    characters alone (U+200B …) warn, because they are valid text the
+    destination keeps (D69). Balanced: every finding warns with the
+    strip_controls path (never silent-pass). Columns already mapped with
+    ``strip_controls`` / ``normalize_unicode`` are skipped.
     """
     sanitized_cols = {
         str(m.get("source") or "").lower()
@@ -1838,9 +1852,11 @@ def _check_encoding_anomalies(
                     "sample": text[:500],
                     "suggested_fix": "Re-encode the source as UTF-8, or apply strip_controls and quarantine remaining bad cells.",
                     "suggested_transform": "strip_controls",
+                    "blocking": True,
                 })
                 continue
-            bad = _format_control_chars(text)
+            controls, formats = _format_control_chars(text)
+            bad = controls + formats
             if bad:
                 findings.append({
                     "column": str(col),
@@ -1854,40 +1870,32 @@ def _check_encoding_anomalies(
                         "or quarantine affected rows — never drop silently."
                     ),
                     "suggested_transform": "strip_controls",
+                    "blocking": bool(controls),
                 })
         if len(findings) >= 12:
             break
 
     mode = (validation_mode or "strict").strip().lower()
-    # Strict/maximum: always block — control chars break Snowflake/PG/MySQL loads.
-    # Balanced: surface findings as warnings + strip_controls fix path so a single
-    # U+200B in legacy data does not hard-stop Validate; never silent-pass.
+    # Strict/maximum: U+FFFD and control chars block — they break Snowflake/PG/
+    # MySQL loads. Format characters only warn: they load and read back intact.
+    # Balanced: every finding warns + strip_controls fix path so a single bad
+    # cell in legacy data does not hard-stop Validate; never silent-pass.
     issue_payload: list[Any] = findings[:12] if findings else []
-    if mode == "balanced" and findings:
-        return {
-            "check": "encoding_anomalies",
-            "passed": True,
-            "blocks_transfer": False,
-            "issues": [],
-            "warnings": [
-                (
-                    f"{f.get('column')}: {f.get('message')} — apply strip_controls "
-                    "or quarantine before Run"
-                )
-                for f in issue_payload
-            ],
-            "values_checked": checked,
-            "affected_columns": sorted({f["column"] for f in findings}),
-            "suggested_transform": "strip_controls",
-            "encoding_findings": issue_payload,
-        }
-    blocks = bool(findings)
+    blocking = [] if mode == "balanced" else [f for f in issue_payload if f["blocking"]]
+    advisory = [f for f in issue_payload if f not in blocking]
+    blocks = bool(blocking)
     return {
         "check": "encoding_anomalies",
         "passed": not blocks,
         "blocks_transfer": blocks,
-        "issues": issue_payload,
-        "warnings": [],
+        "issues": blocking,
+        "warnings": [
+            (
+                f"{f.get('column')}: {f.get('message')} — apply strip_controls "
+                "or quarantine before Run"
+            )
+            for f in advisory
+        ],
         "values_checked": checked,
         "affected_columns": sorted({f["column"] for f in findings}),
         "suggested_transform": "strip_controls" if findings else None,
