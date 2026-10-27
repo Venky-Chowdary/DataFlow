@@ -730,7 +730,21 @@ def _collect_type_paths(
     return paths
 
 
-def _column_type_path_label(column: str, type_paths: dict[str, str]) -> str:
+def _type_path_display(src_type: str, tgt_type: str, dest_db: str) -> str:
+    """``SOURCE → TARGET`` with a document store's instant carrier named as one.
+
+    A BSON / Elasticsearch ``date`` printed as ``DATE`` told the operator their
+    timestamps were being cut to a calendar day (D136), when the real finding
+    is the zone or the sub-millisecond digits.
+    """
+    from services.carrier_instant import temporal_carrier_display_label
+
+    return f"{src_type}{_TYPE_PATH_ARROW}{temporal_carrier_display_label(tgt_type, dest_db)}"
+
+
+def _column_type_path_label(
+    column: str, type_paths: dict[str, str], dest_db: str = ""
+) -> str:
     """``name SOURCE_TYPE → TARGET_TYPE`` when the pair is known, else the name.
 
     A bare column name sends the operator hunting through Map for what is wrong
@@ -738,7 +752,10 @@ def _column_type_path_label(column: str, type_paths: dict[str, str]) -> str:
     whether the verdict is even right.
     """
     path = type_paths.get(column)
-    return f"{column} {path}" if path else column
+    if not path:
+        return column
+    src_type, _, tgt_type = path.partition(_TYPE_PATH_ARROW)
+    return f"{column} {_type_path_display(src_type.strip(), tgt_type.strip(), dest_db)}"
 
 
 def _destination_db(preflight: dict[str, Any]) -> str:
@@ -787,7 +804,7 @@ def _zoneless_instant_remedies(
         policy = resolve_timezone_policy(src_type, tgt_type, dest_db=dest_db)
         if policy is None or policy.policy != POLICY_UTC_INVENT or not policy.remediation:
             continue
-        out.append(f"{col} ({src_type} → {tgt_type}): {policy.remediation}")
+        out.append(f"{col} ({_type_path_display(src_type, tgt_type, dest_db)}): {policy.remediation}")
     return out
 
 
@@ -900,11 +917,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 }
             )
             type_paths = _collect_type_paths(fidelity_gates + fidelity_blockers, cr)
-            zone_remedies = _zoneless_instant_remedies(
-                cols, type_paths, _destination_db(preflight)
-            )
+            dest_db = _destination_db(preflight)
+            zone_remedies = _zoneless_instant_remedies(cols, type_paths, dest_db)
             col_label = ", ".join(
-                _column_type_path_label(c, type_paths) for c in cols[:5]
+                _column_type_path_label(c, type_paths, dest_db) for c in cols[:5]
             ) + (f" (+{len(cols) - 5} more)" if len(cols) > 5 else "")
             if cols:
                 summary = (
@@ -1018,7 +1034,8 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 [*gates, *blockers], preflight.get("coercion_report") or {}
             )
             col_label = ", ".join(
-                _column_type_path_label(c, merged_paths) for c in merged_cols[:5]
+                _column_type_path_label(c, merged_paths, _destination_db(preflight))
+                for c in merged_cols[:5]
             ) + (f" (+{len(merged_cols) - 5} more)" if len(merged_cols) > 5 else "")
             fidelity_root.affected_columns = merged_cols
             fidelity_root.absorbed_blocker_ids = merged_absorbed

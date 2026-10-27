@@ -466,7 +466,12 @@ def assess_create_new_type_risk(
                 ),
             })
 
-    if is_precision_collapse_coercion(src, tgt, dest_db=db):
+    # The samples are the measured population: a declared DATETIME(6) whose
+    # cells hold whole milliseconds loses nothing on a BSON / Elasticsearch
+    # date. Judging the declaration alone stamped a blocking chip G3 then
+    # cleared, parking the mapping at 0.70 under the G4 floor where no
+    # declared zone or signed contract could lift it (D148/D156).
+    if is_precision_collapse_coercion(src, tgt, dest_db=db, population=samples):
         risks.append({
             "kind": "precision_collapse",
             "severity": "block",
@@ -476,7 +481,7 @@ def assess_create_new_type_risk(
                 + ". Remap or Accept · Risk Contract before Execute."
             ),
         })
-    elif is_lossy_coercion(src, tgt, dest_db=db):
+    elif is_lossy_coercion(src, tgt, dest_db=db, population=samples):
         risks.append({
             "kind": "lossy_coercion",
             "severity": "block",

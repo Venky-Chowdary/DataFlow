@@ -284,10 +284,13 @@ def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
     Identity for SQL engines. A document store has exactly one temporal carrier
     and it is an instant, so *every* temporal spelling there — ``date``,
     ``timestamp``, ``timestamp_ntz`` as a sampler may have stamped it — resolves
-    to ``TIMESTAMPTZ``. Resolving only the bare ``date`` token left an
-    introspected ``TIMESTAMP`` reading as zoneless, so the timezone policy saw
-    naive→naive and asked for no contract while the writer refused every naive
-    row: Validate green, Run quarantining the whole batch.
+    to ``TIMESTAMPTZ(3)``: a UTC instant with millisecond precision. Resolving
+    only the bare ``date`` token left an introspected ``TIMESTAMP`` reading as
+    zoneless, so the timezone policy saw naive→naive and asked for no contract
+    while the writer refused every naive row: Validate green, Run quarantining
+    the whole batch. Dropping the precision (bare ``TIMESTAMPTZ`` is six
+    digits) fingerprinted a contracted microsecond source unquantized against
+    the millisecond read-back, failing Gate-8 after the contract (D156).
     """
     from services.type_system import (
         LOGICAL_DATE,
@@ -299,5 +302,5 @@ def instant_date_carrier(engine: str | None, ddl_type_token: str | None) -> str:
     if (engine or "").strip().lower() not in INSTANT_DATE_TOKEN_ENGINES:
         return token
     if normalize_logical_type(token) in {LOGICAL_DATE, LOGICAL_DATETIME}:
-        return "TIMESTAMPTZ"
+        return f"TIMESTAMPTZ({DOCUMENT_INSTANT_FRACTIONAL_DIGITS})"
     return token

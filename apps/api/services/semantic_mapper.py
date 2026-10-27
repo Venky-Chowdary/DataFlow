@@ -1351,7 +1351,9 @@ def map_columns(
                     }
                 )
         return _stamp_review_kinds(
-            _apply_create_new_risk_stamps(out, dest_db, source_db_type=src_db)
+            _apply_create_new_risk_stamps(
+                out, dest_db, source_samples=src_samples, source_db_type=src_db
+            )
         )
 
     idf = _build_idf(source_columns + target_columns)

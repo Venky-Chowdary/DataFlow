@@ -26,6 +26,7 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 
 from connectors.sql_temporal import round_to_smalldatetime, sql_base_type
+from services.document_instant import INSTANT_DATE_TOKEN_ENGINES
 from services.type_system import destination_temporal_fractional_digits
 
 # SQL Server ``datetime`` stores 1/300-second ticks (.000/.003/.007 endings).
@@ -155,6 +156,32 @@ def _round_mssql_legacy(value: datetime) -> datetime:
     return value.replace(microsecond=micro)
 
 
+def _quantize_document_instant(value: object, *, ddl_type: str, engine: str) -> object:
+    """A BSON / Elasticsearch date as the store keeps it: milliseconds, truncated.
+
+    The encoder floors to the millisecond (``.123999`` is stored ``.123``), so
+    rounding here would fail Gate-8 on a contracted narrowing (D156). Bind
+    leaves the cell as ISO text on this carrier — a zoneless reader cell is
+    refused by the SQL binder and an aware one is rendered — so text is parsed
+    too; text that is not ISO-8601 passes through and still compares as-is.
+    """
+    digits = carrier_instant_digits(ddl_type, engine=engine)
+    if digits is None:
+        return value
+    if isinstance(value, str):
+        text = value.strip()
+        if text.endswith(("Z", "z")):
+            text = text[:-1] + "+00:00"
+        try:
+            value = datetime.fromisoformat(text)
+        except ValueError:
+            return value
+    if not isinstance(value, datetime) or digits >= 6:
+        return value
+    step = 10 ** (6 - digits)
+    return value.replace(microsecond=(value.microsecond // step) * step)
+
+
 def quantize_instant_for_carrier(
     value: object,
     *,
@@ -166,9 +193,11 @@ def quantize_instant_for_carrier(
     Non-temporal values, unknown carriers and unknown engines pass through
     unchanged — an unmodelled carrier must not be assumed lossless *or* lossy.
     """
+    eng = (engine or "").strip().lower()
+    if eng in INSTANT_DATE_TOKEN_ENGINES and ddl_type:
+        return _quantize_document_instant(value, ddl_type=ddl_type, engine=eng)
     if not isinstance(value, (datetime, time, timedelta)):
         return value
-    eng = (engine or "").strip().lower()
     if not eng or not ddl_type:
         return value
     base = sql_base_type(ddl_type)

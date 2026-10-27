@@ -101,8 +101,8 @@ class TestGenericSqlTimezoneCarrier:
 
 class TestBsonDateTokenIsAnInstant:
     def test_document_stores_resolve_date_to_an_instant_carrier(self) -> None:
-        assert instant_date_carrier("mongodb", "date") == "TIMESTAMPTZ"
-        assert instant_date_carrier("elasticsearch", "DATE") == "TIMESTAMPTZ"
+        assert instant_date_carrier("mongodb", "date") == "TIMESTAMPTZ(3)"
+        assert instant_date_carrier("elasticsearch", "DATE") == "TIMESTAMPTZ(3)"
         assert instant_date_carrier("postgresql", "DATE") == "DATE"
         assert instant_date_carrier("mongodb", "string") == "string"
 

@@ -136,17 +136,20 @@ def _stamp_create_new_type_risks(
     destination_db_type: str = "",
     dest_table_exists: bool | None = None,
     source_db_type: str = "",
+    source_samples: dict[str, list] | None = None,
 ) -> list[dict]:
     """Annotate create-new mappings with cross-dialect precision/width risk.
 
     Competitors often hide create-new type loss until write time. We surface it
-    on the mapping so Map / Validate / Pilot all see the same risk chip.
+    on the mapping so Map / Validate / Pilot all see the same risk chip. The
+    samples are the population the risk is judged on, as G3 judges it.
     """
     from services.create_new_risk_stamp import apply_create_new_risk_stamps
 
     return apply_create_new_risk_stamps(
         mappings,
         destination_db_type,
+        source_samples=source_samples,
         dest_table_exists=dest_table_exists,
         source_db_type=source_db_type,
     )
@@ -1587,6 +1590,7 @@ def run_mapping_pipeline(
         destination_db_type=destination_db_type or "",
         dest_table_exists=destination_table_exists,
         source_db_type=source_db_type,
+        source_samples=samples_by_src,
     )
     # Additive create-new gaps: Kernel stamp before pending honesty pass.
     try:
