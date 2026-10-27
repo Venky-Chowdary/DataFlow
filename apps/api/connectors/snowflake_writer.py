@@ -22,6 +22,8 @@ from connectors.snowflake_conn import (
     get_connection,
     normalize_account,
     resolve_snowflake_table_name,
+    snowflake_column_ref,
+    snowflake_physical_name_map,
 )
 from connectors.stub_writer import simulate_stub_write
 from connectors.writer_common import (
@@ -567,48 +569,6 @@ def resolve_snowflake_create_types(
     return out
 
 
-def _snowflake_physical_name_map(
-    cur: Any, schema: str, table_name: str
-) -> dict[str, str] | None:
-    """Stored column names keyed by UPPER — one DESC lookup.
-
-    ``None`` means the catalog could not be probed (callers keep legacy raw
-    quoting); an empty dict means the table was probed and does not exist.
-    """
-    from connectors.snowflake_conn import snowflake_physical_column_rows
-
-    try:
-        rows = snowflake_physical_column_rows(cur, schema, table_name)
-    except Exception:
-        return None
-    return {str(r[0]).upper(): str(r[0]) for r in (rows or [])}
-
-
-def _snowflake_column_ref(
-    name: Any,
-    physical_names: dict[str, str] | None = None,
-) -> str:
-    """Quoted column identifier — live stored name first, fold for create-new.
-
-    The table name binds to its stored/folded case before DDL, but column
-    projections quoted the raw logical name — a create-new table stored
-    case-sensitive ``"user_id"`` columns that no unquoted ``user_id`` /``USER_ID``
-    read could ever see (M5). When the catalog was probed, the stored name
-    wins (a pre-existing lower-quoted table keeps landing); a column the
-    table does not have folds the way unquoted SQL does. An unprobed
-    catalog keeps legacy raw quoting rather than guess.
-    """
-    raw = str(name or "")
-    if physical_names is not None:
-        live = physical_names.get(raw.upper())
-        if live is not None:
-            return quote_sql_identifier(live)
-        from connectors.sql_identifiers import snowflake_fold_identifier
-
-        return quote_sql_identifier(snowflake_fold_identifier(raw))
-    return quote_sql_identifier(raw)
-
-
 def _fetch_snowflake_column_types(
     cur: Any, schema: str, table_name: str
 ) -> dict[str, str]:
@@ -738,7 +698,7 @@ def _widen_existing_number_columns(
         try:
             cur.execute(
                 f'ALTER TABLE "{table_name}" ALTER COLUMN '
-                f"{_snowflake_column_ref(col, existing_names)} "
+                f"{snowflake_column_ref(col, existing_names)} "
                 f"SET DATA TYPE NUMBER({want_p},{want_s})"
             )
         except Exception as exc:
@@ -854,9 +814,9 @@ def _sf_apply_sparse_upsert(
     written = 0
     skipped = 0
     checksum_rows: list[tuple] = []
-    select_sql = ", ".join(_snowflake_column_ref(c, physical_names) for c in target_cols)
+    select_sql = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
     where_sql = " AND ".join(
-        f"{_snowflake_column_ref(c, physical_names)} = %s" for c in conflict
+        f"{snowflake_column_ref(c, physical_names)} = %s" for c in conflict
     )
 
     for row_idx, row in enumerate(sparse_rows):
@@ -922,7 +882,7 @@ def _sf_apply_sparse_upsert(
         if non_pk:
             set_cols = list(non_pk.keys())
             set_sql = ", ".join(
-                f"{_snowflake_column_ref(c, physical_names)} = %s" for c in set_cols
+                f"{snowflake_column_ref(c, physical_names)} = %s" for c in set_cols
             )
             cur.execute(
                 f"UPDATE {tbl} SET {set_sql} WHERE {where_sql}",  # nosec B608
@@ -935,7 +895,7 @@ def _sf_apply_sparse_upsert(
                 )
                 continue
         cols = list(present.keys())
-        col_sql = ", ".join(_snowflake_column_ref(c, physical_names) for c in cols)
+        col_sql = ", ".join(snowflake_column_ref(c, physical_names) for c in cols)
         ph = ", ".join(["%s"] * len(cols))
         try:
             cur.execute(
@@ -951,7 +911,7 @@ def _sf_apply_sparse_upsert(
                 raise
             set_cols = list(non_pk.keys())
             set_sql = ", ".join(
-                f"{_snowflake_column_ref(c, physical_names)} = %s" for c in set_cols
+                f"{snowflake_column_ref(c, physical_names)} = %s" for c in set_cols
             )
             cur.execute(
                 f"UPDATE {tbl} SET {set_sql} WHERE {where_sql}",  # nosec B608
@@ -991,7 +951,7 @@ def _batch_insert_rows(
     sub-batch, stringify JSON-typed values so ``PARSE_JSON(columnN)`` can parse
     them, and bind all values as positional parameters.
     """
-    col_list = ", ".join(_snowflake_column_ref(c, physical_names) for c in target_cols)
+    col_list = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
     select_items = []
     for i, t in enumerate(target_types, start=1):
         if _is_json_type(t):
@@ -1110,7 +1070,7 @@ def _load_rows_into_table(
             physical_names=physical_names,
         )
     else:
-        col_list = ", ".join(_snowflake_column_ref(c, physical_names) for c in target_cols)
+        col_list = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
         value_placeholders = ", ".join(["%s"] * len(target_cols))
         insert_sql = (
             f"INSERT INTO {quote_sql_identifier(table_name)} ({col_list}) "  # nosec B608
@@ -1135,7 +1095,7 @@ def build_snowflake_merge_sql(
     conflict = resolve_conflict_targets(conflict_columns, target_cols, strict=True)
     if not conflict:
         raise ValueError("Snowflake MERGE requires conflict_columns present in target_cols")
-    col_ref = lambda c: _snowflake_column_ref(c, physical_names)  # noqa: E731
+    col_ref = lambda c: snowflake_column_ref(c, physical_names)  # noqa: E731
     on_clause = null_safe_merge_on(
         conflict,
         left_alias="t",
@@ -1205,7 +1165,7 @@ def _merge_batch_via_temp(
     # Temp columns take the SAME resolved names as the target so the MERGE's
     # s."col" references line up (M5: resolved live-first / folded).
     col_defs = ", ".join(
-        f"{_snowflake_column_ref(c, physical_names)} {t}"
+        f"{snowflake_column_ref(c, physical_names)} {t}"
         for c, t in zip(target_cols, target_types)
     )
     cur.execute(f"CREATE TEMPORARY TABLE {quote_sql_identifier(temp)} ({col_defs})")
@@ -1256,7 +1216,7 @@ def _copy_into_table(
     try:
         cur.execute(f'CREATE TEMP STAGE IF NOT EXISTS "{stage_name}"')
         cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE")
-        col_list = ", ".join(_snowflake_column_ref(c, physical_names) for c in target_cols)
+        col_list = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
         # VARIANT/JSON columns are parsed from the CSV string using PARSE_JSON($i);
         # all other columns are loaded directly by position.
         select_items = []
@@ -1677,14 +1637,14 @@ def write_mapped_rows(
                 found if found is not None else snowflake_fold_identifier(table_name)
             )
             # One DESC probe — every column projection below resolves through
-            # _snowflake_column_ref (M5: live stored name first, folded on
+            # snowflake_column_ref (M5: live stored name first, folded on
             # create-new so unquoted reads resolve; unprobed stays raw).
-            physical_names = _snowflake_physical_name_map(cur, schema, table_name)
+            physical_names = snowflake_physical_name_map(cur, schema, table_name)
 
             if create_table:
                 conflict_keys = {str(c).upper() for c in (conflict or [])}
                 col_defs = ", ".join(
-                    f"{_snowflake_column_ref(c, physical_names)} {t}"
+                    f"{snowflake_column_ref(c, physical_names)} {t}"
                     + (" NOT NULL" if str(c).upper() in conflict_keys else "")
                     for c, t in zip(target_cols, target_types)
                 )

@@ -3689,7 +3689,10 @@ def verify_snowflake_table(
             get_connection,
             normalize_account,
             resolve_or_fold_snowflake_table,
+            snowflake_column_name,
+            snowflake_physical_name_map,
             snowflake_qualified_table,
+            snowflake_select_list,
         )
 
         conn = get_connection(
@@ -3722,12 +3725,20 @@ def verify_snowflake_table(
             cur.execute(f"SELECT COUNT(*) FROM {qualified_name}")  # nosec B608
             count = int(cur.fetchone()[0])
             ids, pk = keyed_readback_scope(written_ids, pk_column)
-            from connectors.sql_identifiers import quote_column_list
-
-            select_list = quote_column_list(target_columns)
+            physical = snowflake_physical_name_map(
+                cur, schema or "PUBLIC", resolved
+            )
+            select_list = (
+                snowflake_select_list(target_columns, physical)
+                if target_columns
+                else "*"
+            )
             if ids:
                 where = keyed_readback_where(
-                    pk, ids, dialect="snowflake", placeholders=["%s"] * len(ids)
+                    snowflake_column_name(pk, physical),
+                    ids,
+                    dialect="snowflake",
+                    placeholders=["%s"] * len(ids),
                 )
                 cur.execute(
                     f"SELECT {select_list} FROM {qualified_name} {where}", ids

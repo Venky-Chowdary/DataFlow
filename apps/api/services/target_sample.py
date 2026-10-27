@@ -694,7 +694,10 @@ def read_target_sample(
                 get_connection,
                 normalize_account,
                 resolve_or_fold_snowflake_table,
+                snowflake_column_ref,
+                snowflake_physical_name_map,
                 snowflake_qualified_table,
+                snowflake_select_list,
             )
 
             try:
@@ -707,10 +710,7 @@ def read_target_sample(
                     warehouse=dest.get("warehouse", ""),
                     connection_string=dest.get("connection_string", ""),
                 )
-                from connectors.sql_identifiers import (
-                    quote_sql_identifier,
-                    require_safe_identifier,
-                )
+                from connectors.sql_identifiers import require_safe_identifier
 
                 with conn.cursor() as cur:
                     resolved = resolve_or_fold_snowflake_table(
@@ -719,27 +719,30 @@ def read_target_sample(
                     qualified_name = snowflake_qualified_table(
                         schema or "PUBLIC", resolved
                     )
+                    physical = snowflake_physical_name_map(
+                        cur, schema or "PUBLIC", resolved
+                    )
                     sf_col_sql = (
                         "*"
                         if cols == ["*"]
-                        else quote_column_list(
+                        else snowflake_select_list(
                             [
                                 require_safe_identifier(c, preserve_case=True)
                                 for c in cols
-                            ]
+                            ],
+                            physical,
                         )
                     )
                     sf_order = (
-                        quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
+                        snowflake_column_ref(
+                            require_safe_identifier(sort_key, preserve_case=True),
+                            physical,
                         )
                         if sort_key
                         else "1"
                     )
                     if keys and sort_key:
-                        key_col = quote_sql_identifier(
-                            require_safe_identifier(sort_key, preserve_case=True)
-                        )
+                        key_col = sf_order
                         # Snowflake IN is type-sensitive; widen via write-path variants.
                         widened: set[Any] = set()
                         for k in keys:

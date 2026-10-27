@@ -1579,6 +1579,8 @@ def _snowflake_key_list(
         get_connection,
         normalize_account,
         resolve_snowflake_table_name,
+        snowflake_column_ref,
+        snowflake_physical_name_map,
         snowflake_qualified_table,
     )
     from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
@@ -1610,7 +1612,8 @@ def _snowflake_key_list(
             if resolved is None:
                 return []
             qualified = snowflake_qualified_table(sch, resolved)
-            col_sql = ", ".join(quote_sql_identifier(c) for c in cols)
+            physical = snowflake_physical_name_map(cur, sch, resolved)
+            col_sql = ", ".join(snowflake_column_ref(c, physical) for c in cols)
             cur.execute(f"SELECT {col_sql} FROM {qualified}")  # nosec B608
             fetched = cur.fetchall() or []
     except Exception as exc:
@@ -1662,6 +1665,8 @@ def _snowflake_delete_keys(
         get_connection,
         normalize_account,
         resolve_snowflake_table_name,
+        snowflake_column_ref,
+        snowflake_physical_name_map,
         snowflake_qualified_table,
     )
     from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
@@ -1696,7 +1701,8 @@ def _snowflake_delete_keys(
             if resolved is None:
                 return 0
             qualified = snowflake_qualified_table(sch, resolved)
-            qcols = [quote_sql_identifier(c) for c in cols]
+            physical = snowflake_physical_name_map(cur, sch, resolved)
+            qcols = [snowflake_column_ref(c, physical) for c in cols]
             deleted = 0
             for tup in leftover:
                 clause = " AND ".join(f"{q} = %s" for q in qcols)

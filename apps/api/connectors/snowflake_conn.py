@@ -516,6 +516,79 @@ def resolve_or_fold_snowflake_table(cur: Any, schema: str, table: str) -> str:
     return snowflake_fold_identifier((table or "").strip())
 
 
+def snowflake_physical_name_map(
+    cur: Any, schema: str, table: str
+) -> dict[str, str] | None:
+    """Stored column names keyed by UPPER — one DESC lookup.
+
+    ``None`` means the catalog could not be probed (callers keep legacy raw
+    quoting); an empty dict means the table was probed and does not exist.
+    """
+    try:
+        rows = snowflake_physical_column_rows(cur, schema, table)
+    except Exception:
+        return None
+    return {str(r[0]).upper(): str(r[0]) for r in (rows or [])}
+
+
+def snowflake_column_name(
+    name: Any,
+    physical_names: dict[str, str] | None = None,
+) -> str:
+    """Stored column name — live stored name first, fold for create-new.
+
+    The one column resolver for every Snowflake writer and reader. The table
+    name binds to its stored/folded case before DDL, but column projections
+    quoted the raw logical name — a create-new table stored case-sensitive
+    ``"user_id"`` columns that no unquoted ``user_id``/``USER_ID`` read could
+    ever see (M5). When the catalog was probed, the stored name wins (a
+    pre-existing lower-quoted table keeps landing); a column the table does
+    not have folds the way unquoted SQL does. An unprobed catalog keeps
+    legacy raw quoting rather than guess.
+    """
+    from connectors.sql_identifiers import snowflake_fold_identifier
+
+    raw = str(name or "")
+    if physical_names is not None:
+        live = physical_names.get(raw.upper())
+        if live is not None:
+            return live
+        return snowflake_fold_identifier(raw)
+    return raw
+
+
+def snowflake_column_ref(
+    name: Any,
+    physical_names: dict[str, str] | None = None,
+) -> str:
+    """Quoted :func:`snowflake_column_name`."""
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    return quote_sql_identifier(snowflake_column_name(name, physical_names))
+
+
+def snowflake_select_list(
+    names: list[str], physical_names: dict[str, str] | None
+) -> str:
+    """Projection of logical ``names`` over their stored columns.
+
+    Readers quoted the logical ``"id"`` while the writer had created the
+    folded ``ID`` — ``000904 invalid identifier`` failed every Gate-8 read of
+    a plain table (D120a). Each column resolves through
+    :func:`snowflake_column_ref` and is aliased back to its logical name, so
+    callers keep keying rows, checksums and type maps by the names they asked
+    for.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    items: list[str] = []
+    for name in names:
+        ref = snowflake_column_ref(name, physical_names)
+        logical = quote_sql_identifier(str(name))
+        items.append(ref if ref == logical else f"{ref} AS {logical}")
+    return ", ".join(items)
+
+
 _SF_COLUMN_PROJECTIONS: tuple[str, ...] = (
     (
         "column_name, data_type, is_nullable, character_maximum_length, "

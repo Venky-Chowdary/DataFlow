@@ -950,10 +950,11 @@ def read_snowflake_rows(
         get_connection,
         normalize_account,
         resolve_or_fold_snowflake_table,
+        snowflake_physical_name_map,
         snowflake_qualified_table,
+        snowflake_select_list,
     )
     from connectors.sql_identifiers import (
-        quote_column_list,
         quote_sql_identifier,
         require_safe_identifier,
         snowflake_fold_identifier,
@@ -985,11 +986,14 @@ def read_snowflake_rows(
             col_sql = (
                 "*"
                 if not columns
-                else quote_column_list(
+                else snowflake_select_list(
                     [
                         require_safe_identifier(c, preserve_case=True)
                         for c in columns
-                    ]
+                    ],
+                    snowflake_physical_name_map(
+                        cur, snowflake_fold_identifier(schema or "PUBLIC"), resolved
+                    ),
                 )
             )
             cur.execute(f"SELECT {col_sql} FROM {qualified}")  # nosec B608
