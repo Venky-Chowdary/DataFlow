@@ -1218,7 +1218,9 @@ def _copy_into_table(
         cur.execute(f"PUT file://{local_path} {stage_ref} AUTO_COMPRESS=TRUE")
         col_list = ", ".join(snowflake_column_ref(c, physical_names) for c in target_cols)
         # VARIANT/JSON columns are parsed from the CSV string using PARSE_JSON($i);
-        # all other columns are loaded directly by position.
+        # all other columns are loaded directly by position. Binary cells are
+        # staged in the canonical base64 wire (cell_to_string), which the file
+        # format must name — Snowflake's CSV default is HEX (D76).
         select_items = []
         for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
             if _is_json_type(t):
@@ -1235,6 +1237,7 @@ def _copy_into_table(
                 SKIP_HEADER = 1
                 FIELD_OPTIONALLY_ENCLOSED_BY = '"'
                 NULL_IF = ('\\\\N')
+                BINARY_FORMAT = BASE64
                 ERROR_ON_COLUMN_COUNT_MISMATCH = TRUE
             )
             ON_ERROR = 'ABORT_STATEMENT'
