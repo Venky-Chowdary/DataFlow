@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
@@ -59,9 +60,16 @@ class EmailQuotaExceeded(EmailSendError):
 
 
 class EmailProviderError(EmailSendError):
-    """Non-quota provider failure (bad key, rejected payload, 5xx, transport)."""
+    """Non-quota provider failure (bad key, rejected payload, 5xx, transport).
+
+    ``status`` is the provider's HTTP status, 0 for a transport failure.
+    """
 
     code = "email_provider_error"
+
+    def __init__(self, message: str, *, retryable: bool = False, status: int = 0) -> None:
+        super().__init__(message, retryable=retryable)
+        self.status = int(status or 0)
 
 
 @dataclass(frozen=True)
@@ -124,29 +132,56 @@ class ResendEmailSender:
             timeout=_RESEND_TIMEOUT_SEC,
         )
         status = int(result.get("status") or 0)
-        if not result.get("ok"):
+        if not status:
+            # No HTTP answer at all (DNS, connect, TLS, timeout): worth a retry.
             raise EmailProviderError(
                 "Resend request failed (transport)",
                 retryable=True,
             )
-        if status in (200, 201, 202):
+        if result.get("ok") and status in (200, 201, 202):
             message_id = ""
             try:
                 message_id = str(json.loads(result.get("body") or "{}").get("id") or "")
             except (ValueError, TypeError):
                 message_id = ""
             return {"ok": True, "provider": self.name, "message_id": message_id}
-        retry_after = _retry_after_hint(result.get("body"))
+        retry_after = int(result.get("retry_after_sec") or 0) or _retry_after_hint(result.get("body"))
         if status == 429:
             raise EmailQuotaExceeded(
                 "Resend rate limit reached", retry_after_sec=retry_after or 60
             )
-        # The body can echo the recipient list; log only the status class.
-        logger.warning("Resend send rejected (status=%s)", status)
+        # D130: a refusal used to surface as a retryable "transport" failure,
+        # hiding a bad key (401), an unverified domain or edge block (403) and a
+        # rejected payload (422) behind endless retries. 4xx is permanent, 5xx
+        # retryable. Log the provider's error name only: the body can echo the
+        # recipient list.
+        error_name = _provider_error_name(result.get("body"))
+        logger.warning("Resend send rejected (status=%s, error=%s)", status, error_name or "-")
         retryable = status >= 500
+        detail = f"status={status}, error={error_name}" if error_name else f"status={status}"
         raise EmailProviderError(
-            f"Resend send rejected (status={status})", retryable=retryable
+            f"Resend send rejected ({detail})", retryable=retryable, status=status
         )
+
+
+_EDGE_ERROR_CODE = re.compile(r"^\s*error code:\s*(\d{3,5})\s*$", re.IGNORECASE)
+
+
+def _provider_error_name(body: Any) -> str:
+    """Resend's machine error name (``validation_error``, ``invalid_api_key``…),
+    or the Cloudflare edge code when the edge refused before Resend answered."""
+    text = str(body or "")
+    try:
+        data = json.loads(text or "{}")
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        name = data.get("name")
+        if isinstance(name, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", name):
+            return name
+        return ""
+    edge = _EDGE_ERROR_CODE.match(text)
+    return f"edge_error_{edge.group(1)}" if edge else ""
 
 
 def _retry_after_hint(body: Any) -> int:

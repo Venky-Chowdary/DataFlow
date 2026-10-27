@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from services.brand_env import getenv_brand
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Any
@@ -63,12 +65,30 @@ class _NoRedirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
+#: Sent on every outbound HTTP call. Cloudflare-fronted APIs (Resend) refuse
+#: the default ``Python-urllib/3.x`` agent with 403 "error code: 1010" before
+#: the credential is even read (D130).
+USER_AGENT = "Datawrap/1.0 (+https://www.datawrap.io)"
+
+_EMAIL_ADDRESS = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+_ERROR_BODY_CHARS = 500
+
+
+def _redacted_error_body(raw: bytes) -> str:
+    """A refusal body short enough to triage, with echoed addresses masked."""
+    text = raw[: _ERROR_BODY_CHARS * 2].decode("utf-8", errors="ignore")
+    return _EMAIL_ADDRESS.sub("<redacted-email>", text)[:_ERROR_BODY_CHARS]
+
+
 def _http_post(
     url: str,
     payload: dict[str, Any],
     headers: dict[str, str] | None = None,
     timeout: float = 30.0,
 ) -> dict[str, Any]:
+    """POST JSON. A non-2xx answer returns ``ok: False`` with its ``status`` and
+    a short redacted ``body`` so callers can tell a refusal from a transport
+    failure; a transport failure carries no ``status``."""
     if not _allowed_url(url):
         return {"ok": False, "error": "Webhook URL is not allowed (private, loopback, or non-http(s))"}
     try:
@@ -76,13 +96,24 @@ def _http_post(
         req = urllib.request.Request(
             url,
             data=data,
-            headers={"Content-Type": "application/json", **(headers or {})},
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT, **(headers or {})},
             method="POST",
         )
         opener = urllib.request.build_opener(_NoRedirect)
         with opener.open(req, timeout=timeout) as resp:  # nosec: B310 — scheme + host gated by egress_guard
             body = resp.read().decode("utf-8", errors="ignore")
         return {"ok": True, "status": resp.status, "body": body[:2000]}
+    except urllib.error.HTTPError as exc:
+        try:
+            body = _redacted_error_body(exc.read() or b"")
+        except Exception:  # noqa: BLE001 — an unreadable error body is still a refusal
+            body = ""
+        logger.warning("notification HTTP POST refused: status=%s", exc.code)
+        refused: dict[str, Any] = {"ok": False, "status": int(exc.code), "body": body, "error": str(exc)}
+        retry_after = (exc.headers.get("Retry-After") if exc.headers else None) or ""
+        if retry_after.strip().isdigit():
+            refused["retry_after_sec"] = int(retry_after.strip())
+        return refused
     except Exception as exc:
         # Slack/Teams webhook URLs carry their secret in the path; the error
         # text can echo it. The class name is enough to triage.
@@ -129,7 +160,11 @@ def _send_mailgun(recipients: list[str], subject: str, body: str, from_addr: str
     data = urllib.parse.urlencode({"from": from_addr, "to": ",".join(recipients), "subject": subject, "text": body}).encode("utf-8")
     import base64
     credentials = base64.b64encode(f"api:{api_key}".encode()).decode()
-    req = urllib.request.Request(url, data=data, headers={"Authorization": f"Basic {credentials}"}, method="POST")
+    req = urllib.request.Request(
+        url, data=data,
+        headers={"Authorization": f"Basic {credentials}", "User-Agent": USER_AGENT},
+        method="POST",
+    )
     try:
         opener = urllib.request.build_opener(_NoRedirect)
         with opener.open(req, timeout=30) as resp:  # nosec: B310 — scheme is https and validated above
