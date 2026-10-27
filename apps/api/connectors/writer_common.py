@@ -4117,6 +4117,31 @@ def quarantine_unfit_integers(
     return out
 
 
+#: Engines whose REAL / DOUBLE PRECISION store NaN and ±Infinity as values.
+_NONFINITE_FLOAT_ENGINES = frozenset(
+    {"postgresql", "postgres", "timescaledb", "supabase", "cockroachdb"}
+)
+
+
+def engine_stores_nonfinite_float(engine: str) -> bool:
+    """True when a non-finite float is data the destination keeps, not an invent.
+
+    MySQL / SQL Server have no NaN or Infinity (MySQL would store NULL), so
+    those are held out; PostgreSQL stores them, and refusing them made a
+    PG->PG copy of a NaN column impossible (D51).
+    """
+    from services.type_system import _normalize_dest_db
+
+    eng = (engine or "").strip().lower()
+    return bool(eng) and _normalize_dest_db(eng) in _NONFINITE_FLOAT_ENGINES
+
+
+def _is_nonfinite_float(value: Any) -> bool:
+    return isinstance(value, float) and (
+        value != value or value in {float("inf"), float("-inf")}
+    )
+
+
 def quarantine_unfit_floats(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -4161,8 +4186,10 @@ def quarantine_unfit_floats(
             except ValueError as exc:
                 reason = str(exc)
                 coerced = None
-            if not reason and isinstance(coerced, float) and (
-                coerced != coerced or coerced in {float("inf"), float("-inf")}
+            if (
+                not reason
+                and _is_nonfinite_float(coerced)
+                and not engine_stores_nonfinite_float(engine)
             ):
                 reason = (
                     f"non-finite float into {dialect_label}({typ}) "
@@ -4298,9 +4325,7 @@ def bind_rows_keeping_numbers(
                 bound = normalize_sql_bind_value(
                     val, ddl, engine=engine
                 )
-                if isinstance(bound, float) and (
-                    bound != bound or bound in {float("inf"), float("-inf")}
-                ):
+                if _is_nonfinite_float(bound) and not engine_stores_nonfinite_float(engine):
                     raise ValueError(
                         f"non-finite float into {dialect_label}({ddl}) "
                         "— quarantined (refuse silent NULL)"

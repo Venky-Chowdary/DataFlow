@@ -57,6 +57,9 @@ def _pg(sql: str) -> list[tuple]:
 CASES = {
     # D50 — timetz was planned as TIME, refused as an offset-dropping collapse.
     "D50_timetz": ("timetz", "'10:00:00+05:30'", "'23:59:59-04'"),
+    # D51 — NaN / ±Infinity were quarantined as "non-finite float" invents.
+    "D51_real_nonfinite": ("real", "'NaN'", "'Infinity'"),
+    "D51_double_nonfinite": ("double precision", "'-Infinity'", "1.5"),
 }
 
 
