@@ -2020,6 +2020,101 @@ def _pg_route_backup_connection(cfg: dict[str, Any]) -> Any:
     return conn
 
 
+class PgBackupRestoreRefused(RuntimeError):
+    """A strict keyed write whose pre-run rows could not be restored exactly.
+
+    Raised before any write, so the run is refused instead of risking a failed
+    verification that leaves its rejected batch in place (D122).
+    """
+
+
+#: ``pg_trigger.tgenabled`` -> the ALTER TABLE clause that restores it.
+_PG_TRIGGER_ENABLE: dict[str, str] = {
+    "O": "ENABLE TRIGGER",
+    "A": "ENABLE ALWAYS TRIGGER",
+    "R": "ENABLE REPLICA TRIGGER",
+}
+
+
+def _pg_active_user_triggers(cur: Any, schema: str, table: str) -> list[tuple[str, str]]:
+    """``[(trigger_name, tgenabled)]`` for the table's enabled user triggers."""
+    cur.execute(
+        "SELECT t.tgname, t.tgenabled FROM pg_trigger t "
+        "JOIN pg_class c ON c.oid = t.tgrelid "
+        "JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s "
+        "AND NOT t.tgisinternal AND t.tgenabled <> 'D' ORDER BY t.tgname",
+        (schema, table),
+    )
+    return [(str(name), str(mode)) for name, mode in cur.fetchall() or []]
+
+
+def _pg_refuse_unrestorable_triggers(cur: Any, schema: str, table: str) -> None:
+    """Refuse up front when a restore would have to replay rows through triggers.
+
+    Suspending a table's triggers needs its owner (or a superuser). Any other
+    role restoring the backup fires them again, the verify sees the rewrite,
+    and the failed batch stays live with the originals only in ``__dfbak``.
+    """
+    triggers = _pg_active_user_triggers(cur, schema, table)
+    if not triggers:
+        return
+    cur.execute(
+        "SELECT pg_has_role(current_user, c.relowner, 'USAGE') "
+        "OR (SELECT rolsuper FROM pg_roles WHERE rolname = current_user), "
+        "current_user FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
+        "WHERE n.nspname = %s AND c.relname = %s",
+        (schema, table),
+    )
+    row = cur.fetchone() or (False, "")
+    if row[0]:
+        return
+    names = ", ".join(name for name, _mode in triggers)
+    raise PgBackupRestoreRefused(
+        f"Strict keyed write into {schema}.{table} refused before any write: "
+        f"the table has user trigger(s) {names} that role {row[1]!r} cannot "
+        "suspend, so a failed verification could not restore the pre-run rows "
+        "exactly. Run as the table's owner, or choose a validation mode that "
+        "keeps rows on a failed proof."
+    )
+
+
+def _pg_suspend_user_triggers(
+    cur: Any, tbl_ref: str, schema: str, table: str
+) -> list[tuple[str, str]]:
+    """Disable the table's enabled user triggers inside the restore transaction.
+
+    ``session_replication_role = replica`` (superuser only) also skips FK
+    enforcement as before, but it neither exists for an ordinary owner nor
+    silences ``ENABLE ALWAYS`` triggers; disabling each trigger by name covers
+    both, and the transaction (or :func:`_pg_resume_user_triggers`) puts every
+    trigger back in its own mode.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    cur.execute("SAVEPOINT route_backup_role")
+    try:
+        cur.execute("SET LOCAL session_replication_role = 'replica'")
+        cur.execute("RELEASE SAVEPOINT route_backup_role")
+    except Exception:  # noqa: BLE001 - superuser only; per-trigger disable follows
+        cur.execute("ROLLBACK TO SAVEPOINT route_backup_role")
+        cur.execute("RELEASE SAVEPOINT route_backup_role")
+    triggers = _pg_active_user_triggers(cur, schema, table)
+    for name, _mode in triggers:
+        cur.execute(f"ALTER TABLE {tbl_ref} DISABLE TRIGGER {quote_sql_identifier(name)}")
+    return triggers
+
+
+def _pg_resume_user_triggers(
+    cur: Any, tbl_ref: str, triggers: list[tuple[str, str]]
+) -> None:
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    for name, mode in triggers:
+        clause = _PG_TRIGGER_ENABLE.get(mode, "ENABLE TRIGGER")
+        cur.execute(f"ALTER TABLE {tbl_ref} {clause} {quote_sql_identifier(name)}")
+
+
 def create_pg_table_backup(
     cfg: dict[str, Any],
     *,
@@ -2036,6 +2131,9 @@ def create_pg_table_backup(
     state. Returns the ``{table, backup, schema}`` pair for the
     ``route_backups`` stamp, or None when the backup could not be taken
     (the run proceeds; undo then reports honestly that no rollback exists).
+
+    Raises :class:`PgBackupRestoreRefused` when the table carries user
+    triggers this role cannot suspend — that restore could never be exact.
     """
     from connectors.sql_identifiers import quote_table_ref, split_qualified_table
 
@@ -2056,9 +2154,12 @@ def create_pg_table_backup(
             )
             if not cur.fetchone():
                 return None
+            _pg_refuse_unrestorable_triggers(cur, schema, table)
             cur.execute(f"DROP TABLE IF EXISTS {bak_ref}")
             cur.execute(f"CREATE TABLE {bak_ref} (LIKE {live_ref} INCLUDING ALL)")
             cur.execute(f"INSERT INTO {bak_ref} SELECT * FROM {live_ref}")
+    except PgBackupRestoreRefused:
+        raise
     except Exception as exc:  # noqa: BLE001 - a missing backup must not abort the write
         logger.warning(
             "Strict-run backup copy of %s.%s skipped (%s); a post-write "
@@ -2145,37 +2246,25 @@ def restore_pg_route_backups(
                     if not cur.fetchone():
                         cur.execute("RELEASE SAVEPOINT route_backup_restore")
                         continue
-                    # D114: replaying the pre-run rows through user triggers
-                    # mutates them (a BEFORE INSERT amt:=amt+0.01 fired again
-                    # on restore). Suppress triggers for this transaction so
-                    # the restore lands the backup bytes, then verify the live
-                    # table against the backup before claiming "restored".
-                    # session_replication_role needs superuser/pg_owner — when
-                    # the role lacks it the failed statement aborts this txn,
-                    # so retry unsuppressed and let the verify below decide.
-                    try:
-                        cur.execute(
-                            "SET LOCAL session_replication_role = 'replica'"
-                        )
-                    except Exception:  # noqa: BLE001 - privilege varies by role
-                        logger.warning(
-                            "Route %s restore cannot suppress triggers "
-                            "(session_replication_role denied) — verifying "
-                            "against the backup instead",
-                            route,
-                        )
-                        cur.execute("ROLLBACK TO SAVEPOINT route_backup_restore")
-                        cur.execute("SAVEPOINT route_backup_restore")
+                    # D114/D122: replaying the pre-run rows through user
+                    # triggers mutates them (a BEFORE INSERT amt:=amt+0.01
+                    # fired again on restore), so they are suspended for this
+                    # transaction — by name, which an owner may do, not only
+                    # via the superuser-only session_replication_role.
+                    suspended = _pg_suspend_user_triggers(cur, tbl_ref, schema, table)
                     cur.execute(f"DELETE FROM {tbl_ref}")
                     cur.execute(f"INSERT INTO {tbl_ref} SELECT * FROM {bak_ref}")
-                    # Verify restored content is byte-identical to the backup —
-                    # a trigger that still fired (replica role unavailable) or
-                    # any drift must not be reported as "restored".
+                    # Verify the live table equals the backup as a multiset —
+                    # EXCEPT ALL, so a lost or doubled duplicate row counts —
+                    # over each row's text image, since json / point / xml
+                    # have no equality operator for EXCEPT to use.
                     cur.execute(
                         f"SELECT COUNT(*) FROM ("
-                        f"SELECT * FROM {tbl_ref} EXCEPT SELECT * FROM {bak_ref}"
+                        f"(SELECT _t::text FROM {tbl_ref} _t"
+                        f" EXCEPT ALL SELECT _b::text FROM {bak_ref} _b)"
                         f" UNION ALL "
-                        f"SELECT * FROM {bak_ref} EXCEPT SELECT * FROM {tbl_ref}"
+                        f"(SELECT _b::text FROM {bak_ref} _b"
+                        f" EXCEPT ALL SELECT _t::text FROM {tbl_ref} _t)"
                         f") _df_restore_diff"
                     )
                     diff = int((cur.fetchone() or [0])[0] or 0)
@@ -2188,6 +2277,7 @@ def restore_pg_route_backups(
                         cur.execute("ROLLBACK TO SAVEPOINT route_backup_restore")
                         cur.execute("RELEASE SAVEPOINT route_backup_restore")
                         continue
+                    _pg_resume_user_triggers(cur, tbl_ref, suspended)
                     cur.execute(f"DROP TABLE {bak_ref}")
                     cur.execute("RELEASE SAVEPOINT route_backup_restore")
                     restored.append(str(route))

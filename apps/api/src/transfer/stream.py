@@ -443,6 +443,48 @@ def _merge_chunk_write_summaries(
     return merged
 
 
+def _arm_strict_keyed_backup(
+    destination: EndpointConfig,
+    *,
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    dest_table: str,
+    job_id: str,
+) -> dict[str, Any]:
+    """D111 — row-copy a populated PG destination before a strict keyed write.
+
+    A failed verification then restores the exact prior state (DELETE + INSERT
+    FROM ``__dfbak_<job>``) instead of leaving the rejected batch in place.
+    Armed once per run (a COPY attempt and the row path share it); returns the
+    ``route_backups`` stamp on ``destination.extra``. A backup that cannot be
+    taken never aborts the write, but a table whose triggers this role cannot
+    suspend is refused up front (D122) — that restore could never be exact.
+    """
+    from connectors.table_manager import PgBackupRestoreRefused, create_pg_table_backup
+
+    extra = dict(getattr(destination, "extra", None) or {})
+    backups = dict(extra.get("route_backups") or {})
+    if backups:
+        return backups
+    try:
+        pair = create_pg_table_backup(
+            dest_cfg,
+            schema=schema_from_cfg(dest_type, dest_cfg),
+            table=dest_table,
+            job_id=job_id,
+        )
+    except PgBackupRestoreRefused:
+        raise
+    except Exception as exc:  # noqa: BLE001 - never abort a write for the safety net
+        logger.warning("Strict-run destination backup of %s failed: %s", dest_table, exc)
+        return backups
+    if pair:
+        backups[str(pair.get("table") or dest_table)] = pair
+        extra["route_backups"] = backups
+        destination.extra = extra
+    return backups
+
+
 def _fk_orphans_fail_closed(validation_mode: str) -> bool:
     return str(validation_mode or "").strip().lower() in {"strict", "maximum"}
 
@@ -876,6 +918,25 @@ def _stream_database_transfer_impl(
             + ", ".join(risk_contract_columns)
             + ") need per-row quarantine/skip on the row path"
         )
+    # D111/D122 — the strict keyed backup is the rollback for *either* write
+    # path. Armed here, a COPY upsert is undone exactly like the row path
+    # instead of leaving its rejected batch live; the row path reuses it.
+    copy_route_backups: dict[str, Any] = {}
+    if (
+        write_mode == "upsert"
+        and pk_target_cols
+        and dest_type == "postgresql"
+        and not pending_shape
+        and str(validation_mode or "").strip().lower() in {"strict", "maximum", ""}
+        and int(pre_write_rows_before or 0) > 0
+    ):
+        copy_route_backups = _arm_strict_keyed_backup(
+            destination,
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table=resolve_dest_table(dest_type, destination, _source_name(source)),
+            job_id=str(job_id or ""),
+        )
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
     try:
@@ -917,6 +978,8 @@ def _stream_database_transfer_impl(
     if fast is not None:
         rows_copied, ddl_log, dest_summary, columns = fast
         dest_summary["copy_fast_path"] = "used"
+        if copy_route_backups:
+            dest_summary["route_backups"] = dict(copy_route_backups)
         _copy_profile.add(
             PHASE_BULK_COPY,
             time.perf_counter() - _copy_started,
@@ -1963,28 +2026,15 @@ def _stream_database_transfer_impl(
         and int(dest_summary.get(PRECOUNT_KEY) or 0) > 0
         and (shape_runner is None or shape_runner.recipe.router_step is None)
     ):
-        try:
-            from connectors.table_manager import create_pg_table_backup
-
-            _bak_pair = create_pg_table_backup(
-                dest_cfg,
-                schema=schema_from_cfg(dest_type, dest_cfg),
-                table=str(dest_table),
-                job_id=str(job_id or ""),
-            )
-            if _bak_pair:
-                _dextra = dict(getattr(destination, "extra", None) or {})
-                _dextra.setdefault("route_backups", {})[
-                    str(_bak_pair.get("table") or dest_table)
-                ] = _bak_pair
-                destination.extra = _dextra
-                dest_summary["route_backups"] = dict(_dextra["route_backups"])
-        except Exception as _bak_exc:  # noqa: BLE001 - never abort a write for the safety net
-            logger.warning(
-                "Strict-run destination backup of %s failed: %s",
-                dest_table,
-                _bak_exc,
-            )
+        _route_backups = _arm_strict_keyed_backup(
+            destination,
+            dest_type=dest_type,
+            dest_cfg=dest_cfg,
+            dest_table=str(dest_table),
+            job_id=str(job_id or ""),
+        )
+        if _route_backups:
+            dest_summary["route_backups"] = dict(_route_backups)
     keyed_census_acc = (
         KeyCensusAccumulator()
         if pk_target_cols and (keyed_upsert_scope or dest_key_addressed)

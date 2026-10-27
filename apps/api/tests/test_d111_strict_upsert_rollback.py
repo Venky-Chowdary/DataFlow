@@ -29,7 +29,12 @@ class _FakeCursor:
             self._has = True
 
     def fetchone(self):
+        if "_df_restore_diff" in self.conn.sql[-1]:
+            return (0,)  # the restore's backup-vs-live verify: no difference
         return (1,) if getattr(self, "_has", True) else None
+
+    def fetchall(self):
+        return []  # pg_trigger: the table carries no user triggers
 
     def __getattr__(self, name):
         # SAVEPOINT / RELEASE etc. route through execute in the real code.
