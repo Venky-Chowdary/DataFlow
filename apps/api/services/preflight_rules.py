@@ -441,6 +441,26 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
             {"kind": "review_mappings", "label": "Open Map to fix identity/reconcile"},
         ],
     },
+    "g_pii_hash_key": {
+        "title": "hash_pii key not configured",
+        "category": "hard",
+        "why": (
+            "A mapping or shape step hashes a column with hash_pii, an HMAC digest "
+            "that needs a secret key. No key is set, and a built-in default is "
+            "refused because the digests would be reversible across tenants."
+        ),
+        "fix": (
+            "Set DATAFLOW_PII_HASH_KEY (or DATAWRAP_PII_HASH_KEY) on the API service "
+            "to a long random secret (e.g. `openssl rand -hex 32`) in its secret "
+            "variables (Railway: service -> Variables), redeploy, then re-run "
+            "Validate. Keep the key stable: a new key changes every digest. If a "
+            "keyed digest is not required, switch the column to mask_pii or redact. "
+            "Do not remove the transform: the column would be written in clear."
+        ),
+        "examples": [
+            "email → hash_pii with no DATAFLOW_PII_HASH_KEY on the API service.",
+        ],
+    },
     "g9_data_integrity": {
         "title": "Data integrity audit",
         "category": "hard",

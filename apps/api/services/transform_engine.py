@@ -1581,17 +1581,32 @@ def _parse_uuid(value: str) -> str | None:
         return None
 
 
+#: Operator setup for a missing ``hash_pii`` key. Validate raises it as a
+#: blocker and the write path refuses with it, so both name one fix (D8).
+PII_HASH_KEY_SETUP = (
+    "hash_pii is not configured: no HMAC key is set. Set DATAFLOW_PII_HASH_KEY "
+    "(or DATAWRAP_PII_HASH_KEY) on the API service to a long random secret, "
+    "e.g. the output of `openssl rand -hex 32`, in its secret variables "
+    "(Railway: service -> Variables), redeploy, then re-run Validate. Keep the "
+    "key stable and private: a new key changes every digest. No row was "
+    "hashed, and a shared default key is refused because it would be "
+    "reversible across tenants. Use mask_pii or redact if a keyed digest is "
+    "not required."
+)
+
+
+def pii_hash_key() -> str:
+    """The ``hash_pii`` HMAC key, or ``""`` when none is configured."""
+    return getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET") or ""
+
+
 def _hash_pii(value: str) -> str:
     """HMAC-SHA256 digest for PII masking. Requires DATAFLOW_PII_HASH_KEY in prod."""
-    secret = getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET")
+    secret = pii_hash_key()
     if not secret:
         # Fail closed — never hash with a shared public default (would be reversible
         # across tenants that ship the same binary).
-        raise ValueError(
-            "hash_pii is not configured. Set DATAFLOW_PII_HASH_KEY to an HMAC "
-            "secret and retry this replay. No row was hashed, and a shared "
-            "default key is refused because it would be reversible across tenants."
-        )
+        raise ValueError(PII_HASH_KEY_SETUP)
     digest = hmac.new(
         secret.encode("utf-8"),
         value.encode("utf-8"),

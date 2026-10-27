@@ -1369,6 +1369,26 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             if unknown_name
             else "Sample transform / cast failures"
         )
+        alternative_fixes = [
+            "Widen FLOAT/DECIMAL→INT to DOUBLE (preserve numeric meaning before text)",
+            "Empty→typed: allow NULL / default or sign QUARANTINE_ROW",
+            "Remap image/url columns off the url semantic transform",
+            "Sign CAST_AND_CONTINUE only for intentional lossy casts",
+        ]
+        if any(
+            "hash_pii is not configured" in str(src.get("message") or "")
+            for src in xf_gates + xf_blockers
+        ):
+            # D8: the cells fail because the HMAC key is missing, not because
+            # of the data. "Transform to identity" would write PII in clear and
+            # a continue contract would hold out every row — name the setup.
+            from services.preflight_rules import PREFLIGHT_GATE_RULES
+
+            key_rule = PREFLIGHT_GATE_RULES["g_pii_hash_key"]
+            title = key_rule["title"]
+            rec_fix = key_rule["fix"]
+            alternative_fixes = ["Switch the column to mask_pii or redact (no key needed)"]
+            absorbed = sorted({*absorbed, "g_pii_hash_key"})
         summary_head = (
             f"Unknown transform: {unknown_name}. "
             if unknown_name
@@ -1400,12 +1420,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 estimated_total_rows=est_n,
                 risk_level="high",
                 recommended_fix=rec_fix,
-                alternative_fixes=[
-                    "Widen FLOAT/DECIMAL→INT to DOUBLE (preserve numeric meaning before text)",
-                    "Empty→typed: allow NULL / default or sign QUARANTINE_ROW",
-                    "Remap image/url columns off the url semantic transform",
-                    "Sign CAST_AND_CONTINUE only for intentional lossy casts",
-                ],
+                alternative_fixes=alternative_fixes,
                 recovery_strategy=(
                     "After remap or Risk Contract, re-Validate. Contracted holdouts "
                     "quarantine at write — primary table must not invent NULL unless "

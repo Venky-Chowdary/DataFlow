@@ -2081,6 +2081,42 @@ def run_file_preflight(
         )
         additive_stamp_blocked = True
 
+    # D8: hash_pii fails closed without its HMAC key. Refuse from the plan, not
+    # the sample — an all-NULL sample never runs the digest and a shape-recipe
+    # step is not in the mapping replay — so the run cannot be the first to say.
+    from services.transform_engine import PII_HASH_KEY_SETUP, pii_hash_key
+
+    hashed_columns = [pm.source for pm in plan_mappings if pm.transform == "hash_pii"]
+    for step in (shape_recipe or {}).get("steps") or []:
+        if (
+            isinstance(step, dict)
+            and step.get("enabled") is not False
+            and step.get("op") == "hash_pii"
+        ):
+            hashed_columns.append(str(step.get("column") or ""))
+    hashed_columns = list(dict.fromkeys(c for c in hashed_columns if c))
+    pii_hash_gate: dict[str, Any] | None = None
+    if hashed_columns:
+        key_missing = not pii_hash_key()
+        pii_hash_gate = {
+            "id": "g_pii_hash_key",
+            "status": "block" if key_missing else "pass",
+            "message": (
+                PII_HASH_KEY_SETUP if key_missing else "hash_pii HMAC key is configured"
+            ),
+            "duration_ms": 0,
+            "details": {"columns": hashed_columns[:20], "kind": "pii_hash_key"},
+        }
+        if key_missing:
+            blockers.append(
+                {
+                    "id": pii_hash_gate["id"],
+                    "message": PII_HASH_KEY_SETUP,
+                    "details": dict(pii_hash_gate["details"]),
+                }
+            )
+    pii_hash_blocked = bool(pii_hash_gate and pii_hash_gate["status"] == "block")
+
     # Bounded destination carriers (DECIMAL(p,s) / VARCHAR(n) / sized INTEGER)
     # are decidable before the write. Screening a preview and letting the writer
     # discover row 431 is how a 1M-row load ends with zero rows committed and a
@@ -2334,6 +2370,7 @@ def run_file_preflight(
         ([fit_gate] if fit_gate else [])
         + ([null_cursor_gate] if null_cursor_gate else [])
         + ([upsert_ddl_gate] if upsert_ddl_gate else [])
+        + ([pii_hash_gate] if pii_hash_gate else [])
     )
     extra_passed = sum(1 for g in extra_gates if g.get("status") != "block")
     total_gates = result.total_gates + len(extra_gates)
@@ -2345,7 +2382,7 @@ def run_file_preflight(
         # would describe a different database's carriers.
         "destination_db_type": destination_db_type or "",
         "passed": bool(result.passed) and not additive_stamp_blocked and not fit_blocked
-        and not null_cursor_blocked and not upsert_ddl_blocked,
+        and not null_cursor_blocked and not upsert_ddl_blocked and not pii_hash_blocked,
         "passed_count": passed_count,
         "total_gates": total_gates,
         "readiness_score": round(passed_count / max(total_gates, 1) * 100, 1),
