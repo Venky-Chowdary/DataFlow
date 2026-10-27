@@ -741,6 +741,8 @@ def run_file_preflight(
     # Operator approved the DDL DataFlow disclosed for this run (e.g. the
     # unique index an upsert needs on an existing destination table — D101).
     ddl_changes_acknowledged: bool = False,
+    # Operator chose to empty a populated destination from a 0-row source (D56).
+    empty_source_overwrite_acknowledged: bool = False,
     acknowledgment_actor: str = "",
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
@@ -3315,6 +3317,17 @@ def run_file_preflight(
         dest_kind=dest_kind,
         validation_mode=validation_mode,
     )
+    _ps._apply_empty_source_overwrite_gate(
+        out,
+        sync_mode=sync_mode,
+        source_measured_empty=source_measured_empty,
+        destination_table_exists=destination_table_exists,
+        destination_config=dict(destination_config or {}),
+        destination_table=destination_table,
+        acknowledged=empty_source_overwrite_acknowledged,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
 
     from services.root_cause_engine import apply_root_causes_to_preflight
     from services.validation_mode_contract import stamp_validation_mode
@@ -3522,6 +3535,7 @@ from services.preflight_source_kind import resolve_preflight_source_kind  # noqa
 _EXTRACTED_PREFLIGHT_EXPORTS = {
     "FilePreflightContext": "preflight_context",
     "_apply_overwrite_emptied_gate": "preflight_population",
+    "_apply_empty_source_overwrite_gate": "preflight_population",
     "_cdc_log_capture_gates": "preflight_population",
     "_iter_table_population_for_preflight": "preflight_population",
 }

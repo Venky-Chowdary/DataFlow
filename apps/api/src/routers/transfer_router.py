@@ -295,6 +295,8 @@ class ExecuteTransferRequest(BaseModel):
     # Operator approved destination DDL disclosed at Validate (e.g. the
     # unique index an upsert needs on an existing table — D101).
     ddl_changes_acknowledged: bool = False
+    # Empty a populated destination from a 0-row source on purpose (D56).
+    empty_source_overwrite_acknowledged: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
@@ -964,6 +966,9 @@ async def execute_transfer_json(
         schema_drift_acknowledged=bool(body.schema_drift_acknowledged),
         fk_risk_acknowledged=bool(body.fk_risk_acknowledged),
         ddl_changes_acknowledged=bool(body.ddl_changes_acknowledged),
+        empty_source_overwrite_acknowledged=bool(
+            body.empty_source_overwrite_acknowledged
+        ),
         acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
         acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=str(

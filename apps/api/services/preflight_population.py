@@ -233,8 +233,104 @@ def _apply_overwrite_emptied_gate(
         return
     message += " — map a source column to it, or acknowledge the schema change to empty it"
     details.update({"remediation_kind": "acknowledge_schema_drift", "ack_required": True})
+    _append_block_gate(
+        out,
+        "overwrite_emptied_columns",
+        message,
+        details,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
+
+
+def _apply_empty_source_overwrite_gate(
+    out: dict[str, Any],
+    *,
+    sync_mode: str,
+    source_measured_empty: bool,
+    destination_table_exists: bool | None,
+    destination_config: dict[str, Any] | None,
+    destination_table: str,
+    acknowledged: bool,
+    dest_kind: str,
+    validation_mode: str,
+) -> None:
+    """Refuse an overwrite whose measured-empty source would wipe live rows (D56).
+
+    The load-volume guard only compares against this route's own history, so
+    the first DataFlow overwrite of a populated table from an empty source
+    replaced every row with nothing and reported success. Zero source rows
+    over a destination that holds rows is a decision, made explicitly with
+    ``empty_source_overwrite_acknowledged``.
+    """
+    from services.db_type_utils import overwrite_replaces_rows
+    from services.sync_cursor import is_overwrite_sync
+
+    if (
+        not source_measured_empty
+        or destination_table_exists is not True
+        or not is_overwrite_sync(sync_mode)
+        or not overwrite_replaces_rows(dest_kind)
+        or not destination_config
+        or not destination_table
+    ):
+        return
+    from services.dest_precount import count_dialect, precount_table
+
+    try:
+        dest_rows = precount_table(
+            count_dialect(str(destination_config.get("type") or dest_kind)),
+            dict(destination_config),
+            destination_table,
+        )
+    except Exception as exc:  # noqa: BLE001 — an unknown count is reported below
+        logger.warning("empty-source overwrite precount failed: %s", exc)
+        dest_rows = None
+    if dest_rows == 0:
+        return
+    held = f"{dest_rows:,} row(s)" if isinstance(dest_rows, int) else "rows (count unavailable)"
+    details = {
+        "rule_id": "overwrite_empty_source",
+        "sync_mode": sync_mode,
+        "destination_rows": dest_rows,
+        "source_rows": 0,
+    }
+    message = (
+        f"The source holds 0 rows and '{destination_table}' holds {held}: this "
+        "overwrite would replace them all with nothing"
+    )
+    if acknowledged:
+        out.setdefault("warnings", []).append(
+            {"id": "overwrite_empty_source", "message": message, "details": details}
+        )
+        return
+    details.update(
+        {"remediation_kind": "acknowledge_empty_source_overwrite", "ack_required": True}
+    )
+    _append_block_gate(
+        out,
+        "overwrite_empty_source",
+        message
+        + ". Check the source (an emptied or wrong table looks exactly like "
+        "this), or rerun with empty_source_overwrite_acknowledged=true to "
+        "empty the destination on purpose.",
+        details,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
+    )
+
+
+def _append_block_gate(
+    out: dict[str, Any],
+    gate_id: str,
+    message: str,
+    details: dict[str, Any],
+    *,
+    dest_kind: str,
+    validation_mode: str,
+) -> None:
     gate = {
-        "id": "overwrite_emptied_columns",
+        "id": gate_id,
         "status": "block",
         "message": message,
         "duration_ms": 0,

@@ -158,6 +158,9 @@ def _execute_preflight_parity_kwargs(
             getattr(request, "schema_drift_acknowledged", False)
         ),
         "fk_risk_acknowledged": bool(getattr(request, "fk_risk_acknowledged", False)),
+        "empty_source_overwrite_acknowledged": bool(
+            getattr(request, "empty_source_overwrite_acknowledged", False)
+        ),
         "acknowledgment_actor": str(
             getattr(request, "acknowledgment_actor", "") or ""
         ).strip(),
