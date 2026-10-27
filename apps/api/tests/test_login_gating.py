@@ -131,3 +131,32 @@ def test_unknown_email_still_neutral_401(gating_env, monkeypatch):
     resp = c.post("/api/v1/auth/login", json={
         "email": "nobody@example.com", "password": "xx-password"})
     assert resp.status_code == 401
+
+
+def test_failed_rekey_heal_on_login_is_audited(gating_env, monkeypatch):
+    """A failed rekey heal at sign-in must land its security event. The audit
+    call named ``record_security_event`` before the function's later local
+    import bound it, so it raised UnboundLocalError and the event was lost."""
+    import services.signup_service as signup_service
+    from services import audit_coverage
+
+    def boom(*, email):
+        raise RuntimeError("membership move failed")
+
+    events: list[tuple[str, dict]] = []
+    real = audit_coverage.record_security_event
+
+    def capture(action, *args, **kwargs):
+        events.append((action, kwargs))
+        return real(action, *args, **kwargs)
+
+    monkeypatch.setattr(signup_service, "finish_pending_rekeys", boom)
+    monkeypatch.setattr(audit_coverage, "record_security_event", capture)
+    resp = _client(flag_on=False).post(
+        "/api/v1/auth/login",
+        json={"email": "admin@example.com", "password": "strong-password-123"})
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["token"]
+    heal = [kw for action, kw in events if action == "email_change.rekey_flag_failed"]
+    assert heal and heal[0]["reason_code"] == "heal_retry_failed"
+    assert heal[0]["actor"] == "admin@example.com"

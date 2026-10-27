@@ -996,6 +996,8 @@ async def login(body: LoginRequest, request: Request):
     except Exception:
         logger.error("rekey_pending retry failed", exc_info=True)
         try:
+            from services.audit_coverage import record_security_event
+
             record_security_event(
                 "email_change.rekey_flag_failed",
                 outcome="failed", actor=user["email"],
