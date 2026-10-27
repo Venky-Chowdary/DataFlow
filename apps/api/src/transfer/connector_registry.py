@@ -711,7 +711,7 @@ def probe_file_source(fmt: str, path: str) -> tuple[bool, str]:
             return True, f"{label} readable — {int(total or 0)} rows, {n_cols} columns."
         except Exception as exc:
             op.errored(exc)
-            return False, humanize_connection_error(kind, exc, auth_mode=str(cfg.get("auth_mode") or "").strip().lower())
+            return False, humanize_connection_error(kind, exc)
 
 
 def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:

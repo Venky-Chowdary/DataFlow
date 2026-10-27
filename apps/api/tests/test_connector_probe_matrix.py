@@ -120,3 +120,20 @@ def test_snowflake_250001_humanize_is_idempotent():
     assert first == SNOWFLAKE_BAD_PASSWORD_MSG
     assert second == first
     assert "refused this login. Snowflake rejected" not in first
+
+
+def test_file_probe_read_error_is_humanized_not_a_name_error(tmp_path, monkeypatch):
+    """A file that exists but cannot be parsed used to raise NameError ('cfg'
+    is not defined in probe_file_source) instead of a Test failure message."""
+    import src.transfer.file_stream as file_stream
+
+    path = tmp_path / "broken.csv"
+    path.write_text("a,b\n1,2\n")
+
+    def _boom(*_a, **_k):
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(file_stream, "peek_file_source", _boom)
+    ok, message = probe_file_source("csv", str(path))
+    assert ok is False
+    assert message
