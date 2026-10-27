@@ -15,7 +15,7 @@ import uuid as uuid_lib
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, Overflow
 from collections.abc import Iterable
-from typing import Any
+from typing import Any, Callable
 
 from services.pii_guard import mask as pii_mask
 from services.semantic_types import (
@@ -1860,8 +1860,8 @@ TRANSFORM_SEMANTICS: dict[str, dict[str, Any]] = {
     "uuid": {"semantics": "parse to canonical UUID", "deterministic": True, "lossy": True},
     "trim": {"semantics": "strip leading/trailing whitespace", "deterministic": True, "lossy": True},
     "trim_id": {"semantics": "strip identifier whitespace", "deterministic": True, "lossy": True},
-    "upper": {"semantics": "uppercase per SQL UPPER (no trim)", "deterministic": True, "lossy": False},
-    "lower": {"semantics": "lowercase per SQL LOWER (no trim)", "deterministic": True, "lossy": False},
+    "upper": {"semantics": "uppercase per SQL UPPER: one character in, one out, ß kept (no trim)", "deterministic": True, "lossy": False},
+    "lower": {"semantics": "lowercase per SQL LOWER: one character in, one out (no trim)", "deterministic": True, "lossy": False},
     "hash_pii": {"semantics": "one-way HMAC-SHA256 hash (requires key)", "deterministic": True, "lossy": True},
     "mask_pii": {"semantics": "one-way PII mask", "deterministic": True, "lossy": True},
     "redact": {"semantics": "one-way constant redaction token", "deterministic": True, "lossy": True},
@@ -1895,6 +1895,38 @@ def describe_transforms() -> list[dict[str, Any]]:
         meta = TRANSFORM_SEMANTICS[name]
         out.append({"transform": name, **meta})
     return out
+
+
+def _one_to_one_case(text: str, full: Callable[[str], str], simple: Callable[[str], str]) -> str:
+    mapped = full(text)
+    if len(mapped) == len(text):
+        # Case mapping never shortens a character, so equal length means no
+        # character expanded and the full mapping is already one-to-one.
+        return mapped
+    out: list[str] = []
+    for ch in text:
+        one = full(ch)
+        if len(one) != 1:
+            one = simple(ch)
+        out.append(one if len(one) == 1 else ch)
+    return "".join(out)
+
+
+def sql_upper(text: str) -> str:
+    """UPPER as PostgreSQL / MySQL / SQL Server / Oracle apply it (D13).
+
+    Engines use the one-character (simple) Unicode mapping. Python's full
+    mapping expands ß -> SS and ﬁ -> FI, which no SQL UPPER does and which can
+    push a value past the VARCHAR(n) its source fitted. Where the full mapping
+    expands, the single-character titlecase form is the simple mapping
+    (U+1FB3 -> U+1FBC); otherwise the character is kept, as ß is.
+    """
+    return _one_to_one_case(text, str.upper, str.title)
+
+
+def sql_lower(text: str) -> str:
+    """LOWER as SQL engines apply it: İ -> i, never i + U+0307 (D13)."""
+    return _one_to_one_case(text, str.lower, lambda ch: ch.lower()[:1])
 
 
 def _strip_format_controls(text: str) -> str:
@@ -2590,11 +2622,11 @@ def apply_transform(
 
     if transform == "upper":
         # SQL UPPER does not trim — per-character casing only (D13).
-        return raw_s.upper(), None
+        return sql_upper(raw_s), None
 
     if transform == "lower":
         # SQL LOWER does not trim — per-character casing only (D13).
-        return raw_s.lower(), None
+        return sql_lower(raw_s), None
 
     if transform == "hash_pii":
         try:

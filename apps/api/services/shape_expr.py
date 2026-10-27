@@ -913,6 +913,13 @@ def _fn_title_case(value: Any) -> Any:
     return re.sub(r"\b(\w)", lambda m: m.group(1).upper(), text.lower())
 
 
+def _sql_case(mode: str, text: str) -> str:
+    """One case mapping for the shape plane and the column transform (D13)."""
+    from services.transform_engine import sql_lower, sql_upper
+
+    return sql_upper(text) if mode == "upper" else sql_lower(text)
+
+
 def _text_fn(name: str, fn: Callable[[str], Any], summary: str) -> _Function:
     def impl(value: Any) -> Any:
         text = _as_text(value)
@@ -932,8 +939,8 @@ def _number_fn(name: str, fn: Callable[[Decimal], Any], summary: str) -> _Functi
 
 _FUNCTION_LIST: tuple[_Function, ...] = (
     # text
-    _text_fn("lower", str.lower, "Lower-case the text"),
-    _text_fn("upper", str.upper, "Upper-case the text"),
+    _text_fn("lower", lambda s: _sql_case("lower", s), "Lower-case the text"),
+    _text_fn("upper", lambda s: _sql_case("upper", s), "Upper-case the text"),
     _text_fn("trim", str.strip, "Remove leading and trailing whitespace"),
     _text_fn("ltrim", lambda s: s.lstrip(), "Remove leading whitespace"),
     _text_fn("rtrim", lambda s: s.rstrip(), "Remove trailing whitespace"),
