@@ -153,6 +153,36 @@ def debezium_to_row(change: DebeziumChange) -> dict[str, Any] | None:
     return None
 
 
+def _seek_on_assign(consumer: Any, start_offsets: list[dict[str, Any]]) -> Any:
+    """Rebalance listener that resumes assigned partitions at ``start_offsets``.
+
+    A run never commits group offsets until it is accepted (D85), so the group
+    position stays where the run began. A continuation batch must start after
+    the offsets this run already read, or it re-reads them.
+    """
+    from kafka import ConsumerRebalanceListener, TopicPartition  # type: ignore
+
+    positions = {
+        TopicPartition(str(item["topic"]), int(item["partition"])): int(item["offset"])
+        for item in start_offsets
+        if isinstance(item, dict)
+        and item.get("topic") is not None
+        and item.get("partition") is not None
+        and item.get("offset") is not None
+    }
+
+    class _Listener(ConsumerRebalanceListener):
+        def on_partitions_revoked(self, revoked: Any) -> None:
+            return None
+
+        def on_partitions_assigned(self, assigned: Any) -> None:
+            for tp in assigned:
+                if tp in positions:
+                    consumer.seek(tp, positions[tp])
+
+    return _Listener()
+
+
 class KafkaDebeziumConsumer:
     """Optional kafka-python consumer. Requires ``kafka-python`` extra.
 
@@ -191,6 +221,13 @@ class KafkaDebeziumConsumer:
                     # Keep raw bytes so Confluent Schema Registry wire (magic+id+payload) survives.
                     value_deserializer=lambda b: b if b is not None else b,
                 ),
+            )
+        start = self.config.get("start_offsets") or []
+        if start:
+            # Same subscription, plus the listener that resumes this run.
+            self._consumer.subscribe(
+                [self.config["topic"]],
+                listener=_seek_on_assign(self._consumer, start),
             )
 
     def pending_offsets(self) -> list[dict[str, Any]]:

@@ -4764,6 +4764,9 @@ class UniversalTransferEngine:
             else:
                 release_args = None
             _settle_overwrite_backup(request.destination, restore=False)
+            # D85: Kafka is a streaming source, so this is the path that must
+            # commit the group offsets; without it every run re-read the topic.
+            _commit_kafka_offsets_on_accept(request, dest_summary)
             status_written = _write_success_status(
                 mongo,
                 job_id,

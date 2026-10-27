@@ -3,8 +3,9 @@
 Honest scope: Debezium JSON envelopes (``op`` + ``before``/``after``) and plain
 JSON object records. Requires ``kafka-python``.
 
-Durable offsets use the consumer group with **commit-after-apply**. After dest
-apply, ``commit_kafka_offsets`` assigns the pending partitions and commits —
+Durable offsets use the consumer group with **commit-after-accept**. Once the
+job is accepted (destination committed and Gate-8 passed),
+``commit_kafka_offsets`` assigns the pending partitions and commits —
 subscribe-then-commit on a fresh consumer is kicked out of the group.
 Crash mid-write redelivers — at-least-once.
 """
@@ -198,13 +199,17 @@ def read_topic_batch(
         or cfg.get("username")
         or "dataflow-kafka-source"
     )
-    # Durable commits happen only after destination apply (stream.commit_kafka_offsets).
-    # Never commit prior pending offsets here — prefetch can race ahead of sink durability.
+    # Durable commits happen only once the job is accepted (engine
+    # _commit_kafka_offsets_on_accept). Never commit prior pending offsets
+    # here — prefetch can race ahead of sink durability. The group therefore
+    # still sits where the run began, so a continuation batch resumes at the
+    # offsets this run already read instead of re-reading them (D85).
     consumer = KafkaDebeziumConsumer({
         **cfg,
         "topic": topic_name,
         "bootstrap_servers": _bootstrap(cfg),
         "group_id": group_id,
+        "start_offsets": list((kafka_cursor or {}).get("pending_offsets") or []),
         "auto_offset_reset": cfg.get("auto_offset_reset") or "earliest",
         "schema_registry_url": str(
             cfg.get("schema_registry_url") or cfg.get("registry_url") or ""
