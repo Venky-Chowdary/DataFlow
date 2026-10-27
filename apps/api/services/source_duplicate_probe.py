@@ -35,7 +35,8 @@ ProbeStatus = Literal[
 
 # SQL path covers generic_sql and all SQL-like catalog IDs.
 SQLISH_SOURCE_TYPES = frozenset({
-    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase",
+    # pgvector is PostgreSQL on the wire: same GROUP BY probe (D140).
+    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase", "pgvector",
     "mysql", "mariadb", "singlestore",
     "sqlserver", "mssql", "synapse", "azure_sql_database",
     "oracle", "db2", "sqlite", "duckdb", "generic_sql", "h2",
@@ -821,6 +822,12 @@ def probe_source_duplicate_keys_result(
 
                 cfg = probe_cfg_from_saved(conn)
                 db_type = (conn.type or "").lower()
+                # D91 — the run's endpoint names the schema it reads; the saved
+                # connector only carries its default (``public``), so probing
+                # with it alone checked a different table, or none.
+                run_schema = str((source_config or {}).get("schema") or "").strip()
+                if cfg is not None and run_schema:
+                    cfg = {**cfg, "schema": run_schema}
 
         if cfg is None and source_config:
             cfg = dict(source_config)

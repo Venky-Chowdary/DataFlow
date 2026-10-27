@@ -48,6 +48,17 @@ def _object_names_from_list(listed: Any) -> list[str]:
     return names
 
 
+def _is_relational_connector(conn: dict[str, Any]) -> bool:
+    """True for SQL connectors, where a dot separates schema from table.
+
+    File, search and stream connectors name objects like ``orders.csv``.
+    """
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    return bool(ctype) and resolve_driver_type(ctype) not in _BATCH_SAMPLE_DRIVERS
+
+
 def resolve_table_name(
     conn: dict[str, Any],
     table: str,
@@ -95,6 +106,12 @@ def resolve_table_name(
         resolved = lower_map[wanted.lower()]
         note = f"Using `{resolved}` (matched case-insensitively)." if resolved != wanted else None
         return _with_sheet(resolved), note, names
+    if "." in wanted and not sheet and _is_relational_connector(conn):
+        # D92 — ``schema.table`` is an exact address. Matching its bare table
+        # (or a fuzzy neighbour) to a same-named object in another schema
+        # sampled a decoy; an inventory that lists only the default schema is
+        # not evidence the qualified table is absent, so the read decides.
+        return wanted, None, names
     # Unqualified vs schema.table
     bare = wanted.split(".")[-1].lower()
     bare_hits = [n for n in names if n.split(".")[-1].lower() == bare]
