@@ -1203,6 +1203,24 @@ def map_columns(
     destination_table_exists: bool | None = None,
     source_db_type: str = "",
 ) -> list[dict]:
+    from services.source_engine_scope import active_source_engine, bind_source_engine
+
+    # Every pair score and lossy check below reads the source engine from this
+    # scope. Unbound, a PostgreSQL VARCHAR scored onto the NVARCHAR column run 1
+    # created as a lossy pair (D158).
+    scoped_engine = (source_db_type or "").strip().lower()
+    if scoped_engine and not active_source_engine():
+        with bind_source_engine(scoped_engine):
+            return map_columns(
+                source_columns,
+                target_columns,
+                source_schemas=source_schemas,
+                target_schemas=target_schemas,
+                threshold=threshold,
+                destination_db_type=destination_db_type,
+                destination_table_exists=destination_table_exists,
+                source_db_type=source_db_type,
+            )
     from services.semantic_analyzer import analyze_column
     from services.conversion_contract import classify_conversion, create_new_mapping_reason
     from services.decision_kernel import (

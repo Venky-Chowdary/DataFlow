@@ -70,6 +70,7 @@ def _stamp_job_mapping_artifacts(
     plan_payload: dict | None = None,
     mappings: list | None = None,
     destination_format: str = "",
+    source_format: str = "",
     source_kind: str = "",
     dest_kind: str = "",
     sync_mode: str = "",
@@ -86,6 +87,7 @@ def _stamp_job_mapping_artifacts(
         source_kind=source_kind or "",
         dest_kind=dest_kind or "",
         sync_mode=sync_mode or "",
+        source_db_type=(source_format or "").lower(),
     )
     updates: dict = {}
     if proof:
@@ -1096,6 +1098,7 @@ async def execute_transfer_json(
         plan_payload=plan_payload,
         mappings=mappings_from_request(request_obj),
         destination_format=dst.format or "",
+        source_format=src.format or "",
         source_kind=src.kind or "",
         dest_kind=dst.kind or "",
         sync_mode=request_obj.sync_mode or "",
@@ -1584,6 +1587,7 @@ async def run_universal_transfer(
         plan_payload=plan_payload,
         mappings=mappings_from_request(request_obj),
         destination_format=dest_format or "",
+        source_format=source_format or "",
         source_kind=source_kind or "",
         dest_kind=dest_kind or "",
         sync_mode=request_obj.sync_mode or "",
@@ -1694,6 +1698,7 @@ async def get_transfer_mapping_proof(job_id: str, request: Request):
             mappings,
             destination_db_type=str(dest.get("format") or job.get("destination_type") or "").lower(),
             source_kind=str(src.get("kind") or job.get("source_type") or ""),
+            source_db_type=str(src.get("format") or src.get("type") or ""),
             dest_kind=str(dest.get("kind") or job.get("destination_kind") or ""),
             sync_mode=str(job.get("sync_mode") or req.get("sync_mode") or ""),
         )

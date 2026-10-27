@@ -1037,6 +1037,7 @@ def mapping_proof_or_build(
     dest_kind: str = "",
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> dict[str, Any]:
     """Prefer a persisted proof; otherwise build from the mappings that ran."""
     if isinstance(existing, dict) and existing.get("mappings"):
@@ -1052,6 +1053,7 @@ def mapping_proof_or_build(
         dest_kind=dest_kind,
         sync_mode=sync_mode,
         destination_table_exists=destination_table_exists,
+        source_db_type=source_db_type,
     )
 
 
@@ -1096,6 +1098,7 @@ def build_mapping_proof(
     dest_kind: str = "",
     sync_mode: str = "",
     destination_table_exists: bool | None = None,
+    source_db_type: str = "",
 ) -> dict[str, Any]:
     """Build universal mapping proof for Map/Validate UI — any connector pair.
 
@@ -1103,7 +1106,26 @@ def build_mapping_proof(
     - ``create_new`` — confirmed missing table (or every mapping is create-new with no targets)
     - ``schema_pending`` — destination existence/schema unknown; refuse invent create-new
     - ``match_existing`` — destination columns present (adds are per-row, not whole-plan create)
+
+    ``source_db_type`` is bound for the fidelity verdicts: the plan, run
+    payload and job-detail routes build this proof outside any transfer, and
+    an unbound PostgreSQL VARCHAR → SQL Server NVARCHAR read as lossy (D158).
     """
+    from services.source_engine_scope import active_source_engine, bind_source_engine
+
+    scoped_engine = (source_db_type or "").strip().lower()
+    if scoped_engine and not active_source_engine():
+        with bind_source_engine(scoped_engine):
+            return build_mapping_proof(
+                mappings,
+                target_columns=target_columns,
+                destination_db_type=destination_db_type,
+                source_kind=source_kind,
+                dest_kind=dest_kind,
+                sync_mode=sync_mode,
+                destination_table_exists=destination_table_exists,
+                source_db_type=source_db_type,
+            )
     has_targets = bool(target_columns)
     pending = any(
         str(m.get("assignment_strategy") or "") == "pending_dest_schema"

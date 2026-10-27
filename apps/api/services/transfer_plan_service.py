@@ -584,6 +584,7 @@ def build_run_payload(plan_id: str) -> dict[str, Any]:
         target_columns=plan.target_columns,
         destination_db_type=str(dest.get("format") or dest.get("type") or ""),
         source_kind=str(src.get("kind") or ""),
+        source_db_type=str(src.get("format") or src.get("type") or ""),
         dest_kind=str(dest.get("kind") or ""),
         sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
     )
@@ -650,6 +651,7 @@ def merge_plan_into_run(
         target_columns=plan.target_columns,
         destination_db_type=str(dest.get("format") or dest.get("type") or ""),
         source_kind=str(src.get("kind") or ""),
+        source_db_type=str(src.get("format") or src.get("type") or ""),
         dest_kind=str(dest.get("kind") or ""),
         sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
     )

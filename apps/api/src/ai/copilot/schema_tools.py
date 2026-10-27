@@ -945,9 +945,11 @@ def map_connector_schemas(
     dst_cols: list[str] = []
     dst_schemas: list[dict] = []
     dst_name = dest_connector_name
+    dst_db = ""
     if dest_connector_id or dest_connector_name:
         dst = introspect_connector_schema(dest_connector_id, dest_connector_name, dst_table)
         if dst.success:
+            dst_db = str((dst.output or {}).get("type") or "")
             dst_cols = [c["name"] for c in (dst.output or {}).get("columns") or []]
             dst_schemas = [
                 {
@@ -985,6 +987,10 @@ def map_connector_schemas(
         source_schemas=src_schemas,
         target_schemas=dst_schemas or None,
         threshold=float(threshold or 0.85),
+        # Both engines decide the type pair: PostgreSQL VARCHAR onto SQL Server
+        # NVARCHAR is a preserve only once the mapper knows the two sides (D158).
+        destination_db_type=dst_db,
+        source_db_type=str((src.output or {}).get("type") or ""),
     )
     mapped_src = {m.get("source") for m in mappings if m.get("source")}
     mapped_tgt = {m.get("target") for m in mappings if m.get("target")}

@@ -492,6 +492,7 @@ def _mapping_proof_for_request(request: TransferRequest) -> dict[str, Any]:
         dest_kind=request.destination.kind or "",
         sync_mode=request.sync_mode or "",
         destination_table_exists=table_exists,
+        source_db_type=request.source.format or "",
     )
 
 

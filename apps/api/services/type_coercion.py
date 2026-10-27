@@ -4,6 +4,7 @@ from typing import Any, Mapping
 from services import type_system as _ts
 from services.dest_dialect_facts import dest_has_no_uuid_type
 from services.document_instant import document_instant_wire_preserved
+from services.source_engine_scope import active_source_engine, bind_source_engine
 from services.type_system import (
     LOGICAL_ARRAY,
     LOGICAL_BINARY,
@@ -750,6 +751,7 @@ def is_lossy_coercion(
     target_type: str,
     *,
     dest_db: str = "",
+    source_db: str = "",
     dest_table_exists: bool | None = None,
     population: Any = None,
     source: str | None = None,
@@ -758,6 +760,12 @@ def is_lossy_coercion(
 ) -> bool:
     """True when converting sourceâ†’target may lose precision, fail silently, or
     change the semantic meaning of a value.
+
+    ``source_db`` is the engine the values come from. The charset, timestamp
+    and LONG checks read it from :func:`active_source_engine`, which is empty
+    outside a transfer, so a caller that knows the engine binds it here: an
+    unbound PostgreSQL ``VARCHAR`` → SQL Server ``NVARCHAR`` graded as an
+    invented national charset and blocked run 2 into DataFlow's own table (D158).
 
     The allow-list below captures the widening / reversible conversions that the
     transform engine can perform without losing the original value:
@@ -780,6 +788,19 @@ def is_lossy_coercion(
     lossy: :func:`uuid_would_collapse` treats the lost UUID *domain constraint*
     as an operator-visible collapse rather than silent green.
     """
+    engine = (source_db or "").strip().lower()
+    if engine and engine != active_source_engine():
+        with bind_source_engine(engine):
+            return is_lossy_coercion(
+                source_type,
+                target_type,
+                dest_db=dest_db,
+                dest_table_exists=dest_table_exists,
+                population=population,
+                source=source,
+                target=target,
+                proven=proven,
+            )
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)

@@ -222,6 +222,7 @@ def add_mapping_revision(
             target_columns=tgt_cols,
             destination_db_type=str(dest.get("format") or dest.get("type") or ""),
             source_kind=str(src.get("kind") or ""),
+            source_db_type=str(src.get("format") or src.get("type") or ""),
             dest_kind=str(dest.get("kind") or ""),
             sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
             destination_table_exists=(
@@ -341,6 +342,7 @@ def sync_ui_mappings(
             target_columns=plan.target_columns,
             destination_db_type=str(dest.get("format") or dest.get("type") or ""),
             source_kind=str(src.get("kind") or ""),
+            source_db_type=str(src.get("format") or src.get("type") or ""),
             dest_kind=str(dest.get("kind") or ""),
             sync_mode=str((plan.policies or {}).get("sync_mode") or ""),
             destination_table_exists=(
