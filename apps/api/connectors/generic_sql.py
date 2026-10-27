@@ -1074,6 +1074,11 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
         except (NoSuchModuleError, ImportError) as exc:
             raise _dialect_unavailable(url, cfg.get("type")) from exc
     url = _build_url(cfg)
+    if str(getattr(url, "drivername", url)).startswith("postgresql"):
+        from connectors.pg_infinity import register_pg_temporal_infinity
+
+        # D63: same infinity decode as the native PostgreSQL reader.
+        register_pg_temporal_infinity()
     # Fast, safe defaults for local and network databases.
     db_type = (cfg.get("type") or "").lower()
     connection_string = (cfg.get("connection_string") or "").lower()

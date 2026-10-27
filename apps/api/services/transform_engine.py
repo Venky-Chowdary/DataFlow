@@ -167,6 +167,8 @@ _KEEP_EMPTY_TRANSFORMS = frozenset({
 #: NaN / ±Infinity are not SQL null for JSON/vector — the typed parsers reject
 #: them rather than inventing JSON null or an empty embedding.
 _NONFINITE_TOKENS = frozenset({"nan", "infinity", "+infinity", "-infinity"})
+#: PostgreSQL's unbounded date/timestamp literals, as the PG reads keep them (D63).
+_PG_TEMPORAL_INFINITY = frozenset({"infinity", "-infinity"})
 
 #: Transforms that parse into a concrete type, so null sentinels mean null.
 #: Includes currency/percentage — empty must not silent-NULL into numeric sinks.
@@ -2549,6 +2551,12 @@ def apply_transform(
         if parsed_bool is None:
             return None, f"Invalid boolean: {text!r}"
         return parsed_bool, None
+
+    if transform in {"date", "datetime"} and text.strip().lower() in _PG_TEMPORAL_INFINITY:
+        # D63 — PostgreSQL infinity is data, not a malformed date. It passes
+        # through verbatim; the destination bind carries it to the PG family
+        # and refuses it by name everywhere else (never a clamped 9999-12-31).
+        return text.strip().lower(), None
 
     if transform == "date":
         if _is_ambiguous_mdy_dmy(text):

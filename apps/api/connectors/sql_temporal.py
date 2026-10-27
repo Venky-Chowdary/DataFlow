@@ -885,6 +885,10 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
     # Still a string after coerce → cannot bind as temporal.
     if isinstance(coerced, str):
         text = coerced.strip()
+        if pg_temporal_special(text) is not None and _is_postgres_family(engine):
+            # D63 — the PG family stores 'infinity' / '-infinity' literally;
+            # coerce_sql_temporal carried it, so it binds as itself.
+            return {"ok": True, "wire_value": text, "reason": "", "needs_normalize": False}
         return {
             "ok": False,
             "wire_value": None,

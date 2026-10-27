@@ -81,6 +81,9 @@ def get_connection(
     from services.egress_guard import assert_connector_dial_allowed
 
     assert_connector_dial_allowed(ep["host"], connection_string)
+    from connectors.pg_infinity import register_pg_temporal_infinity
+
+    register_pg_temporal_infinity()
     try:
         conn = psycopg2.connect(**kwargs)
     except Exception as first_exc:
