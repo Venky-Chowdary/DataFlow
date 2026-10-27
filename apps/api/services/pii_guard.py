@@ -13,6 +13,8 @@ import hashlib
 import re
 from typing import Any
 
+from services.value_serializer import is_reader_null_cell
+
 # Simplistic but fast patterns.  For production, integrate with a DLP or ML service.
 PII_PATTERNS: dict[str, re.Pattern[str]] = {
     "email": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b"),
@@ -233,7 +235,10 @@ def mask_record(record: dict[str, Any], sensitive_columns: set[str] | None = Non
         sensitive_columns = {k for k in record if is_sensitive_name(k)}
     out: dict[str, Any] = {}
     for k, v in record.items():
-        if k in sensitive_columns:
+        # SQL NULL carries no PII; masking it turned None into '' and the wire
+        # sentinel into masked text, so redacted load-history profiles saw a
+        # different null population than the live compare (D81).
+        if k in sensitive_columns and not is_reader_null_cell(v):
             out[k] = mask(v)
         else:
             out[k] = v

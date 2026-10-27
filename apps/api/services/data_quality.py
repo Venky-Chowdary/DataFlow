@@ -22,7 +22,7 @@ try:
 except ImportError:  # pragma: no cover - compatibility for tests
     from src.services.pii_guard import is_sensitive_name, pii_findings
     from src.services.transform_engine import _parse_date, _parse_datetime, decimal_wire_value
-    from src.services.value_serializer import cell_to_string, is_null_evidence, present_cell_text
+    from src.services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell, present_cell_text
 
 _UTC = timezone.utc
 

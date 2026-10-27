@@ -24,7 +24,7 @@ from typing import Any, Mapping
 
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
-from services.value_serializer import cell_to_string, is_null_evidence
+from services.value_serializer import cell_to_string, is_null_evidence, is_reader_null_cell
 
 # Keep enough history to answer "what changed across the last ~10 loads".
 DEFAULT_HISTORY_LIMIT = max(5, min(50, int(getenv_brand("QUALITY_HISTORY_LIMIT", "20"))))
@@ -37,6 +37,12 @@ DEFAULT_HISTORY_LIMIT = max(5, min(50, int(getenv_brand("QUALITY_HISTORY_LIMIT",
 MIN_ANOMALY_SAMPLE_ROWS = max(
     5, int(getenv_brand("QUALITY_ANOMALY_MIN_ROWS", "25"))
 )
+
+# Definition of ``ColumnProfile.null_count`` stamped on every persisted run.
+# v2 counts SQL NULL / Missing only (``is_reader_null_cell``); earlier runs also
+# counted '' and the text 'null'/'none', so their rates are a different metric
+# and must not be a baseline for v2 loads (D81). Bump on any definition change.
+NULL_RATE_METRIC = "sql_null_v2"
 
 
 @dataclass
@@ -129,12 +135,9 @@ def _coerce_datetime(value: Any) -> datetime | None:
 def profile_column(values: list[Any], column: str, dtype: str = "string") -> ColumnProfile:
     """Compute a descriptive statistical profile for a single column."""
     profile = ColumnProfile(column=column, dtype=dtype, count=len(values))
-    non_null = [
-        v
-        for v in values
-        if not is_null_evidence(v)
-        and cell_to_string(v).strip().lower() not in {"null", "none"}
-    ]
+    # SQL NULL only: a stored '' and the text 'null' / 'none' are customer
+    # values, and the destination keeps them as values (D81).
+    non_null = [v for v in values if not is_reader_null_cell(v)]
     profile.null_count = profile.count - len(non_null)
 
     as_text = [cell_to_string(v) for v in non_null]
@@ -564,6 +567,7 @@ def save_profile(
         "job_id": jid or None,
         "row_count": rc,
         "schema_version": _schema_version(profile),
+        "null_rate_metric": NULL_RATE_METRIC,
         "columns": columns,
         "quarantine_histogram": quarantine_histogram(rejected_details),
         "rejected_rows": int(rejected_rows or 0),
@@ -690,34 +694,36 @@ def build_load_history_report(
     # null rate (mongo→postgres "0% to 46%").
     current_version = _schema_version(current_profile)
     col_series: dict[str, dict[str, list[Any]]] = {}
-    for run in history:
-        cols = _deserialize_profile(run.get("columns") or {})
-        version = str(run.get("schema_version") or "") or _schema_version(cols)
-        if version != current_version:
-            continue
+
+    def _add_to_series(cols: dict[str, ColumnProfile], *, null_comparable: bool) -> None:
         for name, prof in cols.items():
             bucket = col_series.setdefault(name, {"null_rate": [], "mean": [], "count": [], "distinct_rate": []})
-            bucket["null_rate"].append(prof.null_rate)
+            # A prior rate is a baseline only under the same NULL definition
+            # and over a sample that can carry a rate: a 5-row change batch
+            # with 2 NULLs is not "40% NULL" for the next full load (D2).
+            if null_comparable and prof.count >= MIN_ANOMALY_SAMPLE_ROWS:
+                bucket["null_rate"].append(prof.null_rate)
             bucket["count"].append(float(prof.count))
             bucket["distinct_rate"].append(prof.distinct_rate)
             bound = _rehydrate_stat(prof.mean)
             if bound is not None:
                 bucket["mean"].append(bound)
 
-    # If no ring history, fall back to single baseline dict.
+    for run in history:
+        cols = _deserialize_profile(run.get("columns") or {})
+        version = str(run.get("schema_version") or "") or _schema_version(cols)
+        if version != current_version:
+            continue
+        _add_to_series(cols, null_comparable=run.get("null_rate_metric") == NULL_RATE_METRIC)
+
+    # If no ring history, fall back to single baseline dict. Callers profile
+    # it in-process with ``profile_column``, so it is the current metric.
     if (
         not history
         and fallback_baseline
         and _schema_version(fallback_baseline) == current_version
     ):
-        for name, prof in fallback_baseline.items():
-            bucket = col_series.setdefault(name, {"null_rate": [], "mean": [], "count": [], "distinct_rate": []})
-            bucket["null_rate"].append(prof.null_rate)
-            bucket["count"].append(float(prof.count))
-            bucket["distinct_rate"].append(prof.distinct_rate)
-            bound = _rehydrate_stat(prof.mean)
-            if bound is not None:
-                bucket["mean"].append(bound)
+        _add_to_series(fallback_baseline, null_comparable=True)
 
     z_cut = 3.5
     null_abs_cut = 0.10

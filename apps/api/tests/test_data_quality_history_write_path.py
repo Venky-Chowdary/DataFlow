@@ -80,10 +80,11 @@ def test_reader_null_is_absence_not_a_token():
         "string",
     )
     assert p.count == 5
-    assert p.null_count == 4
-    assert p.distinct_count == 1
-    assert p.min_value == "kept"
-    assert p.max_value == "kept"
+    # D81: only SQL NULL (None / wire sentinel) is absence; a stored '' and
+    # the text 'null' are customer values the destination keeps.
+    assert p.null_count == 2
+    assert p.distinct_count == 3
+    assert {v for v, _ in p.top_values} == {"", "kept", "null"}
     assert not any(v == SQL_NULL_SENTINEL for v, _ in p.top_values)
 
 
