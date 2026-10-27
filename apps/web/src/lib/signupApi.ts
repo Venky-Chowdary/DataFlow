@@ -5,6 +5,7 @@
  * envelope rather than {detail}; errors surface as SignupApiError carrying
  * the machine code so the UI can react without sniffing message text.
  */
+import type { WorkspaceSession } from "./session";
 import { API_BASE } from "./types";
 
 export class SignupApiError extends Error {
@@ -93,15 +94,43 @@ export async function signupRequest(input: {
   return challenge(data);
 }
 
+export interface VerifiedSignup {
+  token: string;
+  expires_at: number;
+  user: { email: string; name?: string; role?: string };
+  next?: string;
+}
+
+/**
+ * Verify the emailed code. The API answers with the same session payload as
+ * password login; a response without a token is refused here rather than
+ * stored, because an empty token reads back as "signed out" (D153).
+ */
 export async function verifyEmail(input: {
   challengeId: string;
   code: string;
-}): Promise<{ user: { email: string; name?: string; role?: string }; next?: string }> {
+}): Promise<VerifiedSignup> {
   const data = await call("/auth/verify-email", {
     challenge_id: input.challengeId,
     code: input.code,
   });
-  return data as { user: { email: string; name?: string; role?: string }; next?: string };
+  const result = data as unknown as VerifiedSignup;
+  if (typeof result.token !== "string" || !result.token || !result.user?.email) {
+    throw new SignupApiError(502, "session_missing", "Your email is verified, but we couldn't sign you in. Sign in to continue.");
+  }
+  return result;
+}
+
+/** The browser session a verified signup opens — shaped exactly like a login's. */
+export function verifiedSignupSession(result: VerifiedSignup): WorkspaceSession {
+  return {
+    email: result.user.email,
+    name: result.user.name ?? "",
+    role: result.user.role ?? "admin",
+    token: result.token,
+    expires_at: result.expires_at,
+    signed_in_at: Date.now(),
+  };
 }
 
 export async function resendCode(challengeId: string): Promise<ChallengeResponse> {

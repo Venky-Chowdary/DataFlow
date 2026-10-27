@@ -191,3 +191,27 @@ def test_no_cookie_no_session_returns_401():
     c = _client()
     resp = c.get("/api/v1/auth/sessions")
     assert resp.status_code == 401
+
+
+def test_verify_returns_login_shaped_bearer_session_d153():
+    """D153: the web client signs every call with a Bearer token, so verify-email
+    must hand back the same session payload login does — a cookie alone left the
+    browser holding an empty token and the first click bounced to sign-in."""
+    from src.routers.auth_router import router as auth_router
+
+    c = _client()
+    c.app.include_router(auth_router, prefix="/api/v1")
+    body = _signup_and_verify(c)
+    assert body["token"], "verify-email must return a usable session token"
+    assert body["expires_at"] > 0
+    assert body["user"]["email"] == "ada@example.com"
+    assert body["must_change_password"] is False
+
+    # A fresh browser context with no cookies: the Bearer alone authenticates,
+    # exactly as it does after a password login.
+    fresh = TestClient(c.app, base_url="https://testserver")
+    me = fresh.get("/api/v1/auth/me",
+                   headers={"Authorization": f"Bearer {body['token']}"})
+    assert me.status_code == 200, me.text
+    assert me.json()["email"] == "ada@example.com"
+    assert fresh.get("/api/v1/auth/me").status_code == 401

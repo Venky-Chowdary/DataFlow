@@ -301,7 +301,22 @@ async def verify_email(body: VerifyRequest, request: Request, response: Response
         samesite="strict",
         path="/",
     )
-    return result
+    # D153: the web client authenticates every API call with the Bearer token
+    # login issues; the cookie alone left it holding an empty token, so the
+    # first navigation after verifying bounced to sign-in. Issue the same
+    # session payload login returns.
+    from src.services.auth_service import create_token
+
+    try:
+        token, expires_at = create_token(result["user"]["email"])
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {
+        **result,
+        "token": token,
+        "expires_at": expires_at,
+        "must_change_password": False,
+    }
 
 
 def _session_summary(doc: dict, *, current_jti: str = "") -> dict:

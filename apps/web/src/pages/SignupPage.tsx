@@ -12,6 +12,7 @@ import {
   routeSsoForEmail,
   SignupApiError,
   signupRequest,
+  verifiedSignupSession,
   verifyEmail,
 } from "../lib/signupApi";
 import { changeEmailRequestError, codeEntryError, mailSendError } from "../lib/authFlowCopy";
@@ -252,17 +253,7 @@ export function SignupPage({ onAuthenticated, onSignIn, onBack, initialEmail = "
     setErrorIsField(false);
     try {
       const result = await verifyEmail({ challengeId: challenge.id, code });
-      writeSession(
-        {
-          email: result.user.email,
-          name: result.user.name ?? "",
-          role: result.user.role ?? "admin",
-          token: "", // cookie session carries auth; no bearer on the new surface
-          expires_at: Math.floor(Date.now() / 1000) + 86400,
-          signed_in_at: Date.now(),
-        },
-        true,
-      );
+      writeSession(verifiedSignupSession(result), true);
       toast({ title: "Email verified", message: "Your workspace is ready.", tone: "success" });
       onAuthenticated(result.user.email);
     } catch (err) {
