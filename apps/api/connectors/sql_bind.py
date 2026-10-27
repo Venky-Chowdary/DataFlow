@@ -11,7 +11,9 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
+import sys
 from typing import Any
 
 # Bind normalize runs once per cell — a 10M-row load resolves these names ~60M
@@ -1576,6 +1578,15 @@ _IEEE_NONFINITE_TOKENS = frozenset({
 })
 
 
+# Exact IEEE-754 limits (D157/D66). The rounded 3.40e38 / 1.79e308 windows
+# refused legal values: SQL Server FLOAT(53) rejected DBL_MAX, PostgreSQL REAL
+# rejected FLT_MAX. A float32 carrier rounds to nearest, so every double below
+# the FLT_MAX/infinity midpoint (FLT_MAX + 2**103) stores as a finite REAL.
+_FLOAT32_MIN_NORMAL = 2.0**-126
+_FLOAT32_MAX = (2.0 - 2.0**-23) * 2.0**127
+_FLOAT32_MAX_ROUNDING = math.nextafter(_FLOAT32_MAX + 2.0**103, 0.0)
+
+
 def _float_magnitude_bounds(
     ddl_type: str | None, engine: str
 ) -> tuple[float, float] | None:
@@ -1607,7 +1618,7 @@ def _float_magnitude_bounds(
     if base in {"float4", "float32", "real"} or (
         base == "float" and width is not None and width <= 24
     ):
-        return (1.18e-38, 3.40e38)
+        return (_FLOAT32_MIN_NORMAL, _FLOAT32_MAX_ROUNDING)
     sqlserver = eng in {
         "sqlserver",
         "mssql",
@@ -1623,7 +1634,7 @@ def _float_magnitude_bounds(
         "azure_synapse_serverless",
     } or eng.startswith("mssql")
     if sqlserver:
-        return (2.23e-308, 1.79e308)
+        return (sys.float_info.min, sys.float_info.max)
     return None
 
 
@@ -1649,8 +1660,9 @@ def coerce_float_wire(
         if mag < lo or mag > hi:
             raise ValueError(
                 f"float {num!r} is outside {ddl_type or 'FLOAT'} on "
-                f"{engine or 'destination'} (carrier {lo:.2e}..{hi:.2e}) "
-                "— quarantined (one unfit value must not abort the load)"
+                f"{engine or 'destination'} (carrier magnitude {lo!r}..{hi!r}) "
+                "— refused: a quarantine policy holds this row out, strict "
+                "validation fails the load"
             )
         return num
 
