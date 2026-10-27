@@ -771,7 +771,10 @@ def project_row_cells(
         if is_missing_sentinel(cell):
             out.append(DF_MISSING_SENTINEL)
             continue
-        out.append(cell_to_string(cell, preserve_sql_null=preserve_sql_null))
+        # Database rows already crossed the reader leaf: re-escaping their
+        # NULL sentinel turned every NULL into ``__DF_ESC____DF_SQL_NULL__``
+        # text that typed casts refuse (D118).
+        out.append(wire_cell_text(cell) if preserve_sql_null else cell_to_string(cell))
     return out
 
 

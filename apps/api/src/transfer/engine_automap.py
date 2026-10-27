@@ -6,7 +6,6 @@ from src.transfer import engine as _engine
 from src.transfer.type_mapper import default_mappings
 from src.transfer.engine import (
     TransferRequest,
-    cell_to_string,
     confidence_threshold_for_mode,
     destination_exists_for_shape,
     is_overwrite_sync,
@@ -14,6 +13,7 @@ from src.transfer.engine import (
     resolve_effective_sync_mode,
     schema_registry,
 )
+from services.value_serializer import wire_cell_text
 from services.timezone_policy import (
     apply_declared_source_timezone,
     declare_zone_on_schema,
@@ -40,7 +40,7 @@ def _auto_map(
             "name": column,
             "inferred_type": schema.get(column, "string"),
             "samples": [
-                cell_to_string(row.get(column, ""), preserve_sql_null=True)
+                wire_cell_text(row.get(column, ""))
                 for row in (sample_rows or [])[:8]
             ],
         }
@@ -58,7 +58,7 @@ def _auto_map(
         })
     source_samples = {
         column: [
-            cell_to_string(row.get(column, ""), preserve_sql_null=True)
+            wire_cell_text(row.get(column, ""))
             for row in (sample_rows or [])[:8]
         ]
         for column in columns

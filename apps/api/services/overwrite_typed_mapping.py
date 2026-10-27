@@ -57,10 +57,10 @@ def build_overwrite_create_new_mappings(
         from services.data_profiler import source_types_are_authoritative
         from services.mapping_pipeline import run_mapping_pipeline
         from services.preflight_service import confidence_threshold_for_mode
-        from services.value_serializer import cell_to_string
+        from services.value_serializer import wire_cell_text
 
         head = (sample_rows or [])[:8]
-        # Preserve SQL NULL. ``cell_to_string(None)`` is ``""``, and a JSON
+        # Preserve SQL NULL. A plain ``cell_to_string(None)`` is ``""``, and a JSON
         # null then looks like a present empty string. That widened a real
         # JSON column to VARCHAR and stored ``{"k":"v"}`` as text.
         source_schemas = [
@@ -68,13 +68,13 @@ def build_overwrite_create_new_mappings(
                 "name": c,
                 "inferred_type": schema.get(c, "string"),
                 "samples": [
-                    cell_to_string(r.get(c, ""), preserve_sql_null=True) for r in head
+                    wire_cell_text(r.get(c, "")) for r in head
                 ],
             }
             for c in columns
         ]
         source_samples = {
-            c: [cell_to_string(r.get(c, ""), preserve_sql_null=True) for r in head]
+            c: [wire_cell_text(r.get(c, "")) for r in head]
             for c in columns
         }
         overwrite_result = run_mapping_pipeline(
