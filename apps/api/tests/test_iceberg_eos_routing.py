@@ -569,7 +569,7 @@ def _router_client(monkeypatch: pytest.MonkeyPatch):
         "_stamp_job_mapping_artifacts",
         lambda *_args, **_kwargs: None,
     )
-    monkeypatch.setattr(transfer_router, "_resolve_write_workspace", lambda *_args: "")
+    monkeypatch.setattr(transfer_router, "resolve_write_workspace", lambda *_args: "")
     monkeypatch.setattr(transfer_router, "_residency_check", lambda *_args: None)
     monkeypatch.setattr(transfer_router, "_actor_email", lambda *_args: "test@example.com")
     app = FastAPI()

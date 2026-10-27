@@ -132,11 +132,13 @@ def test_http_freshness_does_not_name_sibling_workspace(client):
     assert "job-a" not in listed_b.text
 
 
-def test_isolation_on_without_header_is_400(client, monkeypatch):
+def test_isolation_on_without_header_no_longer_400s(client, monkeypatch):
+    # D154: a header-less read resolves the caller's scope instead of 400ing.
+    # Auth is off here, so the caller is the single operator (platform view).
     monkeypatch.setenv("DATAFLOW_REQUIRE_WORKSPACE", "1")
     missing = client.get("/api/v1/ops/freshness?warn_seconds=60")
-    assert missing.status_code == 400
-    assert "workspace" in missing.json()["detail"].lower()
+    assert missing.status_code == 200, missing.text
+    assert missing.json()["workspace_id"] is None
 
 
 def test_unscoped_get_stays_platform_wide(client):

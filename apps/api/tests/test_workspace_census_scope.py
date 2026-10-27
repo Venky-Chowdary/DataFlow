@@ -106,6 +106,15 @@ class _Req:
         self.state = type(
             "S", (), {"user_email": email, "user": {"role": role or ""}}
         )()
+        self.headers: dict[str, str] = {}
+
+
+def _no_memberships(monkeypatch):
+    """Nobody is a member of anything (the tenant resolver's membership seam)."""
+    import services.tenant_scope as ts
+
+    monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "1")
+    monkeypatch.setattr(ts, "ordered_memberships", lambda email: ())
 
 
 def _conn(workspace_id: str) -> store.SavedConnector:
@@ -121,9 +130,7 @@ def test_admin_non_member_sees_scoped_connector(monkeypatch):
     from the admin UI (prod defect)."""
     from src.routers import saved_connectors_router as r
 
-    monkeypatch.setattr(
-        r, "can_read_workspace", lambda ws, actor: False  # not a member
-    )
+    _no_memberships(monkeypatch)
     req = _Req("admin@example.com", "admin")
     assert r._can_access_connector(req, _conn("ws-prod")) is True
 
@@ -132,7 +139,7 @@ def test_non_admin_non_member_still_denied(monkeypatch):
     """Tenancy stays fail-closed: a non-admin non-member gets nothing."""
     from src.routers import saved_connectors_router as r
 
-    monkeypatch.setattr(r, "can_read_workspace", lambda ws, actor: False)
+    _no_memberships(monkeypatch)
     req = _Req("dev@example.com", "developer")
     assert r._can_access_connector(req, _conn("ws-prod")) is False
 
@@ -186,7 +193,7 @@ def test_resolve_workspace_admin_bypass_and_nonadmin_403(monkeypatch):
 
     from src.routers import saved_connectors_router as r
 
-    monkeypatch.setattr(r, "can_read_workspace", lambda ws, actor: False)
+    _no_memberships(monkeypatch)
     admin = _Req("admin@example.com", "admin")
     assert r._resolve_workspace(admin, "ws-prod") == "ws-prod"
     dev = _Req("dev@example.com", "developer")

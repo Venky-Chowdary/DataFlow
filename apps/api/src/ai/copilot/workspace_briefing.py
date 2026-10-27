@@ -154,10 +154,14 @@ def _schedule_line(sched: dict[str, Any]) -> str:
 def _load_connectors(workspace_id: str) -> list[dict[str, Any]]:
     try:
         from services import connector_store
+        from services.tenant_scope import current_workspace_filter
 
         rows = connector_store.list_connectors(workspace_id=workspace_id)
+        visible = current_workspace_filter()
         out = []
         for c in rows or []:
+            if visible is not None and not visible.matches(getattr(c, "workspace_id", "")):
+                continue
             if hasattr(c, "to_dict"):
                 d = c.to_dict()
             elif isinstance(c, dict):
@@ -215,7 +219,9 @@ def _load_schedules(workspace_id: str) -> list[dict[str, Any]]:
     try:
         from services.schedule_store import list_schedules
 
-        rows = list_schedules()
+        from services.tenant_scope import current_workspace_filter
+
+        rows = list_schedules(current_workspace_filter())
         out = []
         for s in rows or []:
             d = s.to_dict() if hasattr(s, "to_dict") else dict(s)

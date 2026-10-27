@@ -17,6 +17,7 @@ from typing import Any
 from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
 from services.value_serializer import json_default
+from services.workspace_filter import WorkspaceFilter
 
 _logger = logging.getLogger(__name__)
 STORE_PATH = data_dir() / "usage_metering.json"
@@ -84,12 +85,19 @@ def record_transfer_usage(
     return event_id
 
 
-def _load_events(workspace_id: str = "") -> list[dict[str, Any]]:
+def _load_events(
+    workspace_id: str = "", workspace_filter: WorkspaceFilter | None = None
+) -> list[dict[str, Any]]:
+    """Events for ``workspace_filter``, else exactly ``workspace_id`` ("" = all)."""
+    if workspace_filter is None:
+        workspace_filter = (
+            WorkspaceFilter.only(workspace_id) if workspace_id else WorkspaceFilter.everything()
+        )
     coll = _mongo()
     events: list[dict[str, Any]] = []
     if coll is not None:
         try:
-            filt = {"workspace_id": workspace_id} if workspace_id else {}
+            filt = workspace_filter.mongo_query()
             events = list(coll.find(filt))
             for e in events:
                 e.pop("_id", None)
@@ -101,8 +109,7 @@ def _load_events(workspace_id: str = "") -> list[dict[str, Any]]:
                 events = list(json.loads(STORE_PATH.read_text(encoding="utf-8")).get("events") or [])
             except Exception:
                 events = []
-        if workspace_id:
-            events = [e for e in events if e.get("workspace_id") == workspace_id]
+        events = [e for e in events if workspace_filter.matches(e.get("workspace_id"))]
     return events
 
 
@@ -118,13 +125,20 @@ def _event_day(created_at: Any) -> str | None:
     return text[:10] if len(text) >= 10 else None
 
 
-def summarize_usage(workspace_id: str = "", *, days: int | None = None) -> dict[str, Any]:
+def summarize_usage(
+    workspace_id: str = "",
+    *,
+    days: int | None = None,
+    workspace_filter: WorkspaceFilter | None = None,
+) -> dict[str, Any]:
     """Return aggregate rows/bytes for a workspace (or global).
 
-    When ``days`` is set, also returns a per-day breakdown covering that window
-    (UTC calendar days, inclusive of today).
+    ``workspace_filter`` (the caller's tenant scope) decides which events count;
+    ``workspace_id`` is then only the label. When ``days`` is set, also returns
+    a per-day breakdown covering that window (UTC calendar days, inclusive of
+    today).
     """
-    events = _load_events(workspace_id)
+    events = _load_events(workspace_id, workspace_filter)
     window_start: datetime | None = None
     if days is not None:
         days_n = max(1, min(int(days), 366))

@@ -25,6 +25,7 @@ from services.log_redaction import (
 )
 from services.platform_config import data_dir
 from services.value_serializer import json_default
+from services.workspace_filter import WorkspaceFilter
 
 STORE_PATH = data_dir() / "audit_events.jsonl"
 MAX_EVENTS = int(os.getenv("DATAFLOW_AUDIT_MAX_EVENTS", "5000"))
@@ -430,7 +431,10 @@ def _event_in_scope(
     tenant_id: str | None,
     since: str | None,
     until: str | None,
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> bool:
+    if workspace_filter is not None and not workspace_filter.matches(ev.get("workspace_id")):
+        return False
     if workspace_id and str(ev.get("workspace_id") or "") != workspace_id:
         return False
     if tenant_id and str(ev.get("tenant_id") or "") != tenant_id:
@@ -453,12 +457,15 @@ def list_audit_events(
     since: str | None = None,
     until: str | None = None,
     after_seq: int | None = None,
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> list[dict[str, Any]]:
     """Return recent events, or an ascending chain-sequence cursor page.
 
     ``workspace_id`` / ``tenant_id`` are exact matches. Unscoped historical
     events (empty workspace) are excluded from a scoped query so one tenant
     cannot export another tenant's rows — or the global leftovers.
+    ``workspace_filter`` is the caller's tenant scope (several workspaces);
+    ``None`` is system scope.
     """
     if after_seq is not None and after_seq < 0:
         raise ValueError("after_seq must be nonnegative")
@@ -474,6 +481,8 @@ def list_audit_events(
                 query["level"] = level
             if actor:
                 query["actor"] = actor
+            if workspace_filter is not None:
+                query.update(workspace_filter.mongo_query())
             if ws:
                 query["workspace_id"] = ws
             if tid:
@@ -516,7 +525,10 @@ def list_audit_events(
             continue
         if after_seq is not None and chain_seq_of(ev) <= after_seq:
             continue
-        if not _event_in_scope(ev, workspace_id=ws, tenant_id=tid, since=since, until=until):
+        if not _event_in_scope(
+            ev, workspace_id=ws, tenant_id=tid, since=since, until=until,
+            workspace_filter=workspace_filter,
+        ):
             continue
         events.append(ev)
         if after_seq is None and len(events) >= limit:
@@ -527,10 +539,15 @@ def list_audit_events(
 
 
 def scan_audit_events_for_secrets(
-    *, limit: int = 20000, workspace_id: str | None = None
+    *,
+    limit: int = 20000,
+    workspace_id: str | None = None,
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> dict[str, Any]:
     """Report paths containing legacy unredacted values without changing the store."""
-    events = list_audit_events(limit=limit, workspace_id=workspace_id)
+    events = list_audit_events(
+        limit=limit, workspace_id=workspace_id, workspace_filter=workspace_filter
+    )
     findings: list[dict[str, Any]] = []
 
     for event in events:
@@ -915,21 +932,6 @@ def _maybe_opportunistic_audit_purge() -> None:
             type(exc).__name__,
             exc_info=exc,
         )
-
-
-def requested_workspace_id_from_request(request: Any) -> str:
-    """Workspace scope the caller requested for an authorized read."""
-    if request is None:
-        return ""
-    try:
-        from services.workspace_access import requested_workspace_id
-
-        header = requested_workspace_id(request)
-    except Exception:
-        header = ""
-    if str(header).strip():
-        return str(header).strip()
-    return str(getattr(request.state, "workspace_id", "") or "").strip()
 
 
 def workspace_id_from_request(request: Any) -> str:

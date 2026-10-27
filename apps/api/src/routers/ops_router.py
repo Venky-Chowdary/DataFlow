@@ -19,36 +19,39 @@ async def get_freshness(
 ):
     """Pipeline CDC lag / heartbeat summary for Overview and Pipelines.
 
-    ``stale_count`` / ``alerts`` / ``worst_lag_seconds`` are this workspace
-    when ``X-Workspace-Id`` is set — never another tenant's CDC lag. Isolation
-    on and no header is a 400 (same as audit export).
+    ``stale_count`` / ``alerts`` / ``worst_lag_seconds`` are one workspace's:
+    the ``X-Workspace-Id`` workspace, else the caller's own. Only a platform
+    admin without a header gets the process-wide view (D154).
     """
-    from services.audit_log import requested_workspace_id_from_request
     from services.ops_metrics import freshness_summary
-    from services.team_store import require_workspace_isolation
+    from services.workspace_access import tenant_scope
 
-    workspace_id = requested_workspace_id_from_request(request)
-    if require_workspace_isolation() and not workspace_id:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Workspace-Id is required for freshness. "
-            "This SLO is a workspace sample, not a platform dump.",
-        )
-
+    scope = tenant_scope(request)
     return freshness_summary(
         max_lag_warn_seconds=warn_seconds,
         max_lag_critical_seconds=critical_seconds,
         heartbeat_stale_seconds=heartbeat_stale_seconds,
-        workspace_id=workspace_id or "",
+        workspace_id=scope.workspace_id,
+        workspace_filter=scope.single_workspace_filter(),
     )
 
 
 @router.get("/metrics/json")
-async def get_metrics_json():
-    """JSON mirror of in-process Prometheus metrics (UI-friendly)."""
-    from services.ops_metrics import snapshot
+async def get_metrics_json(request: Request):
+    """JSON mirror of in-process Prometheus metrics (UI-friendly).
 
-    return snapshot()
+    Process counters and gauges are platform-wide, so only a platform admin
+    sees them; anyone else gets the per-pipeline series of their own
+    workspace (D154).
+    """
+    from services.ops_metrics import snapshot
+    from services.workspace_access import tenant_scope
+
+    scope = tenant_scope(request)
+    workspace_filter = scope.single_workspace_filter()
+    if workspace_filter.is_everything:
+        return snapshot()
+    return snapshot(workspace_filter=workspace_filter)
 
 
 @router.get("/dlq")
@@ -59,24 +62,18 @@ async def get_dlq(
 ):
     """Quarantine dead-letter queue events (newest first).
 
-    ``count`` / ``total`` are this workspace's queue when ``X-Workspace-Id``
-    is set — never the platform dump, never the page length. ``returned`` is
-    the page. Isolation on and no header is a 400 (same as audit export).
+    ``count`` / ``total`` are one workspace's queue — the ``X-Workspace-Id``
+    workspace, else the caller's own; only a platform admin without a header
+    gets the platform queue (D154). ``returned`` is the page.
     """
-    from services.audit_log import requested_workspace_id_from_request
     from services.quarantine_dlq import count_dlq_events, list_dlq_events
-    from services.team_store import require_workspace_isolation
+    from services.workspace_access import tenant_scope
 
-    workspace_id = requested_workspace_id_from_request(request)
-    if require_workspace_isolation() and not workspace_id:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Workspace-Id is required for DLQ. "
-            "This count is a workspace sample, not a platform dump.",
-        )
-
-    events = list_dlq_events(job_id=job_id, workspace_id=workspace_id or None, limit=limit)
-    total = count_dlq_events(job_id=job_id, workspace_id=workspace_id or None)
+    scope = tenant_scope(request)
+    workspace_filter = scope.single_workspace_filter()
+    workspace_id = scope.workspace_id
+    events = list_dlq_events(job_id=job_id, workspace_filter=workspace_filter, limit=limit)
+    total = count_dlq_events(job_id=job_id, workspace_filter=workspace_filter)
     by_action: dict[str, int] = {}
     for ev in events:
         action = str(ev.get("action") or "unknown")

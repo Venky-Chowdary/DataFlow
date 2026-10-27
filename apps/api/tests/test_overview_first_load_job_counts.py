@@ -1,9 +1,10 @@
 """Overview first-load undercount — the API half of the race.
 
 The browser used to fetch jobs before Permissions named ``X-Workspace-Id``.
-That unscoped read counts only legacy (no workspace) jobs. A hard refresh
-already has the id in localStorage, so the same endpoint returns the real
-scoped total. This fixture is that pair of requests.
+That unscoped read counted only legacy (no workspace) jobs while a hard
+refresh (id already in localStorage) returned the real scoped total. Since
+D154 the header-less read is the caller's tenant scope — here the single
+operator of an auth-off deployment, i.e. every job — so both reads agree.
 """
 
 from __future__ import annotations
@@ -47,7 +48,7 @@ def _seed(n: int, status: str, workspace_id: str = "") -> None:
         mongo.update_job_status(job_id, status)
 
 
-def test_first_load_without_workspace_header_undercounts_scoped_history(client):
+def test_first_load_without_workspace_header_counts_the_callers_whole_scope(client):
     ws = create_workspace(name="Ops", created_by="anonymous")
     _seed(5, "completed")
     _seed(80, "completed", workspace_id=ws.id)
@@ -59,11 +60,11 @@ def test_first_load_without_workspace_header_undercounts_scoped_history(client):
         headers={"X-Workspace-Id": ws.id},
     ).json()
 
-    assert first_paint["total"] == 5
-    assert first_paint["count"] <= 50
+    assert first_paint["total"] == 95
+    assert first_paint["count"] == 50
+    # The header narrows to the workspace; isolation is off, so legacy rows stay.
     assert after_refresh["total"] == 95
     assert after_refresh["status_counts"]["completed"] == 85
     assert after_refresh["status_counts"]["failed"] == 10
     assert after_refresh["count"] == 50
     assert after_refresh["count"] < after_refresh["total"]
-    assert first_paint["total"] < after_refresh["total"]

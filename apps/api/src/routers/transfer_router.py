@@ -25,19 +25,20 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from services.team_store import can_read_workspace, can_write_workspace
+from services.workspace_access import resolve_write_workspace, tenant_scope
 from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
 
 
 def _can_access_job(request: Request | None, job: dict) -> bool:
-    """Workspace + optional resource-ACL gate for job-scoped sub-resources."""
+    """Tenant scope (D154) + optional resource-ACL gate for job-scoped sub-resources."""
     if request is None:
         return True
     workspace_id = (job.get("workspace_id") or "").strip()
     actor = _actor_email(request)
-    if workspace_id and not can_read_workspace(workspace_id, actor):
+    scope = tenant_scope(request)
+    if not scope.allows(workspace_id):
         return False
     job_id = str(job.get("_id") or job.get("id") or "").strip()
     if not job_id:
@@ -45,15 +46,13 @@ def _can_access_job(request: Request | None, job: dict) -> bool:
     try:
         from services.resource_acl import assert_resource_acl
 
-        user = getattr(request.state, "user", None) or {}
-        is_admin = str(user.get("role") or "").lower() == "admin"
         assert_resource_acl(
             tenant_id=workspace_id,
             resource_type="job",
             resource_id=job_id,
             principal=actor,
             min_role="viewer",
-            is_admin=is_admin,
+            is_admin=scope.unrestricted,
         )
     except PermissionError:
         return False
@@ -204,11 +203,6 @@ def _validated_shape_recipe(raw: dict | str | None) -> dict:
     return recipe.to_wire()
 
 
-def _resolve_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
-    workspace_id = (x_workspace_id or "").strip()
-    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
-        raise HTTPException(status_code=403, detail="Write access to workspace denied")
-    return workspace_id
 class EndpointDTO(BaseModel):
     # Allow Studio flat keys (schema_types, table_exists, …) so EndpointConfig.from_dict
     # can fold them into extra — never silently strip live DDL / existence SSOT.
@@ -925,7 +919,7 @@ async def execute_transfer_json(
             status_code=400, detail=redact_log_text(str(exc))
         ) from exc
 
-    workspace_id = _resolve_write_workspace(request, workspace_id)
+    workspace_id = resolve_write_workspace(request, workspace_id)
     src = src_preview
     dst = dst_preview
     region = (
@@ -1246,7 +1240,7 @@ async def run_universal_transfer(
             status_code=400, detail=redact_log_text(str(exc))
         ) from exc
 
-    workspace_id = _resolve_write_workspace(request, workspace_id)
+    workspace_id = resolve_write_workspace(request, workspace_id)
 
     src_fmt = source_format
     if source_kind == "file" and file:
@@ -2153,7 +2147,7 @@ async def rebaseline_append_continuity(
     from ..transfer.adapters import resolve_endpoint
     from ..transfer.models import EndpointConfig
 
-    _resolve_write_workspace(request, workspace_id)
+    resolve_write_workspace(request, workspace_id)
     reason = (body.reason or "").strip()
     if not reason:
         raise HTTPException(

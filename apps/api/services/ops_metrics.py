@@ -11,6 +11,8 @@ import threading
 import time
 from typing import Any
 
+from services.workspace_filter import WorkspaceFilter
+
 _lock = threading.Lock()
 
 _counters: dict[str, float] = {  # nosec B105
@@ -164,9 +166,12 @@ def set_running_jobs(count: int) -> None:
     _set_gauge("dataflow_jobs_running", float(max(0, count)))
 
 
-def snapshot() -> dict[str, Any]:
+def snapshot(workspace_filter: WorkspaceFilter | None = None) -> dict[str, Any]:
+    """Every in-process metric, or — with ``workspace_filter`` — only the
+    per-pipeline series whose proven workspace the filter allows. Process-wide
+    counters and gauges have no workspace, so a filtered view omits them."""
     with _lock:
-        return {
+        snap = {
             "counters": dict(_counters),
             "gauges": dict(_gauges),
             "pipeline_lag_seconds": dict(_labeled_gauges.get("dataflow_pipeline_lag_seconds", {})),
@@ -175,6 +180,21 @@ def snapshot() -> dict[str, Any]:
             "pipeline_heartbeat_at": dict(_pipeline_heartbeat),
             "scraped_at": time.time(),
         }
+    if workspace_filter is None or workspace_filter.is_everything:
+        return snap
+    snap["counters"] = {}
+    snap["gauges"] = {}
+    for series in ("pipeline_lag_seconds", "pipeline_lag_bytes", "pipeline_polls_total", "pipeline_heartbeat_at"):
+        snap[series] = {
+            key: value
+            for key, value in snap[series].items()
+            if _pipeline_in_freshness_scope(key, _series_parts(key), workspace_filter)
+        }
+    return snap
+
+
+def _series_parts(key: str) -> dict[str, str]:
+    return dict(p.split("=", 1) for p in key.split(",") if "=" in p)
 
 
 def _workspace_of_pipeline(key: str, parts: dict[str, str]) -> str:
@@ -210,11 +230,12 @@ def _workspace_of_pipeline(key: str, parts: dict[str, str]) -> str:
     return ""
 
 
-def _pipeline_in_freshness_scope(key: str, parts: dict[str, str], workspace_id: str) -> bool:
-    ws = (workspace_id or "").strip()
-    if not ws:
+def _pipeline_in_freshness_scope(
+    key: str, parts: dict[str, str], workspace_filter: WorkspaceFilter
+) -> bool:
+    if workspace_filter.is_everything:
         return True
-    return _workspace_of_pipeline(key, parts) == ws
+    return workspace_filter.matches(_workspace_of_pipeline(key, parts))
 
 
 def freshness_summary(
@@ -223,6 +244,7 @@ def freshness_summary(
     max_lag_critical_seconds: float | None = None,
     heartbeat_stale_seconds: float = 300.0,
     workspace_id: str = "",
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> dict[str, Any]:
     """UI-friendly freshness view: worst lag, per-pipeline rows, SLO alerts.
 
@@ -231,6 +253,8 @@ def freshness_summary(
 
     ``workspace_id`` scopes alerts / stale_count / worst lag to that
     workspace. Empty keeps the process-wide scrape (Prometheus / unscoped GET).
+    ``workspace_filter`` (the caller's tenant scope) overrides that rule;
+    ``workspace_id`` is then only the label.
     """
     from services.cdc_lag_honesty import (
         BYTE_CRITICAL,
@@ -254,9 +278,13 @@ def freshness_summary(
     keys |= set(snap.get("pipeline_lag_bytes") or {})
 
     scope_ws = (workspace_id or "").strip()
+    if workspace_filter is None:
+        workspace_filter = (
+            WorkspaceFilter.only(scope_ws) if scope_ws else WorkspaceFilter.everything()
+        )
     for key in keys:
-        parts = dict(p.split("=", 1) for p in key.split(",") if "=" in p)
-        if not _pipeline_in_freshness_scope(key, parts, scope_ws):
+        parts = _series_parts(key)
+        if not _pipeline_in_freshness_scope(key, parts, workspace_filter):
             continue
         lag_raw = (snap.get("pipeline_lag_seconds") or {}).get(key)
         bytes_raw = (snap.get("pipeline_lag_bytes") or {}).get(key)
@@ -323,7 +351,7 @@ def freshness_summary(
     pipelines.sort(key=_sort_key)
     global_lag = (snap.get("gauges") or {}).get("dataflow_cdc_lag_seconds")
     # Process-wide gauge is another workspace's lag when this read is scoped.
-    if worst is None and not scope_ws and global_lag is not None and float(global_lag) > 0:
+    if worst is None and workspace_filter.is_everything and global_lag is not None and float(global_lag) > 0:
         worst = float(global_lag)
 
     alerts: list[dict[str, Any]] = []

@@ -325,8 +325,9 @@ def compose_schedule_setup_capability(ctx: dict[str, Any] | None = None) -> str:
     if n is None:
         try:
             from services.schedule_store import list_schedules
+            from services.tenant_scope import current_workspace_filter
 
-            n = len(list_schedules() or [])
+            n = len(list_schedules(current_workspace_filter()) or [])
         except Exception:
             n = 0
     have = ""

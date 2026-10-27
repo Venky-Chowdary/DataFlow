@@ -3444,8 +3444,10 @@ class DataPilotTools:
             return None, None
         # Full name only. A substring used to run or delete a different
         # pipeline, and two schedules were allowed to share a name.
+        from services.tenant_scope import current_workspace_filter
+
         exact = [
-            s for s in list_schedules()
+            s for s in list_schedules(current_workspace_filter())
             if (s.name or "").strip().lower() == needle
         ]
         if len(exact) == 1:
@@ -3514,8 +3516,10 @@ class DataPilotTools:
 
     def _list_schedules(self, limit: int = 20) -> ToolResult:
         from services.schedule_store import list_schedules
+        from services.tenant_scope import current_workspace_filter
 
-        rows = [self._schedule_summary(s) for s in list_schedules()[: max(1, min(int(limit or 20), 100))]]
+        visible = list_schedules(current_workspace_filter())
+        rows = [self._schedule_summary(s) for s in visible[: max(1, min(int(limit or 20), 100))]]
         return ToolResult(name="list_schedules", success=True, output={"schedules": rows, "count": len(rows)})
 
     def _get_schedule(self, schedule_id: str = "", name: str = "") -> ToolResult:

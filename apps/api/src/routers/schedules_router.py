@@ -26,7 +26,7 @@ from services.workspace_access import (
     assert_resource_workspace,
     resolve_read_workspace,
     resolve_write_workspace,
-    workspace_resource_is_visible,
+    tenant_scope,
 )
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
@@ -550,13 +550,8 @@ async def list_pipeline_schedules(
 ):
     import asyncio
 
-    ws = resolve_read_workspace(request, workspace_id)
-    schedules = await asyncio.to_thread(list_schedules)
-    if ws:
-        schedules = [
-            s for s in schedules
-            if workspace_resource_is_visible(s.workspace_id, ws)
-        ]
+    scope = tenant_scope(request, workspace_id).filter
+    schedules = await asyncio.to_thread(list_schedules, scope)
     return [ScheduleSummaryResponse.from_schedule(s) for s in schedules]
 
 

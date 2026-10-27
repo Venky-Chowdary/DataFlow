@@ -35,16 +35,27 @@ def audit_export_honesty() -> dict[str, object]:
     }
 
 
-def _scope(request: Request) -> tuple[str, str]:
-    from services.audit_log import requested_workspace_id_from_request
+def _tenant_of(workspace_id: str) -> str:
     from services.tenant_store import get_tenant_for_workspace
 
-    workspace_id = requested_workspace_id_from_request(request)
-    tenant_id = ""
-    if workspace_id:
-        tenant = get_tenant_for_workspace(workspace_id)
-        tenant_id = str(tenant.id) if tenant else ""
-    return workspace_id, tenant_id
+    if not workspace_id:
+        return ""
+    tenant = get_tenant_for_workspace(workspace_id)
+    return str(tenant.id) if tenant else ""
+
+
+def _scope(request: Request):
+    """The caller's tenant scope (D154)."""
+    from services.workspace_access import tenant_scope
+
+    return tenant_scope(request)
+
+
+def _report_workspace(scope) -> str:
+    """One workspace for a report; "" (platform) only for a platform admin."""
+    if not scope.workspace_id and not scope.unrestricted:
+        raise HTTPException(status_code=403, detail="No workspace membership")
+    return scope.workspace_id
 
 
 def _next_after_seq(
@@ -120,14 +131,16 @@ async def list_events(
 ):
     from services.audit_log import list_audit_events
 
-    workspace_id, tenant_id = _scope(request)
-    # Scope by the workspace the caller is looking at. Do not AND tenant_id:
-    # events stamped with this workspace before a tenant existed would vanish,
-    # and a shared tenant must not pull sibling-workspace rows.
+    scope = _scope(request)
+    workspace_id = scope.requested_workspace_id
+    tenant_id = _tenant_of(workspace_id)
+    # Scope by the caller's workspaces (or the one they are looking at). Do not
+    # AND tenant_id: events stamped with this workspace before a tenant existed
+    # would vanish, and a shared tenant must not pull sibling-workspace rows.
     events = list_audit_events(
         limit=limit,
         level=level,
-        workspace_id=workspace_id or None,
+        workspace_filter=scope.strict_filter(),
         after_seq=after_seq,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
@@ -155,19 +168,24 @@ async def export_events(
 ):
     """Workspace-scoped audit download for an auditor sample.
 
-    Requires ``X-Workspace-Id``. Only events stamped with that workspace
-    are included. This is evidence, not a SOC 2 / HIPAA letter. CEF omits
+    One workspace: ``X-Workspace-Id``, else the caller's own. Only events
+    stamped with that workspace are included. This is evidence, not a SOC 2 / HIPAA letter. CEF omits
     event details intentionally; use NDJSON when those details are needed.
     """
     from services.audit_log import latest_event_hash, list_audit_events
 
-    workspace_id, tenant_id = _scope(request)
-    if not workspace_id:
+    scope = _scope(request)
+    try:
+        workspace_id = scope.target_workspace_id()
+    except HTTPException as exc:
+        if exc.status_code != 400:
+            raise
         raise HTTPException(
             status_code=400,
             detail="X-Workspace-Id is required for audit export. "
             "This download is a workspace sample, not a global dump.",
-        )
+        ) from exc
+    tenant_id = _tenant_of(workspace_id)
     events = list_audit_events(
         limit=limit,
         level=level,
@@ -299,17 +317,11 @@ async def scan_audit_secrets(
     limit: int = Query(20000, ge=1, le=20000),
 ):
     from services.audit_log import scan_audit_events_for_secrets
-    from services.team_store import require_workspace_isolation
 
-    workspace_id, _tenant_id = _scope(request)
-    if require_workspace_isolation() and not workspace_id:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Workspace-Id is required for an audit secret scan.",
-        )
+    scope = _scope(request)
     result = scan_audit_events_for_secrets(
         limit=limit,
-        workspace_id=workspace_id or None,
+        workspace_filter=scope.strict_filter(),
     )
     record_security_event(
         "audit.secret_scan.read", outcome="succeeded", request=request,
@@ -328,19 +340,13 @@ async def verify_audit_chain(
     record). Findings named in the response are this workspace's when
     ``X-Workspace-Id`` is set — another tenant's event ids are withheld.
 
-    Isolation on and no header is a 400, same as audit export: an unscoped
-    verify would list every workspace's broken event ids.
+    With no header the findings are the caller's own workspace's; only a
+    platform admin gets the platform-wide list of broken event ids (D154).
     """
     from services.evidence_chain import verify_chain
-    from services.team_store import require_workspace_isolation
 
-    workspace_id, _tenant_id = _scope(request)
-    if require_workspace_isolation() and not workspace_id:
-        raise HTTPException(
-            status_code=400,
-            detail="X-Workspace-Id is required for chain verification. "
-            "The walk is platform-wide; findings named here are this workspace.",
-        )
+    scope = _scope(request)
+    workspace_id = _report_workspace(scope)
     result = verify_chain(limit=limit, workspace_id=workspace_id)
     record_security_event(
         "audit.verify.read", outcome="succeeded", request=request,

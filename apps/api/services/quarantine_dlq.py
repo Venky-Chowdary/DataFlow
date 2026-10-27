@@ -32,6 +32,7 @@ from typing import Any
 
 from services.platform_config import data_dir
 from services.value_serializer import json_default, json_loads_exact
+from services.workspace_filter import WorkspaceFilter
 
 logger = logging.getLogger(__name__)
 
@@ -469,14 +470,28 @@ def _unwire_quarantine_detail(detail: dict[str, Any]) -> dict[str, Any]:
     return changed
 
 
-def _dlq_query(*, job_id: str | None = None, workspace_id: str | None = None) -> dict[str, Any]:
+def _dlq_workspace_filter(
+    workspace_id: str | None, workspace_filter: WorkspaceFilter | None
+) -> WorkspaceFilter:
+    """The caller's tenant scope, else an exact workspace ("" / None = all)."""
+    if workspace_filter is not None:
+        return workspace_filter
+    ws = (workspace_id or "").strip()
+    return WorkspaceFilter.only(ws) if ws else WorkspaceFilter.everything()
+
+
+def _dlq_query(
+    *,
+    job_id: str | None = None,
+    workspace_id: str | None = None,
+    workspace_filter: WorkspaceFilter | None = None,
+) -> dict[str, Any]:
     """Mongo filter for DLQ reads. Workspace is exact — unscoped rows stay out."""
-    query: dict[str, Any] = {}
+    query: dict[str, Any] = dict(
+        _dlq_workspace_filter(workspace_id, workspace_filter).mongo_query()
+    )
     if job_id:
         query["job_id"] = job_id
-    ws = (workspace_id or "").strip()
-    if ws:
-        query["workspace_id"] = ws
     return query
 
 
@@ -485,16 +500,19 @@ def _event_in_dlq_scope(
     *,
     job_id: str | None = None,
     workspace_id: str | None = None,
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> bool:
     if job_id and ev.get("job_id") != job_id:
         return False
-    ws = (workspace_id or "").strip()
-    if ws and str(ev.get("workspace_id") or "") != ws:
-        return False
-    return True
+    return _dlq_workspace_filter(workspace_id, workspace_filter).matches(ev.get("workspace_id"))
 
 
-def count_dlq_events(*, job_id: str | None = None, workspace_id: str | None = None) -> int:
+def count_dlq_events(
+    *,
+    job_id: str | None = None,
+    workspace_id: str | None = None,
+    workspace_filter: WorkspaceFilter | None = None,
+) -> int:
     """DLQ count — never the length of a paged ``list_dlq_events`` window.
 
     Overview used ``len(events)`` with ``limit=50``, so a 200-event queue read as
@@ -502,7 +520,7 @@ def count_dlq_events(*, job_id: str | None = None, workspace_id: str | None = No
     ``workspace_id`` is set this is that workspace's queue, not the platform.
     """
     coll = _dlq_coll()
-    query = _dlq_query(job_id=job_id, workspace_id=workspace_id)
+    query = _dlq_query(job_id=job_id, workspace_id=workspace_id, workspace_filter=workspace_filter)
     if coll is not None:
         try:
             return int(coll.count_documents(query))
@@ -524,7 +542,9 @@ def count_dlq_events(*, job_id: str | None = None, workspace_id: str | None = No
         ev = load_dlq_event(line)
         if ev is None:
             continue
-        if not _event_in_dlq_scope(ev, job_id=job_id, workspace_id=workspace_id):
+        if not _event_in_dlq_scope(
+            ev, job_id=job_id, workspace_id=workspace_id, workspace_filter=workspace_filter
+        ):
             continue
         n += 1
     return n
@@ -535,11 +555,12 @@ def list_dlq_events(
     job_id: str | None = None,
     workspace_id: str | None = None,
     limit: int = 100,
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> list[dict[str, Any]]:
     coll = _dlq_coll()
     if coll is not None:
         try:
-            query = _dlq_query(job_id=job_id, workspace_id=workspace_id)
+            query = _dlq_query(job_id=job_id, workspace_id=workspace_id, workspace_filter=workspace_filter)
             docs = list(coll.find(query).sort("ts", -1).limit(max(1, int(limit))))
             out: list[dict[str, Any]] = []
             for d in docs:
@@ -565,7 +586,9 @@ def list_dlq_events(
         ev = load_dlq_event(line)
         if ev is None:
             continue
-        if not _event_in_dlq_scope(ev, job_id=job_id, workspace_id=workspace_id):
+        if not _event_in_dlq_scope(
+            ev, job_id=job_id, workspace_id=workspace_id, workspace_filter=workspace_filter
+        ):
             continue
         events.append(ev)
         if len(events) >= limit:

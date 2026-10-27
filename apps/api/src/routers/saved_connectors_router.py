@@ -30,7 +30,7 @@ from services.connector_store import (
     mask_connector,
     update_connector,
 )
-from services.team_store import can_read_workspace, can_write_workspace
+from services.workspace_access import resolve_write_workspace, tenant_scope
 from services.connector_telemetry import connector_operation, driver_family
 
 router = APIRouter(prefix="/connectors/saved", tags=["Saved Connectors"])
@@ -95,46 +95,26 @@ def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
-def _actor_is_platform_admin(request: Request) -> bool:
-    user = getattr(request.state, "user", None) or {}
-    return str(user.get("role") or "").lower() == "admin"
+def _writable_connector_or_404(request: Request, conn: Any) -> Any:
+    """404 an invisible connector, 403 one the actor may only read."""
+    if not conn or not _can_access_connector(request, conn):
+        raise HTTPException(status_code=404, detail="Connector not found")
+    if not tenant_scope(request).can_write(conn.workspace_id):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")
+    return conn
 
 
 def _resolve_workspace(
     request: Request,
     x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> str:
-    """Return the workspace id after verifying the actor can read it.
+    """The header scope after the tenant resolver authorized it ("" = none).
 
-    Platform admins administer every workspace — the same bypass
-    ``_can_access_connector`` applies per-doc, or a browser whose
-    ``df2.workspace`` points at a workspace the admin is not a member of
-    403s the whole saved-connector list and the UI falls back to empty
-    (prod UI census defect). Non-admins still fail closed.
+    Platform admins may name any workspace; anyone else gets a 403 for a
+    workspace they are not a member of. Which rows the caller then sees is
+    ``_can_access_connector``'s job.
     """
-    workspace_id = (x_workspace_id or "").strip()
-    if (
-        workspace_id
-        and not _actor_is_platform_admin(request)
-        and not can_read_workspace(workspace_id, _actor_email(request))
-    ):
-        raise HTTPException(status_code=403, detail="Access to workspace denied")
-    return workspace_id
-
-
-def _require_write_workspace(
-    request: Request,
-    x_workspace_id: str = Header(default="", alias="X-Workspace-Id"),
-) -> str:
-    """Return the workspace id after verifying the actor can write to it."""
-    workspace_id = (x_workspace_id or "").strip()
-    if (
-        workspace_id
-        and not _actor_is_platform_admin(request)
-        and not can_write_workspace(workspace_id, _actor_email(request))
-    ):
-        raise HTTPException(status_code=403, detail="Write access to workspace denied")
-    return workspace_id
+    return tenant_scope(request, x_workspace_id).requested_workspace_id
 
 
 def _to_ui(c) -> dict[str, Any]:
@@ -178,12 +158,17 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
 
 
 def _can_access_connector(request: Request, conn: Any) -> bool:
-    """True if the actor may see or mutate this connector (workspace + optional ACL)."""
+    """True if the actor may see this connector.
+
+    Workspace visibility is the request's tenant scope (D154): members of the
+    connector's workspace, platform admins, and — only while isolation is not
+    enforced — anyone for an unscoped legacy connector. A per-resource ACL can
+    restrict further.
+    """
     actor = _actor_email(request)
-    is_admin = _actor_is_platform_admin(request)
-    # Platform admins bypass workspace membership (they administer all
-    # workspaces); non-admins still need membership to see a scoped doc.
-    if conn.workspace_id and not is_admin and not can_read_workspace(conn.workspace_id, actor):
+    scope = tenant_scope(request)
+    is_admin = scope.unrestricted
+    if not scope.allows(conn.workspace_id):
         return False
     try:
         from services.resource_acl import assert_resource_acl
@@ -210,14 +195,8 @@ def get_saved_connectors(
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    workspace_id = _resolve_workspace(request, workspace_id)
-    conns = list_connectors(role, workspace_id=workspace_id)
-    if not workspace_id and not _actor_is_platform_admin(request):
-        # No scope header: a non-admin sees only unscoped connectors, even when
-        # they happen to be a member of another workspace (workspace-scoped docs
-        # are reached via the X-Workspace-Id header). Store-level "" means
-        # "no filter" since the census fix, so re-apply the unscoped view here.
-        conns = [c for c in conns if not getattr(c, "workspace_id", "")]
+    _resolve_workspace(request, workspace_id)
+    conns = list_connectors(role)
     return {
         "connectors": [_to_ui(c) for c in conns if _can_access_connector(request, c)]
     }
@@ -250,7 +229,7 @@ def save_connector(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = resolve_write_workspace(request, workspace_id)
     data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     data["workspace_id"] = workspace_id
@@ -276,12 +255,11 @@ def update_saved_connector(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = _resolve_workspace(request, workspace_id)
     data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     existing = get_connector(connector_id, workspace_id=workspace_id)
-    if not existing or not _can_access_connector(request, existing):
-        raise HTTPException(status_code=404, detail="Connector not found")
+    _writable_connector_or_404(request, existing)
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
@@ -298,10 +276,9 @@ def remove_saved_connector(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = _resolve_workspace(request, workspace_id)
     conn = get_connector(connector_id, workspace_id=workspace_id)
-    if not conn or not _can_access_connector(request, conn):
-        raise HTTPException(status_code=404, detail="Connector not found")
+    _writable_connector_or_404(request, conn)
     if not delete_connector(connector_id, workspace_id=workspace_id):
         raise HTTPException(status_code=404, detail="Connector not found")
     return {"ok": True}
@@ -333,10 +310,9 @@ def rotate_saved_connector_secrets(
 
     from services.audit_log import actor_from_request, append_audit_event
 
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = _resolve_workspace(request, workspace_id)
     existing = get_connector(connector_id, workspace_id=workspace_id)
-    if not existing or not _can_access_connector(request, existing):
-        raise HTTPException(status_code=404, detail="Connector not found")
+    _writable_connector_or_404(request, existing)
 
     payload = body.model_dump(exclude_none=True)
     if not payload:

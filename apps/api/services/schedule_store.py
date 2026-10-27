@@ -23,6 +23,7 @@ from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
 from services.platform_config import data_dir
 from services.value_serializer import json_default
+from services.workspace_filter import WorkspaceFilter
 
 logger = logging.getLogger(__name__)
 
@@ -918,8 +919,13 @@ def schedule_overdue_seconds(
     return max(0, int((current - due).total_seconds()))
 
 
-def list_schedules() -> list[PipelineSchedule]:
-    return sorted(_load_all(), key=lambda s: s.created_at, reverse=True)
+def list_schedules(workspace_filter: WorkspaceFilter | None = None) -> list[PipelineSchedule]:
+    """Newest first. ``workspace_filter`` is the caller's tenant scope; ``None``
+    is system scope (the scheduler, CDC workers)."""
+    rows = _load_all()
+    if workspace_filter is not None:
+        rows = [s for s in rows if workspace_filter.matches(s.workspace_id)]
+    return sorted(rows, key=lambda s: s.created_at, reverse=True)
 
 
 def get_schedule(schedule_id: str) -> PipelineSchedule | None:

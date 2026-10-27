@@ -455,6 +455,7 @@ async def mcp_request_logs(http_request: Request, limit: int = 50):
 async def mcp_status(http_request: Request):
     from services.connector_store import list_connectors
     from services.mcp_invocation_log import list_mcp_invocations
+    from services.workspace_access import tenant_scope
 
     from ..ai.copilot.pilot_agent import get_pilot_agent
     from ..ai.copilot.tools import TOOL_DEFINITIONS
@@ -468,26 +469,24 @@ async def mcp_status(http_request: Request):
         anthropic_available = False
         datasets = 0
 
+    # Public discovery route: the counts are the caller's tenant scope (an
+    # anonymous caller sees no tenant's numbers), never the platform's (D154).
+    scope = tenant_scope(http_request)
     try:
-        jobs_service = None
-        try:
-            from ..services.mongodb_service import get_mongodb_service
-            jobs_service = get_mongodb_service()
-        except Exception as exc:
-            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
-        if jobs_service is None:
-            from services.jobs import job_store
-            jobs_service = job_store
-        jobs = len(jobs_service.list_jobs(limit=100))
+        from ..services.mongodb_service import get_mongodb_service
+
+        jobs = len(get_mongodb_service().list_jobs(limit=100, workspace_filter=scope.filter))
     except Exception:
-        try:
-            from services.jobs import job_store
-            jobs = len(job_store.list_recent(limit=100))
-        except Exception:
-            jobs = 0
+        jobs = 0
+        if scope.filter.is_everything:
+            try:
+                from services.jobs import job_store
+                jobs = len(job_store.list_recent(limit=100))
+            except Exception:
+                jobs = 0
 
     try:
-        connectors = len(list_connectors())
+        connectors = sum(1 for c in list_connectors() if scope.allows(c.workspace_id))
     except Exception:
         connectors = 0
 

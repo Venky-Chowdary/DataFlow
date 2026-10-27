@@ -188,7 +188,12 @@ def test_secret_scan_endpoint_matches_verify_access_and_scopes_workspace(
     verify_without_workspace = client.get(
         "/api/v1/audit/verify", headers=missing_workspace
     )
-    assert scan_without_workspace.status_code == verify_without_workspace.status_code == 400
+    # D154: no header defaults to the key owner's own workspace (it used to
+    # 400) — still that workspace only, never the foreign event.
+    assert scan_without_workspace.status_code == verify_without_workspace.status_code == 200
+    assert [event["id"] for event in scan_without_workspace.json()["events"]] == ["own-event"]
+    assert foreign_secret not in scan_without_workspace.text
+    assert verify_without_workspace.json()["workspace_id"] == audit_scan_context["workspace_id"]
     raw = audit_scan_context["path"].read_bytes()
     assert raw.startswith(before)
     appended = [
@@ -197,6 +202,8 @@ def test_secret_scan_endpoint_matches_verify_access_and_scopes_workspace(
         if line.strip()
     ]
     assert appended == [
+        "audit.secret_scan.read",
+        "audit.verify.read",
         "audit.secret_scan.read",
         "audit.verify.read",
         "audit.secret_scan.read",

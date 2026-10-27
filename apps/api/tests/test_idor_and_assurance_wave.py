@@ -15,8 +15,21 @@ class _State:
         self.user = {"email": email, "role": role}
 
 
+def _memberships(monkeypatch, gate):
+    """Route the tenant resolver's membership read through ``gate(ws, email)``."""
+    import services.tenant_scope as ts
+
+    monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "1")
+    workspaces = ("ws-a", "ws1")
+    monkeypatch.setattr(
+        ts,
+        "ordered_memberships",
+        lambda email: tuple((ws, "editor") for ws in workspaces if gate(ws, email)),
+    )
+
+
 def test_can_access_job_denies_foreign_workspace(monkeypatch):
-    monkeypatch.setattr(tr, "can_read_workspace", lambda ws, email: email.endswith("@ok.com") and ws == "ws-a")
+    _memberships(monkeypatch, lambda ws, email: email.endswith("@ok.com") and ws == "ws-a")
     job = {"_id": "j1", "workspace_id": "ws-a"}
     ok_req = SimpleNamespace(state=_State("a@ok.com"))
     bad_req = SimpleNamespace(state=_State("outsider@evil.com"))
@@ -30,7 +43,7 @@ def test_can_access_job_acl_deny(monkeypatch, tmp_path):
     path = tmp_path / "acls.jsonl"
     monkeypatch.setattr(acl, "STORE_PATH", path)
     monkeypatch.setenv("RESOURCE_ACL_STORE", str(path))
-    monkeypatch.setattr(tr, "can_read_workspace", lambda ws, email: True)
+    _memberships(monkeypatch, lambda ws, email: True)
 
     acl.upsert_grant(
         tenant_id="ws1",
@@ -133,27 +146,18 @@ def test_job_subroute_access_matrix_denies_foreign_workspace(monkeypatch, resour
     """Every job-scoped surface shares the fail-closed workspace gate (404 posture)."""
     from src.routers.connectors_router import _can_access_job as connectors_can_access_job
     from src.routers.transfer_router import _can_access_job as transfer_can_access_job
-    from src.routers import transfer_router as tr
 
     gate = lambda ws, email: ws == "ws-a" and email == "a@ok.com"
-    monkeypatch.setattr(tr, "can_read_workspace", gate)
+    _memberships(monkeypatch, gate)
 
     job = {"_id": "job-a", "workspace_id": "ws-a"}
-    ok_req = SimpleNamespace(state=_State("a@ok.com"))
-    bad_req = SimpleNamespace(state=_State("b@other.com"))
+    ok_req = SimpleNamespace(state=_State("a@ok.com"), headers={})
+    bad_req = SimpleNamespace(state=_State("b@other.com"), headers={})
 
-    assert transfer_can_access_job(ok_req, job) is True
-    assert transfer_can_access_job(bad_req, job) is False
-
-    # connectors_router binds can_read_workspace at import — patch function globals.
-    g = connectors_can_access_job.__globals__
-    previous = g["can_read_workspace"]
-    g["can_read_workspace"] = gate
-    try:
-        assert connectors_can_access_job(ok_req, job) is True
-        assert connectors_can_access_job(bad_req, job) is False
-    finally:
-        g["can_read_workspace"] = previous
+    # Both routers' gates are the one tenant resolver (D154).
+    for can_access_job in (transfer_can_access_job, connectors_can_access_job):
+        assert can_access_job(ok_req, job) is True
+        assert can_access_job(bad_req, job) is False
     assert resource  # matrix parameter kept for future HTTP expansion per surface
 
 

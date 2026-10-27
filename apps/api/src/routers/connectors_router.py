@@ -22,8 +22,11 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pymongo.errors import PyMongoError
 from services.runtime_estimate import estimate_for_job_doc
-from services.team_store import can_read_workspace, can_write_workspace
-from services.workspace_access import assert_resource_workspace, workspace_resource_is_visible
+from services.workspace_access import (
+    assert_resource_workspace,
+    resolve_write_workspace,
+    tenant_scope,
+)
 from services.value_serializer import json_default
 from services.connector_telemetry import connector_operation, driver_family
 
@@ -83,25 +86,6 @@ def _job_contract_flags(xfer_req: Any) -> tuple[bool, bool]:
 
 def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
-
-
-def _actor_is_platform_admin(request: Request) -> bool:
-    user = getattr(request.state, "user", None) or {}
-    return str(user.get("role") or "").lower() == "admin"
-
-
-def _resolve_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
-    workspace_id = (x_workspace_id or "").strip()
-    if workspace_id and not can_read_workspace(workspace_id, _actor_email(request)):
-        raise HTTPException(status_code=403, detail="Access to workspace denied")
-    return workspace_id
-
-
-def _require_write_workspace(request: Request, x_workspace_id: str = Header(default="", alias="X-Workspace-Id")) -> str:
-    workspace_id = (x_workspace_id or "").strip()
-    if workspace_id and not can_write_workspace(workspace_id, _actor_email(request)):
-        raise HTTPException(status_code=403, detail="Write access to workspace denied")
-    return workspace_id
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -346,7 +330,7 @@ async def create_connector(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Create and save a new connector configuration (file store + MongoDB when available)."""
-    workspace_id = _require_write_workspace(request, workspace_id)
+    workspace_id = resolve_write_workspace(request, workspace_id)
     connector_data = {
         "name": config.name,
         "type": config.type,
@@ -427,8 +411,8 @@ async def list_connectors(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """List saved connectors scoped to the requested workspace."""
-    workspace_id = _resolve_workspace(request, workspace_id)
+    """List saved connectors the caller's tenant scope covers (D154)."""
+    scope = tenant_scope(request, workspace_id)
     try:
         import sys
         from pathlib import Path
@@ -436,15 +420,7 @@ async def list_connectors(
         if str(_api_root) not in sys.path:
             sys.path.insert(0, str(_api_root))
         from services.connector_store import connector_ui_status, list_connectors as fs_list, normalize_connector_role
-        items = [
-            connector for connector in fs_list(workspace_id=workspace_id)
-            if workspace_resource_is_visible(connector.workspace_id, workspace_id)
-        ]
-        if not workspace_id and not _actor_is_platform_admin(request):
-            # No scope header: a non-admin sees only unscoped connectors; scoped
-            # docs are reached via X-Workspace-Id. Store-level "" means "all"
-            # since the census fix, so re-apply the unscoped view here.
-            items = [c for c in items if not getattr(c, "workspace_id", "")]
+        items = [c for c in fs_list() if scope.allows(c.workspace_id)]
         if items:
             return {
                 "connectors": [
@@ -479,11 +455,8 @@ async def list_connectors(
         connectors = mongo.list_connectors()
 
         result = []
-        unscoped_only = not workspace_id and not _actor_is_platform_admin(request)
         for c in connectors:
-            if not workspace_resource_is_visible(c.get("workspace_id"), workspace_id):
-                continue
-            if unscoped_only and (c.get("workspace_id") or "").strip():
+            if not scope.allows(c.get("workspace_id")):
                 continue
             created = c.get("created_at")
             result.append({
@@ -511,27 +484,17 @@ async def list_connectors(
 
 
 def _can_access_job(request: Request, job: dict) -> bool:
-    """True if the actor may *read* this job.
+    """True if the actor may *read* this job — the same scope ``list_jobs`` uses.
 
-    Must stay aligned with ``list_jobs``: unscoped/global jobs (empty
-    ``workspace_id``) are returned by the list endpoint for the default
-    workspace filter. Denying them here caused Job Theater 404s in production
-    when ``DATAFLOW_REQUIRE_WORKSPACE`` / production isolation is on.
+    Unscoped legacy jobs follow the tenant scope too: while isolation is
+    enforced only platform admins see them (D154).
     """
-    workspace_id = (job.get("workspace_id") or "").strip()
-    if not workspace_id:
-        # Global / legacy jobs — same visibility as list_jobs for "".
-        return True
-    return can_read_workspace(workspace_id, _actor_email(request))
+    return tenant_scope(request).allows(job.get("workspace_id"))
 
 
 def _can_mutate_job(request: Request, job: dict) -> bool:
     """True if the actor may resume / retry / replay / export this job."""
-    workspace_id = (job.get("workspace_id") or "").strip()
-    if not workspace_id:
-        # Legacy unscoped jobs: still require an authenticated actor (router RBAC).
-        return bool(_actor_email(request))
-    return can_write_workspace(workspace_id, _actor_email(request))
+    return tenant_scope(request).can_write(job.get("workspace_id"))
 
 
 @router.get("/jobs")
@@ -550,11 +513,11 @@ async def list_transfer_jobs(
     of erroring. The ``/health`` endpoint continues to report the outage, so
     the infrastructure problem is not hidden.
     """
-    workspace_id = _resolve_workspace(request, workspace_id)
+    scope = tenant_scope(request, workspace_id).filter
     try:
         mongo = get_mongodb_service()
-        jobs = await asyncio.to_thread(mongo.list_jobs, workspace_id=workspace_id)
-        counts = await asyncio.to_thread(mongo.count_jobs, workspace_id=workspace_id)
+        jobs = await asyncio.to_thread(mongo.list_jobs, workspace_filter=scope)
+        counts = await asyncio.to_thread(mongo.count_jobs, workspace_filter=scope)
         return {
             "jobs": jobs,
             "count": len(jobs),
@@ -2561,7 +2524,7 @@ async def transfer_data(
         from ..transfer.engine import get_transfer_engine
         from ..transfer.models import EndpointConfig, TransferRequest
 
-        workspace_id = _require_write_workspace(request, workspace_id)
+        workspace_id = resolve_write_workspace(request, workspace_id)
 
         from connectors.sql_identifiers import unsafe_destination_identifier_reason
 

@@ -19,6 +19,7 @@ from pymongo import MongoClient
 from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.ops_events import emit_event
 from services.runtime_estimate import append_throughput_mark
+from services.workspace_filter import WorkspaceFilter
 
 
 logger = logging.getLogger(__name__)
@@ -221,6 +222,23 @@ def _fresh_object_id_hex() -> str:
     import os
 
     return os.urandom(12).hex()
+
+
+def job_workspace_filter(
+    workspace_id: str | None, workspace_filter: WorkspaceFilter | None = None
+) -> WorkspaceFilter:
+    """The job rows a list/count covers.
+
+    ``workspace_filter`` (the caller's tenant scope) wins; otherwise
+    ``workspace_id`` is an exact workspace and ``None`` is system scope. Legacy
+    unscoped jobs are no longer OR-ed into every workspace's view (D154): they
+    appear only when the filter says so.
+    """
+    if workspace_filter is not None:
+        return workspace_filter
+    if workspace_id is None:
+        return WorkspaceFilter.everything()
+    return WorkspaceFilter.only(workspace_id)
 
 
 class MongoDBService:
@@ -1189,21 +1207,22 @@ class MongoDBService:
         return result
 
     @staticmethod
-    def _job_scope_query(workspace_id: str | None) -> dict[str, Any]:
-        """Job filter for a workspace scope. An empty id means global jobs only."""
-        if workspace_id is None:
-            return {}
-        allowed = ["", None] if workspace_id == "" else [workspace_id, "", None]
-        return {
-            "$or": [{"workspace_id": w} for w in allowed if w is not None]
-            + [{"workspace_id": {"$exists": False}}]
-        }
+    def _job_scope_query(
+        workspace_id: str | None, workspace_filter: WorkspaceFilter | None = None
+    ) -> dict[str, Any]:
+        """Mongo job filter; see :func:`job_workspace_filter`."""
+        return job_workspace_filter(workspace_id, workspace_filter).mongo_query()
 
-    def count_jobs(self, workspace_id: str | None = None) -> dict[str, Any]:
+    def count_jobs(
+        self,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+    ) -> dict[str, Any]:
         """Job total and per-status breakdown over the whole history, not a page of it."""
         db = self.get_database()
         collection = db["transfer_jobs"]
-        query = self._job_scope_query(workspace_id)
+        query = self._job_scope_query(workspace_id, workspace_filter)
         by_status: dict[str, int] = {}
         for row in collection.aggregate(
             ([{"$match": query}] if query else [])
@@ -1212,7 +1231,13 @@ class MongoDBService:
             by_status[str(row.get("_id") or "unknown")] = int(row.get("n") or 0)
         return {"total": sum(by_status.values()), "by_status": by_status}
 
-    def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
+    def list_jobs(
+        self,
+        limit: int = 50,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+    ) -> list[dict]:
         """List recent transfer jobs, optionally filtered to a workspace."""
         from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
@@ -1221,7 +1246,7 @@ class MongoDBService:
         db = self.get_database()
         collection = db["transfer_jobs"]
 
-        query: dict[str, Any] = self._job_scope_query(workspace_id)
+        query: dict[str, Any] = self._job_scope_query(workspace_id, workspace_filter)
         jobs = []
         # Projection drops the heaviest arrays at the Mongo layer when possible.
         projection = {
@@ -1762,33 +1787,39 @@ class MemoryMongoDBService:
             return rec
         return None
 
-    def count_jobs(self, workspace_id: str | None = None) -> dict[str, Any]:
+    def count_jobs(
+        self,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+    ) -> dict[str, Any]:
         """Job total and per-status breakdown over the whole history, not a page of it."""
+        scope = job_workspace_filter(workspace_id, workspace_filter)
         by_status: dict[str, int] = {}
         for job in self._jobs.values():
-            if workspace_id is not None:
-                allowed = {"", None} if workspace_id == "" else {workspace_id, "", None}
-                if job.get("workspace_id") not in allowed:
-                    continue
+            if not scope.matches(job.get("workspace_id")):
+                continue
             key = str(job.get("status") or "unknown")
             by_status[key] = by_status.get(key, 0) + 1
         return {"total": sum(by_status.values()), "by_status": by_status}
 
-    def list_jobs(self, limit: int = 50, workspace_id: str | None = None) -> list[dict]:
+    def list_jobs(
+        self,
+        limit: int = 50,
+        workspace_id: str | None = None,
+        *,
+        workspace_filter: WorkspaceFilter | None = None,
+    ) -> list[dict]:
         from services.connector_request_limits import bounded_job_list_limit
         from services.job_list_view import slim_job_for_list
 
         limit = bounded_job_list_limit(limit)
+        scope = job_workspace_filter(workspace_id, workspace_filter)
         items = sorted(
-            self._jobs.values(),
+            (j for j in self._jobs.values() if scope.matches(j.get("workspace_id"))),
             key=lambda j: _created_sort_stamp(j.get("created_at")),
             reverse=True,
         )
-        if workspace_id is not None:
-            allowed = {workspace_id, "", None}
-            if workspace_id == "":
-                allowed = {"", None}
-            items = [j for j in items if j.get("workspace_id") in allowed]
         items = items[:limit]
         out = []
         for rec in items:

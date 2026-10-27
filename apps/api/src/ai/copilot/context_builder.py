@@ -250,13 +250,19 @@ class PilotContextBuilder:
     # the fallback and the record that a source was unreachable; swallowing the
     # error here would hand back an empty list that reads as a true answer.
     def _read_connectors(self) -> list[dict]:
+        from services.tenant_scope import current_workspace_filter
+
         from ...services.mongodb_service import get_mongodb_service
+        visible = current_workspace_filter()
         return [
             {"name": c.get("name"), "type": c.get("type"), "database": c.get("database"), "host": c.get("host")}
             for c in get_mongodb_service().list_connectors()
+            if visible is None or visible.matches(c.get("workspace_id"))
         ]
 
     def _read_jobs(self) -> list[dict]:
+        from services.tenant_scope import current_workspace_filter
+
         from ...services.mongodb_service import get_mongodb_service
         return [
             {
@@ -267,7 +273,9 @@ class PilotContextBuilder:
                 "records": j.get("records_processed", 0),
                 "error": (j.get("error") or "")[:160] or None,
             }
-            for j in get_mongodb_service().list_jobs(limit=8)
+            for j in get_mongodb_service().list_jobs(
+                limit=8, workspace_filter=current_workspace_filter()
+            )
         ]
 
     def _read_capabilities(self) -> dict:

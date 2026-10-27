@@ -172,7 +172,13 @@ def _mongo_already_unreachable(mongo: Any) -> bool:
     )
 
 
-def _from_engine_store(limit: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _from_engine_store(
+    limit: int, workspace_filter: Any = None
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    # Engine job records carry no workspace, so only a caller who may see every
+    # workspace may read them (D154).
+    if workspace_filter is not None and not workspace_filter.is_everything:
+        return [], {"total": 0, "by_status": {}}
     raw = list(job_store.list_recent(limit=limit) or [])
     summaries = [summarize_listed_job(_record_as_job_doc(row)) for row in raw]
     by_status: dict[str, int] = {}
@@ -202,15 +208,20 @@ def list_transfer_jobs(
     An empty successful Mongo read is left empty so a process-global leftover
     in the file store cannot invent jobs the operator's workspace does not have.
     """
+    from services.tenant_scope import current_workspace_filter
+
+    # A Pilot/MCP turn reads only what its caller may see (D154); ``workspace_id``
+    # narrows further only for system-scope callers.
+    workspace_filter = current_workspace_filter()
     try:
         from services.mongodb_service import get_mongodb_service
 
         mongo = get_mongodb_service()
         if _mongo_already_unreachable(mongo):
-            summaries, counts = _from_engine_store(limit)
+            summaries, counts = _from_engine_store(limit, workspace_filter)
             return summaries, counts, "job_store"
-        raw = mongo.list_jobs(limit=limit, workspace_id=workspace_id)
-        counts = mongo.count_jobs(workspace_id=workspace_id)
+        raw = mongo.list_jobs(limit=limit, workspace_id=workspace_id, workspace_filter=workspace_filter)
+        counts = mongo.count_jobs(workspace_id=workspace_id, workspace_filter=workspace_filter)
         summaries = [summarize_listed_job(j) for j in (raw or []) if isinstance(j, dict)]
         return summaries, counts or {"total": 0, "by_status": {}}, "mongo"
     except Exception as exc:
@@ -227,7 +238,7 @@ def list_transfer_jobs(
             "local job store — durable jobs may be temporarily absent",
             type(exc).__name__,
         )
-        summaries, counts = _from_engine_store(limit)
+        summaries, counts = _from_engine_store(limit, workspace_filter)
         return summaries, counts, "job_store"
 
 

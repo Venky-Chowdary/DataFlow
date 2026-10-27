@@ -74,9 +74,15 @@ def test_counts_are_scoped_to_the_workspace_that_asked(client):
     assert scoped["total"] == 3
     assert scoped["status_counts"]["failed"] == 2
 
-    global_only = client.get("/api/v1/connectors/jobs").json()
-    assert global_only["total"] == 1
-    assert global_only["status_counts"] == {"completed": 1}
+    # D154: no header is the caller's whole scope — for the single operator of
+    # an auth-off deployment that is every job, not "legacy only".
+    everything = client.get("/api/v1/connectors/jobs").json()
+    assert everything["total"] == 3
+    assert everything["status_counts"] == {"failed": 2, "completed": 1}
+
+    other = create_workspace(name="Other", created_by="anonymous")
+    narrowed = client.get("/api/v1/connectors/jobs", headers={"X-Workspace-Id": other.id}).json()
+    assert narrowed["total"] == 1  # the legacy job only; isolation is off
 
 
 def test_empty_history_reports_zero(client):
