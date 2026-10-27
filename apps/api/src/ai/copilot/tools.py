@@ -978,6 +978,15 @@ TOOL_DEFINITIONS: list[dict] = [
                 "dest_connector_id": {"type": "string"},
                 "dest_table": {"type": "string", "description": "Destination table; defaults to the file name"},
                 "sync_mode": {"type": "string"},
+                # D58: the handler always took the key; the schema never
+                # offered it, so an upsert of a file had no way to name one.
+                "upsert_key": {
+                    "type": "string",
+                    "description": (
+                        "File column that identifies a row for upsert, SCD2, or mirror. "
+                        "Comma-separate a composite key. A column named id is never invented."
+                    ),
+                },
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
