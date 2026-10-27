@@ -47,11 +47,7 @@ async def get_metrics_json(request: Request):
     from services.ops_metrics import snapshot
     from services.workspace_access import tenant_scope
 
-    scope = tenant_scope(request)
-    workspace_filter = scope.single_workspace_filter()
-    if workspace_filter.is_everything:
-        return snapshot()
-    return snapshot(workspace_filter=workspace_filter)
+    return snapshot(workspace_filter=tenant_scope(request).single_workspace_filter())
 
 
 @router.get("/dlq")

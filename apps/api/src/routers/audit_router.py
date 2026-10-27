@@ -12,6 +12,7 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from services.audit_coverage import record_security_event
+from services.workspace_access import tenant_scope
 
 router = APIRouter(prefix="/audit", tags=["Audit"])
 
@@ -42,13 +43,6 @@ def _tenant_of(workspace_id: str) -> str:
         return ""
     tenant = get_tenant_for_workspace(workspace_id)
     return str(tenant.id) if tenant else ""
-
-
-def _scope(request: Request):
-    """The caller's tenant scope (D154)."""
-    from services.workspace_access import tenant_scope
-
-    return tenant_scope(request)
 
 
 def _report_workspace(scope) -> str:
@@ -131,7 +125,7 @@ async def list_events(
 ):
     from services.audit_log import list_audit_events
 
-    scope = _scope(request)
+    scope = tenant_scope(request)
     workspace_id = scope.requested_workspace_id
     tenant_id = _tenant_of(workspace_id)
     # Scope by the caller's workspaces (or the one they are looking at). Do not
@@ -169,12 +163,13 @@ async def export_events(
     """Workspace-scoped audit download for an auditor sample.
 
     One workspace: ``X-Workspace-Id``, else the caller's own. Only events
-    stamped with that workspace are included. This is evidence, not a SOC 2 / HIPAA letter. CEF omits
-    event details intentionally; use NDJSON when those details are needed.
+    stamped with that workspace are included. This is evidence, not a
+    SOC 2 / HIPAA letter. CEF omits event details intentionally; use NDJSON
+    when those details are needed.
     """
     from services.audit_log import latest_event_hash, list_audit_events
 
-    scope = _scope(request)
+    scope = tenant_scope(request)
     try:
         workspace_id = scope.target_workspace_id()
     except HTTPException as exc:
@@ -318,7 +313,7 @@ async def scan_audit_secrets(
 ):
     from services.audit_log import scan_audit_events_for_secrets
 
-    scope = _scope(request)
+    scope = tenant_scope(request)
     result = scan_audit_events_for_secrets(
         limit=limit,
         workspace_filter=scope.strict_filter(),
@@ -345,7 +340,7 @@ async def verify_audit_chain(
     """
     from services.evidence_chain import verify_chain
 
-    scope = _scope(request)
+    scope = tenant_scope(request)
     workspace_id = _report_workspace(scope)
     result = verify_chain(limit=limit, workspace_id=workspace_id)
     record_security_event(
