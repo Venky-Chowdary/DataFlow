@@ -771,7 +771,7 @@ def request_password_reset(*, email: str, ip: str = "",
         return _forgot_reply(fake, started)
     if turnstile.configured():
         verdict = turnstile.verify(
-            turnstile_token, remote_ip=ip, user_agent=ua)
+            turnstile_token, remote_ip=ip)
         if not verdict["ok"]:
             record_security_event("password.reset.requested", outcome="failed",
                                   reason_code=f"turnstile:{verdict['reason']}",

@@ -1195,3 +1195,29 @@ def test_provider_timeouts_stay_under_the_lease():
 
     assert _RESEND_TIMEOUT_SEC < mail_outbox._LEASE_SEC / 2
     assert _SMTP_TIMEOUT_SEC < mail_outbox._LEASE_SEC
+
+
+def test_forgot_with_turnstile_configured_verifies_instead_of_crashing(monkeypatch):
+    """With a Turnstile secret set, forgot-password passed turnstile.verify()
+    an unknown ``user_agent`` keyword: TypeError, a 500 for every reset."""
+    c = _client()
+    _verified_user(c)
+    monkeypatch.setenv("DATAWRAP_TURNSTILE_SECRET", "ts-secret")
+
+    class _Resp:
+        def json(self):
+            return {"success": True, "hostname": "datawrap.io", "action": ""}
+
+    seen = []
+    monkeypatch.setattr("services.turnstile.httpx.post",
+                        lambda url, data=None, timeout=None: seen.append(data) or _Resp())
+    resp = c.post("/api/v1/auth/password/forgot",
+                  json={"email": "ada@example.com",
+                        "form_token": form_token_mod.issue("reset"),
+                        "turnstile_token": "tok-1"})
+    assert resp.status_code == 202, resp.text
+    assert seen and seen[0]["response"] == "tok-1"
+    from tests.helpers.mail_wait import await_outbox
+
+    mails = await_outbox("ada@example.com", min_count=2)  # signup code + reset link
+    assert any("reset-password#token=" in m.text for m in mails)
