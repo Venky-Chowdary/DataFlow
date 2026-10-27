@@ -669,17 +669,34 @@ def _pk_key(value: Any) -> str | None:
 
 def _index_by_pk(
     rows: Iterable[dict[str, Any]],
-    pk_column: str,
+    pk_column: str | list[str],
 ) -> dict[str, dict[str, Any]]:
+    """Address rows by their key. A composite key names every column (D18).
+
+    Indexing a composite key by its first column alone collapsed rows that
+    share it, and the culprit the ladder named dropped the other columns —
+    ``id=7`` for what was ``region=eu, id=7``.
+    """
+    cols = [pk_column] if isinstance(pk_column, str) else [c for c in pk_column if c]
     out: dict[str, dict[str, Any]] = {}
     for rec in rows:
         if not isinstance(rec, dict):
             continue
-        key = _pk_key(rec.get(pk_column))
-        if key is None:
+        parts = [_pk_key(rec.get(col)) for col in cols]
+        if not parts or any(part is None for part in parts):
             continue
+        key = parts[0] if len(cols) == 1 else ", ".join(
+            f"{col}={part}" for col, part in zip(cols, parts)
+        )
         out[key] = rec
     return out
+
+
+def _row_address(pk_label: str, key_cols: list[str], key: Any) -> str:
+    """``id='7'`` for one key column; a composite key already names its columns."""
+    if len(key_cols) > 1:
+        return f"({key})"
+    return f"{pk_label}={key!r}"
 
 
 def read_sqlite_rows(
@@ -1020,6 +1037,7 @@ def run_five_layer_verification(
     target_rows: list[dict[str, Any]],
     columns: list[str],
     pk_column: str,
+    pk_columns: list[str] | None = None,
     source_row_count: int | None = None,
     target_row_count: int | None = None,
     rejected_rows: int = 0,
@@ -1043,6 +1061,10 @@ def run_five_layer_verification(
     """
     cols = [c for c in columns if c]
     pk = (pk_column or "").strip()
+    key_cols = [str(c).strip() for c in (pk_columns or []) if str(c or "").strip()]
+    if not key_cols and pk:
+        key_cols = [pk]
+    pk_label = pk if len(key_cols) <= 1 else ", ".join(key_cols)
     src_n = int(source_row_count if source_row_count is not None else len(source_rows))
     tgt_n = int(target_row_count if target_row_count is not None else len(target_rows))
 
@@ -1194,7 +1216,7 @@ def run_five_layer_verification(
     localization: dict[str, Any] = {}
 
     run_localize = ((not l3.passed) or always_localize) and not incomparable
-    if run_localize and pk and cols:
+    if run_localize and key_cols and cols:
         src_col = column_typed_checksums(
             source_rows, cols, dest_db_type=dest_db_type, dest_types=dest_types
         )
@@ -1205,10 +1227,10 @@ def run_five_layer_verification(
         layers["L4"] = l4.to_dict()
         focus = list(l4.details.get("mismatched_columns") or cols)
         l5 = binary_search_row_diff(
-            source_by_pk=_index_by_pk(source_rows, pk),
-            target_by_pk=_index_by_pk(target_rows, pk),
+            source_by_pk=_index_by_pk(source_rows, key_cols),
+            target_by_pk=_index_by_pk(target_rows, key_cols),
             columns=cols,
-            pk_column=pk,
+            pk_column=pk_label,
             dest_db_type=dest_db_type,
             dest_types=dest_types,
             focus_columns=focus or cols,
@@ -1262,7 +1284,7 @@ def run_five_layer_verification(
     if localization.get("rows"):
         first = localization["rows"][0]
         summary = (
-            f"L4/L5 localized: row {pk}={first.get('pk')!r} "
+            f"L4/L5 localized: row {_row_address(pk_label, key_cols, first.get('pk'))} "
             f"column {first.get('column')!r} "
             f"source={first.get('source_value')!r} "
             f"target={first.get('target_value')!r}"

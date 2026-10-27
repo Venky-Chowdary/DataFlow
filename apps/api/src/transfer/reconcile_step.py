@@ -3181,6 +3181,7 @@ def _maybe_attach_verification_ladder(
         target_rows=target_rows,
         columns=target_cols,
         pk_column=pk_column,
+        pk_columns=pk_cols,
         # A measured 0 is a count, not a missing one. ``report["source_rows"] or
         # len(...)`` replaced a quiet incremental poll's reader count (0) with a
         # whole-table re-read, so L1 expected every existing row to be new and
