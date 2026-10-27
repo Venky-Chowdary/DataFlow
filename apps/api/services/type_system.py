@@ -27,6 +27,7 @@ _ts = sys.modules[__name__]
 from services.dest_dialect_facts import (  # noqa: F401  (re-exported)
     _collation_compatible_with_dest,
     _normalize_dest_db,
+    dest_char_is_unpadded,
     dest_string_length_is_unenforced,
 )
 from services.source_engine_scope import active_source_engine
@@ -5174,7 +5175,9 @@ def fixed_width_pad_polarity_loss(
     if src_l in {LOGICAL_STRING, LOGICAL_TEXT} and tgt_l in {LOGICAL_STRING, LOGICAL_TEXT}:
         # A dynamically typed engine has no fixed-width carrier to lose: SQLite
         # never blank-pads, so CHAR(36) there is the same TEXT the invent picks.
-        if dest_string_length_is_unenforced(dest_db):
+        # Nor does an engine whose CHAR(n) is VARCHAR(n): the source pad rides
+        # in the value and VARCHAR(n) is the widest carrier it spells (D71).
+        if dest_string_length_is_unenforced(dest_db) or dest_char_is_unpadded(dest_db):
             return False
         src_fixed = is_fixed_width_char_carrier(source_type)
         tgt_fixed = is_fixed_width_char_carrier(target_type)

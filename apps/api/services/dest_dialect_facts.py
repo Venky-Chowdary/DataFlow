@@ -204,6 +204,17 @@ def dest_string_length_is_unenforced(db_type: str | None) -> bool:
     return _normalize_dest_db(db_type) in _UNENFORCED_STRING_ENGINES
 
 
+# Engines whose ``CHAR(n)`` is a synonym for ``VARCHAR(n)``: nothing is ever
+# blank-padded (Snowflake documents the deviation), so there is no
+# fixed-width carrier whose pad or trim-equality a ``VARCHAR(n)`` could lose.
+_UNPADDED_CHAR_ENGINES = frozenset({"snowflake"})
+
+
+def dest_char_is_unpadded(db_type: str | None) -> bool:
+    """True when the engine's CHAR(n) stores and compares like VARCHAR(n)."""
+    return _normalize_dest_db(db_type) in _UNPADDED_CHAR_ENGINES
+
+
 def _collation_compatible_with_dest(db: str, collation: str) -> bool:
     """Refuse cross-engine invent (MySQL utf8mb4_* on PG, etc.)."""
     coll = (collation or "").strip()
