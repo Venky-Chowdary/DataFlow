@@ -7,6 +7,7 @@ execution or require human review.
 
 from __future__ import annotations
 
+import ipaddress
 import logging
 import re
 from typing import Any
@@ -14,7 +15,16 @@ from typing import Any
 _logger = logging.getLogger(__name__)
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
-PHONE_RE = re.compile(r"^\+?[0-9][0-9\s().-]{6,18}[0-9]$")
+# Digits plus the separators printed numbers use; a leading ``(`` is an area
+# code, ``(555) 123-4567`` (D94). The digit count is checked separately
+# against E.164's 7..15 so the shape alone never decides.
+PHONE_RE = re.compile(r"^\+?[0-9(][0-9\s().-]{5,22}[0-9]$")
+# Four dot-separated 1-3 digit groups: an IPv4 (validated) or a version /
+# malformed address — never a phone, though it has phone-like digit count.
+_DOTTED_QUAD_RE = re.compile(r"^\d{1,3}(?:\.\d{1,3}){3}$")
+# ICAO 9303 TD3 (passport) machine-readable zone, 44 characters per line.
+_MRZ_LINE1_RE = re.compile(r"^P[A-Z<][A-Z][A-Z<]{2}[A-Z<]{39}$")
+_MRZ_LINE2_RE = re.compile(r"^[A-Z0-9<]{9}\d[A-Z][A-Z<]{2}\d{7}[MFX<]\d{7}[A-Z0-9<]{14}[0-9<]\d$")
 SSN_RE = re.compile(r"^\d{3}-\d{2}-\d{4}$")
 # Calendar shapes (ISO / slash) are not PII by themselves. DOB is name-gated
 # in ``_NAME_PATTERN_GROUPS`` — Fivetran / Airbyte / Collibra classifiers treat
@@ -51,6 +61,16 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"country(?:_?code)?\b",
     ), 0.18),
     "dob": ((r"\bdob\b", r"birth", r"date_of_birth"), 0.42),
+    # Online identifier under GDPR. ``ip`` must be a whole snake_case token:
+    # ``zip`` / ``tip`` / ``skip_count`` are not addresses.
+    "ip_address": ((
+        r"(?:^|_)ip(?:_|$)",
+        r"ip_?addr",
+        r"\bipv[46]\b",
+        r"remote_?addr",
+    ), 0.18),
+    # Government travel-document number: as regulated as an SSN (D94).
+    "passport": ((r"passport", r"travel_?doc"), 0.5),
     "ssn": ((r"\bssn\b", r"social_security", r"tax_id", r"\btin\b"), 0.5),
     # PCI/financial account — NOT boolean flags like accountLocked / accountActive.
     "account": ((
@@ -91,6 +111,9 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
     ), 0.4),
 }
 
+# Categories that alone force compliance review.
+_HIGH_RISK_CATEGORIES = frozenset({"ssn", "passport", "dob", "account", "salary", "pci_pan"})
+
 # Personal names, not technical surrogates. ``username`` matches the name
 # category via user_name and must stay a medium signal — forcing review on
 # every login column is a different policy.
@@ -108,6 +131,64 @@ def _field_hits(name: str) -> list[str]:
     return hits
 
 
+def _is_ip_address(text: str) -> bool:
+    """Canonical IPv4 (octets 0-255, no leading zeros) or IPv6 literal."""
+    if "." not in text and ":" not in text:
+        return False
+    try:
+        ipaddress.ip_address(text)
+    except ValueError:
+        return False
+    return True
+
+
+def _is_phone(text: str) -> bool:
+    if not PHONE_RE.match(text) or _DOTTED_QUAD_RE.match(text):
+        return False
+    from services.pii_guard import _is_decimal_literal
+
+    # ``12345.67`` is an amount, not a phone (X-26 for the log masker).
+    if _is_decimal_literal(text):
+        return False
+    return 7 <= sum(ch.isdigit() for ch in text) <= 15
+
+
+def _mrz_check_digit(field: str) -> int:
+    """ICAO 9303 check digit: weights 7-3-1, A-Z = 10..35, ``<`` = 0."""
+    total = 0
+    for i, ch in enumerate(field):
+        if ch.isdigit():
+            value = int(ch)
+        elif "A" <= ch <= "Z":
+            value = ord(ch) - 55
+        else:
+            value = 0
+        total += value * (7, 3, 1)[i % 3]
+    return total % 10
+
+
+def _is_passport_mrz(text: str) -> bool:
+    """A TD3 MRZ line. Line 2 must pass every check digit, so a 44-character
+    code that merely has the shape is not a passport. A bare passport number
+    (``K1234567``) is indistinguishable from a SKU and is name-gated."""
+    if _MRZ_LINE1_RE.match(text):
+        return "<<" in text[5:]
+    if not _MRZ_LINE2_RE.match(text):
+        return False
+    digit = _mrz_check_digit
+    if text[42] == "<":
+        optional_ok = set(text[28:42]) == {"<"}
+    else:
+        optional_ok = digit(text[28:42]) == int(text[42])
+    return (
+        optional_ok
+        and digit(text[0:9]) == int(text[9])
+        and digit(text[13:19]) == int(text[19])
+        and digit(text[21:27]) == int(text[27])
+        and digit(text[0:10] + text[13:20] + text[21:43]) == int(text[43])
+    )
+
+
 def _value_hits(values: list[str]) -> list[str]:
     hits: list[str] = []
     for value in values:
@@ -118,6 +199,10 @@ def _value_hits(values: list[str]) -> list[str]:
             hits.append("email")
         elif SSN_RE.match(text):
             hits.append("ssn")
+        elif _is_ip_address(text):
+            hits.append("ip_address")
+        elif _is_passport_mrz(text):
+            hits.append("passport")
         else:
             from services.pii_guard import luhn_valid
 
@@ -125,7 +210,7 @@ def _value_hits(values: list[str]) -> list[str]:
             # the phone shape matches card numbers, so PCI wins precedence.
             if luhn_valid(text):
                 hits.append("pci_pan")
-            elif PHONE_RE.match(text):
+            elif _is_phone(text):
                 hits.append("phone")
             elif ACCOUNT_RE.match(text):
                 hits.append("account")
@@ -214,7 +299,7 @@ def detect_pii_fields(
             _HIGH_RISK_NAME_RE.search(col.lower())
         )
         if personal_name or any(
-            cat in {"ssn", "dob", "account", "salary", "pci_pan"}
+            cat in _HIGH_RISK_CATEGORIES
             for cat in categories
         ):
             high_risk_fields.append(col)
@@ -257,6 +342,8 @@ def score_compliance_risk(
         "address": 0.16,
         "dob": 0.42,
         "ssn": 0.5,
+        "passport": 0.5,
+        "ip_address": 0.18,
         "account": 0.4,
         "pci_pan": 0.45,
         "identifier": 0.28,
@@ -269,7 +356,7 @@ def score_compliance_risk(
         for category in field_risk.get(col, []):
             weight = weight_by_category.get(category, 0.12)
             total_weight += weight
-            if category in {"ssn", "dob", "account", "salary", "pci_pan"}:
+            if category in _HIGH_RISK_CATEGORIES:
                 high_risk_weight += weight
 
     if not sensitive_fields:
