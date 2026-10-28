@@ -81,17 +81,31 @@ _bound_stamp: contextvars.ContextVar[str] = contextvars.ContextVar(
 )
 
 
+# Who is acting ("" = nobody bound: the single operator, or system code).
+_bound_actor: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "bound_workspace_actor", default=""
+)
+
+
 @contextlib.contextmanager
 def bound_workspace_filter(
-    workspace_filter: WorkspaceFilter | None, stamp: str = ""
+    workspace_filter: WorkspaceFilter | None, stamp: str = "", actor: str = ""
 ) -> Iterator[None]:
     token = _bound.set(workspace_filter)
     stamp_token = _bound_stamp.set(stamp)
+    actor_token = _bound_actor.set(actor)
     try:
         yield
     finally:
+        _bound_actor.reset(actor_token)
         _bound_stamp.reset(stamp_token)
         _bound.reset(token)
+
+
+def current_actor() -> str:
+    """The authenticated actor of this request, for state that must not be
+    shared between accounts (Pilot working memory)."""
+    return _bound_actor.get()
 
 
 def current_workspace_stamp() -> str:

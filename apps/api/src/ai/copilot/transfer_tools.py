@@ -1966,12 +1966,14 @@ def _preview_bound_contract(
     """
     cid = str(contract_id or "").strip()
     require = _require_signed_flag(cid, require_signed_contract)
-    from services.contract_store import bound_contract_preview, get_contract_store
+    from services.contract_store import bound_contract_preview, contract_visible, get_contract_store
 
     preview = bound_contract_preview(cid, require_signed=require)
     if not cid:
         return preview
     contract = get_contract_store().get_contract(cid)
+    if contract is not None and not contract_visible(contract):
+        contract = None  # another workspace's contract does not exist here
     preview["contract_status"] = (
         str(getattr(contract.status, "value", contract.status)).upper()
         if contract is not None
