@@ -95,6 +95,35 @@ def data_dir() -> Path:
     return path
 
 
+def _on_root_filesystem(path: Path) -> bool:
+    """True when ``path`` shares a device with ``/`` — i.e. no volume is mounted."""
+    try:
+        return os.stat(path).st_dev == os.stat("/").st_dev
+    except OSError:
+        return True
+
+
+def persistent_storage_warnings() -> list[str]:
+    """Production notes about state that will not survive a restart.
+
+    Not fatal: the service runs, but every connector, SQLite database and
+    spill under the data directory is lost with the container.
+    """
+    if not is_production():
+        return []
+    path = data_dir()
+    if not _on_root_filesystem(path):
+        return []
+    mount = _railway_volume_root() or Path("/data")
+    return [
+        f"Data directory {path} is on the container's own filesystem, not a "
+        "mounted volume. Connectors, SQLite databases and other state under it "
+        "are lost on every restart or redeploy. Attach a persistent volume "
+        f"mounted at {mount} (Railway: service -> Settings -> Volumes), or set "
+        "DATAFLOW_DATA_DIR to a path on one."
+    ]
+
+
 def upload_dir() -> Path:
     vol = _railway_volume_root()
     raw = getenv_brand("UPLOAD_DIR", "").strip()

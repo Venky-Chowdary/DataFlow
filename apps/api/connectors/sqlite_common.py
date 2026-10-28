@@ -84,6 +84,30 @@ def require_sqlite_source_file(path: str) -> None:
     )
 
 
+def sqlite_root() -> tuple[str, bool]:
+    """``(root, explicit)`` — where SQLite files must live, or ``("", False)``.
+
+    ``DATAFLOW_SQLITE_ROOT`` wins. Without it, production confines SQLite to a
+    directory on the persistent data volume: a relative name used to land in
+    the container's working directory and ``/tmp`` in its temp, so a
+    destination file (and the tables DataFlow created in it) vanished on the
+    next restart (item 54). Development keeps any path.
+    """
+    explicit = (getenv_brand("SQLITE_ROOT") or "").strip()
+    if explicit:
+        return explicit, True
+    from services.platform_config import data_dir, is_production
+
+    if not is_production():
+        return "", False
+    root = data_dir() / "sqlite"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return str(root), False
+
+
 def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
     """Resolve the filesystem path to a SQLite database.
 
@@ -91,8 +115,9 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
     looks like a SQLAlchemy ``sqlite://`` URL, strip the scheme so ``sqlite3``
     receives a filesystem path.
 
-    When ``DATAFLOW_SQLITE_ROOT`` is set, resolved paths must stay under that
-    directory (blocks ``..`` / absolute escapes outside the allowlist).
+    Resolved paths must stay under :func:`sqlite_root` when there is one
+    (blocks ``..`` / absolute escapes outside the allowlist); a relative path
+    is anchored at that root.
     """
     path = (database or connection_string or "").strip()
     if not path:
@@ -107,19 +132,29 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
             path = path[1:]  # sqlite:///relative -> relative
     if "\x00" in path:
         raise ValueError("Invalid SQLite path")
-    root = (getenv_brand("SQLITE_ROOT") or "").strip()
+    root, explicit = sqlite_root()
     if not root:
         return path
     try:
-        resolved = Path(path).expanduser().resolve(strict=False)
         root_resolved = Path(root).expanduser().resolve(strict=False)
+        candidate = Path(path).expanduser()
+        if not candidate.is_absolute():
+            candidate = root_resolved / candidate
+        resolved = candidate.resolve(strict=False)
     except OSError as exc:
         raise ValueError(f"Invalid SQLite path: {exc}") from exc
     try:
         resolved.relative_to(root_resolved)
     except ValueError as exc:
+        if explicit:
+            raise ValueError(
+                f"SQLite path must be under DATAFLOW_SQLITE_ROOT ({root_resolved})"
+            ) from exc
         raise ValueError(
-            f"SQLite path must be under DATAFLOW_SQLITE_ROOT ({root_resolved})"
+            f"SQLite path must be under {root_resolved}, on the persistent data "
+            "volume: a file anywhere else is lost when the service restarts. "
+            "Use a path under it, or set DATAFLOW_SQLITE_ROOT to another "
+            "mounted volume."
         ) from exc
     return str(resolved)
 

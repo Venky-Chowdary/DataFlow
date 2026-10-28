@@ -99,6 +99,10 @@ async def lifespan(app: FastAPI):
         for msg in config_errors:
             print(f"[FATAL] Production config: {msg}")
         print("[!] Refusing traffic except /health until production config is fixed")
+    from services.platform_config import persistent_storage_warnings
+
+    for msg in persistent_storage_warnings():
+        print(f"[!] Persistent storage: {msg}")
     # Configure logging before anything else can emit a line, so no startup
     # message escapes with Uvicorn's default handler and no correlation fields.
     try:
