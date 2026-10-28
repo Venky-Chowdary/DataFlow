@@ -48,7 +48,7 @@ async function buildValidOrdersChain(page: Page): Promise<void> {
   await page.locator(".df2-canvas-op[data-op='trim']").click();
   await page.locator(".df2-canvas-op[data-op='drop_column']").click();
   await page.locator(".df2-canvas-op[data-op='filter_rows']").click();
-  await page.locator("#canvas-opt-condition-field").click();
+  await page.locator("#canvas-opt-condition-field-0").click();
   await page.getByRole("option", { name: "status", exact: true }).click();
   await page.getByRole("button", { name: "Add step" }).click();
   await expect(page.locator(".df2-canvas-node")).toHaveCount(3);
