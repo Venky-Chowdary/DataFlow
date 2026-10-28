@@ -1562,6 +1562,7 @@ def _run_preflight(
     schema_drift_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
+    from services.population_fit_scan import STUDIO_FIT_SCAN_SECONDS
     from services.preflight_run_store import save_preflight_run
     from services.preflight_service import (
         apply_policy_gates,
@@ -1707,6 +1708,11 @@ def _run_preflight(
             source_connector_id=str(src_conn.get("id") or ""),
             source_config=source_config,
             confidence_threshold=confidence_threshold_for_mode(validation_mode),
+            # An MCP request has a client timeout (-32001). The population walk
+            # behind g3f read every row of the source on this thread — 148 s for
+            # 200k Oracle rows (D145). Studio's budget applies here too: rows
+            # past it stay unproven (PARTIAL) and write-time checks still bind.
+            fit_scan_seconds=STUDIO_FIT_SCAN_SECONDS,
             # Key-addressed destinations (Mongo, Redis, vector stores) refuse a
             # write they cannot address. Studio carries the key on a stream
             # contract; the Pilot has no Map screen to fill one in, so without
