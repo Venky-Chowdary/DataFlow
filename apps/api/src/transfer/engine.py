@@ -3877,6 +3877,14 @@ class UniversalTransferEngine:
             and not str(getattr(request, "number_locale", "") or "").strip()
         )
         try:
+            if getattr(request, "ddl_changes_acknowledged", False):
+                # D101: the writers gate the unique index an upsert needs on an
+                # existing table on this flag. Only the buffered path passed it,
+                # so a streamed run refused DDL the operator had approved.
+                request.destination.extra = {
+                    **(request.destination.extra or {}),
+                    "upsert_ddl_approved": True,
+                }
             mongo.update_job_status(
                 job_id,
                 "running",

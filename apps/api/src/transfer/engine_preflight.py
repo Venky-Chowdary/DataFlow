@@ -161,6 +161,11 @@ def _execute_preflight_parity_kwargs(
             getattr(request, "schema_drift_acknowledged", False)
         ),
         "fk_risk_acknowledged": bool(getattr(request, "fk_risk_acknowledged", False)),
+        # The DDL Validate disclosed and the operator approved (D101): without
+        # it Execute's preflight re-blocked the run Validate had cleared.
+        "ddl_changes_acknowledged": bool(
+            getattr(request, "ddl_changes_acknowledged", False)
+        ),
         "empty_source_overwrite_acknowledged": bool(
             getattr(request, "empty_source_overwrite_acknowledged", False)
         ),

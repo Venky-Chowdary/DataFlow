@@ -160,6 +160,9 @@ def _write_batch(
         source_handoff["records"] = records
     if allow_equal_lsn:
         source_handoff["allow_equal_lsn"] = True
+    if (getattr(dest, "extra", None) or {}).get("upsert_ddl_approved"):
+        # Operator-approved unique index on an existing table (D101).
+        source_handoff["upsert_ddl_approved"] = True
     from services.duplicate_policy import (
         DuplicatePolicyError,
         reset_match_action,
