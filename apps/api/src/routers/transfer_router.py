@@ -25,7 +25,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from services.workspace_access import resolve_write_workspace, tenant_scope
+from services.workspace_access import assert_connector_accessible, resolve_write_workspace, tenant_scope
 from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
@@ -203,6 +203,28 @@ def _validated_shape_recipe(raw: dict | str | None) -> dict:
             detail=redact_log_text(recipe.set_errors[0].message),
         )
     return recipe.to_wire()
+
+
+def _connector_id_of(endpoint: Any) -> str | None:
+    return endpoint if isinstance(endpoint, str) else getattr(endpoint, "connector_id", None)
+
+
+def _assert_endpoint_connectors(
+    request: Request,
+    *,
+    read: tuple[Any, ...] = (),
+    write: tuple[Any, ...] = (),
+) -> None:
+    """404 / 403 when a named saved connector is outside the caller's tenant scope.
+
+    A ``connector_id`` expands into stored host and credentials, so it is
+    authorized against the connector's own workspace before it is resolved;
+    a destination also needs write access there.
+    """
+    for endpoint in read:
+        assert_connector_accessible(request, _connector_id_of(endpoint))
+    for endpoint in write:
+        assert_connector_accessible(request, _connector_id_of(endpoint), write=True)
 
 
 class EndpointDTO(BaseModel):
@@ -401,8 +423,9 @@ async def transfer_readiness():
 
 
 @router.post("/route")
-async def analyze_route(body: AnalyzeRequest):
+async def analyze_route(body: AnalyzeRequest, request: Request):
     """Score a source → destination route with conversion and driver hints."""
+    _assert_endpoint_connectors(request, read=(body.source, body.destination))
     from services.universal_router import analyze_route as score_route
 
     from ..transfer.adapters import resolve_endpoint
@@ -416,8 +439,9 @@ async def analyze_route(body: AnalyzeRequest):
 
 
 @router.post("/analyze")
-async def analyze_transfer(request: AnalyzeRequest):
+async def analyze_transfer(request: AnalyzeRequest, http_request: Request):
     """Understand source/destination and show auto-creation plan."""
+    _assert_endpoint_connectors(http_request, read=(request.source, request.destination))
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig
 
@@ -433,8 +457,9 @@ async def analyze_transfer(request: AnalyzeRequest):
 
 
 @router.post("/introspect")
-async def introspect_endpoint_route(request: AnalyzeRequest):
+async def introspect_endpoint_route(request: AnalyzeRequest, http_request: Request):
     """Probe source or destination — list tables/collections, infer schema."""
+    _assert_endpoint_connectors(http_request, read=(request.source, request.destination))
     from ..transfer.endpoint_intelligence import introspect_endpoint
     from ..transfer.models import EndpointConfig
 
@@ -924,6 +949,7 @@ async def execute_transfer_json(
         ) from exc
 
     workspace_id = resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(request, read=(body.source,), write=(body.destination,))
     src = src_preview
     dst = dst_preview
     region = (
@@ -1244,6 +1270,11 @@ async def run_universal_transfer(
         ) from exc
 
     workspace_id = resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(
+        request,
+        read=tuple(c for c in (source_connector_id,) if c),
+        write=tuple(c for c in (dest_connector_id,) if c),
+    )
 
     src_fmt = source_format
     if source_kind == "file" and file:
@@ -2152,6 +2183,7 @@ async def rebaseline_append_continuity(
     from ..transfer.models import EndpointConfig
 
     resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(request, write=(body.destination,))
     reason = (body.reason or "").strip()
     if not reason:
         raise HTTPException(

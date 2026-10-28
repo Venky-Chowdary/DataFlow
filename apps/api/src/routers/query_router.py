@@ -460,6 +460,18 @@ def _check_workspace_write(request: Request, workspace_id: str | None):
         raise HTTPException(status_code=403, detail="Workspace write access denied")
 
 
+def _check_connector_read(request: Request, connector_id: str | None) -> None:
+    from services.workspace_access import assert_connector_accessible
+
+    assert_connector_accessible(request, connector_id)
+
+
+def _check_connector_write(request: Request, connector_id: str | None) -> None:
+    from services.workspace_access import assert_connector_accessible
+
+    assert_connector_accessible(request, connector_id, write=True)
+
+
 @router.post("/execute", response_model=QueryResult)
 async def query_execute(
     body: QueryExecuteRequest,
@@ -469,6 +481,7 @@ async def query_execute(
     """Run a read-only query against a saved connector and return rows."""
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
+    _check_connector_read(request, body.connector_id)
     connector = connector_store.get_connector(body.connector_id, workspace_id=workspace_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -514,6 +527,7 @@ async def query_export(
     """Run a query and export the results to a file or a destination connector."""
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
+    _check_connector_read(request, body.connector_id)
     connector = connector_store.get_connector(body.connector_id, workspace_id=workspace_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -614,6 +628,7 @@ async def query_schema(
     """
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
+    _check_connector_read(request, body.connector_id)
 
     from services.connector_probe import endpoint_from_saved_connector
 
@@ -729,6 +744,7 @@ async def query_schemas(
     """
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
+    _check_connector_read(request, body.connector_id)
 
     from services.connector_probe import endpoint_from_saved_connector
     from services.query_catalog import build_catalog_tree, live_schema_names
@@ -773,6 +789,7 @@ def _export_to_connector(
 ) -> QueryExportResult:
     """Write query results to a saved database, warehouse, or object-store connector."""
     _check_workspace_write(request, workspace_id)
+    _check_connector_write(request, body.destination_connector_id)
     dest_connector = connector_store.get_connector(body.destination_connector_id, workspace_id=workspace_id)
     if not dest_connector:
         raise HTTPException(status_code=404, detail="Destination connector not found")
