@@ -987,10 +987,14 @@ async def execute_transfer_json(
     )
     from services.batch_progress import effective_backfill_new_fields
 
+    # Only the operator's toggle and the policy persist on the request. A
+    # create_new stamp in the mappings is not folded in here: it says "the table
+    # did not exist" for the run that wrote it, and a schedule replaying it
+    # against the table that run created would silently ADD COLUMN. Execute
+    # derives that part from the live destination.
     request_obj.backfill_new_fields = effective_backfill_new_fields(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
-        mappings=request_obj.mappings,
     )
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
@@ -1013,13 +1017,6 @@ async def execute_transfer_json(
             ) from e
     else:
         plan_payload = None
-
-    # Recompute after plan mappings may have been merged (create_new → ADD COLUMN).
-    request_obj.backfill_new_fields = effective_backfill_new_fields(
-        backfill_new_fields=request_obj.backfill_new_fields,
-        schema_policy=request_obj.schema_policy,
-        mappings=request_obj.mappings,
-    )
 
     _residency_check(request, dst, region)
     from src.transfer.contract_engine import stamp_request_contract
@@ -1499,7 +1496,6 @@ async def run_universal_transfer(
     request_obj.backfill_new_fields = effective_backfill_new_fields(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
-        mappings=getattr(request_obj, "mappings", None),
     )
     if stream_contracts_json.strip():
         try:

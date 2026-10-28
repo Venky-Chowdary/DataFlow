@@ -908,8 +908,17 @@ def _apply_schema_auto_propagate(
     dest_schema_types: dict[str, str] | None,
 ) -> list[dict[str, Any]]:
     """Validate≡Execute schema auto-propagate — pause on hard-break, extend maps."""
-    from services.schema_drift import apply_propagate_mappings, detect_schema_drift
+    from services.schema_drift import (
+        apply_propagate_mappings,
+        detect_schema_drift,
+        effective_schema_policy,
+    )
 
+    # Validate's policy, not the raw field: a backfill request is propagate.
+    schema_policy = effective_schema_policy(
+        getattr(request, "schema_policy", None),
+        backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
+    )
     contract = resolve_sync_contract(getattr(request, "stream_contracts", None))
     from services.db_type_utils import dest_schema_is_recreated_on_overwrite
 
@@ -927,7 +936,7 @@ def _apply_schema_auto_propagate(
         target_schema=dest_schema_types or {},
         mappings=mappings,
         destination_db_type=(getattr(request.destination, "format", "") or "").lower(),
-        schema_policy=getattr(request, "schema_policy", None) or "manual_review",
+        schema_policy=schema_policy,
         dest_recreated=dest_recreated,
     )
     evolution = drift.get("schema_evolution") or {}
@@ -957,23 +966,30 @@ def _apply_schema_auto_propagate(
         raise ValueError(
             (drift.get("issues") or ["Breaking schema change — sync paused"])[0]
         )
-    if _widen_props:
-        from services.schema_drift import (
-            PROPAGATE_POLICIES,
-            normalize_schema_policy,
-            stamp_approved_widens,
-        )
+    from services.db_type_utils import dest_declares_column_ddl
+    from services.schema_drift import (
+        destination_evolution_approved,
+        plan_destination_evolution,
+    )
 
-        _widen_policy = normalize_schema_policy(
-            getattr(request, "schema_policy", None) or "manual_review"
+    # The decision Validate made, from the same function and the same plan:
+    # propagate (or a backfill request) evolves the destination automatically,
+    # manual_review only after the acknowledgement; type_locked / pause_on_change
+    # / block_all never ALTER. A schemaless sink has no DDL to evolve.
+    if (
+        dest_schema_types
+        and dest_declares_column_ddl(
+            str(getattr(request.destination, "format", "") or "")
         )
-        # Propagate policies widen automatically; manual_review widens only
-        # after the drift acknowledgement. type_locked / pause_on_change /
-        # block_all never ALTER here — the run fails closed on bind instead.
-        if _widen_policy in PROPAGATE_POLICIES or (
-            acknowledged and _widen_policy == "manual_review"
-        ):
-            stamp_approved_widens(mappings, _widen_props)
+        and destination_evolution_approved(schema_policy, acknowledged=acknowledged)
+    ):
+        mappings, _evolved_types, _ = plan_destination_evolution(
+            mappings,
+            source_columns=columns,
+            source_schema=schema,
+            dest_types=dest_schema_types,
+            dest_db=(getattr(request.destination, "format", "") or "").lower(),
+        )
     if not evolution.get("should_propagate"):
         return mappings
     mappings, applied = apply_propagate_mappings(
@@ -981,7 +997,7 @@ def _apply_schema_auto_propagate(
         source_columns=columns,
         source_schema=schema,
         evolution=evolution,
-        schema_policy=getattr(request, "schema_policy", None) or "manual_review",
+        schema_policy=schema_policy,
     )
     if not applied:
         return mappings
@@ -2947,7 +2963,12 @@ class UniversalTransferEngine:
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
-                mappings=getattr(request, "mappings", None),
+                # The evolved plan (mappings _apply_schema_auto_propagate
+                # stamped), not the request's pre-evolution copy.
+                mappings=mappings,
+                dest_columns=(
+                    list(dest_schema_types or {}) if dest_table_exists_flag is True else None
+                ),
             )
 
             # Reconciliation must weigh the destination against the whole source
@@ -4359,7 +4380,12 @@ class UniversalTransferEngine:
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
-                mappings=getattr(request, "mappings", None),
+                # The evolved plan (mappings _apply_schema_auto_propagate
+                # stamped), not the request's pre-evolution copy.
+                mappings=mappings,
+                dest_columns=(
+                    list(dest_schema_types or {}) if dest_table_exists_flag is True else None
+                ),
             )
 
             mongo.update_job_status(
@@ -5443,7 +5469,12 @@ class UniversalTransferEngine:
             backfill_fields = effective_backfill_new_fields(
                 backfill_new_fields=request.backfill_new_fields,
                 schema_policy=request.schema_policy,
-                mappings=getattr(request, "mappings", None),
+                # The evolved plan (mappings _apply_schema_auto_propagate
+                # stamped), not the request's pre-evolution copy.
+                mappings=mappings,
+                dest_columns=(
+                    list(dest_schema_types or {}) if dest_table_exists_flag is True else None
+                ),
             )
 
             mongo.update_job_status(

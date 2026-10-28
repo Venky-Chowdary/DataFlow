@@ -502,10 +502,12 @@ def build_schedule_request(
         validation_mode=sched.validation_mode or "strict",
         delivery_guarantee=getattr(sched, "delivery_guarantee", None)
         or "at_least_once",
+        # The stored mappings were stamped create_new by the run that created
+        # the table; they do not arm ADD COLUMN for this one. Execute derives
+        # that from the live destination.
         backfill_new_fields=effective_backfill_new_fields(
             backfill_new_fields=bool(sched.backfill_new_fields),
             schema_policy=schema_policy,
-            mappings=mappings,
         ),
         write_via_staging=bool(getattr(sched, "write_via_staging", False)),
         priority_column=str(getattr(sched, "priority_column", "") or ""),

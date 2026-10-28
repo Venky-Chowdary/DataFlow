@@ -923,6 +923,15 @@ def stamp_approved_widens(
             m["dest_widen"] = True
             m["target_type"] = new_type
             m["target_type_origin"] = "drift_widen"
+            if m.get("review_kind") == "lossy":
+                # Map raised that review against the narrower live carrier
+                # (INT4 ← BIGINT). The approved widen removes its cause, and an
+                # ambiguous-mapping block would otherwise outlive the decision.
+                m["requires_review"] = False
+                m.pop("review_kind", None)
+                m["reasoning"] = str(m.get("reasoning") or "").replace(
+                    " · lossy type pair", ""
+                )
             applied.append({
                 "source": src_name,
                 "target": m.get("target") or src_name,
@@ -931,6 +940,95 @@ def stamp_approved_widens(
                 "new_type": new_type,
             })
     return applied
+
+
+def effective_schema_policy(
+    schema_policy: str | None, *, backfill_new_fields: bool = False
+) -> str:
+    """The policy this run is governed by — one rule for every gate.
+
+    ``backfill_new_fields`` asks for ADD COLUMN, which is what propagate means.
+    Under ``manual_review`` it used to align only G10, so drift detection kept
+    the review policy and blocked the very column the operator asked to land
+    (D20). ``type_locked`` / ``pause_on_change`` forbid silent ADD COLUMN and
+    keep their policy; G10 names that conflict.
+    """
+    policy = (schema_policy or "manual_review").strip().lower() or "manual_review"
+    if backfill_new_fields and policy == "manual_review":
+        return "propagate_columns"
+    return policy
+
+
+def destination_evolution_approved(
+    schema_policy: str | None, *, acknowledged: bool = False
+) -> bool:
+    """Whether additive destination evolution (widen, ADD COLUMN) is approved.
+
+    Propagate policies approve it up front; ``manual_review`` approves it after
+    the drift acknowledgement. ``type_locked`` / ``pause_on_change`` /
+    ``block_all`` never ALTER — the run fails closed on bind instead. Validate
+    and Execute both ask this, so they cannot disagree.
+    """
+    policy = normalize_schema_policy(schema_policy)
+    return policy in PROPAGATE_POLICIES or (acknowledged and policy == "manual_review")
+
+
+def plan_destination_evolution(
+    mappings: list[dict[str, Any]] | None,
+    *,
+    source_columns: list[str],
+    source_schema: dict[str, str],
+    dest_types: dict[str, str],
+    dest_db: str = "",
+) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
+    """Apply approved destination evolution to the plan, once.
+
+    Returns ``(mappings, dest_types, applied)`` where the destination types are
+    the post-ALTER carriers: a widened column reads as its new, wider type and
+    a mapped column the table lacks reads as the ADD COLUMN it will become.
+    Every gate downstream then grades the source against the destination this
+    run will leave behind, instead of each gate patching the live types itself
+    (D20/D107). The caller decides approval
+    (:func:`destination_evolution_approved`) and that the table exists.
+    """
+    from services.mapping_constraints import write_mappings
+
+    planned = [dict(m) for m in (mappings or []) if isinstance(m, dict)]
+    types = dict(dest_types or {})
+    active = write_mappings(planned)
+    applied: list[dict[str, Any]] = []
+
+    widens = propose_dest_widens(
+        active, source_schema=source_schema, target_schema=types, dest_db=dest_db
+    )
+    applied.extend(stamp_approved_widens(planned, widens))
+    by_target = {str(k).lower(): k for k in types}
+    for change in widens:
+        key = by_target.get(str(change.get("target") or "").lower())
+        if key is not None:
+            types[key] = str(change["new_type"])
+
+    present = {str(c).lower() for c in source_columns}
+    for m in active:
+        src = str(m.get("source") or "")
+        tgt = str(m.get("target") or "")
+        if not src or not tgt or src.lower() not in present or tgt.lower() in by_target:
+            continue
+        added = str(m.get("target_type") or ci_get(source_schema, src) or "VARCHAR")
+        types[tgt] = added
+        by_target[tgt.lower()] = tgt
+        # The same vocabulary Map uses for an ADD COLUMN proposal, so the
+        # writer's backfill lane opens for this column and no other.
+        m["create_new"] = True
+        m["assignment_strategy"] = "create_compatible_new"
+        applied.append({
+            "source": src,
+            "target": tgt,
+            "propagated": True,
+            "propagate_reason": "add_column",
+            "new_type": added,
+        })
+    return planned, types, applied
 
 
 def apply_propagate_mappings(

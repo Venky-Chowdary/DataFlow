@@ -123,6 +123,7 @@ def stamp_additive_mappings_for_write(
             backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
             schema_policy=str(getattr(request, "schema_policy", "") or ""),
             mappings=mappings,
+            dest_columns=list(dest_types or {}) if dest_table_exists is True else None,
         )
     except Exception:
         backfill = bool(getattr(request, "backfill_new_fields", False))
