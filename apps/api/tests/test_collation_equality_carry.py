@@ -85,8 +85,9 @@ def test_mysql_ci_unique_is_not_claimed_carried_on_postgres():
     assert decision.column_prefixes == []
 
 
-def test_sqlserver_ci_as_is_not_mapped_to_mysql_unicode_ci():
-    """unicode_ci is accent-insensitive; CI_AS is not. A stand-in would equate café/cafe."""
+def test_sqlserver_ci_as_maps_to_mysql_accent_sensitive_ci_not_unicode_ci():
+    """unicode_ci is accent-insensitive; CI_AS is not. MySQL 8 has the real
+    counterpart, utf8mb4_0900_as_ci (D149); MariaDB has none and refuses."""
     catalog = SourceSchemaCatalog(
         dialect="sqlserver",
         columns=["name"],
@@ -94,17 +95,25 @@ def test_sqlserver_ci_as_is_not_mapped_to_mysql_unicode_ci():
         collations={"name": "Latin1_General_CI_AS"},
         unique_keys=[["name"]],
     )
-    plan = plan_collation_carry(
-        catalog=catalog,
-        dest_dialect="mysql",
-        dest_name_for_source=lambda c: c,
-        dest_type_for_column=lambda _: "VARCHAR(50)",
-        unique_or_pk={"name"},
-    )
-    decision = plan.decisions[0]
-    assert decision.status == "unsupported"
-    assert "accent" in decision.reason.lower()
-    assert not decision.column_prefixes
+
+    def plan(dest):
+        return plan_collation_carry(
+            catalog=catalog,
+            dest_dialect=dest,
+            dest_name_for_source=lambda c: c,
+            dest_type_for_column=lambda _: "VARCHAR(50)",
+            unique_or_pk={"name"},
+        ).decisions[0]
+
+    mysql = plan("mysql")
+    assert mysql.status == "carried"
+    assert mysql.dest_collation == "utf8mb4_0900_as_ci"
+    assert "utf8mb4_unicode_ci" not in " ".join(mysql.column_prefixes)
+
+    mariadb = plan("mariadb")
+    assert mariadb.status == "unsupported"
+    assert "accent" in mariadb.reason.lower()
+    assert not mariadb.column_prefixes
 
 
 def test_sqlite_nocase_is_not_a_unicode_ci_stand_in():
