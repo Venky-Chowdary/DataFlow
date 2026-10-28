@@ -62,6 +62,8 @@ CASES = {
     "D51_double_nonfinite": ("double precision", "'-Infinity'", "1.5"),
     # D80 — the read-back rendered unbounded ranges as ``[1, None)``.
     "D80_unbounded_range": ("int4range", "'[1,)'", "'(,5]'"),
+    # D79 — varbit was validated as hex/base64 bytes; odd-length bits refused.
+    "D79_varbit": ("varbit", "B'101'", "B'1'"),
 }
 
 

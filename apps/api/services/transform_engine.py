@@ -2073,9 +2073,18 @@ def infer_transform_for_mapping(
 
     from services.type_system import parse_numeric_precision_scale, temporal_carrier_holds_time
 
+    from services.type_system import is_bitstring_carrier
+
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type) if target_type else None
     tgt_name = target_col.lower()
+    if is_bitstring_carrier(target_type) or (
+        is_bitstring_carrier(source_type) and tgt in {None, "binary"}
+    ):
+        # BIT / VARBIT hold 0/1 text, not bytes: the hex/base64 ``binary``
+        # parse refused an odd-length ``101`` (D79). Identity carries the
+        # digits; the writer's bit-string quarantine checks digits and width.
+        return "none"
 
     semantic = detect_semantic_type(source_col, source_samples)
     samples_temporal = _samples_look_temporal(source_samples)

@@ -237,6 +237,22 @@ def resolve_transform(
             or "VARCHAR",
         )
 
+    # D79 — the logical type of BIT/VARBIT is "binary", so the decision below
+    # would validate 0/1 text as hex/base64 bytes and refuse ``101``. Decide on
+    # the declared carriers instead (the same rule infer_transform_for_mapping
+    # applies when it is handed them).
+    if str(raw or "").lower() in {"", "none", "null", "binary"}:
+        from services.type_system import is_bitstring_carrier
+
+        declared_target = live_hit or mapping.get("target_type") or column_types.get(
+            mapping["target"]
+        )
+        if is_bitstring_carrier(declared_target) or (
+            is_bitstring_carrier(column_types.get(mapping["source"]))
+            and target_type == "binary"
+        ):
+            return "none"
+
     if raw and _type_compatible_transform(target_type, raw):
         return str(raw)
 

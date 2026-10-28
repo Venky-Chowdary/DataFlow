@@ -2548,6 +2548,10 @@ def ddl_carrier_type(inferred: str | None) -> str:
             return stripped
         return "ARRAY"
     if logical == LOGICAL_BINARY:
+        # BIT(n) / VARBIT are 0/1 strings, not bytes: a BINARY carrier made
+        # create-new invent BYTEA and the hex/base64 parse refuse ``101`` (D79).
+        if is_bitstring_carrier(raw):
+            return strip_identity_qualifier(raw).strip().upper() or upper
         return "BINARY"
     if logical == LOGICAL_INTERVAL:
         return "INTERVAL"
