@@ -899,6 +899,54 @@ def _destination_schema_types(
     return schema
 
 
+def _record_schema_propagation(
+    mongo: Any,
+    job_id: str,
+    columns: list[str],
+    mappings: list[dict[str, Any]],
+    dest_schema_types: dict[str, str] | None,
+) -> None:
+    """Say on the job which source columns the run added, and which it left out.
+
+    A column added to an existing destination is applied silently otherwise,
+    and a live source column no mapping covers (a run that skipped preflight)
+    simply never moves: the operator found out by reading the destination
+    (D165). Both are named here.
+    """
+    from services.mapping_constraints import write_mappings
+
+    live = {str(c).lower() for c in (dest_schema_types or {})}
+    added = (
+        [
+            str(m.get("source") or "")
+            for m in write_mappings(mappings)
+            if str(m.get("target") or "").lower() not in live
+        ]
+        if live
+        else []
+    )
+    covered = {
+        str(m.get("source") or "").lower()
+        for m in mappings or []
+        if isinstance(m, dict)
+    }
+    skipped = [str(c) for c in columns or [] if str(c).lower() not in covered]
+    if not added and not skipped:
+        return
+    if skipped:
+        logger.warning(
+            "Job %s: source column(s) %s are neither mapped nor declared omitted "
+            "and will not be written",
+            job_id,
+            ", ".join(skipped),
+        )
+    mongo.update_job_status(
+        job_id,
+        "running",
+        schema_propagation={"added_columns": added, "skipped_columns": skipped},
+    )
+
+
 def _forget_cached_table_shapes(*endpoints: Any) -> None:
     """A run reads the tables as they are now, not as an earlier run cached them."""
     from services.reflection_cache import invalidate_named_tables
@@ -2539,6 +2587,9 @@ class UniversalTransferEngine:
                 mappings=mappings,
                 dest_schema_types=dest_schema_types,
             )
+            _record_schema_propagation(
+                mongo, job_id, columns, mappings, dest_schema_types
+            )
             mappings = _stamp_additive_mappings_for_write(
                 request,
                 mappings,
@@ -4034,6 +4085,9 @@ class UniversalTransferEngine:
                 mappings=mappings,
                 dest_schema_types=dest_schema_types,
             )
+            _record_schema_propagation(
+                mongo, job_id, columns, mappings, dest_schema_types
+            )
             mappings = _stamp_additive_mappings_for_write(
                 request,
                 mappings,
@@ -5146,6 +5200,9 @@ class UniversalTransferEngine:
                 schema=schema,
                 mappings=mappings,
                 dest_schema_types=dest_schema_types,
+            )
+            _record_schema_propagation(
+                mongo, job_id, columns, mappings, dest_schema_types
             )
             mappings = _stamp_additive_mappings_for_write(
                 request,
