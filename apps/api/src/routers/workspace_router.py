@@ -18,7 +18,6 @@ from services.byok_key_manager import (
     rotate_key,
 )
 from services.team_store import (
-    can_read_workspace,
     can_write_workspace,
     get_workspace,
 )
