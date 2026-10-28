@@ -1119,6 +1119,53 @@ def _resume_restarts_from_scratch(xfer_req: Any) -> bool:
     )
 
 
+#: Resume asks whether a CDC stream can attach before it re-queues the job; a
+#: source that does not answer inside this window refuses instead of leaving the
+#: job "running" at 5% with a frozen ``updated_at`` (D176).
+RESUME_ATTACH_DEADLINE_SECONDS = 20.0
+
+
+async def _cdc_resume_attach_refusal(xfer_req: Any) -> str:
+    """Why a CDC job's change-log stream cannot attach now; empty when it can.
+
+    Runs the same g9c log-capture check Validate runs, so Resume and Validate
+    cannot disagree, bounded by :data:`RESUME_ATTACH_DEADLINE_SECONDS`.
+    """
+    from services.preflight_population import GateStatus, _cdc_log_capture_gates
+    from services.sync_cursor import normalize_sync_mode
+
+    from ..transfer.adapters import resolve_connector_config
+    from ..transfer.cdc_transfer import cdc_source_type
+
+    if normalize_sync_mode(getattr(xfer_req, "sync_mode", "") or "", default="") != "cdc":
+        return ""
+    source = xfer_req.source
+    if getattr(source, "kind", "") in {"file", "cloud"}:
+        return ""
+    try:
+        gates = await asyncio.wait_for(
+            asyncio.to_thread(
+                _cdc_log_capture_gates,
+                list(getattr(xfer_req, "stream_contracts", None) or []),
+                source_type=cdc_source_type(source),
+                source_config=resolve_connector_config(source),
+                source_table=getattr(source, "table", "") or getattr(source, "collection", "") or "",
+                catalog_primary_key_columns=None,
+                mappings=getattr(xfer_req, "mappings", None),
+            ),
+            timeout=RESUME_ATTACH_DEADLINE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return (
+            f"The CDC stream did not attach within {RESUME_ATTACH_DEADLINE_SECONDS:g}s. "
+            "Check that the source is reachable and the user holds REPLICATION SLAVE and "
+            "REPLICATION CLIENT, then resume again."
+        )
+    return " ".join(
+        str(g.get("message") or "") for g in gates if g.get("status") == GateStatus.BLOCK.value
+    ).strip()
+
+
 @router.post("/jobs/{job_id}/resume")
 async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Resume a failed or paused transfer from its last durable checkpoint."""
@@ -1193,11 +1240,24 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         # Resume is the one sanctioned exit from a terminal status, and it must
         # also drop any stale cancel request or the resumed run would abort at
         # its first checkpoint.
+        # A CDC job re-enters with the stored failure on it. Refuse while the
+        # stream still cannot attach (the failure stays visible); otherwise a
+        # resume sat "running" with the old error and no progress (D176).
+        attach_refusal = await _cdc_resume_attach_refusal(xfer_req)
+        if attach_refusal:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Resume refused — the CDC stream cannot attach",
+                    "reasons": [attach_refusal],
+                },
+            )
         mongo.clear_job_cancel(job_id)
         mongo.update_job_status(
             job_id,
             "pending",
             message=f"Resume requested for job {job_id}",
+            error="",
             allow_terminal_exit=True,
         )
         background_tasks.add_task(
