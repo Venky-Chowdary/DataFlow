@@ -302,6 +302,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Node deps install right after checkout: the web test/build steps run under
+      # `failure()` too, so when a database-image pull below fails they still run and
+      # need node_modules (otherwise `tsc` reports TS2307 Cannot find module 'react').
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
       - name: Start MySQL (local_infile), Mongo replica set, fake-gcs, Azurite
         # fake-gcs / Azurite back the desktop lab's postgresql->gcs / ->adls
         # execute cells (same flags as docker-compose.yml; emulator, not tenant).
@@ -311,7 +323,6 @@ jobs:
       - name: Start Postgres with logical CDC
         run: |
           bash .github/scripts/start_ci_databases.sh postgres-cdc
-          exit 1
 
       - name: Start BigQuery emulator
         # goccy/bigquery-emulator gives us an always-on BigQuery API surface in CI
@@ -324,12 +335,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-
       - name: Install Python dependencies
         run: |
           cd apps/api
@@ -337,9 +342,6 @@ jobs:
           python -m pip install -r requirements.txt
           cd ../../packages/preflight
           python -m pip install -e .
-
-      - name: Install Node dependencies
-        run: npm ci
 
       - name: Grant MySQL CDC privileges
         run: |
@@ -566,7 +568,6 @@ jobs:
       - name: Start Postgres with logical CDC
         run: |
           bash .github/scripts/start_ci_databases.sh postgres-cdc
-          exit 1
 
       - name: Start SQL Server
         run: |
