@@ -37,7 +37,6 @@ from services.db_type_utils import (
     DESTS_WITHOUT_SCHEMA_RECREATE,
     NO_RELATIONAL_DDL_DESTS,
     SCHEMALESS_DESTS,
-    ci_get,
     dest_declares_column_ddl,
     normalize_dest_kind,
 )
@@ -384,11 +383,14 @@ def run_transfer_policy_gates(
     # switched policy back but the checkbox state was never cleared). That must not
     # fail Execute after Validate already passed — coerce to additive propagation.
     # type_locked / pause_on_change still forbid silent ADD COLUMN.
-    policy_coerced = False
-    if backfill_new_fields and schema == "manual_review":
-        schema = "propagate_columns"
-        policy_coerced = True
-    elif backfill_new_fields and schema in {"type_locked", "pause_on_change"}:
+    from services.schema_drift import effective_schema_policy
+
+    coerced_schema = effective_schema_policy(
+        schema, backfill_new_fields=backfill_new_fields
+    )
+    policy_coerced = coerced_schema != schema
+    schema = coerced_schema
+    if backfill_new_fields and schema in {"type_locked", "pause_on_change"}:
         schema_issues.append(
             "Backfill new fields conflicts with schema policy "
             f"'{schema}' — switch to Propagate columns, or turn backfill off"
@@ -759,7 +761,18 @@ def run_file_preflight(
     source_population_counted: bool = False,
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
+    from services.schema_drift import (
+        destination_evolution_approved,
+        effective_schema_policy,
+    )
     from services.timezone_policy import declared_source_column_types
+
+    # ``backfill_new_fields`` is a request for propagate. Resolved once so
+    # drift detection, the DDL checks and the evolution plan below all read the
+    # policy G10 reports, not the pre-coercion one (D20).
+    schema_policy = effective_schema_policy(
+        schema_policy, backfill_new_fields=backfill_new_fields
+    )
 
     # A zone declared on Map is a fact about the source, so every gate below
     # reads the declared type rather than the zoneless one it was introspected
@@ -1040,6 +1053,13 @@ def run_file_preflight(
                 backfill_new_fields=bool(backfill_new_fields),
                 schema_policy=schema_policy,
                 mappings=mappings,
+                # A table that exists already has the columns a stale create_new
+                # stamp names; only a target it lacks proposes ADD COLUMN.
+                dest_columns=(
+                    list(destination_column_types or {})
+                    if destination_table_exists is True and not dest_recreated
+                    else None
+                ),
             )
         )
     except Exception:
@@ -1105,6 +1125,63 @@ def run_file_preflight(
             )
             and not str(m.get("target_type") or m.get("dest_type") or "").strip()
         ]
+
+    # Approved destination evolution (widen, ADD COLUMN for a mapped new
+    # column) is applied to the plan once, here, so every gate below grades the
+    # source against the destination this run leaves behind. Patching the live
+    # types gate by gate left schema contract, mapping confidence, data
+    # integrity and population fit each refusing a widen the operator had
+    # approved (D107), and a mapped new column blocked under an acknowledgement
+    # (D20). Unapproved runs keep the strict live contract.
+    destination_evolution: list[dict[str, Any]] = []
+    # The Decision Artifact fingerprints the table as it stands: "dest drifted
+    # since Validate" compares it with the live table at Execute, which has not
+    # been ALTERed yet.
+    live_destination_types = dict(destination_column_types or {})
+    if (
+        destination_table_exists is True
+        and not dest_recreated
+        and destination_column_types
+        and dest_declares_column_ddl(destination_db_type)
+        and destination_evolution_approved(
+            schema_policy, acknowledged=schema_drift_acknowledged
+        )
+    ):
+        from services.schema_drift import plan_destination_evolution
+
+        mappings, destination_column_types, destination_evolution = (
+            plan_destination_evolution(
+                mappings,
+                source_columns=list(columns),
+                source_schema=column_types or {},
+                dest_types=destination_column_types,
+                dest_db=str(destination_db_type or ""),
+            )
+        )
+        # Map stamped the fidelity verdict against the table as it stood
+        # (BIGINT → INT4 narrowing); a widened pair is lossless against the
+        # carrier it will have, and G4 reads the stale stamp as a risk-contract
+        # demand otherwise.
+        from services.mapping_proof import stamp_mapping_fidelity
+
+        widened_sources = {
+            str(a["source"]).lower()
+            for a in destination_evolution
+            if a.get("propagate_reason") == "widen_type"
+        }
+        if widened_sources:
+            mappings = [
+                stamp_mapping_fidelity(
+                    [m],
+                    source_types=column_types or {},
+                    target_types=destination_column_types,
+                    destination_db_type=str(destination_db_type or ""),
+                    dest_table_exists=True,
+                )[0]
+                if str(m.get("source") or "").lower() in widened_sources
+                else m
+                for m in mappings
+            ]
 
     # Source nullability defaults to True (unknown), which is the safe reading
     # for files. For an introspected database source it is knowable, and
@@ -1365,45 +1442,6 @@ def run_file_preflight(
         ),
         dest_db=dest_kind,
     )
-
-    # D107: when this run is armed to widen destination columns — a propagate
-    # schema policy, explicit backfill, or an acknowledged drift review — the
-    # DDL/fidelity checks must grade the source against the post-ALTER
-    # carrier. A VARCHAR(200) source landing in a VARCHAR(10) column that the
-    # write path will ALTER is not a collapse; grading it as one refused every
-    # later run of a pipeline whose source only ever drifted wider. Unarmed
-    # runs keep the strict contract (the drift gate owns the ack UX), and an
-    # explicit operator Map stamp stays a ceiling.
-    if ddl_dest_types and (
-        backfill_new_fields
-        or schema_drift_acknowledged
-        or (schema_policy or "").strip().lower()
-        in {"propagate_columns", "propagate_all"}
-    ):
-        from connectors.schema_drift import is_wider_type as _is_wider_dest
-        from connectors.writer_common import (
-            stamp_is_operator_ceiling as _widen_ceiling,
-        )
-        from services.type_system import (
-            normalize_logical_type as _norm_logical_widen,
-        )
-
-        _dest_lower = {str(k).lower(): k for k in ddl_dest_types}
-        for _m in write_maps:
-            _src = str(_m.get("source") or "")
-            _tgt = str(_m.get("target") or "")
-            _src_t = ci_get(column_types, _src)
-            _dst_key = _dest_lower.get(_tgt.lower())
-            _dst_t = str(ddl_dest_types.get(_dst_key) or "") if _dst_key else ""
-            if (
-                _src_t
-                and _dst_t
-                and _norm_logical_widen(str(_src_t))
-                == _norm_logical_widen(_dst_t)
-                and not _widen_ceiling(_m)
-                and _is_wider_dest(_dst_t, str(_src_t), dest_db=dest_kind)
-            ):
-                ddl_dest_types[_dst_key] = str(_src_t)
 
     target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
@@ -1990,7 +2028,7 @@ def run_file_preflight(
         )
 
         dest_fp = live_dest_schema_fingerprint(
-            destination_column_types,
+            live_destination_types,
             destination_table_exists=destination_table_exists,
             sync_mode=str(sync_mode or ""),
         )
@@ -3167,6 +3205,10 @@ def run_file_preflight(
             out["proof_bundle"] = pb
         except Exception:
             pass
+
+    if destination_evolution:
+        out["destination_evolution"] = destination_evolution
+        out["effective_mappings"] = mappings
 
     # Schema drift is its own rule — never masquerade as Target DDL.
     # Datawrap rule: hard-breaking ALWAYS pauses (even under propagate_*).
