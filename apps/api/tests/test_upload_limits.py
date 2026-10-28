@@ -129,12 +129,18 @@ def test_file_parser_refuses_gzip_bomb(small_caps):
     assert ok.success and ok.row_count == 1
 
 
-def test_file_stream_decompress_refuses_gzip_bomb(small_caps):
+def test_file_stream_json_peek_refuses_gzip_bomb(small_caps, tmp_path):
+    """CSV/TSV stream through gzip row by row; JSON needs the whole image."""
     from src.transfer import file_stream
 
+    bomb = tmp_path / "bomb.json.gz"
+    bomb.write_bytes(_bomb())
     with pytest.raises(PayloadTooLarge):
-        file_stream._decompress_bytes_if_gzip(_bomb())
-    assert file_stream._decompress_bytes_if_gzip(gzip.compress(b"a\n1\n")) == b"a\n1\n"
+        file_stream.peek_file_source(str(bomb), "bomb.json.gz")
+    fine = tmp_path / "rows.json.gz"
+    fine.write_bytes(gzip.compress(b'[{"a": 1}]'))
+    headers, _schema, total, _sample = file_stream.peek_file_source(str(fine), "rows.json.gz")
+    assert headers == ["a"] and total == 1
 
 
 def test_copy_local_columnar_spool_refuses_bomb(small_caps, tmp_path):
