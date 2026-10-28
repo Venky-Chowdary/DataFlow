@@ -2378,7 +2378,7 @@ async def delete_connector(connector_id: str, request: Request):
         connector = mongo.get_connector(connector_id)
         if not connector:
             raise HTTPException(status_code=404, detail="Connector not found")
-        assert_resource_workspace(request, str(connector.get("workspace_id") or ""))
+        assert_resource_workspace(request, str(connector.get("workspace_id") or ""), write=True)
         success = mongo.delete_connector(connector_id)
 
         if not success:

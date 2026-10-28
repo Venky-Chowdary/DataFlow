@@ -399,13 +399,6 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
     ]
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Preflight run records do not persist workspace ownership and "
-        "GET /preflight/runs/{run_id} returns the global run record."
-    ),
-)
 def test_preflight_run_id_is_not_visible_cross_workspace(resource_matrix, monkeypatch):
     admin = _admin()
     workspace_a = _workspace(admin, "Preflight workspace A")
