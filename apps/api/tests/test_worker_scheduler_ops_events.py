@@ -338,6 +338,7 @@ def test_schedule_misfire_events_include_missed_count(tmp_path, monkeypatch, cap
         "source_table": "orders",
         "dest_connector_id": "destination-event",
         "dest_table": "orders_copy",
+        "shared_destination_acknowledged": True,
         "interval": "hourly",
         "mappings": [{"source": "id", "target": "id"}],
     })
