@@ -16,37 +16,59 @@ from collections.abc import Iterable, Sequence
 from datetime import datetime
 from typing import Any, Final
 
-#: ``TO_CHAR`` mask whose output :func:`parse_oracle_tstz_text` reads back.
+#: ``TO_CHAR`` mask for ``TIMESTAMP WITH TIME ZONE``: it carries a stored offset.
 ORACLE_TSTZ_READ_FORMAT: Final = 'YYYY-MM-DD"T"HH24:MI:SS.FF6TZH:TZM'
+#: Mask for ``WITH LOCAL TIME ZONE`` after ``SYS_EXTRACT_UTC``. Oracle rejects a
+#: TZH/TZM element on an LTZ value (ORA-01821, D167): it stores an instant and
+#: no offset, so the instant is rendered in UTC with an explicit ``+00:00``.
+ORACLE_LTZ_READ_FORMAT: Final = 'YYYY-MM-DD"T"HH24:MI:SS.FF6'
 
-#: Spellings of the zone-bearing TIMESTAMP types: the catalog's
-#: ``all_tab_columns.data_type`` and python-oracledb's ``DbType`` names.
-_TZ_TYPE_TOKENS: Final = (
-    "WITH TIME ZONE",
-    "WITH LOCAL TIME ZONE",
-    "TIMESTAMP_TZ",
-    "TIMESTAMP_LTZ",
-)
+_TZ = "tz"
+_LTZ = "ltz"
+
+
+def oracle_tz_kind(type_name: Any) -> str | None:
+    """``"tz"`` / ``"ltz"`` for an Oracle zone-bearing TIMESTAMP type name, else ``None``.
+
+    Accepts the catalog's ``data_type`` (``TIMESTAMP(6) WITH [LOCAL] TIME
+    ZONE``) and python-oracledb's ``DB_TYPE_TIMESTAMP_TZ`` / ``_LTZ``.
+    """
+    text = " ".join(str(getattr(type_name, "name", type_name) or "").upper().split())
+    if "WITH LOCAL TIME ZONE" in text or "TIMESTAMP_LTZ" in text:
+        return _LTZ
+    if "WITH TIME ZONE" in text or "TIMESTAMP_TZ" in text:
+        return _TZ
+    return None
 
 
 def is_oracle_tz_type_name(type_name: Any) -> bool:
     """True for an Oracle TIMESTAMP WITH [LOCAL] TIME ZONE type name."""
-    text = " ".join(str(getattr(type_name, "name", type_name) or "").upper().split())
-    return any(tok in text for tok in _TZ_TYPE_TOKENS)
+    return oracle_tz_kind(type_name) is not None
 
 
-def oracle_tz_to_char(quoted_column: str) -> str:
-    """SQL for one zone-bearing column rendered with its offset."""
+def oracle_tz_to_char(quoted_column: str, kind: str = _TZ) -> str:
+    """SQL rendering one zone-bearing column as ISO text that keeps its instant."""
+    if kind == _LTZ:
+        return (
+            f"TO_CHAR(SYS_EXTRACT_UTC({quoted_column}), '{ORACLE_LTZ_READ_FORMAT}')"
+            " || '+00:00'"
+        )
     return f"TO_CHAR({quoted_column}, '{ORACLE_TSTZ_READ_FORMAT}')"
+
+
+def oracle_tz_kinds(description: Sequence[Any] | None) -> dict[int, str]:
+    """``{index: kind}`` of the zone-bearing columns in a DB-API ``cursor.description``."""
+    out: dict[int, str] = {}
+    for idx, entry in enumerate(description or ()):
+        kind = oracle_tz_kind(entry[1]) if len(entry) > 1 else None
+        if kind:
+            out[idx] = kind
+    return out
 
 
 def oracle_tz_positions(description: Sequence[Any] | None) -> frozenset[int]:
     """Indexes of the zone-bearing columns in a DB-API ``cursor.description``."""
-    return frozenset(
-        idx
-        for idx, entry in enumerate(description or ())
-        if len(entry) > 1 and is_oracle_tz_type_name(entry[1])
-    )
+    return frozenset(oracle_tz_kinds(description))
 
 
 def oracle_tz_select_list(description: Sequence[Any] | None) -> str:
@@ -58,13 +80,17 @@ def oracle_tz_select_list(description: Sequence[Any] | None) -> str:
     """
     from connectors.sql_identifiers import quote_sql_identifier
 
-    tz = oracle_tz_positions(description)
-    if not tz:
+    kinds = oracle_tz_kinds(description)
+    if not kinds:
         return "*"
     parts: list[str] = []
     for idx, entry in enumerate(description or ()):
         quoted = quote_sql_identifier(str(entry[0]), '"')
-        parts.append(f"{oracle_tz_to_char(quoted)} AS {quoted}" if idx in tz else quoted)
+        parts.append(
+            f"{oracle_tz_to_char(quoted, kinds[idx])} AS {quoted}"
+            if idx in kinds
+            else quoted
+        )
     return ", ".join(parts)
 
 

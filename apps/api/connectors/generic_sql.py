@@ -23,8 +23,9 @@ from typing import Any, Final
 
 from connectors.base import ReadBatch
 from connectors.oracle_tstz import (
+    ORACLE_LTZ_READ_FORMAT,
     ORACLE_TSTZ_READ_FORMAT,
-    is_oracle_tz_type_name,
+    oracle_tz_kind,
     oracle_tz_positions,
     oracle_tz_select_list,
     parse_oracle_tz_row,
@@ -3187,30 +3188,39 @@ def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
         return list(cols)
     out: list[Any] = []
     for col in cols:
-        if _is_oracle_tz_sa(getattr(col, "type", None)):
+        kind = _oracle_tz_kind_sa(getattr(col, "type", None))
+        if kind == "tz":
             out.append(
                 sa.func.to_char(col, ORACLE_TSTZ_READ_FORMAT).label(col.name)
+            )
+        elif kind == "ltz":
+            # LTZ holds an instant, not an offset: TZH/TZM is ORA-01821 on it.
+            out.append(
+                (
+                    sa.func.to_char(sa.func.sys_extract_utc(col), ORACLE_LTZ_READ_FORMAT)
+                    + sa.literal("+00:00")
+                ).label(col.name)
             )
         else:
             out.append(col)
     return out
 
 
-def _is_oracle_tz_sa(col_type: Any) -> bool:
-    """True for a reflected Oracle TIMESTAMP WITH [LOCAL] TIME ZONE column.
+def _oracle_tz_kind_sa(col_type: Any) -> str | None:
+    """``"tz"`` / ``"ltz"`` for a reflected Oracle zone-bearing TIMESTAMP, else ``None``.
 
     The SQLAlchemy flags are one spelling; a type carried by its DDL name (a
     native passthrough such as ``TIMESTAMP(6) WITH TIME ZONE``) is the other,
     and missing it read the column naive (D155).
     """
     if col_type is None:
-        return False
-    if isinstance(col_type, sa.DateTime) and (
-        getattr(col_type, "timezone", False)
-        or getattr(col_type, "local_timezone", False)
-    ):
-        return True
-    return is_oracle_tz_type_name(getattr(col_type, "col_spec", ""))
+        return None
+    if isinstance(col_type, sa.DateTime):
+        if getattr(col_type, "local_timezone", False):
+            return "ltz"
+        if getattr(col_type, "timezone", False):
+            return "tz"
+    return oracle_tz_kind(getattr(col_type, "col_spec", ""))
 
 
 def _raw_select_list(conn: Any, dialect: str, qualified: str, probe: Any = None) -> str:
