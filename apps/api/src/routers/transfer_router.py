@@ -26,6 +26,7 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from services.rbac import require_admin_for_endpoints
 from services.workspace_access import assert_connector_accessible, resolve_write_workspace, tenant_scope
 from services.value_serializer import cell_to_string
 
@@ -971,6 +972,7 @@ async def execute_transfer_json(
     _assert_endpoint_connectors(request, read=(body.source,), write=(body.destination,))
     src = src_preview
     dst = dst_preview
+    require_admin_for_endpoints(request, workspace_id, src, dst)
     region = (
         (body.data_region or "").strip()
         or getattr(request.state, "data_region", "")
@@ -1375,6 +1377,7 @@ async def run_universal_transfer(
         auth_source=dest_auth_source,
         extra=dest_extra,
     )
+    require_admin_for_endpoints(request, workspace_id, source, destination)
 
     source_filter: dict = {}
     if source_filter_json.strip():

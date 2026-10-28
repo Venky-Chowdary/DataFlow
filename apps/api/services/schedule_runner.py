@@ -1654,6 +1654,13 @@ def _run_schedule(
         return None
     if not sched.enabled and not manual:
         return None
+    from services.request_principal import assert_bound_principal_may_use_endpoints
+
+    assert_bound_principal_may_use_endpoints(
+        getattr(sched, "workspace_id", "") or None,
+        {"connector_id": sched.source_connector_id},
+        {"connector_id": sched.dest_connector_id},
+    )
     # Cadence already releases create-new dest-exists parks before the beat.
     # Run now must do the same or the first unattended fire stays parked.
     from services.schedule_approvals import release_create_new_dest_exists_false_refuse

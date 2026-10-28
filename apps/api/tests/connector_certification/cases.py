@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -27,8 +28,12 @@ _CURSOR_FINAL = "2026-01-04T00:00:00Z"
 
 
 def _tap_source(tmp_path: Path) -> Path:
-    script = tmp_path / "synthetic_certification_tap.py"
+    """Install the synthetic tap as ``tap-synthetic`` in an operator taps directory."""
+    taps = tmp_path / "taps"
+    taps.mkdir(exist_ok=True)
+    script = taps / "tap-synthetic"
     script.write_text(
+        "#!" + sys.executable + "\n"
         """\
 import argparse
 import json
@@ -108,10 +113,11 @@ if selected:
 """,
         encoding="utf-8",
     )
+    script.chmod(0o755)
     return script
 
 
-def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
+def build_certification_cases(tmp_path: Path, monkeypatch: Any = None) -> dict[str, CertificationCase]:
     records: tuple[Mapping[str, Any], ...] = (
         {"id": "1", "updated_at": _CURSOR_START, "name": "one"},
         {"id": "2", "updated_at": _CURSOR_SECOND, "name": "two"},
@@ -940,6 +946,10 @@ def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
     )
 
     tap_script = _tap_source(tmp_path)
+    if monkeypatch is not None:
+        monkeypatch.setenv("DATAWRAP_SINGER_TAPS_DIR", str(tap_script.parent))
+    else:  # pragma: no cover - callers should pass pytest's monkeypatch
+        os.environ["DATAWRAP_SINGER_TAPS_DIR"] = str(tap_script.parent)
 
     def singer_factory(
         _base_url: str,
@@ -949,7 +959,7 @@ def build_certification_cases(tmp_path: Path) -> dict[str, CertificationCase]:
     ) -> SingerTapBridge:
         return SingerTapBridge(
             {
-                "tap_command": [sys.executable, str(tap_script)],
+                "tap_command": [tap_script.name],
                 "tap_config": {
                     "api_key": _SECRET,
                     "phase": phase,

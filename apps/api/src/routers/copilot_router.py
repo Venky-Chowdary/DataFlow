@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from services.rbac import require_admin_connector_access, require_admin_for_endpoints
 from src.services import auth_service
 
 _logger = logging.getLogger(__name__)
@@ -225,6 +226,7 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
 
     src = dict(payload.get("source") or {})
     dst = dict(payload.get("destination") or {})
+    require_admin_for_endpoints(None, src.get("workspace_id") or dst.get("workspace_id"), src, dst)
     try:
         request_obj = transfer_request_from_ack(payload)
     except ValueError as exc:
@@ -694,6 +696,11 @@ async def copilot_confirm(
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_connector":
+        try:
+            require_admin_connector_access(None, payload.get("type"))
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
         from services.connector_store import (
             connector_name_conflict_message,
             connector_name_taken,

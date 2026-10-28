@@ -14,10 +14,19 @@ from connectors.sdk import SingerTapBridge, SingerTapError, StreamSchema
 from connectors.sdk.http_declarative import DeclarativeHttpConnector
 
 
+@pytest.fixture(autouse=True)
+def _taps_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Singer runs only ``tap-*`` programs from the operator's taps directory."""
+    taps = tmp_path / "taps"
+    taps.mkdir()
+    monkeypatch.setenv("DATAWRAP_SINGER_TAPS_DIR", str(taps))
+    return taps
+
+
 def _fake_tap(tmp_path: Path, *, empty_discover: bool = False) -> SingerTapBridge:
-    script = tmp_path / "fake_tap.py"
+    script = tmp_path / "taps" / "tap-fake"
     script.write_text(
-        """
+        "#!" + sys.executable + """
 import json
 import sys
 from pathlib import Path
@@ -48,9 +57,10 @@ print(json.dumps({"type": "RECORD", "stream": "contacts", "record": {"id": "1"}}
 """,
         encoding="utf-8",
     )
+    script.chmod(0o755)
     return SingerTapBridge(
         {
-            "tap_command": [sys.executable, str(script)],
+            "tap_command": ["tap-fake"],
             "tap_config": {"empty_discover": empty_discover, "token": "test-secret"},
         }
     )
@@ -159,15 +169,19 @@ def test_singer_check_fallback_rejects_empty_discovery(tmp_path: Path) -> None:
     ],
 )
 def test_singer_discover_raises_typed_errors(
+    _taps_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     outcome: Exception | subprocess.CompletedProcess[str],
     expected_fragment: str,
 ) -> None:
     secret = "planted-secret"
+    tap = _taps_dir / "tap-stub"
+    tap.write_text("#!/bin/sh\n")
+    tap.chmod(0o755)
     bridge = SingerTapBridge(
         {
-            "tap_command": ["tap", "--discover"],
+            "tap_command": ["tap-stub", "--discover"],
             "tap_config": {"api_key": secret},
         }
     )

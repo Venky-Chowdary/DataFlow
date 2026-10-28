@@ -57,6 +57,7 @@ Optional:
 | `DATAFLOW_EXPOSE_ERROR_DETAIL` | `0` | Debug-only: add redacted, truncated exception detail to safe API errors. Never enable in production. |
 | `DATAFLOW_SEED_DEMO` | `0` | No demo connectors |
 | `DATAFLOW_RBAC_UNRULED_ROUTES` | `deny` | `deny` rejects authenticated requests without a reviewed public exception or explicit permission rule; `allow_and_log` temporarily restores method-based fallback permissions and warns/audits. Invalid values fail closed. |
+| `DATAWRAP_SINGER_TAPS_DIR` | unset | Directory of operator-installed `tap-*` executables. **Unset disables the `singer_tap` connector.** Only `tap-*` programs inside it run (no interpreters, no paths elsewhere); only the platform administrator may create, test or run a Singer connector. Every `tap-*` entry in the directory, symlinks included, is trusted. |
 
 ### Multi-replica / enterprise coordination
 

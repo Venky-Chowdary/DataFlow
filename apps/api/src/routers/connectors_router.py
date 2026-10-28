@@ -30,6 +30,7 @@ from services.workspace_access import (
 from services.value_serializer import json_default
 from services.upload_limits import PayloadTooLarge, read_upload
 from services.connector_telemetry import connector_operation, driver_family
+from services.rbac import require_admin_connector_access
 
 from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
@@ -212,7 +213,8 @@ class TransferRequest(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/test")
-async def test_connection(request: TestConnectionRequest):
+async def test_connection(request: TestConnectionRequest, http_request: Request):
+    require_admin_connector_access(http_request, request.type)
     with connector_operation(
         "probe",
         driver_family="unknown",
@@ -361,6 +363,7 @@ async def create_connector(
 ):
     """Create and save a new connector configuration (file store + MongoDB when available)."""
     workspace_id = resolve_write_workspace(request, workspace_id)
+    require_admin_connector_access(request, config.type)
     connector_data = {
         "name": config.name,
         "type": config.type,

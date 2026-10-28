@@ -20,12 +20,24 @@ import threading
 from typing import Any
 from weakref import WeakKeyDictionary
 
+from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
 from src.services import auth_service as _auth_service
+from services.request_principal import (  # noqa: F401 — re-exported RBAC surface
+    _REQUEST_ROLE,
+    ADMIN_ONLY_CONNECTOR_TYPES,
+    admin_only_message,
+    admin_only_types,
+    assert_bound_principal_may_use_connector,
+    assert_bound_principal_may_use_endpoints,
+    connector_type_aliases,
+    connector_type_requires_admin,
+    endpoint_connector_types,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -503,6 +515,47 @@ def has_permission(user: dict[str, Any] | None, permission: str) -> bool:
     return permission in principal_permissions(user, role)
 
 
+def _may_run_host_executables(user: dict[str, Any] | None) -> bool:
+    """Platform administrator, or authentication switched off (single local operator).
+
+    A workspace ``admin`` is not enough: a Singer tap runs on the API host that
+    every workspace shares.
+    """
+    from services.tenant_scope import actor_is_unrestricted
+
+    return actor_is_unrestricted(user)
+
+
+def admin_connector_denial(user: dict[str, Any] | None, *connector_types: Any) -> str | None:
+    """Return a denial message when ``user`` may not use any of ``connector_types``."""
+    gated = admin_only_types(connector_types)
+    if not gated or _may_run_host_executables(user):
+        return None
+    return admin_only_message(gated)
+
+
+def require_admin_connector_access(request: Request | None, *connector_types: Any) -> None:
+    """Raise 403 unless the request principal may use every given connector type.
+
+    Without a ``request`` the principal bound by :class:`RBACMiddleware` is used
+    (no bound principal: scheduler/worker or auth off, not blocked).
+    """
+    types = [alias for t in connector_types for alias in connector_type_aliases(t)]
+    if request is not None:
+        denial = admin_connector_denial(getattr(getattr(request, "state", None), "user", None), *types)
+    else:
+        role = _REQUEST_ROLE.get()
+        gated = admin_only_types(types)
+        denial = admin_only_message(gated) if gated and role not in (None, "admin") else None
+    if denial:
+        raise HTTPException(status_code=403, detail=denial)
+
+
+def require_admin_for_endpoints(request: Request | None, workspace_id: str | None, *endpoints: Any) -> None:
+    """Raise 403 when a non-admin principal would run an admin-only connector endpoint."""
+    require_admin_connector_access(request, *endpoint_connector_types(workspace_id, *endpoints))
+
+
 def _is_public_mcp_path(path: str) -> bool:
     """Discovery + Streamable handshake only — not ``/tools/call`` or ``/logs``."""
     if path in ("/api/v1/mcp", "/api/v1/mcp/"):
@@ -636,6 +689,20 @@ class RBACMiddleware(BaseHTTPMiddleware):
     """Enforce role-based permissions for authenticated API requests."""
 
     async def dispatch(self, request: Request, call_next):
+        # Bind the principal for sinks that run outside the router layer (a
+        # Singer tap probe, preflight, introspection). Unbound = auth off, a
+        # scheduler or a worker thread.
+        token = None
+        if _auth_service.auth_required():
+            user = getattr(request.state, "user", None)
+            token = _REQUEST_ROLE.set("admin" if _may_run_host_executables(user) else "member")
+        try:
+            return await self._dispatch(request, call_next)
+        finally:
+            if token is not None:
+                _REQUEST_ROLE.reset(token)
+
+    async def _dispatch(self, request: Request, call_next):
         # RBAC only matters when authentication is enforced. Read it off the
         # auth module per request rather than copying the symbol at import
         # time, so RBAC can never enforce against a stale view of the setting.
