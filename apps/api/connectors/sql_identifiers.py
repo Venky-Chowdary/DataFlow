@@ -74,6 +74,36 @@ def sanitize_identifier(name: str, preserve_case: bool = False, *, max_len: int 
     return s[:max_len]
 
 
+#: Engines whose column names compare case-insensitively, so ``ID`` and ``id``
+#: are one column even when both are quoted.
+_CASE_INSENSITIVE_COLUMN_ENGINES = frozenset(
+    {"mysql", "mariadb", "sqlite", "sqlserver", "mssql"}
+)
+
+
+def sanitized_name_collisions(
+    names: list[str], dest_kind: str = ""
+) -> list[tuple[str, list[str]]]:
+    """Distinct names that sanitise to one destination identifier (D54).
+
+    ``First Name`` and ``First-Name`` both become ``First_Name``; the writer
+    then emits the column twice and the driver reports "specified more than
+    once" after DDL has run. Returns ``[(identifier, [originals...])]``.
+    """
+    fold = (dest_kind or "").strip().lower() in _CASE_INSENSITIVE_COLUMN_ENGINES
+    groups: dict[str, list[str]] = {}
+    for raw in names:
+        name = str(raw or "").strip()
+        if not name:
+            continue
+        ident = sanitize_identifier(name, preserve_case=True)
+        key = ident.casefold() if fold else ident
+        bucket = groups.setdefault(key, [])
+        if name not in bucket:
+            bucket.append(name)
+    return [(key, originals) for key, originals in groups.items() if len(originals) > 1]
+
+
 def snowflake_fold_identifier(name: str) -> str:
     """Fold Snowflake identifiers the way unquoted SQL does (UPPER).
 
