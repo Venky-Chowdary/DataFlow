@@ -166,6 +166,36 @@ def _configure_route(
     return route
 
 
+def _seed_nonempty_destination(
+    fixture: FixtureServer, kind: str, request: TransferRequest
+) -> None:
+    """Load one record so the destination is non-empty before the faulted run.
+
+    A failed run against an empty/absent destination is rolled back to
+    byte-identical state (services.batch_undo, X-35/X-41), which is the
+    intended product behaviour. These tests exercise the other path - a
+    mid-stream fault against a destination that already holds data keeps the
+    pages already committed - so they must not start from an empty table.
+    """
+    record = _records(kind, 1, 1)
+    route = {
+        "github": "/repos/acme/widgets/issues",
+        "jira": "/rest/api/3/search/jql",
+        "intercom": "/contacts",
+    }[kind]
+    if kind == "github":
+        body = record
+    elif kind == "jira":
+        body = {"issues": record, "isLast": True}
+    else:
+        body = {"data": record, "pages": {}}
+    fixture.add_route(route, responses=[FixtureResponse(body=body)])
+    seeded = UniversalTransferEngine().execute_tracked(
+        request, f"seed-{uuid.uuid4().hex[:12]}"
+    )
+    assert seeded.success, seeded.error
+
+
 def _table_rows(path: Path, table: str) -> list[tuple]:
     with sqlite3.connect(path) as conn:
         return conn.execute(f'SELECT id FROM "{table}" ORDER BY id').fetchall()
@@ -237,6 +267,8 @@ def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
             ],
         )
 
+        _seed_nonempty_destination(fixture, kind, request)
+        _configure_route(fixture, kind, pages, fail_page_two=True)
         with caplog.at_level(logging.WARNING):
             first = UniversalTransferEngine().execute_tracked(request, job_id)
 
@@ -379,6 +411,8 @@ def test_intercom_fault_then_full_reread_retry_uses_pk_upsert(
             ],
         )
 
+        _seed_nonempty_destination(fixture, "intercom", request)
+        _configure_route(fixture, "intercom", pages, fail_page_two=True)
         with caplog.at_level(logging.WARNING):
             failed = UniversalTransferEngine().execute_tracked(request, job_id)
         assert not failed.success
@@ -431,6 +465,8 @@ def test_github_resume_is_refused_before_http_or_destination_mutation(
                 }
             ],
         )
+        _seed_nonempty_destination(fixture, "github", request)
+        _configure_route(fixture, "github", pages, fail_page_two=True)
         failed = UniversalTransferEngine().execute_tracked(request, job_id)
         assert not failed.success
         assert len(_table_rows(destination_path, "issues")) == 100
