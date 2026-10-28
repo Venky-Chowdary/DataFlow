@@ -16,7 +16,7 @@ from typing import Any, Iterator
 
 from connectors.sql_identifiers import quote_sql_identifier
 from services.cdc_engine import ChangeBatch
-from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+from services.value_serializer import wire_cell
 
 logger = logging.getLogger(__name__)
 
@@ -170,14 +170,7 @@ class OracleFlashbackCdc:
             return False
 
     def _row_to_record(self, cols: list[str], row: tuple) -> dict[str, str]:
-        return {
-            str(cols[i]).upper(): (
-                SQL_NULL_SENTINEL
-                if row[i] is None
-                else cell_to_string(row[i], preserve_sql_null=True)
-            )
-            for i in range(len(cols))
-        }
+        return {str(cols[i]).upper(): wire_cell(row[i]) for i in range(len(cols))}
 
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Full table dump at current SCN, then hand off to flashback versions."""
@@ -331,14 +324,7 @@ class OracleFlashbackCdc:
                         scn_val = rec.pop("DF_SCN", None) or rec.pop("df_scn", None) or head_scn
                         next_scn = max(next_scn, int(scn_val or 0))
                         self._last_event_at = datetime.now(timezone.utc)
-                        clean = {
-                            str(k).upper(): (
-                                SQL_NULL_SENTINEL
-                                if v is None
-                                else cell_to_string(v, preserve_sql_null=True)
-                            )
-                            for k, v in rec.items()
-                        }
+                        clean = {str(k).upper(): wire_cell(v) for k, v in rec.items()}
                         key = clean.get(pk, "")
                         if str(op).upper() == "D":
                             from services.cdc_identity import is_present_cdc_row_key

@@ -94,6 +94,24 @@ class WireLiteral(str):
     """
 
 
+class WireCell(str):
+    """A cell a reader already encoded for the transfer wire (D174).
+
+    ``cell_to_string(None, preserve_sql_null=True)`` is ``"__DF_SQL_NULL__"`` and
+    a user text that spells a sentinel is escaped. Encoding that result again
+    escapes the NULL sentinel into the *text* ``"__DF_SQL_NULL__"`` and escapes a
+    user literal twice. A bare ``str`` cannot say which side of the encode it is
+    on, so a reader that hands the engine wire cells marks them and
+    :func:`cell_to_string` passes a marked cell through unchanged. Raw values (a
+    ``None``, a ``Decimal``, a user ``str``) stay unmarked and are encoded once.
+    """
+
+
+def wire_cell(value: Any) -> WireCell:
+    """Encode ``value`` once for the wire and mark the result as encoded."""
+    return WireCell(cell_to_string(value, preserve_sql_null=True))
+
+
 def driver_bind_value(value: Any) -> Any:
     """The value a database driver binds: a :class:`WireLiteral` leaves as ``str``.
 
@@ -918,6 +936,9 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     * numpy / pandas scalars -> their scalar .item() representation
     * unknown -> str(value) (never repr)
     """
+    if isinstance(value, WireCell):
+        return str(value)
+
     if value is None:
         return SQL_NULL_SENTINEL if preserve_sql_null else ""
 
