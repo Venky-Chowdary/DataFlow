@@ -428,10 +428,11 @@ def export_dataflow_manifest(
     from services.gitops_manifest import build_dataflow_manifest
     from services.team_store import require_workspace_isolation
 
-    ws = resolve_read_workspace(request, workspace_id)
+    scope = tenant_scope(request, workspace_id)
     artifact = build_dataflow_manifest(
-        workspace_id=ws,
+        workspace_id=scope.workspace_id,
         isolation=require_workspace_isolation(),
+        workspace_filter=scope.filter,
     )
     if format == "yaml":
         return Response(
@@ -462,9 +463,9 @@ async def gitops_plan_manifest(
     """Dry-run a DatawrapManifest / PipelineSchedule / DataContract YAML body."""
     from services.gitops_manifest import WorkspaceScopeError, plan_manifest
 
-    ws = resolve_read_workspace(request, workspace_id)
+    scope = tenant_scope(request, workspace_id)
     try:
-        return plan_manifest(payload, workspace_id=ws)
+        return plan_manifest(payload, workspace_id=scope.workspace_id, workspace_filter=scope.filter)
     except WorkspaceScopeError as exc:
         _record_gitops_scope_denial(request)
         raise HTTPException(status_code=403, detail="Resource belongs to another workspace") from exc
@@ -495,6 +496,7 @@ async def gitops_apply_manifest(
             dry_run=dry_run,
             require_signed_contracts=require_signed_contracts,
             workspace_id=ws,
+            workspace_filter=tenant_scope(request, workspace_id).filter,
         )
     except WorkspaceScopeError as exc:
         _record_gitops_scope_denial(request)
@@ -689,7 +691,12 @@ async def import_pipeline_schedule(
         spec = payload.get("spec") if isinstance(payload.get("spec"), dict) else payload
         if isinstance(spec, dict):
             spec["workspace_id"] = ws
-    result = apply_manifest(payload, dry_run=False, workspace_id=ws)
+    result = apply_manifest(
+        payload,
+        dry_run=False,
+        workspace_id=ws,
+        workspace_filter=tenant_scope(request, workspace_id).filter,
+    )
     rows = result.get("results") or []
     sched_row = next((r for r in rows if r.get("kind") == "PipelineSchedule" and r.get("ok")), None)
     if not sched_row:
@@ -1240,8 +1247,8 @@ async def list_open_approvals(
 
     from services.schedule_approvals import open_approvals
 
-    scope = resolve_read_workspace(request, workspace_id)
-    items = await asyncio.to_thread(open_approvals, scope or "")
+    scope = tenant_scope(request, workspace_id).filter
+    items = await asyncio.to_thread(open_approvals, workspace_filter=scope)
     return {"count": len(items), "approvals": items}
 
 
