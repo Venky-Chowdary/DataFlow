@@ -4187,6 +4187,11 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
         # DuckDB/SQLite resolve to the generic routing key — the census needs
         # the real engine from the endpoint's own format.
         eng = str(fmt or "").strip().lower() or eng
+    if eng == "sqlserver":
+        # resolve_driver_type names SQL Server "sqlserver"; the census helpers
+        # below key it "mssql". Without the alias Gate-8 said SQL Server "has
+        # no census driver" while listing mssql among them (D173).
+        eng = "mssql"
     if eng == "postgresql":
         from connectors.postgresql_conn import get_connection
 
@@ -7444,8 +7449,9 @@ def _run_reconciliation_impl(
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
-                "Gate-8 refused: streaming write completed but no reconcile_sample "
-                "was stashed for key-aligned proof. Re-run with sample stash enabled."
+                "Gate-8 refused: streaming write completed but the writer recorded "
+                "no source sample, so the write cannot be proven key by key. "
+                "Re-run the transfer; if it repeats, report this job."
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,

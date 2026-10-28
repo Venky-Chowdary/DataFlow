@@ -1175,6 +1175,21 @@ def _align_inherited_batch(
     return list(mappings), list(headers), pk_target_col, note
 
 
+def _stash_reconcile_evidence(dest_summary: dict[str, Any], change: Any) -> None:
+    """Stash the bounded source sample / delete keys Gate-8 reads back.
+
+    Every delivery branch must leave this evidence, or the streaming write has
+    nothing to prove against and is refused.
+    """
+    sample_rows = list(change.inserts or []) + list(change.updates or [])
+    if sample_rows:
+        dest_summary["reconcile_sample"] = sample_rows[:50]
+    if change.deletes:
+        # PK tombstones for post-write absence proof (not full after-images).
+        dest_summary["reconcile_deletes"] = [str(k) for k in change.deletes[:50]]
+        dest_summary["reconcile_delete_count"] = len(change.deletes)
+
+
 def _apply_change_batch(
     dest_type: str,
     destination: Any,
@@ -1269,6 +1284,12 @@ def _apply_change_batch(
             stream_name=stream_name,
             writer_fence=writer_fence,
         )
+        if dest_summary is None:
+            dest_summary = {}
+        # The exactly-once branch used to return before the stash below, so
+        # Gate-8 refused every SQL Server change-tracking run as "no
+        # reconcile_sample" although the destination equalled the source (D173).
+        _stash_reconcile_evidence(dest_summary, change)
         return rows, checksum, _note_inherited_map(
             _stamp_unparsed_sql_redo_summary(dest_summary, rejected_details),
             inherit_note,
@@ -1449,15 +1470,9 @@ def _apply_change_batch(
 
     # Stash a bounded source sample so Gate-8 reconciliation can compare the
     # rows we just wrote against a read-back of the destination.
-    sample_rows = list(change.inserts or []) + list(change.updates or [])
     if dest_summary is None:
         dest_summary = {}
-    if sample_rows:
-        dest_summary["reconcile_sample"] = sample_rows[:50]
-    if change.deletes:
-        # PK tombstones for post-write absence proof (not full after-images).
-        dest_summary["reconcile_deletes"] = [str(k) for k in change.deletes[:50]]
-        dest_summary["reconcile_delete_count"] = len(change.deletes)
+    _stash_reconcile_evidence(dest_summary, change)
     if census_payload:
         from services.row_conservation import CENSUS_KEY
 
