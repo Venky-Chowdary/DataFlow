@@ -40,6 +40,12 @@ class _JoiningBridge:
             return [{"topic": "t", "partition": 0, "offset": self.rows}]
         return []
 
+    def exhausted(self):
+        return False
+
+    def end_offsets_snapshot(self):
+        return []
+
     def close(self):
         self.closed = True
 

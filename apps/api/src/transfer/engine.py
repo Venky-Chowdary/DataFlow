@@ -1096,65 +1096,6 @@ def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
         )
 
 
-def _stamp_kafka_route_group(request: Any) -> None:
-    """D84 — a Kafka source without a configured group reads under its route's.
-
-    Stamped once on the resolved source endpoint, so the peek, the stream and
-    the accept-time commit all name the same group, and two pipelines on one
-    connector never share (and rebalance) one group (D87).
-    """
-    from connectors.kafka_reader import (
-        KAFKA_ROUTE_GROUP_KEY,
-        configured_kafka_group_id,
-        kafka_route_group_id,
-    )
-    from services.copy_kafka_common import kafka_family_name
-
-    source = request.source
-    if kafka_family_name(str(source.format or "")) != "kafka":
-        return
-    extra = dict(source.extra or {})
-    if configured_kafka_group_id(extra):
-        return
-    extra[KAFKA_ROUTE_GROUP_KEY] = kafka_route_group_id(source, request.destination)
-    source.extra = extra
-
-
-def _commit_kafka_offsets_on_accept(request: Any, dest_summary: dict) -> None:
-    """D85 — commit Kafka consumer-group offsets once, only on acceptance.
-
-    Called on the success path after reconcile passed and the destination
-    committed. During the run, ``stream`` accumulates the per-partition end
-    offsets in ``dest_summary['kafka_offsets']`` and never commits; a failed or
-    cancelled run leaves the broker position untouched so the next run
-    re-reads every uncommitted message (at-least-once).
-    """
-    kafka_commit = dest_summary.get("kafka_offsets") or {}
-    pending = kafka_commit.get("pending_offsets") or []
-    if (request.source.format or "") != "kafka" or not pending:
-        return
-    try:
-        from connectors.kafka_reader import commit_kafka_offsets
-
-        commit_kafka_offsets(
-            resolve_connector_config(request.source),
-            {
-                "group_id": kafka_commit.get("group_id"),
-                "topic": kafka_commit.get("topic"),
-                "pending_offsets": pending,
-            },
-        )
-    except Exception as exc:
-        from services.execution_engine_contract import (
-            kafka_offset_commit_must_fail_closed,
-        )
-
-        raise kafka_offset_commit_must_fail_closed(exc) from exc
-    kafka_commit["committed"] = True
-    kafka_commit["committed_offsets"] = [dict(item) for item in pending]
-    dest_summary["kafka_offsets"] = kafka_commit
-
-
 def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -> Any:
     """Write the success terminal status, or record the commit on a cancelled job.
 
@@ -1223,6 +1164,10 @@ from .job_quarantine import (  # noqa: E402,F401 — re-export
     _persist_job_quarantine,
     checkpoint_quarantine_summary,
     fail_closed_on_silent_loss,
+)
+from .engine_kafka import (  # noqa: E402
+    commit_kafka_offsets_on_accept,
+    stamp_kafka_source,
 )
 from .engine_identity import (  # noqa: E402,F401 — re-export
     _enforce_ddl_identity,
@@ -1642,7 +1587,7 @@ class UniversalTransferEngine:
         # Resolve first: a connector_id reference carries the engine id that
         # create-new invention needs, and an inline format may be empty.
         self._resolve_saved_connectors(request)
-        _stamp_kafka_route_group(request)
+        stamp_kafka_source(request)
         from connectors.sql_identifiers import unsafe_destination_identifier_reason
 
         ident_err = unsafe_destination_identifier_reason(
@@ -3641,7 +3586,7 @@ class UniversalTransferEngine:
                 # The buffered read took one poll batch; its offsets commit
                 # with the job, never earlier (D85).
                 _kafka_accumulate_offsets(dest_summary, source_stamp["kafka_cursor"])
-            _commit_kafka_offsets_on_accept(request, dest_summary)
+            commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,
                 job_id,
@@ -4809,7 +4754,7 @@ class UniversalTransferEngine:
             _settle_overwrite_backup(request.destination, restore=False)
             # D85: Kafka is a streaming source, so this is the path that must
             # commit the group offsets; without it every run re-read the topic.
-            _commit_kafka_offsets_on_accept(request, dest_summary)
+            commit_kafka_offsets_on_accept(request, dest_summary)
             status_written = _write_success_status(
                 mongo,
                 job_id,
@@ -5660,7 +5605,7 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
-            _commit_kafka_offsets_on_accept(request, dest_summary)
+            commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,
                 job_id,

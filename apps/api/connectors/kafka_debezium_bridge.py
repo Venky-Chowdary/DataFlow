@@ -175,12 +175,20 @@ def debezium_to_row(change: DebeziumChange) -> dict[str, Any] | None:
     return None
 
 
-def _seek_on_assign(consumer: Any, start_offsets: list[dict[str, Any]]) -> Any:
+def _seek_on_assign(
+    consumer: Any,
+    start_offsets: list[dict[str, Any]],
+    *,
+    from_beginning: bool = False,
+) -> Any:
     """Rebalance listener that resumes assigned partitions at ``start_offsets``.
 
     A run never commits group offsets until it is accepted (D85), so the group
     position stays where the run began. A continuation batch must start after
-    the offsets this run already read, or it re-reads them.
+    the offsets this run already read, or it re-reads them. Any other assigned
+    partition starts at the log start when ``from_beginning`` (a full refresh
+    re-reads the topic whatever the group has committed), else at the group's
+    committed position.
     """
     from kafka import ConsumerRebalanceListener, TopicPartition  # type: ignore
 
@@ -201,6 +209,8 @@ def _seek_on_assign(consumer: Any, start_offsets: list[dict[str, Any]]) -> Any:
             for tp in assigned:
                 if tp in positions:
                     consumer.seek(tp, positions[tp])
+                elif from_beginning:
+                    consumer.seek_to_beginning(tp)
 
     return _Listener()
 
@@ -220,6 +230,20 @@ class KafkaDebeziumConsumer:
         self._consumer = None
         self._pending_offsets: dict[tuple[str, int], int] = {}
         self.tombstones_seen: int = 0
+        # The run's frozen log end per partition, and where each began. A
+        # continuation batch carries the snapshot in its config.
+        self._end: dict[tuple[str, int], int] | None = {
+            (str(i["topic"]), int(i["partition"])): int(i["offset"])
+            for i in config.get("end_offsets") or []
+        } or None
+        self._start: dict[tuple[str, int], int] = {
+            (str(i["topic"]), int(i["partition"])): int(i.get("start") or 0)
+            for i in config.get("end_offsets") or []
+        }
+        # Where an earlier batch of this run left off beats where the run began.
+        for i in config.get("start_offsets") or []:
+            if isinstance(i, dict) and i.get("offset") is not None:
+                self._start[(str(i["topic"]), int(i["partition"]))] = int(i["offset"])
 
     def connect(self) -> None:
         try:
@@ -245,11 +269,14 @@ class KafkaDebeziumConsumer:
                 ),
             )
         start = self.config.get("start_offsets") or []
-        if start:
-            # Same subscription, plus the listener that resumes this run.
+        from_beginning = self.config.get("start_position") == "earliest"
+        if start or from_beginning:
+            # Same subscription, plus the listener that positions this read.
             self._consumer.subscribe(
                 [self.config["topic"]],
-                listener=_seek_on_assign(self._consumer, start),
+                listener=_seek_on_assign(
+                    self._consumer, start, from_beginning=from_beginning
+                ),
             )
 
     def pending_offsets(self) -> list[dict[str, Any]]:
@@ -288,6 +315,51 @@ class KafkaDebeziumConsumer:
     def has_assignment(self) -> bool:
         return bool(self._consumer is not None and self._consumer.assignment())
 
+    def _snapshot_end_offsets(self) -> None:
+        """Freeze the log end of every assigned partition for this run.
+
+        A run reads the topic as it stood when it began: later arrivals belong
+        to the next run. That makes the population (and so the final page)
+        well-defined, which a staged overwrite needs to know when to publish.
+        """
+        if self._end is not None or self._consumer is None:
+            return
+        assigned = list(self._consumer.assignment() or [])
+        if not assigned:
+            return
+        begin = self._consumer.beginning_offsets(assigned) or {}
+        end = self._consumer.end_offsets(assigned) or {}
+        committed = {}
+        if self.config.get("start_position") != "earliest":
+            committed = {tp: self._consumer.committed(tp) for tp in assigned}
+        cursor = {
+            (str(i["topic"]), int(i["partition"])): int(i["offset"])
+            for i in self.config.get("start_offsets") or []
+            if isinstance(i, dict) and i.get("offset") is not None
+        }
+        self._end = {}
+        for tp in assigned:
+            key = (tp.topic, int(tp.partition))
+            self._end[key] = int(end.get(tp) or 0)
+            self._start[key] = cursor.get(key) or int(
+                committed.get(tp) or begin.get(tp) or 0
+            )
+
+    def end_offsets_snapshot(self) -> list[dict[str, Any]]:
+        return [
+            {"topic": t, "partition": p, "offset": off, "start": self._start.get((t, p), 0)}
+            for (t, p), off in sorted((self._end or {}).items())
+        ]
+
+    def exhausted(self) -> bool:
+        """True when every partition has been read up to its snapshot end."""
+        if not self._end:
+            return False
+        return all(
+            self._pending_offsets.get(key, self._start.get(key, 0)) >= stop
+            for key, stop in self._end.items()
+        )
+
     def poll_rows(self, *, max_records: int = 500, timeout_ms: int = 1000) -> Iterator[dict[str, Any]]:
         """Yield destination rows — Debezium envelopes preferred, else JSON passthrough."""
         if self._consumer is None:
@@ -296,10 +368,15 @@ class KafkaDebeziumConsumer:
             raise RuntimeError("Kafka consumer is not connected")
         registry_url = str(self.config.get("schema_registry_url") or "").strip()
         batch = self._consumer.poll(timeout_ms=timeout_ms, max_records=max_records)
+        self._snapshot_end_offsets()
         for tp, messages in batch.items():
             for msg in messages:
-                # Track next offset to commit after successful apply.
                 key = (msg.topic, int(msg.partition))
+                stop = (self._end or {}).get(key)
+                if stop is not None and int(msg.offset) >= stop:
+                    # Arrived after the run's snapshot: the next run's.
+                    continue
+                # Track next offset to commit after successful apply.
                 nxt = int(msg.offset) + 1
                 prev = self._pending_offsets.get(key)
                 if prev is None or nxt > prev:
