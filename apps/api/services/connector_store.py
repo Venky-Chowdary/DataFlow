@@ -514,10 +514,26 @@ def _seed_defaults() -> list[SavedConnector]:
     return defaults
 
 
+def _legacy_visible() -> bool:
+    """Whether unscoped (legacy) connectors are visible to the bound caller.
+
+    Always for system scope; for a request, only when its tenant scope says so
+    (a fresh signup account's never does - D162)."""
+    return bound_allows("")
+
+
+def _workspace_or_legacy(workspace_id: str) -> dict[str, Any]:
+    """Mongo filter: this workspace, plus the legacy rows when the caller may see them."""
+    arms: list[dict[str, Any]] = [{"workspace_id": workspace_id}]
+    if _legacy_visible():
+        arms.append({"workspace_id": {"$in": ["", None]}})
+    return {"$or": arms}
+
+
 def _list_file(role: str | None, workspace_id: str | None = None) -> list[SavedConnector]:
     items = _load_all()
     if workspace_id is not None:
-        items = [c for c in items if c.workspace_id == workspace_id or c.workspace_id == ""]
+        items = [c for c in items if c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible())]
     if role:
         items = [c for c in items if c.role == role or c.role == "both"]
     return items
@@ -529,7 +545,7 @@ def _list_mongo(role: str | None, workspace_id: str | None = None) -> list[Saved
     if role:
         filters.append({"$or": [{"role": role}, {"role": "both"}]})
     if workspace_id is not None:
-        filters.append({"$or": [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]})
+        filters.append(_workspace_or_legacy(workspace_id))
     query = {"$and": filters} if len(filters) > 1 else (filters[0] if filters else {})
     return _materialize_docs(coll.find(query))
 
@@ -594,7 +610,11 @@ def _visible_connectors(connectors: list[SavedConnector]) -> list[SavedConnector
 
 def _get_file(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     for c in _load_all():
-        if c.id == connector_id and (workspace_id is None or c.workspace_id == workspace_id or c.workspace_id == ""):
+        if c.id == connector_id and (
+            workspace_id is None
+            or c.workspace_id == workspace_id
+            or (c.workspace_id == "" and _legacy_visible())
+        ):
             return c
     return None
 
@@ -613,7 +633,7 @@ def _connector_id_query(connector_id: str, workspace_id: str | None = None) -> d
         query = {
             "$and": [
                 query,
-                {"$or": [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]},
+                _workspace_or_legacy(workspace_id),
             ]
         }
     return query
@@ -816,7 +836,7 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
         c for c in connectors
         if not (
             c.id == connector_id
-            and (workspace_id is None or c.workspace_id == workspace_id or c.workspace_id == "")
+            and (workspace_id is None or c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible()))
         )
     ]
     if len(filtered) == before:
