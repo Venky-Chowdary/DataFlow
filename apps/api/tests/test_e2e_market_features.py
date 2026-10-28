@@ -204,8 +204,19 @@ def test_e2e_adapter_write_salesforce_reverse_etl(
     assert mock_req.call_args.kwargs.get("token") or mock_req.call_args[1].get("token")
 
 
+@patch(
+    "connectors.hubspot.describe_properties",
+    return_value=[
+        {"name": "email", "type": "string", "fieldType": "text"},
+        {"name": "firstname", "type": "string", "fieldType": "text"},
+    ],
+)
 @patch("connectors.hubspot_writer.request")
-def test_e2e_stream_write_hubspot(mock_req: MagicMock) -> None:
+def test_e2e_stream_write_hubspot(mock_req: MagicMock, _describe: MagicMock) -> None:
+    # The writer runs a live Properties Describe before binding (it refuses to
+    # guess types on an auth failure); that call goes through
+    # connectors.hubspot.request, not the writer's, so stub it here - otherwise
+    # the test needs api.hubapi.com and a valid token.
     mock_resp = MagicMock()
     mock_resp.content = b"{}"
     mock_resp.json.return_value = {"results": [{"id": "1"}], "errors": []}
