@@ -4047,6 +4047,14 @@ class UniversalTransferEngine:
                             shape_runner=design_runner,
                         )
                     ),
+                    population_replay=lambda: _table_population_rows(
+                        request,
+                        mappings,
+                        column_types=schema,
+                        dest_types=dest_schema_types,
+                        dest_db=dst_fmt.lower(),
+                        shape_runner=design_runner,
+                    ),
                     rows_are_population=not reuse_fit and not _sync_mode_is_cdc(request),
                     skip_population_fit=reuse_fit,
                     source_filter=request.source_filter or None,
@@ -4212,6 +4220,9 @@ class UniversalTransferEngine:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
+                from services.population_fit_scan import stamp_create_widens
+
+                stamp_create_widens(mappings, pf.get("population_fit"))
 
             # Data contract / circuit breaker enforcement.
             try:
@@ -5142,6 +5153,10 @@ class UniversalTransferEngine:
                             _file_population_rows(content, filename, read_options),
                         )
                     ),
+                    population_replay=lambda: _shaped_population_rows(
+                        shape_runner,
+                        _file_population_rows(content, filename, read_options),
+                    ),
                     rows_are_population=not reuse_fit or not sample_rows,
                     skip_population_fit=reuse_fit,
                     source_filter=request.source_filter or None,
@@ -5307,6 +5322,9 @@ class UniversalTransferEngine:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
+                from services.population_fit_scan import stamp_create_widens
+
+                stamp_create_widens(mappings, pf.get("population_fit"))
 
             # Data contract / circuit breaker enforcement.
             try:

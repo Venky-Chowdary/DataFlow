@@ -217,6 +217,8 @@ class FitScanReport:
     envelope_complete: bool = False
     max_observed_widths: tuple[tuple[str, int], ...] = ()
     probe_error: str = ""
+    #: Create-new carriers resized from this scan, as (column, from, to).
+    create_widens: tuple[tuple[str, str, str], ...] = ()
 
     @property
     def scanned_population(self) -> bool:
@@ -253,6 +255,10 @@ class FitScanReport:
             "max_observed_widths": dict(self.max_observed_widths),
             "probe_error": self.probe_error,
             "note": self.note,
+            "create_widens": [
+                {"column": c, "from": was, "to": now}
+                for c, was, now in self.create_widens
+            ],
         }
 
 
@@ -1783,12 +1789,17 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
         }
 
     if report.scanned_population:
+        sized = "".join(
+            f"; CREATE type sized from the full scan: {c} {was} → {now}"
+            for c, was, now in report.create_widens
+        )
         return {
             "id": GATE_ID,
             "status": "pass",
             "message": (
                 f"Every value in {report.rows_scanned} source row(s) fits its "
                 f"destination carrier ({len(report.targets)} bounded column(s))"
+                f"{sized}"
             ),
             "duration_ms": duration_ms,
             "details": details,
@@ -1893,7 +1904,18 @@ def create_new_population_widen(
     rows_list = list(mappings or [])
     if not rows_list:
         return None
-    actions = applyable_widen_actions(report)
+    # A type DataFlow inferred is ours to resize; one the operator locked
+    # (user_override) is a declaration, and keeps the block-and-approve path.
+    locked = {
+        str(m.get("source") or "")
+        for m in rows_list
+        if m.get("user_override") or m.get("userOverride")
+    }
+    actions = [
+        a
+        for a in applyable_widen_actions(report)
+        if str(a.get("column") or "") not in locked
+    ]
     if not actions:
         return None
     rows = replay()
@@ -1921,7 +1943,39 @@ def create_new_population_widen(
         applied.append({"column": src, "from": was, "to": now})
     if not applied:
         return None
-    return CreateNewWiden(report=after, applied=tuple(applied))
+    from dataclasses import replace
+
+    return CreateNewWiden(
+        report=replace(
+            after,
+            create_widens=tuple((a["column"], a["from"], a["to"]) for a in applied),
+        ),
+        applied=tuple(applied),
+    )
+
+
+def stamp_create_widens(
+    mappings: list[dict[str, Any]],
+    population_fit: Mapping[str, Any] | None,
+) -> list[dict[str, str]]:
+    """Carry the CREATE widens a preflight proved onto the mappings that write.
+
+    Preflight hydrates its own copy of the mappings, so a widen stamped there
+    never reached the CREATE: the table was made with the peeked width and the
+    load quarantined the very values the scan had just proved fit (D31).
+    """
+    applied: list[dict[str, str]] = []
+    widens = (population_fit or {}).get("create_widens") or []
+    by_source = {str(m.get("source") or ""): m for m in mappings}
+    for item in widens:
+        mapping = by_source.get(str(item.get("column") or ""))
+        if mapping is None or not item.get("to"):
+            continue
+        for key in ("target_type", "dest_type", "destination_type", "destType"):
+            if key in mapping or key in ("target_type", "dest_type"):
+                mapping[key] = item["to"]
+        applied.append(dict(item))
+    return applied
 
 
 def apply_suggested_widens_and_rescan(

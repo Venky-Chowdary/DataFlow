@@ -381,6 +381,7 @@ def scan_existing_table_population_fit(
     deadline_monotonic: float | None,
     on_progress: Callable[[int], None] | None,
     iter_table_population: Callable[..., Iterable[Mapping[str, Any]] | None],
+    population_replay: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None,
 ) -> tuple[Any, str, Iterable[Mapping[str, Any]] | None, bool, dict[str, Any]]:
     """Scan an existing table before DDL and gates, so every consumer shares it."""
     from connectors.writer_common import transform_error_policy_for_validation_mode
@@ -413,6 +414,12 @@ def scan_existing_table_population_fit(
 
             def replay_source() -> Iterable[Mapping[str, Any]] | None:
                 return iter_stored_upload_rows(source_file_id)
+
+    if replay_source is None and population_rows is not None:
+        # A caller that hands in a one-shot population (a file route) also
+        # hands in how to read it again, so a create-new carrier can be
+        # re-proven (D31).
+        replay_source = population_replay
 
     if population_rows is None:
         try:

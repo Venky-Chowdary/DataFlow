@@ -7,7 +7,7 @@ import sys
 from collections.abc import Iterable, Mapping
 from contextlib import nullcontext
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
 _ps = sys.modules[__name__]
@@ -748,6 +748,7 @@ def run_file_preflight(
     run_population_orphan_scan: bool = False,
     resume: bool = False,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
+    population_replay: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None,
     rows_are_population: bool = False,
     shape_recipe: Mapping[str, Any] | None = None,
     source_filter: Mapping[str, Any] | None = None,
@@ -1347,6 +1348,7 @@ def run_file_preflight(
                 ),
                 on_progress=on_fit_progress,
                 iter_table_population=_ps._iter_table_population_for_preflight,
+                population_replay=population_replay,
             )
         except Exception as fit_exc:
             pre_gate_fit_error = str(fit_exc)[:400]
