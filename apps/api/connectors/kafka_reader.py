@@ -128,6 +128,28 @@ def configured_kafka_group_id(cfg: dict[str, Any]) -> str:
     return ""
 
 
+#: Endpoint extra the engine stamps with where this run starts reading.
+KAFKA_START_KEY = "kafka_start_position"
+
+
+def configured_kafka_start(cfg: dict[str, Any]) -> str:
+    """Where a Kafka source read starts: ``"committed"`` or ``"earliest"``.
+
+    ``committed`` continues from the consumer group's committed offsets (an
+    incremental run). Everything else reads from the log start: a full
+    refresh re-reads the topic whatever an earlier run committed, and a read
+    with no group of its own (a preview or Validate sample) has no business
+    skipping messages. Reading the committed position on a full refresh loaded
+    0 rows on every run after the first (D151).
+    """
+    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
+    value = str(cfg.get(KAFKA_START_KEY) or extra.get(KAFKA_START_KEY) or "").strip()
+    if value:
+        return "committed" if value == "committed" else "earliest"
+    # Not stamped by a run: a read under the operator's own group follows it.
+    return "committed" if configured_kafka_group_id(cfg) else "earliest"
+
+
 def kafka_route_group_id(source: Any, destination: Any) -> str:
     """A stable consumer group per route: source endpoint + topic → destination."""
     from services.sync_cursor import build_cursor_key, route_endpoint_identity
@@ -249,12 +271,15 @@ def read_topic_batch(
     # here — prefetch can race ahead of sink durability. The group therefore
     # still sits where the run began, so a continuation batch resumes at the
     # offsets this run already read instead of re-reading them (D85).
+    start_position = (kafka_cursor or {}).get("start_position") or configured_kafka_start(cfg)
     consumer = KafkaDebeziumConsumer({
         **cfg,
         "topic": topic_name,
         "bootstrap_servers": _bootstrap(cfg),
         "group_id": group_id,
+        "start_position": start_position,
         "start_offsets": list((kafka_cursor or {}).get("pending_offsets") or []),
+        "end_offsets": list((kafka_cursor or {}).get("end_offsets") or []),
         "auto_offset_reset": cfg.get("auto_offset_reset") or "earliest",
         "schema_registry_url": str(
             cfg.get("schema_registry_url") or cfg.get("registry_url") or ""
@@ -303,6 +328,13 @@ def read_topic_batch(
             if tombstones:
                 batch.meta["kafka_tombstones_seen"] = tombstones
         pending = consumer.pending_offsets()
+        # The run reads the log up to the end it saw at its first poll; the
+        # batch that reaches it is the last page (a staged overwrite
+        # publishes there).
+        exhausted = consumer.exhausted()
+        if exhausted:
+            batch.meta = dict(batch.meta or {})
+            batch.meta["final_page"] = True
         # Emit a continuation cursor whenever offsets were consumed — including
         # tombstone / decode-skip batches that produce no output rows. Without
         # this, those offsets never checkpoint and the consumer re-reads forever.
@@ -311,6 +343,9 @@ def read_topic_batch(
                 "group_id": group_id,
                 "topic": topic_name,
                 "pending_offsets": pending,
+                "end_offsets": consumer.end_offsets_snapshot(),
+                "exhausted": exhausted,
+                "start_position": start_position,
                 "delivery": "at_least_once",
             }
             if pending

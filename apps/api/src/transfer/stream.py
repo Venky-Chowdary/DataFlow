@@ -2699,7 +2699,7 @@ def _stream_database_transfer_impl(
                     "generic_sql",
                 )
                 and (incremental or use_keyset)
-            ) or src_read_type in ("elasticsearch", "redis", "kafka", "qdrant"):
+            ) or src_read_type in ("elasticsearch", "redis", "qdrant"):
                 return None
         if src_type == "dynamodb":
             if not ddb_cursor:
@@ -2719,7 +2719,9 @@ def _stream_database_transfer_impl(
             )
             return batch
         if src_type == "kafka":
-            if kafka_cursor is None and last_batch is not None:
+            if last_batch is not None and (
+                kafka_cursor is None or kafka_cursor.get("exhausted")
+            ):
                 return None
             batch, kafka_cursor = _unwrap_read(
                 _read_batch(
@@ -3423,6 +3425,21 @@ def _stream_database_transfer_impl(
             int(meta.get("kafka_tombstones_seen") or 0),
         )
 
+    def _chunks_for_page(idx: int, batch: Any) -> int:
+        """The batch count the writer is told while writing page ``idx``.
+
+        A Kafka topic has no row count to size the run by, so the estimate
+        can undershoot; a staged overwrite publishes on the last page and
+        would never publish (or publish early). The reader flags the page that
+        reaches the run's frozen log end, which is the last one.
+        """
+        if src_type != "kafka":
+            return chunks
+        meta = getattr(batch, "meta", None)
+        if isinstance(meta, dict) and meta.get("final_page"):
+            return idx
+        return max(chunks, idx + 1)
+
     def _process_db_chunk_inner(idx: int, batch: Any) -> dict[str, Any]:
         nonlocal rejected_total
         batch_sdk_state = None
@@ -3929,7 +3946,7 @@ def _stream_database_transfer_impl(
                             create_table=create_this,
                             on_checkpoint=None,
                             chunk_idx=idx,
-                            total_chunks=chunks,
+                            total_chunks=_chunks_for_page(idx, batch),
                             rows_so_far=0,
                             write_mode=write_mode,
                             conflict_columns=pk_target_cols or None,
@@ -5629,6 +5646,9 @@ def _kafka_accumulate_offsets(
         # range carried in by a resumed run) and the end offsets committed on
         # acceptance.
         "start_offsets": prev.get("start_offsets") or prev.get("pending_offsets") or [],
+        # Where this run began reading: "earliest" (a full refresh, or no
+        # committed position) or "committed" (an incremental continuation).
+        "start_position": prev.get("start_position") or kafka_cursor.get("start_position"),
         "pending_offsets": cumulative,
     }
     return kafka_cursor

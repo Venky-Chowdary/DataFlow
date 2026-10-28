@@ -69,7 +69,7 @@ def _run(topic: str, db: str):
             extra={"group_id": f"g_{topic}"}, **_BROKER,
         ),
         destination=EndpointConfig(kind="database", format="sqlite", database=db, table="t"),
-        sync_mode="full_refresh_append",
+        sync_mode="incremental_append",
         priority_column="id",
         validation_mode="strict",
     )
