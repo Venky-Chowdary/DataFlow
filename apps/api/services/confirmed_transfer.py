@@ -128,3 +128,57 @@ def apply_stored_schema_drift_ack(request: TransferRequest, job: dict[str, Any] 
             or "Accept drift for this run"
         )
     return not bool(stored_req.get("schema_drift_acknowledged"))
+
+
+def mapped_sources_missing_from(
+    request: TransferRequest, live_columns: set[str] | list[str]
+) -> list[str]:
+    """Mapped source columns the live source no longer has (case-insensitive)."""
+    from services.mapping_constraints import write_mappings
+
+    live = {str(c).strip().casefold() for c in live_columns if str(c).strip()}
+    if not live:
+        return []
+    missing: list[str] = []
+    for mapping in write_mappings(list(request.mappings or [])):
+        source = str(mapping.get("source") or "").strip()
+        if source and source.casefold() not in live and source not in missing:
+            missing.append(source)
+    return missing
+
+
+def assert_source_schema_unchanged(request: TransferRequest) -> None:
+    """Re-read the source's columns at Confirm and refuse a stale approval (D21).
+
+    The approval mapped columns as they were when it was staged. A column
+    dropped or renamed since then used to surface only as a raw driver error
+    mid-run. An unreadable source is left to Execute's own preflight, which
+    reports connectivity itself.
+    """
+    source = request.source
+    if source.kind != "database" or not (source.table or source.collection):
+        return
+    from services.procedure_source import is_callable_source
+
+    if is_callable_source(source):
+        return
+    from src.transfer.adapters import resolve_endpoint
+    from src.transfer.endpoint_intelligence import introspect_endpoint
+
+    try:
+        resolved = resolve_endpoint(source, workspace_id=request.workspace_id)
+        info = introspect_endpoint(resolved) or {}
+    except Exception:  # noqa: BLE001 - connectivity is Execute's to report
+        return
+    live = {str(k) for k in (info.get("schema") or {})} | {
+        str(c) for c in (info.get("columns") or []) if isinstance(c, str)
+    }
+    missing = mapped_sources_missing_from(request, live)
+    if missing:
+        listed = ", ".join(missing[:8])
+        raise ValueError(
+            f"The source changed since this transfer was staged: mapped column(s) "
+            f"{listed} no longer exist on {source.table or source.collection}. "
+            "Re-stage the transfer so the mapping is rebuilt from the current "
+            "schema."
+        )

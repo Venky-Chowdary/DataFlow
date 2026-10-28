@@ -236,6 +236,13 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     engine = get_transfer_engine()
+    from services.confirmed_transfer import assert_source_schema_unchanged
+
+    try:
+        # Staging mapped the source as it was then; Confirm checks it still is.
+        assert_source_schema_unchanged(request_obj)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     job_id = engine._create_pending_job(request_obj)
     run_transfer_async(job_id, request_obj)
     if request_obj.source.kind == "file":
