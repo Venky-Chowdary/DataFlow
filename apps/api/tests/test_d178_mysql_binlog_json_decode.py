@@ -44,6 +44,7 @@ def test_blob_bytes_stay_base64():
 def test_row_to_record_decodes_json_and_keeps_blob():
     cdc = MySqlChangeStreamCdc.__new__(MySqlChangeStreamCdc)
     cdc._remap_positional = lambda row, table=None: row
+    cdc._instant_columns = lambda table=None: frozenset()
     record = MySqlChangeStreamCdc._row_to_record(
         cdc, {"id": 1, "payload": _binlog_form(DOC), "raw": b"\x00\xff"}
     )
