@@ -426,6 +426,23 @@
   --df-z-alert: 9999;
   --df-z-splash: 10000;
   --df-z-max: 12000;
+  /* Dark auth gate palette (login/signup/forgot/reset under data-theme=dark).
+     Component rules read these; rgb() keeps the exact original colours. */
+  --df-auth-dark-canvas: rgb(7 17 26);
+  --df-auth-dark-grad-start: rgb(8 20 32);
+  --df-auth-dark-field: rgb(8 24 34);
+  --df-auth-dark-grad-mid: rgb(10 26 34);
+  --df-auth-dark-card: rgb(13 31 40);
+  --df-auth-dark-line: rgb(35 68 65);
+  --df-auth-dark-disabled: rgb(84 112 108);
+  --df-auth-dark-placeholder: rgb(91 117 113);
+  --df-auth-dark-muted: rgb(159 184 180);
+  --df-auth-dark-label: rgb(184 204 201);
+  --df-auth-dark-alert-body: rgb(215 209 195);
+  --df-auth-dark-ink: rgb(232 240 238);
+  --df-auth-dark-alert-title: rgb(253 232 200);
+  --df-auth-dark-legal: rgb(139 167 163);
+  --df-auth-dark-sub: rgb(169 196 192);
 }
 
 html,
