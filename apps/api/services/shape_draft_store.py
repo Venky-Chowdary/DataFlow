@@ -35,10 +35,16 @@ def _load() -> dict[str, Any]:
 
 def _save(data: dict[str, Any]) -> None:
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    if len(data) > MAX_DRAFTS:
-        ranked = sorted(data.items(), key=lambda item: str(item[1].get("saved_at") or ""))
-        data = dict(ranked[-MAX_DRAFTS:])
-    STORE_PATH.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    # The cap is per workspace: one tenant saving drafts must not evict another's.
+    buckets: dict[str, list[tuple[str, Any]]] = {}
+    for item in data.items():
+        owner = str(item[1].get("workspace_id") or "").strip() if isinstance(item[1], dict) else ""
+        buckets.setdefault(owner, []).append(item)
+    kept: dict[str, Any] = {}
+    for items in buckets.values():
+        ranked = sorted(items, key=lambda it: str(it[1].get("saved_at") or "") if isinstance(it[1], dict) else "")
+        kept.update(ranked[-MAX_DRAFTS:])
+    STORE_PATH.write_text(json.dumps(kept, indent=2), encoding="utf-8")
 
 
 def route_key(source: str, dest: str) -> str:

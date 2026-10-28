@@ -54,3 +54,22 @@ def test_a_draft_refuses_an_unknown_operation(tmp_path, monkeypatch):
             recipe={"steps": [{"op": "not-a-real-op", "column": "email"}]},
             source_columns=["email"],
         )
+
+
+def test_one_workspace_cannot_evict_another_workspaces_drafts(tmp_path, monkeypatch):
+    """The draft cap is per workspace (D154): a busy tenant keeps only its own newest."""
+    import services.shape_draft_store as store
+    from services.workspace_filter import bound_workspace_filter
+
+    monkeypatch.setattr(store, "STORE_PATH", tmp_path / "drafts.json")
+    monkeypatch.setattr(store, "MAX_DRAFTS", 3)
+    recipe = {"steps": [{"op": "trim", "column": "email"}]}
+
+    with bound_workspace_filter(None, stamp="ws-quiet"):
+        save_shape_draft(route_key="quiet-route", recipe=recipe, source_columns=["email"])
+    with bound_workspace_filter(None, stamp="ws-busy"):
+        for n in range(6):
+            save_shape_draft(route_key=f"busy-{n}", recipe=recipe, source_columns=["email"])
+        assert [load_shape_draft(f"busy-{n}") is not None for n in range(6)] == [False] * 3 + [True] * 3
+    with bound_workspace_filter(None, stamp="ws-quiet"):
+        assert load_shape_draft("quiet-route") is not None
