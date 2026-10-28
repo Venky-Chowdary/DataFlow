@@ -717,6 +717,11 @@ def _write_batch(
                 else None
             ),
         }
+        # The SQL Server / Oracle writers forward to the generic SQL CREATE,
+        # which withholds the source key on append: an overwrite must carry it
+        # as the PostgreSQL / MySQL / SQLite writers do (D144).
+        if dest_type in ("sqlserver", "mssql", "oracle"):
+            common.update(key_carry)
         from connectors.engine_record_spill import spool_write_kinds
 
         if dest_type in spool_write_kinds():

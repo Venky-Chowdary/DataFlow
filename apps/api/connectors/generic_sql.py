@@ -5748,7 +5748,11 @@ def write_mapped_rows(
                         db_type=cfg.get("type", ""),
                         conflict_columns=conflict_columns,
                         fidelity_plan=fidelity_plan,
-                        declare_key=write_mode != "insert",
+                        # An overwrite rebuilds the table from one snapshot, so
+                        # the planner's carried key must reach the CREATE
+                        # (SQL Server overwrite dropped it, D144).
+                        declare_key=write_mode != "insert"
+                        or bool(_kwargs.get("carry_source_keys")),
                     )
                     _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                 except Exception as exc:
