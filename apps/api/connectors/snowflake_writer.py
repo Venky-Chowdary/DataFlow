@@ -924,6 +924,21 @@ def _sf_apply_sparse_upsert(
     return written, skipped, checksum_rows
 
 
+def _json_select_expr(sf_type: str, source: str) -> str:
+    """``PARSE_JSON(source)``, cast to the declared type when that is structured.
+
+    ``PARSE_JSON`` yields a VARIANT. Snowflake does not assign a VARIANT to a
+    structured ``ARRAY(NUMBER(38,0))`` / ``OBJECT(...)`` / ``MAP(...)`` column
+    without a cast ("Expression type does not match column data type"), and
+    DataFlow creates exactly those carriers for typed arrays (D77). Plain
+    VARIANT / ARRAY / OBJECT take the parsed value as is.
+    """
+    parsed = f"PARSE_JSON({source})"
+    if "(" in (sf_type or ""):
+        return f"{parsed}::{sf_type.strip()}"
+    return parsed
+
+
 def _is_json_type(sf_type: str) -> bool:
     return sf_type and sf_type.split("(")[0].upper() in {
         "VARIANT",
@@ -955,7 +970,7 @@ def _batch_insert_rows(
     select_items = []
     for i, t in enumerate(target_types, start=1):
         if _is_json_type(t):
-            select_items.append(f"PARSE_JSON(column{i})")
+            select_items.append(_json_select_expr(t, f"column{i}"))
         else:
             select_items.append(f"column{i}")
     select_sql = ", ".join(select_items)
@@ -1224,7 +1239,7 @@ def _copy_into_table(
         select_items = []
         for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
             if _is_json_type(t):
-                select_items.append(f"PARSE_JSON(${i})")
+                select_items.append(_json_select_expr(t, f"${i}"))
             else:
                 select_items.append(f"${i}")
         select_sql = ", ".join(select_items)
