@@ -7464,10 +7464,15 @@ def _run_reconciliation_impl(
     # reported as "checksum mismatch (strict)" on a correct load. A partial key
     # list is a diagnostic sample, not a scope: fall through to the append delta.
     keys_cover_batch = bool(written_ids) and len(written_ids) >= expected_batch
+    # Engine digests already compared both whole populations in their engines;
+    # swapping the target for a keyed Python fingerprint would compare two
+    # different algorithms and always disagree (an append that also added a
+    # column failed Gate-8 on matching tables).
     if (
         allow_extra
         and pk_column
         and keys_cover_batch
+        and engine_digests is None
         and target_rows > expected_batch
         and source_checksum
         and target_checksum
