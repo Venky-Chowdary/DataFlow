@@ -3129,7 +3129,8 @@ def fingerprint_for_reconcile(
     """
     ddl_type = instant_date_carrier(engine, ddl_type)
     wire: Any = value
-    if is_missing_sentinel(value):
+    absent_field = is_missing_sentinel(value)
+    if absent_field:
         # An absent field is NULL to every SQL destination — that is what the
         # writer stores and what the read-back returns. Only the ``Missing``
         # *object* reached this path untranslated (its string spelling was
@@ -3157,9 +3158,13 @@ def fingerprint_for_reconcile(
     tname = (transform or "").strip().lower()
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
-        if value is None:
+        if absent_field:
+            # An absent field stays NULL; nothing was written for the recipe to act on.
             converted, err = None, None
         else:
+            # A real NULL goes through the same ``apply_transform`` as the
+            # writer: ``default:`` turns it into the literal, every other
+            # transform maps NULL to NULL (D175).
             # The writer ran this transform under the run's number locale,
             # and a raw source cell ('1,234' text from a DB driver) must be
             # fingerprinted the same way — ``source_locale`` carries it.
@@ -3177,9 +3182,7 @@ def fingerprint_for_reconcile(
             # fingerprints NULL against a faithful destination value.
             strict_token = set_strict_number_reading(False)
             try:
-                converted, err = apply_transform(
-                    cell if cell is not None else "", transform or "none"
-                )
+                converted, err = apply_transform(cell, transform or "none")
             finally:
                 reset_strict_number_reading(strict_token)
                 reset_active_number_locale(locale_token)
