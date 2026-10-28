@@ -454,11 +454,12 @@ conn.commit()
     await page.getByRole("button", { name: "Fit", exact: true }).click();
     await page.getByRole("button", { name: "Auto-arrange" }).click();
     await expect(node).toBeVisible();
-    await page.getByLabel("Search operations").fill("join");
-    const join = page.locator(".df2-canvas-op[data-op='join']").filter({ visible: true });
-    await expect(join).toHaveAttribute("data-executable", "false");
-    await expect(join).toBeDisabled();
-    await expect(join).toHaveAttribute("data-icon", "join");
+    // join/union/lookup graduated to in-flight row steps; pivot is still post-load only.
+    await page.getByLabel("Search operations").fill("pivot");
+    const pivot = page.locator(".df2-canvas-op[data-op='pivot']").filter({ visible: true });
+    await expect(pivot).toHaveAttribute("data-executable", "false");
+    await expect(pivot).toBeDisabled();
+    await expect(pivot).toHaveAttribute("data-icon", "pivot");
     await page.getByRole("button", { name: "Preview this step" }).click();
     await expect(page.getByTestId("canvas-node-preview")).toContainText(/sample|Preview|row/i);
     await expect(page.getByTestId("transform-canvas")).toHaveAttribute("data-document", "chain");
