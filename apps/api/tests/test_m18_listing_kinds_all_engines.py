@@ -69,6 +69,10 @@ def test_postgres_listing_labels_views():
     creds = pg_creds()
     suffix = uuid.uuid4().hex[:8]
     table, view = f"m18_t_{suffix}", f"m18_v_{suffix}"
+    # A private schema: the shared test database accumulates thousands of
+    # tables, and the listing is bounded (alphabetical first page, M7), so
+    # objects in ``public`` can fall off the page.
+    schema = f"m18_s_{suffix}"
     conn = psycopg2.connect(
         host=creds["host"], port=int(creds["port"]), dbname=creds["database"],
         user=creds["username"], password=creds["password"],
@@ -76,20 +80,20 @@ def test_postgres_listing_labels_views():
     conn.autocommit = True
     try:
         with conn.cursor() as cur:
-            cur.execute(f'CREATE TABLE public."{table}" (id INT PRIMARY KEY)')
-            cur.execute(f'CREATE VIEW public."{view}" AS SELECT id FROM public."{table}"')
+            cur.execute(f'CREATE SCHEMA "{schema}"')
+            cur.execute(f'CREATE TABLE "{schema}"."{table}" (id INT PRIMARY KEY)')
+            cur.execute(f'CREATE VIEW "{schema}"."{view}" AS SELECT id FROM "{schema}"."{table}"')
         info = introspect_endpoint(
             EndpointConfig(
                 kind="database", format="postgresql", host=str(creds["host"]),
-                port=int(creds["port"]), database=str(creds["database"]), schema="public",
+                port=int(creds["port"]), database=str(creds["database"]), schema=schema,
                 username=str(creds["username"]), password=str(creds["password"]),
             )
         )
         assert _kinds(info, table, view) == {table: "table", view: "view"}
     finally:
         with conn.cursor() as cur:
-            cur.execute(f'DROP VIEW IF EXISTS public."{view}"')
-            cur.execute(f'DROP TABLE IF EXISTS public."{table}"')
+            cur.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
         conn.close()
 
 
