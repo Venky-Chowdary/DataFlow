@@ -34,7 +34,9 @@ def pwned_count(password: str, *, http_get=None, now=None) -> int:
     """
     if not enabled():
         return -1
-    digest = hashlib.sha1(password.encode("utf-8")).hexdigest().upper()
+    # The HIBP range API is keyed by the SHA-1 of the password (k-anonymity):
+    # the digest is a lookup key the service defines, not a security control.
+    digest = hashlib.sha1(password.encode("utf-8"), usedforsecurity=False).hexdigest().upper()
     prefix, suffix = digest[:5], digest[5:]
     import time as _time
 

@@ -4389,7 +4389,8 @@ def _generic_key_census(
                                         "\x1f".join(
                                             normalize_cell(v, engine=dst_eng)
                                             for v in r[1:]
-                                        ).encode("utf-8", "replace")
+                                        ).encode("utf-8", "replace"),
+                                        usedforsecurity=False,
                                     ).hexdigest(),
                                 )
                                 for r in chunk
