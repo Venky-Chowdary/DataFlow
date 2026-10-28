@@ -1148,6 +1148,12 @@ def _to_pyformat(sql: str, params: dict[str, Any]) -> str:
     return pattern.sub(lambda m: f"%({m.group(1)})s", sql)
 
 
+def _is_oracle_connector(connector_type: object) -> bool:
+    from connectors.generic_sql import _is_oracle_wire
+
+    return _is_oracle_wire("", str(connector_type or ""))
+
+
 def _run_sql_query(connector, body):
     raw_query = body.query.strip()
     if not raw_query:
@@ -1203,6 +1209,25 @@ def _run_sql_query(connector, body):
             _apply_read_only_session(conn, connector.type)
             from services.sql_literals import escape_sqlalchemy_literal_colons
 
+            tz_positions: frozenset[int] = frozenset()
+            if _is_oracle_connector(connector.type):
+                # python-oracledb reads TIMESTAMP WITH [LOCAL] TIME ZONE naive,
+                # and this result feeds the preflight sample: a naive cell for
+                # a tz-aware target blocked g3 (D155).
+                from connectors.oracle_tstz import tz_projected_query
+
+                def _probe_description(sql: str):
+                    probe = conn.execute(
+                        text(escape_sqlalchemy_literal_colons(sql)),
+                        dict(body.params or {}),
+                    )
+                    desc = getattr(getattr(probe, "cursor", None), "description", None)
+                    probe.close()
+                    return desc
+
+                clean_query, tz_positions = tz_projected_query(
+                    _probe_description, clean_query
+                )
             result = conn.execute(
                 text(escape_sqlalchemy_literal_colons(clean_query)),
                 dict(body.params or {}),
@@ -1220,6 +1245,10 @@ def _run_sql_query(connector, body):
                 if i >= body.limit:
                     withheld += 1
                     break
+                if tz_positions:
+                    from connectors.oracle_tstz import parse_oracle_tz_row
+
+                    row = parse_oracle_tz_row(row, tz_positions)
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
             try:
                 result.close()

@@ -94,6 +94,29 @@ def oracle_tz_select_list(description: Sequence[Any] | None) -> str:
     return ", ".join(parts)
 
 
+def tz_projected_query(
+    probe_description: Any, query: str
+) -> tuple[str, frozenset[int]]:
+    """Wrap an arbitrary Oracle ``SELECT`` so its zone-bearing columns keep their instant.
+
+    ``probe_description(sql)`` returns the DB-API ``cursor.description`` of a
+    zero-row run of ``sql``. Returns ``(query, ∅)`` unchanged when no column is
+    zone-bearing or the result names are not unique (a projection by name would
+    be ambiguous); otherwise the outer select list from
+    :func:`oracle_tz_select_list` over the original as an inline view, plus the
+    positions :func:`parse_oracle_tz_row` should parse back.
+    """
+    description = probe_description(f"SELECT * FROM ({query}) WHERE 1=0")
+    kinds = oracle_tz_kinds(description)
+    names = [str(entry[0]) for entry in description or ()]
+    if not kinds or len(set(names)) != len(names):
+        return query, frozenset()
+    return (
+        f"SELECT {oracle_tz_select_list(description)} FROM ({query})",
+        frozenset(kinds),
+    )
+
+
 def parse_oracle_tstz_text(value: Any) -> Any:
     """Aware ``datetime`` from :data:`ORACLE_TSTZ_READ_FORMAT` text.
 
