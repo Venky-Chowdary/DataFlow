@@ -45,8 +45,10 @@ def test_conflict_key_wire_null_vs_present():
 
 
 def test_mirror_pk_reader_null_is_incomplete():
-    for wire in (None, SQL_NULL_SENTINEL, "__df_ddb_null__", Missing, DF_MISSING_SENTINEL, ""):
+    for wire in (None, SQL_NULL_SENTINEL, "__df_ddb_null__", Missing, DF_MISSING_SENTINEL):
         assert complete_mirror_pk_tuple([wire]) is None, wire
+    # D53: '' is a key, not incomplete identity.
+    assert complete_mirror_pk_tuple([""]) == ("",)
     assert complete_mirror_pk_tuple([0]) == (0,)
     assert complete_mirror_pk_tuple([False]) == (False,)
     assert complete_mirror_pk_tuple(["1"]) == ("1",)

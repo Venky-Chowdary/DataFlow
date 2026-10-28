@@ -446,15 +446,19 @@ def test_scd2_sanitized_target_stamp_still_quarantines_overflow():
             pass
 
 
-def test_scd2_empty_pk_quarantined_not_silent():
-    """Blank primary keys must surface in rejected_details — never vanish."""
+def test_scd2_empty_pk_is_a_key_and_null_pk_is_quarantined():
+    """D53: '' is a valid key and lands as its own active row; only a NULL key
+    is rejected, with a visible primary-key reason - nothing vanishes."""
+    from services.value_serializer import SQL_NULL_SENTINEL
+
     fd, db_path = tempfile.mkstemp(suffix=".db")
     try:
         endpoint = _sqlite_endpoint(Path(db_path))
         summary = apply_scd2(
             endpoint,
             [
-                {"id": "", "name": "ghost"},
+                {"id": "", "name": "empty-key"},
+                {"id": SQL_NULL_SENTINEL, "name": "null-key"},
                 {"id": "2", "name": "ok"},
             ],
             columns=["id", "name"],
@@ -467,12 +471,18 @@ def test_scd2_empty_pk_quarantined_not_silent():
             validation_mode="balanced",
         )
         assert summary.get("ok") is not False
-        assert int(summary.get("rejected_rows") or 0) >= 1
+        assert int(summary.get("rejected_rows") or 0) == 1
         assert any(
             "primary key" in str(d.get("reason") or "").lower()
             for d in (summary.get("rejected_details") or [])
         )
-        assert int(summary.get("active_rows") or 0) == 1
+        assert int(summary.get("active_rows") or 0) == 2
+        conn = sqlite3.connect(db_path)
+        try:
+            names = dict(conn.execute("SELECT id, name FROM products").fetchall())
+        finally:
+            conn.close()
+        assert names == {"": "empty-key", "2": "ok"}
     finally:
         try:
             Path(db_path).unlink(missing_ok=True)

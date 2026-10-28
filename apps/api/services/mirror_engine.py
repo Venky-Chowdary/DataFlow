@@ -577,9 +577,9 @@ def mirror_pk_sources(
 def complete_mirror_pk_tuple(values: Iterable[Any]) -> tuple[Any, ...] | None:
     """Return the PK tuple, or None when identity is incomplete.
 
-    Incomplete is skip, not invent: None, empty string, ``DF_MISSING``, or
-    extract reader-null (``SQL_NULL_SENTINEL``). A missing CDC field is not
-    a key. Do not coerce it to NULL or ``""``.
+    Incomplete is skip, not invent: None, ``DF_MISSING``, or extract
+    reader-null (``SQL_NULL_SENTINEL``). A missing CDC field is not a key. Do
+    not coerce it to NULL or ``""``; an empty string is a valid key (D53).
     """
     from connectors.writer_common import _is_nullish_conflict_key
 

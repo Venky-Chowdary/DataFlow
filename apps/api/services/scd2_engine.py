@@ -832,7 +832,7 @@ def _pk_validate_mapped_rows(
                     "value": "",
                     "reason": (
                         "SCD2 primary key cannot be DF_MISSING / STOP_COLUMN omit "
-                        "or extract SQL NULL"
+                        "or extract SQL NULL (an empty string is a valid key)"
                     ),
                     "policy": "quarantine",
                     "chars": [],
@@ -1141,9 +1141,8 @@ def _merge_scd2_bundle(
     tracked_set = set(tracked) if tracked else None
     keys: set[str] = set()
     for row in batch:
-        key = _compose_key(row, pk_columns)
-        if key and not all(p == "" for p in key.split(_KEY_SEP)):
-            keys.add(key)
+        # NULL keys were quarantined upstream; '' is a key (D53).
+        keys.add(_compose_key(row, pk_columns))
     pk_types = key_column_types(table_obj, pk_columns)
     current_snaps = _fetch_current_snapshots(
         conn, qualified, pk_columns, target_cols, keys, dialect_name,
@@ -1181,8 +1180,6 @@ def _merge_scd2_bundle(
 
     for row in batch:
         key = _compose_key(row, pk_columns)
-        if not key or all(p == "" for p in key.split(_KEY_SEP)):
-            continue
         snap = current_snaps.get(key)
         hydrated = _hydrate_scd2_omit(
             row,
@@ -1916,7 +1913,6 @@ def preview_scd2_merge(
                         _compose_key(row, pk_columns)
                         for row in pk_ok
                     }
-                    keys.discard("")
                     seen_keys.update(keys)
                     snaps = _fetch_current_snapshots(
                         conn,
@@ -1929,10 +1925,6 @@ def preview_scd2_merge(
                     )
                     for row in pk_ok:
                         key = _compose_key(row, pk_columns)
-                        if not key or all(
-                            p == "" for p in key.split(_KEY_SEP)
-                        ):
-                            continue
                         label = key.replace(_KEY_SEP, "|")[:80]
                         snap = snaps.get(key)
                         hydrated = _hydrate_scd2_omit(
