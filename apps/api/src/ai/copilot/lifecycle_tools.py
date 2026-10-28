@@ -726,6 +726,11 @@ def _job_tool(
         return _stage(tool, payload={"job_id": jid}, preview=brief,
                       label=f"Resume job {short} from its last checkpoint", destructive=False)
     if tool == "replay_quarantine":
+        from services.quarantine_dlq import replay_parent_not_committed
+
+        parent_refusal = replay_parent_not_committed(job)
+        if parent_refusal:
+            return _tool_result(tool, success=False, output=None, error=parent_refusal)
         if not (job.get("rejected_rows") or status == "completed_with_quarantine" or job.get("rejected_details")):
             return _tool_result(tool, success=False, output=None,
                 error=f"Job {short} has no quarantined rows to replay.",

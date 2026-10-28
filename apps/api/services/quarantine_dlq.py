@@ -1225,6 +1225,28 @@ def job_quarantine_closure(job: dict[str, Any] | None) -> dict[str, Any] | None:
     return None
 
 
+def replay_parent_not_committed(job: dict[str, Any] | None) -> str | None:
+    """Refuse replay unless the parent job committed its good rows (D133).
+
+    Replay re-sends only the quarantined rows. A failed parent was rolled back
+    (or left unproven), so replaying onto it built a table holding just the
+    quarantined rows, reported "verified", and closed the ledger.
+    """
+    from services.job_status import is_completed
+
+    j = job if isinstance(job, dict) else {}
+    status = str(j.get("status") or "").strip().lower()
+    if is_completed(status):
+        return None
+    jid = str(j.get("job_id") or j.get("_id") or "").strip()
+    return (
+        f"Job {jid or 'this job'} is {status or 'unknown'}: its good rows were not "
+        "committed (a failed run is rolled back or left unproven), so replaying "
+        "only its quarantined rows would build a partial table. Re-run the "
+        "parent job first, then replay the quarantine of the run that completed."
+    )
+
+
 def quarantine_sample_incomplete(job: dict[str, Any] | None, details: list[dict[str, Any]]) -> str | None:
     """Refuse replay when the hydrated sample cannot reconstruct every open row.
 

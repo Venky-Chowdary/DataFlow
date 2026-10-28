@@ -1803,6 +1803,12 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     if not _can_mutate_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace write access required")
 
+    from services.quarantine_dlq import replay_parent_not_committed
+
+    parent_refusal = replay_parent_not_committed(job)
+    if parent_refusal:
+        raise HTTPException(status_code=409, detail=parent_refusal)
+
     payload = job.get("transfer_request")
     if not payload:
         raise HTTPException(
