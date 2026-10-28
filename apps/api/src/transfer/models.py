@@ -361,6 +361,13 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "empty_source_overwrite_acknowledged": bool(
             request.empty_source_overwrite_acknowledged
         ),
+        # Run semantics the persisted job must carry: rerun / retry / resume
+        # rebuild the request from this dict, and from_dict already restores
+        # them — leaving them out silently ran the rerun with the defaults.
+        "source_timezone": request.source_timezone or "",
+        "duplicate_policy": request.duplicate_policy or "",
+        "allow_duplicates": bool(request.allow_duplicates),
+        "file_wait_seconds": int(request.file_wait_seconds or 0),
         "preflight_scope": request.preflight_scope or "",
         "parent_job_id": request.parent_job_id or "",
         "historical_resync": bool(request.historical_resync),
