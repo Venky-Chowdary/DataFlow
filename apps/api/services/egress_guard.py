@@ -542,15 +542,32 @@ def _control_plane_addresses(real_getaddrinfo: Any) -> frozenset[str]:
     return result
 
 
+def _is_control_plane_target(shown: str, real: Any) -> bool:
+    """True for a host the operator configured as the API's own store.
+
+    Checked before the ``.internal`` / ``.localhost`` name rule: a platform's
+    private network name (``mongo.railway.internal``) is the control plane
+    there. Metadata names and addresses are never exempt.
+    """
+    if shown in _METADATA_NAMES:
+        return False
+    try:
+        if _unwrap(ipaddress.ip_address(shown)) in _METADATA_ADDRESSES:
+            return False
+    except ValueError:
+        pass
+    return shown in _control_plane_addresses(real)
+
+
 def _refusal_for_target(host: str, policy: tuple[Sequence[str] | None, str], real: Any) -> str | None:
     allowlist, workspace_id = policy
     shown = _normalize_host(host)
     if not shown or "://" in shown or shown.startswith(("/", "\\")):
         return None
+    if _is_control_plane_target(shown, real):
+        return None
     if _name_is_non_overridable(shown):
         return _refusal_text(shown, "cloud metadata and link-local")
-    if shown in _control_plane_addresses(real):
-        return None
     try:
         literal = ipaddress.ip_address(shown)
     except ValueError:
@@ -609,10 +626,10 @@ def _install_guards() -> None:
             if "://" in raw_host or raw_host.startswith(("/", "\\")):
                 return real(host, port, *args, **kwargs)
             shown = _normalize_host(raw_host)
+            if _is_control_plane_target(shown, real):
+                return real(host, port, *args, **kwargs)
             if _name_is_non_overridable(shown):
                 raise EgressRefused(_refusal_text(shown, "cloud metadata and link-local"))
-            if shown in _control_plane_addresses(real):
-                return real(host, port, *args, **kwargs)
             try:
                 literal = ipaddress.ip_address(shown)
             except ValueError:
