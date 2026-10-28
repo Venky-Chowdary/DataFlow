@@ -15,8 +15,10 @@ def bound_schedule(monkeypatch):
         transform_recipe_version=2,
         transform_recipe_version_mode="follow",
     )
+    # list_schedules takes an optional workspace filter; the delete guard
+    # passes none so it sees every workspace's bindings.
     monkeypatch.setattr(
-        schedule_store, "list_schedules", lambda: [sched]
+        schedule_store, "list_schedules", lambda *_args, **_kwargs: [sched]
     )
     return sched
 
@@ -89,7 +91,7 @@ def test_delete_recipe_endpoint_raises_409_with_used_by(bound_schedule, monkeypa
 def test_delete_recipe_unbound_deletes(monkeypatch):
     from starlette.requests import Request
 
-    monkeypatch.setattr(schedule_store, "list_schedules", lambda: [])
+    monkeypatch.setattr(schedule_store, "list_schedules", lambda *_args, **_kwargs: [])
     deleted = []
 
     class _Store:
