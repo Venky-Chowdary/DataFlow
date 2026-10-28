@@ -3651,10 +3651,22 @@ class DataPilotTools:
 
         return _job_tool("retry_job", job_id, selector)
 
-    def _rerun_job(self, job_id: str = "", selector: str = "", force: bool = False) -> ToolResult:
+    def _rerun_job(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        force: bool = False,
+        risk_acceptance: dict | None = None,
+    ) -> ToolResult:
         from .lifecycle_tools import _job_tool
 
-        return _job_tool("rerun_job", job_id, selector, force=bool(force))
+        return _job_tool(
+            "rerun_job",
+            job_id,
+            selector,
+            force=bool(force),
+            risk_acceptance=risk_acceptance,
+        )
 
     def _resume_job(self, job_id: str = "", selector: str = "") -> ToolResult:
         from .lifecycle_tools import _job_tool

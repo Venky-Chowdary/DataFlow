@@ -861,20 +861,83 @@ async def retry_transfer_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class RerunRequest(BaseModel):
+    """Optional body of a rerun: what the operator accepts for this run."""
+
+    force: bool = False
+    #: ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}`` -
+    #: the same acceptance ``plan_transfer`` takes. Signs a continue-policy Risk
+    #: Contract on the replayed mappings so rows that no longer cast (the source
+    #: changed since the first run) are quarantined instead of refusing the run.
+    risk_acceptance: dict[str, Any] | None = None
+
+
+def _sign_rerun_risk_acceptance(xfer_req: Any, acceptance: dict[str, Any]) -> list[str]:
+    """Sign the operator's acceptance onto the replayed request's mappings (D170).
+
+    Returns the columns that gained a contract. Refuses (400) rather than
+    silently ignoring an acceptance that signs nothing.
+    """
+    from ..ai.copilot.transfer_tools import _sign_required_risk_contracts
+
+    mappings = [dict(m) for m in (xfer_req.mappings or []) if isinstance(m, dict)]
+    if not mappings:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This job has no saved column mappings to attach a Risk Contract "
+                "to — re-plan with plan_transfer (risk_acceptance) instead."
+            ),
+        )
+    named = {
+        str(c).strip() for c in (acceptance.get("columns") or []) if str(c or "").strip()
+    }
+    table = str(
+        getattr(xfer_req.destination, "table", "")
+        or getattr(xfer_req.destination, "collection", "")
+        or ""
+    )
+    try:
+        signed = _sign_required_risk_contracts(
+            mappings, acceptance, table=table, force_columns=named or None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    gained = [
+        str(new.get("source") or new.get("target") or "")
+        for old, new in zip(mappings, signed)
+        if new.get("risk_contract") and not old.get("risk_contract")
+    ]
+    if not gained:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "risk_acceptance signed nothing: no mapped column needs a Risk "
+                "Contract (name the columns that fail in risk_acceptance.columns)."
+            ),
+        )
+    xfer_req.mappings = signed
+    return gained
+
+
 @router.post("/jobs/{job_id}/rerun")
 async def rerun_transfer_job(
     job_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
     force: bool = False,
+    body: RerunRequest | None = None,
 ):
     """Start a finished or cancelled job again as a new job.
 
     The new job records ``rerun_of`` and keeps preflight (``skip_preflight``
     stays false), so Execute re-validates. Allowed for completed,
     completed-with-quarantine, and cancelled. Append that already committed
-    rows is refused unless ``force=true``. A failed job uses ``/retry``.
+    rows is refused unless ``force=true``. A failed job uses ``/retry``. An
+    optional ``risk_acceptance`` body signs a continue-policy Risk Contract so
+    rows that no longer cast are quarantined instead of refusing the run (D170).
     """
+    force = bool(force or (body is not None and body.force))
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
@@ -932,6 +995,9 @@ async def rerun_transfer_job(
         # D6: record who triggered the rerun and what they acknowledged.
         actor = _actor_email(request)
         xfer_req.triggered_by = actor or f"rerun of {job_id}"
+        risk_columns: list[str] = []
+        if body is not None and body.risk_acceptance:
+            risk_columns = _sign_rerun_risk_acceptance(xfer_req, body.risk_acceptance)
         forced = bool(force and not decision["allowed"])
         if forced:
             xfer_req.acknowledgment_actor = actor
@@ -955,6 +1021,7 @@ async def rerun_transfer_job(
             "action": "rerun",
             "of": job_id,
             "forced": forced,
+            "risk_accepted_columns": risk_columns,
             "at": datetime.now(timezone.utc).isoformat(),
         }
         mongo.update_job_status(
