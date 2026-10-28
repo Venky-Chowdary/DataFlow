@@ -64,6 +64,8 @@ CASES = {
     "D80_unbounded_range": ("int4range", "'[1,)'", "'(,5]'"),
     # D79 — varbit was validated as hex/base64 bytes; odd-length bits refused.
     "D79_varbit": ("varbit", "B'101'", "B'1'"),
+    # D75 — the checksum read-back decoded JSON ``null`` as SQL NULL.
+    "D75_json_null": ("jsonb", "'null'", "'[]'"),
 }
 
 

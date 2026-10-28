@@ -17,10 +17,7 @@ import json
 import logging
 from typing import Any
 
-from connectors.postgresql_reader import (
-    _ordered_column_names,
-    _text_carry_column_names,
-)
+from connectors.postgresql_reader import text_carry_select_sql
 from services.reconciliation import (
     TargetSampleUnavailable,
 )
@@ -110,35 +107,6 @@ def mongo_query_key_variants(key: Any) -> set[Any]:
 from services.target_sample_vector import (  # noqa: E402
     read_pgvector_target_sample,
 )
-
-
-def _pg_text_carry_select(
-    cur: Any, schema: str, table_name: str, cols: list[str]
-) -> str | None:
-    """Select list that reads lossy-decode PG columns as engine text, or None.
-
-    The source reader carries json/jsonb, ranges, bit strings, intervals, real
-    and network types as ``col::text``; reading the destination through
-    psycopg2's decoders instead compared ``[1,)`` with its ``[1, None)``
-    Range repr (D80) and JSON ``null`` with SQL NULL (D75) — the same rule
-    must hold on both sides of the compare.
-    """
-    from connectors.sql_identifiers import quote_sql_identifier, split_qualified_table
-
-    sch, table = split_qualified_table(str(table_name or ""), schema or "public")
-    carry = _text_carry_column_names(cur, sch or "public", table)
-    if not carry:
-        return None
-    names = _ordered_column_names(cur, sch or "public", table) if cols == ["*"] else cols
-    parts = []
-    for name in names:
-        q = quote_sql_identifier(str(name))
-        parts.append(
-            f"CASE WHEN {q} IS NULL THEN NULL ELSE {q}::text END AS {q}"
-            if name in carry
-            else q
-        )
-    return ", ".join(parts)
 
 
 def read_target_sample(
@@ -284,7 +252,7 @@ def _read_destination_sample(
                         ssl=attempt_ssl,
                     )
                     with conn.cursor() as cur:
-                        read_sql = _pg_text_carry_select(cur, schema, table_name, cols) or col_sql
+                        read_sql = text_carry_select_sql(cur, schema, table_name, cols) or col_sql
                         if keys and sort_key:
                             key_col = quote_sql_identifier(
                                 require_safe_identifier(sort_key, preserve_case=True)

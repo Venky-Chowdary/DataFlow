@@ -1840,21 +1840,26 @@ def verify_postgres_table(
         table_ref = quote_table_ref(
             table_name, schema or "public", dialect="postgresql"
         )
+        from connectors.postgresql_reader import text_carry_select_sql
+
         with conn.cursor() as cur:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
+            # Digest what the source reader digests: json/jsonb, ranges, bit
+            # strings … as engine text, not psycopg2's decode (D75/D80).
+            select_list = text_carry_select_sql(cur, schema, table_name) or "*"
         ids, pk = keyed_readback_scope(written_ids, pk_column)
         with streaming_readback_cursor(conn, engine="postgresql") as cur:
             if ids:
                 pk_q = quote_sql_identifier(pk)
                 # Ids are text; an uncast bigint/uuid key aborts the read-back.
                 cur.execute(
-                    f"SELECT * FROM {table_ref} "  # nosec B608
+                    f"SELECT {select_list} FROM {table_ref} "  # nosec B608
                     f"WHERE CAST({pk_q} AS text) = ANY(%s)",
                     (ids,),
                 )
             else:
-                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+                cur.execute(f"SELECT {select_list} FROM {table_ref}")  # nosec B608
             names, rows = dbapi_streaming_rows(cur)
             columns, projected = project_readback(names, target_columns, rows)
             checksum = canonical_checksum_from_iter(

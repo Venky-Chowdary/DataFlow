@@ -150,6 +150,36 @@ def _text_carry_column_names(cur, schema: str, table: str) -> frozenset[str]:
     return frozenset(str(row[0]) for row in cur.fetchall() if _text_carry_row(row))
 
 
+def text_carry_select_sql(
+    cur: Any, schema: str, table_name: str, cols: list[str] | None = None
+) -> str | None:
+    """Select list for a read-back that must see what this reader saw, or None.
+
+    This reader carries the lossy-decode families as ``col::text`` (see
+    :func:`_text_carry_column_names`). A verification read through psycopg2's
+    decoders instead compared ``[1,)`` with the Range repr ``[1, None)``
+    (D80) and JSON ``null`` with SQL NULL (D75); both sides of a compare must
+    follow one rule. ``None`` means plain columns are already faithful.
+    """
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    sch, table = split_qualified_table(str(table_name or ""), schema or "public")
+    sch = sch or "public"
+    carry = _text_carry_column_names(cur, sch, table)
+    if not carry:
+        return None
+    names = _ordered_column_names(cur, sch, table) if not cols or cols == ["*"] else cols
+    parts = []
+    for name in names:
+        q = quote_sql_identifier(str(name))
+        parts.append(
+            f"CASE WHEN {q} IS NULL THEN NULL ELSE {q}::text END AS {q}"
+            if name in carry
+            else q
+        )
+    return ", ".join(parts)
+
+
 def _json_column_names(cur, schema: str, table: str) -> frozenset[str]:
     """Back-compat alias — JSON is one of the text-carry families."""
     return _text_carry_column_names(cur, schema, table)
