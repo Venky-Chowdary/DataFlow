@@ -3442,7 +3442,7 @@ def _stream_database_transfer_impl(
                 "warnings": [],
                 "batch_max": _raw_page_cursor(batch) or None,
                 "batch_keyset": _raw_page_keyset(batch) or None,
-                "batch_rows": _raw_page_rows(batch),
+                "batch_rows": _raw_page_rows(batch) + len(kafka_rejects),
                 "filter_page_removed": _raw_page_filtered(batch),
                 "cursor_bounded_page": _raw_page_cursor_bounded(batch),
                 "shape_page_removed": max(
@@ -3988,7 +3988,7 @@ def _stream_database_transfer_impl(
         try:
             batch_written = 0
             last_checksum = ""
-            dest_summary: dict[str, Any] = {}
+            chunk_summary: dict[str, Any] = {}
             routes_wire: dict[str, dict[str, Any]] = {}
             for _rname, _rtable, _wop in write_calls:
                 _w, _cs, _ds = with_retry(
@@ -4005,7 +4005,7 @@ def _stream_database_transfer_impl(
                 batch_written += int(_w or 0)
                 if _cs:
                     last_checksum = _cs
-                dest_summary = _merge_chunk_write_summaries(dest_summary, _ds)
+                chunk_summary = _merge_chunk_write_summaries(chunk_summary, _ds)
                 if _rname is not None:
                     ddl_state["created_tables"].add(_rtable)
                     routes_wire[_rname] = {
@@ -4017,20 +4017,20 @@ def _stream_database_transfer_impl(
                         "map": dict(_rmap_decls.get(_rname) or {}),
                     }
             if routes_wire:
-                dest_summary["routes"] = routes_wire
+                chunk_summary["routes"] = routes_wire
             # Fold orphan-FK holdouts into the batch's own rejected ledger so
             # they persist to the quarantine DLQ and balance Gate-8
             # conservation (read = written + rejected + filtered).
             fk_orphans = getattr(batch, "fk_orphan_details", None) or []
             if fk_orphans:
-                det = list(dest_summary.get("rejected_details") or [])
+                det = list(chunk_summary.get("rejected_details") or [])
                 det.extend(fk_orphans)
-                dest_summary["rejected_details"] = det
-                dest_summary["rejected_rows"] = int(
-                    dest_summary.get("rejected_rows") or 0
+                chunk_summary["rejected_details"] = det
+                chunk_summary["rejected_rows"] = int(
+                    chunk_summary.get("rejected_rows") or 0
                 ) + len(fk_orphans)
-                dest_summary["orphan_fk_rows"] = int(
-                    dest_summary.get("orphan_fk_rows") or 0
+                chunk_summary["orphan_fk_rows"] = int(
+                    chunk_summary.get("orphan_fk_rows") or 0
                 ) + len(fk_orphans)
         except WriteBatchBlocked as blocked:
             if keyed_census_acc is not None:
@@ -4066,15 +4066,16 @@ def _stream_database_transfer_impl(
         return {
             "batch_written": batch_written,
             "last_checksum": last_checksum,
-            "dest_summary": dest_summary,
-            "rejected": int(dest_summary.get("rejected_rows", 0) or 0),
-            "coerced_null": int(dest_summary.get("coerced_null_rows", 0) or 0),
-            "warnings": (dest_summary.get("warnings") or [])[:10] + local_warnings,
+            "dest_summary": chunk_summary,
+            "rejected": int(chunk_summary.get("rejected_rows", 0) or 0),
+            "coerced_null": int(chunk_summary.get("coerced_null_rows", 0) or 0),
+            "warnings": (chunk_summary.get("warnings") or [])[:10] + local_warnings,
             "batch_max": batch_max,
             "batch_keyset": batch_keyset,
             # Source rows this page consumed — the offset and the run's read
-            # population count them, including the ones a recipe removed.
-            "batch_rows": _raw_page_rows(batch),
+            # population count them, including the ones a recipe removed and a
+            # Kafka poison message (read, then quarantined).
+            "batch_rows": _raw_page_rows(batch) + len(kafka_rejects),
             "filter_page_removed": _raw_page_filtered(batch),
             "cursor_bounded_page": _raw_page_cursor_bounded(batch),
             "shape_page_removed": max(
