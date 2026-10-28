@@ -21,7 +21,7 @@ from services.signup_config import signup_enabled
 from services.user_store import get_user as get_stored_user
 from services.user_store import normalize_email, set_password
 from services.sso_authorization import require_sso_authorization
-from services.workspace_access import actor_email
+from services.workspace_access import actor_email, tenant_scope
 
 from ..services.auth_service import (
     auth_bootstrap_status,
@@ -1067,6 +1067,16 @@ async def me(request: Request):
     if not email:
         raise HTTPException(status_code=401, detail="Authentication required")
     named_workspace_id = workspace_id_from_request_headers(request.headers)
+    # A header naming a workspace the actor does not belong to is not echoed
+    # back as theirs, nor used to decide their permissions (D164); the session
+    # check answers as if none were sent and says so.
+    header_rejected = False
+    if named_workspace_id:
+        try:
+            tenant_scope(request)
+        except HTTPException:
+            named_workspace_id = ""
+            header_rejected = True
     # The workspace the request named, or the single membership that answered it,
     # so the client can name that workspace explicitly from here on. The summary
     # is resolved in that same workspace: a response whose permissions were
@@ -1093,6 +1103,7 @@ async def me(request: Request):
         "workspace_role": workspace_role,
         "must_change_password": bool(account and account.get("must_change_password")),
         "auth_required": auth_required(),
+        "workspace_header_rejected": header_rejected,
         **summary,
     }
 
