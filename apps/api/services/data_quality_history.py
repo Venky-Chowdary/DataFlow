@@ -811,9 +811,11 @@ def build_load_history_report(
         anomalies.append(msg)
 
     row_counts = [float(r.get("row_count") or 0) for r in history if (r.get("row_count") or 0) > 0]
+    # Volume is judged only against a load size the caller measured. A
+    # profiled sample is bounded (100 rows of a 6,000-row topic), so reading
+    # its length as the volume failed every rerun of a large source whose
+    # size is not known up front, e.g. a Kafka topic (D151).
     cur_rows = current_row_count
-    if cur_rows is None and current_profile:
-        cur_rows = max((c.count for c in current_profile.values()), default=0)
     volume_note = None
     if cur_rows is not None and row_counts:
         med_rows = _median(row_counts)
@@ -901,6 +903,6 @@ def compare_route_to_history(
         current_profile=current,
         prior_runs=history,
         current_quarantine=quarantine_histogram(rejected_details),
-        current_row_count=int(current_row_count) if current_row_count is not None else len(rows),
+        current_row_count=int(current_row_count) if current_row_count is not None else None,
         compare_last_k=compare_last_k,
     )
