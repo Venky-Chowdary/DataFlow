@@ -149,8 +149,29 @@ def consumed_reached_binlog_head(
     return consumed_at >= head_at
 
 
+def _decode_binlog_json(value: Any) -> Any:
+    """Turn the ``bytes`` keys and string leaves of a binlog JSON document into ``str``.
+
+    python-mysql-replication decodes a MySQL binary JSON column into Python
+    containers whose keys and string values are ``bytes``. Serialised as is,
+    the keys read ``"b'k'"`` and the strings base64. A container can only come
+    from a JSON column (a BLOB stays ``bytes``), so decoding inside containers
+    never touches real binary data.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {_decode_binlog_json(k): _decode_binlog_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_decode_binlog_json(v) for v in value]
+    return value
+
+
 def _serialize(value: Any) -> str:
     from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+
+    if isinstance(value, (dict, list, tuple)):
+        value = _decode_binlog_json(value)
 
     if value is None:
         return SQL_NULL_SENTINEL
