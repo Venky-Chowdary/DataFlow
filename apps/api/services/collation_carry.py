@@ -34,6 +34,7 @@ from typing import Any, Literal, Protocol
 from services.type_system import (
     is_accent_insensitive_collation,
     is_case_insensitive_collation,
+    normalize_logical_type,
     parse_collation,
 )
 
@@ -624,6 +625,11 @@ def apply_dest_native_collation(
     if re.search(r"\bCOLLATE\b", text, re.I):
         return ddl
     if not _accepts_collation(text):
+        return ddl
+    if normalize_logical_type(source_type) in {"datetime", "date", "time"}:
+        # A temporal source stored as text (offset-bearing timestamp onto
+        # VARCHAR(64)) has no string equality to carry. Stamping the engine's
+        # default string collation made two carriers for one tstz (D144).
         return ddl
     src = _norm(source_dialect)
     declared = (parse_collation(source_type) or "").strip()
