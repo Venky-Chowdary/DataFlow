@@ -26,6 +26,7 @@ import logging
 from datetime import date, datetime
 from typing import Any
 
+from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mysql_oracle import python_bind_for_ora_ddl
@@ -258,6 +259,8 @@ def copy_sqlite_to_oracle(
         try:
             src_cur.execute(select_sql)
             while True:
+                # D102: a cancel stops the copy between fetch batches.
+                cancel_checkpoint()
                 rows = src_cur.fetchmany(_FETCH_BATCH)
                 if not rows:
                     break

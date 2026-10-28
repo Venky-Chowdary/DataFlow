@@ -24,6 +24,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import (
     FastPathResult,
@@ -90,6 +91,8 @@ def _select_into_sqlserver(
             cur.execute(select_sql)
         batch: list[tuple[Any, ...]] = []
         while True:
+            # D102: a cancel stops the copy between fetch batches.
+            cancel_checkpoint()
             rows = cur.fetchmany(_FETCH_BATCH)
             if not rows:
                 break

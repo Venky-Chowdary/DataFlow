@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mongo_sink import (
@@ -90,6 +91,8 @@ def _select_insert_many(
             logger.debug("SQL Server arraysize skipped", exc_info=True)
         cur.execute(select_sql)
         while True:
+            # D102: a cancel stops the copy between fetch batches.
+            cancel_checkpoint()
             rows = cur.fetchmany(_FETCH_BATCH)
             if not rows:
                 break

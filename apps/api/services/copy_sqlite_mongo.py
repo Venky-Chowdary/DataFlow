@@ -20,6 +20,7 @@ import logging
 from datetime import date
 from typing import Any
 
+from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from services.copy_mongo_sink import (
@@ -163,6 +164,8 @@ def copy_sqlite_to_mongo(
         inserted = 0
         batch: list[dict[str, Any]] = []
         while True:
+            # D102: a cancel stops the copy between fetch batches.
+            cancel_checkpoint()
             rows = src_cur.fetchmany(_FETCH_BATCH)
             if not rows:
                 break
