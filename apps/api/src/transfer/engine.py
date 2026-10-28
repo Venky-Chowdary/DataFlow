@@ -899,6 +899,22 @@ def _destination_schema_types(
     return schema
 
 
+def _forget_cached_table_shapes(*endpoints: Any) -> None:
+    """A run reads the tables as they are now, not as an earlier run cached them."""
+    from services.reflection_cache import invalidate_named_tables
+
+    invalidate_named_tables(
+        *(
+            name
+            for endpoint in endpoints
+            for name in (
+                getattr(endpoint, "table", None),
+                getattr(endpoint, "collection", None),
+            )
+        )
+    )
+
+
 def _apply_schema_auto_propagate(
     *,
     request: Any,
@@ -968,6 +984,7 @@ def _apply_schema_auto_propagate(
         )
     from services.db_type_utils import dest_declares_column_ddl
     from services.schema_drift import (
+        PROPAGATE_POLICIES,
         destination_evolution_approved,
         plan_destination_evolution,
     )
@@ -989,6 +1006,7 @@ def _apply_schema_auto_propagate(
             source_schema=schema,
             dest_types=dest_schema_types,
             dest_db=(getattr(request.destination, "format", "") or "").lower(),
+            adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
         )
     if not evolution.get("should_propagate"):
         return mappings
@@ -2265,6 +2283,7 @@ class UniversalTransferEngine:
     ) -> TransferResult:
         mongo = get_mongodb_service()
         checkpoint_service = CheckpointService(mongo)
+        _forget_cached_table_shapes(request.source, request.destination)
         if resume:
             contract = resolve_sync_contract(request.stream_contracts)
             checkpoint = resolve_resume_checkpoint(

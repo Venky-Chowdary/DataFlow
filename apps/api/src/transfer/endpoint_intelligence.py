@@ -298,6 +298,10 @@ def introspect_endpoint(
 ) -> dict:
     raw_role = str((endpoint.extra or {}).get("introspect_purpose") or "")
     role = raw_role if raw_role in {"source", "destination"} else ""
+    # Validate describes the table as it is now (D165); see reflection_cache.
+    from services.reflection_cache import invalidate_named_tables
+
+    invalidate_named_tables(endpoint.table, endpoint.collection)
     with connector_operation(
         "introspect",
         driver_family=driver_family(endpoint.format or endpoint.kind),
