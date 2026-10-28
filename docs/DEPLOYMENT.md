@@ -58,6 +58,12 @@ Optional:
 | `DATAFLOW_SEED_DEMO` | `0` | No demo connectors |
 | `DATAFLOW_RBAC_UNRULED_ROUTES` | `deny` | `deny` rejects authenticated requests without a reviewed public exception or explicit permission rule; `allow_and_log` temporarily restores method-based fallback permissions and warns/audits. Invalid values fail closed. |
 | `DATAWRAP_SINGER_TAPS_DIR` | unset | Directory of operator-installed `tap-*` executables. **Unset disables the `singer_tap` connector.** Only `tap-*` programs inside it run (no interpreters, no paths elsewhere); only the platform administrator may create, test or run a Singer connector. Every `tap-*` entry in the directory, symlinks included, is trusted. |
+| `DATAFLOW_SQLITE_ROOT` | `<data dir>/sqlite` in production; unset (any path) in development | Directory (or `os.pathsep`-separated list) local SQLite connector files must live under; a relative name is anchored at the first. The service data directory itself is always refused. A SQLite connector pointing elsewhere (e.g. `/tmp/x.db`) is refused in production. |
+| `DATAFLOW_DUCKDB_ROOT` | `DATAFLOW_SQLITE_ROOT`, else `<data dir>/duckdb` in production | Same confinement for local DuckDB files (MotherDuck `md:` and `:memory:` are unaffected). |
+| `DATAFLOW_ICEBERG_ROOT` | `<data dir>/iceberg` in production; unset in development | Directory local Iceberg warehouses and SQLite catalogs must live under. Object-store warehouses (`s3://`, `gs://` ...) are unaffected. |
+| `DATAFLOW_SOURCE_PATH_ROOTS` | unset | Extra `os.pathsep`-separated directories a file transfer may read `source_path` from, besides the upload/staging directories. |
+| `DATAFLOW_MAX_UPLOAD_BYTES` | `268435456` | Largest upload body read into memory by the upload routes; over it the API answers 413 (matches nginx `client_max_body_size 256m`). |
+| `DATAFLOW_MAX_DECOMPRESSED_BYTES` | `1073741824` | Largest size a gzip payload may inflate to where a reader needs the whole image (JSON, Excel, XML, Parquet/ORC footers); streaming CSV/TSV readers are not capped. |
 
 ### Multi-replica / enterprise coordination
 

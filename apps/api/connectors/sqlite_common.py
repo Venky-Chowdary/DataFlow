@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -87,6 +88,9 @@ def require_sqlite_source_file(path: str) -> None:
 def sqlite_root() -> tuple[str, bool]:
     """``(root, explicit)`` — where SQLite files must live, or ``("", False)``.
 
+    ``DATAFLOW_SQLITE_ROOT`` may list several directories separated by
+    ``os.pathsep`` (a relative path is anchored at the first).
+
     ``DATAFLOW_SQLITE_ROOT`` wins. Without it, production confines SQLite to a
     directory on the persistent data volume: a relative name used to land in
     the container's working directory and ``/tmp`` in its temp, so a
@@ -106,6 +110,112 @@ def sqlite_root() -> tuple[str, bool]:
     except OSError:
         pass
     return str(root), False
+
+
+def duckdb_root() -> tuple[str, bool]:
+    """``(root, explicit)`` for local DuckDB files, like :func:`sqlite_root`.
+
+    ``DATAFLOW_DUCKDB_ROOT`` wins, then ``DATAFLOW_SQLITE_ROOT``. Without either,
+    production confines DuckDB to ``<data_dir>/duckdb`` on the persistent
+    volume; development keeps any path.
+    """
+    explicit = (getenv_brand("DUCKDB_ROOT") or getenv_brand("SQLITE_ROOT") or "").strip()
+    if explicit:
+        return explicit, True
+    from services.platform_config import data_dir, is_production
+
+    if not is_production():
+        return "", False
+    root = data_dir() / "duckdb"
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+    except OSError:
+        pass
+    return str(root), False
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    c = os.path.normcase(str(child))
+    p = os.path.normcase(str(parent))
+    try:
+        return os.path.commonpath([c, p]) == p
+    except ValueError:  # different drives on Windows
+        return False
+
+
+def _confine_embedded_path(
+    path: str, root: str, explicit: bool, *, label: str, env_name: str, volume_subdir: str
+) -> str:
+    """Resolve an embedded-database file path and keep it under ``root``.
+
+    Symlinks and ``..`` are followed before the check; a relative path is
+    anchored at the root. The service's own state directory
+    (``platform_config.data_dir()``) is refused, except its ``sqlite`` /
+    ``duckdb`` volume sub-directory, so a connector can never open the job
+    store, ledgers or secrets.
+    Without a root (development) any other path is returned unchanged.
+    """
+    from services.platform_config import data_dir
+
+    try:
+        roots = [
+            Path(part).expanduser().resolve(strict=False)
+            for part in (root or "").split(os.pathsep)
+            if part.strip()
+        ]
+        candidate = Path(path).expanduser()
+        if roots and not candidate.is_absolute():
+            candidate = roots[0] / candidate
+        resolved = candidate.resolve(strict=False)
+        state_dir = data_dir().resolve(strict=False)
+    except OSError as exc:
+        raise ValueError(f"Invalid {label} path: {exc}") from exc
+    if roots and not any(_is_within(resolved, r) for r in roots):
+        shown = os.pathsep.join(str(r) for r in roots)
+        if explicit:
+            raise ValueError(f"{label} path must be under {env_name} ({shown})")
+        raise ValueError(
+            f"{label} path must be under {shown}, on the persistent data "
+            "volume: a file anywhere else is lost when the service restarts. "
+            f"Use a path under it, or set {env_name} to another mounted volume."
+        )
+    volume_dir = state_dir / volume_subdir
+    if _is_within(resolved, state_dir) and not _is_within(resolved, volume_dir):
+        raise ValueError(
+            f"{label} path is inside the Datawrap service data directory and cannot be "
+            f"opened as a connector; place the file under {volume_dir} "
+            f"or set {env_name}"
+        )
+    if not roots:
+        return path
+    return str(resolved)
+
+
+def confine_sqlite_path(path: str) -> str:
+    """Confine a plain SQLite file path (no URL scheme) like :func:`sqlite_file_path`."""
+    if not path or path == ":memory:":
+        return path
+    if "\x00" in path:
+        raise ValueError("Invalid SQLite path")
+    root, explicit = sqlite_root()
+    return _confine_embedded_path(
+        path, root, explicit,
+        label="SQLite", env_name="DATAFLOW_SQLITE_ROOT", volume_subdir="sqlite",
+    )
+
+
+def confine_duckdb_path(path: str) -> str:
+    """Confine a plain DuckDB file path; ``md:`` / ``:memory:`` pass through."""
+    lowered = (path or "").lower()
+    if not path or path == ":memory:" or lowered.startswith(("md:", "motherduck:")):
+        return path
+    if "\x00" in path:
+        raise ValueError("Invalid DuckDB path")
+    root, explicit = duckdb_root()
+    return _confine_embedded_path(
+        path, root, explicit,
+        label="DuckDB", env_name="DATAFLOW_DUCKDB_ROOT", volume_subdir="duckdb",
+    )
 
 
 def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
@@ -132,31 +242,7 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
             path = path[1:]  # sqlite:///relative -> relative
     if "\x00" in path:
         raise ValueError("Invalid SQLite path")
-    root, explicit = sqlite_root()
-    if not root:
-        return path
-    try:
-        root_resolved = Path(root).expanduser().resolve(strict=False)
-        candidate = Path(path).expanduser()
-        if not candidate.is_absolute():
-            candidate = root_resolved / candidate
-        resolved = candidate.resolve(strict=False)
-    except OSError as exc:
-        raise ValueError(f"Invalid SQLite path: {exc}") from exc
-    try:
-        resolved.relative_to(root_resolved)
-    except ValueError as exc:
-        if explicit:
-            raise ValueError(
-                f"SQLite path must be under DATAFLOW_SQLITE_ROOT ({root_resolved})"
-            ) from exc
-        raise ValueError(
-            f"SQLite path must be under {root_resolved}, on the persistent data "
-            "volume: a file anywhere else is lost when the service restarts. "
-            "Use a path under it, or set DATAFLOW_SQLITE_ROOT to another "
-            "mounted volume."
-        ) from exc
-    return str(resolved)
+    return confine_sqlite_path(path)
 
 
 def duckdb_file_path(database: str, connection_string: str, host: str = "") -> str:
@@ -184,4 +270,4 @@ def duckdb_file_path(database: str, connection_string: str, host: str = "") -> s
         return ":memory:" if raw else ""
     if "\x00" in raw:
         raise ValueError("Invalid DuckDB path")
-    return raw
+    return confine_duckdb_path(raw)

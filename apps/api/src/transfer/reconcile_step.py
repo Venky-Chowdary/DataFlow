@@ -4254,12 +4254,24 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
     if eng == "duckdb":
         import duckdb
 
+        from connectors.sqlite_common import duckdb_file_path
+
         return eng, duckdb.connect(
-            database=str(cfg.get("database") or cfg.get("path") or ":memory:")
+            database=duckdb_file_path(
+                str(cfg.get("database") or cfg.get("path") or ""),
+                str(cfg.get("connection_string") or ""),
+            )
+            or ":memory:"
         )
     if eng == "sqlite":
+        from connectors.sqlite_common import sqlite_file_path
+
         return eng, sqlite3.connect(
-            str(cfg.get("database") or cfg.get("path") or "")
+            sqlite_file_path(
+                str(cfg.get("database") or cfg.get("path") or ""),
+                str(cfg.get("connection_string") or ""),
+                "",
+            )
         )
     if eng == "mssql":
         from services.copy_sqlserver_sqlserver import _ss_connect

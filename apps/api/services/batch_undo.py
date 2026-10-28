@@ -468,7 +468,13 @@ def _delete_all_rows(
     from connectors.sql_identifiers import quote_table_ref
 
     if db_type == "sqlite":
-        database = str(cfg.get("database") or "")
+        from connectors.sqlite_common import sqlite_file_path
+
+        database = sqlite_file_path(
+            str(cfg.get("database") or ""),
+            str(cfg.get("connection_string") or ""),
+            str(cfg.get("host") or ""),
+        )
         if not database:
             return False
         ref = quote_table_ref(table_name, dialect="sqlite")
