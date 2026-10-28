@@ -83,6 +83,107 @@ def cancel_checkpoint(rows_written: int | None = None) -> None:
     fn = _probe.get()
     if fn is not None:
         fn(rows_written)
+    meter = _meter.get()
+    if meter is not None and rows_written is not None:
+        meter.observe_cumulative(rows_written)
+    elif meter is not None:
+        meter.beat()
+
+
+# --- per-batch progress (D168) ----------------------------------------------
+# The engine's on_checkpoint fires once per *chunk* (thousands of rows) and
+# COPY paths report nothing until they finish, so a job read 0 rows / 5% with a
+# frozen updated_at while the destination grew batch by batch. Every batch
+# boundary already calls cancel_checkpoint; the same seam now feeds a throttled
+# progress write to the job row.
+
+_meter: contextvars.ContextVar["ProgressMeter | None"] = contextvars.ContextVar(
+    "df_progress_meter", default=None
+)
+#: Rows the current context's writer call had reported (per pool task, since
+#: each task runs in its own copied context).
+_last_written: contextvars.ContextVar[int] = contextvars.ContextVar(
+    "df_last_written", default=0
+)
+
+
+class ProgressMeter:
+    """Accumulates committed rows and writes them to the job row, throttled."""
+
+    def __init__(self, mongo: Any, job_id: str, *, interval: float = 1.0) -> None:
+        import threading
+
+        self._mongo = mongo
+        self._job_id = job_id
+        self._interval = interval
+        self._lock = threading.Lock()
+        self._rows = 0
+        self._last_flush = 0.0
+
+    def observe_cumulative(self, written: int) -> None:
+        """``written`` is cumulative within one writer call; a smaller value
+        than the last one means a new call started in this context."""
+        last = _last_written.get()
+        delta = written - last if written >= last else written
+        _last_written.set(written)
+        self.add(delta)
+
+    def add(self, delta: int) -> None:
+        with self._lock:
+            self._rows += max(0, int(delta or 0))
+        self.beat()
+
+    def beat(self) -> None:
+        import time
+
+        now = time.monotonic()
+        with self._lock:
+            if now - self._last_flush < self._interval:
+                return
+            self._last_flush = now
+            rows = self._rows
+        self._flush(rows)
+
+    def _flush(self, rows: int) -> None:
+        try:
+            job = _read_job(self._mongo, self._job_id) or {}
+            if str(job.get("status") or "") != "running" or _is_superseded(job):
+                return
+            fields: dict[str, Any] = {}
+            shown = int(job.get("records_processed") or 0)
+            if rows > shown:
+                from services.batch_progress import compute_transfer_progress_pct
+
+                fields["records_processed"] = rows
+                pct = compute_transfer_progress_pct(
+                    phase="writing",
+                    rows_processed=rows,
+                    total_rows=int(job.get("total_rows") or 0),
+                )
+                if pct is not None and pct > float(job.get("progress_pct") or 0):
+                    fields["progress_pct"] = pct
+            # Even with nothing new to show, a live batch is a heartbeat: the
+            # stall watchdog and the Jobs list read updated_at.
+            from datetime import datetime, timezone
+
+            self._mongo.update_job_fields(
+                self._job_id,
+                fields or {"last_batch_at": datetime.now(timezone.utc).isoformat()},
+            )
+        except Exception as exc:  # noqa: BLE001 - progress must never fail a write
+            logger.debug("progress heartbeat skipped for %s: %s", self._job_id, exc)
+
+
+def set_progress_meter(meter: "ProgressMeter | None") -> None:
+    _meter.set(meter)
+    _last_written.set(0)
+
+
+def report_rows(rows: int) -> None:
+    """COPY loops: ``rows`` were just read for (and are about to be) loaded."""
+    meter = _meter.get()
+    if meter is not None and rows:
+        meter.add(rows)
 
 
 def _read_job(mongo: Any, job_id: str) -> dict | None:

@@ -112,6 +112,10 @@ def _select_into_mysql_load_data(
                 # D102: a cancel stops the copy between fetch batches.
                 cancel_checkpoint()
                 batch = cur.fetchmany(_FETCH_BATCH)
+                # D168: rows read per fetch batch feed the job's progress.
+                from services.cancel_check import report_rows
+
+                report_rows(len(batch))
                 if not batch:
                     break
                 payload = "\n".join(join(encode(v) for v in row) for row in batch)
