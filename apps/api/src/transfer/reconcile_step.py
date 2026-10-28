@@ -2306,6 +2306,46 @@ def _compute_source_checksum(
     )
 
 
+def _mapped_sources(mappings: list[dict], target_cols: list[str]) -> list[str]:
+    """Source column feeding each of ``target_cols`` (the target name when unmapped)."""
+    from services.mapping_constraints import write_mappings
+
+    by_target = {
+        str(m.get("target") or m.get("source") or ""): str(m.get("source") or "")
+        for m in write_mappings(mappings)
+    }
+    return list(dict.fromkeys(by_target.get(t) or t for t in target_cols))
+
+
+def _source_rows_as_written(
+    source_rows: list[dict],
+    *,
+    mappings: list[dict],
+    target_cols: list[str],
+    dest_types: dict[str, str],
+    dest_type: str,
+    validation_mode: str,
+) -> list[dict]:
+    """The re-read source pre-image, mapped exactly as the writer mapped it.
+
+    D123/D132 — one owner for transform-aware read-back: the same mapping,
+    transforms and quarantine policy the write pass ran. A row the writer held
+    out to quarantine is held out here too, so it can never count as a
+    missing or mismatched destination row.
+    """
+    headers = list(dict.fromkeys(str(k) for r in source_rows for k in r))
+    mapped, _held_out = map_rows_for_fingerprint(
+        headers=headers,
+        data_rows=[[r.get(h) for h in headers] for r in source_rows],
+        mappings=mappings,
+        target_cols=target_cols,
+        error_policy=transform_error_policy_for_validation_mode(validation_mode),
+        dest_types=dest_types,
+        dest_kind=dest_type,
+    )
+    return [dict(zip(target_cols, row)) for row in mapped]
+
+
 def _mapped_targets(mappings: list[dict], columns: list[str]) -> list[str]:
     """Return the ordered list of target column names used for reconciliation.
 
@@ -3005,6 +3045,10 @@ def _maybe_attach_verification_ladder(
             "shaped_run_pinned_recipe",
         )
     source_reread = False
+    # D123/D132 — a source re-read is the pre-image. When the mapping renames
+    # or transforms a cell, the re-read must be read by *source* name and run
+    # through the writer's own mapping (below) before any layer compares it.
+    rewrites = mappings_rewrite_written_cells(mappings)
     if source_endpoint is not None and not source_rows:
         from services.procedure_source import is_callable_source
 
@@ -3017,7 +3061,9 @@ def _maybe_attach_verification_ladder(
                     src_type,
                     src_cfg,
                     table=str(source_endpoint.table or src_cfg.get("table") or ""),
-                    columns=target_cols,
+                    columns=(
+                        _mapped_sources(mappings, target_cols) if rewrites else target_cols
+                    ),
                 )
             except PopulationTooLarge as exc:
                 return _return(
@@ -3070,6 +3116,7 @@ def _maybe_attach_verification_ladder(
     # whole-table rows while ``source_checksum`` describes only the window,
     # and ``key_rows`` below degenerates to every key in the table.
     _win_cursor = str(dest_summary.get("incremental_window_cursor") or "").strip()
+    window_scoped_target = False
     if _win_cursor and source_rows:
         from services.sync_cursor import (
             compare_cursor_values,
@@ -3083,34 +3130,56 @@ def _maybe_attach_verification_ladder(
         # D124: a run seeded from the stored watermark re-read its whole tie
         # group; a resume seeks strictly past its committed page edge.
         _win_inclusive = bool(dest_summary.get("incremental_window_seed_inclusive"))
-        _in_window: list[dict[str, Any]] = []
-        for _wr in source_rows:
+
+        def _in_run_window(_wr: Any, _cur: str, _pk: str) -> bool:
             if not isinstance(_wr, dict):
-                continue
+                return False
             if _win_seed not in (None, "") and (
-                row_in_run_window(_wr, _win_cursor, str(_win_seed))
+                row_in_run_window(_wr, _cur, str(_win_seed))
                 if _win_inclusive
-                else row_after_watermark(
-                    _wr, _win_cursor, str(_win_seed), primary_key=_win_pk
-                )
+                else row_after_watermark(_wr, _cur, str(_win_seed), primary_key=_pk)
             ) is not True:
-                continue
+                return False
             if _win_max not in (None, ""):
-                _wrc = _wr.get(_win_cursor)
+                _wrc = _wr.get(_cur)
                 _candidate = str(_wrc) if _wrc is not None else ""
-                if _win_pk and _win_pk != _win_cursor:
+                if _pk and _pk != _cur:
                     from services.keyset_pagination import encode_keyset_bookmark
 
                     _candidate = encode_keyset_bookmark(
-                        [
-                            _candidate,
-                            str(_wr.get(_win_pk) or ""),
-                        ]
+                        [_candidate, str(_wr.get(_pk) or "")]
                     )
                 if compare_cursor_values(_candidate, str(_win_max)) > 0:
-                    continue
-            _in_window.append(_wr)
-        source_rows = _in_window
+                    return False
+            return True
+
+        source_rows = [r for r in source_rows if _in_run_window(r, _win_cursor, _win_pk)]
+        if not keyed and allow_extra and dest_before and target_rows:
+            # D123 — an append into an occupied table: the rows this run wrote
+            # are the destination rows inside the same cursor window (an append
+            # table can repeat a key across runs, so a key lookup would match
+            # history). Rows earlier runs appended stay outside the comparison.
+            _to_target = {
+                str(m.get("source") or ""): str(m.get("target") or "")
+                for m in mappings
+                if m.get("source") and m.get("target")
+            }
+            _t_cur = _to_target.get(_win_cursor, _win_cursor)
+            _t_pk = _to_target.get(_win_pk, _win_pk)
+            if _t_cur in target_cols:
+                target_rows = [
+                    r for r in target_rows if _in_run_window(r, _t_cur, _t_pk)
+                ]
+                window_scoped_target = True
+    if source_reread and rewrites and source_rows:
+        source_rows = _source_rows_as_written(
+            source_rows,
+            mappings=mappings,
+            target_cols=target_cols,
+            dest_types=dest_types,
+            dest_type=dest_type,
+            validation_mode=validation_mode,
+        )
     # X-OW1: a keyed run into an occupied destination is only comparable on
     # the written batch's keys — the destination legitimately holds rows this
     # run never wrote. Restrict the re-read population to the batch keys so
@@ -3210,12 +3279,12 @@ def _maybe_attach_verification_ladder(
         # destination digest — recompute on the compared populations (D67/D95).
         source_checksum=(
             ""
-            if (batch_scoped or _rej_keys)
+            if (batch_scoped or window_scoped_target or _rej_keys)
             else str(report.get("source_checksum") or "")
         ),
         target_checksum=(
             ""
-            if (batch_scoped or _rej_keys)
+            if (batch_scoped or window_scoped_target or _rej_keys)
             else str(report.get("target_checksum") or "")
         ),
         dest_db_type=dest_type,
@@ -3230,9 +3299,7 @@ def _maybe_attach_verification_ladder(
         # A table re-read is the pre-image. Crosswalks, masks, and renames
         # already match on the written-batch checksum; L2 must not veto them.
         l2_skip_reason=(
-            "source_reread_is_pre_transform"
-            if source_reread and mappings_rewrite_written_cells(mappings)
-            else ""
+            "source_reread_is_pre_transform" if source_reread and rewrites else ""
         ),
     )
     return attach_ladder_to_reconcile_report(report, ladder)
