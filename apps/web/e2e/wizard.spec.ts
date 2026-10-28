@@ -47,9 +47,11 @@ test.describe("wizard baseline", () => {
 
     const primary = page.locator(".df2-xform-actions .df2-btn-primary");
     const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
-    // The primary fill is the --df-brand token — assert the resolved token,
-    // never a hex literal that goes stale on a brand repaint (UI-11).
-    expect(color).toBe(await tokenColor(page, "--df-brand"));
+    // The primary fill is the --df-action-bg token (#0f766e): white label text
+    // needs >= 4.5:1, which --df-brand (#0d9488, non-text accents only) misses;
+    // contrast.test.ts pins that. Assert the resolved token, never a hex
+    // literal that goes stale on a brand repaint (UI-11).
+    expect(color).toBe(await tokenColor(page, "--df-action-bg"));
 
     // Toasts are hidden in shoot(), so these shots are the step list itself.
     // The compose-step sentence is part of the pre-upgrade builder.
