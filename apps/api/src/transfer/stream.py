@@ -795,6 +795,18 @@ def _stream_database_transfer_impl(
             cursor_pk_source = incremental_tiebreak_column(
                 src_read_type, cursor_source_col, pk_source_cols
             )
+    if not pk_target_cols:
+        from services.copy_kafka_common import kafka_family_name
+        from services.primary_key import mapped_catalog_upsert_key
+
+        if kafka_family_name(dest_type) == "kafka":
+            # D88: with no declared identity, the source table's own primary
+            # key is the message key; append runs went out key=None, which
+            # breaks per-key ordering and log compaction downstream.
+            pk_source_cols, pk_target_cols = mapped_catalog_upsert_key(
+                (_src_rich_catalog[2] or {}).get("primary_key_columns"),
+                mappings,
+            )
     if requires_upsert(effective_sync) and not pk_target_cols:
         raise ValueError(
             f"Sync mode `{effective_sync}` requires primary_key for upsert; "
