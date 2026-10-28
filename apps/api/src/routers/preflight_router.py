@@ -41,7 +41,7 @@ class MappingItem(BaseModel):
     target_type: str | None = None
     source_type: str | None = None
 
-    @field_validator("target_type", "source_type")
+    @field_validator("target_type")
     @classmethod
     def _type_stamp_is_a_type(cls, value: str | None) -> str | None:
         from services.type_stamp_grammar import validate_mapping_type_stamps

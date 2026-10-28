@@ -48,8 +48,8 @@ _MODIFIER_WORDS = frozenset(
 #: Top-level words that introduce exactly one collation / charset name.
 _NAME_INTRODUCERS = frozenset({"COLLATE", "CHARSET", "SET"})
 
-#: Statement / column-clause keywords that never belong inside a type, at any
-#: depth. A type argument list holds numbers, element types and literals only.
+#: Statement / column-clause keywords that never belong in a type's top level.
+#: (Inside a balanced group they are legitimate struct field names.)
 _FORBIDDEN_WORDS = frozenset(
     {
         "ADD", "ALTER", "AS", "ATTACH", "CALL", "CASCADE", "CHECK", "COMMENT",
@@ -58,6 +58,15 @@ _FORBIDDEN_WORDS = frozenset(
         "INSERT", "INTO", "KEY", "MERGE", "ON", "PRAGMA", "PRIMARY",
         "REFERENCES", "RENAME", "REPLACE", "REVOKE", "SELECT", "TABLE",
         "TRUNCATE", "UNION", "UNIQUE", "UPDATE", "USING", "VALUES", "WHERE",
+    }
+)
+
+#: Statement verbs: refused even inside a type argument list.
+_STATEMENT_WORDS = frozenset(
+    {
+        "ALTER", "ATTACH", "CALL", "COPY", "CREATE", "DELETE", "DETACH", "DROP",
+        "EXEC", "EXECUTE", "GRANT", "INSERT", "MERGE", "PRAGMA", "REVOKE",
+        "SELECT", "TRUNCATE", "UNION", "UPDATE",
     }
 )
 
@@ -127,8 +136,14 @@ def type_stamp_violation(stamp: object) -> str | None:
     # "done" (a collation name was read; only nothing more may follow).
     state = "start"
     for kind, value in tokens:
-        if kind == "word" and value.upper() in _FORBIDDEN_WORDS:
-            return f"keyword {value.upper()} is not part of a type"
+        if kind == "word":
+            upper = value.upper()
+            # Inside a balanced group a clause word is an argument or a field
+            # name (``STRUCT<key STRING, comment STRING>``, ``ROW(value INT)``):
+            # it cannot close the group, so it cannot start another clause.
+            # Statement verbs are refused at any depth.
+            if upper in (_STATEMENT_WORDS if stack else _FORBIDDEN_WORDS):
+                return f"keyword {upper} is not part of a type"
         if stack:
             if value in _OPENERS and kind == "punct":
                 stack.append(_OPENERS[value])
@@ -205,7 +220,10 @@ def require_safe_type_stamps(stamps: Iterable[object], *, context: str = "") -> 
 
 
 #: Mapping keys whose value is a type carrier that can reach DDL.
-MAPPING_TYPE_KEYS = ("target_type", "dest_type", "source_type", "type")
+#: ``source_type`` / ``type`` describe the source side (Arrow ``timestamp[us,
+#: tz=Asia/Kolkata]``, ``string|null``, Mongo mixed types) and are never pasted
+#: into DDL, so they are not judged here; the writers re-check what they emit.
+MAPPING_TYPE_KEYS = ("target_type", "dest_type")
 
 
 def validate_mapping_type_stamps(mappings: Iterable[Any] | None, *, context: str = "mapping") -> None:

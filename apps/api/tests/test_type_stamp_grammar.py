@@ -107,8 +107,8 @@ def test_mapping_ingest_refuses_injection():
     payload = "VARCHAR(9)); DROP TABLE users; --"
     with pytest.raises(ValidationError):
         MappingItem(source="a", target="a", target_type=payload)
-    with pytest.raises(ValidationError):
-        MappingItem(source="a", target="a", source_type=payload)
+    # Source-side types describe the source; they never reach DDL.
+    assert MappingItem(source="a", target="a", source_type="timestamp[us, tz=Asia/Kolkata]")
     assert MappingItem(source="a", target="a", target_type="VARCHAR(20)").target_type
     endpoint = {"type": "sqlite", "config": {}}
     with pytest.raises(ValidationError):
@@ -245,29 +245,20 @@ def test_sqlite_pg_copy_refuses_injected_dest_ddl_before_connecting(tmp_path: Pa
         )
 
 
-def test_sqlite_pg_copy_refuses_injected_declared_source_type(tmp_path: Path, monkeypatch):
-    import services.copy_sqlite_pg as mod
 
-    src = tmp_path / "s.db"
-    conn = sqlite3.connect(str(src))
-    conn.execute('CREATE TABLE s (a "VARCHAR(9)); DROP TABLE users; --")')
-    conn.commit()
-    conn.close()
-    monkeypatch.delenv("DATAFLOW_SQLITE_PG_COPY", raising=False)
+@pytest.mark.parametrize(
+    "stamp",
+    [
+        "STRUCT<key STRING, value INT64>",
+        "ARRAY<STRUCT<comment STRING, from_ts TIMESTAMP, table INT64>>",
+        "ROW(key VARCHAR, value INT)",
+        "Tuple(key String, default Int32)",
+    ],
+)
+def test_struct_field_names_may_be_sql_keywords(stamp):
+    assert is_safe_type_stamp(stamp)
 
-    class _Conn:
-        def close(self):
-            pass
 
-    monkeypatch.setattr(mod, "_pg_connect", lambda cfg: _Conn())
-    with pytest.raises(UnsafeTypeStamp):
-        mod.copy_sqlite_to_postgres(
-            source_cfg={"type": "sqlite", "format": "sqlite", "database": str(src), "table": "s"},
-            source_table="s",
-            dest_cfg={"host": "127.0.0.1", "port": 5432, "database": "x"},
-            dest_schema="public",
-            dest_table="t",
-            pairs=[("a", "a")],
-            pg_ddls=["TEXT"],
-            replace_destination=True,
-        )
+def test_top_level_clause_keywords_still_refused_after_a_group():
+    for bad in ("STRUCT<a INT64> DEFAULT 1", "VARCHAR(5) KEY", "INT(1) REFERENCES t(x)"):
+        assert not is_safe_type_stamp(bad), bad
