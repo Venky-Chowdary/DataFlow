@@ -12,9 +12,28 @@ from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from services.audit_coverage import record_security_event
-from services.workspace_access import tenant_scope
+from services.workspace_access import tenant_scope as _tenant_scope
 
 router = APIRouter(prefix="/audit", tags=["Audit"])
+
+
+def tenant_scope(request: Request):
+    """The request's tenant scope; a header naming a workspace the caller is not
+    in is a 403 that is itself an audit event (authz.denied, cross_workspace)."""
+    try:
+        return _tenant_scope(request)
+    except HTTPException as exc:
+        if exc.status_code == 403:
+            from services.audit_coverage import record_authz_denial
+
+            request.state.workspace_header_rejected = True
+            record_authz_denial(
+                request,
+                required_permission="audit.read",
+                effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+                reason="cross_workspace",
+            )
+        raise
 
 
 def audit_export_honesty() -> dict[str, object]:
