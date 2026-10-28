@@ -149,6 +149,51 @@ def consumed_reached_binlog_head(
     return consumed_at >= head_at
 
 
+_ROLE_GRANT = re.compile(r"^GRANT\s+(`[^`]+`(?:@`[^`]*`)?(?:\s*,\s*`[^`]+`(?:@`[^`]*`)?)*)\s+TO\s", re.I)
+_GLOBAL_GRANT = re.compile(r"^GRANT\s+(.+?)\s+ON\s+\*\.\*\s+TO\s", re.I)
+#: Global privileges that satisfy each binlog requirement (``ALL PRIVILEGES``
+#: satisfies both). SUPER and MariaDB's BINLOG MONITOR also allow SHOW MASTER STATUS.
+_BINLOG_PRIVILEGES = {
+    "REPLICATION SLAVE": {"REPLICATION SLAVE"},
+    "REPLICATION CLIENT": {"REPLICATION CLIENT", "SUPER", "BINLOG MONITOR"},
+}
+
+
+def _global_privileges(cur: Any, statement: str) -> tuple[set[str], list[str]]:
+    """Global (``*.*``) privileges and role names listed by a SHOW GRANTS statement."""
+    cur.execute(statement)
+    privileges: set[str] = set()
+    roles: list[str] = []
+    for (line,) in cur.fetchall():
+        text = str(line).strip()
+        role_match = _ROLE_GRANT.match(text)
+        if role_match:
+            roles.extend(part.strip() for part in role_match.group(1).split(","))
+            continue
+        global_match = _GLOBAL_GRANT.match(text)
+        if global_match:
+            privileges.update(p.strip().upper() for p in global_match.group(1).split(","))
+    return privileges, roles
+
+
+def _missing_replication_privileges(cur: Any) -> list[str]:
+    """Binlog privileges the current user lacks; empty when satisfied or unknowable."""
+    try:
+        privileges, roles = _global_privileges(cur, "SHOW GRANTS FOR CURRENT_USER()")
+        if roles:
+            privileges |= _global_privileges(
+                cur, f"SHOW GRANTS FOR CURRENT_USER() USING {', '.join(roles)}"
+            )[0]
+    except Exception as exc:
+        _logger.warning("MySQL CDC grant check inconclusive: %s", exc)
+        return []
+    if "ALL PRIVILEGES" in privileges or "ALL" in privileges:
+        return []
+    return [
+        name for name, accepted in _BINLOG_PRIVILEGES.items() if not privileges & accepted
+    ]
+
+
 def _serialize(value: Any) -> str:
     from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
 
@@ -329,9 +374,10 @@ class MySqlChangeStreamCdc:
     def is_available(self) -> bool:
         """True when binlog is ON + ROW format and pymysqlreplication is importable.
 
-        Stream open is best-effort: missing REPLICATION privileges still return
-        True when server vars are correct so CI/integration can proceed; poll()
-        surfaces privilege errors clearly.
+        Also False when the connecting user lacks ``REPLICATION SLAVE`` or
+        ``REPLICATION CLIENT`` (D176): the snapshot would otherwise commit and
+        the run die afterwards on error 1227. When the grants cannot be read
+        the check is inconclusive and does not block; poll() still raises.
 
         A ``False`` answer records :attr:`unavailable_reason` so the caller can
         separate "this server does not write a ROW binlog" (degrade, declared)
@@ -373,6 +419,14 @@ class MySqlChangeStreamCdc:
                     raise RuntimeError(
                         f"binlog_row_image={row[1]} — FULL required so upserts do not NULL-wipe"
                     )
+                missing = _missing_replication_privileges(cur)
+                if missing:
+                    conn.close()
+                    raise RuntimeError(
+                        f"the MySQL user needs REPLICATION SLAVE and REPLICATION CLIENT "
+                        f"on *.* to read the binlog; missing {' and '.join(missing)} "
+                        "(access denied for binlog streaming, error 1227)"
+                    )
             conn.close()
 
             try:
@@ -382,7 +436,7 @@ class MySqlChangeStreamCdc:
                 stream = BinLogStreamReader(**kwargs)
                 stream.close()
             except Exception as exc:
-                # Vars OK — treat as available; poll will raise with detail.
+                # Vars and grants OK — treat as available; poll will raise with detail.
                 _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return True
         except Exception as exc:
