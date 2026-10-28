@@ -438,6 +438,24 @@ def _is_lossless_text_or_numeric_widening(
         return False
 
 
+def _json_text_into_json_column(src_logical: str, tgt_logical: str, samples: list[str]) -> bool:
+    """Text whose every sampled value parses as JSON, onto a JSON/JSONB column.
+
+    That is the document load itself (``payload`` text onto an existing
+    JSONB), not a cross-family guess; text that does not parse stays weak.
+    """
+    if src_logical not in {"string", "text"} or tgt_logical != "json" or not samples:
+        return False
+    import json
+
+    try:
+        for raw in samples:
+            json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def classify_mapping_confidence(
     mapping: dict,
     *,
@@ -485,6 +503,7 @@ def classify_mapping_confidence(
     safe_promo = (
         (src_logical, tgt_logical) in _SAFE_PROMOTIONS
         or sanctioned_carrier
+        or _json_text_into_json_column(src_logical, tgt_logical, samples)
         or (
             not is_identity
             and not type_same

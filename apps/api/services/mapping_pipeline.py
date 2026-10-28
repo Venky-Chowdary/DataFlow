@@ -231,6 +231,23 @@ def _passthrough_identity_transform(
     name-triggered rewrite on PK / cursor / FK columns silently mutates
     identity values and the checkpoint contract (QA T10).
     """
+    if (
+        transform in {"datetime", "date", "time"}
+        and not user_override
+        and not create_new
+        and strategy not in {"identity_passthrough", "create_compatible_new"}
+    ):
+        # Date-looking text in a text column of an existing table (``note``,
+        # ``long_txt``) stays text: the sample-inferred datetime parse made a
+        # "custom transform" and held the exact-name column at G4 (D159).
+        try:
+            if (
+                normalize_logical_type(src_type) in _TEXT_CARRIER_LOGICALS
+                and normalize_logical_type(tgt_type) in _TEXT_CARRIER_LOGICALS
+            ):
+                return "none"
+        except Exception:
+            return transform
     if user_override or transform not in _VALUE_REWRITING_TRANSFORMS:
         return transform
     identity_named = bool(source) and bool(target) and (
