@@ -281,7 +281,7 @@ def test_live_mongo_sqlserver_empty_string_and_null_preserved():
         ss.close()
 
 
-def test_live_mongo_sqlserver_skip_when_dest_count_matches():
+def test_live_mongo_sqlserver_equal_count_append_declines():
     pytest.importorskip("pymongo")
     ss = _ss_connect()
     tag = uuid.uuid4().hex[:8]
@@ -303,18 +303,20 @@ def test_live_mongo_sqlserver_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_mongo_to_sqlserver(
-            source_cfg=_mongo_cfg(mid),
-            source_table=mid,
-            dest_cfg=_ss_cfg(),
-            dest_schema="dbo",
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            sqlserver_ddls=["BIGINT", "NVARCHAR(32)"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        # A Mongo source has no PK-range proof that an occupied SQL Server
+        # destination holds the same rows, so an append never skips on a
+        # matching COUNT: the route declines to the row path.
+        with pytest.raises(FastPathUnavailable, match="occupied SQL Server dest"):
+            copy_mongo_to_sqlserver(
+                source_cfg=_mongo_cfg(mid),
+                source_table=mid,
+                dest_cfg=_ss_cfg(),
+                dest_schema="dbo",
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                sqlserver_ddls=["BIGINT", "NVARCHAR(32)"],
+                replace_destination=False,
+            )
         assert _ss_count(dest) == 800
     finally:
         cur = ss.cursor()
