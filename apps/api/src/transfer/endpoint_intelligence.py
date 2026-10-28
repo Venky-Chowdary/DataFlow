@@ -964,17 +964,22 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 prefer_bson_source_carrier,
             )
 
-            bson_types = mongodb_bson_column_types(records)
-            homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(records)
             # Match Execute path (mongodb_reader): expand nested docs + string
             # matrix via cell_to_string so Map/Validate columns ≡ write headers.
+            # Expansion keeps the BSON leaves, so the carriers are read from the
+            # expanded documents: a nested date (``customer.since``) is a BSON
+            # date like a top-level one, and read from the unexpanded sample it
+            # was typed from its stringified, zoneless text (TIMESTAMP against
+            # the top-level TIMESTAMPTZ).
             from services.json_intelligence import expand_mongo_documents
             from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
+            records = expand_mongo_documents(records, cfg=cfg)
+            bson_types = mongodb_bson_column_types(records)
+            homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(records)
             for doc in records:
                 if isinstance(doc, dict) and "_id" in doc:
                     doc["_id"] = str(doc["_id"])
-            records = expand_mongo_documents(records, cfg=cfg)
 
             # Union keys across the sample (sparse nested fields mid-batch).
             columns: list[str] = []

@@ -3103,12 +3103,16 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                     columns[key] = {
                         "name": key,
                         "inferred_type": _sample_logical_type(val, key),
-                        "nullable": val is None,
+                        # A document store enforces no NOT NULL but ``_id``: a
+                        # field the sampled documents carry is still NULL (absent)
+                        # in the next one that omits it, and in every row an
+                        # empty sub-document flattens to. Reporting it required
+                        # made the destination column NOT NULL and the sparse row
+                        # an EMPTY_VALUE_NOT_NULLABLE block (D147).
+                        "nullable": key != "_id",
                         "samples": [sample_text] if sample_text else [],
                     }
                 else:
-                    if val is None:
-                        columns[key]["nullable"] = True
                     samples = columns[key].setdefault("samples", [])
                     if sample_text and len(samples) < 8 and sample_text not in samples:
                         samples.append(sample_text)
