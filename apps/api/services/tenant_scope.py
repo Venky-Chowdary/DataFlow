@@ -248,7 +248,13 @@ def resolve_tenant_scope(request: Any, requested_workspace_id: str | None = None
 def bind_tenant_scope(scope: TenantScope | None) -> Iterator[None]:
     """Bind ``scope`` for store-level reads in this request/turn (see
     ``services.workspace_filter.bound_workspace_filter``)."""
-    with bound_workspace_filter(scope.filter if scope is not None else None):
+    stamp = ""
+    if scope is not None:
+        try:
+            stamp = scope.target_workspace_id(write=True)
+        except HTTPException:
+            stamp = ""
+    with bound_workspace_filter(scope.filter if scope is not None else None, stamp):
         yield
 
 

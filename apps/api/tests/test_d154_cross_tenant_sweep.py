@@ -44,6 +44,8 @@ _MUST_SHOW_A = (
     "/api/v1/transforms/",
     "/api/v1/audit/events",
     "/api/v1/ops/dlq",
+    "/api/v1/preflight/runs",
+    "/api/v1/transfer/plans",
 )
 
 
@@ -146,6 +148,8 @@ def test_id_addressed_reads_of_a_are_refused_for_b(world):
         f"/api/v1/contracts/{ids['a_contract']}",
         f"/api/v1/transforms/{ids['a_project']}",
         f"/api/v1/transform-library/{ids['a_recipe']}",
+        f"/api/v1/preflight/runs/{ids['a_preflight_run']}",
+        f"/api/v1/transfer/plans/{ids['a_plan']}",
     )
     clients = [(world.b, {}), (world.b, {"X-Workspace-Id": world.ws_b})]
     if world.m is not None:
@@ -168,3 +172,16 @@ def test_b_cannot_plan_or_apply_a_resource_through_gitops(world):
         for path in ("/api/v1/schedules/gitops/plan", "/api/v1/schedules/gitops/apply"):
             response = client.post(path, json=manifest)
             assert response.status_code in {403, 404}, (path, response.status_code, response.text)
+
+
+def test_shape_drafts_are_per_workspace(world):
+    route = f"{owner_marker('a', world.tag)}-src→dst"
+    mine = world.a.get("/api/v1/shape/drafts", params={"route_key": route})
+    assert mine.json()["draft"] is not None
+    # B reading, overwriting and deleting the same route name touches only B's.
+    assert world.b.get("/api/v1/shape/drafts", params={"route_key": route}).json()["draft"] is None
+    saved = world.b.put("/api/v1/shape/drafts", json={"route_key": route, "recipe": {"steps": []}})
+    assert saved.status_code == 200, saved.text
+    assert world.b.delete("/api/v1/shape/drafts", params={"route_key": route}).status_code == 200
+    assert world.a.get("/api/v1/shape/drafts", params={"route_key": route}).json()["draft"] is not None
+

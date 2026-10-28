@@ -75,13 +75,29 @@ _bound: contextvars.ContextVar[WorkspaceFilter | None] = contextvars.ContextVar(
 )
 
 
+# The workspace a row written during this request belongs to ("" = unscoped).
+_bound_stamp: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "bound_workspace_stamp", default=""
+)
+
+
 @contextlib.contextmanager
-def bound_workspace_filter(workspace_filter: WorkspaceFilter | None) -> Iterator[None]:
+def bound_workspace_filter(
+    workspace_filter: WorkspaceFilter | None, stamp: str = ""
+) -> Iterator[None]:
     token = _bound.set(workspace_filter)
+    stamp_token = _bound_stamp.set(stamp)
     try:
         yield
     finally:
+        _bound_stamp.reset(stamp_token)
         _bound.reset(token)
+
+
+def current_workspace_stamp() -> str:
+    """The workspace for a row this request writes into a store that has no
+    explicit workspace parameter (preflight runs, plans, drafts)."""
+    return _bound_stamp.get()
 
 
 def current_workspace_filter() -> WorkspaceFilter | None:
