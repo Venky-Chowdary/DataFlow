@@ -47,6 +47,14 @@ def world(monkeypatch):
     monkeypatch.setattr(
         adapters, "_lookup_saved_connector", lambda cid, workspace_id=None: saved.get(cid)
     )
+    import services.connector_store as connector_store
+
+    # The workspace-scoped existence check refresh_saved_endpoint runs first.
+    monkeypatch.setattr(
+        connector_store,
+        "get_connector",
+        lambda cid, workspace_id=None: object() if cid in saved else None,
+    )
     store = MemoryMongoDBService()
     import services.mongodb_service as mongo_mod
     import importlib
@@ -111,10 +119,10 @@ def test_replay_of_a_deleted_connector_is_refused_not_guessed(world):
     del saved["c-src"]
     resp = _client().post(f"/api/v1/connectors/jobs/{job_id}/rerun")
     assert resp.status_code == 409, resp.text
-    assert "c-src" in resp.text
+    assert "Connector c-src no longer exists" in resp.text
 
 
-def test_inline_endpoints_and_explicit_database_overrides_keep_their_stored_config():
+def test_inline_endpoints_and_explicit_database_overrides_keep_their_stored_config(world):
     inline = EndpointConfig(
         kind="database", format="mysql", host="db.internal", port=3307,
         database="inline_db", username="u", password="p", table="t",
@@ -125,15 +133,27 @@ def test_inline_endpoints_and_explicit_database_overrides_keep_their_stored_conf
         kind="database", format="mysql", connector_id="c-src", host="stale", database="chosen",
         extra={"destination_identity": {"authority": "studio_override", "database": "chosen"}},
     )
-    adapters_saved = {"c-src": _saved()}
-    original = adapters._lookup_saved_connector
-    adapters._lookup_saved_connector = lambda cid, workspace_id=None: adapters_saved.get(cid)
-    try:
-        refreshed = adapters.refresh_saved_endpoint(overridden)
-    finally:
-        adapters._lookup_saved_connector = original
+    refreshed = adapters.refresh_saved_endpoint(overridden)
     assert refreshed.host == "10.0.0.1"  # the connection follows the connector
     assert refreshed.database == "chosen"  # the operator's choice stays
+
+
+def test_a_connector_outside_the_jobs_workspace_is_refused(world, monkeypatch):
+    """Existence is checked in the job's workspace, never via an unscoped fallback."""
+    import services.connector_store as connector_store
+
+    seen: list = []
+
+    def scoped(cid, workspace_id=None):
+        seen.append((cid, workspace_id))
+        return object() if workspace_id == "ws-a" else None
+
+    monkeypatch.setattr(connector_store, "get_connector", scoped)
+    endpoint = EndpointConfig(kind="database", format="mysql", connector_id="c-src", table="t")
+    with pytest.raises(ValueError, match="Connector c-src no longer exists"):
+        adapters.refresh_saved_endpoint(endpoint, workspace_id="ws-b")
+    assert seen == [("c-src", "ws-b")]
+    assert adapters.refresh_saved_endpoint(endpoint, workspace_id="ws-a").host == "10.0.0.1"
 
 
 def test_rerun_preview_names_source_and_destination(world, monkeypatch):
