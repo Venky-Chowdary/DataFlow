@@ -3040,7 +3040,7 @@ def verify_kafka_topic(
     producer wrote through (D83).
     """
     try:
-        from connectors.kafka_reader import read_topic_batch
+        from connectors.kafka_reader import read_topic_to_end
 
         cfg = {
             **(security_options or {}),
@@ -3051,11 +3051,13 @@ def verify_kafka_topic(
             "connection_string": connection_string,
             "database": topic,
             "table": topic,
-            "group_id": f"dataflow-gate8-verify-{abs(hash(topic)) % 10_000_000}",
-            "auto_offset_reset": "earliest",
             "schema_registry_url": schema_registry_url,
         }
-        batch, _cursor = read_topic_batch(
+        # The whole log up to its end offsets, not one poll batch: a batch
+        # under-counted every large produce and failed a job whose rows were
+        # all written (D152). An unfinished read is unverified (-1), never a
+        # short count.
+        batch, complete = read_topic_to_end(
             cfg=cfg,
             topic=topic,
             columns=target_columns,
@@ -3065,6 +3067,9 @@ def verify_kafka_topic(
         rows = list(batch.rows or [])
         if _saas_readback_truncated("Kafka", limit, len(rows)):
             return -1, ""
+        if not complete:
+            logger.warning("Kafka read-back of %s did not reach the end offsets", topic)
+            return -1, ""
         dict_rows: list[Any] = []
         for row in rows:
             if isinstance(row, dict):
@@ -3073,7 +3078,10 @@ def verify_kafka_topic(
                 dict_rows.append(
                     {headers[i]: row[i] if i < len(row) else None for i in range(len(headers))}
                 )
-        columns = headers or target_columns or []
+        # The digest is over what the job produced. The reader's broker
+        # envelope (_kafka_topic/_partition/_offset/_key) is provenance the
+        # source never had; digesting it failed every write (D152).
+        columns = list(target_columns or []) or headers
         return len(dict_rows), canonical_checksum_from_iter(
             dict_rows,
             columns,

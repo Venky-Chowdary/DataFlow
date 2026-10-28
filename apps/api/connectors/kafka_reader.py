@@ -368,33 +368,23 @@ def _records_to_batch(
     return batch
 
 
-def sample_topic_batch(
-    *,
-    cfg: dict[str, Any],
-    topic: str,
-    limit: int = 50,
-) -> ReadBatch:
-    """Read up to ``limit`` records that are already on the topic.
+def _registry_url(cfg: dict[str, Any]) -> str:
+    return str(cfg.get("schema_registry_url") or cfg.get("registry_url") or "").strip()
 
-    The transfer reader subscribes with the pipeline consumer group. After a
-    load that group sits at the end, and the first poll during a rebalance
-    is empty, so a sample reported 0 rows on a topic that had data. This
-    assigns the partitions and seeks to the tail. It does not join that
-    group and it does not commit.
+
+def _open_assigned(
+    cfg: dict[str, Any], topic_name: str
+) -> tuple[Any, list[Any], dict[Any, int], dict[Any, int]]:
+    """A consumer assigned every partition of ``topic_name``, with its offsets.
+
+    Returns ``(consumer, partitions, beginning, end)``; no partitions when the
+    topic does not exist. It joins no consumer group and never commits. The
+    caller closes the consumer.
     """
-    topic_name = (topic or cfg.get("database") or cfg.get("table") or "").strip()
-    if not topic_name:
-        raise ValueError("Kafka source topic name required")
     try:
         from kafka import KafkaConsumer, TopicPartition
     except ImportError as exc:
-        raise ImportError("kafka-python is required to sample a Kafka topic") from exc
-
-    from connectors.kafka_debezium_bridge import kafka_message_meta, kafka_value_to_row
-
-    registry_url = str(
-        cfg.get("schema_registry_url") or cfg.get("registry_url") or ""
-    ).strip()
+        raise ImportError("kafka-python is required to read a Kafka topic") from exc
     from services.copy_kafka_common import kafka_classified_bootstrap
 
     with kafka_classified_bootstrap(cfg):
@@ -418,11 +408,99 @@ def sample_topic_batch(
                 logger.debug("Kafka metadata refresh failed: %s", exc)
             parts = consumer.partitions_for_topic(topic_name)
         if not parts:
-            return _records_to_batch([], None, 0)
+            return consumer, [], {}, {}
         tps = [TopicPartition(topic_name, int(part)) for part in sorted(parts)]
         consumer.assign(tps)
         begin = consumer.beginning_offsets(tps) or {}
         end = consumer.end_offsets(tps) or {}
+        return consumer, tps, begin, end
+    except BaseException:
+        consumer.close()
+        raise
+
+
+#: How long a read-to-end may take before it reports the topic unread.
+_READ_TO_END_S = 120.0
+
+
+def read_topic_to_end(
+    *,
+    cfg: dict[str, Any],
+    topic: str,
+    columns: list[str] | None = None,
+    limit: int,
+) -> tuple[ReadBatch, bool]:
+    """Every message from the log start to the end offsets at call time.
+
+    For Gate-8 read-back of a Kafka destination. The transfer reader stops
+    after a few polls (one batch), so a read-back of a 3,000-message produce
+    saw 2,500 and failed a job whose every row was written — an invitation
+    to a duplicating retry (D152). This reads each partition up to its end
+    offset. Returns ``(batch, complete)``; ``complete`` is False when ``limit``
+    or the time budget stopped the read first, so the caller reports the
+    topic unverified instead of under-counted. No group, no commit.
+    """
+    topic_name = (topic or cfg.get("database") or cfg.get("table") or "").strip()
+    if not topic_name:
+        raise ValueError("Kafka topic name required")
+    from connectors.kafka_debezium_bridge import kafka_message_meta, kafka_value_to_row
+
+    consumer, tps, begin, end = _open_assigned(cfg, topic_name)
+    registry_url = _registry_url(cfg)
+    try:
+        remaining = {
+            tp: int(end.get(tp, 0) or 0)
+            for tp in tps
+            if int(end.get(tp, 0) or 0) > int(begin.get(tp, 0) or 0)
+        }
+        for tp in remaining:
+            consumer.seek(tp, int(begin.get(tp, 0) or 0))
+        records: list[dict[str, Any]] = []
+        deadline = time.monotonic() + _READ_TO_END_S
+        while remaining and len(records) < limit and time.monotonic() < deadline:
+            polled = consumer.poll(timeout_ms=800, max_records=500) or {}
+            for tp, messages in polled.items():
+                stop = remaining.get(tp)
+                for msg in messages:
+                    if stop is None or int(msg.offset) >= stop:
+                        break
+                    row = kafka_value_to_row(
+                        msg.value, registry_url=registry_url, meta=kafka_message_meta(msg)
+                    )
+                    if row:
+                        records.append(row)
+            for tp in list(remaining):
+                if consumer.position(tp) >= remaining[tp]:
+                    del remaining[tp]
+        return _records_to_batch(records, columns, None), not remaining
+    finally:
+        consumer.close()
+
+
+def sample_topic_batch(
+    *,
+    cfg: dict[str, Any],
+    topic: str,
+    limit: int = 50,
+) -> ReadBatch:
+    """Read up to ``limit`` records that are already on the topic.
+
+    The transfer reader subscribes with the pipeline consumer group. After a
+    load that group sits at the end, and the first poll during a rebalance
+    is empty, so a sample reported 0 rows on a topic that had data. This
+    assigns the partitions and seeks to the tail. It does not join that
+    group and it does not commit.
+    """
+    topic_name = (topic or cfg.get("database") or cfg.get("table") or "").strip()
+    if not topic_name:
+        raise ValueError("Kafka source topic name required")
+    from connectors.kafka_debezium_bridge import kafka_message_meta, kafka_value_to_row
+
+    consumer, tps, begin, end = _open_assigned(cfg, topic_name)
+    registry_url = _registry_url(cfg)
+    try:
+        if not tps:
+            return _records_to_batch([], None, 0)
         window = max(1, int(limit))
         for tp in tps:
             start = max(int(begin.get(tp, 0) or 0), int(end.get(tp, 0) or 0) - window)
