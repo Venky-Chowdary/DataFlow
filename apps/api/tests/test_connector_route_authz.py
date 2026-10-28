@@ -86,7 +86,9 @@ def _member(admin: TestClient, workspace_id: str, email: str, role: str = "edito
 
 
 def _sqlite(tmp_path: Path, name: str) -> str:
-    db_path = tmp_path / f"{name}.db"
+    # connectors may not open files in the service data dir, only its sqlite/ volume
+    (tmp_path / "sqlite").mkdir(exist_ok=True)
+    db_path = tmp_path / "sqlite" / f"{name}.db"
     conn = sqlite3.connect(db_path)
     conn.execute("CREATE TABLE secrets (id INTEGER PRIMARY KEY, value TEXT)")
     conn.execute("INSERT INTO secrets (id, value) VALUES (1, 'TENANT_B_ROW_SENTINEL')")

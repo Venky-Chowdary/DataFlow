@@ -195,7 +195,10 @@ def seed(*, tag: str, ws_a: str, a_email: str, memory: Any, data_dir: Any = None
             # A connector that really connects: a SQLite file with a table and rows.
             import sqlite3
 
-            db_path = data_dir / f"{marker}.sqlite"
+            # The service data directory is off-limits to connectors; its
+            # ``sqlite`` volume sub-directory is where connector files belong.
+            (data_dir / "sqlite").mkdir(parents=True, exist_ok=True)
+            db_path = data_dir / "sqlite" / f"{marker}.sqlite"
             with sqlite3.connect(db_path) as db:
                 db.execute(f"CREATE TABLE {marker}_tbl (id INTEGER, note TEXT)")
                 db.executemany(
