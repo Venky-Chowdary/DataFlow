@@ -22,7 +22,7 @@ from services.foreign_key_metadata import probe_foreign_keys
 from services.identity_carry import apply_identity_probe
 from services.physical_storage_metadata import probe_physical_storage
 from services.secondary_indexes import probe_secondary_indexes
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, evidence_text, json_default
 
 logger = logging.getLogger(__name__)
 _si = sys.modules[__name__]
@@ -3096,7 +3096,7 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(docs)
         for doc in docs:
             for key, val in list(doc.items()):
-                sample_text = "" if val is None else str(val)
+                sample_text = "" if val is None else evidence_text(val)
                 if key not in columns:
                     # Null-first fields stay untyped until a non-null sample
                     # votes — do not invent TEXT from BSON null alone.

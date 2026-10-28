@@ -254,8 +254,25 @@ def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
     like non-numeric strings, so Map invented a lossy ``<col>_text`` LONGTEXT
     destination for a column whose declared type was perfectly representable.
     """
-    out = [str(v).strip() for v in (values or []) if not is_null_evidence(v)]
+    out = [evidence_text(v) for v in (values or []) if not is_null_evidence(v)]
     return out[:limit] if limit else out
+
+
+def evidence_text(value: Any) -> str:
+    """One sample cell as the text a type parser reads.
+
+    A driver hands a JSON / JSONB / document cell over already parsed, and
+    ``str()`` of a dict is a Python repr (``{'k': 1}``): not JSON, so the sample
+    validator failed every cell of a column whose values were fine and demoted
+    DataFlow's own embedded-document field on run 2 (D179). Containers carry as
+    the JSON document they are.
+    """
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json_dumps_exact_numbers(value)
+        except (TypeError, ValueError):
+            pass
+    return str(value).strip()
 
 
 def public_mapped_cell(value: Any, *, dense_null: bool = False) -> Any:
