@@ -66,6 +66,10 @@ CASES = {
     "D79_varbit": ("varbit", "B'101'", "B'1'"),
     # D75 — the checksum read-back decoded JSON ``null`` as SQL NULL.
     "D75_json_null": ("jsonb", "'null'", "'[]'"),
+    # D74 — a high-precision JSON number was rewritten as a JSON string.
+    "D74_json_big_number": (
+        "jsonb", "'{\"a\": 12345678901234567890.12345678901234567890}'", "'[1.5, 2]'"
+    ),
 }
 
 

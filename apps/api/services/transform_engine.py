@@ -1483,14 +1483,14 @@ def _parse_json(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
+        from services.value_serializer import json_dumps_exact_numbers
+
         try:
             # JSONDecodeError subclasses ValueError — catch it first so bare
             # scalars wrap as JSON string literals (Mongo mixed fields → VARIANT).
             # Numbers parse exactly: the stdlib routes every non-integer through
             # binary64, which silently dropped digits off a DECIMAL landing in a
-            # JSON / JSONB / VARIANT / SUPER column. Values binary64 holds exactly
-            # still serialize as JSON numbers; the rest keep every digit as exact
-            # text, per this codebase's Decimal-to-JSON policy.
+            # JSON / JSONB / VARIANT / SUPER column.
             parsed = json_loads_exact(value, parse_constant=_json_reject_nonfinite)
         except json.JSONDecodeError:
             # ``{bad json`` is a broken document, not a Mongo bare scalar.
@@ -1505,6 +1505,12 @@ def _parse_json(value: Any) -> str | None:
             raise
         except TypeError:
             parsed = value
+        else:
+            # D74 — a number the document stated stays a JSON number, every
+            # digit kept. The Decimal-as-string policy is for values with no
+            # JSON number of their own; applied here it rewrote
+            # ``12345678901234567890.1`` into the string ``"12345678901234567890.1"``.
+            return json_dumps_exact_numbers(parsed, separators=(",", ":"))
     elif isinstance(value, (dict, list, tuple, set, frozenset)):
         parsed = value
     else:
