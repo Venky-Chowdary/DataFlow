@@ -631,19 +631,36 @@ def adopt_inherited_mappings(
     That is silent column loss. A mismatch returns an identity map of this
     stream's own columns (each name written to itself). An empty inherited
     list is the same identity map, with no note.
+
+    The job's declared ``source_timezone`` is not another table's column cast:
+    it was stamped as ``assume_timezone:<zone>`` on the columns that carry a
+    zoneless instant, and the writer refuses a naive value for a ``TIMESTAMPTZ``
+    column without it (D177). A same-named column therefore keeps that transform
+    through the identity fallback.
     """
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+
     cols = [str(c).strip() for c in columns or [] if str(c).strip()]
     comparable = [c for c in cols if fold(c) != fold("_df_lsn")]
     mapped: set[str] = set()
+    declared_zone: dict[str, str] = {}
     for item in mappings or []:
         if not isinstance(item, Mapping):
             continue
         src = str(item.get("source") or "").strip()
         if src and fold(src) != fold("_df_lsn"):
             mapped.add(fold(src))
+            transform = str(item.get("transform") or "").strip()
+            if transform.lower().startswith(ASSUME_TIMEZONE_PREFIX):
+                declared_zone[fold(src)] = transform
     have = {fold(c) for c in comparable}
     identity = [
-        {"source": c, "target": c, "confidence": 0.95}
+        {
+            "source": c,
+            "target": c,
+            "confidence": 0.95,
+            **({"transform": declared_zone[fold(c)]} if fold(c) in declared_zone else {}),
+        }
         for c in comparable
     ]
     if mapped and mapped == have:

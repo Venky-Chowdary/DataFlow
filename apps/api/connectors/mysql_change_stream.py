@@ -27,9 +27,15 @@ from services.cdc_schema_history import (
 )
 
 from connectors.mysql_conn import get_connection
-from connectors.mysql_reader import read_table_batch, read_table_scan_batch
+from connectors.mysql_reader import (
+    _instant_set_from_types,
+    _mysql_column_types,
+    read_table_batch,
+    read_table_scan_batch,
+)
 from connectors.sql_identifiers import quote_table_ref
 from services.cdc_cursor_gap import CdcBinlogGapError
+from services.timezone_policy import mysql_timestamp_instant_wire
 from services.value_serializer import WireCell, wire_cell
 
 _DDL_RE = re.compile(
@@ -213,10 +219,18 @@ def _missing_replication_privileges(cur: Any) -> list[str]:
     ]
 
 
-def _serialize(value: Any) -> str:
-    """One binlog cell as a wire cell (marked, so apply encodes it once)."""
+def _serialize(value: Any, *, instant: bool = False) -> str:
+    """One binlog/keyset cell as a wire cell (marked, so apply encodes it once).
+
+    ``instant`` is a MySQL ``TIMESTAMP`` column: its digits are the UTC instant
+    (binlog and a UTC-pinned session both hand back naive UTC), so the wire
+    carries the offset the way ``mysql_reader`` does. A ``DATETIME`` stays
+    zoneless wall-clock.
+    """
     if isinstance(value, (dict, list, tuple)):
         value = _decode_binlog_json(value)
+    if instant:
+        value = mysql_timestamp_instant_wire(value)
     if isinstance(value, datetime):
         return WireCell(value.isoformat())
     return wire_cell(value)
@@ -266,6 +280,8 @@ class MySqlChangeStreamCdc:
         # remapped every captured table's positional UNKNOWN_COLn keys into
         # the wrong columns, so deletes removed the wrong destination rows.
         self._column_names_cache: dict[str, list[str]] = {}
+        #: Per-table ``TIMESTAMP`` columns (instants on the wire), same keying.
+        self._instant_columns_cache: dict[str, frozenset[str]] = {}
         self.source_key = connection_fingerprint(
             {**cfg, "type": "mysql"},
             connector_id=str(cfg.get("connector_id") or ""),
@@ -862,7 +878,14 @@ class MySqlChangeStreamCdc:
                 cur.execute(sql, params)
                 rows = cur.fetchall() or []
                 headers = [d[0] for d in (cur.description or [])]
-            return [dict(zip(headers, row)) for row in rows]
+            instants = self._instant_columns(table)
+            return [
+                {
+                    h: mysql_timestamp_instant_wire(v) if h in instants else v
+                    for h, v in zip(headers, row)
+                }
+                for row in rows
+            ]
         finally:
             if close:
                 try:
@@ -1315,6 +1338,7 @@ class MySqlChangeStreamCdc:
         # whole cache would force every sibling table back through an ordinal
         # lookup against tables[0]'s columns.
         self._column_names_cache[self.table] = list(live["columns"].keys())
+        self._instant_columns_cache.pop(self.table, None)
         self.last_ddl_at = str(entry.get("recorded_at") or "") or self.last_ddl_at
         try:
             from services.cdc_mapping_review import flag_mapping_review
@@ -1381,6 +1405,31 @@ class MySqlChangeStreamCdc:
         self._column_names_cache[tbl] = cols
         return cols
 
+    def _instant_columns(self, table: str | None = None) -> frozenset[str]:
+        """``TIMESTAMP`` columns of one captured table (UTC instants on the wire).
+
+        A binlog row carries no column types, and a ``DATETIME`` and a
+        ``TIMESTAMP`` both decode to a naive ``datetime``. Without the catalog
+        type a ``TIMESTAMP`` reached the writer as zoneless wall-clock and a
+        ``TIMESTAMPTZ`` destination refused it (D177).
+        """
+        tbl = table or self.table
+        cached = self._instant_columns_cache.get(tbl)
+        if cached is not None:
+            return cached
+        found: frozenset[str] = frozenset()
+        try:
+            conn = self._conn()
+            try:
+                with conn.cursor() as cur:
+                    found = _instant_set_from_types(_mysql_column_types(cur, tbl))
+            finally:
+                conn.close()
+        except Exception:
+            _logger.debug("MySQL TIMESTAMP column lookup failed for %s", tbl, exc_info=True)
+        self._instant_columns_cache[tbl] = found
+        return found
+
     def _remap_positional(
         self, row: dict[str, Any], *, table: str | None = None
     ) -> dict[str, Any]:
@@ -1407,7 +1456,8 @@ class MySqlChangeStreamCdc:
         self, row: dict[str, Any], *, table: str | None = None
     ) -> dict[str, str]:
         row = self._remap_positional(row, table=table)
-        return {k: _serialize(v) for k, v in row.items()}
+        instants = self._instant_columns(table)
+        return {k: _serialize(v, instant=k in instants) for k, v in row.items()}
 
     def _pk_columns_for(self, table: str | None = None) -> list[str]:
         from services.cdc_snapshot_window import _pk_columns
