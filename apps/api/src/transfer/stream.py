@@ -73,12 +73,10 @@ from .adapters import (
 from .connector_capabilities import resolve_driver_type, source_read_driver
 from .job_quarantine import align_reported_rejects
 from .stream_row_accounting import (
-    _mark_raw_page,
     _raw_page_cursor,
     _raw_page_cursor_bounded,
     _raw_page_filtered,
     _raw_page_keyset,
-    _raw_page_marked,
     _raw_page_rows,
     stamp_incremental_no_op,
     reader_population,
@@ -455,18 +453,18 @@ def _stream_database_transfer_impl(
     Returns (rows_written, ddl_log, dest_summary, columns).
     """
     run = DbRunContext(
-        cfg=RunConfig(source=source, destination=destination, job_id=job_id, limit=limit, schema=schema),
+        cfg=RunConfig(source=source, destination=destination, job_id=job_id, limit=limit, schema=schema, mappings=mappings, shape_runner=shape_runner, source_filter=source_filter, validation_mode=validation_mode),
         cur=ReadCursors(),
         tally=RunTally(),
     )
     # A recipe that arrives as steps is built after this stream's columns are
     # known. Until then it still has to keep the run off a server-side COPY,
     # which would write the raw rows the operator asked to change.
-    pending_shape = shape_runner is not None or bool(shape_steps)
+    pending_shape = run.cfg.shape_runner is not None or bool(shape_steps)
     from .connector_capabilities import resolve_bind_dialect
     run.cfg.src_type = resolve_driver_type(run.cfg.source.format)
     run.cfg.src_read_type = _stream_source_read_driver(run.cfg.source.format)
-    dest_type = resolve_driver_type(run.cfg.destination.format)
+    run.cfg.dest_type = resolve_driver_type(run.cfg.destination.format)
     from connectors.sdk import get_descriptor
 
     sdk_descriptor = get_descriptor(run.cfg.src_type)
@@ -479,11 +477,11 @@ def _stream_database_transfer_impl(
         getattr(checkpoint, "cursor_value", None) if run.cfg.sdk_source else None
     )
     run.cfg.src_cfg = resolve_connector_config(run.cfg.source)
-    dest_cfg = resolve_connector_config(run.cfg.destination)
+    run.cfg.dest_cfg = resolve_connector_config(run.cfg.destination)
     # Gate-8 fingerprints must name the dialect the writer binds against, not
     # the driver family: generic_sql hides DuckDB/ClickHouse carrier rules.
-    dest_bind_dialect = resolve_bind_dialect(
-        run.cfg.destination.format, config_type=str(dest_cfg.get("type") or "")
+    run.cfg.dest_bind_dialect = resolve_bind_dialect(
+        run.cfg.destination.format, config_type=str(run.cfg.dest_cfg.get("type") or "")
     )
     from services.procedure_source import is_callable_source, stamp_callable_job_id
 
@@ -499,25 +497,24 @@ def _stream_database_transfer_impl(
         resolve_effective_sync_mode,
         resolve_incremental_read_scope,
         resolve_sync_contract,
-        row_in_run_window,
         set_watermark,
         source_bounds_cursor_reads,
     )
 
     contract = resolve_sync_contract(stream_contracts)
-    effective_sync = resolve_effective_sync_mode(
+    run.cfg.effective_sync = resolve_effective_sync_mode(
         sync_mode,
         contract.sync_mode if contract else None,
     )
-    run.cfg.incremental = requires_incremental(effective_sync)
+    run.cfg.incremental = requires_incremental(run.cfg.effective_sync)
     run.cfg.cursor_source_col = contract.cursor_field if contract else ""
-    pk_target_cols: list[str] = []
-    pk_source_cols: list[str] = []
+    run.cfg.pk_target_cols: list[str] = []
+    run.cfg.pk_source_cols: list[str] = []
     run.cfg.cursor_pk_source = ""
     if contract and contract.primary_key:
-        pk_source_cols = contract.primary_key_columns()
-        pk_target_cols = [
-            map_source_to_target(col, mappings) for col in pk_source_cols
+        run.cfg.pk_source_cols = contract.primary_key_columns()
+        run.cfg.pk_target_cols = [
+            map_source_to_target(col, run.cfg.mappings) for col in run.cfg.pk_source_cols
         ]
     if run.cfg.incremental and run.cfg.cursor_source_col:
         # Tie-break incremental watermarks with a stable source PK (Airbyte
@@ -527,34 +524,34 @@ def _stream_database_transfer_impl(
         from services.keyset_pagination import incremental_tiebreak_column
 
         run.cfg.cursor_pk_source = incremental_tiebreak_column(
-            run.cfg.src_read_type, run.cfg.cursor_source_col, pk_source_cols
+            run.cfg.src_read_type, run.cfg.cursor_source_col, run.cfg.pk_source_cols
         )
-    if not pk_target_cols:
+    if not run.cfg.pk_target_cols:
         from services.copy_kafka_common import kafka_family_name
-        if kafka_family_name(dest_type) == "kafka":
+        if kafka_family_name(run.cfg.dest_type) == "kafka":
             # A Kafka key is partitioning/compaction identity, not a merge
             # constraint — any declared identity (primary_key, upsert_key,
             # dedupe_key, merge_key) is the right produce key (D88).
             from services.sync_cursor import declared_identity_columns
-            pk_source_cols = declared_identity_columns(
+            run.cfg.pk_source_cols = declared_identity_columns(
                 SimpleNamespace(
                     stream_contracts=stream_contracts or [],
                     read_options={},
-                    source_filter=source_filter or {},
+                    source_filter=run.cfg.source_filter or {},
                 )
             )
-            pk_target_cols = [
-                map_source_to_target(c, mappings) for c in pk_source_cols
+            run.cfg.pk_target_cols = [
+                map_source_to_target(c, run.cfg.mappings) for c in run.cfg.pk_source_cols
             ]
-    if requires_upsert(effective_sync) and not pk_target_cols:
+    if requires_upsert(run.cfg.effective_sync) and not run.cfg.pk_target_cols:
         # No contract key, but the destination table may declare one. That is
         # catalog evidence, not a guess, so an upsert keyed on it resolves rows
         # on the same identity the destination already enforces.
-        pk_source_cols, pk_target_cols = _declared_destination_key_columns(
-            dest_type,
-            dest_cfg,
-            resolve_dest_table(dest_type, run.cfg.destination, _source_name(run.cfg.source)),
-            mappings,
+        run.cfg.pk_source_cols, run.cfg.pk_target_cols = _declared_destination_key_columns(
+            run.cfg.dest_type,
+            run.cfg.dest_cfg,
+            resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
+            run.cfg.mappings,
         )
     # Source-catalog primary key is read with the schema below. Refusing here
     # made incremental_upsert fail before that evidence existed.
@@ -591,7 +588,7 @@ def _stream_database_transfer_impl(
                 run.cfg.src_read_type,
                 run.cfg.src_cfg,
                 _source_name(run.cfg.source),
-                [str(m.get("source") or "") for m in mappings if m.get("source")],
+                [str(m.get("source") or "") for m in run.cfg.mappings if m.get("source")],
             )
         except Exception as exc:
             logger.debug("source schema introspection failed: %s", exc, exc_info=exc)
@@ -606,46 +603,46 @@ def _stream_database_transfer_impl(
         run.cfg.cursor_pk_source = catalog_incremental_tiebreak(
             run.cfg.src_read_type,
             run.cfg.cursor_source_col,
-            contract_pk=pk_source_cols,
+            contract_pk=run.cfg.pk_source_cols,
             catalog_pk=list(_tb_keys.get("primary_key_columns") or []),
             unique_keys=list(_tb_keys.get("unique_keys") or []),
             nullable=_tb_nulls,
         )
-    if requires_upsert(effective_sync) and not pk_target_cols:
+    if requires_upsert(run.cfg.effective_sync) and not run.cfg.pk_target_cols:
         from services.primary_key import mapped_catalog_upsert_key
 
-        pk_source_cols, pk_target_cols = mapped_catalog_upsert_key(
+        run.cfg.pk_source_cols, run.cfg.pk_target_cols = mapped_catalog_upsert_key(
             (_src_rich_catalog[2] or {}).get("primary_key_columns"),
-            mappings,
+            run.cfg.mappings,
         )
-        if pk_source_cols and run.cfg.incremental and run.cfg.cursor_source_col and not run.cfg.cursor_pk_source:
+        if run.cfg.pk_source_cols and run.cfg.incremental and run.cfg.cursor_source_col and not run.cfg.cursor_pk_source:
             run.cfg.cursor_pk_source = incremental_tiebreak_column(
-                run.cfg.src_read_type, run.cfg.cursor_source_col, pk_source_cols
+                run.cfg.src_read_type, run.cfg.cursor_source_col, run.cfg.pk_source_cols
             )
-    if not pk_target_cols:
+    if not run.cfg.pk_target_cols:
         from services.copy_kafka_common import kafka_family_name
         from services.primary_key import mapped_catalog_upsert_key
 
-        if kafka_family_name(dest_type) == "kafka":
+        if kafka_family_name(run.cfg.dest_type) == "kafka":
             # D88: with no declared identity, the source table's own primary
             # key is the message key; append runs went out key=None, which
             # breaks per-key ordering and log compaction downstream.
-            pk_source_cols, pk_target_cols = mapped_catalog_upsert_key(
+            run.cfg.pk_source_cols, run.cfg.pk_target_cols = mapped_catalog_upsert_key(
                 (_src_rich_catalog[2] or {}).get("primary_key_columns"),
-                mappings,
+                run.cfg.mappings,
             )
-    if requires_upsert(effective_sync) and not pk_target_cols:
+    if requires_upsert(run.cfg.effective_sync) and not run.cfg.pk_target_cols:
         raise ValueError(
-            f"Sync mode `{effective_sync}` requires primary_key for upsert; "
+            f"Sync mode `{run.cfg.effective_sync}` requires primary_key for upsert; "
             "refuse silent insert fallback (set primary_key on the stream contract)"
         )
     write_mode = (
-        "upsert" if requires_upsert(effective_sync) and pk_target_cols else "insert"
+        "upsert" if requires_upsert(run.cfg.effective_sync) and run.cfg.pk_target_cols else "insert"
     )
     _create_scope_token, _create_scope = begin_fast_path_create_scope(
-        _fast_path_source_catalog(run.cfg.src_read_type, mappings, run.cfg.schema, _src_rich_catalog),
-        mappings,
-        resolve_dest_table(dest_type, run.cfg.destination, _source_name(run.cfg.source)),
+        _fast_path_source_catalog(run.cfg.src_read_type, run.cfg.mappings, run.cfg.schema, _src_rich_catalog),
+        run.cfg.mappings,
+        resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
     )
     pre_copy_cursor_key = ""
     pre_copy_watermark = None
@@ -654,19 +651,19 @@ def _stream_database_transfer_impl(
         if _tbl and not (is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg)):
             from services.preflight_cursor_gate import refuse_unusable_cursor_state
 
-            _dest_obj = resolve_dest_table(dest_type, run.cfg.destination, _tbl)
+            _dest_obj = resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _tbl)
             _scope = resolve_incremental_read_scope(
-                sync_mode=effective_sync,
+                sync_mode=run.cfg.effective_sync,
                 stream_contracts=stream_contracts,
                 source_type=run.cfg.src_read_type,
                 source_database=run.cfg.source.database or run.cfg.src_cfg.get("database", ""),
                 source_object=_tbl,
-                dest_type=dest_type,
-                dest_database=run.cfg.destination.database or dest_cfg.get("database", ""),
+                dest_type=run.cfg.dest_type,
+                dest_database=run.cfg.destination.database or run.cfg.dest_cfg.get("database", ""),
                 dest_object=_dest_obj,
                 source=run.cfg.src_cfg,
                 destination=run.cfg.destination,
-                destination_config=dest_cfg,
+                destination_config=run.cfg.dest_cfg,
             )
             pre_copy_cursor_key = _scope.cursor_key
             pre_copy_watermark = _scope.watermark
@@ -674,7 +671,7 @@ def _stream_database_transfer_impl(
 
             run.cfg.cursor_pk_source = reconcile_cursor_tiebreak(_scope, run.cfg.cursor_pk_source)
             refuse_unusable_cursor_state(
-                _scope, dest_type, dest_cfg, _dest_obj
+                _scope, run.cfg.dest_type, run.cfg.dest_cfg, _dest_obj
             )
     # Gate-8 append proof needs the destination cardinality from before the
     # first write, whichever path performs it. Measured once here, ahead of the
@@ -694,9 +691,9 @@ def _stream_database_transfer_impl(
         )
     ):
         pre_write_rows_before = precount_table(
-            dest_type,
-            dest_cfg,
-            resolve_dest_table(dest_type, run.cfg.destination, _source_name(run.cfg.source)),
+            run.cfg.dest_type,
+            run.cfg.dest_cfg,
+            resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
         )
     # Schema evolution (ADD COLUMN / widen under backfill_new_fields) is owned
     # by the destination writer; a server-to-server copy would write into the
@@ -707,7 +704,7 @@ def _stream_database_transfer_impl(
         logger.info(
             "COPY fast path declined: backfill_new_fields on an existing %s "
             "destination — schema evolution runs on the writer path",
-            dest_type,
+            run.cfg.dest_type,
         )
     # Write-path referential-integrity guard (QA fk__pg-maria / fk__pg-pg):
     # child rows whose destination parent does not exist are quarantined, not
@@ -716,20 +713,20 @@ def _stream_database_transfer_impl(
     # guarded route takes the row path instead of landing orphans unchecked.
     # Strict/maximum fail the run on the first orphan before it is committed;
     # balanced/warn quarantine it and Gate-8 G22 reports the count as a warn.
-    fk_orphan_guard = None
+    run.cfg.fk_orphan_guard = None
     try:
         from .stream_foreign_keys import build_fk_orphan_guard
 
-        fk_orphan_guard = build_fk_orphan_guard(
+        run.cfg.fk_orphan_guard = build_fk_orphan_guard(
             run.cfg.source,
             run.cfg.destination,
             _source_name(run.cfg.source),
-            dest_type=dest_type,
-            dest_cfg=dest_cfg,
+            dest_type=run.cfg.dest_type,
+            dest_cfg=run.cfg.dest_cfg,
         )
     except Exception as exc:
         logger.debug("FK orphan guard not built for %s: %s", _source_name(run.cfg.source), exc)
-    if fk_orphan_guard is not None:
+    if run.cfg.fk_orphan_guard is not None:
         copy_decline.append(
             "COPY fast path declined: source foreign keys need a per-row "
             "destination parent check (orphans are quarantined on the row path)"
@@ -740,7 +737,7 @@ def _stream_database_transfer_impl(
     # of being held out as the contract instructs — those routes stream rows.
     risk_contract_columns = [
         str(m.get("source") or m.get("target") or "")
-        for m in (mappings or [])
+        for m in (run.cfg.mappings or [])
         if isinstance(m, dict) and m.get("risk_contract")
     ]
     if risk_contract_columns:
@@ -761,17 +758,17 @@ def _stream_database_transfer_impl(
     copy_route_backups: dict[str, Any] = {}
     if (
         write_mode == "upsert"
-        and pk_target_cols
-        and dest_type == "postgresql"
+        and run.cfg.pk_target_cols
+        and run.cfg.dest_type == "postgresql"
         and not pending_shape
-        and str(validation_mode or "").strip().lower() in {"strict", "maximum", ""}
+        and str(run.cfg.validation_mode or "").strip().lower() in {"strict", "maximum", ""}
         and int(pre_write_rows_before or 0) > 0
     ):
         copy_route_backups = _arm_strict_keyed_backup(
             run.cfg.destination,
-            dest_type=dest_type,
-            dest_cfg=dest_cfg,
-            dest_table=resolve_dest_table(dest_type, run.cfg.destination, _source_name(run.cfg.source)),
+            dest_type=run.cfg.dest_type,
+            dest_cfg=run.cfg.dest_cfg,
+            dest_table=resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
             job_id=str(run.cfg.job_id or ""),
         )
     _copy_profile = PhaseProfile()
@@ -784,27 +781,27 @@ def _stream_database_transfer_impl(
             pending_shape
             or writer_owns_evolution
             or dest_proc_plan is not None
-            or fk_orphan_guard is not None
+            or run.cfg.fk_orphan_guard is not None
             or bool(risk_contract_columns)
         ) else _try_copy_fast_path(
             source=run.cfg.source,
             destination=run.cfg.destination,
-            mappings=mappings,
+            mappings=run.cfg.mappings,
             schema=run.cfg.schema,
             src_type=run.cfg.src_read_type,
-            dest_type=dest_type,
+            dest_type=run.cfg.dest_type,
             src_cfg=run.cfg.src_cfg,
-            dest_cfg=dest_cfg,
-            effective_sync=effective_sync,
+            dest_cfg=run.cfg.dest_cfg,
+            effective_sync=run.cfg.effective_sync,
             incremental=run.cfg.incremental,
-            source_filter=source_filter,
+            source_filter=run.cfg.source_filter,
             limit=run.cfg.limit,
             checkpoint=checkpoint,
             incremental_cursor=run.cfg.cursor_source_col if run.cfg.incremental else "",
             incremental_watermark=pre_copy_watermark,
             incremental_pk=(run.cfg.cursor_pk_source or "") if run.cfg.incremental else "",
             incremental_key=(
-                (pk_source_cols[0] if pk_source_cols else "")
+                (run.cfg.pk_source_cols[0] if run.cfg.pk_source_cols else "")
                 if run.cfg.incremental else ""
             ),
             job_id=run.cfg.job_id,
@@ -834,8 +831,8 @@ def _stream_database_transfer_impl(
             run.cfg.source,
             run.cfg.destination,
             _fast_table,
-            resolve_dest_table(dest_type, run.cfg.destination, _fast_table),
-            mappings,
+            resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _fast_table),
+            run.cfg.mappings,
             dest_summary,
             ddl_log,
         )
@@ -845,7 +842,7 @@ def _stream_database_transfer_impl(
         if pre_write_rows_before is not None:
             dest_summary.setdefault(PRECOUNT_KEY, int(pre_write_rows_before))
         if run.cfg.incremental:
-            dest_summary["sync_mode"] = effective_sync
+            dest_summary["sync_mode"] = run.cfg.effective_sync
             wm = str(dest_summary.get("incremental_watermark") or "").strip()
             if int(rows_copied or 0) == 0:
                 stamp_incremental_no_op(dest_summary)
@@ -856,7 +853,7 @@ def _stream_database_transfer_impl(
                     wm,
                     metadata={
                         "job_id": run.cfg.job_id,
-                        "sync_mode": effective_sync,
+                        "sync_mode": run.cfg.effective_sync,
                         "cursor_column": run.cfg.cursor_source_col,
                         # The column a composite watermark is decodable on (QA ACC-02).
                         "tiebreak_column": run.cfg.cursor_pk_source,
@@ -890,20 +887,20 @@ def _stream_database_transfer_impl(
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
     resume_key_resolved = False
     from services.copy_kafka_common import kafka_family_name as _kafka_family
-    if resuming and write_mode == "insert" and _kafka_family(dest_type) != "kafka":
+    if resuming and write_mode == "insert" and _kafka_family(run.cfg.dest_type) != "kafka":
         resume_key_resolved = True
-        if not pk_target_cols:
+        if not run.cfg.pk_target_cols:
             # No stream contract, but the destination itself may enforce a key.
             # Resuming an append re-delivers the interrupted batch, so honouring
             # that key turns an unavoidable duplicate-key abort into an
             # idempotent apply instead of stranding a half-loaded destination.
-            pk_source_cols, pk_target_cols = _declared_destination_key_columns(
-                dest_type,
-                dest_cfg,
-                resolve_dest_table(dest_type, run.cfg.destination, _source_name(run.cfg.source)),
-                mappings,
+            run.cfg.pk_source_cols, run.cfg.pk_target_cols = _declared_destination_key_columns(
+                run.cfg.dest_type,
+                run.cfg.dest_cfg,
+                resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source)),
+                run.cfg.mappings,
             )
-        if pk_target_cols:
+        if run.cfg.pk_target_cols:
             write_mode = "upsert"
         else:
             raise ValueError(
@@ -915,16 +912,16 @@ def _stream_database_transfer_impl(
     # destinations get retries only for failures that prove nothing landed;
     # everything else keeps the full retry budget.
     replay_safety = classify_replay_safety(
-        dest_type=dest_type,
+        dest_type=run.cfg.dest_type,
         write_mode=write_mode,
-        conflict_columns=pk_target_cols or None,
+        conflict_columns=run.cfg.pk_target_cols or None,
         job_id=run.cfg.job_id,
-        has_primary_key=bool(pk_target_cols),
+        has_primary_key=bool(run.cfg.pk_target_cols),
     )
     if run.cfg.src_read_type not in _STREAMING_SOURCES and not run.cfg.sdk_source:
         raise ValueError(f"Streaming source '{run.cfg.src_type}' not supported")
-    if dest_type not in _STREAMING_DESTINATIONS:
-        raise ValueError(f"Streaming destination '{dest_type}' not supported")
+    if run.cfg.dest_type not in _STREAMING_DESTINATIONS:
+        raise ValueError(f"Streaming destination '{run.cfg.dest_type}' not supported")
 
     run.cfg.table = _source_name(run.cfg.source)
     if is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg):
@@ -965,17 +962,17 @@ def _stream_database_transfer_impl(
         # watermark through the same call, so what they judge is what this run
         # will read. Callable identity includes SQL+binds, not just the stream label.
         scope = resolve_incremental_read_scope(
-            sync_mode=effective_sync,
+            sync_mode=run.cfg.effective_sync,
             stream_contracts=stream_contracts,
             source_type=run.cfg.src_read_type,
             source_database=run.cfg.source.database or run.cfg.src_cfg.get("database", ""),
             source_object=cursor_source_object,
-            dest_type=dest_type,
-            dest_database=run.cfg.destination.database or dest_cfg.get("database", ""),
-            dest_object=resolve_dest_table(dest_type, run.cfg.destination, run.cfg.table),
+            dest_type=run.cfg.dest_type,
+            dest_database=run.cfg.destination.database or run.cfg.dest_cfg.get("database", ""),
+            dest_object=resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table),
             source=run.cfg.source if is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg) else run.cfg.src_cfg,
             destination=run.cfg.destination,
-            destination_config=dest_cfg,
+            destination_config=run.cfg.dest_cfg,
         )
         cursor_key = scope.cursor_key
         run.cfg.watermark = scope.read_watermark
@@ -985,13 +982,13 @@ def _stream_database_transfer_impl(
         run.cfg.cursor_pk_source = reconcile_cursor_tiebreak(scope, run.cfg.cursor_pk_source)
 
         refuse_unusable_cursor_state(
-            scope, dest_type, dest_cfg, resolve_dest_table(dest_type, run.cfg.destination, run.cfg.table)
+            scope, run.cfg.dest_type, run.cfg.dest_cfg, resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table)
         )
     # A source whose read call cannot carry the cursor bound (Redis SCAN, Dynamo
     # Scan, an ES search) hands its whole population over, so the bound is
     # applied to each page instead. Without it "incremental" degraded into a
     # full re-read and the second run appended the population again.
-    client_cursor_bound = bool(
+    run.cfg.client_cursor_bound = bool(
         run.cfg.incremental
         and run.cfg.cursor_source_col
         and run.cfg.watermark
@@ -1041,23 +1038,23 @@ def _stream_database_transfer_impl(
                 src_cfg=run.cfg.src_cfg,
                 bucket=bucket,
                 key=key,
-                dest_type=dest_type,
-                dest_cfg=dest_cfg,
+                dest_type=run.cfg.dest_type,
+                dest_cfg=run.cfg.dest_cfg,
                 source=run.cfg.source,
                 destination=run.cfg.destination,
-                mappings=mappings,
+                mappings=run.cfg.mappings,
                 schema=run.cfg.schema,
-                effective_sync=effective_sync,
+                effective_sync=run.cfg.effective_sync,
                 stream_contracts=stream_contracts,
                 job_id=run.cfg.job_id,
                 checkpoint=checkpoint,
                 checkpoint_service=checkpoint_service,
                 retry_budget=retry_budget,
                 backfill_new_fields=backfill_new_fields,
-                validation_mode=validation_mode,
-                source_filter=source_filter,
+                validation_mode=run.cfg.validation_mode,
+                source_filter=run.cfg.source_filter,
                 skip_preflight=skip_preflight,
-                shape_runner=shape_runner,
+                shape_runner=run.cfg.shape_runner,
                 pre_write_rows_before=pre_write_rows_before,
             )
         cache_key = f"{run.cfg.src_type}:{bucket}:{key}"
@@ -1072,19 +1069,19 @@ def _stream_database_transfer_impl(
             path=path,
             filename=key,
             destination=run.cfg.destination,
-            mappings=mappings,
+            mappings=run.cfg.mappings,
             schema=run.cfg.schema,
-            sync_mode=effective_sync,
+            sync_mode=run.cfg.effective_sync,
             stream_contracts=stream_contracts,
             job_id=run.cfg.job_id,
             checkpoint=checkpoint,
             checkpoint_service=checkpoint_service,
             retry_budget=retry_budget,
             backfill_new_fields=backfill_new_fields,
-            validation_mode=validation_mode,
-            source_filter=source_filter,
+            validation_mode=run.cfg.validation_mode,
+            source_filter=run.cfg.source_filter,
             skip_preflight=skip_preflight,
-            shape_runner=shape_runner,
+            shape_runner=run.cfg.shape_runner,
         )
 
     # Property 3 — one MVCC/transaction snapshot for the whole full-refresh read
@@ -1213,14 +1210,14 @@ def _stream_database_transfer_impl(
         run.cfg.cursor_pk_source = catalog_incremental_tiebreak(
             run.cfg.src_read_type,
             run.cfg.cursor_source_col,
-            contract_pk=pk_source_cols,
+            contract_pk=run.cfg.pk_source_cols,
             catalog_pk=list(_cat_keys.get("primary_key_columns") or []),
             unique_keys=list(_cat_keys.get("unique_keys") or []),
             nullable=_cat_nulls,
         )
     _cursor_is_unique = cursor_unique_evidence(
         run.cfg.cursor_source_col,
-        primary_key_columns=pk_source_cols or (_cat_keys.get("primary_key_columns") or []),
+        primary_key_columns=run.cfg.pk_source_cols or (_cat_keys.get("primary_key_columns") or []),
         unique_keys=_cat_keys.get("unique_keys") or [],
         nullable=_cat_nulls,
     )
@@ -1273,11 +1270,11 @@ def _stream_database_transfer_impl(
     # PostgreSQL/MySQL stay tight: wide JSON/TEXT rows OOM mid-COPY otherwise.
     _warehouse_dests = {"mongodb", "snowflake", "bigquery", "redshift"}
     _sql_tight = {"postgresql", "postgres", "mysql", "mariadb", "sqlserver", "mssql"}
-    if dest_type in _warehouse_dests:
+    if run.cfg.dest_type in _warehouse_dests:
         target_memory_bytes = 64 * 1024 * 1024
-    elif dest_type in _sql_tight and avg_row_size >= 4096:
+    elif run.cfg.dest_type in _sql_tight and avg_row_size >= 4096:
         target_memory_bytes = 4 * 1024 * 1024  # wide-row PG/MySQL ceiling
-    elif dest_type in _sql_tight:
+    elif run.cfg.dest_type in _sql_tight:
         target_memory_bytes = 8 * 1024 * 1024
     else:
         target_memory_bytes = 8 * 1024 * 1024
@@ -1294,8 +1291,8 @@ def _stream_database_transfer_impl(
     if proxy_stream_batch_size is not None:
         before_proxy = int(run.cfg.chunk_size)
         run.cfg.chunk_size = proxy_stream_batch_size(
-            dest_cfg.get("host"),
-            connection_string=dest_cfg.get("connection_string") or dest_cfg.get("uri") or "",
+            run.cfg.dest_cfg.get("host"),
+            connection_string=run.cfg.dest_cfg.get("connection_string") or run.cfg.dest_cfg.get("uri") or "",
             default=run.cfg.chunk_size,
         )
         proxy_capped = int(run.cfg.chunk_size) < before_proxy
@@ -1303,7 +1300,7 @@ def _stream_database_transfer_impl(
     # Chunked writes would overwrite the same key and silently lose data.
     # Always force a single shot — gating on truthy total_rows failed open after
     # honesty waves set total_rows=None for unknown cardinality.
-    if dest_type in ("s3", "gcs", "adls"):
+    if run.cfg.dest_type in ("s3", "gcs", "adls"):
         run.cfg.chunk_size = max(1, int(sample_probe.total_rows or 10_000_000))
         object_store_single_shot = True
     chunk_policy = {
@@ -1419,7 +1416,7 @@ def _stream_database_transfer_impl(
     _schema_absorb_lock = threading.Lock()
 
     def _absorb_schemaless_discovered_attrs(batch) -> None:
-        nonlocal mappings, backfill_new_fields, target_cols
+        nonlocal backfill_new_fields
         from connectors.header_union import (
             SCHEMALESS_SOURCE_TYPES,
             union_attribute_keys,
@@ -1434,7 +1431,7 @@ def _stream_database_transfer_impl(
             if not new_headers and set(batch.headers).issubset(known):
                 return
             run.cfg.columns = union_attribute_keys(run.cfg.columns, batch.headers)
-            mapped_sources = {str(m.get("source") or "") for m in mappings}
+            mapped_sources = {str(m.get("source") or "") for m in run.cfg.mappings}
             meta = getattr(batch, "meta", None) or {}
             native_types = meta.get("native_types") if isinstance(meta, dict) else {}
             if not isinstance(native_types, dict):
@@ -1444,7 +1441,7 @@ def _stream_database_transfer_impl(
                 run.cfg.schema[h] = lt
                 run.cfg.column_types[h] = ddl_carrier_type(lt)
                 if h not in mapped_sources:
-                    mappings.append({
+                    run.cfg.mappings.append({
                         "source": h,
                         "target": h,
                         "confidence": 0.9,
@@ -1454,12 +1451,12 @@ def _stream_database_transfer_impl(
                     })
                     mapped_sources.add(h)
                     ddl_log.append(
-                        f"{dest_type.upper()} COLUMN {h} {ddl_type(dest_type, run.cfg.schema.get(h, 'string'))} "
+                        f"{run.cfg.dest_type.upper()} COLUMN {h} {ddl_type(run.cfg.dest_type, run.cfg.schema.get(h, 'string'))} "
                         f"(discovered mid-transfer from {run.cfg.src_type} — no silent drop)"
                     )
             if new_headers:
                 backfill_new_fields = True
-                target_cols, _ = resolve_target_columns(mappings, run.cfg.column_types, preserve_case=True)
+                run.cfg.target_cols, _ = resolve_target_columns(run.cfg.mappings, run.cfg.column_types, preserve_case=True)
 
     if not run.cfg.schema:
         if run.cfg.src_type in ("s3", "gcs", "adls"):
@@ -1505,16 +1502,16 @@ def _stream_database_transfer_impl(
 
     # Built after schema resolution so ordering steps compare under the
     # source column's declared type, never wire text (DD-1).
-    if shape_steps and shape_runner is None:
+    if shape_steps and run.cfg.shape_runner is None:
         from .stream_dest_procedure import runner_for_stream_steps
 
-        shape_runner = runner_for_stream_steps(
+        run.cfg.shape_runner = runner_for_stream_steps(
             shape_steps,
             columns=list(run.cfg.columns),
             table=run.cfg.table,
-            effective_sync=effective_sync,
+            effective_sync=run.cfg.effective_sync,
             cursor_field=run.cfg.cursor_source_col or "",
-            key_columns=pk_source_cols,
+            key_columns=run.cfg.pk_source_cols,
             workspace_id=workspace_id,
             source_types=dict(run.cfg.schema or {}),
             typed_values=_typed_value_source(run.cfg.src_read_type),
@@ -1525,7 +1522,7 @@ def _stream_database_transfer_impl(
     # the declared contract PK, then the source catalog PRIMARY KEY, then
     # a fully non-null enforced unique key. Keyless sources keep the
     # proof's multiset fallback (G-1f).
-    ledger_key_cols = [c for c in (pk_source_cols or []) if c in run.cfg.columns]
+    ledger_key_cols = [c for c in (run.cfg.pk_source_cols or []) if c in run.cfg.columns]
     if not ledger_key_cols:
         ledger_key_cols = [
             c for c in (_cat_keys.get("primary_key_columns") or [])
@@ -1540,31 +1537,31 @@ def _stream_database_transfer_impl(
             )
             or []
         )
-    pin_ledger = (
+    run.cfg.pin_ledger = (
         _StepRawLedger(
             ledger_key_cols,
             col_ddl={c: str(run.cfg.schema.get(c, "")) for c in run.cfg.columns},
         )
-        if shape_runner is not None and ledger_key_cols
+        if run.cfg.shape_runner is not None and ledger_key_cols
         else None
     )
 
     # ``columns`` stays the source's own column list: it is what every read
     # projects on. Under a recipe the writer sees different columns, so the
     # carriers, the mappings and the DDL are decided from the recipe's output.
-    write_columns = list(shape_runner.output_columns or run.cfg.columns) if shape_runner else run.cfg.columns
+    write_columns = list(run.cfg.shape_runner.output_columns or run.cfg.columns) if run.cfg.shape_runner else run.cfg.columns
     run.cfg.column_types = {c: ddl_carrier_type(run.cfg.schema.get(c, "string")) for c in write_columns}
     from .stream_dest_procedure import adopt_stream_column_map
 
-    mappings, inherit_note = adopt_stream_column_map(
-        mappings, write_columns, inherited=mappings_inherited
+    run.cfg.mappings, inherit_note = adopt_stream_column_map(
+        run.cfg.mappings, write_columns, inherited=mappings_inherited
     )
-    if not mappings:
-        mappings = [{"source": c, "target": c, "confidence": 0.95} for c in write_columns]
+    if not run.cfg.mappings:
+        run.cfg.mappings = [{"source": c, "target": c, "confidence": 0.95} for c in write_columns]
     from services.shape_contract import write_ready_mappings
 
     # Pending extras and intentional omits stay off INSERT/MERGE (name-addressed).
-    mappings = write_ready_mappings(mappings)
+    run.cfg.mappings = write_ready_mappings(run.cfg.mappings)
     # Schemaless sources: always allow ADD COLUMN when attrs appear mid-transfer.
     if run.cfg.src_type in ("dynamodb", "mongodb", "elasticsearch", "redis", "kafka"):
         backfill_new_fields = True
@@ -1573,8 +1570,8 @@ def _stream_database_transfer_impl(
             if name in run.cfg.schema and run.cfg.schema[name] in {"string", "VARCHAR", "TEXT", "S"}:
                 run.cfg.schema[name] = str(lt)
                 run.cfg.column_types[name] = ddl_carrier_type(str(lt))
-    target_cols, logical_types = resolve_target_columns(
-        mappings, run.cfg.column_types, preserve_case=True
+    run.cfg.target_cols, logical_types = resolve_target_columns(
+        run.cfg.mappings, run.cfg.column_types, preserve_case=True
     )
     # Write-path dest_types for Gate-8 fingerprint remap parity — including the
     # drift widen the backfill write applies, so the digest is taken against the
@@ -1582,8 +1579,8 @@ def _stream_database_transfer_impl(
     from connectors.writer_common import effective_dest_types_under_backfill
 
     fingerprint_dest_types = effective_dest_types_under_backfill(
-        {target_cols[i]: logical_types[i] for i in range(len(target_cols))},
-        list(mappings or []),
+        {run.cfg.target_cols[i]: logical_types[i] for i in range(len(run.cfg.target_cols))},
+        list(run.cfg.mappings or []),
         backfill=bool(backfill_new_fields),
     )
 
@@ -1594,9 +1591,9 @@ def _stream_database_transfer_impl(
     checkpoint_service = checkpoint_service or CheckpointService()
     checkpoint = checkpoint or Checkpoint(job_id=run.cfg.job_id or "")
     checkpoint.source_type = run.cfg.src_type
-    checkpoint.dest_type = dest_type
+    checkpoint.dest_type = run.cfg.dest_type
     checkpoint.write_mode = write_mode
-    checkpoint.conflict_columns = pk_target_cols or []
+    checkpoint.conflict_columns = run.cfg.pk_target_cols or []
 
     # Account for resume state when calculating progress so the UI doesn't see
     # a chunk index greater than the total chunk estimate.
@@ -1613,7 +1610,7 @@ def _stream_database_transfer_impl(
     if not run.cfg.total_rows and (run.cur.ddb_cursor or (run.cfg.src_type == "kafka" and probe.rows)):
         remaining_chunks = max(remaining_chunks, 1)
     chunks = max(1, completed_chunks + (1 if chunk_idx == 0 and resume_offset == 0 else 0) + remaining_chunks)
-    dest_table = resolve_dest_table(dest_type, run.cfg.destination, run.cfg.table)
+    run.cfg.dest_table = resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table)
     # An existing destination column decides what an instant keeps, not the plan,
     # and this digest must be taken at that granularity or the destination re-read
     # disagrees with it and a correct load fails Gate-8 on two opaque hashes.
@@ -1622,7 +1619,7 @@ def _stream_database_transfer_impl(
     # feeding the carrier's precision into it would hold out every row whose
     # fractional seconds the carrier rounds, which is a narrowing to disclose,
     # not a row to reject.
-    digest_dest_types = dict(fingerprint_dest_types)
+    run.cfg.digest_dest_types = dict(fingerprint_dest_types)
     try:
         from services.dest_physical_types import (
             apply_physical_temporal_precision,
@@ -1635,14 +1632,14 @@ def _stream_database_transfer_impl(
         # over a Mongo string carrier) and a degraded TEXT carrier both follow
         # overlay_physical_dest_types, or write-pass and read-back hash
         # identical rows differently.
-        digest_dest_types = overlay_physical_dest_types(
-            digest_dest_types,
+        run.cfg.digest_dest_types = overlay_physical_dest_types(
+            run.cfg.digest_dest_types,
             physical_column_types(
-                dest_type, dest_cfg, table=str(dest_table), columns=list(target_cols)
+                run.cfg.dest_type, run.cfg.dest_cfg, table=str(run.cfg.dest_table), columns=list(run.cfg.target_cols)
             ),
         )
-        digest_dest_types = apply_physical_temporal_precision(
-            digest_dest_types, dest_type, dest_cfg, table=str(dest_table)
+        run.cfg.digest_dest_types = apply_physical_temporal_precision(
+            run.cfg.digest_dest_types, run.cfg.dest_type, run.cfg.dest_cfg, table=str(run.cfg.dest_table)
         )
     except Exception as exc:
         logger.warning(
@@ -1653,18 +1650,18 @@ def _stream_database_transfer_impl(
         )
 
     ddl_log: list[str] = [
-        f"STREAM {run.cfg.src_type}.{run.cfg.table} → {dest_type}.{dest_table} "
+        f"STREAM {run.cfg.src_type}.{run.cfg.table} → {run.cfg.dest_type}.{run.cfg.dest_table} "
         f"({('unknown' if run.cfg.total_rows is None else f'{run.cfg.total_rows:,}')} rows est., "
-        f"{chunks} batches, sync={effective_sync})"
+        f"{chunks} batches, sync={run.cfg.effective_sync})"
     ]
     if run.cfg.incremental and run.cfg.watermark:
         ddl_log.append(f"INCREMENTAL cursor {run.cfg.cursor_source_col} > {run.cfg.watermark}")
     for col in write_columns:
-        ddl_log.append(f"{dest_type.upper()} COLUMN {col} {ddl_type(dest_type, run.cfg.schema.get(col, 'string'))}")
-    if shape_runner is not None:
+        ddl_log.append(f"{run.cfg.dest_type.upper()} COLUMN {col} {ddl_type(run.cfg.dest_type, run.cfg.schema.get(col, 'string'))}")
+    if run.cfg.shape_runner is not None:
         ddl_log.append(
-            f"SHAPE recipe {shape_runner.recipe_hash} applied on the read: "
-            f"{shape_runner.recipe.describe()}"
+            f"SHAPE recipe {run.cfg.shape_runner.recipe_hash} applied on the read: "
+            f"{run.cfg.shape_runner.recipe.describe()}"
         )
     if inherit_note:
         ddl_log.append(inherit_note)
@@ -1681,15 +1678,15 @@ def _stream_database_transfer_impl(
     route_backup_state: dict[str, Any] = {}
     # R2: shape-diverted rows are quarantine, not removal — counted here and
     # stamped as rejected_rows so the ledger reads in = out + diverted.
-    shape_diverted_total: list[int] = [0]
+    run.tally.shape_diverted_total: list[int] = [0]
     # Keys of rows the recipe diverted (unmatched=divert etc.): keyed routed
     # runs delete these from every route table so a key that stopped matching
     # loses its stale copy (P1-B).
-    shape_divert_key_tuples: list[tuple] = []
+    run.tally.shape_divert_key_tuples: list[tuple] = []
     # Defensive early binding — _persist_shape_diverts is a closure that can
     # run before the pk-audit assignment later in this function
     # (pk_source_cols is already bound unconditionally near line 630).
-    pk_audit_cols: list[str] = []
+    run.cfg.pk_audit_cols: list[str] = []
     if copy_decline:
         dest_summary["copy_fast_path"] = "declined"
         dest_summary["copy_decline_reason"] = copy_decline[0]
@@ -1700,8 +1697,8 @@ def _stream_database_transfer_impl(
     if not (written or offset):
         rows_before = pre_write_rows_before
         _rstep0 = (
-            shape_runner.recipe.router_step
-            if shape_runner is not None and getattr(shape_runner, "recipe", None) is not None
+            run.cfg.shape_runner.recipe.router_step
+            if run.cfg.shape_runner is not None and getattr(run.cfg.shape_runner, "recipe", None) is not None
             else None
         )
         if _rstep0 is not None:
@@ -1712,7 +1709,7 @@ def _stream_database_transfer_impl(
             # append-delta reconciliation then reads the whole dest as one
             # run's growth (RT-4).
             _rtargets0 = dict(_rstep0.options.get("targets") or {})
-            _rbase0 = resolve_dest_table(dest_type, run.cfg.destination, _source_name(run.cfg.source))
+            _rbase0 = resolve_dest_table(run.cfg.dest_type, run.cfg.destination, _source_name(run.cfg.source))
             _rsum0 = 0
             _rper0: dict[str, int] = {}
             for _rroute in _rstep0.options.get("routes") or []:
@@ -1720,7 +1717,7 @@ def _stream_database_transfer_impl(
                 if not _rname0:
                     continue
                 _rtable0 = str(_rtargets0.get(_rname0) or f"{_rbase0}__{_rname0}")
-                _rn0 = precount_table(dest_type, dest_cfg, _rtable0)
+                _rn0 = precount_table(run.cfg.dest_type, run.cfg.dest_cfg, _rtable0)
                 if _rn0 is None:
                     # One unreadable route table keeps the sum honest: report
                     # no "before" at all rather than a wrong one.
@@ -1738,8 +1735,8 @@ def _stream_database_transfer_impl(
                 # run's digest. Measure the pre-write additive sum for each
                 # occupied route table now (postgres only — other engines
                 # stay honestly "not comparable").
-                if dest_type == "postgresql" and not is_overwrite_sync(
-                    str(effective_sync or "")
+                if run.cfg.dest_type == "postgresql" and not is_overwrite_sync(
+                    str(run.cfg.effective_sync or "")
                 ):
                     from services.reconciliation import (
                         verify_postgres_route_table,
@@ -1759,24 +1756,24 @@ def _stream_database_transfer_impl(
                             continue
                         _ptable = _rmap0.get(_rname1) or f"{_rbase0}__{_rname1}"
                         _pc, _pchk, _padd = verify_postgres_route_table(
-                            host=str(dest_cfg.get("host") or ""),
-                            port=int(dest_cfg.get("port") or 5432),
-                            database=str(dest_cfg.get("database") or ""),
+                            host=str(run.cfg.dest_cfg.get("host") or ""),
+                            port=int(run.cfg.dest_cfg.get("port") or 5432),
+                            database=str(run.cfg.dest_cfg.get("database") or ""),
                             username=str(
-                                dest_cfg.get("username") or dest_cfg.get("user") or ""
+                                run.cfg.dest_cfg.get("username") or run.cfg.dest_cfg.get("user") or ""
                             ),
-                            password=str(dest_cfg.get("password") or ""),
-                            schema=str(dest_cfg.get("schema") or "public"),
+                            password=str(run.cfg.dest_cfg.get("password") or ""),
+                            schema=str(run.cfg.dest_cfg.get("schema") or "public"),
                             connection_string=str(
-                                dest_cfg.get("connection_string") or ""
+                                run.cfg.dest_cfg.get("connection_string") or ""
                             ),
-                            ssl=bool(dest_cfg.get("ssl") or dest_cfg.get("sslmode")),
+                            ssl=bool(run.cfg.dest_cfg.get("ssl") or run.cfg.dest_cfg.get("sslmode")),
                             table_name=_ptable,
                             # Digest only the columns the run writes — a
                             # customer column (default/generated) must not
                             # enter the additive delta.
                             target_columns=list(
-                                shape_runner.recipe.route_output_columns(_rname1)
+                                run.cfg.shape_runner.recipe.route_output_columns(_rname1)
                             ),
                         )
                         if _padd:
@@ -1800,10 +1797,10 @@ def _stream_database_transfer_impl(
                 from services.dest_precount import destination_table_exists
 
                 _existed = destination_table_exists(
-                    dest_type,
-                    dest_cfg,
-                    schema=schema_from_cfg(dest_type, dest_cfg),
-                    table_name=str(dest_table),
+                    run.cfg.dest_type,
+                    run.cfg.dest_cfg,
+                    schema=schema_from_cfg(run.cfg.dest_type, run.cfg.dest_cfg),
+                    table_name=str(run.cfg.dest_table),
                 )
                 if _existed is not None:
                     dest_summary["dest_table_existed_before"] = bool(_existed)
@@ -1825,7 +1822,7 @@ def _stream_database_transfer_impl(
         # earlier pass committed (reported as kept when it was cancelled) are
         # not this pass's batch, so the undo must never clear or drop them.
         try:
-            _resume_live = precount_table(dest_type, dest_cfg, str(dest_table))
+            _resume_live = precount_table(run.cfg.dest_type, run.cfg.dest_cfg, str(run.cfg.dest_table))
         except Exception:  # noqa: BLE001 - unknown stays unknown (undo retains)
             _resume_live = None
         dest_summary["resume_rows_before"] = _resume_live
@@ -1833,10 +1830,10 @@ def _stream_database_transfer_impl(
     # write, so even an append needs the dest-engine census (new keys vs
     # replaced keys) to close conservation — COUNT(*) growth alone reads a
     # correct re-write of the same keys as silent loss.
-    dest_key_addressed = dest_is_key_addressed(dest_type, pk_target_cols)
+    dest_key_addressed = dest_is_key_addressed(run.cfg.dest_type, run.cfg.pk_target_cols)
     if dest_key_addressed:
         dest_summary[KEY_ADDRESSED_KEY] = True
-    keyed_upsert_scope = write_mode == "upsert" and bool(pk_target_cols)
+    keyed_upsert_scope = write_mode == "upsert" and bool(run.cfg.pk_target_cols)
     # D111 — strict keyed upsert on a populated PG destination: row-copy the
     # pre-run table to __dfbak_<job> so a failed verification restores the
     # exact prior state (DELETE + INSERT FROM backup) instead of leaving the
@@ -1846,28 +1843,28 @@ def _stream_database_transfer_impl(
     # "left in place" report.
     if (
         keyed_upsert_scope
-        and dest_type == "postgresql"
+        and run.cfg.dest_type == "postgresql"
         and not resumed_pass
-        and str(validation_mode or "").strip().lower() in {"strict", "maximum", ""}
+        and str(run.cfg.validation_mode or "").strip().lower() in {"strict", "maximum", ""}
         and int(dest_summary.get(PRECOUNT_KEY) or 0) > 0
-        and (shape_runner is None or shape_runner.recipe.router_step is None)
+        and (run.cfg.shape_runner is None or run.cfg.shape_runner.recipe.router_step is None)
     ):
         _route_backups = _arm_strict_keyed_backup(
             run.cfg.destination,
-            dest_type=dest_type,
-            dest_cfg=dest_cfg,
-            dest_table=str(dest_table),
+            dest_type=run.cfg.dest_type,
+            dest_cfg=run.cfg.dest_cfg,
+            dest_table=str(run.cfg.dest_table),
             job_id=str(run.cfg.job_id or ""),
         )
         if _route_backups:
             dest_summary["route_backups"] = dict(_route_backups)
     keyed_census_acc = (
         KeyCensusAccumulator()
-        if pk_target_cols and (keyed_upsert_scope or dest_key_addressed)
+        if run.cfg.pk_target_cols and (keyed_upsert_scope or dest_key_addressed)
         else None
     )
     overwrite_keys_acc = begin_overwrite_source_keys(
-        effective_sync, pk_target_cols, resumed=resumed_pass
+        run.cfg.effective_sync, run.cfg.pk_target_cols, resumed=resumed_pass
     )
     last_checksum = ""
     # Phase F1 — accumulate fingerprints during the write pass (avoids double source I/O).
@@ -1881,7 +1878,7 @@ def _stream_database_transfer_impl(
     inline_fingerprints_used = not (
         should_reread_source(
             src_type=run.cfg.src_read_type,
-            dest_type=dest_type,
+            dest_type=run.cfg.dest_type,
             incremental=run.cfg.incremental,
             partial_write_pass=False,
         )
@@ -1933,7 +1930,7 @@ def _stream_database_transfer_impl(
     page_skips = {"skipped": 0, "collapsed": 0}
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     # Threaded to every writer so the streaming path matches the buffered path.
-    stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
+    run.cfg.stream_error_policy = transform_error_policy_for_validation_mode(run.cfg.validation_mode)
     # Bounded: warnings arrive per batch, so an uncapped list grows with the
     # batch count on large transfers. Truncating at emit time bounded the output
     # but never the memory.
@@ -1956,7 +1953,7 @@ def _stream_database_transfer_impl(
         safe_keyset_unique_columns,
     )
 
-    keyset_pk_cols = [c for c in pk_source_cols if c and c in run.cfg.columns]
+    keyset_pk_cols = [c for c in run.cfg.pk_source_cols if c and c in run.cfg.columns]
     pagination_warning = ""
     _pk_introspect_types = _PK_INTROSPECT_TYPES
     # Property 6 — source catalog for create-new fidelity (any SQL sink that
@@ -2074,127 +2071,12 @@ def _stream_database_transfer_impl(
     # unkeyed append matches full-row content: an upsert still rewrites a peer
     # whose content changed, and a quiet poll stays a no-op, so its covered-
     # content proof still runs. The verify re-read drops the same rows.
-    _tie_dedupe = seeded_from_watermark
-    _boundary_fps_state: dict[str, Any] = {
+    run.cfg._tie_dedupe = seeded_from_watermark
+    run.cur._boundary_fps_state: dict[str, Any] = {
         "fps": None,
         "match_cols": [],
         "new_cols": [],
     }
-
-    def _boundary_rows_already_landed(headers: list[str], rows: list[list[str]]) -> set[int]:
-        """Indices of re-read tie-group rows the destination already holds."""
-        if not (_tie_dedupe and rows):
-            return set()
-        cidx = header_column_index(headers or [], run.cfg.cursor_source_col)
-        if cidx is None:
-            return set()
-        try:
-            from services.keyset_pagination import split_cursor_bookmark
-            from services.target_sample import read_target_sample
-            from services.value_serializer import present_cell_text
-
-            cur_val, _ = split_cursor_bookmark(str(run.cfg.watermark), has_tiebreak=True)
-            boundary_idx = [
-                i
-                for i, row in enumerate(rows)
-                if cidx < len(row) and present_cell_text(row[cidx]) == str(cur_val)
-            ]
-            if not boundary_idx:
-                return set()
-            all_cols = list(target_cols or [])
-            cursor_dest_col = str(
-                next(
-                    (
-                        m.get("target")
-                        for m in mappings
-                        if m.get("source") == run.cfg.cursor_source_col
-                    ),
-                    run.cfg.cursor_source_col,
-                )
-            )
-            match_cols = all_cols
-            if (
-                not requires_upsert(effective_sync)
-                and pk_target_cols
-                and all(c in all_cols for c in pk_target_cols)
-            ):
-                match_cols = [cursor_dest_col] + [
-                    c for c in pk_target_cols if c != cursor_dest_col
-                ]
-            if _boundary_fps_state["fps"] is None:
-                # A run that ADDs a column (approved schema evolution) re-reads
-                # tie peers whose new column the destination does not have yet.
-                # Selecting it failed the read, which fails open: every peer was
-                # delivered twice. Compare on the columns the table holds, and
-                # keep a peer only when its new columns carry a value.
-                landed = read_target_sample(
-                    dest_bind_dialect or dest_type,
-                    dest_cfg,
-                    schema=str(dest_cfg.get("schema") or "public"),
-                    table_name=dest_table,
-                    columns=None,
-                    limit=1,
-                    sort_key=cursor_dest_col,
-                    key_values=[cur_val],
-                )
-                live_cols = {str(k).lower() for k in (landed[0] if landed else {})}
-                read_cols = [c for c in all_cols if c.lower() in live_cols] or all_cols
-                _boundary_fps_state["new_cols"] = [
-                    c for c in all_cols if c.lower() not in live_cols
-                ] if landed else []
-                match_cols = [c for c in match_cols if c in read_cols] or match_cols
-                _boundary_fps_state["match_cols"] = match_cols
-                dest_rows = read_target_sample(
-                    dest_bind_dialect or dest_type,
-                    dest_cfg,
-                    schema=str(dest_cfg.get("schema") or "public"),
-                    table_name=dest_table,
-                    columns=read_cols,
-                    limit=10_000,
-                    sort_key=cursor_dest_col,
-                    key_values=[cur_val],
-                )
-                dest_tups = []
-                for dr in dest_rows or []:
-                    low = {str(k).lower(): v for k, v in dr.items()}
-                    dest_tups.append(tuple(low.get(str(c).lower()) for c in match_cols))
-                _boundary_fps_state["fps"] = {
-                    fp
-                    for _k, fp in row_fingerprints(
-                        dest_tups,
-                        match_cols,
-                        dest_db_type=dest_bind_dialect,
-                        dest_types=digest_dest_types,
-                    )
-                }
-            dest_fps = _boundary_fps_state["fps"]
-            if not dest_fps:
-                return set()
-            match_cols = _boundary_fps_state["match_cols"]
-            drop = _boundary_append_dedupe(
-                list(headers or []),
-                [rows[i] for i in boundary_idx],
-                dest_fps,
-                match_cols=match_cols,
-                new_cols=_boundary_fps_state["new_cols"],
-                mappings=mappings,
-                target_cols=all_cols,
-                column_types=run.cfg.column_types,
-                stream_error_policy=stream_error_policy,
-                digest_dest_types=digest_dest_types,
-                dest_bind_dialect=dest_bind_dialect,
-            )
-            if drop:
-                logger.info(
-                    "Boundary re-read dedupe dropped %d already-present row(s) "
-                    "at watermark %r.",
-                    len(drop),
-                    str(cur_val),
-                )
-            return {boundary_idx[i] for i in drop}
-        except Exception as exc:  # fail open — dedupe must never lose a row
-            logger.warning("Boundary dedupe skipped (fail-open): %s", exc)
-            return set()
 
     decision = decide_keyset_pagination(
         src_type=run.cfg.src_read_type,
@@ -2298,7 +2180,7 @@ def _stream_database_transfer_impl(
             and bulk_export_implemented(run.cfg.src_read_type)
             and not run.cfg.incremental
             and not _is_resume
-            and not source_filter
+            and not run.cfg.source_filter
             and not run.cfg.limit
             and not is_callable_source(run.cfg.source)
             and not is_callable_source(run.cfg.src_cfg)
@@ -2392,288 +2274,12 @@ def _stream_database_transfer_impl(
     # resume past rows that were read but never written.
     committed_keyset = checkpoint.cursor_value or ""
 
-    shape_inputs = (
-        frozenset(shape_runner.recipe.input_columns) if shape_runner is not None else frozenset()
+    run.cfg.shape_inputs = (
+        frozenset(run.cfg.shape_runner.recipe.input_columns) if run.cfg.shape_runner is not None else frozenset()
     )
-
-    def _rows_after_watermark_matrix(
-        headers: list[str], rows: list[list[str]]
-    ) -> tuple[list[list[str]], int]:
-        """Bound a read page to this run's window past the watermark.
-
-        The comparison goes through the same typed comparator the SQL readers
-        bound with, so a Redis or Dynamo delta means the same thing the seed's
-        ``WHERE cursor >= :watermark`` means — the tie group at the watermark
-        included (D124). Returns the kept rows and how many carried no cursor
-        value at all.
-        """
-        cursor_idx = header_column_index(headers, run.cfg.cursor_source_col)
-        if cursor_idx is None:
-            # The cursor column is not on the page: nothing here can be proven
-            # historical, and dropping the page would lose rows.
-            return list(rows), 0
-        kept: list[list[str]] = []
-        unbounded = 0
-        for row in rows:
-            verdict = row_in_run_window(
-                {run.cfg.cursor_source_col: row[cursor_idx]}, run.cfg.cursor_source_col, run.cfg.watermark
-            )
-            if verdict is None:
-                unbounded += 1
-                continue
-            if verdict:
-                kept.append(row)
-        return kept, unbounded
 
     # ``fk_orphan_guard`` was built ahead of the COPY decision (one guard per
     # stream); the row path below applies it to every page.
-
-    def _filter_batch(batch):
-        """Source filter, then the approved recipe — once per page.
-
-        The page carries its own pre-filter, pre-shape row count: the source
-        OFFSET must advance by the rows the source handed over, not by the rows
-        that survived a filter or a recipe, or every dropped row shifts the next
-        page and the tail of the table is never read.
-
-        That mark is also what makes this idempotent, and why both rewrites are
-        recorded by one mark: they happen together, in this call, so the mark
-        means "this page has already been rewritten". The first page passes
-        through here twice (its DDL is committed before any worker starts), and a
-        page already shaped is returned untouched: shaping it again would round a
-        rounded value and count the page's effects into the run's ledger twice.
-        """
-        if not batch:
-            return batch
-        if _raw_page_marked(batch):
-            return batch
-        raw_rows = len(batch.rows or [])
-        if raw_rows and (
-            source_filter
-            or shape_runner is not None
-            or client_cursor_bound
-            or _tie_dedupe
-            or fk_orphan_guard is not None
-        ):
-            # Pagination bookmarks belong to the rows the source handed over. A
-            # recipe that drops the page's highest key would otherwise bookmark a
-            # lower one and the next read would hand those rows over again.
-            order_cols = run.cfg.keyset_order_cols or (
-                [run.cfg.keyset_col] + ([run.cfg.keyset_tiebreak] if run.cfg.keyset_tiebreak else [])
-            )
-            keyset_mark = max_keyset_bookmark(batch.rows, batch.headers, order_cols)
-            if keyset_mark is None and header_column_index(
-                batch.headers or [], run.cfg.keyset_col
-            ) is not None:
-                keyset_mark = max_cursor_value(
-                    batch.rows, batch.headers, run.cfg.keyset_col, run.cfg.keyset_tiebreak or None
-                )
-            cursor_mark = ""
-            if run.cfg.incremental and run.cfg.cursor_source_col:
-                cursor_mark = (
-                    max_cursor_value(
-                        batch.rows,
-                        batch.headers,
-                        run.cfg.cursor_source_col,
-                        run.cfg.cursor_pk_source or None,
-                    )
-                    or ""
-                )
-            if not _mark_raw_page(batch, raw_rows, cursor_mark, keyset_mark or ""):
-                raise ValueError(
-                    "this source's read page cannot record the page as it was read, "
-                    "so a filter or a transform recipe cannot be proven to be applied "
-                    "to it exactly once, nor the next page proven to resume where "
-                    "this one ended — refusing rather than risk skipping source rows"
-                )
-        if client_cursor_bound and batch.rows:
-            # The source could not push the cursor bound into its read call, so
-            # it handed the whole keyspace over. Honouring the bound here is
-            # what makes "incremental" mean incremental for it: without this the
-            # second run re-offered every row and an append destination held 2N.
-            before = len(batch.rows)
-            kept, unbounded = _rows_after_watermark_matrix(
-                batch.headers, batch.rows
-            )
-            if unbounded:
-                # A row with no cursor value cannot be proven new or already at
-                # rest. Skipping it loses data and sending it duplicates data,
-                # so the run refuses instead of choosing silently.
-                raise ValueError(
-                    f"{unbounded} row(s) carry no value for cursor "
-                    f"'{run.cfg.cursor_source_col}' — an incremental read of "
-                    f"{run.cfg.src_type} cannot prove whether they already landed. "
-                    "Fill the cursor column at the source, or run this sync as "
-                    "full refresh."
-                )
-            batch.rows = kept
-            excluded = before - len(kept)
-            if excluded:
-                try:
-                    batch.raw_page_cursor_bounded = excluded
-                except AttributeError as exc:
-                    raise ValueError(
-                        "this source's read page cannot record how many rows the "
-                        "incremental cursor bound excluded, so the run's source "
-                        "population cannot be stated — refusing rather than "
-                        "counting rows this run was never asked to move"
-                    ) from exc
-        if _tie_dedupe and batch.rows:
-            # Tie peers an earlier run already delivered are outside this
-            # run's scope, exactly like rows below the watermark.
-            landed = _boundary_rows_already_landed(batch.headers, batch.rows)
-            if landed:
-                batch.rows = [r for i, r in enumerate(batch.rows) if i not in landed]
-                try:
-                    batch.raw_page_cursor_bounded = (
-                        int(getattr(batch, "raw_page_cursor_bounded", 0) or 0)
-                        + len(landed)
-                    )
-                except AttributeError as exc:
-                    raise ValueError(
-                        "this source's read page cannot record the re-read tie "
-                        "rows it dropped, so the run's source population cannot "
-                        "be stated — refusing rather than miscounting them"
-                    ) from exc
-        if source_filter and batch.rows:
-            before = len(batch.rows)
-            batch.rows = apply_row_filter_to_matrix(
-                batch.headers, batch.rows, source_filter
-            )
-            removed = before - len(batch.rows)
-            try:
-                batch.raw_page_filtered = removed
-            except AttributeError as exc:
-                # Without this the removal would be charged to the recipe, and
-                # proof would name the wrong authority for a missing row.
-                raise ValueError(
-                    "this source's read page cannot record how many rows the "
-                    "declared source filter removed, so proof cannot say whether "
-                    "the filter or the transform recipe removed a row — refusing "
-                    "rather than attributing it to the wrong authority"
-                ) from exc
-        if fk_orphan_guard is not None and batch.rows:
-            # fk__pg-maria/fk__pg-pg: a child row whose parent is absent at the
-            # destination must quarantine, never land. The guard anti-joins
-            # this page's FK tuples against the destination parent table.
-            kept_rows, orphan_details = fk_orphan_guard.partition(
-                list(batch.headers or []), list(batch.rows)
-            )
-            if orphan_details and _fk_orphans_fail_closed(validation_mode):
-                raise ValueError(_fk_orphan_violation_message(orphan_details))
-            if orphan_details:
-                batch.rows = kept_rows
-                try:
-                    batch.fk_orphan_details = orphan_details
-                except AttributeError as exc:
-                    raise ValueError(
-                        "this source's read page cannot carry quarantined "
-                        "orphan-FK details, so the run cannot prove the rows "
-                        "were held out — refusing rather than dropping them"
-                    ) from exc
-        if shape_runner is not None and batch.rows is not None:
-            headers = list(batch.headers or [])
-            if pin_ledger is not None:
-                pin_ledger.add_page(headers, batch.rows)
-            _shape_inputs_folded = {
-                str(s).casefold() for s in (shape_inputs or [])
-            }
-            unknown = [
-                h
-                for h in headers
-                if h and str(h).casefold() not in _shape_inputs_folded
-            ]
-            if unknown:
-                # A column the recipe was never validated against cannot be
-                # shaped, and writing it raw beside shaped columns would put two
-                # different rules in one row. Fail closed, naming it.
-                raise ValueError(
-                    f"source column(s) {', '.join(sorted(unknown))} appeared on the read "
-                    f"but the approved transform recipe ({shape_runner.recipe_hash}) was "
-                    "validated against a different column set — re-validate the recipe "
-                    "against the source as it is now"
-                )
-            batch.headers, batch.rows = shape_runner.matrix(headers, batch.rows)
-            batch.raw_page_diverted = _persist_shape_diverts()
-            # Rows still held by a buffering step are not removals — the
-            # ledger subtracts them via this marker (DD-3).
-            batch.raw_page_held = int(shape_runner.effect.rows_buffered or 0)
-        return batch
-
-    def _persist_shape_diverts() -> int:
-        """Persist this page's shape-diverted rows to the quarantine DLQ.
-
-        A row a recipe step diverted (on_error=divert, divert_rows, lookup
-        unmatched=divert) is excluded from the destination — quarantine is what
-        makes it recoverable. Persisting per page keeps the pending list
-        bounded and keeps quarantine durable across a mid-stream abort.
-        """
-        if shape_runner is None:
-            return 0
-        diverted = shape_runner.take_diverted()
-        shape_diverted_total[0] += len(diverted or [])
-        # Keyed routed runs purge diverted keys from every route table —
-        # a row that stopped matching any route must lose its stale copy
-        # (P1-B). Records carry the shaped row; try the contract pk names
-        # then the identity source names.
-        for _d in diverted or []:
-            _rec = getattr(_d, "record", None) or {}
-            _key = None
-            for _names in (pk_source_cols, pk_audit_cols):
-                if _names and all(n in _rec for n in _names):
-                    _key = tuple(_rec[n] for n in _names)
-                    break
-            if _key is not None and all(v is not None for v in _key):
-                shape_divert_key_tuples.append(_key)
-        if not diverted or not run.cfg.job_id:
-            return len(diverted or [])
-        from services.quarantine_dlq import persist_rejected_rows
-
-        details = [
-            {
-                "row": d.record,
-                "reason": (
-                    f"transform divert — step {d.step} '{d.op}': {d.reason}"
-                ),
-                "failure_reason": d.reason,
-                "transform_attempted": f"shape step {d.step} '{d.op}'",
-                "shape_step": d.step,
-                "shape_op": d.op,
-                "source_row_index": d.row_index + 1,
-                **(
-                    {
-                        "dedupe_key": list(d.dedupe_key),
-                        "winner_row": d.winner_row_index + 1,
-                    }
-                    if getattr(d, "dedupe_key", None) is not None
-                    and getattr(d, "winner_row_index", None) is not None
-                    else {}
-                ),
-            }
-            for d in diverted
-        ]
-        persist_rejected_rows(
-            job_id=str(run.cfg.job_id),
-            rejected_details=details,
-            source="shape_divert",
-            connector=str(
-                getattr(run.cfg.destination, "format", None)
-                or getattr(run.cfg.destination, "kind", None)
-                or ""
-            ),
-        )
-        return len(diverted)
-
-    def _page_cursor_max(batch) -> str:
-        """The page's highest cursor value, as the source handed it over.
-
-        A row the recipe removed was still read, so the watermark must move past
-        it — otherwise the next incremental run reads it again to remove it again,
-        for ever.
-        """
-        return _raw_page_cursor(batch) or max_cursor_value(
-            batch.rows, batch.headers, run.cfg.cursor_source_col, run.cfg.cursor_pk_source or None
-        )
 
     if run.cfg.use_keyset and (offset > 0 or chunk_idx > 0):
         # Bookmark seek — the probe was schema-only (or the first page of a
@@ -2685,8 +2291,8 @@ def _stream_database_transfer_impl(
         first_page = _fetch_next_batch(run, None)
     else:
         first_page = probe
-    batch = _filter_batch(first_page)
-    batch_quality_enabled = validation_mode in ("strict", "maximum")
+    batch = _filter_batch(run, first_page)
+    batch_quality_enabled = run.cfg.validation_mode in ("strict", "maximum")
     drift_detector = BatchDriftDetector()
     # Per-route drift detectors — routed runs audit each split separately.
     route_drift_detectors: dict[str, Any] = {}
@@ -2694,9 +2300,9 @@ def _stream_database_transfer_impl(
     # Cursor fields (updated_at, id) are not the uniqueness contract; Mongo→Redis
     # must audit `_id`, not a business `id` that legitimately repeats.
     pk_source_col = ""
-    if pk_target_cols and mappings:
-        target_to_source = {m.get("target", "").lower(): m.get("source", "") for m in mappings if m.get("target")}
-        for pk in pk_target_cols:
+    if run.cfg.pk_target_cols and run.cfg.mappings:
+        target_to_source = {m.get("target", "").lower(): m.get("source", "") for m in run.cfg.mappings if m.get("target")}
+        for pk in run.cfg.pk_target_cols:
             src = target_to_source.get(pk.lower())
             if src:
                 pk_source_col = src
@@ -2707,10 +2313,10 @@ def _stream_database_transfer_impl(
 
             pk_source_col = (
                 resolve_primary_key_source(
-                    mappings,
+                    run.cfg.mappings,
                     list(run.cfg.columns or (batch.headers if batch else [])),
-                    dest_type,
-                    validation_mode=validation_mode,
+                    run.cfg.dest_type,
+                    validation_mode=run.cfg.validation_mode,
                     purpose="uniqueness",
                 )
                 or ""
@@ -2725,7 +2331,7 @@ def _stream_database_transfer_impl(
     # first component alone hard-blocked every (region, id) upsert at Execute.
     from services.primary_key import identity_source_columns
 
-    pk_audit_cols = identity_source_columns(pk_target_cols, mappings)
+    run.cfg.pk_audit_cols = identity_source_columns(run.cfg.pk_target_cols, run.cfg.mappings)
 
     # Phase F6 — default per-transfer parallelism raised from 2 → min(4, CPUs).
     max_workers = int(
@@ -2740,7 +2346,7 @@ def _stream_database_transfer_impl(
     # and each of those connections truncates then commits its own slice, so
     # the last batch is the only one a reader still sees. Wide rows shrink
     # the chunk to one row and that is how a 3-row LOB copy landed as 1.
-    pg_overwrite_one_txn = dest_type in ("postgresql", "redshift") and bool(
+    pg_overwrite_one_txn = run.cfg.dest_type in ("postgresql", "redshift") and bool(
         (getattr(run.cfg.destination, "extra", None) or {}).get("pg_overwrite_in_transaction")
     )
     # A routed run writes several tables — on PostgreSQL it must run on the
@@ -2749,13 +2355,13 @@ def _stream_database_transfer_impl(
     # its own connection and each route commits independently, leaving
     # half-written route sets on failure.
     routed_pg = (
-        dest_type in ("postgresql", "redshift")
-        and shape_runner is not None
-        and getattr(shape_runner, "recipe", None) is not None
-        and shape_runner.recipe.router_step is not None
+        run.cfg.dest_type in ("postgresql", "redshift")
+        and run.cfg.shape_runner is not None
+        and getattr(run.cfg.shape_runner, "recipe", None) is not None
+        and run.cfg.shape_runner.recipe.router_step is not None
     )
     if (
-        dest_type in ("sqlite", "snowflake", "iceberg")
+        run.cfg.dest_type in ("sqlite", "snowflake", "iceberg")
         or pg_overwrite_one_txn
         or routed_pg
     ):
@@ -2765,11 +2371,11 @@ def _stream_database_transfer_impl(
             from connectors.write_resilience import is_public_proxy_host
         except ImportError:
             is_public_proxy_host = lambda _h: False  # noqa: E731
-        proxy_host = str(dest_cfg.get("host") or "")
+        proxy_host = str(run.cfg.dest_cfg.get("host") or "")
         proxy_cs = str(
-            dest_cfg.get("connection_string")
-            or dest_cfg.get("uri")
-            or dest_cfg.get("url")
+            run.cfg.dest_cfg.get("connection_string")
+            or run.cfg.dest_cfg.get("uri")
+            or run.cfg.dest_cfg.get("url")
             or ""
         )
         if is_public_proxy_host(proxy_host) or is_public_proxy_host(proxy_cs):
@@ -2798,18 +2404,18 @@ def _stream_database_transfer_impl(
 
         from services.connector_auth import engine_login_role
 
-        pem = str(dest_cfg.get("private_key") or "")
+        pem = str(run.cfg.dest_cfg.get("private_key") or "")
         sf_conn_state["conn"] = get_connection(
-            account=normalize_account(dest_cfg.get("host", "")),
-            username=dest_cfg.get("username", ""),
-            password=dest_cfg.get("password", ""),
-            database=dest_cfg.get("database", ""),
-            schema=dest_cfg.get("schema", "PUBLIC"),
-            warehouse=dest_cfg.get("warehouse", ""),
-            connection_string=dest_cfg.get("connection_string", ""),
-            role=engine_login_role(dest_cfg.get("auth_role"), dest_cfg.get("role")),
+            account=normalize_account(run.cfg.dest_cfg.get("host", "")),
+            username=run.cfg.dest_cfg.get("username", ""),
+            password=run.cfg.dest_cfg.get("password", ""),
+            database=run.cfg.dest_cfg.get("database", ""),
+            schema=run.cfg.dest_cfg.get("schema", "PUBLIC"),
+            warehouse=run.cfg.dest_cfg.get("warehouse", ""),
+            connection_string=run.cfg.dest_cfg.get("connection_string", ""),
+            role=engine_login_role(run.cfg.dest_cfg.get("auth_role"), run.cfg.dest_cfg.get("role")),
             private_key=pem,
-            private_key_passphrase=str(dest_cfg.get("password") or "") if pem else "",
+            private_key_passphrase=str(run.cfg.dest_cfg.get("password") or "") if pem else "",
         )
         return sf_conn_state["conn"]
 
@@ -2825,17 +2431,17 @@ def _stream_database_transfer_impl(
         from connectors.postgresql_conn import get_connection as pg_get_connection
 
         pg_port = int(
-            dest_cfg.get("port")
-            or (5439 if dest_type == "redshift" else 5432)
+            run.cfg.dest_cfg.get("port")
+            or (5439 if run.cfg.dest_type == "redshift" else 5432)
         )
         conn = pg_get_connection(
-            host=dest_cfg.get("host", ""),
+            host=run.cfg.dest_cfg.get("host", ""),
             port=pg_port,
-            database=dest_cfg.get("database", ""),
-            username=dest_cfg.get("username", ""),
-            password=dest_cfg.get("password", ""),
-            connection_string=dest_cfg.get("connection_string", ""),
-            ssl=dest_cfg.get("ssl", False),
+            database=run.cfg.dest_cfg.get("database", ""),
+            username=run.cfg.dest_cfg.get("username", ""),
+            password=run.cfg.dest_cfg.get("password", ""),
+            connection_string=run.cfg.dest_cfg.get("connection_string", ""),
+            ssl=run.cfg.dest_cfg.get("ssl", False),
         )
         try:
             conn.autocommit = False
@@ -2978,27 +2584,27 @@ def _stream_database_transfer_impl(
         # reads one route's mapped/diverted population as another's NULLs
         # and shrinkage (RT-3).
         _batch_routed = (
-            shape_runner is not None
-            and getattr(shape_runner, "recipe", None) is not None
-            and shape_runner.recipe.router_step is not None
+            run.cfg.shape_runner is not None
+            and getattr(run.cfg.shape_runner, "recipe", None) is not None
+            and run.cfg.shape_runner.recipe.router_step is not None
         )
         if batch_quality_enabled and not _batch_routed:
             # Audit uniqueness must match the *write* posture, not only the sync
             # label. Resume upgrades insert→upsert while effective_sync stays
             # append — inventing a soft uniqueness check would last-row-wins.
             audit_sync = (
-                "upsert" if write_mode == "upsert" else effective_sync
+                "upsert" if write_mode == "upsert" else run.cfg.effective_sync
             )
             audit = run_integrity_audit(
                 headers=batch.headers,
                 rows=batch.rows,
                 column_types=run.cfg.column_types,
-                mappings=mappings,
-                required_targets=pk_target_cols or [],
+                mappings=run.cfg.mappings,
+                required_targets=run.cfg.pk_target_cols or [],
                 primary_key=pk_source_col if pk_source_col in batch.headers else None,
-                primary_key_columns=pk_audit_cols,
-                validation_mode=validation_mode,
-                dest_kind=dest_type,
+                primary_key_columns=run.cfg.pk_audit_cols,
+                validation_mode=run.cfg.validation_mode,
+                dest_kind=run.cfg.dest_type,
                 # Validate↔Run parity: Full append must not invent a uniqueness
                 # hard-block after G9 unlocked Execute for the same sync mode.
                 sync_mode=audit_sync,
@@ -3011,7 +2617,7 @@ def _stream_database_transfer_impl(
                 raise ValueError(f"Batch {idx} failed data-quality audit: {'; '.join(audit.issues[:5])}")
             drift_warnings = drift_detector.check(audit.stats or {})
             if drift_warnings:
-                if validation_mode == "maximum":
+                if run.cfg.validation_mode == "maximum":
                     raise ValueError(
                         f"Batch {idx} drift detected: {'; '.join(drift_warnings[:3])}"
                     )
@@ -3053,11 +2659,11 @@ def _stream_database_transfer_impl(
                 getattr(run.cfg.source, "kind", "") or "database", run.cfg.src_type
             ),
         }
-        if dest_type == "snowflake":
+        if run.cfg.dest_type == "snowflake":
             write_kwargs["connection"] = _ensure_snowflake_conn()
             write_kwargs["close_connection"] = False
             write_kwargs["skip_session_setup"] = bool(sf_conn_state["session_ready"])
-        elif dest_type in ("postgresql", "redshift") and max_workers == 1:
+        elif run.cfg.dest_type in ("postgresql", "redshift") and max_workers == 1:
             # One connection for the job. Later batches stay on this thread
             # (drive_ordered_batches). psycopg2 deadlocks once that handle
             # is used from the pool, which is how a 100k load stopped after
@@ -3067,14 +2673,14 @@ def _stream_database_transfer_impl(
             write_kwargs["connection_holder"] = pg_conn_state
 
         router_step = (
-            shape_runner.recipe.router_step
-            if shape_runner is not None and shape_runner.recipe is not None
+            run.cfg.shape_runner.recipe.router_step
+            if run.cfg.shape_runner is not None and run.cfg.shape_runner.recipe is not None
             else None
         )
         _rconn = None
         if (
             router_step is not None
-            and dest_type in ("postgresql", "redshift")
+            and run.cfg.dest_type in ("postgresql", "redshift")
             and write_kwargs.get("connection") is not None
         ):
             # A routed run writes several tables; a failure must not leave
@@ -3105,7 +2711,7 @@ def _stream_database_transfer_impl(
             # _settle_overwrite_backup DELETE+INSERT the prior rows back and
             # drop the copies (the txn commits before Gate-8, so the backup
             # is the only way to restore prior content).
-            _rsync_now = str(effective_sync or "")
+            _rsync_now = str(run.cfg.effective_sync or "")
             if is_overwrite_sync(_rsync_now) and not route_backup_state.get(
                 "armed"
             ):
@@ -3124,10 +2730,10 @@ def _stream_database_transfer_impl(
                     if not _rrn or int(_rprecount.get(_rrn) or 0) <= 0:
                         continue
                     _rrt = str(
-                        _rtargets_map.get(_rrn) or f"{dest_table}__{_rrn}"
+                        _rtargets_map.get(_rrn) or f"{run.cfg.dest_table}__{_rrn}"
                     )
                     _rschema, _rtbl = split_qualified_table(
-                        _rrt, str(dest_cfg.get("schema") or "public")
+                        _rrt, str(run.cfg.dest_cfg.get("schema") or "public")
                     )
                     _rbak = pg_route_backup_name(_rtbl, run.cfg.job_id or "")
                     try:
@@ -3187,7 +2793,7 @@ def _stream_database_transfer_impl(
             write_calls.append(
                 (
                     None,
-                    dest_table,
+                    run.cfg.dest_table,
                     partial(write_procedure_chunk, run.cfg.destination, records, row_apply_plan),
                 )
             )
@@ -3195,15 +2801,15 @@ def _stream_database_transfer_impl(
             from .stream_write import _write_batch
 
             splits = (
-                _split_routed_batch(batch, shape_runner.recipe, dest_table)
+                _split_routed_batch(batch, run.cfg.shape_runner.recipe, run.cfg.dest_table)
                 if router_step is not None
-                else [(None, dest_table, batch.headers, batch.rows)]
+                else [(None, run.cfg.dest_table, batch.headers, batch.rows)]
             )
             if (
                 router_step is not None
                 and write_mode == "upsert"
                 and _rconn is not None
-                and pk_source_cols
+                and run.cfg.pk_source_cols
             ):
                 # Dedupe-by-partition (P1-B): a keyed row that changed route
                 # must not keep its old copy — delete every batch/diverted
@@ -3212,14 +2818,14 @@ def _stream_database_transfer_impl(
                 _purge_route_key_tuples(
                     _rconn,
                     router_step=router_step,
-                    recipe=shape_runner.recipe,
-                    dest_table=dest_table,
-                    dest_cfg=dest_cfg,
+                    recipe=run.cfg.shape_runner.recipe,
+                    dest_table=run.cfg.dest_table,
+                    dest_cfg=run.cfg.dest_cfg,
                     batch=batch,
-                    pk_source_cols=pk_source_cols,
-                    pk_target_cols=pk_target_cols,
-                    pk_audit_cols=pk_audit_cols,
-                    diverted_keys=shape_divert_key_tuples,
+                    pk_source_cols=run.cfg.pk_source_cols,
+                    pk_target_cols=run.cfg.pk_target_cols,
+                    pk_audit_cols=run.cfg.pk_audit_cols,
+                    diverted_keys=run.tally.shape_divert_key_tuples,
                 )
             created_tables = ddl_state.setdefault("created_tables", set())
             _rmap_decls = (
@@ -3265,7 +2871,7 @@ def _stream_database_transfer_impl(
                         }
                     else:
                         _rmappings = [
-                            m for m in mappings
+                            m for m in run.cfg.mappings
                             if str(m.get("source") or "") in _rheader_set
                         ]
                         _rtargets = {
@@ -3289,11 +2895,11 @@ def _stream_database_transfer_impl(
                                 mappings=_rmappings,
                                 target_cols=sorted(_rtargets),
                                 column_types=_rcol_types,
-                                error_policy=stream_error_policy,
+                                error_policy=run.cfg.stream_error_policy,
                                 dest_types=fingerprint_dest_types,
                                 preserve_case=True,
-                                dest_kind=dest_bind_dialect,
-                                destination_pk_columns=list(pk_target_cols or []) or None,
+                                dest_kind=run.cfg.dest_bind_dialect,
+                                destination_pk_columns=list(run.cfg.pk_target_cols or []) or None,
                                 empty_cells_as_null=bool(
                                     write_kwargs.get("empty_cells_as_null")
                                 ),
@@ -3313,8 +2919,8 @@ def _stream_database_transfer_impl(
                                     row_fingerprints(
                                         _r_mapped_fp,
                                         sorted(_rtargets),
-                                        dest_db_type=dest_bind_dialect,
-                                        dest_types=digest_dest_types,
+                                        dest_db_type=run.cfg.dest_bind_dialect,
+                                        dest_types=run.cfg.digest_dest_types,
                                     )
                                 )
                         except Exception as exc:
@@ -3322,7 +2928,7 @@ def _stream_database_transfer_impl(
                                 "Route fingerprint skipped for %s: %s", _rname, exc
                             )
                 else:
-                    _rmappings = mappings
+                    _rmappings = run.cfg.mappings
                     _rcol_types = run.cfg.column_types
                 if _rname is not None and batch_quality_enabled:
                     # Each route table is its own destination — audit the
@@ -3334,19 +2940,19 @@ def _stream_database_transfer_impl(
                             rows=_rrows,
                             column_types=_rcol_types,
                             mappings=_rmappings,
-                            required_targets=pk_target_cols or [],
+                            required_targets=run.cfg.pk_target_cols or [],
                             primary_key=pk_source_col
                             if pk_source_col in _rheaders
                             else None,
                             primary_key_columns=[
-                                c for c in (pk_audit_cols or []) if c in _rheaders
+                                c for c in (run.cfg.pk_audit_cols or []) if c in _rheaders
                             ],
-                            validation_mode=validation_mode,
-                            dest_kind=dest_type,
+                            validation_mode=run.cfg.validation_mode,
+                            dest_kind=run.cfg.dest_type,
                             sync_mode=(
                                 "upsert"
                                 if write_mode == "upsert"
-                                else effective_sync
+                                else run.cfg.effective_sync
                             ),
                         )
                         if audit.issues:
@@ -3368,7 +2974,7 @@ def _stream_database_transfer_impl(
                         )
                         drift_warnings = _rdet.check(audit.stats or {})
                         if drift_warnings:
-                            if validation_mode == "maximum":
+                            if run.cfg.validation_mode == "maximum":
                                 raise ValueError(
                                     f"Batch {idx} route {_rname} drift "
                                     f"detected: "
@@ -3390,9 +2996,9 @@ def _stream_database_transfer_impl(
                         _rtable,
                         partial(
                             _write_batch,
-                            dest_type,
+                            run.cfg.dest_type,
                             run.cfg.destination,
-                            dest_cfg,
+                            run.cfg.dest_cfg,
                             _rtable,
                             _rheaders,
                             _rrows,
@@ -3404,10 +3010,10 @@ def _stream_database_transfer_impl(
                             total_chunks=_chunks_for_page(idx, batch),
                             rows_so_far=0,
                             write_mode=write_mode,
-                            conflict_columns=pk_target_cols or None,
-                            sync_mode=effective_sync,
+                            conflict_columns=run.cfg.pk_target_cols or None,
+                            sync_mode=run.cfg.effective_sync,
                             backfill_new_fields=backfill_new_fields,
-                            error_policy=stream_error_policy,
+                            error_policy=run.cfg.stream_error_policy,
                             job_id=run.cfg.job_id,
                             skip_preflight=skip_preflight,
                             source_schema_catalog=source_schema_catalog,
@@ -3423,12 +3029,12 @@ def _stream_database_transfer_impl(
                 keyed_census_acc,
                 headers=batch.headers,
                 rows=batch.rows,
-                mappings=mappings,
-                key_columns=pk_target_cols,
-                db_type=dest_type,
-                cfg=dest_cfg,
-                schema=schema_from_cfg(dest_type, dest_cfg),
-                table_name=dest_table,
+                mappings=run.cfg.mappings,
+                key_columns=run.cfg.pk_target_cols,
+                db_type=run.cfg.dest_type,
+                cfg=run.cfg.dest_cfg,
+                schema=schema_from_cfg(run.cfg.dest_type, run.cfg.dest_cfg),
+                table_name=run.cfg.dest_table,
             )
         # Phase F1 — fingerprint the mapped rows from this chunk (same policy as
         # post-write re-read) so the write pass can own the source checksum.
@@ -3440,31 +3046,31 @@ def _stream_database_transfer_impl(
                 mapped_fp, _ = map_rows_for_fingerprint(
                     headers=batch.headers,
                     data_rows=batch.rows,
-                    mappings=mappings,
-                    target_cols=target_cols,
+                    mappings=run.cfg.mappings,
+                    target_cols=run.cfg.target_cols,
                     column_types=run.cfg.column_types,
-                    error_policy=stream_error_policy,
+                    error_policy=run.cfg.stream_error_policy,
                     dest_types=fingerprint_dest_types,
                     preserve_case=True,
-                    dest_kind=dest_bind_dialect,
-                    destination_pk_columns=list(pk_target_cols or []) or None,
+                    dest_kind=run.cfg.dest_bind_dialect,
+                    destination_pk_columns=list(run.cfg.pk_target_cols or []) or None,
                     empty_cells_as_null=bool(write_kwargs.get("empty_cells_as_null")),
                 )
-                if mapped_fp and pk_target_cols:
+                if mapped_fp and run.cfg.pk_target_cols:
                     from services.primary_key import sync_collapses_in_file_duplicates
 
-                    if sync_collapses_in_file_duplicates(effective_sync):
+                    if sync_collapses_in_file_duplicates(run.cfg.effective_sync):
                         from connectors.writer_common import dedupe_rows
 
                         mapped_fp = dedupe_rows(
-                            list(mapped_fp), list(pk_target_cols), list(target_cols)
+                            list(mapped_fp), list(run.cfg.pk_target_cols), list(run.cfg.target_cols)
                         )
                 if mapped_fp:
                     inline_fps = row_fingerprints(
                         mapped_fp,
-                        target_cols,
-                        dest_db_type=dest_bind_dialect,
-                        dest_types=digest_dest_types,
+                        run.cfg.target_cols,
+                        dest_db_type=run.cfg.dest_bind_dialect,
+                        dest_types=run.cfg.digest_dest_types,
                     )
             except Exception as exc:
                 logger.warning(
@@ -3558,7 +3164,7 @@ def _stream_database_transfer_impl(
                 keyed_census_acc.reverse_last_live_batch()
             else:
                 keyed_census_acc.keep_last_live_batch()
-        if dest_type == "snowflake":
+        if run.cfg.dest_type == "snowflake":
             sf_conn_state["session_ready"] = True
         return {
             "batch_written": batch_written,
@@ -3597,7 +3203,7 @@ def _stream_database_transfer_impl(
             "fingerprints": inline_fps,
             "overwrite_keys": (
                 matrix_to_key_tuples(
-                    batch.headers, batch.rows, mappings, pk_target_cols
+                    batch.headers, batch.rows, run.cfg.mappings, run.cfg.pk_target_cols
                 )
                 if overwrite_keys_acc is not None
                 else None
@@ -3791,7 +3397,7 @@ def _stream_database_transfer_impl(
                     running_cursor,
                     metadata={
                         "job_id": run.cfg.job_id,
-                        "sync_mode": effective_sync,
+                        "sync_mode": run.cfg.effective_sync,
                         # A watermark is a value of one column; record which one
                         # so a later run on a different cursor cannot inherit it.
                         "cursor_column": run.cfg.cursor_source_col,
@@ -3829,30 +3435,6 @@ def _stream_database_transfer_impl(
 
     first_idx = chunk_idx + 1
 
-    def _advance_fetch_cursor(page: Any) -> None:
-        """Move the read edge to the page's high-water mark.
-
-        The seed page is taken whole: an inclusive tie-group read can end
-        *below* the stored ``(cursor, last key)``, and keeping the stored mark
-        then would skip the tie rows between the page edge and it.
-        """
-        if not (run.cfg.incremental and run.cfg.cursor_source_col and _raw_page_rows(page)):
-            return
-        batch_max = _page_cursor_max(page)
-        if batch_max and (
-            run.cur.fetch_from_seed
-            or run.cur.fetch_cursor is None
-            or compare_cursor_values(batch_max, run.cur.fetch_cursor) > 0
-        ):
-            run.cur.fetch_cursor = batch_max
-            run.cur.fetch_from_seed = False
-
-    def _prepare_batch(idx: int, raw_batch: Any) -> Any:
-        prepared = _filter_batch(raw_batch)
-        _advance_fetch_cursor(prepared)
-        run.cur.fetch_offset += _raw_page_rows(prepared)
-        return prepared
-
     from .stream_dest_procedure import run_session_after, run_session_before
 
     run_after = False
@@ -3862,8 +3444,8 @@ def _stream_database_transfer_impl(
         # Process the first batch synchronously so DDL (table/index creation) is
         # committed before any parallel workers try to insert into the new table.
         while batch:
-            batch = _filter_batch(batch)
-            _advance_fetch_cursor(batch)
+            batch = _filter_batch(run, batch)
+            _advance_fetch_cursor(run, batch)
             _apply_result(first_idx, _process_db_chunk(first_idx, batch))
             run.cur.fetch_offset += _raw_page_rows(batch)
             if batch.rows:
@@ -3882,7 +3464,7 @@ def _stream_database_transfer_impl(
             max_workers=max_workers,
             initial=batch,
             fetch_next=partial(_fetch_next_batch, run),
-            prepare=_prepare_batch,
+            prepare=partial(_prepare_batch, run),
             process=_process_db_chunk,
             apply_result=_apply_result,
             start_idx=first_idx + 1,
@@ -3890,8 +3472,8 @@ def _stream_database_transfer_impl(
         # A buffering recipe step (dedupe keep-last, aggregate, sort, rank)
         # holds rows until the population is fully read — this is that moment.
         # Drained rows run the same write path and DDL gate as every other page.
-        if shape_runner is not None:
-            tail_headers, tail_rows = shape_runner.drain_matrix()
+        if run.cfg.shape_runner is not None:
+            tail_headers, tail_rows = run.cfg.shape_runner.drain_matrix()
             if tail_rows:
                 tail_batch = SimpleNamespace(
                     headers=tail_headers,
@@ -3906,7 +3488,7 @@ def _stream_database_transfer_impl(
                 tail_idx = first_idx + 1 + 10_000_000
                 _apply_result(tail_idx, _process_db_chunk(tail_idx, tail_batch))
             # Winners can still hit a divert step downstream of the buffer.
-            _persist_shape_diverts()
+            _persist_shape_diverts(run)
         row_path_ok = True
     except BaseException as _row_exc:
         # X-9: same undo as the file path — a transform refusal / writer
@@ -3926,7 +3508,7 @@ def _stream_database_transfer_impl(
                 _undo_note = undo_failed_batch_if_dest_was_empty(
                     destination=run.cfg.destination,
                     dest_summary=dest_summary,
-                    sync_mode=effective_sync,
+                    sync_mode=run.cfg.effective_sync,
                 )
                 if _undo_note:
                     setattr(_row_exc, "failed_batch_undo_note", _undo_note)
@@ -3996,7 +3578,7 @@ def _stream_database_transfer_impl(
                             )
 
                             _rschema = str(
-                                dest_cfg.get("schema") or "public"
+                                run.cfg.dest_cfg.get("schema") or "public"
                             )
                             _txids: dict[str, int] = {}
                             with conn.cursor() as _txcur:
@@ -4035,10 +3617,10 @@ def _stream_database_transfer_impl(
 
     if written == 0 and run.cfg.incremental:
         ddl_log.append("INCREMENTAL — no new rows since last watermark")
-        dest_summary["sync_mode"] = effective_sync
+        dest_summary["sync_mode"] = run.cfg.effective_sync
         # No batch ran, so no writer summary named the table; the job record
         # read an empty destination and fell back to the database (QA MX3-01).
-        dest_summary.setdefault("table", dest_table)
+        dest_summary.setdefault("table", run.cfg.dest_table)
         stamp_incremental_no_op(dest_summary)
         if resume_key_resolved:
             # Honest delivery label: the read side re-delivers the interrupted
@@ -4084,13 +3666,13 @@ def _stream_database_transfer_impl(
             "create_empty_source"
         ):
             written_n, checksum, empty_summary = _stream._write_batch(
-                dest_type,
+                run.cfg.dest_type,
                 run.cfg.destination,
-                dest_cfg,
-                dest_table,
+                run.cfg.dest_cfg,
+                run.cfg.dest_table,
                 list(run.cfg.columns),
                 [],
-                mappings,
+                run.cfg.mappings,
                 run.cfg.column_types,
                 create_table=True,
                 on_checkpoint=None,
@@ -4098,10 +3680,10 @@ def _stream_database_transfer_impl(
                 total_chunks=1,
                 rows_so_far=0,
                 write_mode=write_mode,
-                conflict_columns=pk_target_cols or None,
-                sync_mode=effective_sync,
+                conflict_columns=run.cfg.pk_target_cols or None,
+                sync_mode=run.cfg.effective_sync,
                 backfill_new_fields=backfill_new_fields,
-                error_policy=stream_error_policy,
+                error_policy=run.cfg.stream_error_policy,
                 job_id=run.cfg.job_id,
                 skip_preflight=skip_preflight,
                 source_schema_catalog=source_schema_catalog,
@@ -4110,7 +3692,7 @@ def _stream_database_transfer_impl(
             dest_summary["source_row_count"] = 0
             dest_summary["empty_source_table"] = True
             dest_summary["checksum"] = checksum
-            ddl_log.append(f"CREATE TABLE {dest_table} — source has columns and 0 rows")
+            ddl_log.append(f"CREATE TABLE {run.cfg.dest_table} — source has columns and 0 rows")
             return int(written_n or 0), ddl_log, dest_summary, run.cfg.columns
         raise ValueError("Source table is empty")
 
@@ -4120,7 +3702,7 @@ def _stream_database_transfer_impl(
             running_cursor,
             metadata={
                 "job_id": run.cfg.job_id,
-                "sync_mode": effective_sync,
+                "sync_mode": run.cfg.effective_sync,
                 # A watermark is a value of one column; record which one so a
                 # later run on a different cursor cannot inherit it.
                 "cursor_column": run.cfg.cursor_source_col,
@@ -4160,16 +3742,16 @@ def _stream_database_transfer_impl(
         write_pass_fp.total > 0
         and _expected_population > 0
         and write_pass_fp.total < _expected_population
-        and (is_overwrite_sync(effective_sync) or resumed_pass)
+        and (is_overwrite_sync(run.cfg.effective_sync) or resumed_pass)
     )
     _reread = should_reread_source(
         src_type=run.cfg.src_read_type,
-        dest_type=dest_type,
+        dest_type=run.cfg.dest_type,
         incremental=run.cfg.incremental,
         partial_write_pass=_partial_write_pass,
     )
     if run.cfg.incremental and _reread and not (
-        run.cfg.cursor_source_col and running_cursor and pk_target_cols
+        run.cfg.cursor_source_col and running_cursor and run.cfg.pk_target_cols
     ):
         # M3 — an incremental re-read is only honest when it is bounded to
         # the [watermark, max_seen] window this run covered AND the
@@ -4187,7 +3769,7 @@ def _stream_database_transfer_impl(
         dest_summary["source_independently_reread"] = False
         dest_summary["identity_hash_aligned"] = False
         _unbounded = run.cfg.incremental and not (
-            run.cfg.cursor_source_col and running_cursor and pk_target_cols
+            run.cfg.cursor_source_col and running_cursor and run.cfg.pk_target_cols
         )
         dest_summary["checksum_note"] = (
             "Source fingerprints accumulated during the write pass (Phase F1) — "
@@ -4257,7 +3839,7 @@ def _stream_database_transfer_impl(
         # replays the same approved recipe. Its own runner: the run's shaping
         # effects were counted on the write pass and must not be counted twice.
         reread_shaper = (
-            ShapeRunner(shape_runner.recipe, typed_values=shape_runner.typed_values) if shape_runner is not None else None
+            ShapeRunner(run.cfg.shape_runner.recipe, typed_values=run.cfg.shape_runner.typed_values) if run.cfg.shape_runner is not None else None
         )
         reread_holdouts: list[dict[str, Any]] = []
         reread_tombstones_excluded = 0
@@ -4335,11 +3917,11 @@ def _stream_database_transfer_impl(
                     # No early break: OFFSET pages do not guarantee cursor
                     # ordering, so a straddling page does not end the window.
                     digest_rows = _win_rows
-                if _boundary_fps_state["fps"] is not None and digest_rows:
+                if run.cur._boundary_fps_state["fps"] is not None and digest_rows:
                     # The write pass dropped these tie peers as already at the
                     # destination (judged against its pre-run rows, cached):
                     # the digest covers what was written, not re-delivered.
-                    _landed = _boundary_rows_already_landed(batch.headers, digest_rows)
+                    _landed = _boundary_rows_already_landed(run, batch.headers, digest_rows)
                     if _landed:
                         digest_rows = [
                             r for i, r in enumerate(digest_rows) if i not in _landed
@@ -4348,23 +3930,23 @@ def _stream_database_transfer_impl(
                     digest_rows, _excluded_now = live_rows_for_digest(
                         batch.headers,
                         digest_rows,
-                        key_columns=pk_target_cols,
-                        mappings=mappings,
+                        key_columns=run.cfg.pk_target_cols,
+                        mappings=run.cfg.mappings,
                     )
                     reread_tombstones_excluded += _excluded_now
                 digest_headers = batch.headers
-                if source_filter and digest_rows:
+                if run.cfg.source_filter and digest_rows:
                     # The write pass only wrote the rows the filter kept, so the
                     # digest has to cover the same population — hashing the rows
                     # it removed would fail Gate-8 on a correct run.
                     digest_rows = apply_row_filter_to_matrix(
-                        batch.headers, digest_rows, source_filter
+                        batch.headers, digest_rows, run.cfg.source_filter
                     )
-                if fk_orphan_guard is not None and digest_rows:
+                if run.cfg.fk_orphan_guard is not None and digest_rows:
                     # Orphans were quarantined, not written: the digest covers
                     # the rows the write pass let through, in the same order of
                     # owners (filter → FK guard → recipe).
-                    digest_rows, _orphans_now = fk_orphan_guard.partition(
+                    digest_rows, _orphans_now = run.cfg.fk_orphan_guard.partition(
                         list(digest_headers or []), list(digest_rows)
                     )
                 if reread_shaper is not None:
@@ -4376,23 +3958,23 @@ def _stream_database_transfer_impl(
                 mapped, reread_rejected = map_rows_for_fingerprint(
                     headers=digest_headers,
                     data_rows=digest_rows,
-                    mappings=mappings,
-                    target_cols=target_cols,
+                    mappings=run.cfg.mappings,
+                    target_cols=run.cfg.target_cols,
                     column_types=run.cfg.column_types,
-                    error_policy=stream_error_policy,
+                    error_policy=run.cfg.stream_error_policy,
                     dest_types=fingerprint_dest_types,
                     preserve_case=True,
-                    dest_kind=dest_bind_dialect,
-                    destination_pk_columns=list(pk_target_cols or []) or None,
+                    dest_kind=run.cfg.dest_bind_dialect,
+                    destination_pk_columns=list(run.cfg.pk_target_cols or []) or None,
                 )
                 reread_holdouts.extend(reread_rejected or [])
                 if mapped:
                     fp_accumulator.add_many(
                         row_fingerprints(
                             mapped,
-                            target_cols,
-                            dest_db_type=dest_bind_dialect,
-                            dest_types=digest_dest_types,
+                            run.cfg.target_cols,
+                            dest_db_type=run.cfg.dest_bind_dialect,
+                            dest_types=run.cfg.digest_dest_types,
                         )
                     )
                 checksum_rows_read += len(batch.rows)
@@ -4430,18 +4012,18 @@ def _stream_database_transfer_impl(
                 tail_mapped, _tail_rejected = map_rows_for_fingerprint(
                     headers=tail_headers,
                     data_rows=tail_rows,
-                    mappings=mappings,
-                    target_cols=target_cols,
+                    mappings=run.cfg.mappings,
+                    target_cols=run.cfg.target_cols,
                     column_types=run.cfg.column_types,
-                    error_policy=stream_error_policy,
+                    error_policy=run.cfg.stream_error_policy,
                 )
                 if tail_mapped:
                     fp_accumulator.add_many(
                         row_fingerprints(
                             tail_mapped,
-                            target_cols,
-                            dest_db_type=dest_bind_dialect,
-                            dest_types=digest_dest_types,
+                            run.cfg.target_cols,
+                            dest_db_type=run.cfg.dest_bind_dialect,
+                            dest_types=run.cfg.digest_dest_types,
                         )
                     )
         run.cfg.phase_profile.add(
@@ -4530,7 +4112,7 @@ def _stream_database_transfer_impl(
 
         dest_summary["connector_versions"] = capture_route_versions(
             source_engine=run.cfg.src_type,
-            dest_type=dest_type,
+            dest_type=run.cfg.dest_type,
         )
     # Phase F2 — operator-visible pagination honesty (OFFSET cliff vs keyset).
     dest_summary["pagination_mode"] = pagination_mode
@@ -4635,7 +4217,7 @@ def _stream_database_transfer_impl(
     if suppressed_warnings:
         dest_summary["warnings_suppressed"] = suppressed_warnings
     dest_summary["error_policy"] = "quarantine" if (rejected_total or coerced_null_total) else "none"
-    dest_summary["sync_mode"] = effective_sync
+    dest_summary["sync_mode"] = run.cfg.effective_sync
     stamp_overwrite_source_keys(dest_summary, overwrite_keys_acc)
     if keyed_census_acc is not None:
         census = keyed_census_acc.to_census()
@@ -4647,9 +4229,9 @@ def _stream_database_transfer_impl(
                     census, prior_pass_inserts=max(_resume_held - _job_before, 0)
                 )
             dest_summary[CENSUS_KEY] = census.to_dict()
-    if pk_target_cols:
-        dest_summary.setdefault("conflict_columns", list(pk_target_cols))
-        dest_summary.setdefault("primary_key_columns", list(pk_target_cols))
+    if run.cfg.pk_target_cols:
+        dest_summary.setdefault("conflict_columns", list(run.cfg.pk_target_cols))
+        dest_summary.setdefault("primary_key_columns", list(run.cfg.pk_target_cols))
     dest_summary["watermark"] = running_cursor
     dest_summary["chunk_size"] = run.cfg.chunk_size
     dest_summary["chunk_policy"] = chunk_policy
@@ -4683,7 +4265,7 @@ def _stream_database_transfer_impl(
             f"{cursor_bounded_total:,} row(s) at or before the watermark were "
             f"not in this run's read scope ({run.cfg.src_type} cannot push the bound down)"
         )
-    _diverted_total = int(shape_diverted_total[0] or 0)
+    _diverted_total = int(run.tally.shape_diverted_total[0] or 0)
     if removed_on_read_total or _diverted_total:
         # committed_offset counts the rows the source handed over, so the rows a
         # declared filter or an approved recipe removed are inside that population
@@ -4725,7 +4307,7 @@ def _stream_database_transfer_impl(
             dest_summary["load_method"] = "merge_batch"
         else:
             dest_summary["load_method"] = load_methods_seen[-1]
-    ddl_log.insert(1, f"CREATE TABLE IF NOT EXISTS {dest_table}")
+    ddl_log.insert(1, f"CREATE TABLE IF NOT EXISTS {run.cfg.dest_table}")
     try:
         from services.source_snapshot import get_source_snapshot_meta
 
@@ -4751,21 +4333,21 @@ def _stream_database_transfer_impl(
             }
     except Exception as exc:
         logger.debug("source_snapshot stamp skipped: %s", exc)
-    if pin_ledger is not None:
+    if run.cfg.pin_ledger is not None:
         try:
-            _pin_meta = pin_ledger.summary()
+            _pin_meta = run.cfg.pin_ledger.summary()
             if _pin_meta:
                 dest_summary["shape_raw_ledger"] = _pin_meta
         except Exception as exc:
             logger.debug("raw-pin ledger stamp skipped: %s", exc)
     _carry_single_table_foreign_keys(
-        run.cfg.source, run.cfg.destination, run.cfg.table, dest_table, mappings, dest_summary, ddl_log
+        run.cfg.source, run.cfg.destination, run.cfg.table, run.cfg.dest_table, run.cfg.mappings, dest_summary, ddl_log
     )
     # The exact type basis the write-pass/re-read fingerprinted on — the dest
     # read-back must hash against it or a correct load mismatches (SQLite TEXT
     # degrade: write pass hashes DECIMAL-declared, naive read-back hashes the
     # TEXT carrier literally).
-    dest_summary.setdefault("gate8_digest_types", dict(digest_dest_types))
+    dest_summary.setdefault("gate8_digest_types", dict(run.cfg.digest_dest_types))
     from services.null_cursor_probe import stamp_skipped_null_cursor_rows
 
     stamp_skipped_null_cursor_rows(
@@ -4919,4 +4501,11 @@ from .stream_db_read import (  # noqa: E402
     _batch_limit,
     _cursor_read_args,
     _fetch_next_batch,
+)
+from .stream_db_page import (  # noqa: E402
+    _advance_fetch_cursor,
+    _boundary_rows_already_landed,
+    _filter_batch,
+    _persist_shape_diverts,
+    _prepare_batch,
 )
