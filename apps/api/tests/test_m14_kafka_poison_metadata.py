@@ -83,6 +83,13 @@ class _FakeConsumer:
     def has_assignment(self):
         return True
 
+    # The reader asks the bridge whether the run reached its frozen end (D151).
+    def exhausted(self):
+        return False
+
+    def end_offsets_snapshot(self):
+        return []
+
     def close(self):
         pass
 
