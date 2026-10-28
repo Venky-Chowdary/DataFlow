@@ -1565,15 +1565,27 @@ def stream_file_to_database(
     # A non-text schema declaration must override the text carrier here or
     # the two sides of Gate-8 hash the same value on different bases.
     _schema_decl_types: dict[str, str] = {}
+    # A column whose Map stamp names a target_type is an approved carrier, even
+    # when that carrier is TEXT (a SQLite/DuckDB DECIMAL rematerialised to
+    # TEXT): the destination stores the stamped type, so the source digest has
+    # to hash on it, not on the sample-inferred DECIMAL(17,2).
+    _stamped_targets: set[str] = set()
     for _m in mappings or []:
         if not isinstance(_m, dict):
             continue
         _t = str(_m.get("target") or _m.get("source") or "")
+        if _t and _m.get("target_type"):
+            _stamped_targets.add(_t)
+            continue
         _s = str(_m.get("source") or _t)
         if _t and schema.get(_s):
             _schema_decl_types[_t] = str(schema[_s])
     for _tc in target_cols:
-        if _tc not in _schema_decl_types and schema.get(_tc):
+        if (
+            _tc not in _schema_decl_types
+            and _tc not in _stamped_targets
+            and schema.get(_tc)
+        ):
             _schema_decl_types[_tc] = str(schema[_tc])
     # Inferred schema types fill ONLY a text carrier — an approved mapping
     # type (DECIMAL(38,10)) always wins over a sample-inferred declaration
