@@ -15,7 +15,7 @@ import uuid as uuid_lib
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, Overflow
 from collections.abc import Iterable
-from typing import Any, Callable
+from typing import Any, Callable, Final
 
 from services.pii_guard import mask as pii_mask
 from services.semantic_types import (

@@ -12,7 +12,6 @@ from services.transform_engine import _parse_boolean, _parse_date, _parse_dateti
 from services.value_serializer import (
     NULL_WIRE_SENTINELS,
     SQL_NULL_SENTINEL,
-    cell_to_string,
     wire_cell_text,
     is_reader_null_cell,
 )

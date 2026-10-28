@@ -329,11 +329,7 @@ def set_wide_decimal_inputsizes(cur: Any, sqlserver_ddls: list[str]) -> None:
         import pyodbc
     except ImportError:
         return
-    from services.type_system import (
-        LOGICAL_DECIMAL,
-        normalize_logical_type,
-        parse_numeric_precision_scale,
-    )
+    from services.type_system import normalize_logical_type
 
     inner = getattr(cur, "_cur", cur)
     setter = getattr(inner, "setinputsizes", None)

@@ -22,7 +22,6 @@ from services.csv_profiler import (
 from services.platform_config import data_dir, upload_dir
 from services.read_options import ReadOptions, ReadOptionsError
 from services.schema_inference import infer_columns_from_rows
-from services.tabular_rows import is_blank_row
 from services.tabular_window import header_and_rows, row_to_record
 from services.value_serializer import cell_to_string, json_default, json_loads_exact
 

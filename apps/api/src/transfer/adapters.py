@@ -29,13 +29,6 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
 
-try:
-    from services.value_serializer import cell_to_string, json_default  # noqa: F401
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-    pass
-
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
 from services.read_options import ReadOptions
 

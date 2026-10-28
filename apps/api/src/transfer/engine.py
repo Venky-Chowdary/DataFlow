@@ -46,7 +46,6 @@ try:
         set_active_date_locale,
         set_active_number_locale,
     )
-    from services.value_serializer import cell_to_string
     from services.preflight_service import (
         apply_policy_gates,
         confidence_threshold_for_mode,
@@ -91,7 +90,6 @@ except (
         set_active_date_locale,
         set_active_number_locale,
     )
-    from src.services.value_serializer import cell_to_string
     from src.services.preflight_service import (
         apply_policy_gates,
         confidence_threshold_for_mode,
