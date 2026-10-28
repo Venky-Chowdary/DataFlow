@@ -289,6 +289,9 @@ async def _run_lifecycle_confirm(
                 background_tasks,
                 http_request,
                 force=bool(payload.get("force")),
+                body=connectors_router.RerunRequest(
+                    risk_acceptance=payload.get("risk_acceptance") or None
+                ),
             )
         )
     if kind == "resume_job":

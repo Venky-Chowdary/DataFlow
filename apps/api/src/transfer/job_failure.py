@@ -820,6 +820,17 @@ def _fail_job_preflight(
         or "; ".join(str(x) for x in blocker_reasons if x)
         or "Preflight blocked transfer"
     )
+    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, QUARANTINE_REPLAN_FIX
+
+    if any(
+        isinstance(b, dict)
+        and (b.get("details") or {}).get("root_cause")
+        and (b.get("details") or {}).get("title") == CAST_FAILURE_ROOT_TITLE
+        for b in pf.get("blockers", [])
+    ):
+        # D170: the run was refused whole; say how to load the valid rows.
+        error_message = f"{error_message.rstrip('. ')}. {QUARANTINE_REPLAN_FIX}."
+        error_details["remediation"] = QUARANTINE_REPLAN_FIX
     lineage.emit_preflight_completed(
         run_id=job_id,
         passed=False,

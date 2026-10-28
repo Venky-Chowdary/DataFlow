@@ -102,6 +102,15 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                     "type": "boolean",
                     "description": "Accept a second copy of rows an append already committed.",
                 },
+                "risk_acceptance": {
+                    "type": "object",
+                    "description": (
+                        "Load the rows that still cast and quarantine the ones that "
+                        "no longer do (the source changed since the first run). "
+                        "{approved_by, reason, execution_policy: CAST_AND_CONTINUE, "
+                        "on_cast_failure: quarantine, columns?: [names that fail]}."
+                    ),
+                },
             },
             "required": [],
         },
@@ -571,6 +580,7 @@ def _job_tool(
     rows: Any = None,
     key_ids: Any = None,
     force: bool = False,
+    risk_acceptance: Any = None,
 ) -> ToolResult:
     if not (job_id or "").strip() and not (selector or "").strip():
         # A mutating call with no target must not fall through to the
@@ -695,11 +705,20 @@ def _job_tool(
                     "A failed job uses retry_job."
                 ),
             )
+        if risk_acceptance is not None and not isinstance(risk_acceptance, dict):
+            return _tool_result(tool, success=False, output=None,
+                error="risk_acceptance must be an object {approved_by, reason, execution_policy, ...}.",
+            )
+        payload: dict[str, Any] = {"job_id": jid, "force": bool(force)}
+        label = f"Re-run job {short} (preflight kept)"
+        if risk_acceptance:
+            payload["risk_acceptance"] = dict(risk_acceptance)
+            label += " — quarantine rows that no longer cast"
         return _stage(
             tool,
-            payload={"job_id": jid, "force": bool(force)},
+            payload=payload,
             preview=brief,
-            label=f"Re-run job {short} (preflight kept)",
+            label=label,
             destructive=True,
         )
     if tool == "resume_job":

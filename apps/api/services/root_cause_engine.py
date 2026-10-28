@@ -843,6 +843,19 @@ def _root_id(kind: str, columns: list[str], gate_ids: list[str]) -> str:
     return f"rc-{kind.replace('_', '-')}-{digest}"
 
 
+#: Title of the root cause the engine raises for sample cast / transform failures.
+CAST_FAILURE_ROOT_TITLE = "Sample transform / cast failures"
+
+#: The way out that keeps the valid rows: load them and hold the failing ones out
+#: in quarantine instead of refusing the whole run (D170).
+QUARANTINE_REPLAN_FIX = (
+    "Re-plan with quarantine: pass risk_acceptance {execution_policy: "
+    "CAST_AND_CONTINUE, on_cast_failure: quarantine, approved_by, reason} to "
+    "plan_transfer / start_transfer, or to rerun_job, so the failing rows are held "
+    "out for review and the valid rows load"
+)
+
+
 def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCause]:
     """Collapse multi-gate failures into operator-facing migration roots."""
     if not preflight:
@@ -1387,9 +1400,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         title = (
             f"Unknown transform: {unknown_name}"
             if unknown_name
-            else "Sample transform / cast failures"
+            else CAST_FAILURE_ROOT_TITLE
         )
         alternative_fixes = [
+            QUARANTINE_REPLAN_FIX,
             "Widen FLOAT/DECIMAL→INT to DOUBLE (preserve numeric meaning before text)",
             "Empty→typed: allow NULL / default or sign QUARANTINE_ROW",
             "Remap image/url columns off the url semantic transform",
