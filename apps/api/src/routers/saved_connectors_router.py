@@ -99,7 +99,7 @@ def _actor_email(request: Request) -> str:
 
 def _writable_connector_or_404(request: Request, conn: Any) -> Any:
     """404 an invisible connector, 403 one the actor may only read."""
-    if not conn or not _can_access_connector(request, conn):
+    if not conn or not _can_access_connector(request, conn, write=True):
         raise HTTPException(status_code=404, detail="Connector not found")
     if not tenant_scope(request).can_write(conn.workspace_id):
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
@@ -159,13 +159,13 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
     return out
 
 
-def _can_access_connector(request: Request, conn: Any) -> bool:
-    """True if the actor may see this connector.
+def _can_access_connector(request: Request, conn: Any, *, write: bool = False) -> bool:
+    """True if the actor may see this connector (with ``write``: may change it).
 
     Workspace visibility is the request's tenant scope (D154): members of the
     connector's workspace, platform admins, and — only while isolation is not
     enforced — anyone for an unscoped legacy connector. A per-resource ACL can
-    restrict further.
+    restrict further; changing the connector needs an editor grant there.
     """
     actor = _actor_email(request)
     scope = tenant_scope(request)
@@ -180,7 +180,7 @@ def _can_access_connector(request: Request, conn: Any) -> bool:
             resource_type="connector",
             resource_id=str(getattr(conn, "id", "") or ""),
             principal=actor,
-            min_role="viewer",
+            min_role="editor" if write else "viewer",
             is_admin=is_admin,
         )
     except PermissionError:
