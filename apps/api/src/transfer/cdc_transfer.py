@@ -972,6 +972,72 @@ def _max_cursor_value(records: list[dict[str, Any]], cursor_field: str, wm_type:
     return max_watermark(values, wm_type)
 
 
+def _dest_table_absent(dest_type: str, dest_cfg: dict[str, Any], table: str) -> bool:
+    """True only when the destination table is provably absent before this run.
+
+    Unknown (a driver without a metadata probe, a probe that errored) is not
+    absent: a missed probe must never turn a failed run into a drop.
+    """
+    from services.dest_precount import destination_table_exists
+    from services.dialect_profiles import schema_from_cfg
+
+    try:
+        return (
+            destination_table_exists(
+                dest_type,
+                dest_cfg,
+                schema=schema_from_cfg(dest_type, dest_cfg),
+                table_name=str(table or ""),
+            )
+            is False
+        )
+    except Exception:  # noqa: BLE001 - an unanswerable probe means "do not drop"
+        return False
+
+
+def _drop_created_table_left_empty(
+    dest_type: str,
+    dest_cfg: dict[str, Any],
+    table: str,
+    ddl_log: list[str],
+) -> bool:
+    """Drop the table a failed first run created when it landed no row.
+
+    Overwrite and upsert already return a failed run's destination to the
+    state it was found in (``batch_undo``). A CDC run that failed on its first
+    batch kept an empty table whose columns, typed from the failed mapping, the
+    next run then reused (D177). A table that holds any row is kept: the
+    snapshot checkpoint and the upserts are resumable, and deleting landed rows
+    is not a rollback. Never raises: the failure that got here stays the error.
+    """
+    from connectors.table_manager import drop_table
+    from services.dest_precount import precount_table
+    from services.dest_quarantine import dlq_table_name
+    from services.dialect_profiles import schema_from_cfg
+
+    try:
+        if precount_table(dest_type, dest_cfg, table) != 0:
+            return False
+        schema = schema_from_cfg(dest_type, dest_cfg)
+        dropped = bool(drop_table(dest_type, dest_cfg, table, schema=schema))
+        if dropped:
+            ddl_log.append(
+                f"CDC first run failed before landing a row; dropped the table it "
+                f"created ({table})."
+            )
+            try:
+                # FAIL_JOB litters ``{table}_df_quarantine`` beside the table.
+                drop_table(dest_type, dest_cfg, dlq_table_name(table), schema=schema)
+            except Exception:  # noqa: BLE001 - the DLQ may never have been created
+                logging.getLogger(__name__).debug("no CDC quarantine table to drop")
+        return dropped
+    except Exception as exc:  # noqa: BLE001
+        logging.getLogger(__name__).warning(
+            "Dropping the empty CDC destination table %s failed: %s", table, exc
+        )
+        return False
+
+
 def _stamp_cdc_lsn(
     change: ChangeBatch,
     headers: list[str],
@@ -3604,6 +3670,7 @@ def _run_cdc_single_stream(
             f"(DDD-3 stream-wins; not blocking dump)"
         )
 
+    dest_absent_before = _dest_table_absent(dest_type, dest_cfg, str(dest_table or ""))
     try:
         with cdc_destination_hooks(destination, ddl_log):
             snapshot_resume = None
@@ -4105,6 +4172,10 @@ def _run_cdc_single_stream(
             delivery="exactly_once" if eos_active else "at-least-once",
             has_position=state.running_cursor is not None, error=exc,
         )
+        if dest_absent_before:
+            _drop_created_table_left_empty(
+                dest_type, dest_cfg, str(dest_table or ""), ddl_log
+            )
         raise
     finally:
         stamp_capture_identity(sys.exc_info()[1], cdc)
