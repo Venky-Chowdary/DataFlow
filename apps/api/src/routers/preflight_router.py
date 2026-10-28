@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.acknowledgment_contract import (
@@ -205,11 +205,17 @@ def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
 
 
 @router.post("/run")
-async def run_preflight(body: PreflightRequest):
+async def run_preflight(body: PreflightRequest, http_request: Request):
     """
     Run core G1–G9 preflight gates before a transfer.
     Blocks transfer if any gate fails — no mocked pass when connectors or samples are missing.
     """
+    from services.workspace_access import assert_connector_accessible
+
+    # Preflight probes and introspects saved connectors with their stored
+    # credentials: authorize each against its own workspace first (404).
+    assert_connector_accessible(http_request, body.connector_id)
+    assert_connector_accessible(http_request, body.source_connector_id)
     if not body.columns:
         raise HTTPException(status_code=400, detail="No columns provided for preflight")
     if not body.mappings:

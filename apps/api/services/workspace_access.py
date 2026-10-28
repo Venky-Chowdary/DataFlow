@@ -19,6 +19,7 @@ __all__ = [
     "TenantScope",
     "WorkspaceFilter",
     "actor_email",
+    "assert_connector_accessible",
     "assert_resource_workspace",
     "authorized_workspace_id",
     "requested_workspace_id",
@@ -142,4 +143,30 @@ def assert_resource_workspace(
     if not scope.allows(resource_workspace_id):
         raise HTTPException(status_code=404, detail="Not found")
     if write and not scope.can_write(resource_workspace_id):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")
+
+
+def assert_connector_accessible(
+    request: Request, connector_id: str | None, *, write: bool = False
+) -> None:
+    """Authorize a saved-connector id against the connector's own workspace.
+
+    404 when the tenant scope does not cover it; with ``write`` also 403 when
+    the actor holds no admin/editor role there. A ``connector_id`` expands into
+    stored host and credentials and, as a destination, is written to, so seeing
+    it (a viewer of that workspace) is not enough to load data into it. An id
+    that does not exist is left to the caller's own not-found handling.
+    """
+    from services.connector_store import connector_owner_workspace
+
+    cid = str(connector_id or "").strip()
+    if not cid:
+        return
+    exists, owner = connector_owner_workspace(cid)
+    if not exists:
+        return
+    scope = resolve_tenant_scope(request)
+    if not scope.allows(owner):
+        raise HTTPException(status_code=404, detail="Connector not found")
+    if write and not scope.can_write(owner):
         raise HTTPException(status_code=403, detail="Write access to workspace denied")

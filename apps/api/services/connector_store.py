@@ -21,7 +21,7 @@ from services.platform_config import data_dir
 from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
 from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
-from services.workspace_filter import bound_allows, current_workspace_filter
+from services.workspace_filter import bound_allows, bound_workspace_filter, current_workspace_filter
 
 _CONNECTOR_SECRET_KEYS = (
     "password",
@@ -656,6 +656,20 @@ def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedCo
             logger.warning("MongoDB get_connector failed, falling back to file: %s", exc)
     found = _get_file(connector_id, workspace_id)
     return found if found is None or bound_allows(found.workspace_id) else None
+
+
+def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
+    """``(exists, workspace_id)`` for an id, read without the caller's scope.
+
+    Only for authorization: a router asks who owns an id so it can refuse a
+    caller outside that workspace (404) or without write access to it (403)
+    instead of silently treating the connector as missing.
+    """
+    with bound_workspace_filter(None):
+        conn = get_connector(connector_id)
+    if conn is None:
+        return False, ""
+    return True, str(conn.workspace_id or "")
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
