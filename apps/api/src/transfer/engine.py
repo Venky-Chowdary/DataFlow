@@ -972,6 +972,28 @@ def _forget_cached_table_shapes(*endpoints: Any) -> None:
     )
 
 
+def _run_backfill_new_fields(
+    request: Any,
+    mappings: list[dict[str, Any]],
+    dest_schema_types: dict[str, str] | None,
+    dest_table_exists: bool | None,
+) -> bool:
+    """Whether the writer must evolve an existing destination (ADD COLUMN / widen).
+
+    Asked of the evolved plan (what ``_apply_schema_auto_propagate`` stamped),
+    not the request's pre-evolution copy. A destination that does not exist is
+    created whole: the ``create_new`` stamps then describe CREATE TABLE, not an
+    ADD COLUMN, so they must not arm the backfill lane (it would also forfeit
+    the engine-copy fast path for every plain first run).
+    """
+    return effective_backfill_new_fields(
+        backfill_new_fields=request.backfill_new_fields,
+        schema_policy=request.schema_policy,
+        mappings=None if dest_table_exists is False else mappings,
+        dest_columns=list(dest_schema_types or {}) if dest_table_exists is True else None,
+    )
+
+
 def _apply_schema_auto_propagate(
     *,
     request: Any,
@@ -3051,15 +3073,8 @@ class UniversalTransferEngine:
                 # progress write below may drop intermediate calls.
                 _check_cancelled(rows)
                 _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
-            backfill_fields = effective_backfill_new_fields(
-                backfill_new_fields=request.backfill_new_fields,
-                schema_policy=request.schema_policy,
-                # The evolved plan (mappings _apply_schema_auto_propagate
-                # stamped), not the request's pre-evolution copy.
-                mappings=mappings,
-                dest_columns=(
-                    list(dest_schema_types or {}) if dest_table_exists_flag is True else None
-                ),
+            backfill_fields = _run_backfill_new_fields(
+                request, mappings, dest_schema_types, dest_table_exists_flag
             )
 
             # Reconciliation must weigh the destination against the whole source
@@ -4483,15 +4498,8 @@ class UniversalTransferEngine:
                 # progress write below may drop intermediate calls.
                 _check_cancelled(rows)
                 _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
-            backfill_fields = effective_backfill_new_fields(
-                backfill_new_fields=request.backfill_new_fields,
-                schema_policy=request.schema_policy,
-                # The evolved plan (mappings _apply_schema_auto_propagate
-                # stamped), not the request's pre-evolution copy.
-                mappings=mappings,
-                dest_columns=(
-                    list(dest_schema_types or {}) if dest_table_exists_flag is True else None
-                ),
+            backfill_fields = _run_backfill_new_fields(
+                request, mappings, dest_schema_types, dest_table_exists_flag
             )
 
             mongo.update_job_status(
@@ -5575,15 +5583,8 @@ class UniversalTransferEngine:
                 # progress write below may drop intermediate calls.
                 _check_cancelled(rows)
                 _throttled_progress(chunk, chunks, rows, checkpoint=checkpoint)
-            backfill_fields = effective_backfill_new_fields(
-                backfill_new_fields=request.backfill_new_fields,
-                schema_policy=request.schema_policy,
-                # The evolved plan (mappings _apply_schema_auto_propagate
-                # stamped), not the request's pre-evolution copy.
-                mappings=mappings,
-                dest_columns=(
-                    list(dest_schema_types or {}) if dest_table_exists_flag is True else None
-                ),
+            backfill_fields = _run_backfill_new_fields(
+                request, mappings, dest_schema_types, dest_table_exists_flag
             )
 
             mongo.update_job_status(
