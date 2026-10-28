@@ -2283,7 +2283,11 @@ def _stream_database_transfer_impl(
     # whose content changed, and a quiet poll stays a no-op, so its covered-
     # content proof still runs. The verify re-read drops the same rows.
     _tie_dedupe = seeded_from_watermark
-    _boundary_fps_state: dict[str, Any] = {"fps": None}
+    _boundary_fps_state: dict[str, Any] = {
+        "fps": None,
+        "match_cols": [],
+        "new_cols": [],
+    }
 
     def _boundary_rows_already_landed(headers: list[str], rows: list[list[str]]) -> set[int]:
         """Indices of re-read tie-group rows the destination already holds."""
@@ -2326,12 +2330,34 @@ def _stream_database_transfer_impl(
                     c for c in pk_target_cols if c != cursor_dest_col
                 ]
             if _boundary_fps_state["fps"] is None:
+                # A run that ADDs a column (approved schema evolution) re-reads
+                # tie peers whose new column the destination does not have yet.
+                # Selecting it failed the read, which fails open: every peer was
+                # delivered twice. Compare on the columns the table holds, and
+                # keep a peer only when its new columns carry a value.
+                landed = read_target_sample(
+                    dest_bind_dialect or dest_type,
+                    dest_cfg,
+                    schema=str(dest_cfg.get("schema") or "public"),
+                    table_name=dest_table,
+                    columns=None,
+                    limit=1,
+                    sort_key=cursor_dest_col,
+                    key_values=[cur_val],
+                )
+                live_cols = {str(k).lower() for k in (landed[0] if landed else {})}
+                read_cols = [c for c in all_cols if c.lower() in live_cols] or all_cols
+                _boundary_fps_state["new_cols"] = [
+                    c for c in all_cols if c.lower() not in live_cols
+                ] if landed else []
+                match_cols = [c for c in match_cols if c in read_cols] or match_cols
+                _boundary_fps_state["match_cols"] = match_cols
                 dest_rows = read_target_sample(
                     dest_bind_dialect or dest_type,
                     dest_cfg,
                     schema=str(dest_cfg.get("schema") or "public"),
                     table_name=dest_table,
-                    columns=all_cols,
+                    columns=read_cols,
                     limit=10_000,
                     sort_key=cursor_dest_col,
                     key_values=[cur_val],
@@ -2352,11 +2378,13 @@ def _stream_database_transfer_impl(
             dest_fps = _boundary_fps_state["fps"]
             if not dest_fps:
                 return set()
+            match_cols = _boundary_fps_state["match_cols"]
             drop = _boundary_append_dedupe(
                 list(headers or []),
                 [rows[i] for i in boundary_idx],
                 dest_fps,
                 match_cols=match_cols,
+                new_cols=_boundary_fps_state["new_cols"],
                 mappings=mappings,
                 target_cols=all_cols,
                 column_types=column_types,
@@ -5501,6 +5529,7 @@ def _boundary_append_dedupe(
     dest_fps: set,
     *,
     match_cols: list[str],
+    new_cols: list[str] | None = None,
     mappings: list[dict],
     target_cols: list[str],
     column_types: dict | None,
@@ -5515,6 +5544,9 @@ def _boundary_append_dedupe(
     drops the ones already delivered. ``dest_fps`` fingerprints the
     destination's boundary rows on ``match_cols`` — (cursor, key) for a keyed
     route, every column for an unkeyed one.
+
+    ``new_cols`` are columns this run adds: the destination has no history for
+    them, so a peer that carries a value there is new information and is kept.
 
     Fail-open by construction: a quarantine mapping that changes row count, a
     fingerprint that does not match, or any missing fingerprint keeps the row —
@@ -5546,7 +5578,22 @@ def _boundary_append_dedupe(
             dest_types=digest_dest_types,
         )
     ]
-    return {i for i, fp in enumerate(fps) if fp in dest_fps}
+    landed = {i for i, fp in enumerate(fps) if fp in dest_fps}
+    if new_cols:
+        from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+
+        new_pos = [target_cols.index(c) for c in new_cols if c in target_cols]
+        landed = {
+            i
+            for i in landed
+            if all(
+                mapped[i][p] is None
+                or is_missing_sentinel(mapped[i][p])
+                or is_reader_null_cell(mapped[i][p])
+                for p in new_pos
+            )
+        }
+    return landed
 
 
 def _kafka_accumulate_offsets(
