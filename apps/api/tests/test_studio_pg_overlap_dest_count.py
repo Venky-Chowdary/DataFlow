@@ -210,6 +210,9 @@ def test_studio_pg_overlap_append_dest_count_stays_three(tmp_path, monkeypatch):
             "primary_key": "id",
             "enabled": True,
             "mappings": mappings,
+            # The overlap is the scenario under test; creating the second
+            # pipeline on one destination now needs the explicit opt-in.
+            "shared_destination_acknowledged": True,
         })
         assert sched_a.source_connector_id != sched_b.source_connector_id
         assert sched_a.dest_connector_id == sched_b.dest_connector_id
