@@ -1270,7 +1270,10 @@ def read_source_database(
         topic = endpoint.table or endpoint.database or endpoint.collection or ""
         if not topic:
             raise ValueError("Kafka source topic name required")
-        batch, _cursor = read_topic_batch(cfg=cfg, topic=topic, limit=limit or 500)
+        batch, kafka_cursor = read_topic_batch(cfg=cfg, topic=topic, limit=limit or 500)
+        if stamp_total is not None:
+            # The caller that owns the run commits these on acceptance (D85).
+            stamp_total["kafka_cursor"] = kafka_cursor
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, topic)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]
