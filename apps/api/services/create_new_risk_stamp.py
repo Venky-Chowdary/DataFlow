@@ -155,10 +155,16 @@ def apply_create_new_risk_stamps(
             # as a collapse. The calibration below reads ``fidelity``, so a
             # stale verdict caps a lossless create-new under the G4 floor and
             # demands a Risk Contract. Re-derive on the type that will run.
+            # The same measured population the first verdict used: a PostgreSQL
+            # TIMESTAMPTZ declares microseconds, and a BSON date keeps only
+            # milliseconds. Judged without the samples the re-derived verdict
+            # read a column of whole-millisecond cells as a truncation and
+            # parked the mapping at 0.70 under the G4 floor (D148/D156).
             verdict = mapping_fidelity(
                 row,
                 destination_db_type=db,
                 dest_table_exists=dest_table_exists,
+                population=col_samples,
             )
             row["fidelity"] = verdict["verdict"]
             row["fidelity_reason"] = verdict["reason"]
