@@ -90,6 +90,18 @@ _SECRET_QUALIFIED_CATALOG_OBJECTS: dict[str, frozenset[str]] = {
     }),
     "information_schema": frozenset({"processlist", "user_attributes"}),
 }
+#: SQL Server catalog views Pilot needs to introspect (``sys.objects``,
+#: ``sys.databases``). Their bare names are too ordinary to join the global
+#: column vocabulary above, so they pass only when ``sys``-qualified. Every
+#: other unlisted catalog relation still has to be allow-listed by name.
+_SAFE_QUALIFIED_CATALOG_OBJECTS: dict[str, frozenset[str]] = {
+    "sys": frozenset({
+        "objects", "all_objects", "schemas", "indexes", "index_columns",
+        "databases", "types", "all_columns", "all_views", "foreign_keys",
+        "foreign_key_columns", "key_constraints", "identity_columns",
+        "computed_columns", "default_constraints", "check_constraints",
+    }),
+}
 _QUALIFIED_NAME = re.compile(
     r"[A-Za-z_][\w$]*(?:\s*\.\s*[A-Za-z_][\w$]*)*"
 )
@@ -108,17 +120,18 @@ def secret_catalog_references(sql: str) -> set[str]:
     quotes dropped, so ``"pg_catalog"."pg_authid"`` and ``mysql . user``
     are caught on both the sqlglot and the regex path.
     """
-    text = re.sub(r"/\*.*?\*/", " ", sql or "", flags=re.S)
-    text = re.sub(r"--[^\n]*", " ", text)
-    text = re.sub(r"'(?:''|[^'])*'", " ", text)
-    text = re.sub(r'["`\[\]]', "", text)
+    from services.sql_literals import sql_call_views
+
     found: set[str] = set()
-    for match in _QUALIFIED_NAME.finditer(text):
-        parts = [p.strip().lower() for p in match.group(0).split(".")]
-        for i, name in enumerate(parts):
-            schema = parts[i - 1] if i else ""
-            if _is_secret_catalog_object(schema, name):
-                found.add(f"{schema}.{name}" if schema else name)
+    # Lexed once per engine flavour (comments blanked, literals masked, quoted
+    # identifiers kept by name): a quote inside a comment cannot hide a name.
+    for text in sql_call_views(sql or ""):
+        for match in _QUALIFIED_NAME.finditer(text):
+            parts = [p.strip().lower() for p in match.group(0).split(".")]
+            for i, name in enumerate(parts):
+                schema = parts[i - 1] if i else ""
+                if _is_secret_catalog_object(schema, name):
+                    found.add(f"{schema}.{name}" if schema else name)
     return found
 
 
@@ -291,8 +304,12 @@ def _sqlglot_identifiers(sql: str, dialect: str = "") -> set[str] | None:
             # qualified name — the bare name may be an unrelated user table.
             if not name and isinstance(table.this, exp.Func):
                 name = str(table.this.name or "").strip().lower()
-            if name in _CATALOG_OBJECTS and not _is_secret_catalog_object(
-                schema or catalog, name
+            owner = schema or catalog
+            if _is_secret_catalog_object(owner, name):
+                found.add(f"{owner}.{name}")
+                continue
+            if name in _CATALOG_OBJECTS or name in _SAFE_QUALIFIED_CATALOG_OBJECTS.get(
+                owner, frozenset()
             ):
                 continue
             found.add(f"{schema or catalog}.{name or '?'}")
