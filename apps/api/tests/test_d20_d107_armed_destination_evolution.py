@@ -227,6 +227,9 @@ def pg():
     names = (f"d20s_{suffix}", f"d20d_{suffix}")
     cur = conn.cursor()
     cur.execute(f"CREATE TABLE {names[0]} (id INT PRIMARY KEY, name TEXT, qty INT)")
+    # The destination is declared INT. DataFlow now creates BIGINT for an INT
+    # key/measure on its own, so a table it created would never need the widen.
+    cur.execute(f"CREATE TABLE {names[1]} (id INT PRIMARY KEY, name TEXT, qty INT)")
     cur.executemany(f"INSERT INTO {names[0]} VALUES (%s,%s,%s)", [(i, f"n{i}", i) for i in range(1, 6)])
     try:
         yield cur, names
