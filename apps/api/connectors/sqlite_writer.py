@@ -1014,7 +1014,11 @@ def write_mapped_rows(
         table_name = sanitize_identifier(
             f"{live_table_name}__df_stage", preserve_case=True
         )
-        publish_stage = stage_batch_idx + 1 >= stage_total
+        # Batches are 1-based (index 0 is the buffered adapter's only write),
+        # so the last chunk is index == total. ``idx + 1 >= total`` published
+        # the stage one chunk early and the tail wrote straight onto the live
+        # table: a failure there left a prefix where the old table had been.
+        publish_stage = max(stage_batch_idx, 1) >= stage_total
         # A resumed tail (batch index past the first page) must not publish a
         # stage that only holds this session. If the stage from the first pass
         # is gone, those rows are already on the live table.
