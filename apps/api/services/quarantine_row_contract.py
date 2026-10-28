@@ -24,6 +24,8 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from typing import Any
 
+from services.value_serializer import is_reader_null_cell
+
 REQUIRED_QUARANTINE_FIELDS = (
     "original_value",
     "expected_type",
@@ -122,7 +124,8 @@ def _pk_from_named_columns(row: dict[str, Any], cols: list[str]) -> Any:
         if not all(c in bag for c in cols):
             continue
         vals = [bag.get(c) for c in cols]
-        if any(v is None or str(v) == "" for v in vals):
+        # A '' key is a key (D53); only NULL / Missing is "no identity".
+        if any(is_reader_null_cell(v) for v in vals):
             continue
         return vals[0] if len(vals) == 1 else vals
     return None

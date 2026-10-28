@@ -26,7 +26,7 @@ from collections.abc import Mapping
 from typing import Any, Literal
 
 from services.source_duplicate_probe import SQLISH_SOURCE_TYPES
-from services.value_serializer import present_cell_text
+from services.value_serializer import key_identity_text, present_cell_text
 
 logger = logging.getLogger(__name__)
 
@@ -55,10 +55,11 @@ MAX_PROBE_VALUES = 500
 
 
 def batch_key_texts(values: list[Any] | None, *, limit: int = MAX_PROBE_VALUES) -> list[str]:
-    """Present batch keys on the reader wire. SQL NULL is not a collision token."""
+    """Present batch keys on the reader wire. SQL NULL is not a collision token;
+    ``''`` and ``'a '`` are exact keys (D53, D70)."""
     out: list[str] = []
     for raw in values or []:
-        key = present_cell_text(raw)
+        key = key_identity_text(raw)
         if key is None:
             continue
         out.append(key)
@@ -398,7 +399,7 @@ def probe_append_key_collisions(
             destination_table=destination_table,
             columns=target_columns,
             tuples=[
-                tuple(present_cell_text(row.get(source)) for source, _target in pairs)
+                tuple(key_identity_text(row.get(source)) for source, _target in pairs)
                 for row in batch_rows[:MAX_PROBE_VALUES]
             ],
         )

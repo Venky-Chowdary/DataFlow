@@ -21,7 +21,7 @@ from connectors.writer_common import dedupe_rows  # noqa: E402
 from services.value_serializer import SQL_NULL_SENTINEL  # noqa: E402
 
 
-def test_dedupe_collapses_reader_null_and_blank_to_one_key():
+def test_dedupe_collapses_reader_null_to_one_key_and_keeps_blank_text_distinct():
     rows = [
         (SQL_NULL_SENTINEL, "first"),
         (None, "second"),
@@ -30,8 +30,9 @@ def test_dedupe_collapses_reader_null_and_blank_to_one_key():
     ]
     kept = dedupe_rows(rows, ["id"], ["id", "v"])
     by_v = {r[1] for r in kept}
-    assert by_v == {"third", "kept"}
-    assert len(kept) == 2
+    # NULL spellings collapse (last wins); whitespace is its own key (D53).
+    assert by_v == {"second", "third", "kept"}
+    assert len(kept) == 3
 
 
 def test_dedupe_zero_stays_distinct_from_null():
@@ -48,7 +49,7 @@ def test_dedupe_present_text_still_last_wins():
     assert kept == [("a", "3"), ("b", "2")]
 
 
-def test_lsn_dedupe_collapses_reader_null_and_keeps_newest():
+def test_lsn_dedupe_collapses_reader_null_and_keeps_newest_per_key():
     cols = ["id", "v", DF_LSN_COL]
     rows = [
         (SQL_NULL_SENTINEL, "old", "0/100"),
@@ -58,5 +59,5 @@ def test_lsn_dedupe_collapses_reader_null_and_keeps_newest():
     ]
     kept = dedupe_rows_by_pk_and_lsn(rows, ["id"], cols)
     by_v = {r[1] for r in kept}
-    assert by_v == {"new", "other"}
-    assert len(kept) == 2
+    assert by_v == {"new", "mid", "other"}
+    assert len(kept) == 3
