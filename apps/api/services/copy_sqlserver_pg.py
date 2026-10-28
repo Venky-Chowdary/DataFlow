@@ -21,6 +21,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action, _quote
 from services.copy_mysql_pg import (
@@ -152,6 +153,8 @@ class _SelectCopyReader:
         join = "\t".join
         encode = self._encode
         while not self._done and len(self._buf) < want:
+            # D102: a cancel stops the copy between fetch batches.
+            cancel_checkpoint()
             batch = self._cur.fetchmany(_FETCH_BATCH)
             if not batch:
                 self._done = True

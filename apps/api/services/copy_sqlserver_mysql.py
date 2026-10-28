@@ -24,6 +24,7 @@ import os
 import tempfile
 from typing import Any
 
+from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable, occupied_pk_range_action
 from services.copy_mysql_mysql import fast_load_data_text_value
@@ -108,6 +109,8 @@ def _select_into_mysql_load_data(
         join = "\t".join
         with open(path, "wb", buffering=1 << 20) as writer:
             while True:
+                # D102: a cancel stops the copy between fetch batches.
+                cancel_checkpoint()
                 batch = cur.fetchmany(_FETCH_BATCH)
                 if not batch:
                     break

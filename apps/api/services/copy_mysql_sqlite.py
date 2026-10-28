@@ -22,6 +22,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
+from services.cancel_check import cancel_checkpoint
 from services.brand_env import getenv_brand
 from services.copy_fast_path import FastPathResult, FastPathUnavailable
 from connectors.sqlite_common import sqlite_decimal_bind_text
@@ -210,6 +211,8 @@ def copy_mysql_to_sqlite(
         try:
             cur.execute(select_sql)
             while True:
+                # D102: a cancel stops the copy between fetch batches.
+                cancel_checkpoint()
                 rows = cur.fetchmany(_FETCH_BATCH)
                 if not rows:
                     break
