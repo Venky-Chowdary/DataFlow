@@ -881,6 +881,16 @@ def _cursor_type_code_is_text(type_code: Any, dialect: str = "") -> bool:
     )
 
 
+# Python classes a DBAPI (pyodbc) reports as ``cursor.description`` type codes
+# whose precision slot is a size, never a numeric precision.
+_PYTHON_NON_DECIMAL_CLASSES = frozenset(
+    {
+        "str", "bytes", "bytearray", "float", "bool", "datetime", "date", "time",
+        "timedelta", "uuid",
+    }
+)
+
+
 def cursor_declared_numeric_types(
     headers: list[str],
     description: Any,
@@ -905,6 +915,17 @@ def cursor_declared_numeric_types(
             continue
         type_code = col[1] if len(col) > 1 else None
         if _cursor_type_code_is_text(type_code, dialect):
+            continue
+        # pyodbc reports a Python class as the type code and puts the column
+        # SIZE in the precision slot for every type: ``VARCHAR(20)`` arrives as
+        # (str, ..., 20, 20, 0), a FLOAT as (float, ..., 53, 53, 0) and a BIT as
+        # (bool, ..., 1, 1, 0). Only ``decimal.Decimal`` is an exact numeric; for
+        # the rest the size is not a DECIMAL(p,s) (MX2-07: sku became
+        # DECIMAL(20,0), weight_kg DECIMAL(53,0)).
+        if (
+            isinstance(type_code, type)
+            and type_code.__name__.lower() in _PYTHON_NON_DECIMAL_CLASSES
+        ):
             continue
         # DATE / DATETIME / TINYINT carry a display width in the precision
         # slot. Reading it as DECIMAL(10,0) made every MariaDB query column
