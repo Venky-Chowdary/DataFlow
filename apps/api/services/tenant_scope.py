@@ -23,13 +23,16 @@ filter and keeps system scope.
 from __future__ import annotations
 
 import contextlib
-import contextvars
 from dataclasses import dataclass
 from typing import Any, Iterator
 
 from fastapi import HTTPException
 
-from services.workspace_filter import WorkspaceFilter, norm_workspace_id as _norm
+from services.workspace_filter import (
+    WorkspaceFilter,
+    bound_workspace_filter,
+    norm_workspace_id as _norm,
+)
 from services.team_store import (
     list_memberships_for_user,
     list_workspaces_for_user,
@@ -241,22 +244,28 @@ def resolve_tenant_scope(request: Any, requested_workspace_id: str | None = None
     return _base_scope(request).narrowed(requested)
 
 
-# Request-free code paths that still serve one caller (Pilot / MCP tool turns)
-# read the scope bound for that turn; nothing bound means system scope.
-_bound_scope: contextvars.ContextVar[TenantScope | None] = contextvars.ContextVar(
-    "tenant_scope", default=None
-)
-
-
 @contextlib.contextmanager
 def bind_tenant_scope(scope: TenantScope | None) -> Iterator[None]:
-    token = _bound_scope.set(scope)
-    try:
+    """Bind ``scope`` for store-level reads in this request/turn (see
+    ``services.workspace_filter.bound_workspace_filter``)."""
+    with bound_workspace_filter(scope.filter if scope is not None else None):
         yield
-    finally:
-        _bound_scope.reset(token)
 
 
-def current_workspace_filter() -> WorkspaceFilter | None:
-    scope = _bound_scope.get()
-    return scope.filter if scope is not None else None
+def scope_for_binding(request: Any) -> TenantScope | None:
+    """The scope to bind for ``request``; None leaves system scope.
+
+    Auth off means the single local operator, who sees everything. A request
+    whose header names a workspace the actor cannot read binds a scope that
+    sees nothing, so a store read in that request cannot fall back to system
+    scope; the router still answers the 403.
+    """
+    from src.services.auth_service import auth_required
+
+    if not auth_required() or not getattr(request.state, "user_email", None):
+        return None
+    try:
+        return resolve_tenant_scope(request)
+    except HTTPException:
+        return TenantScope(actor="", unrestricted=False, enforced=True, memberships=())
+

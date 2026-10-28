@@ -19,7 +19,7 @@ from pymongo import MongoClient
 from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.ops_events import emit_event
 from services.runtime_estimate import append_throughput_mark
-from services.workspace_filter import WorkspaceFilter
+from services.workspace_filter import WorkspaceFilter, bound_allows
 
 
 logger = logging.getLogger(__name__)
@@ -383,6 +383,8 @@ class MongoDBService:
         id_clauses.append({"id": connector_id})
 
         result = collection.find_one({"$or": id_clauses})
+        if result and not bound_allows(result.get("workspace_id")):
+            return None
         if result:
             result["_id"] = str(result["_id"])
             return _decrypt_connector_secrets(result)
@@ -395,6 +397,8 @@ class MongoDBService:
 
         connectors = []
         for doc in collection.find().sort("created_at", -1):
+            if not bound_allows(doc.get("workspace_id")):
+                continue
             doc["_id"] = str(doc["_id"])
             connectors.append(_decrypt_connector_secrets(doc) or doc)
         return connectors
@@ -1479,7 +1483,7 @@ class MemoryMongoDBService:
                 (c for c in self._connectors.values() if str(c.get("id") or "") == str(connector_id)),
                 None,
             )
-        if rec:
+        if rec and bound_allows(rec.get("workspace_id")):
             rec = dict(rec)
             rec["_id"] = str(rec["_id"])
             return _decrypt_connector_secrets(rec)
@@ -1493,6 +1497,8 @@ class MemoryMongoDBService:
         )
         out = []
         for c in items:
+            if not bound_allows(c.get("workspace_id")):
+                continue
             row = dict(c, _id=str(c["_id"]))
             out.append(_decrypt_connector_secrets(row) or row)
         return out

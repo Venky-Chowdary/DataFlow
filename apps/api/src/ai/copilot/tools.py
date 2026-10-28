@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from services.ops_events import emit_event
 from services.value_serializer import json_default
+from services.workspace_filter import bound_allows, current_workspace_filter
 
 from ..rag.product_docs import (
     cited_sources,
@@ -3437,15 +3438,13 @@ class DataPilotTools:
         sid = (schedule_id or "").strip()
         if sid:
             sched = get_schedule(sid)
-            if sched:
+            if sched and bound_allows(sched.workspace_id):
                 return sched, None
         needle = (name or "").strip().lower()
         if not needle:
             return None, None
         # Full name only. A substring used to run or delete a different
         # pipeline, and two schedules were allowed to share a name.
-        from services.tenant_scope import current_workspace_filter
-
         exact = [
             s for s in list_schedules(current_workspace_filter())
             if (s.name or "").strip().lower() == needle
@@ -3516,7 +3515,6 @@ class DataPilotTools:
 
     def _list_schedules(self, limit: int = 20) -> ToolResult:
         from services.schedule_store import list_schedules
-        from services.tenant_scope import current_workspace_filter
 
         visible = list_schedules(current_workspace_filter())
         rows = [self._schedule_summary(s) for s in visible[: max(1, min(int(limit or 20), 100))]]

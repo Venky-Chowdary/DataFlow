@@ -12,6 +12,7 @@ from typing import Any
 
 from services.job_list_scope import job_list_workspace_scope  # noqa: F401  # re-export
 from services.jobs import job_store
+from services.workspace_filter import bound_allows, current_workspace_filter
 
 
 def summarize_listed_job(doc: dict[str, Any]) -> dict[str, Any]:
@@ -208,8 +209,6 @@ def list_transfer_jobs(
     An empty successful Mongo read is left empty so a process-global leftover
     in the file store cannot invent jobs the operator's workspace does not have.
     """
-    from services.tenant_scope import current_workspace_filter
-
     # A Pilot/MCP turn reads only what its caller may see (D154); ``workspace_id``
     # narrows further only for system-scope callers.
     workspace_filter = current_workspace_filter()
@@ -270,9 +269,15 @@ def read_transfer_job(job_id: str) -> dict[str, Any] | None:
         if not _mongo_already_unreachable(mongo):
             job = mongo.get_job(needle)
             if job:
-                return job
+                # A job of another workspace does not exist for this caller (D154).
+                return job if bound_allows(job.get("workspace_id")) else None
     except Exception:
         job = None
+    # Engine-store records carry no workspace, so only a system-scope or
+    # all-workspaces caller may read them.
+    visible = current_workspace_filter()
+    if visible is not None and not visible.is_everything:
+        return None
     try:
         record = job_store.get(needle)
     except Exception:
