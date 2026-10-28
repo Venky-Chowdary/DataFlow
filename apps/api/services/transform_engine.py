@@ -389,6 +389,10 @@ def _looks_like_grouped_number(raw: str) -> bool:
     text = str(raw or "").strip()
     if not text or not any(ch.isdigit() for ch in text):
         return False
+    # A colon is a clock, never a grouping: "01.02.2024 10:30" is a day-first
+    # timestamp, and the locale warning must not fire on it (D61).
+    if ":" in text:
+        return False
     return "," in text or "." in text
 
 
