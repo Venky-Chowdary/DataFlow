@@ -142,8 +142,14 @@ def test_stream_select_checksum_matches_buffered_canonical() -> None:
     rows = [{"id": "1", "name": "A"}, {"id": "2", "name": "B"}]
 
     class _Row:
+        # A SQLAlchemy Row is a tuple and also exposes ``_mapping``. The
+        # readback kernel zips the select list against the row by position
+        # (D47: Snowflake reports ``ID`` as ``id``), so the fake is iterable.
         def __init__(self, mapping):
             self._mapping = mapping
+
+        def __iter__(self):
+            return iter(self._mapping.values())
 
     class _Result:
         def keys(self):
