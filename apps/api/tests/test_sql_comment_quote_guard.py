@@ -100,3 +100,25 @@ def test_colon_escape_ignores_comment_quotes() -> None:
     escaped = escape_sqlalchemy_literal_colons(sql)
     assert ":since" in escaped and r"\:since" not in escaped
     assert r"'a\:b'" in escaped
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT 1 /*! ; DROP TABLE t */",
+    "SELECT 1 /*!50000 ; DROP TABLE t; */",
+    "SELECT * FROM t /*!50000 INTO OUTFILE '/tmp/x' */",
+    "SELECT 1 /*!50000 */ ; DROP TABLE t",
+])
+@pytest.mark.parametrize("gate", _GATES, ids=lambda g: g.__name__)
+def test_mysql_conditional_comment_body_is_code(gate, sql: str) -> None:
+    """MySQL executes ``/*! ... */``; the guard must judge the body as code."""
+    assert gate(sql) is False
+
+
+@pytest.mark.parametrize("sql", [
+    "SELECT /*!40001 SQL_NO_CACHE */ * FROM t",
+    "SELECT /*!50000 1 */ AS one",
+    "SELECT /*+ INDEX(t i) */ * FROM t",
+])
+@pytest.mark.parametrize("gate", _GATES, ids=lambda g: g.__name__)
+def test_mysql_conditional_comment_read_hints_stay_allowed(gate, sql: str) -> None:
+    assert gate(sql) is True

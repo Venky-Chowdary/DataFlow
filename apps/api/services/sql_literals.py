@@ -33,6 +33,7 @@ class _Lexing(NamedTuple):
     e_strings: bool = False
     brackets: bool = False
     backticks: bool = False
+    cond_comments: bool = False
 
 
 _ANSI = _Lexing()
@@ -42,7 +43,7 @@ _FLAVORS: tuple[_Lexing, ...] = (
     _Lexing(nested_block=True, dollar=True, e_strings=True),
     # MySQL / MariaDB
     _Lexing(backslash=True, dq_string=True, hash_comment=True,
-            dash_needs_space=True, backticks=True),
+            dash_needs_space=True, backticks=True, cond_comments=True),
     # SQL Server / Sybase
     _Lexing(brackets=True, nested_block=True),
     # BigQuery / Snowflake / Spark / Databricks
@@ -107,12 +108,22 @@ def _tokens(sql: str, lex: _Lexing = _ANSI) -> list[tuple[str, str]]:
             out.append(("code", sql[code_start:start]))
         out.append((kind, sql[start:end]))
 
+    cond_open = False
     while i < n:
         ch = sql[i]
         nxt = sql[i + 1] if i + 1 < n else ""
         end = -1
         kind = ""
-        if ch == "-" and nxt == "-":
+        if lex.cond_comments and ch == "/" and nxt == "*" and sql.startswith("/*!", i):
+            # MySQL runs ``/*! ... */`` as code. Only the delimiters are
+            # comment; the body is lexed (and judged) as ordinary SQL.
+            j = i + 3
+            while j < n and j < i + 8 and sql[j].isdigit():
+                j += 1
+            kind, end, cond_open = "comment", j, True
+        elif cond_open and ch == "*" and nxt == "/":
+            kind, end, cond_open = "comment", i + 2, False
+        elif ch == "-" and nxt == "-":
             after = sql[i + 2] if i + 2 < n else ""
             if not lex.dash_needs_space or after == "" or after.isspace() or ord(after) < 32:
                 kind, end = "comment", _line_end(sql, i)
