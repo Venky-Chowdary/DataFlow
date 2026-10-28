@@ -147,6 +147,7 @@ from .reconcile_step import run_reconciliation
 from .registry import validate_transfer
 from .stream import (
     _discard_unconsumed_pin_ledgers,
+    _kafka_accumulate_offsets,
     run_non_cdc_multi_stream_sequential,
     stream_database_transfer,
     stream_scd2_mirror_transfer,
@@ -2418,8 +2419,9 @@ class UniversalTransferEngine:
                 message="Reading source data…",
                 progress_pct=5,
             ):
+                source_stamp: dict[str, Any] = {}
                 records, columns, schema = with_retry(
-                    lambda: self._read_source(request),
+                    lambda: self._read_source(request, source_stamp),
                     budget=read_budget,
                     on_transient=lifecycle_events.source_read_retry_callback(
                         request, read_budget
@@ -3635,6 +3637,10 @@ class UniversalTransferEngine:
             _attach_job_rollback_plan(job_id, dest_summary, request)
             apply_post_load_transforms(request, dest_summary)
             _settle_overwrite_backup(request.destination, restore=False)
+            if source_stamp.get("kafka_cursor"):
+                # The buffered read took one poll batch; its offsets commit
+                # with the job, never earlier (D85).
+                _kafka_accumulate_offsets(dest_summary, source_stamp["kafka_cursor"])
             _commit_kafka_offsets_on_accept(request, dest_summary)
             _write_success_status(
                 mongo,
@@ -5962,7 +5968,9 @@ class UniversalTransferEngine:
             logger.debug("idempotency release skipped for %s: %s", job_id, exc)
 
     def _read_source(
-        self, request: TransferRequest
+        self,
+        request: TransferRequest,
+        source_stamp: dict[str, Any] | None = None,
     ) -> tuple[list, list[str], dict[str, str]]:
         if request.source.kind == "file":
             from services.transfer_file_staging import hydrate_file_source
@@ -6005,6 +6013,7 @@ class UniversalTransferEngine:
                 request.source,
                 cursor_column=cursor_column,
                 cursor_after=cursor_after,
+                stamp_total=source_stamp,
             )
         raise ValueError(f"Unsupported source kind: {request.source.kind}")
 
