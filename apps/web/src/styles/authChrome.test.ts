@@ -142,8 +142,8 @@ describe("mobile auth header rhythm (review-11 item 8)", () => {
     // On mobile the title sat ~8px under the Back row. The <=560 block must
     // re-space it with the shared rhythm tokens, not another magic px.
     const media = EDITORIAL.match(
-      /@media \(max-width: 560px\)\s*\{[^@]*lp-login-brand-inner[^@]*\}/s);
-    assert.ok(media, "no <=560 rhythm override for the auth brand header");
+      /@media \(max-width: 559px\)\s*\{[^@]*lp-login-brand-inner[^@]*\}/s);
+    assert.ok(media, "no <=559 rhythm override for the auth brand header");
     assert.match(media[0],
       /\.lp-login-brand-inner\s*\{[^}]*gap:\s*var\(--lp-brand-head-gap/s);
     assert.match(media[0],

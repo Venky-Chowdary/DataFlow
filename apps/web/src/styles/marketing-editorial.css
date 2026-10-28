@@ -3992,7 +3992,7 @@
   }
 }
 
-@media (max-width: 560px) {
+@media (max-width: 559px) {
   /* "Create your workspace" sat ~8px under the Back row on 390px — give
      the head->title stack the same vertical rhythm token the tablet
      header uses instead of the tight compact-header gap. */
