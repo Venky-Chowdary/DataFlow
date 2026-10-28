@@ -1751,6 +1751,27 @@ def _target_explicitly_not_null(
     return False
 
 
+def _null_into_not_null_error(
+    converted: Any,
+    err: str | None,
+    mapping: dict[str, Any] | None,
+    tgt_name: str,
+    dest_nullability: dict[str, bool],
+) -> str | None:
+    """A NULL bound for a proven NOT NULL column is a cell error (D25).
+
+    A text column's NULL converts without complaint, so the only refusal came
+    from the driver on the whole batch - one NULL failed the job even under a
+    policy that quarantines bad cells. Raising it as a cell error routes it
+    through the same per-cell policy as every other bad value.
+    """
+    if err or converted is not None:
+        return err
+    if _target_explicitly_not_null(mapping, tgt_name, dest_nullability):
+        return f"NULL value for NOT NULL column {tgt_name!r}"
+    return err
+
+
 def _convert_mapped_cell(
     val: Any,
     transform: Any,
@@ -1963,6 +1984,9 @@ def build_mapped_rows_with_details(
                     dest_nullability=dest_nullability,
                     target=tgt_name,
                 )
+                err = _null_into_not_null_error(
+                    converted, err, mapping, tgt_name, dest_nullability
+                )
             cell_policy = policy
             exec_pol: str | None = None
             risk_id: str | None = None
@@ -1981,6 +2005,9 @@ def build_mapped_rows_with_details(
                         empty_cells_as_null=empty_cells_as_null,
                         dest_nullability=dest_nullability,
                         target=tgt_name,
+                    )
+                    err = _null_into_not_null_error(
+                        converted, err, mapping, tgt_name, dest_nullability
                     )
                     if not err:
                         cell_policy = "ok"
