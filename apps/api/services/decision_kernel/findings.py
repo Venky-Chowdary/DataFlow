@@ -187,6 +187,8 @@ def classify_transform_failure(
             "cannot coerce to datetime",
             "cannot coerce to date",
             "cannot parse",
+            # A spring-forward wall clock (transform_engine zone apply, D52).
+            "does not exist in timezone",
         )
     ) and any(t in msg or t in tgt_l for t in ("date", "time", "timestamp")):
         return FailureClass.INVALID_TIMESTAMP
