@@ -2,8 +2,8 @@
 
 Dest COUNT is ``count_documents({})`` — never ``estimatedDocumentCount``.
 Empty dest is ``insert_many`` (unordered), **not** upsert / ``ReplaceOne``.
-Occupied dest whose COUNT already equals the source snapshot is
-skip-complete. Occupied dest with a different COUNT declines.
+An occupied dest declines whatever its COUNT: equal counts do not prove
+equal content, and an insert would duplicate.
 ``_id`` is not invented from row bytes.
 
 SQL NULL is BSON null (field present). Empty string stays empty string.
@@ -115,7 +115,7 @@ def prepare_mongo_dest(
     replace_destination: bool,
     extra_snapshot: dict[str, Any] | None = None,
 ) -> tuple[Any, bool, str] | FastPathResult:
-    """Return ``(coll, created_here, mongo_write)`` or a skip-complete result."""
+    """Return ``(coll, created_here, mongo_write)``; an occupied dest declines."""
     try:
         import pymongo  # noqa: F401
     except Exception as exc:
