@@ -385,6 +385,30 @@ def _object_version_token(store: str, cfg: dict[str, Any], bucket: str, key: str
     return ""
 
 
+def _single_object_key(store: str, cfg: dict[str, Any], bucket: str, key: str) -> str:
+    """The object a single-object read of ``key`` means.
+
+    A glob, prefix or dated pattern is not an object key: GET on ``in/*.csv``
+    is NoSuchKey, so samples, nullability, population and duplicate probes
+    all came back unread for a scheduled pattern (D34). One match is that
+    object; none is "file not arrived"; several cannot be stood for by one
+    object — the pickup reads them file by file.
+    """
+    from services.file_pickup import file_not_arrived, is_file_pattern, list_remote_files
+
+    if not is_file_pattern(key):
+        return key
+    listed = list_remote_files(store, cfg, bucket, key)
+    if len(listed) == 1:
+        return listed[0].name
+    if not listed:
+        raise file_not_arrived(key, cfg.get("extra"))
+    raise ValueError(
+        f"{key!r} matches {len(listed)} objects; a single-object read cannot "
+        "stand for the set (the pickup loads them file by file)"
+    )
+
+
 def materialize_store_spill(
     store: str,
     cfg: dict[str, Any],
@@ -392,6 +416,7 @@ def materialize_store_spill(
     key: str,
 ) -> Any:
     """Download an object once. Uniqueness scans this path in a single pass."""
+    key = _single_object_key(store, cfg, bucket, key)
     version = _object_version_token(store, cfg, bucket, key)
     cache_key = f"{store}:{bucket}:{key}:{version or 'nov'}"
     # No version ⇒ force download (refuse TTL reuse of potentially stale bytes).

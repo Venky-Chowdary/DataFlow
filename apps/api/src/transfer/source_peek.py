@@ -36,28 +36,33 @@ def _peek_each_file(
     src_db: str,
     sdk_state: str | None,
 ):
-    """Peek each new file in name order and tag rows with ``_df_file``.
+    """Peek each matched file in name order and tag rows with ``_df_file``.
 
     A glob validated as one batch treats a key shared by two files as a
     duplicate. Files are applied in that same order, so the key is last-wins
-    and must not block. Returns None when the source is not a multi-file pattern.
+    and must not block. Returns None when the source is not a file pattern.
+
+    A pattern is never read as an object key (D34): one match is peeked by
+    its own name, no match is "file not arrived", and a listing or read
+    error is that error — the old fallback re-read the glob literally and
+    failed with "no object 'in/*.csv'".
     """
     if src_type not in {"sftp", "s3", "gcs", "adls"}:
         return None
-    try:
-        from services.file_pickup import is_file_pattern, list_remote_files, ordered_files
-    except Exception:
-        return None
+    from services.file_pickup import (
+        file_not_arrived,
+        is_file_pattern,
+        list_remote_files,
+        ordered_files,
+    )
+
     if not is_file_pattern(table):
         return None
-    try:
-        listed = ordered_files(
-            list_remote_files(src_type, src_cfg, str(source.database or src_db or ""), table)
-        )
-    except Exception:
-        return None
-    if len(listed) < 2:
-        return None
+    listed = ordered_files(
+        list_remote_files(src_type, src_cfg, str(source.database or src_db or ""), table)
+    )
+    if not listed:
+        raise file_not_arrived(table, getattr(source, "extra", None))
     from .stream import CHUNK_SIZE, _read_batch, _unwrap_read
 
     columns: list[str] | None = None
@@ -66,21 +71,18 @@ def _peek_each_file(
     total = 0
     probe = None
     for item in listed:
-        try:
-            probe, _ = _unwrap_read(
-                _read_batch(
-                    src_type,
-                    src_cfg,
-                    item.name,
-                    None,
-                    0,
-                    CHUNK_SIZE,
-                    database=src_db,
-                    sdk_state=sdk_state,
-                )
+        probe, _ = _unwrap_read(
+            _read_batch(
+                src_type,
+                src_cfg,
+                item.name,
+                None,
+                0,
+                CHUNK_SIZE,
+                database=src_db,
+                sdk_state=sdk_state,
             )
-        except Exception:
-            return None
+        )
         if columns is None:
             columns = list(probe.headers or [])
             probe_meta = getattr(probe, "meta", None) or {}

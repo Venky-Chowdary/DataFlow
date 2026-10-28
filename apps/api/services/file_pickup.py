@@ -314,6 +314,23 @@ def plan_pickup(
     )
 
 
+def file_not_arrived(pattern: str, extra: dict | None = None) -> FileNotArrived:
+    """The operator error for a pattern or path that matches no file yet.
+
+    ``extra`` carries the source's wait window; the message and retryability
+    are the pickup plan's own, so a peek and a load say the same thing.
+    """
+    extra = extra if isinstance(extra, dict) else {}
+    plan = plan_pickup(
+        pattern=pattern,
+        files=[],
+        manifest=None,
+        wait_seconds=int(extra.get("file_wait_seconds") or 0),
+        waited_seconds=int(extra.get("file_waited_seconds") or 0),
+    )
+    return FileNotArrived(plan.message, retryable=plan.retryable, pattern=pattern)
+
+
 def list_remote_files(src_type: str, cfg: dict, bucket: str, pattern: str) -> list[RemoteFile]:
     """List objects that match a glob, prefix, or exact key."""
     kind = (src_type or "").strip().lower()

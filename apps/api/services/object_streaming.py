@@ -915,17 +915,9 @@ def download_adls_object(path: Path, cfg: dict[str, Any], bucket: str, key: str)
 
 def _missing_sftp_file(remote_path: str, cfg: dict[str, Any]) -> Any:
     """One operator message for a glob or a path that is not on the server yet."""
-    from services.file_pickup import FileNotArrived, plan_pickup
+    from services.file_pickup import file_not_arrived
 
-    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    plan = plan_pickup(
-        pattern=remote_path,
-        files=[],
-        manifest=None,
-        wait_seconds=int(extra.get("file_wait_seconds") or 0),
-        waited_seconds=int(extra.get("file_waited_seconds") or 0),
-    )
-    return FileNotArrived(plan.message, retryable=plan.retryable, pattern=remote_path)
+    return file_not_arrived(remote_path, cfg.get("extra"))
 
 
 def download_sftp_object(path: Path, cfg: dict[str, Any], bucket: str, key: str) -> None:
