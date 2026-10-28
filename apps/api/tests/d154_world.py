@@ -20,6 +20,8 @@ from uuid import uuid4
 
 from fastapi.testclient import TestClient
 
+from services.workspace_filter import bound_workspace_filter
+
 ADMIN = "root-d154@example.com"
 ADMIN_PASSWORD = "Bootstrap-Admin-2026"
 PASSWORD = "Tenant-Password-2026!"
@@ -85,6 +87,7 @@ def build_world(tmp_path, monkeypatch, *, signup: bool) -> World:
         usage_metering,
         user_store,
     )
+    from services import preflight_run_store, shape_draft_store, transfer_plan_store
     from services.auth_rate_limit import reset_auth_rate_limits
     from src.services.contract_store import reset_contract_store
 
@@ -120,6 +123,9 @@ def build_world(tmp_path, monkeypatch, *, signup: bool) -> World:
     monkeypatch.setattr(usage_metering, "STORE_PATH", tmp_path / "usage.json")
     monkeypatch.setattr(quarantine_dlq, "DLQ_PATH", tmp_path / "dlq.jsonl")
     monkeypatch.setattr(quarantine_dlq, "_dlq_coll", lambda: None)
+    monkeypatch.setattr(preflight_run_store, "STORE_PATH", tmp_path / "preflight_runs.jsonl")
+    monkeypatch.setattr(transfer_plan_store, "STORE_PATH", tmp_path / "plans.json")
+    monkeypatch.setattr(shape_draft_store, "STORE_PATH", tmp_path / "shape_drafts.json")
     for series in ("dataflow_pipeline_lag_seconds", "dataflow_pipeline_lag_bytes"):
         monkeypatch.setitem(ops_metrics._labeled_gauges, series, {})
     monkeypatch.setitem(ops_metrics._labeled_counters, "dataflow_pipeline_cdc_polls_total", {})
@@ -163,6 +169,9 @@ def seed(*, tag: str, ws_a: str, a_email: str, memory: Any) -> dict[str, str]:
         schedule_store,
         usage_metering,
     )
+    from services.preflight_run_store import save_preflight_run
+    from services.shape_draft_store import save_shape_draft
+    from services.transfer_plan_store import create_plan
     from services.transform_library import get_transform_library
     from services.transform_recipe import RecipeStep, TransformRecipe
     from services.transform_store import TransformProject, get_transform_store
@@ -212,6 +221,15 @@ def seed(*, tag: str, ws_a: str, a_email: str, memory: Any) -> dict[str, str]:
             steps=[RecipeStep(op="trim", column="name", options={})],
         ))
         ids[f"{label}_recipe"] = recipe.id
+        # Stores that stamp the workspace of the request that wrote them.
+        with bound_workspace_filter(None, ws):
+            run = save_preflight_run(
+                {"passed": True, "gates": []}, source_label=f"{marker}-src", dest_label=f"{marker}-dst"
+            )
+            plan = create_plan({"name": f"{marker}-plan"})
+            save_shape_draft(route_key=f"{marker}-src→dst", recipe={"steps": []})
+        ids[f"{label}_preflight_run"] = run["run_id"]
+        ids[f"{label}_plan"] = plan.id
     ops_metrics.record_cdc_poll(
         lag_seconds=500.0, job_id=ids["a_job"], schedule_id=ids["a_schedule"],
         stream=f"stream-{owner_marker('a', tag)}", workspace_id=ws_a,
