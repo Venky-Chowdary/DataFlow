@@ -33,6 +33,8 @@ SKIPPED_WITH_REASON = {
     "key_id": "API-key/service-account routes require secret-bearing key records.",
     "plan_id": "Transfer plans require a completed plan/preflight lifecycle.",
     "project_id": "Transform projects require their project-store fixture.",
+    "recipe_id": "Transform-library recipes are covered by the D154 cross-tenant sweep.",
+    "key": "Template keys address the global recipe catalog, not an owned resource.",
     "proposal_id": "Repair proposals require generated repair evidence.",
     "provider": "AI provider routes require provider-secret configuration.",
     "review_id": "CDC mapping reviews require a live capture review fixture.",
@@ -44,6 +46,12 @@ SKIPPED_WITH_REASON = {
     "filename": "Download filenames address generated artifacts, not owned resources.",
 }
 ALLOWLISTED_WITH_REASON = {
+    ("DELETE", "/api/v1/auth/sessions/{jti}"): (
+        "Account-scoped: revokes only the caller's own session; another user's jti is a 404."
+    ),
+    ("DELETE", "/auth/sessions/{jti}"): (
+        "Same router mounted at the legacy /auth prefix; account-scoped."
+    ),
     ("GET", "/api/v1/catalog/connectors/{connector_id}"): (
         "Global connector catalog metadata; this is not a saved workspace connector."
     ),
@@ -320,6 +328,8 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             body = {"password": "matrix-rotated-secret", "reason": "matrix probe"}
             if "/contracts/" in template:
                 body = {"strict": True}
+            if template.endswith("/transform-recipe/upgrade"):
+                body = {"target_version": 2}
             if template.endswith("/authorization"):
                 body = {"reason": "matrix probe", "scopes": ["run"]}
             if template.endswith("/members"):
