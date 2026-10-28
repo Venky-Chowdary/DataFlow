@@ -189,7 +189,7 @@ def ordered_memberships(email: str) -> tuple[tuple[str, str], ...]:
 
 
 def actor_is_unrestricted(user: dict[str, Any] | None) -> bool:
-    """Platform admin, same notion as ``team_router._is_platform_admin``.
+    """Platform admin, the one definition of a platform admin (``team_router`` resolves a user by email and asks it).
 
     A workspace API key carrying ``admin`` is unrestricted only when the account
     that minted it is a platform admin — the key's role is a workspace role.

@@ -49,7 +49,7 @@ from services.user_store import (
     update_user,
     validate_email,
 )
-from src.services.auth_service import auth_required, lookup_user
+from src.services.auth_service import lookup_user
 
 router = APIRouter(prefix="/team", tags=["Team"])
 
@@ -100,15 +100,13 @@ def _is_platform_admin(email: str) -> bool:
 
     ``lookup_user`` covers both the environment-provisioned bootstrap admin and
     stored accounts, so a deployment always has someone who can create the first
-    workspace. A deployment running with authentication switched off has no
-    identities to authorize against, so the single local operator is the admin —
-    otherwise a developer box could never create its first workspace, while a
-    client deployment (auth required) still enforces the role.
+    workspace. The decision itself is the tenant scope's single definition of an
+    unrestricted actor (which also lets a deployment with authentication
+    switched off have its single local operator as admin).
     """
-    if not auth_required():
-        return True
-    user = lookup_user(email)
-    return bool(user) and str(user.get("role", "")).strip().lower() == "admin"
+    from services.tenant_scope import actor_is_unrestricted
+
+    return actor_is_unrestricted(lookup_user(email))
 
 
 def _require_platform_admin(request: Request) -> str:
