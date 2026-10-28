@@ -1034,6 +1034,18 @@ def _stream_database_transfer_impl(
                     },
                 )
             dest_summary["cursor_key"] = pre_copy_cursor_key
+            if pre_copy_watermark not in (None, "") and cursor_source_col:
+                # D99 — the COPY seed drops NULL-cursor rows exactly as the
+                # row path's seek does; the job says so on both paths.
+                from services.null_cursor_probe import stamp_skipped_null_cursor_rows
+
+                stamp_skipped_null_cursor_rows(
+                    dest_summary,
+                    _null_cursor_rows_skipped(
+                        src_cfg, _source_name(source), cursor_source_col
+                    ),
+                    cursor_source_col,
+                )
         return rows_copied, ddl_log, dest_summary, columns
     # Parallel/chunked resume is only safe with idempotent writes.
     resuming = bool(checkpoint and getattr(checkpoint, "chunk_index", 0) > 0)
@@ -1149,23 +1161,16 @@ def _stream_database_transfer_impl(
 
     # D99: when the source bounds the delta in SQL, ``cursor > watermark``
     # silently drops every NULL-cursor row — the job must say how many it
-    # skipped rather than report verified. (Client-bound sources refuse
-    # unbounded rows above instead of skipping them.)
+    # skipped rather than report verified. Not only the pushdown family:
+    # SQLite / SQL Server / Oracle reads are SQL-bounded as well (their seek or
+    # filtered scan drops NULLs before the client-side bound could refuse
+    # them), so the probe runs for every source it can measure; a source that
+    # hands NULL-cursor rows over is refused by the client-side bound instead.
     null_cursor_rows_skipped: int | None = None
-    if incremental and cursor_source_col and watermark and not client_cursor_bound:
-        try:
-            from services.null_cursor_probe import probe_null_cursor_count
-
-            _ncp = probe_null_cursor_count(
-                source_config=src_cfg,
-                source_table=cursor_source_object or table,
-                source_collection=str(src_cfg.get("collection") or ""),
-                cursor_column=cursor_source_col,
-            )
-            if _ncp.ran:
-                null_cursor_rows_skipped = int(_ncp.null_count or 0)
-        except Exception:  # noqa: BLE001 — unmeasured, stamped as such below
-            null_cursor_rows_skipped = None
+    if incremental and cursor_source_col and watermark:
+        null_cursor_rows_skipped = _null_cursor_rows_skipped(
+            src_cfg, cursor_source_object or table, cursor_source_col
+        )
 
     src_db = source.database or src_cfg.get("database") or ("test" if src_type == "mongodb" else "")
 
@@ -5249,6 +5254,22 @@ def _stream_database_transfer_impl(
     )
     return written, ddl_log, dest_summary, columns
 
+
+
+def _null_cursor_rows_skipped(src_cfg: Any, table: str, cursor_column: str) -> int | None:
+    """Source rows a ``cursor > watermark`` read can never see (None = unmeasured)."""
+    try:
+        from services.null_cursor_probe import probe_null_cursor_count
+
+        probe = probe_null_cursor_count(
+            source_config=src_cfg,
+            source_table=table,
+            source_collection=str((src_cfg or {}).get("collection") or ""),
+            cursor_column=cursor_column,
+        )
+    except Exception:  # noqa: BLE001 — unmeasured is stamped as unmeasured
+        return None
+    return int(probe.null_count or 0) if probe.ran else None
 
 
 def _typed_value_source(fmt: str) -> bool:
