@@ -279,7 +279,7 @@ test.describe("studio next", () => {
 
     await openMenuAction(page, "Rules and suggestions");
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toHaveCount(0);
 
     await setPalette(page, true);
