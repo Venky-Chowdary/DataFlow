@@ -24,6 +24,35 @@ from services.column_case import column_type_or_none
 logger = logging.getLogger("datawrap.preflight")
 
 
+#: ``EndpointConfig.extra`` key listing source columns introspected as a bare
+#: ``numeric`` whose DECIMAL(p,s) in the schema is measured, not declared.
+UNCONSTRAINED_DECIMALS_KEY = "unconstrained_decimal_columns"
+
+
+def declared_decimal_for_dest(
+    schema: dict[str, Any], source: Any, dest_format: str
+) -> dict[str, Any]:
+    """Source schema with measured-decimal columns restored to a bare DECIMAL.
+
+    A bare ``numeric`` is measured to a DECIMAL(p,s) so a comparison against a
+    bounded destination can be decided from the data (see
+    :mod:`services.decimal_capacity_probe`). That measurement describes the rows
+    present, so it must not become the DDL of an engine that has the same
+    unbounded type: create-new on PostgreSQL would invent NUMERIC(29,9) and the
+    next larger value would fail (D68). Other destinations keep the measurement.
+    """
+    from connectors.sql_temporal import _is_postgres_family
+
+    measured = (getattr(source, "extra", None) or {}).get(UNCONSTRAINED_DECIMALS_KEY)
+    if not measured or not _is_postgres_family(str(dest_format or "")):
+        return schema
+    folded = {str(c).casefold() for c in measured}
+    return {
+        col: ("DECIMAL" if str(col).casefold() in folded else typ)
+        for col, typ in schema.items()
+    }
+
+
 def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:
     """Declared column types for an already-built source endpoint.
 
@@ -46,6 +75,10 @@ def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:
     schema = info.get("schema") or {}
     if not isinstance(schema, dict):
         return {}
+    measured = [str(c) for c in (info.get("unconstrained_decimals") or [])]
+    if measured:
+        # Map reads these to keep a bare ``numeric`` bare on PostgreSQL (D68).
+        endpoint.extra = {**(endpoint.extra or {}), UNCONSTRAINED_DECIMALS_KEY: measured}
     return {str(k): str(v) for k, v in schema.items() if str(v or "").strip()}
 
 

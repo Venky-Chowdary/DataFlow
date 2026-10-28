@@ -34,6 +34,14 @@ def build_overwrite_create_new_mappings(
     from services.column_case import column_type_or_none
     from src.transfer.type_mapper import default_mappings
 
+    from services.source_schema_authority import declared_decimal_for_dest
+
+    # A measured bare ``numeric`` stays bare on a PostgreSQL create-new (D68).
+    schema = declared_decimal_for_dest(
+        schema,
+        getattr(request, "source", None),
+        str(getattr(getattr(request, "destination", None), "format", "") or ""),
+    )
     mappings = default_mappings(columns)
     for m in mappings:
         if not isinstance(m, dict):

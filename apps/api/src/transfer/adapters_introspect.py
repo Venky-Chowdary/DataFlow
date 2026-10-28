@@ -139,9 +139,12 @@ def _introspect_table_schema_rich(
             if msg not in warnings:
                 warnings.append(msg)
         charsets: dict[str, str] = {}
+        unconstrained: list[str] = []
         for col in payload.get("columns") or []:
             if not isinstance(col, dict):
                 continue
+            if col.get("decimal_capacity_measured") and col.get("name"):
+                unconstrained.append(str(col["name"]))
             name = str(col.get("name") or "").strip()
             cs = str(col.get("charset") or "").strip()
             if name and cs:
@@ -154,6 +157,9 @@ def _introspect_table_schema_rich(
             "generated_columns": list(generated_columns or []),
             "collations": dict(collations or {}),
             "charsets": charsets,
+            # Bare ``numeric`` columns whose type above is a measurement of
+            # the rows present, not a declaration (D68).
+            "unconstrained_decimals": unconstrained,
             "foreign_keys": list(payload.get("foreign_keys") or []),
             "check_constraints": list(payload.get("check_constraints") or []),
             # None when the dialect/probe never measured placement — the

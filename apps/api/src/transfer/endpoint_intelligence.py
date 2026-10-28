@@ -1451,6 +1451,9 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 (schema_keys or {}).get("primary_key_columns") or []
             )
             out["unique_keys"] = list((schema_keys or {}).get("unique_keys") or [])
+            out["unconstrained_decimals"] = list(
+                (schema_keys or {}).get("unconstrained_decimals") or []
+            )
             schema_warnings = [
                 str(w) for w in ((schema_keys or {}).get("warnings") or []) if w
             ]

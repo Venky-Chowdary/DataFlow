@@ -70,6 +70,8 @@ CASES = {
     "D74_json_big_number": (
         "jsonb", "'{\"a\": 12345678901234567890.12345678901234567890}'", "'[1.5, 2]'"
     ),
+    # D68 — a bare numeric was created as the NUMERIC(p,s) its rows measured.
+    "D68_unconstrained_numeric": ("numeric", "1.5", "12345678901234567890.123456789"),
 }
 
 
@@ -111,5 +113,11 @@ def test_pg_to_pg_value_survives(isolated, monkeypatch, case, copy_path):
 
         image = "SELECT id, c::text, pg_typeof(c)::text FROM public.{} ORDER BY id"
         assert _pg(image.format(dst)) == _pg(image.format(src))
+        if case.startswith("D68"):
+            # Still unbounded: the next, larger value must fit the new table.
+            assert _pg(
+                "SELECT format_type(atttypid, atttypmod) FROM pg_attribute "
+                f"WHERE attrelid = 'public.{dst}'::regclass AND attname = 'c'"
+            ) == [("numeric",)]
     finally:
         _pg(f"DROP TABLE IF EXISTS public.{src}; DROP TABLE IF EXISTS public.{dst}")

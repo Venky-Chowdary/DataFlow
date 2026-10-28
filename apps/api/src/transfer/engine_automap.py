@@ -35,10 +35,15 @@ def _auto_map(
     the destination can be created from the source shape.
     """
     mappings: list[dict] | None = None
+    from services.source_schema_authority import declared_decimal_for_dest
+
+    create_schema = declared_decimal_for_dest(
+        schema, request.source, request.destination.format
+    )
     source_schemas = [
         {
             "name": column,
-            "inferred_type": schema.get(column, "string"),
+            "inferred_type": create_schema.get(column, "string"),
             "samples": [
                 wire_cell_text(row.get(column, ""))
                 for row in (sample_rows or [])[:8]
