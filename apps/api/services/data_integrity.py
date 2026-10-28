@@ -16,7 +16,11 @@ from services.column_case import column_type_or_none, lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.mapping_constraints import write_mappings
 from services.validation_coverage import stamp_validation_coverage
-from services.value_serializer import project_row_cells, wire_cell_text
+from services.value_serializer import (
+    is_reader_null_cell,
+    project_row_cells,
+    wire_cell_text,
+)
 
 # Validation mode → minimum confidence / null tolerance
 _MODE_THRESHOLDS = {
@@ -580,7 +584,12 @@ def _check_required_nulls(
         values = [lookup_row_value(row, src, None) for row in rows]
         if not values:
             continue
-        empty = sum(1 for v in values if wire_cell_text(v) == "")
+        # A NULL cell serialises to the wire sentinel, not "" — count it (and
+        # the reader's NULL/Missing spellings) as empty, or a key column that
+        # is entirely NULL sails through as populated.
+        empty = sum(
+            1 for v in values if is_reader_null_cell(v) or wire_cell_text(v) == ""
+        )
         rate = empty / len(values)
         if rate > null_rate_max:
             issues.append(f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field)")
