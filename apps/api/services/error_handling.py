@@ -31,7 +31,11 @@ class TransferCancelled(Exception):
         message: str = "Transfer cancelled by user",
         *,
         rows_written: int | None = None,
+        superseded: bool = False,
     ) -> None:
+        #: True when a newer run attempt of the same job took over (resume /
+        #: rerun-in-place): this attempt must stop without touching the job.
+        self.superseded = superseded
         text = message
         if rows_written is not None:
             try:
