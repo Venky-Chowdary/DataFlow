@@ -203,9 +203,20 @@ def retain_dest_exists_write_mappings(
     create-new dest column from source position is the dest-exists jumble
     (write by dest name — never source position).
     """
+    from connectors.sql_identifiers import sanitize_identifier
+
     dest = {_norm(c) for c in (dest_columns or []) if str(c).strip()}
     if not dest:
         return list(mappings or [])
+    # The table DataFlow created holds sanitised names (``Café`` -> ``Caf_``).
+    # A source spelled differently from its column resolves through the
+    # sanitiser's own mapping, and the write targets the column that exists
+    # (D55) - otherwise drift reads the original spelling as a new column.
+    dest_by_sanitised = {
+        sanitize_identifier(str(c)).lower(): str(c).strip()
+        for c in (dest_columns or [])
+        if str(c).strip()
+    }
     kept: list[dict] = []
     for m in mappings or []:
         if not isinstance(m, dict):
@@ -214,7 +225,12 @@ def retain_dest_exists_write_mappings(
             kept.append(m)
             continue
         tgt = str(m.get("target") or "").strip()
-        if tgt and _norm(tgt) in dest:
+        if not tgt:
+            continue
+        actual = dest_by_sanitised.get(sanitize_identifier(tgt).lower())
+        if actual and actual != tgt:
+            kept.append({**m, "target": actual})
+        elif _norm(tgt) in dest:
             kept.append(m)
     return kept
 

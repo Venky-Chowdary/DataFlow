@@ -443,7 +443,17 @@ def classify_mapping_confidence(
     if not samples and mapping.get("samples"):
         samples = [str(x) for x in mapping["samples"] if str(x).strip()]
     sparse = len(samples) < 3
-    name_exact = src_l == tgt_l or src_l.replace("_", "") == tgt_l.replace("_", "")
+    # A table DataFlow created holds the *sanitised* names (``First Name`` ->
+    # ``First_Name``, ``Café`` -> ``Caf_``). Judging those against the original
+    # spelling by underscores alone demoted every such rerun below the
+    # confidence floor (D55); the sanitiser's own mapping is the identity.
+    from connectors.sql_identifiers import sanitize_identifier
+
+    name_exact = (
+        src_l == tgt_l
+        or src_l.replace("_", "") == tgt_l.replace("_", "")
+        or sanitize_identifier(src).lower() == tgt_l
+    )
     type_same = src_logical == tgt_logical
     safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS or sanctioned_carrier
     structural = src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
