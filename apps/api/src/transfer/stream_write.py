@@ -49,7 +49,14 @@ def _writer_diagnostics(result: Any) -> dict[str, Any]:
         # ``rows_expanded`` is the STRUCT explode delta (spool out minus the
         # rows the reader fetched); without it Gate-8 reads exploded rows as
         # unexplained extras on the target (X-30).
-        for key in ("reconcile_sample", "written_ids", "source_row_count", "rows_expanded"):
+        for key in (
+            "reconcile_sample",
+            "written_ids",
+            "source_row_count",
+            "rows_expanded",
+            # Older images of a key the upsert kept the latest of (D89).
+            "collapsed_duplicate_rows",
+        ):
             if key in meta and meta[key] is not None:
                 out[key] = meta[key]
     if isinstance(meta, dict) and isinstance(meta.get("embedding_usage"), dict):

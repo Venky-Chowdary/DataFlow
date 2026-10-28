@@ -978,7 +978,9 @@ def probe_source_duplicate_keys_result(
             # A file or object payload is one batch. Duplicate keys in it are
             # in-file copies the upsert writer collapses, not a SQL table that
             # is itself non-unique. Stamp them so G9 can tell the two apart.
-            if db_type in OBJECT_PAYLOAD_SOURCE_TYPES:
+            # A Kafka topic is a changelog: a repeated key is a later version
+            # of the record, and upsert keeps the last one in log order (D89).
+            if db_type in OBJECT_PAYLOAD_SOURCE_TYPES or db_type == "kafka":
                 for finding in findings:
                     if isinstance(finding, dict):
                         finding["in_file"] = True

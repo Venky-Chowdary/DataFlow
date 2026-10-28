@@ -3232,9 +3232,22 @@ def gate_g8_reconciliation(ctx: PreflightContext) -> GateResult:
         mapping_dicts = [
             {"source": m.target, "target": m.target} for m in ctx.plan.mappings
         ]
+        # An upsert writes the last image of each key, so the constraints are
+        # checked over those survivors — same collapse as the key count above.
+        # A changelog topic repeating a key is otherwise blocked here as soon
+        # as the destination table exists (D89).
+        constraint_rows = mapped_rows
+        if pk_target and _plan_keeps_last(ctx):
+            from services.duplicate_policy import collapse_keep_last
+
+            constraint_rows = [
+                row
+                for group in _file_groups(mapped_rows)
+                for row in collapse_keep_last(group, [pk_target])[0]
+            ]
         composite_issues = _check_destination_unique_constraints(
             mapping_dicts,
-            mapped_rows,
+            constraint_rows,
             destination_pk_columns=getattr(ctx.plan, "destination_pk_columns", None)
             or [],
             destination_unique_keys=getattr(ctx.plan, "destination_unique_keys", None)

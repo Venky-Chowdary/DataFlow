@@ -2134,6 +2134,11 @@ def _stream_database_transfer_impl(
     # held contribution is the delta so buffered rows aren't counted as
     # recipe removals (DD-3).
     shape_held_seen = [0]
+    # Writer-skipped rows and upsert-collapsed older key images, summed over
+    # pages. A page's summary used to replace the last one, and the collapsed
+    # images were never counted, so a changelog upsert that kept the latest
+    # image of a repeated key failed Gate-8 one row short per repeat (D89).
+    page_skips = {"skipped": 0, "collapsed": 0}
     # Strict/maximum FAIL-FAST on coercion errors; balanced quarantines them.
     # Threaded to every writer so the streaming path matches the buffered path.
     stream_error_policy = transform_error_policy_for_validation_mode(validation_mode)
@@ -4193,6 +4198,8 @@ def _stream_database_transfer_impl(
             incoming.pop("source_row_count", None)
             incoming.pop("source_row_count_source", None)
             expanded_total += int(incoming.get("rows_expanded") or 0)
+            page_skips["skipped"] += int(incoming.get("rows_skipped") or 0)
+            page_skips["collapsed"] += int(incoming.get("collapsed_duplicate_rows") or 0)
             dest_summary = {
                 **prev,
                 **incoming,
@@ -4202,7 +4209,11 @@ def _stream_database_transfer_impl(
                 # Per-batch STRUCT explode deltas sum — the writer stamps only
                 # what its own batch expanded (X-30).
                 "rows_expanded": expanded_total,
+                # A collapsed image is skipped once, as the file path counts it.
+                "rows_skipped": page_skips["skipped"] + page_skips["collapsed"],
             }
+            if page_skips["collapsed"]:
+                dest_summary["collapsed_duplicate_rows"] = page_skips["collapsed"]
             if merged_usage is not None:
                 dest_summary["embedding_usage"] = merged_usage
             # Property 6 — keep first-batch fidelity certificate across chunks.
