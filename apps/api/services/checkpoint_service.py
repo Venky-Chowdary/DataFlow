@@ -403,6 +403,17 @@ class CheckpointService:
         the job instead of continuing with resume risk.
         """
         if not self.save(checkpoint):
+            # D168: a cancelled job's document is terminal and refuses the
+            # write. That refusal is the cancel arriving, not a store fault -
+            # report it as the cancel it is (the committed prefix stays).
+            from services.cancel_check import job_cancel_requested
+            from services.error_handling import TransferCancelled
+
+            if job_cancel_requested(self._mongo(), checkpoint.job_id):
+                raise TransferCancelled(
+                    "Transfer cancelled by user",
+                    rows_written=int(getattr(checkpoint, "rows_processed", 0) or 0),
+                )
             raise CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
 
     def load(self, job_id: str) -> Checkpoint | None:

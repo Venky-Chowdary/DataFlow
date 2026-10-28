@@ -78,7 +78,9 @@ from services.decision_kernel import (
     materialize_dest_ddl,
 )
 from services.dialect_profiles import denormalize_result_key
+from services.cancel_check import cancel_checkpoint
 from services.engine_pool import release_engine
+from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
 from services.value_serializer import cell_to_string
 
@@ -5979,6 +5981,9 @@ def write_mapped_rows(
                     conn.commit()
                 dense_dicts = list(getattr(finished, "dense_dicts", None) or [])
                 for offset in range(0, len(dense_dicts), CHUNK_SIZE) if dense_dicts else []:
+                    # D168: a cancel stops before the NEXT sub-chunk. Outside
+                    # the try below - cancel is control flow, not a chunk failure.
+                    cancel_checkpoint(written)
                     batch = dense_dicts[offset : offset + CHUNK_SIZE]
                     start = row_offset + offset
                     try:
@@ -6279,6 +6284,11 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=transform_errors,
         )
+    except TransferCancelled:
+        # D168: cancel is control flow, not a write failure. The chunks already
+        # committed stay (cancel_outcome reports them); the open one was never
+        # begun, and the finally below releases the connection.
+        raise
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")
         if callable(cleanup):

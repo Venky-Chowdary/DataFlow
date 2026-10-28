@@ -10,8 +10,8 @@ cancel stops further writes instead of being noticed at the end.
 
 from __future__ import annotations
 
+import contextvars
 import logging
-import threading
 from typing import Any, Callable
 
 from services.error_handling import TransferCancelled
@@ -20,17 +20,21 @@ logger = logging.getLogger(__name__)
 
 # The transfer engine registers the active job's probe here so COPY fast paths
 # and writers can poll it without threading a callback through ~30 call sites.
-# Transfers run on a worker thread, so a thread-local keeps concurrent jobs
-# isolated.
-_probe = threading.local()
+# A ContextVar, not a thread-local: transfers run on a worker thread and keep
+# concurrent jobs isolated, but the chunk writers run on a pool that copies the
+# caller's context (ChunkDispatcher) - a thread-local was invisible there, so a
+# cancel never reached a writer already past its first chunk (D168).
+_probe: contextvars.ContextVar[Callable[[int | None], None] | None] = (
+    contextvars.ContextVar("df_cancel_probe", default=None)
+)
 
 
 def set_cancel_probe(fn: Callable[[int | None], None] | None) -> None:
-    _probe.fn = fn
+    _probe.set(fn)
 
 
 def get_cancel_probe() -> Callable[[int | None], None] | None:
-    return getattr(_probe, "fn", None)
+    return _probe.get()
 
 
 def cancel_checkpoint(rows_written: int | None = None) -> None:
@@ -39,7 +43,7 @@ def cancel_checkpoint(rows_written: int | None = None) -> None:
     Called between batches and inside long writes. A no-op when no engine
     run owns this thread (e.g. tools calling a copy helper directly).
     """
-    fn = getattr(_probe, "fn", None)
+    fn = _probe.get()
     if fn is not None:
         fn(rows_written)
 
