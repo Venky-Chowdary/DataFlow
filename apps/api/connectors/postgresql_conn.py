@@ -38,7 +38,6 @@ def get_connection(
     password: str,
     connection_string: str,
     ssl: bool,
-    allow_ssl_downgrade: bool = True,
 ) -> Any:
     try:
         import psycopg2
@@ -91,12 +90,7 @@ def get_connection(
         fallback_sslmode: str | None = None
         if not ssl and public_proxy and sslmode != "require":
             fallback_sslmode = "require"
-        elif (
-            ssl
-            and allow_ssl_downgrade
-            and sslmode == "require"
-            and _ssl_not_supported(str(first_exc))
-        ):
+        elif ssl and sslmode == "require" and _ssl_not_supported(str(first_exc)):
             # ssl=True with a server that does not advertise TLS is often a stale
             # connector setting. Fall back to negotiate/try TLS first, then plain.
             fallback_sslmode = "prefer"
