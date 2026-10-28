@@ -115,6 +115,23 @@ def _pair_mappings(src: EndpointConfig) -> list[dict[str, Any]]:
                 "intentional_omit": True,
             }
         )
+    if src.format == "kafka":
+        # Message provenance the Kafka reader always emits; the lab fixture
+        # columns are the payload, so the envelope is declared omitted.
+        for src_name in (
+            "_kafka_topic",
+            "_kafka_partition",
+            "_kafka_offset",
+            "_kafka_key",
+        ):
+            maps.append(
+                {
+                    "source": src_name,
+                    "target": "",
+                    "confidence": 0.0,
+                    "intentional_omit": True,
+                }
+            )
     if src.format == "qdrant":
         for src_name in (
             "content",
@@ -543,6 +560,16 @@ def _dest_count(ep: EndpointConfig) -> int | None:
         return None
 
 
+def _dest_sync_mode(dst: EndpointConfig) -> str:
+    """Kafka topics are append-only (published messages cannot be replaced).
+
+    Every lab destination is a fresh uniquely-named object, so ``append`` is
+    equivalent to an overwrite there; sending ``full_refresh_overwrite`` to
+    Kafka is correctly blocked by the g_kafka_append_only gate.
+    """
+    return "append" if dst.format == "kafka" else "full_refresh_overwrite"
+
+
 def _kafka_reread(ep: EndpointConfig) -> EndpointConfig:
     """Ephemeral consumer group so each pair re-reads from earliest.
 
@@ -568,7 +595,7 @@ def _seed(engine: str, root: Path) -> tuple[EndpointConfig | None, dict[str, Any
         source_filename="lab.csv",
         source_content=CSV_BYTES,
         mappings=list(MAPPINGS),
-        sync_mode="full_refresh_overwrite",
+        sync_mode=_dest_sync_mode(bound),
         skip_preflight=bound.format in _CREATE_NEW_SKIP_PREFLIGHT,
         validation_mode="strict",
         shape_recipe=dict(SHAPE_RECIPE),
@@ -636,7 +663,7 @@ def _transfer_pair(src: EndpointConfig, dst: EndpointConfig) -> dict[str, Any]:
         source=source,
         destination=dst,
         mappings=_pair_mappings(src),
-        sync_mode="full_refresh_overwrite",
+        sync_mode=_dest_sync_mode(dst),
         skip_preflight=dst.format in _CREATE_NEW_SKIP_PREFLIGHT,
         validation_mode="strict",
     )
