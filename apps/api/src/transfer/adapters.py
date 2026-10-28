@@ -656,6 +656,15 @@ def refresh_saved_endpoint(
         return endpoint
     import dataclasses
 
+    # Existence and scope are checked against the job's workspace first: the
+    # generic lookup below may fall back to an unscoped store read, and a
+    # deleted or out-of-scope connector must fail, never resolve to something
+    # else or to the frozen snapshot.
+    from services.connector_store import get_connector
+
+    if get_connector(endpoint.connector_id, workspace_id=workspace_id) is None:
+        raise ValueError(f"Connector {endpoint.connector_id} no longer exists")
+
     extra = dict(endpoint.extra or {})
     identity = extra.pop("destination_identity", None)
     # The database came from the saved connector (so it follows the connector)
