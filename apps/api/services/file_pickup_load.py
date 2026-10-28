@@ -8,10 +8,24 @@ become one order-independent digest so Gate-8 can grade the whole pickup.
 from __future__ import annotations
 
 import logging
+import tempfile
+from pathlib import Path
 from typing import Any
 
 from services.dest_precount import PRECOUNT_KEY
 from services.row_conservation import CENSUS_KEY, KEY_ADDRESSED_KEY
+
+
+# Source-digest fields one load's summary carries for Gate-8.
+_LOAD_PROOF_KEYS = (
+    "checksum",
+    "checksum_mode",
+    "checksum_note",
+    "source_snapshot",
+    "source_independently_reread",
+    "identity_alignment",
+    "identity_hash_aligned",
+)
 
 
 def merge_file_census(summary: dict[str, Any], file_census: dict[str, Any]) -> None:
@@ -72,13 +86,26 @@ def load_picked_files(
     """List, select, and load new or changed files. Raises FileNotArrived."""
     from services.duplicate_policy import normalize_duplicate_policy
     from services.file_load_ledger import file_bytes_digest, manifest_entries, record_manifest_file
-    from services.file_pickup import FileNotArrived, is_file_pattern, list_remote_files, plan_pickup
+    from services.file_pickup import (
+        FileNotArrived,
+        is_file_pattern,
+        list_remote_files,
+        matches_pattern,
+        ordered_files,
+        plan_pickup,
+    )
     from services.fingerprint_accumulator import FingerprintAccumulator
     from services.object_streaming import (
         download_for_object_store,
         download_object,
         stream_spilled_file_to_database,
     )
+    from services.sync_cursor import is_overwrite_sync
+
+    try:
+        from src.transfer.file_stream import combine_file_set
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH
+        from transfer.file_stream import combine_file_set
 
     extra = getattr(source, "extra", None) or {}
     wait_seconds = int(extra.get("file_wait_seconds") or 0)
@@ -117,9 +144,10 @@ def load_picked_files(
                 "destination file manifest unread; using the local ledger",
                 exc_info=True,
             )
+    listed = list_remote_files(src_type, src_cfg, bucket, key)
     plan = plan_pickup(
         pattern=key,
-        files=list_remote_files(src_type, src_cfg, bucket, key),
+        files=listed,
         manifest=manifest,
         wait_seconds=wait_seconds,
         waited_seconds=int(extra.get("file_waited_seconds") or 0),
@@ -161,28 +189,40 @@ def load_picked_files(
         summary[KEY_ADDRESSED_KEY] = True
     population = FingerprintAccumulator()
     columns: list[str] = []
-    for item in plan.files:
-        # Each file is its own load. A shared chunk cursor would skip the
-        # next file's only batch, and a manifest rollback means a crashed
-        # file must be read again from the first row.
+    files = list(plan.files)
+    whole_set = is_overwrite_sync(effective_sync)
+    if whole_set:
+        # D34: an overwrite replaces the destination with the source, and the
+        # source is every matched file. Loading only the files the manifest
+        # calls new would replace the table with a fraction of the set.
+        files = ordered_files([f for f in listed if matches_pattern(f.name, key)]) or files
+
+    def _reset_checkpoint() -> None:
+        # A load starts at its first row: a shared chunk cursor would skip the
+        # next file's only batch, and a manifest rollback means a crashed load
+        # is read again from the start.
         if checkpoint is not None:
             checkpoint.chunk_index = 0
             checkpoint.rows_processed = 0
             checkpoint.offset = 0
             checkpoint.file_offset = 0
             checkpoint.checksum = ""
-        cache_key = f"{src_type}:{bucket}:{item.name}"
+
+    def _download(item: Any) -> tuple[Path, str]:
         path = download_object(
-            cache_key,
+            f"{src_type}:{bucket}:{item.name}",
             lambda p, item_name=item.name: download_for_object_store(
                 src_type, p, src_cfg, bucket, item_name
             ),
             force=True,
         )
-        checksum = item.checksum or file_bytes_digest(path)
+        return path, item.checksum or file_bytes_digest(path)
+
+    def _load(path: Path, filename: str, identity: dict[str, Any] | None) -> tuple[int, dict]:
+        nonlocal total_rows, columns
         rows, ddl, one_summary, columns = stream_spilled_file_to_database(
             path=path,
-            filename=item.name,
+            filename=filename,
             destination=destination,
             mappings=mappings,
             schema=schema,
@@ -199,16 +239,7 @@ def load_picked_files(
             shape_runner=shape_runner,
             duplicate_policy=str(extra.get("duplicate_policy") or ""),
             fingerprint_sink=population,
-            file_identity={
-                "connector": connector_key,
-                "path": item.name,
-                "size": item.size,
-                "mtime": item.mtime,
-                "sha256": checksum,
-                "job_id": job_id or "",
-                "dest_table": dest_table_name,
-                "schedule_id": schedule_id,
-            },
+            file_identity=identity,
         )
         total_rows += int(rows or 0)
         ddl_log.extend(ddl or [])
@@ -242,17 +273,19 @@ def load_picked_files(
         for key_name in ("primary_key_columns", "conflict_columns"):
             if not summary.get(key_name) and one_summary.get(key_name):
                 summary[key_name] = list(one_summary[key_name])
+        return int(rows or 0), one_summary
+
+    def _record(item: Any, checksum: str, rows: int, loaded: bool) -> None:
         summary["files_picked"].append(
             {
                 "name": item.name,
                 "size": item.size,
                 "checksum": checksum,
                 "mtime": item.mtime,
-                "rows": int(rows or 0),
+                "rows": rows,
             }
         )
-        loaded = str(one_summary.get("file_manifest_status") or "") == "loaded"
-        if int(rows or 0) > 0 or loaded:
+        if rows > 0 or loaded:
             record_manifest_file(
                 route_key,
                 name=item.name,
@@ -260,6 +293,53 @@ def load_picked_files(
                 checksum=checksum,
                 mtime=item.mtime,
             )
+
+    if whole_set and len(files) > 1:
+        # One logical source, one load: the writer's own staged overwrite
+        # (one PostgreSQL transaction, one SQLite stage, one MySQL retire)
+        # covers the whole set, so a failure on any file leaves the pre-run
+        # destination intact and Gate-8 counts every file. A set has no
+        # single file identity to claim in a destination manifest.
+        downloads = [(item, *_download(item)) for item in files]
+        _reset_checkpoint()
+        with tempfile.TemporaryDirectory(prefix="df-pickup-set-") as tmp:
+            combined = Path(tmp) / "set"
+            name, file_rows = combine_file_set(
+                [(path, item.name) for item, path, _checksum in downloads], combined
+            )
+            rows, one_summary = _load(combined, name, None)
+        loads = [one_summary]
+        for (item, _path, checksum), item_rows in zip(downloads, file_rows, strict=True):
+            _record(item, checksum, item_rows if rows else 0, False)
+    else:
+        loads = []
+        for item in files:
+            _reset_checkpoint()
+            path, checksum = _download(item)
+            rows, one_summary = _load(
+                path,
+                item.name,
+                {
+                    "connector": connector_key,
+                    "path": item.name,
+                    "size": item.size,
+                    "mtime": item.mtime,
+                    "sha256": checksum,
+                    "job_id": job_id or "",
+                    "dest_table": dest_table_name,
+                    "schedule_id": schedule_id,
+                },
+            )
+            loads.append(one_summary)
+            loaded = str(one_summary.get("file_manifest_status") or "") == "loaded"
+            _record(item, checksum, rows, loaded)
+    if len(loads) == 1 and not population.total:
+        # A COPY fast-path load proves itself by its own write-pass or re-read
+        # digest and feeds no row fingerprints to the shared sink; one load is
+        # the whole pickup, so its proof is the pickup's.
+        for key_name in _LOAD_PROOF_KEYS:
+            if key_name in loads[0]:
+                summary[key_name] = loads[0][key_name]
     if population.total:
         summary["checksum"] = population.digest()
         summary["checksum_mode"] = "inline_write_pass"

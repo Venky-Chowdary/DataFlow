@@ -986,6 +986,84 @@ def _apply_empty_cell_rule(
     return batch
 
 
+_COMBINABLE_FILE_TYPES = frozenset({"csv", "tsv", "jsonl", "ndjson"})
+
+
+def combine_file_set(
+    sources: list[tuple[Path, str]], target: Path
+) -> tuple[str, list[int]]:
+    """Write several picked files as one source file.
+
+    Returns the name the combined file reads as and each source's row count.
+
+    A multi-file overwrite is one logical source. Loading it as one file is
+    what makes the run atomic: one staged write, one swap, one Gate-8
+    population. Per-file loads each re-ran the overwrite, so only the last
+    file survived (D34). CSV/TSV cells pass through the C04 codec (NULL vs
+    ``''`` intact) under one header; JSONL lines are concatenated. A
+    format that cannot be joined refuses rather than loading a fraction.
+    """
+    try:
+        from services.file_parser import FileParser
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH in tests
+        from src.services.file_parser import FileParser
+
+    types = {FileParser.detect_file_type(name) for _path, name in sources}
+    file_type = types.pop() if len(types) == 1 else ""
+    if file_type not in _COMBINABLE_FILE_TYPES:
+        names = ", ".join(name for _path, name in sources)
+        raise ValueError(
+            f"A full-refresh overwrite of several files ({names}) loads them as "
+            "one source, which needs CSV, TSV or JSONL files of one format. "
+            "Narrow the pattern to one file, or use an append sync mode."
+        )
+    first_name = sources[0][1]
+    stem = first_name.rsplit("/", 1)[-1].split(".", 1)[0] or "pickup"
+    counts: list[int] = []
+    if file_type in ("jsonl", "ndjson"):
+        with open(target, "w", encoding="utf-8", newline="\n") as out:
+            for path, _name in sources:
+                count = 0
+                with _text_reader(path) as reader_file:
+                    for line in reader_file:
+                        if line.strip():
+                            out.write(line.rstrip("\r\n") + "\n")
+                            count += 1
+                counts.append(count)
+        return f"{stem}.jsonl", counts
+
+    from services.csv_codec import csv_cell_encode, format_csv_row, iter_csv_records
+
+    header: list[str] | None = None
+    with open(target, "w", encoding="utf-8", newline="") as out:
+        for path, name in sources:
+            sample = _first_bytes(path)
+            enc = detect_encoding(sample)
+            delim = detect_delimiter(sample.decode(enc, errors="replace"))
+            with _text_reader(path, encoding=enc, newline="") as reader_file:
+                headers, rows = header_and_rows(
+                    iter_csv_records(reader_file, delim),
+                    ReadOptions(),
+                    header_names=csv_header_names,
+                    source_label="CSV",
+                )
+                if header is None:
+                    header = list(headers)
+                    out.write(format_csv_row(header) + "\n")
+                elif list(headers) != header:
+                    raise ValueError(
+                        f"{name} has columns {list(headers)} but {first_name} has "
+                        f"{header}; files loaded as one overwrite source need one "
+                        "header."
+                    )
+                count = 0
+                for row in rows:
+                    out.write(format_csv_row([csv_cell_encode(c) for c in row]) + "\n")
+                    count += 1
+                counts.append(count)
+    return f"{stem}.csv", counts
+
+
 def iter_source_rows(
     content: bytes | str | os.PathLike,
     filename: str,
