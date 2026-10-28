@@ -39,10 +39,12 @@ def test_pg_csv_export_spells_booleans_and_empty_null():
     assert "'true'" in boolean and "'false'" in boolean
     assert "CASE" not in _pg_csv_export_expr("id", "BIGINT", "id")
     source = inspect.getsource(copy_postgres_to_s3)
-    # SQL NULL is a sentinel, not an empty field (R7-001). ``NULL ''`` made
-    # a Postgres NULL indistinguishable from a real empty string.
-    assert "NULL '__DF_SQL_NULL__'" in source
-    assert "NULL ''" not in source
+    # C04 operator CSV (D115): NULL is an unquoted empty field and a real ''
+    # is quoted ``""`` -- PostgreSQL's CSV writer does exactly that with
+    # ``NULL ''``. The internal __DF_SQL_NULL__ wire sentinel must not be
+    # written into operator files.
+    assert "DELIMITER {delim}, NULL '')" in source
+    assert "__DF_SQL_NULL__" not in source
     assert "NULL '\\\\N'" not in source
 
 
