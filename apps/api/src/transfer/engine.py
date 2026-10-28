@@ -286,11 +286,21 @@ def _compare_and_publish_load_history(
             current_row_count=row_count_hint,
         )
         quality_anomalies = list(load_history_report.get("anomalies") or [])
-        if quality_anomalies and _shape_recipe_removes_rows(request):
-            # Divert/drop/filter/router-divert recipes legitimately shrink the
-            # destination population — the ledger already accounts those rows.
-            # Downgrade count/volume-drop signals to notes; every other signal
-            # (null-rate shift, mean drift, novel quarantine) still blocks.
+        # Count/volume-drop signals are expected, not anomalous, when a
+        # divert/drop/filter/router-divert recipe shrinks the population (the
+        # ledger already accounts those rows) or the operator acknowledged the
+        # volume (D82: the guard had no override). Every other signal
+        # (null-rate shift, mean drift, novel quarantine) still blocks.
+        volume_acknowledged = bool(
+            getattr(request, "load_volume_acknowledged", False)
+            or (
+                getattr(request, "empty_source_overwrite_acknowledged", False)
+                and not row_count_hint
+            )
+        )
+        if quality_anomalies and (
+            volume_acknowledged or _shape_recipe_removes_rows(request)
+        ):
             kept = [
                 a
                 for a in quality_anomalies
