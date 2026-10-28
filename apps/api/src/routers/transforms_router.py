@@ -18,6 +18,7 @@ from services.workspace_access import (
     assert_resource_workspace,
     resolve_read_workspace,
     resolve_write_workspace,
+    tenant_scope,
 )
 
 router = APIRouter(prefix="/transforms", tags=["Transformations"])
@@ -137,8 +138,12 @@ def list_projects(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> list[dict[str, Any]]:
-    ws = resolve_read_workspace(request, workspace_id)
-    return [_project_response(p) for p in get_transform_store().list(ws)]
+    scope = tenant_scope(request, workspace_id)
+    return [
+        _project_response(p)
+        for p in get_transform_store().list()
+        if scope.allows(p.workspace_id)
+    ]
 
 
 @router.get("/{project_id}")

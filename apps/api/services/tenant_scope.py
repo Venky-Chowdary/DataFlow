@@ -125,12 +125,14 @@ class TenantScope:
     def target_workspace_id(self, *, write: bool = False) -> str:
         """The one workspace a create/export lands in; never a silent "all".
 
-        With no header and isolation enforced this is the actor's default
-        workspace instead of the old 400. When isolation is off, a header-less
-        write keeps the legacy unscoped stamp.
+        With no header this is the actor's default workspace instead of the old
+        400. A header-less write that has no workspace to land in keeps the
+        legacy unscoped stamp only while isolation is off, and only for
+        callers with no membership to prefer (a member's write must not become
+        an unscoped row every legacy caller can see).
         """
         ws = self.requested_workspace_id
-        if not ws and (self.enforced or not write):
+        if not ws and (self.enforced or not write or (self.memberships and not self.unrestricted)):
             ws = self.default_workspace_id
         if not ws:
             if not self.enforced and write:

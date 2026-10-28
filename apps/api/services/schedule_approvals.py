@@ -30,6 +30,7 @@ import re
 from datetime import datetime, timezone
 from typing import Any
 
+from services.workspace_filter import WorkspaceFilter
 from services.ops_events import emit_event
 from services.schedule_store import (
     PipelineSchedule,
@@ -810,8 +811,13 @@ def _derive_parked_corrective(request: dict[str, Any]) -> str:
     )
 
 
-def open_approvals(workspace_id: str = "") -> list[dict[str, Any]]:
-    """The inbox: every schedule currently parked on a decision."""
+def open_approvals(
+    workspace_id: str = "", *, workspace_filter: WorkspaceFilter | None = None
+) -> list[dict[str, Any]]:
+    """The inbox: every schedule currently parked on a decision.
+
+    ``workspace_filter`` is the caller's tenant scope; ``workspace_id`` is the
+    older exact-workspace filter for internal callers."""
     from services.schedule_mapping_contract import (
         is_empty_mapping_finding,
         persisted_mapping_rows,
@@ -819,7 +825,7 @@ def open_approvals(workspace_id: str = "") -> list[dict[str, Any]]:
     from services.schedule_store import has_open_approval, list_schedules
 
     out: list[dict[str, Any]] = []
-    for sched in list_schedules():
+    for sched in list_schedules(workspace_filter):
         if not has_open_approval(sched):
             continue
         if workspace_id and (sched.workspace_id or "") != workspace_id:

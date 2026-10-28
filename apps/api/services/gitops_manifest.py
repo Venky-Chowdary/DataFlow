@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from services.workspace_filter import WorkspaceFilter
+
 
 class WorkspaceScopeError(ValueError):
     """An explicit manifest id resolves outside the selected workspace."""
@@ -203,15 +205,21 @@ def build_dataflow_manifest(
     include_mapping_bundles: bool = False,
     workspace_id: str = "",
     isolation: bool = False,
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> dict[str, Any]:
-    """Build a multi-resource manifest of schedules (and optional contracts)."""
+    """Build a multi-resource manifest of schedules (and optional contracts).
+
+    ``workspace_filter`` is the caller's tenant scope and replaces the
+    ``workspace_id``/``isolation`` rule, which could not express "legacy rows
+    only" for a caller who belongs to no workspace.
+    """
     from services.schedule_store import list_schedules
 
     resources: list[dict[str, Any]] = []
     ws = (workspace_id or "").strip()
-    for sched in list_schedules():
+    for sched in list_schedules(workspace_filter):
         sws = (getattr(sched, "workspace_id", "") or "").strip()
-        if ws:
+        if workspace_filter is None and ws:
             if isolation and sws != ws:
                 continue
             if not isolation and sws and sws != ws:
@@ -232,7 +240,10 @@ def build_dataflow_manifest(
         for contract in contracts:
             meta = getattr(contract, "metadata", None) or {}
             cws = str(meta.get("workspace_id") or "").strip()
-            if ws:
+            if workspace_filter is not None:
+                if not workspace_filter.matches(cws):
+                    continue
+            elif ws:
                 if isolation and cws != ws:
                     continue
                 if not isolation and cws and cws != ws:
@@ -301,11 +312,11 @@ def plan_manifest(
     payload: dict[str, Any] | list[Any] | str,
     *,
     workspace_id: str = "",
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> dict[str, Any]:
     """Dry-run: report create/update/skip without mutating stores."""
     payload = _coerce_payload(payload)
     from services.schedule_store import get_schedule, list_schedules
-    from services.workspace_access import workspace_resource_is_visible
 
     try:
         from services.contract_store import get_contract_store
@@ -317,7 +328,7 @@ def plan_manifest(
     scope = (workspace_id or "").strip()
     visible_schedules = [
         s for s in list_schedules()
-        if workspace_resource_is_visible(getattr(s, "workspace_id", ""), scope)
+        if _visible(getattr(s, "workspace_id", ""), scope, workspace_filter)
     ]
     schedule_names = {s.name: s.id for s in visible_schedules}
     store = get_contract_store()
@@ -329,8 +340,8 @@ def plan_manifest(
             sid = str(spec.get("id") or "").strip()
             name = str(spec.get("name") or "").strip()
             existing = get_schedule(sid) if sid else None
-            if existing and not workspace_resource_is_visible(
-                getattr(existing, "workspace_id", ""), scope
+            if existing and not _visible(
+                getattr(existing, "workspace_id", ""), scope, workspace_filter
             ):
                 raise WorkspaceScopeError("Schedule belongs to another workspace")
             if existing is None and name and name in schedule_names:
@@ -345,9 +356,10 @@ def plan_manifest(
         elif kind in {"DataContract", "MappingBundle"}:
             cid = str(spec.get("id") or "").strip()
             existing = store.get_contract(cid) if cid else None
-            if existing and not workspace_resource_is_visible(
+            if existing and not _visible(
                 str((getattr(existing, "metadata", None) or {}).get("workspace_id") or ""),
                 scope,
+                workspace_filter,
             ):
                 raise WorkspaceScopeError("Contract belongs to another workspace")
             action = "update" if existing else "create"
@@ -381,7 +393,30 @@ def plan_manifest(
     }
 
 
-def bind_contract_workspace(contract: Any, workspace_id: str, *, existing: Any = None) -> None:
+def _visible(
+    resource_workspace_id: str | None,
+    workspace_id: str,
+    workspace_filter: WorkspaceFilter | None,
+) -> bool:
+    """Whether the caller's scope covers a resource.
+
+    The tenant-scope filter when the router resolved one; the single-workspace
+    rule otherwise (internal callers with no request).
+    """
+    if workspace_filter is not None:
+        return workspace_filter.matches(resource_workspace_id)
+    from services.workspace_access import workspace_resource_is_visible
+
+    return workspace_resource_is_visible(resource_workspace_id, workspace_id)
+
+
+def bind_contract_workspace(
+    contract: Any,
+    workspace_id: str,
+    *,
+    existing: Any = None,
+    workspace_filter: WorkspaceFilter | None = None,
+) -> None:
     """Stamp the caller's workspace and refuse overwriting another tenant's agreement.
 
     Same boundary as PipelineSchedule apply: a UUID in a pasted YAML is not
@@ -391,9 +426,9 @@ def bind_contract_workspace(contract: Any, workspace_id: str, *, existing: Any =
     if existing is not None:
         existing_meta = getattr(existing, "metadata", None) or {}
         existing_ws = str(existing_meta.get("workspace_id") or "").strip()
-        from services.workspace_access import workspace_resource_is_visible
-
-        if bound and not workspace_resource_is_visible(existing_ws, bound):
+        if (bound or workspace_filter is not None) and not _visible(
+            existing_ws, bound, workspace_filter
+        ):
             raise WorkspaceScopeError("Contract belongs to another workspace")
     if bound:
         meta = dict(getattr(contract, "metadata", None) or {})
@@ -407,6 +442,7 @@ def apply_manifest(
     dry_run: bool = False,
     require_signed_contracts: bool = False,
     workspace_id: str = "",
+    workspace_filter: WorkspaceFilter | None = None,
 ) -> dict[str, Any]:
     """Apply a DatawrapManifest (or single resource). ``dry_run=True`` delegates to plan.
 
@@ -417,7 +453,7 @@ def apply_manifest(
     """
     payload = _coerce_payload(payload)
     if dry_run:
-        return plan_manifest(payload, workspace_id=workspace_id)
+        return plan_manifest(payload, workspace_id=workspace_id, workspace_filter=workspace_filter)
 
     from services.schedule_store import (
         assert_signed_contract,
@@ -436,7 +472,6 @@ def apply_manifest(
     resources = _normalize_resources(payload)
     results: list[dict[str, Any]] = []
     store = get_contract_store()
-    from services.workspace_access import workspace_resource_is_visible
 
     for resource in resources:
         kind, _ident = _resource_identity(resource)
@@ -454,8 +489,8 @@ def apply_manifest(
                     assert_signed_contract(cid, require_signed=True)
                 sid = str(apply_spec.get("id") or "").strip()
                 existing = get_schedule(sid) if sid else None
-                if existing and not workspace_resource_is_visible(
-                    getattr(existing, "workspace_id", ""), bound_ws
+                if existing and not _visible(
+                    getattr(existing, "workspace_id", ""), bound_ws, workspace_filter
                 ):
                     raise WorkspaceScopeError("Schedule belongs to another workspace")
                 if sid and existing:
@@ -491,11 +526,13 @@ def apply_manifest(
                 existing = store.get_contract(contract.id) if contract.id else None
                 if existing:
                     existing_meta = getattr(existing, "metadata", None) or {}
-                    if not workspace_resource_is_visible(
-                        str(existing_meta.get("workspace_id") or ""), workspace_id
+                    if not _visible(
+                        str(existing_meta.get("workspace_id") or ""), workspace_id, workspace_filter
                     ):
                         raise WorkspaceScopeError("Contract belongs to another workspace")
-                bind_contract_workspace(contract, workspace_id, existing=existing)
+                bind_contract_workspace(
+                    contract, workspace_id, existing=existing, workspace_filter=workspace_filter
+                )
                 store.save_contract(contract)
                 results.append({
                     "kind": kind,
