@@ -155,11 +155,23 @@ def _stamp_create_new_type_risks(
     )
 
 
+def _connector_declared_columns(source_db_type: str) -> frozenset[str]:
+    """Columns a schemaless connector types itself (Kafka's broker envelope)."""
+    from services.copy_kafka_common import kafka_family_name
+
+    if kafka_family_name(source_db_type or "") != "kafka":
+        return frozenset()
+    from connectors.kafka_debezium_bridge import KAFKA_ENVELOPE_TYPES
+
+    return frozenset(KAFKA_ENVELOPE_TYPES)
+
+
 def _demote_untyped_varchar_confidence(
     mappings: list[dict],
     *,
     source_schemas: list[dict] | None,
     source_types_authoritative: bool = False,
+    declared_columns: frozenset[str] = frozenset(),
 ) -> list[dict]:
     """Cap confidence when Map only has bare VARCHAR and zero samples.
 
@@ -169,6 +181,9 @@ def _demote_untyped_varchar_confidence(
     column on a create-new route mapped at 0.95. The cap is for sources whose
     VARCHAR is a placeholder (thin SaaS / failed introspect), so it only
     applies when the declared type is unproven or the target is not text.
+    ``declared_columns`` are columns the connector types itself even though
+    the source is schemaless (a Kafka message without a key is an all-NULL
+    ``_kafka_key``, not an unknown one — D151).
     """
     by_name = {s["name"]: s for s in (source_schemas or [])}
     text_logicals = {"string", "text", "varchar", "unknown"}
@@ -180,7 +195,9 @@ def _demote_untyped_varchar_confidence(
         samples = src.get("samples") or []
         logical = normalize_logical_type(src_type)
         target_logical = normalize_logical_type(str(out.get("target_type") or ""))
-        catalog_typed = source_types_authoritative and logical != "unknown"
+        catalog_typed = (
+            source_types_authoritative or str(m.get("source") or "") in declared_columns
+        ) and logical != "unknown"
         if catalog_typed and target_logical in text_logicals:
             refined.append(out)
             continue
@@ -1523,6 +1540,7 @@ def run_mapping_pipeline(
         enriched_mappings,
         source_schemas=source_schemas,
         source_types_authoritative=source_types_authoritative,
+        declared_columns=_connector_declared_columns(source_db_type),
     )
     quality_issues = detect_cross_field_issues(enriched_mappings, source_schemas=source_schemas)
 
