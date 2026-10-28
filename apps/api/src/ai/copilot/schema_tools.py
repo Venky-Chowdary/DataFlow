@@ -477,8 +477,16 @@ def introspect_connector_table(
         endpoint.extra = {**(getattr(endpoint, "extra", None) or {}), "introspect_purpose": purpose}
     cfg = resolve_connector_config(endpoint)
     db_type = resolve_driver_type(cfg.get("type") or endpoint.format or "")
+    # The handshake keywords the connector saved (SQL Server trust flag, TLS
+    # mode, Oracle SID...) reach this read exactly as they reach Test and the
+    # engine's reads. Without them a certificate the operator trusted failed
+    # here, the destination read as "cannot introspect", and every mapping sat
+    # at "pending Studio/Map stamp" (D147).
+    from connectors.generic_sql import connection_options
+
     info = introspect_schema(
         db_type,
+        **connection_options({**(cfg.get("extra") or {}), **cfg}),
         host=str(cfg.get("host") or ""),
         port=int(cfg.get("port") or 0) or 5432,
         database=str(cfg.get("database") or ""),
