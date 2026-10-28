@@ -605,6 +605,12 @@ class MongoDBService:
         except Exception:
             prev_doc = None
         previous_status = (prev_doc or {}).get("status")
+        from services.job_status import terminal_exit_resets
+
+        for _key, _value in terminal_exit_resets(
+            previous_status, status, allow_terminal_exit
+        ).items():
+            updates.setdefault(_key, _value)
 
         # One owner: services.job_status.refuse_job_status_write.
         # Sticky terminal + cancel_requested so a late COPY `completed` cannot
@@ -1572,7 +1578,7 @@ class MemoryMongoDBService:
                 return False
         allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
         previous_status = rec.get("status")
-        from services.job_status import refuse_job_status_write
+        from services.job_status import refuse_job_status_write, terminal_exit_resets
 
         refuse_reason = refuse_job_status_write(
             previous_status=previous_status,
@@ -1596,6 +1602,10 @@ class MemoryMongoDBService:
             }
             if str(previous_status or "").strip().lower() not in allowed:
                 return False
+        for _key, _value in terminal_exit_resets(
+            previous_status, status, allow_terminal_exit
+        ).items():
+            kwargs.setdefault(_key, _value)
         fence = kwargs.pop("lease_fence", None)
         if operator_command:
             fence = None
