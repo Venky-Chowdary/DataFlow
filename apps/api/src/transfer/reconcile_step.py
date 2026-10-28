@@ -8015,9 +8015,12 @@ def run_reconciliation(
                         f"{recon['message']} "
                         f"({recon['culprit_keys_unavailable_reason']})"
                     )
+    verify_ms = (time.monotonic() - started) * 1000.0
+    # The wall time Gate-8 itself took — job_phase_timings reports it as verify.
+    recon["verify_seconds"] = round(verify_ms / 1000.0, 3)
     _emit_gate8_verdict(
         recon, endpoint=endpoint, validation_mode=validation_mode,
-        rows_written=rows_written, duration_ms=(time.monotonic() - started) * 1000.0,
+        rows_written=rows_written, duration_ms=verify_ms,
     )
     return recon
 

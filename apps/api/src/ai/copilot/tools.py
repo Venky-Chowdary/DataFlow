@@ -2233,6 +2233,8 @@ class DataPilotTools:
 
         from services.job_status import job_timestamp_iso
 
+        from services.phase_profile import job_phase_timings
+
         from .job_reads import job_governance, job_lineage, read_transfer_job
 
         job = read_transfer_job((job_id or "").strip())
@@ -2326,6 +2328,7 @@ class DataPilotTools:
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
                 "completed_at": job_timestamp_iso(job.get("completed_at")),
                 "governance": job_governance(job),
+                "phase_timings": job_phase_timings(job),
                 "sync_mode": route.get("sync_mode"),
                 "route": route,
                 "live_source_schema": live_schema,

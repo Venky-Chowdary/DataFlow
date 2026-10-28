@@ -643,6 +643,13 @@ class MongoDBService:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
         try:
+            from services.phase_profile import attach_phase_timings_to_updates
+
+            attach_phase_timings_to_updates(status, updates, previous=prev_doc)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
             from services.row_conservation import attach_conservation_to_updates
 
             attach_conservation_to_updates(status, updates, previous=prev_doc)
@@ -1638,6 +1645,13 @@ class MemoryMongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, kwargs, previous=rec)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.phase_profile import attach_phase_timings_to_updates
+
+            attach_phase_timings_to_updates(status, kwargs, previous=rec)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
