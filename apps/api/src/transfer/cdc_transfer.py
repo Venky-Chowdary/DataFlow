@@ -2872,7 +2872,11 @@ def _run_cdc_single_stream(
         # column that may stand in for that poll. A column named id is not
         # invented when the key is something else.
         if not cursor_field:
-            cursor_field = pk_source_cols[0]
+            # The operator's poll column wins over the key (D28): an UPDATE
+            # never moves the primary key, so polling it loses every change.
+            cursor_field = (
+                (contract.poll_cursor_field if contract else "") or pk_source_cols[0]
+            )
     elif not cursor_field:
         raise ValueError("CDC sync requires cursor_field in the stream contract")
 
@@ -3276,7 +3280,11 @@ def _run_cdc_single_stream(
         refusal_text = query_cdc_change_refusal(
             dialect=src_format or src_type,
             cursor_field=cursor_field,
-            cursor_semantics=str(getattr(contract, "cursor_semantics", "") or ""),
+            cursor_semantics=str(
+                getattr(contract, "poll_cursor_semantics", "")
+                or getattr(contract, "cursor_semantics", "")
+                or ""
+            ),
             primary_key_columns=pk_source_cols,
             downgrade_cause=str(capture_downgrade.get("cdc_capture_downgrade_cause") or ""),
         )

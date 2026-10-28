@@ -1369,10 +1369,34 @@ def _identity_stream_contract(
     cursor = ""
     semantics = ""
     inferred = False
+    poll_cursor = ""
+    poll_semantics = ""
     if mode == "cdc":
         # The log is the cursor. A table column here would make the snapshot
         # reader filter on it and skip rows the log had already captured.
         semantics = "cdc_position"
+        # A source with no readable change log falls back to polling a column
+        # (D28). The operator's column rides separately so the fallback uses it
+        # instead of the primary key, which no UPDATE ever moves.
+        raw_poll = (cursor_column or "").strip()
+        if raw_poll:
+            known = {col.lower(): col for col in source_columns}
+            poll_cursor = known.get(raw_poll.lower(), "")
+            if not poll_cursor:
+                listed = ", ".join(source_columns[:12]) or "none readable"
+                return [], (
+                    f"Source has no column `{raw_poll}`, so I cannot poll on "
+                    f"it. Columns I can see: {listed}."
+                )
+            from services.cursor_semantics import CURSOR_SEMANTICS
+
+            raw_poll_sem = (cursor_semantics or "").strip().lower()
+            if raw_poll_sem and raw_poll_sem not in CURSOR_SEMANTICS:
+                return [], (
+                    f"Unknown cursor semantics '{raw_poll_sem}' — declare one of: "
+                    + ", ".join(sorted(CURSOR_SEMANTICS))
+                )
+            poll_semantics = raw_poll_sem
     else:
         raw_cursor = (cursor_column or "").strip()
         if raw_cursor:
@@ -1434,6 +1458,10 @@ def _identity_stream_contract(
     if mode == "cdc":
         # Debezium default: snapshot when no resume exists, then tail the log.
         contract["snapshot_mode"] = "initial"
+        if poll_cursor:
+            contract["poll_cursor_field"] = poll_cursor
+            if poll_semantics:
+                contract["poll_cursor_semantics"] = poll_semantics
     return [contract], ""
 
 

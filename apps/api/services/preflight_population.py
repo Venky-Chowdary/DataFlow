@@ -70,8 +70,13 @@ def _cdc_log_capture_gates(
         )
         gate = build_log_capture_gate(
             probe,
-            cursor_field=contract_cursor_field(contract),
-            cursor_semantics=str(contract.get("cursor_semantics") or ""),
+            cursor_field=str(contract.get("poll_cursor_field") or "").strip()
+            or contract_cursor_field(contract),
+            cursor_semantics=str(
+                contract.get("poll_cursor_semantics")
+                or contract.get("cursor_semantics")
+                or ""
+            ),
             primary_key_columns=keys,
             pass_status=GateStatus.PASS.value,
             block_status=GateStatus.BLOCK.value,

@@ -282,6 +282,12 @@ class SyncContract:
     #: Days a declared ``business_date`` cursor re-reads behind the watermark
     #: each run. 0 = no lookback (the cursor then stays refused — D48).
     cursor_lookback_days: int = 0
+    #: Column a query-CDC poll advances on when the source has no readable
+    #: change log (D28). Kept apart from ``cursor_field``: with a log the log
+    #: position is the cursor, and a table column there would make the
+    #: snapshot reader filter on it and skip rows the log had captured.
+    poll_cursor_field: str = ""
+    poll_cursor_semantics: str = ""
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SyncContract:
@@ -309,6 +315,8 @@ class SyncContract:
                 data.get("delete_mode") or data.get("delete_strategy") or ""
             ).strip().lower(),
             cursor_lookback_days=_contract_lookback_days(data),
+            poll_cursor_field=str(data.get("poll_cursor_field") or "").strip(),
+            poll_cursor_semantics=str(data.get("poll_cursor_semantics") or "").strip().lower(),
         )
 
     def primary_key_columns(self) -> list[str]:
