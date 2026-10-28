@@ -1704,6 +1704,7 @@ def run_file_preflight(
             and not _dest_no_unique_ddl
             and destination_table_exists is True
         ):
+            from services.dest_dialect_facts import dest_upsert_needs_unique_index
             from services.destination_key_collision_probe import _identity_pairs
             from services.upsert_ddl_gate import (
                 count_dest_duplicate_keys,
@@ -1778,6 +1779,29 @@ def run_file_preflight(
                             "Pick different upsert key columns",
                             "Run full refresh overwrite instead of upsert",
                         ],
+                    }
+                elif not dest_upsert_needs_unique_index(dest_kind):
+                    # The writer keys this upsert with MERGE and never creates
+                    # an index, so there is no DDL to disclose or approve; the
+                    # duplicate probe above is the whole check (D47). A probe
+                    # that could not run is unmeasured, not clean.
+                    probed = bool(_dup.get("ran"))
+                    upsert_ddl_gate = {
+                        "id": "g_upsert_dest_key",
+                        "status": "pass" if probed else "warn",
+                        "message": (
+                            f"Upsert merges on ({', '.join(_uk_cols)}); the "
+                            "destination holds no duplicate key values and "
+                            "needs no new DDL"
+                            if probed
+                            else (
+                                f"Upsert merges on ({', '.join(_uk_cols)}) but "
+                                "the destination duplicate-key probe could not "
+                                f"run: {_dup.get('message') or 'unknown'}"
+                            )[:400]
+                        ),
+                        "duration_ms": 0,
+                        "details": {**_details, "planned_ddl": ""},
                     }
                 elif ddl_changes_acknowledged:
                     upsert_ddl_gate = {

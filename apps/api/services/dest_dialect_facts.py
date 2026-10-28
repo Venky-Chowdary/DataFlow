@@ -221,6 +221,18 @@ def dest_char_is_unpadded(db_type: str | None) -> bool:
 _UUID_TYPELESS_ENGINES = frozenset({"snowflake"})
 
 
+# Engines whose writer keys an upsert with MERGE and never creates a unique
+# index: Snowflake has no indexes and does not enforce UNIQUE, so there is no
+# DDL for the upsert-key gate to disclose. Duplicate target keys still matter
+# (MERGE refuses a nondeterministic match), so only the DDL step is skipped.
+_UPSERT_WITHOUT_UNIQUE_INDEX_ENGINES = frozenset({"snowflake"})
+
+
+def dest_upsert_needs_unique_index(db_type: str | None) -> bool:
+    """True when an upsert into an existing table runs CREATE UNIQUE INDEX."""
+    return _normalize_dest_db(db_type) not in _UPSERT_WITHOUT_UNIQUE_INDEX_ENGINES
+
+
 def dest_has_no_uuid_type(db_type: str | None) -> bool:
     """True when no carrier on the engine can enforce a UUID domain."""
     return _normalize_dest_db(db_type) in _UUID_TYPELESS_ENGINES

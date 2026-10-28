@@ -21,8 +21,8 @@ from src.transfer.models import EndpointConfig, TransferRequest
 from tests import test_d120_snowflake_strict_e2e as _strict
 from tests.test_d120_snowflake_strict_e2e import PG_CFG, _snowflake_rows
 
-# Snowflake semantics over fakesnow (case-sensitive quoted identifiers).
-strict_identifiers = _strict.strict_identifiers
+# Real-Snowflake rules over fakesnow (see test_d120_snowflake_strict_e2e).
+snowflake_semantics = _strict.snowflake_semantics
 engine_env = _strict.engine_env
 
 

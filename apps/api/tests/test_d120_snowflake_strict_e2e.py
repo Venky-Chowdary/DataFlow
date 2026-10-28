@@ -9,8 +9,8 @@ Two defects made every plain-table Snowflake load fail:
 
 fakesnow binds client-side through the connector's own converter, so (b)
 reproduces as-is. It runs on DuckDB, where quoted identifiers are
-case-insensitive, so ``strict_identifiers`` restores Snowflake's rule: a
-quoted column identifier must match the stored case exactly. The rows also
+case-insensitive, so ``snowflake_semantics`` restores Snowflake's rule: a
+quoted identifier must match the stored case exactly. The rows also
 carry the D106 (NULL in a short VARCHAR) and D109 (sentinel-spelling
 literal) arms.
 """
@@ -38,33 +38,66 @@ _QUOTED = re.compile(r'(?<![Aa][Ss] )"((?:[^"]|"")+)"')
 
 
 @pytest.fixture()
-def strict_identifiers(monkeypatch):
-    """Quoted column identifiers are case-sensitive, as on Snowflake."""
+def snowflake_semantics(monkeypatch):
+    """Real-Snowflake rules fakesnow lacks.
+
+    Quoted identifiers are case-sensitive. ``executemany`` reports the batch's
+    total rowcount, as the connector does — fakesnow runs one statement per
+    parameter set and keeps only the last statement's count.
+    """
     import snowflake.connector
     from fakesnow.cursor import FakeSnowflakeCursor
 
     orig_execute = FakeSnowflakeCursor.execute
 
+    def _strict_miss(token: str, stored: set[str]) -> bool:
+        return token not in stored and token.upper() in {s.upper() for s in stored}
+
     def execute(self, command: str, *args: Any, **kwargs: Any) -> Any:
+        # User tables only: fakesnow's own ``_fs_*`` catalog has a lower-case
+        # ``name`` column that would flag every ``"NAME"`` reference.
         rows = self._duck_conn.cursor().execute(
-            "SELECT column_name FROM information_schema.columns"
+            "SELECT table_name, column_name FROM information_schema.columns "
+            "WHERE NOT starts_with(table_catalog, '_fs') "
+            "AND NOT starts_with(table_schema, '_fs') "
+            "AND lower(table_schema) <> 'information_schema'"
         ).fetchall()
-        stored = {str(r[0]) for r in rows}
-        folded = {s.upper() for s in stored}
-        for tok in _QUOTED.findall(command or ""):
-            if tok not in stored and tok.upper() in folded:
+        tables = {str(r[0]) for r in rows}
+        columns = {str(r[1]) for r in rows}
+        sql = command or ""
+        # A CREATE naming a differently-cased table makes a second table on
+        # Snowflake rather than failing, so only references are checked.
+        creates = sql.lstrip().upper().startswith("CREATE")
+        for tok in _QUOTED.findall(sql):
+            if _strict_miss(tok, columns):
                 raise snowflake.connector.errors.ProgrammingError(
                     msg=f"SQL compilation error: invalid identifier '\"{tok}\"'",
                     errno=904,
                     sqlstate="42000",
                 )
+            if not creates and _strict_miss(tok, tables):
+                raise snowflake.connector.errors.ProgrammingError(
+                    msg=f"SQL compilation error: Object '\"{tok}\"' does not exist "
+                    "or not authorized.",
+                    errno=2003,
+                    sqlstate="42S02",
+                )
         return orig_execute(self, command, *args, **kwargs)
 
+    def executemany(self, command: str, seqparams: Any, **kwargs: Any) -> Any:
+        total = 0
+        for params in seqparams:
+            self.execute(command, params, **kwargs)
+            total += max(int(self._rowcount or 0), 0)
+        self._rowcount = total
+        return self
+
     monkeypatch.setattr(FakeSnowflakeCursor, "execute", execute)
+    monkeypatch.setattr(FakeSnowflakeCursor, "executemany", executemany)
 
 
 @pytest.fixture()
-def engine_env(tmp_path, monkeypatch, strict_identifiers):
+def engine_env(tmp_path, monkeypatch, snowflake_semantics):
     from tests.test_property2_golden_path_never_blocked import _FakeMongo
 
     import services.sync_cursor as sc

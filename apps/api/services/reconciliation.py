@@ -1657,10 +1657,10 @@ def iter_select_row_dicts(
     batch: list[dict[str, Any]] = []
     size = max(1, int(itersize))
     for row in raw:
-        mapping = getattr(row, "_mapping", None)
-        if mapping is None:
-            mapping = dict(zip(columns, row))
-        batch.append({c: mapping.get(c) for c in columns})
+        # ``columns`` is the statement's own select list, so position is the
+        # exact key. A name lookup is not: SQLAlchemy's Snowflake dialect
+        # reports a stored ``ID`` as ``id``, and every value read as None (D47).
+        batch.append(dict(zip(columns, row)))
         if len(batch) >= size:
             yield batch
             batch = []

@@ -565,16 +565,19 @@ def test_active_checksum_sql_is_a_full_scan_not_limit_offset():
 
     captured: dict[str, str] = {}
 
-    class _Row:
-        def __init__(self, mapping):
-            self._mapping = mapping
+    class _Row(tuple):
+        """Like a SQLAlchemy Row: a tuple in select-list order."""
+
+        @property
+        def _mapping(self):
+            return dict(zip(["id", "name"], self))
 
     class _Result:
         def keys(self):
             return ["id", "name"]
 
         def partitions(self, _n):
-            yield [_Row({"id": "1", "name": "A"})]
+            yield [_Row(("1", "A"))]
 
     class _Conn:
         def execution_options(self, **_kw):

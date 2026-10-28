@@ -18,7 +18,9 @@ from src.transfer import stream_scd2
     [
         ("mysql", "`analytics`.`sp_dst`"),
         ("postgresql", '"analytics"."sp_dst"'),
-        ("snowflake", '"analytics"."sp_dst"'),
+        # Snowflake stores what DataFlow creates folded and its quoted
+        # identifiers are case-sensitive (D47).
+        ("snowflake", '"ANALYTICS"."SP_DST"'),
     ],
 )
 def test_qualified_names_follow_the_destination_dialect(dialect, expected) -> None:
@@ -47,5 +49,18 @@ def test_pk_predicates_are_quoted_for_mysql() -> None:
 
 
 def test_unknown_dialect_falls_back_to_ansi_quotes() -> None:
-    assert mirror_engine._qchar("") == '"'
-    assert scd2_engine._qchar("nonesuch") == '"'
+    from services.dialect_profiles import quote_stored_identifier
+
+    assert quote_stored_identifier("", "sp_dst") == '"sp_dst"'
+    assert quote_stored_identifier("nonesuch", "sp_dst") == '"sp_dst"'
+
+
+def test_snowflake_identifiers_take_the_writer_fold() -> None:
+    from connectors.snowflake_conn import snowflake_column_ref
+    from services.dialect_profiles import quote_stored_identifier
+
+    for name in ("id", "valid_from", "UserId", "ID"):
+        assert quote_stored_identifier("snowflake", name) == snowflake_column_ref(name, {})
+    # Every other engine keeps the verbatim name.
+    assert quote_stored_identifier("postgresql", "ID") == '"ID"'
+    assert quote_stored_identifier("mysql", "id") == "`id`"
