@@ -189,6 +189,23 @@ def _resolve_connector(connector_id: str) -> dict | None:
         return None
 
 
+def _resolve_connector_for_schedule(connector_id: str, sched: Any) -> dict | None:
+    """Current settings of a connector a schedule uses, inside its workspace (D172).
+
+    A schedule stores connector ids, never hosts, so every fire reads the
+    connector as it is now. A connector that belongs to another workspace is
+    treated as absent - same rule as ``connector_store.get_connector``
+    (matching workspace, or a legacy unscoped connector).
+    """
+    conn = _resolve_connector(connector_id)
+    workspace = str(getattr(sched, "workspace_id", "") or "").strip()
+    if conn and workspace:
+        owner = str(conn.get("workspace_id") or "").strip() if isinstance(conn, dict) else ""
+        if owner and owner != workspace:
+            return None
+    return conn
+
+
 def _apply_callable_schedule_source(source, sched) -> None:
     """Stamp CALL/SELECT fields onto the endpoint so the reader is not a table scan."""
     mode = str(getattr(sched, "source_read_mode", "") or "").strip().lower()
@@ -1003,8 +1020,8 @@ def _observe_parallel_run(sched: Any, job_doc: dict | None = None) -> None:
 
     if not population_comparable(getattr(sched, "sync_mode", None)):
         return
-    src = _resolve_connector(sched.source_connector_id)
-    dst = _resolve_connector(sched.dest_connector_id)
+    src = _resolve_connector_for_schedule(sched.source_connector_id, sched)
+    dst = _resolve_connector_for_schedule(sched.dest_connector_id, sched)
     if not src or not dst:
         return
     campaign = dict(getattr(sched, "fidelity_campaign", None) or {})
@@ -1444,8 +1461,8 @@ def _dispatch_transfer(
         return None
     if not sched.enabled and not allow_paused:
         return None
-    src = _resolve_connector(sched.source_connector_id)
-    dst = _resolve_connector(sched.dest_connector_id)
+    src = _resolve_connector_for_schedule(sched.source_connector_id, sched)
+    dst = _resolve_connector_for_schedule(sched.dest_connector_id, sched)
     if not src or not dst:
         # A connector this schedule cannot resolve does not come back on its own:
         # someone has to re-point the schedule or restore the connection. Every
@@ -1454,12 +1471,14 @@ def _dispatch_transfer(
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
         emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="connector_missing", schedule_id=schedule_id)
         missing = "source" if not src else "destination"
+        missing_id = sched.source_connector_id if not src else sched.dest_connector_id
         _park_on_decision(
             schedule_id,
             RuntimeError(
-                f"Schedule cannot run — its {missing} connector is missing or "
-                "unavailable. Re-select the connection on this schedule, or "
-                "restore the deleted connector, then resume."
+                f"Schedule cannot run — Connector {missing_id} no longer exists: "
+                f"its {missing} connector is missing or unavailable. Re-select "
+                "the connection on this schedule, or restore the deleted "
+                "connector, then resume."
             ),
             attempt=attempt,
         )
