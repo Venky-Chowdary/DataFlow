@@ -21,6 +21,7 @@ from services.platform_config import data_dir
 from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
 from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
+from services.workspace_filter import bound_allows, current_workspace_filter
 
 _CONNECTOR_SECRET_KEYS = (
     "password",
@@ -569,13 +570,26 @@ def _workspace_scope(workspace_id: str | None) -> str | None:
 
 
 def list_connectors(role: str | None = None, workspace_id: str | None = None) -> list[SavedConnector]:
+    """Saved connectors, limited to the tenant scope bound to this request.
+
+    ``workspace_id`` narrows further. With nothing bound (schedulers, workers,
+    scripts) this is system scope; inside a request a caller that forgot to
+    pass a filter still cannot read another workspace's credentials (D154).
+    """
     workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
-            return _list_mongo(role, workspace_id)
+            return _visible_connectors(_list_mongo(role, workspace_id))
         except Exception as exc:
             logger.warning("MongoDB list_connectors failed, falling back to file: %s", exc)
-    return _list_file(role, workspace_id)
+    return _visible_connectors(_list_file(role, workspace_id))
+
+
+def _visible_connectors(connectors: list[SavedConnector]) -> list[SavedConnector]:
+    visible = current_workspace_filter()
+    if visible is None:
+        return connectors
+    return [c for c in connectors if visible.matches(c.workspace_id)]
 
 
 def _get_file(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
@@ -613,12 +627,15 @@ def _get_mongo(connector_id: str, workspace_id: str | None = None) -> SavedConne
 
 def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     workspace_id = _workspace_scope(workspace_id)
+    found: SavedConnector | None
     if _use_mongo():
         try:
-            return _get_mongo(connector_id, workspace_id)
+            found = _get_mongo(connector_id, workspace_id)
+            return found if found is None or bound_allows(found.workspace_id) else None
         except Exception as exc:
             logger.warning("MongoDB get_connector failed, falling back to file: %s", exc)
-    return _get_file(connector_id, workspace_id)
+    found = _get_file(connector_id, workspace_id)
+    return found if found is None or bound_allows(found.workspace_id) else None
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
@@ -716,6 +733,8 @@ def _coerce_secret_update(new: Any, existing: Any) -> Any:
 
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
     workspace_id = _workspace_scope(workspace_id)
+    if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
+        return None
     def _merge(existing: SavedConnector) -> SavedConnector:
         merged = {**existing.to_dict(), **data, "id": connector_id}
         # Never let a masked UI payload overwrite a saved secret / connection string.
@@ -781,6 +800,8 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
 
 def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool:
     workspace_id = _workspace_scope(workspace_id)
+    if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
+        return False
     if _use_mongo():
         try:
             coll = _mongo_collection()

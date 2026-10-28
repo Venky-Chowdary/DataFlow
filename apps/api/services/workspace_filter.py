@@ -7,8 +7,10 @@ the request; ``None`` in a store signature means system scope (no filter).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 
 def norm_workspace_id(workspace_id: Any) -> str:
@@ -62,3 +64,32 @@ class WorkspaceFilter:
         if self.include_unscoped:
             arms.append({field: {"$in": unscoped}})
         return arms[0] if len(arms) == 1 else {"$or": arms}
+
+
+# The filter of the request (or Pilot/MCP turn) being served. Stores that can
+# be reached without a request in hand (connectors, Pilot tool reads) consult
+# it so a caller that forgot to pass a filter still cannot read another
+# workspace's rows. Nothing bound = system scope (schedulers, workers, scripts).
+_bound: contextvars.ContextVar[WorkspaceFilter | None] = contextvars.ContextVar(
+    "bound_workspace_filter", default=None
+)
+
+
+@contextlib.contextmanager
+def bound_workspace_filter(workspace_filter: WorkspaceFilter | None) -> Iterator[None]:
+    token = _bound.set(workspace_filter)
+    try:
+        yield
+    finally:
+        _bound.reset(token)
+
+
+def current_workspace_filter() -> WorkspaceFilter | None:
+    return _bound.get()
+
+
+def bound_allows(workspace_id: Any) -> bool:
+    """Whether the bound filter covers a workspace (always, when none is bound)."""
+    visible = _bound.get()
+    return visible is None or visible.matches(workspace_id)
+

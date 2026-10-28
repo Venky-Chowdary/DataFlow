@@ -225,26 +225,18 @@ def caller_role(role: str, permissions: Iterable[str] | None = None) -> Iterator
 
 @contextlib.contextmanager
 def bind_request_principal(http_request: Any, role: str) -> Iterator[None]:
-    """Bind the role, scoped permissions and tenant scope for an HTTP principal.
+    """Bind the role and scoped permissions for an HTTP request principal.
 
-    Tool reads (jobs, schedules, briefings) run without the request, so the
-    turn carries the caller's tenant scope (D154); a refused header scope binds
-    a scope that sees nothing rather than system scope.
+    The tenant scope tool reads need is bound per request by
+    ``TenantScopeMiddleware``.
     """
-    from fastapi import HTTPException
-
     from services.rbac import principal_permissions
-    from services.tenant_scope import TenantScope, bind_tenant_scope, resolve_tenant_scope
 
     user = getattr(http_request.state, "user", None)
-    try:
-        scope = resolve_tenant_scope(http_request)
-    except HTTPException:
-        scope = TenantScope(actor="", unrestricted=False, enforced=True, memberships=())
     with caller_role(
         role,
         permissions=principal_permissions(user, role) if role else None,
-    ), bind_tenant_scope(scope):
+    ):
         yield
 
 
