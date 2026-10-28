@@ -462,6 +462,7 @@ class FilePreflightContext(PreflightContext):
             source_duplicate_probe_message=self.source_duplicate_probe_message,
             source_duplicate_probe_expected=self.source_duplicate_probe_expected,
             source_null_key_rows=getattr(self, "source_null_key_rows", None),
+            source_key_collisions=getattr(self, "source_key_collisions", None),
             dest_table_exists=getattr(self.plan.destination, "table_exists", None),
             empty_cells_as_null=self.empty_cells_as_null,
             dest_nullability=self._dest_nullability(),

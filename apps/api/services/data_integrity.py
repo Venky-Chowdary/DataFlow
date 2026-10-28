@@ -1959,6 +1959,60 @@ def _check_null_keys(
     }
 
 
+def _check_transformed_key_collisions(
+    probe: dict[str, Any],
+    *,
+    sync_mode: str,
+    dest_kind: str,
+    identity_declared: bool = False,
+) -> dict[str, Any]:
+    """D39: distinct source keys that a key-column transform writes as one key."""
+    from services.primary_key import sync_requires_unique_identity
+    from services.sync_cursor import is_overwrite_sync, normalize_sync_mode
+
+    count = int(probe.get("collision_count") or 0)
+    label = " + ".join(probe.get("key_columns") or []) or "the key"
+    transforms = ", ".join(
+        f"{col}: {xform}" for col, xform in (probe.get("transforms") or {}).items()
+    )
+    sample = "; ".join(
+        f"{' vs '.join(repr(k) for k in c.get('source_keys') or [])} "
+        f"-> {c.get('written_key')!r}"
+        for c in (probe.get("collisions") or [])[:3]
+    )
+    message = (
+        f"{label}: {count:,} source row(s) share a key only after the key's "
+        f"transform ({transforms}) - {sample}. The destination key would treat them as one "
+        "row and keep one of them. Drop the transform from the key, dedupe the "
+        "source, or choose a key the transform leaves distinct."
+    )
+    # An overwrite recreates the table with the declared key as its PK, so the
+    # same collision is a unique violation there.
+    keyed = (
+        dest_kind in SCHEMALESS_DESTS
+        or sync_requires_unique_identity(
+            normalize_sync_mode(sync_mode), dest_kind=dest_kind
+        )
+        or (identity_declared and is_overwrite_sync(sync_mode))
+    )
+    if not keyed:
+        return {
+            "check": "transformed_key_collisions",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [message],
+        }
+    return {
+        "check": "transformed_key_collisions",
+        "passed": False,
+        "blocks_transfer": True,
+        "issues": [message],
+        "collision_count": count,
+        "primary_key_columns": list(probe.get("key_columns") or []),
+    }
+
+
 def run_integrity_audit(
     *,
     source_columns: list[str],
@@ -1983,6 +2037,7 @@ def run_integrity_audit(
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
     source_null_key_rows: int | None = None,
+    source_key_collisions: dict[str, Any] | None = None,
     dest_table_exists: bool | None = None,
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
@@ -2164,6 +2219,15 @@ def run_integrity_audit(
                     int(source_null_key_rows),
                     sync_mode=sync_mode,
                     dest_kind=dest_kind,
+                )
+            )
+        if source_key_collisions and source_key_collisions.get("collision_count"):
+            checks.append(
+                _check_transformed_key_collisions(
+                    source_key_collisions,
+                    sync_mode=sync_mode,
+                    dest_kind=dest_kind,
+                    identity_declared=identity_declared,
                 )
             )
         checks.append(

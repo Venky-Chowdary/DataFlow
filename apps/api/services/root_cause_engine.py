@@ -458,7 +458,11 @@ def _is_uniqueness_probe_signal(
 
 _EXPECTATION_ISSUE_RE = re.compile(r"^expect_[a-z0-9_]+", re.I)
 #: G9 ``null_keys`` finding (D46): population rows with a NULL upsert key.
-_NULL_KEY_ISSUE_RE = re.compile(r"source row\(s\) have a NULL upsert key", re.I)
+_NULL_KEY_ISSUE_RE = re.compile(
+    r"source row\(s\) have a NULL upsert key"
+    r"|source row\(s\) share a key only after the key's transform",
+    re.I,
+)
 
 
 def _is_expectation_signal(

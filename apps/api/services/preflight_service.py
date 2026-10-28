@@ -1587,6 +1587,7 @@ def run_file_preflight(
     source_duplicate_probe_status = ""
     source_duplicate_probe_message = ""
     source_null_key_rows: int | None = None
+    source_key_collisions: dict[str, Any] | None = None
     from services.procedure_source import is_callable_source, source_read_mode_of
 
     callable_src = is_callable_source(source_config)
@@ -1631,6 +1632,32 @@ def run_file_preflight(
                 source_duplicate_probe_message = probe_result.message
                 source_duplicate_probe_ran = bool(probe_result.ran)
                 source_null_key_rows = probe_result.null_key_rows
+                # D39: a transform on the key can merge distinct source keys.
+                from services.transformed_key_probe import (
+                    key_transforms,
+                    probe_transformed_key_collisions,
+                )
+
+                _key_xforms = key_transforms(mappings, source_pk_cols)
+                if _key_xforms:
+                    _key_rows = _ps._iter_table_population_for_preflight(
+                        source_columns=list(source_pk_cols),
+                        source_kind=source_kind,
+                        source_format=source_format,
+                        source_connector_id=source_connector_id or "",
+                        source_config=source_config,
+                        source_table=source_table or "",
+                        mappings=list(mappings or []),
+                        column_types=dict(column_types or {}),
+                        dest_types=dict(destination_column_types or {}),
+                        dest_db=destination_db_type,
+                        sync_mode=sync_mode,
+                    )
+                    source_key_collisions = probe_transformed_key_collisions(
+                        _key_rows if _key_rows is not None else (sample_rows or []),
+                        key_sources=list(source_pk_cols),
+                        transforms=_key_xforms,
+                    )
             else:
                 source_duplicate_probe_status = "skipped_no_pk"
                 source_duplicate_probe_message = (
@@ -1875,6 +1902,7 @@ def run_file_preflight(
     )
     ctx.sample_unavailable_reason = sample_unavailable_reason
     ctx.source_null_key_rows = source_null_key_rows
+    ctx.source_key_collisions = source_key_collisions
     ctx.source_measured_empty = source_measured_empty
     # Always collect every reachable gate on Validate. fail_fast=True hid G6 DDL
     # behind G5 integrity blocks and forced a multi-run fix loop. Transfer still
