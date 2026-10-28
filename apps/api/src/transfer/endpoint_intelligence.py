@@ -150,7 +150,8 @@ def _operator_visible_objects(names, type_label: str, type_map: dict | None = No
         name = str(raw)
         if not name or name.startswith("("):
             continue
-        if name.startswith(_INTERNAL_OBJECT_PREFIXES):
+        # Case-insensitive: Snowflake stores these spools UPPER-cased.
+        if name.lower().startswith(_INTERNAL_OBJECT_PREFIXES):
             continue
         out.append({"name": name, "type": (type_map or {}).get(name) or type_label})
     return out
