@@ -127,3 +127,35 @@ def test_non_tenant_host_is_not_filtered(client):
         ).status_code
         == 200
     )
+
+
+def test_every_unauthenticated_route_stays_reachable_on_allowlisted_tenant():
+    """Drift guard: whatever auth_middleware serves without a session (signup,
+    verify-email, Resend webhook, contact-sales, ...) must not be allowlisted
+    away on a tenant custom domain."""
+    from src.middleware import auth_middleware as am
+
+    missing = [
+        p for p in am._PUBLIC_PREFIXES
+        if p.strip("/") and not tm._is_public_path(p)
+        and p not in ("/docs", "/redoc", "/openapi.json")
+    ]
+    assert missing == []
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/auth/resend-webhook",
+        "/api/v1/public/email-events",
+        "/api/v1/auth/signup",
+        "/api/v1/auth/verify-email",
+        "/api/v1/contact-sales",
+        "/api/v1/contact-sales/config",
+        "/api/v1/auth/sso/okta/callback",
+        "/api/v1/auth/password/reset/inspect",
+        "/api/v1/auth/signup/config",
+    ],
+)
+def test_webhooks_signup_and_verify_skip_allowlist(client, path):
+    assert tm._is_public_path(path) is True

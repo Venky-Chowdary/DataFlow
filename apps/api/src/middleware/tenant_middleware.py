@@ -35,6 +35,35 @@ _PUBLIC_PREFIXES = (
     "/auth/bootstrap",
     "/auth/sso/providers",
     "/api/v1/auth/sso/providers",
+    # Unauthenticated-by-design surfaces that the old "/" catch-all kept
+    # reachable (signup/verify/reset, the Resend webhook which is called from
+    # the provider's servers and can never be on a tenant allowlist, SSO
+    # hand-offs, the contact-sales form).  Mirrors auth_middleware's list;
+    # tests/test_tenant_middleware_allowlist.py guards against drift.
+    "/api/v1/auth/signup",
+    "/api/v1/auth/verify-email",
+    "/api/v1/auth/resend",
+    "/api/v1/auth/resend-webhook",
+    "/api/v1/auth/form-token",
+    "/api/v1/auth/password/forgot",
+    "/api/v1/auth/password/reset",
+    "/api/v1/auth/sso",
+    "/api/v1/public/form-token",
+    "/api/v1/public/email-events",
+    "/api/v1/contact-sales",
+    "/api/v1/catalog",
+    "/auth/signup",
+    "/auth/verify-email",
+    "/auth/resend",
+    "/auth/resend-webhook",
+    "/auth/form-token",
+    "/auth/password/forgot",
+    "/auth/password/reset",
+    "/auth/sso",
+    "/public/form-token",
+    "/public/email-events",
+    "/catalog",
+    "/.well-known/oauth-protected-resource",
 )
 
 if docs_enabled():
