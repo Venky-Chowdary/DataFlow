@@ -8024,6 +8024,15 @@ def run_reconciliation(
                         + _tail
                         + (f" {_count_fact}" if _count_fact else "")
                     )
+            # The rewrites above rebuild the message from the count-only note's
+            # head, dropping whatever a later gate appended after it. A G22
+            # block/warn is a finding in its own right (matching digests do
+            # not prove parents exist) and must stay in the operator's text.
+            _ri_gate = recon.get("g22_dest_referential_integrity")
+            if isinstance(_ri_gate, dict) and _ri_gate.get("status") in {"block", "warn"}:
+                _ri_msg = str(_ri_gate.get("message") or "").strip()
+                if _ri_msg and _ri_msg not in str(recon.get("message") or ""):
+                    recon["message"] = f"{str(recon.get('message') or '').rstrip()} {_ri_msg}".strip()
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
     # src vs shaped dest here would flag every transformed row. And this is a
