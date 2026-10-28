@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from services.transform_engine import apply_transform, infer_transform_for_mapping
+from services.value_serializer import evidence_text
 
 
 def _parse_rate(samples: list[str], transform: str) -> tuple[float, list[str]]:
@@ -22,7 +23,7 @@ def _parse_rate(samples: list[str], transform: str) -> tuple[float, list[str]]:
             evaluated += 1
             continue
         evaluated += 1
-        _, err = apply_transform(str(raw), transform)
+        _, err = apply_transform(evidence_text(raw), transform)
         if err:
             if len(issues) < 3:
                 issues.append(err)

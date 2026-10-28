@@ -126,6 +126,10 @@ class BoundedTarget:
     #: True when ``target_type`` is live destination DDL, not a Map remap.
     #: Map type alone does not ALTER Snowflake/MySQL/PG — Execute binds this.
     binds_live_ddl: bool = False
+    #: The source declares a calendar day and the destination keeps dates on an
+    #: instant carrier (BSON ``date``). The write stamps UTC midnight — a date
+    #: has no zone to invent — so the scan binds the cell as a DATE.
+    calendar_day_source: bool = False
 
     @property
     def aborts_job(self) -> bool:
@@ -638,6 +642,9 @@ def bounded_targets(
             risk_id=risk_id,
             transform=transform,
             binds_live_ddl=binds_live_ddl,
+            calendar_day_source=_calendar_day_on_instant_carrier(
+                declared_source, target_type, dest_db=dest_db
+            ),
         )
         if carrier == CARRIER_TYPED:
             # A parse bound has no width to compare declarations against: a
@@ -875,16 +882,47 @@ def _year_bind_reason(value: Any) -> str | None:
     return None
 
 
+def _calendar_day_on_instant_carrier(
+    source_type: str, target_type: str, *, dest_db: str
+) -> bool:
+    """A DATE source onto a destination that stores dates as instants.
+
+    BSON ``date`` is the one carrier a document store has for both DATE and
+    TIMESTAMP, so a collection DataFlow created reads back as TIMESTAMPTZ. The
+    writer lands the day at UTC midnight (``MongoDBWriter`` calendar-day bind),
+    which is what run 1 wrote; asking that column for an offset refused the
+    write's own representation on run 2 (D179).
+    """
+    from connectors.sql_temporal import sql_type_is_temporal
+    from services.type_system import (
+        LOGICAL_DATE,
+        normalize_logical_type,
+        temporal_carrier_holds_time,
+    )
+
+    return (
+        bool(source_type)
+        and normalize_logical_type(source_type) == LOGICAL_DATE
+        and temporal_carrier_holds_time(dest_db)
+        and sql_type_is_temporal(target_type)
+    )
+
+
 def _typed_predicate(
     transform: str,
     target_type: str,
     dest_db: str,
+    *,
+    calendar_day: bool = False,
 ) -> Callable[[Any], str | None] | None:
     """The write's coercion, asked as a question instead of at row 1."""
     from connectors.sql_temporal import sql_type_is_temporal
     from services.transform_engine import apply_transform
 
     temporal = sql_type_is_temporal(target_type)
+    # The write binds the calendar day itself, so the zone-bearing carrier is
+    # not the question: the day must parse as a DATE.
+    bind_type = "DATE" if calendar_day else target_type
     interval = _is_interval_carrier(target_type)
     year = _is_year_carrier(target_type)
     if not transform and not temporal and not interval and not year:
@@ -906,7 +944,7 @@ def _typed_predicate(
                 return None
             bound = out
         if temporal:
-            return _temporal_bind_reason(bound, target_type, dest_db)
+            return _temporal_bind_reason(bound, bind_type, dest_db)
         if interval:
             return _interval_bind_reason(bound, target_type)
         if year:
@@ -930,7 +968,12 @@ def fit_predicate_for(
     the carrier's bound. Asking only the second is how a passing Validate was
     followed by a write that refused every row.
     """
-    typed = _typed_predicate(target.transform, target.target_type, dest_db)
+    typed = _typed_predicate(
+        target.transform,
+        target.target_type,
+        dest_db,
+        calendar_day=target.calendar_day_source,
+    )
     if target.carrier == CARRIER_TYPED:
         return typed or (lambda _value: None)
     bound = _fit_predicate(target, dest_db=dest_db, dialect_label=dialect_label)

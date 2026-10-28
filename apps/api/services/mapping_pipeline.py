@@ -514,6 +514,8 @@ def _repair_unparseable_numeric_targets(
         if renders_typed_wire_values(source_db_type) and not _active_number_locale():
             wire_token = set_active_number_locale(NUMBER_LOCALE_WIRE)
 
+    from services.value_serializer import evidence_text
+
     def _fits(samples: list[str], lt: str, field_name: str) -> bool:
         return samples_fit_logical_type(samples, lt, field_name=field_name)
 
@@ -527,7 +529,11 @@ def _repair_unparseable_numeric_targets(
         for m in mappings:
             src = str(m.get("source") or "")
             tgt = str(m.get("target") or "")
-            samples = [str(x) for x in (src_by.get(src, {}).get("samples") or [])[:8] if str(x).strip()]
+            samples = [
+                evidence_text(x)
+                for x in (src_by.get(src, {}).get("samples") or [])[:8]
+                if str(x).strip()
+            ]
             tgt_type = str(
                 m.get("target_type")
                 or tgt_by.get(tgt, {}).get("inferred_type")
