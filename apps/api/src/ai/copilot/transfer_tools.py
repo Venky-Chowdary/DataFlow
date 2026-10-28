@@ -45,6 +45,7 @@ from .schema_tools import (
     _safe_connector,
     introspect_connector_table as _introspect,
 )
+from .tool_deadline import note_step
 
 _LOG = logging.getLogger(__name__)
 
@@ -863,6 +864,7 @@ def plan_transfer(
                 ),
             )
 
+    note_step(f"reading destination table {dst_table}", dst_conn, role="destination")
     try:
         dst_info = _introspect(dst_conn, dst_table, purpose="destination")
     except Exception as exc:
@@ -883,6 +885,7 @@ def plan_transfer(
             )
         sample_rows = list(src_info.get("sample_rows") or [])
     else:
+        note_step(f"reading source table {src_table}", src_conn, role="source")
         try:
             src_info = _introspect(src_conn, src_table, purpose="source", execute_shape=True)
         except Exception as exc:
@@ -898,6 +901,7 @@ def plan_transfer(
                     + '. Ask me to "list tables on that connector".'
                 ),
             )
+        note_step(f"sampling source table {src_table}", src_conn, role="source")
         sample_rows = _sample_rows(src_conn, src_table)
 
     src_names = [str(c.get("name")) for c in src_info["columns"] if c.get("name")]
@@ -1012,6 +1016,7 @@ def plan_transfer(
             except ValueError as exc:
                 return _tool_result(tool, success=False, error=str(exc))
 
+        note_step("running the preflight checks", src_conn, role="source")
         preflight = _run_preflight(
             src_conn=src_conn,
             dst_conn=dst_conn,

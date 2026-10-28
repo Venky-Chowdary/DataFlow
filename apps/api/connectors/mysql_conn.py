@@ -32,6 +32,7 @@ def get_connection(
 
     ``purpose``:
       - ``write`` / ``bulk`` — long I/O timeouts for large transfers on public proxies
+      - ``introspect`` — bounded connect and per-read waits for schema reads
       - ``ddl`` — short connect/I/O + tight lock waits so DROP/CREATE cannot hang a
         5-row demo for minutes behind a metadata lock (fail with a clear timeout)
     """
@@ -51,9 +52,17 @@ def get_connection(
     public_proxy = is_public_proxy_host(ep["host"])
     purpose_l = (purpose or "write").strip().lower()
     ddl_mode = purpose_l in {"ddl", "drop", "setup", "probe"}
+    # Schema reads answer a person waiting on a tool call: a server that takes
+    # the connection and never speaks must not hold the 120s write timeouts
+    # (D169). Per-read, so a slow catalog query still has 40s.
+    introspect_mode = purpose_l == "introspect"
     # Bulk transfers routinely exceed short socket deadlines on public proxies.
     # DDL/demo paths must fail fast — lock waits, not silent multi-minute hangs.
-    if ddl_mode:
+    if introspect_mode:
+        connect_timeout = 10
+        io_timeout = 40
+        lock_wait_s = 30
+    elif ddl_mode:
         connect_timeout = 10
         # Short lock wait always (fail-fast on metadata locks). Setup on public
         # proxies may need longer socket I/O for CREATE/ALTER; DROP/probe stay tight.

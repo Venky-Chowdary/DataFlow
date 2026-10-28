@@ -1280,6 +1280,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             password=kwargs.get("password", ""),
             connection_string=kwargs.get("connection_string", ""),
             ssl=kwargs.get("ssl", True),
+            purpose="introspect",
         )
         with conn.cursor() as cur:
             # MySQL has no separate schema layer — database is the namespace.
