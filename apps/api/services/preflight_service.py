@@ -762,6 +762,7 @@ def run_file_preflight(
 ) -> dict[str, Any]:
     """Run preflight gates for file/DB Studio transfers (G1–G9 + host policy)."""
     from services.schema_drift import (
+        PROPAGATE_POLICIES,
         destination_evolution_approved,
         effective_schema_policy,
     )
@@ -1156,6 +1157,7 @@ def run_file_preflight(
                 source_schema=column_types or {},
                 dest_types=destination_column_types,
                 dest_db=str(destination_db_type or ""),
+                adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
             )
         )
         # Map stamped the fidelity verdict against the table as it stood

@@ -980,6 +980,7 @@ def plan_destination_evolution(
     source_schema: dict[str, str],
     dest_types: dict[str, str],
     dest_db: str = "",
+    adopt_unmapped: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, str], list[dict[str, Any]]]:
     """Apply approved destination evolution to the plan, once.
 
@@ -990,6 +991,13 @@ def plan_destination_evolution(
     run will leave behind, instead of each gate patching the live types itself
     (D20/D107). The caller decides approval
     (:func:`destination_evolution_approved`) and that the table exists.
+
+    ``adopt_unmapped`` is a propagate policy's other half: a source column that
+    is neither mapped nor declared omitted is a new column to add, not a
+    column to skip. A replayed mapping set (a schedule's stored maps) predates
+    the column, and without this the run was refused or the column silently
+    never moved (D165). An acknowledgement does not adopt: it keeps the
+    existing mappings and records the omission.
     """
     from services.mapping_constraints import write_mappings
 
@@ -1028,7 +1036,50 @@ def plan_destination_evolution(
             "propagate_reason": "add_column",
             "new_type": added,
         })
+
+    if adopt_unmapped:
+        covered = {str(m.get("source") or "").lower() for m in planned}
+        for col in source_columns:
+            if not col or str(col).lower() in covered:
+                continue
+            entry = propagated_mapping_entry(
+                str(col), reason="unmapped_propagate", source_schema=source_schema
+            )
+            entry["create_new"] = True
+            planned.append(entry)
+            covered.add(str(col).lower())
+            types.setdefault(str(col), str(ci_get(source_schema, str(col)) or "VARCHAR"))
+            applied.append({
+                "source": str(col),
+                "target": str(col),
+                "propagated": True,
+                "propagate_reason": "unmapped_propagate",
+                "new_type": types[str(col)],
+            })
     return planned, types, applied
+
+
+def propagated_mapping_entry(
+    name: str,
+    *,
+    reason: str,
+    source_schema: dict[str, str] | None = None,
+    renamed_from: str | None = None,
+) -> dict[str, Any]:
+    """The mapping a propagate policy adds for a source column nobody mapped."""
+    entry: dict[str, Any] = {
+        "source": name,
+        "target": name,
+        "confidence": 1.0,
+        "propagated": True,
+        "assignment_strategy": "create_compatible_new",
+        "propagate_reason": reason,
+    }
+    if name in (source_schema or {}):
+        entry["source_type"] = (source_schema or {})[name]
+    if renamed_from:
+        entry["renamed_from"] = renamed_from
+    return entry
 
 
 def apply_propagate_mappings(
@@ -1070,18 +1121,12 @@ def apply_propagate_mappings(
             if not match:
                 return
             name = match
-        entry: dict[str, Any] = {
-            "source": name,
-            "target": name,
-            "confidence": 1.0,
-            "propagated": True,
-            "assignment_strategy": "create_compatible_new",
-            "propagate_reason": reason,
-        }
-        if name in source_schema:
-            entry["source_type"] = source_schema[name]
-        if renamed_from:
-            entry["renamed_from"] = renamed_from
+        entry = propagated_mapping_entry(
+            name,
+            reason=reason,
+            source_schema=source_schema,
+            renamed_from=renamed_from,
+        )
         mappings.append(entry)
         existing_src.add(name)
         existing_src_lower.add(name.lower())

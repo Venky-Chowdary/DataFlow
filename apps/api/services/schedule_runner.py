@@ -762,10 +762,14 @@ def _schema_types_from_probe(info: dict[str, Any]) -> dict[str, str]:
 
 def _unmapped_added_columns(sched: Any, request: Any, verdict: Any) -> list[str]:
     """New source columns nobody mapped, under a policy that does not propagate."""
-    from services.schema_drift import PROPAGATE_POLICIES
+    from services.schema_drift import PROPAGATE_POLICIES, effective_schema_policy
     from services.source_schema_memory import REVIEW, mapped_source_columns
 
-    policy = str(getattr(sched, "schema_policy", "") or "manual_review").strip().lower()
+    # A backfill request is a propagate request (see effective_schema_policy).
+    policy = effective_schema_policy(
+        str(getattr(sched, "schema_policy", "") or "manual_review"),
+        backfill_new_fields=bool(getattr(sched, "backfill_new_fields", False)),
+    )
     if getattr(verdict, "verdict", "") != REVIEW or policy in PROPAGATE_POLICIES:
         return []
     read = mapped_source_columns(list(getattr(request, "mappings", None) or []))
