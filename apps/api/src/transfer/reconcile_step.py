@@ -7900,6 +7900,14 @@ def run_reconciliation(
             # field carries the failure; the label must not contradict it).
             if recon["checksum_match"]:
                 recon["assurance_level"] = "full_checksum"
+                if recon.get("passed") and recon.get("post_write_pending"):
+                    # The count-only stamp this promotion supersedes also
+                    # said "post-write proof pending". Leaving it made a
+                    # verified, fully digested engine-copy run classify as
+                    # pre_write_only and report migration_proven=false.
+                    recon["phase"] = "post_write_verified"
+                    recon["coverage"] = "full_checksum"
+                    recon["post_write_pending"] = False
             recon["checksum_scope"] = "verify_time_population_digest"
             # X-41b: _finalize already stamped verification_verdict="partial"
             # before this promotion ran — a proven two-sided digest match
