@@ -11,6 +11,7 @@ from __future__ import annotations
 import gzip
 import io
 import json
+import os
 from pathlib import Path
 
 import pytest

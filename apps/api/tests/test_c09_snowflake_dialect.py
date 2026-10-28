@@ -31,7 +31,7 @@ def test_requirements_declares_snowflake_sqlalchemy():
 
 def test_snowflake_dialect_resolves():
     """create_engine resolves the snowflake dialect without connecting."""
-    sqlalchemy = pytest.importorskip("sqlalchemy")
+    pytest.importorskip("sqlalchemy")
     pytest.importorskip("snowflake.sqlalchemy")
     from sqlalchemy import create_engine
 

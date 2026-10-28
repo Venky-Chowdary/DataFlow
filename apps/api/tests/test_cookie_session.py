@@ -86,9 +86,7 @@ def test_verify_sets_session_and_csrf_cookies():
     _signup_and_verify(c)
     assert c.cookies.get("__Host-dw_session")
     assert c.cookies.get("dw_csrf")
-    set_cookies = c.cookies.jar
     # session cookie is HttpOnly; the csrf cookie must be readable by JS
-    raw = [m for m in c.cookies.jar]
     assert "__Host-dw_session" in c.cookies
 
 

@@ -267,7 +267,7 @@ def test_ensure_slot_recreates_lost_slot_only_during_snapshot(monkeypatch):
 
     cdc._drop_replication_slot = _drop
     monkeypatch.setattr(cdc, "_conn", lambda: _Conn())
-    lsn = cdc._ensure_slot(allow_create=True, recreate_if_lost=True)
+    cdc._ensure_slot(allow_create=True, recreate_if_lost=True)
     assert calls["dropped"] == 1
     assert calls["created"] == 1
     assert cdc.consistent_point_lsn == "0/999"

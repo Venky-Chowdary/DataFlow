@@ -583,7 +583,7 @@ def test_oracle_logminer_ddl_eos_restart_has_no_loss_or_duplicate(
                     step_context="test_ddl_barrier_scn",
                 ):
                     cur.execute(
-                        f"""
+                        """
                         SELECT SCN, SQL_REDO
                         FROM V$LOGMNR_CONTENTS
                         WHERE OPERATION = 'DDL'
