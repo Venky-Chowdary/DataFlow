@@ -63,7 +63,7 @@ def test_create_new_timezone_polarity_risk():
     assert "timezone_polarity" in kinds or "precision_collapse" in kinds or "lossy_coercion" in kinds
 
 
-def _create_new_row(inferred_type: str) -> dict:
+def _create_new_row(inferred_type: str, sample: str = "2024-01-01T00:00:00Z") -> dict:
     from services.mapping_pipeline import run_mapping_pipeline
 
     result = run_mapping_pipeline(
@@ -73,7 +73,7 @@ def _create_new_row(inferred_type: str) -> dict:
             {
                 "name": "created_at",
                 "inferred_type": inferred_type,
-                "samples": ["2024-01-01T00:00:00Z"],
+                "samples": [sample],
             },
         ],
         destination_db_type="mysql",
@@ -86,16 +86,29 @@ def _create_new_row(inferred_type: str) -> dict:
 
 
 def test_mapping_pipeline_stamps_create_new_type_risks():
-    # Declared nanoseconds into MySQL's microsecond carrier drop real digits:
-    # the Risk Contract is required. The carrier must still not be the
+    # Nanoseconds in the data into MySQL's microsecond carrier drop real
+    # digits: the Risk Contract is required. The carrier must still not be the
     # 2038-capped TIMESTAMP(6).
-    row = _create_new_row("TIMESTAMPTZ(9)")
+    row = _create_new_row("TIMESTAMPTZ(9)", sample="2024-01-01T00:00:00.123456789Z")
     assert row["target_type"].upper().startswith("DATETIME(6)"), row["target_type"]
     assert row.get("requires_risk_contract") is True
     assert "precision_collapse" in {
         r.get("kind") for r in (row.get("create_new_risks") or [])
     }
     assert "instant_range_cap" not in {
+        r.get("kind") for r in (row.get("create_new_risks") or [])
+    }
+
+
+def test_declared_nanoseconds_that_every_sample_fits_need_no_contract():
+    """A declared ``(9)`` whose measured cells hold whole seconds loses nothing.
+
+    Judging the declaration alone blocked every Snowflake timestamp (its
+    catalog spells scale 9 on all of them) until a contract was signed (D49).
+    """
+    row = _create_new_row("TIMESTAMPTZ(9)")
+    assert row["target_type"].upper().startswith("DATETIME(6)"), row["target_type"]
+    assert "precision_collapse" not in {
         r.get("kind") for r in (row.get("create_new_risks") or [])
     }
 
