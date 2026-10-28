@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import os
@@ -8146,6 +8147,46 @@ def _emit_gate8_verdict(
     )
 
 
+def _bind_endpoints_to_last_stream(
+    endpoint: EndpointConfig,
+    source_endpoint: EndpointConfig | None,
+    dest_summary: dict[str, Any] | None,
+) -> tuple[EndpointConfig, EndpointConfig | None]:
+    """Point Gate-8 at the table the multi-stream summary describes.
+
+    ``run_non_cdc_multi_stream_sequential`` hands back the *last* stream's
+    summary (digests, counts, ``table``) but restores the request's primary
+    endpoints, so Gate-8 would digest the last table's written population
+    against the first table's source and destination rows and call a correct
+    job a checksum mismatch. Rebind copies of both endpoints to that last
+    stream so every figure Gate-8 compares describes one table.
+    """
+    summary = dest_summary or {}
+    streams = summary.get("streams")
+    if not summary.get("multi_stream") or not isinstance(streams, list) or len(streams) < 2:
+        return endpoint, source_endpoint
+    last = streams[-1]
+    name = str(last.get("name") or "").strip() if isinstance(last, dict) else ""
+    if not name:
+        return endpoint, source_endpoint
+
+    def _bound(ep: EndpointConfig | None) -> EndpointConfig | None:
+        if ep is None or getattr(ep, "kind", "") != "database":
+            return ep
+        bound = copy.copy(ep)
+        if getattr(ep, "format", "") == "mongodb" or (
+            getattr(ep, "collection", None) and not getattr(ep, "table", None)
+        ):
+            bound.collection = name
+        elif getattr(ep, "table", None):
+            bound.table = name
+        else:
+            return ep
+        return bound
+
+    return _bound(endpoint) or endpoint, _bound(source_endpoint)
+
+
 def _run_reconciliation_with_rules(
     *,
     endpoint: EndpointConfig,
@@ -8160,6 +8201,9 @@ def _run_reconciliation_with_rules(
     source_endpoint: EndpointConfig | None,
     source_spool: Any,
 ) -> dict[str, Any]:
+    endpoint, source_endpoint = _bind_endpoints_to_last_stream(
+        endpoint, source_endpoint, dest_summary
+    )
     recon = _run_reconciliation_impl(
         endpoint=endpoint,
         records=records,
