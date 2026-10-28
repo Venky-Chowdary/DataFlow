@@ -46,6 +46,26 @@ class RunConfig:
     bulk_export_iter: Any = None
     _scan_kw: Any = None
     _filtered_scan_reason: Any = None
+    dest_cfg: Any = None
+    dest_type: Any = None
+    dest_table: Any = None
+    dest_bind_dialect: Any = None
+    effective_sync: Any = None
+    mappings: Any = None
+    target_cols: Any = None
+    pk_target_cols: Any = None
+    pk_source_cols: Any = None
+    pk_audit_cols: Any = None
+    digest_dest_types: Any = None
+    stream_error_policy: Any = None
+    client_cursor_bound: Any = None
+    fk_orphan_guard: Any = None
+    pin_ledger: Any = None
+    shape_inputs: Any = None
+    shape_runner: Any = None
+    source_filter: Any = None
+    validation_mode: Any = None
+    _tie_dedupe: Any = None
 
 
 @dataclass
@@ -63,11 +83,15 @@ class ReadCursors:
     es_search_after: Any = None
     qdrant_offset: Any = None
     redis_scan_state: Any = None
+    _boundary_fps_state: Any = None
 
 
 @dataclass
 class RunTally:
     """Running totals, accumulators and held connections of the write side."""
+
+    shape_divert_key_tuples: Any = None
+    shape_diverted_total: Any = None
 
 
 @dataclass
