@@ -3972,19 +3972,12 @@ def _stream_database_transfer_impl(
             # its interval, and a cancel during a long batch was ignored
             # until the next flush. The in-flight statement still ends on
             # its lock wait; this stops the next batch.
-            try:
-                from services.error_handling import TransferCancelled
-                from services.mongodb_service import get_mongodb_service
+            from services.cancel_check import raise_if_job_cancelled
+            from services.mongodb_service import get_mongodb_service
 
-                _live = get_mongodb_service().get_job(str(job_id)) or {}
-                if _live.get("cancel_requested") or str(_live.get("status") or "") == "cancelled":
-                    raise TransferCancelled(
-                        "Transfer cancelled by user", rows_written=written
-                    )
-            except TransferCancelled:
-                raise
-            except Exception as exc:  # noqa: BLE001 - a failed read must not hide the write
-                logger.warning("Cancellation check failed: %s", exc, exc_info=exc)
+            raise_if_job_cancelled(
+                get_mongodb_service(), str(job_id), rows_written=written
+            )
         try:
             batch_written = 0
             last_checksum = ""

@@ -357,6 +357,16 @@ class CheckpointService:
         hard failure (prefer ``require_save``) only when the sidecar also failed.
         """
         mongo = self._mongo()
+        from services.cancel_check import attempt_superseded
+        from services.error_handling import TransferCancelled
+
+        if attempt_superseded(mongo, checkpoint.job_id):
+            # A newer attempt owns this job: never overwrite its checkpoint.
+            raise TransferCancelled(
+                "Transfer superseded by a newer attempt of this job",
+                rows_written=int(getattr(checkpoint, "rows_processed", 0) or 0),
+                superseded=True,
+            )
         token = durable_resume_token(checkpoint)
         sidecar_ok = _persist_resume_token(mongo, checkpoint.job_id, token)
         job_ok = False

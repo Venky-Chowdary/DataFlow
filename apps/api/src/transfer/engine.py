@@ -1700,7 +1700,12 @@ class UniversalTransferEngine:
         # D102: publish this job's cancel probe so every batch boundary —
         # row writers and the COPY fast paths alike — stops on cancel even
         # where no on_checkpoint plumbing reaches.
-        from services.cancel_check import cancel_check_for, set_cancel_probe
+        from services.cancel_check import (
+            begin_run_attempt,
+            cancel_check_for,
+            end_run_attempt,
+            set_cancel_probe,
+        )
 
         try:
             # _job_store() resolves get_mongodb_service at module level — a
@@ -1710,6 +1715,7 @@ class UniversalTransferEngine:
         except Exception:  # noqa: BLE001 - a store miss must not hide the transfer
             _probe_mongo = None
         set_cancel_probe(cancel_check_for(_probe_mongo, job_id))
+        begin_run_attempt(_probe_mongo, job_id)
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
@@ -1720,6 +1726,7 @@ class UniversalTransferEngine:
             raise
         finally:
             set_cancel_probe(None)
+            end_run_attempt()
         try:
             record_after_run(request, job_id, result)
         except Exception:
@@ -2199,8 +2206,12 @@ class UniversalTransferEngine:
             reset_active_date_locale(locale_token)
             # The run is over however it ended, so the slot must be freed here.
             # Releasing only on success would leave a failed job's claim in place
-            # and block the operator's retry until the TTL expired.
-            self._release_idempotency(job_id)
+            # and block the operator's retry until the TTL expired. A superseded
+            # attempt must not free the claim the newer attempt now holds.
+            from services.cancel_check import attempt_superseded
+
+            if not attempt_superseded(_job_store(), job_id):
+                self._release_idempotency(job_id)
 
     def _notify_job_status(
         self, request: TransferRequest, result: TransferResult

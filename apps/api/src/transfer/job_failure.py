@@ -554,6 +554,11 @@ def _fail_runtime_job(
     connection-lost error stamped by ``_raise_write_failure``), persist DLQ
     before marking the job failed so quarantine cannot disappear.
     """
+    if getattr(exc, "superseded", False):
+        # A newer attempt of this job owns the record now (resume): this one
+        # stops quietly rather than marking the live attempt cancelled/failed.
+        logger.warning("Job %s: attempt superseded by a newer one; stopping", job_id)
+        return str(exc), {}
     stamped_details = list(getattr(exc, "rejected_details", None) or [])
     if stamped_details:
         summary = dict(getattr(exc, "dest_summary", None) or {})
