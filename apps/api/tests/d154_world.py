@@ -152,7 +152,7 @@ def build_world(tmp_path, monkeypatch, *, signup: bool) -> World:
         b = _admin_account(admin, b_email, ws_b)
         m = _admin_account(admin, f"nomember-{tag}@example.com")
 
-    ids = seed(tag=tag, ws_a=ws_a, a_email=a_email, memory=memory)
+    ids = seed(tag=tag, ws_a=ws_a, a_email=a_email, memory=memory, data_dir=tmp_path)
     return World(
         tag=tag, admin=admin, a=a, b=b, m=m, ws_a=ws_a, ws_b=ws_b, ids=ids,
         a_email=a_email, b_email=b_email,
@@ -164,7 +164,7 @@ def owner_marker(label: str, tag: str) -> str:
     return ("zowna" if label == "a" else "zlegacy") + tag
 
 
-def seed(*, tag: str, ws_a: str, a_email: str, memory: Any) -> dict[str, str]:
+def seed(*, tag: str, ws_a: str, a_email: str, memory: Any, data_dir: Any = None) -> dict[str, str]:
     """A's workspace rows and legacy unscoped rows; every name carries ``tag``."""
     from services import (
         audit_log,
@@ -191,6 +191,22 @@ def seed(*, tag: str, ws_a: str, a_email: str, memory: Any) -> dict[str, str]:
             "port": 5432, "workspace_id": ws,
         })
         ids[f"{label}_connector"] = connector.id
+        if data_dir is not None:
+            # A connector that really connects: a SQLite file with a table and rows.
+            import sqlite3
+
+            db_path = data_dir / f"{marker}.sqlite"
+            with sqlite3.connect(db_path) as db:
+                db.execute(f"CREATE TABLE {marker}_tbl (id INTEGER, note TEXT)")
+                db.executemany(
+                    f"INSERT INTO {marker}_tbl VALUES (?, ?)",
+                    [(i, f"{marker}-secret-row-{i}") for i in range(1, 4)],
+                )
+            live = connector_store.create_connector({
+                "name": f"{marker}-db", "type": "sqlite", "host": str(db_path), "database": str(db_path),
+                "port": 0, "workspace_id": ws, "role": "both",
+            })
+            ids[f"{label}_db"] = live.id
         sched = schedule_store.create_schedule({
             "name": f"{marker}-sched", "source_connector_id": connector.id,
             "source_table": f"{marker}_orders", "dest_connector_id": connector.id,
