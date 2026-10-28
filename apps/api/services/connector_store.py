@@ -669,7 +669,7 @@ def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
         conn = get_connector(connector_id)
     if conn is None:
         return False, ""
-    return True, str(conn.workspace_id or "")
+    return True, str(getattr(conn, "workspace_id", "") or "")
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
