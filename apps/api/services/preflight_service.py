@@ -41,14 +41,16 @@ from services.db_type_utils import (
 )
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.preflight_file_plan import (
-    _drift_column_phrase,
     _fit_scan_deadline,
     _lift_in_file_collapse_advisories,
     _plan_duplicate_policy,
     _plan_in_file_dedupe,
 )
 from services.coercion_gate_reconcile import reconcile_coercion_report
-from services.preflight_file_phases import apply_constraint_findings
+from services.preflight_file_phases import (
+    apply_constraint_findings,
+    apply_schema_drift_gate,
+)
 from services.destination_requirements_gate import build_mapping_contract_gates
 from services.preflight_cursor_gate import (
     resolve_read_scope as _resolve_read_scope,
@@ -2534,231 +2536,20 @@ def run_file_preflight(
         out["destination_evolution"] = destination_evolution
         out["effective_mappings"] = mappings
 
-    # Schema drift is its own rule — never masquerade as Target DDL.
-    # Datawrap rule: hard-breaking ALWAYS pauses (even under propagate_*).
-    # Propagate auto-applies additive; manual_review keeps existing mappings.
-    evolution = drift.get("schema_evolution") or {}
-    column_phrase = _drift_column_phrase(evolution)
-    action = evolution.get("action")
-    # Evolution is the sole authority for pause|propagate|review|continue.
-    # Fingerprint flags alone must not bypass resolve_schema_evolution.
-    requires_drift_decision = bool(
-        evolution.get("should_pause")
-        or evolution.get("should_propagate")
-        or action not in (None, "continue")
+    apply_schema_drift_gate(
+        out,
+        drift,
+        schema_policy=schema_policy,
+        schemaless=schemaless,
+        schema_drift_acknowledged=schema_drift_acknowledged,
+        acknowledgment_actor=acknowledgment_actor,
+        acknowledgment_reason=acknowledgment_reason,
+        mappings=mappings,
+        columns=columns,
+        column_types=column_types,
+        dest_kind=dest_kind,
+        validation_mode=validation_mode,
     )
-    if requires_drift_decision:
-        policy = (schema_policy or "manual_review").strip().lower()
-        if schemaless and not evolution.get("hard_breaking"):
-            out.setdefault("warnings", []).append(
-                {
-                    "id": "schema_drift",
-                    "message": (
-                        "Mapping/schema fingerprint changed on a schemaless destination — "
-                        "informational only (no DDL to invalidate)."
-                    ),
-                    "details": {
-                        "issues": list(drift.get("issues") or []),
-                        "severity": "warning",
-                        "schema_evolution": evolution,
-                    },
-                }
-            )
-        elif evolution.get("should_pause") and evolution.get("hard_breaking"):
-            hard = evolution.get("hard_breaking") or []
-            if hard and isinstance(hard[0], dict) and hard[0].get("kind"):
-                drift_msg = (
-                    f"Breaking schema change: {hard[0].get('kind')} "
-                    "— sync paused for review (Datawrap fail-closed)"
-                    f"{column_phrase}"
-                )
-            elif drift.get("issues"):
-                drift_msg = str(drift["issues"][0])
-            else:
-                drift_msg = "Schema drift requires review"
-            drift_gate = {
-                "id": "schema_drift",
-                "status": "block",
-                "message": drift_msg,
-                "duration_ms": 0,
-                "details": {
-                    "issues": list(drift.get("issues") or []),
-                    "severity": "breaking",
-                    "source_changed": drift.get("source_changed"),
-                    "target_changed": drift.get("target_changed"),
-                    "schema_evolution": evolution,
-                    "rule_id": "schema_drift.breaking",
-                    "remediation_kind": "review_mappings",
-                    "ack_required": False,
-                },
-            }
-            out["gates"] = [*out["gates"], drift_gate]
-            drift_blocker = enrich_blockers(
-                [
-                    {
-                        "id": "schema_drift",
-                        "message": drift_msg,
-                        "details": drift_gate["details"],
-                    }
-                ],
-                dest_kind=dest_kind,
-                validation_mode=validation_mode,
-            )
-            out["blockers"] = [*out["blockers"], *drift_blocker]
-            out["passed"] = False
-            out["passed_count"] = sum(
-                1 for g in out["gates"] if g.get("status") == "pass"
-            )
-            out["total_gates"] = len(out["gates"])
-            out["readiness_score"] = round(
-                out["passed_count"] / max(out["total_gates"], 1) * 100, 1
-            )
-        elif evolution.get("should_propagate"):
-            from services.schema_drift import apply_propagate_mappings
-
-            propagated_maps, applied = apply_propagate_mappings(
-                list(mappings or []),
-                source_columns=list(columns or []),
-                source_schema=column_types or {},
-                evolution=evolution,
-                schema_policy=policy,
-            )
-            if applied:
-                out["effective_mappings"] = propagated_maps
-                out["propagated_mappings"] = applied
-            out["gates"] = [
-                *out["gates"],
-                {
-                    "id": "schema_drift",
-                    "status": "pass",
-                    "message": (
-                        f"Schema auto-propagate ({policy}): "
-                        f"{len(applied)} column mapping(s) added; "
-                        "destination ADD COLUMN on Execute"
-                    ),
-                    "duration_ms": 0,
-                    "details": {
-                        "issues": list(drift.get("issues") or []),
-                        "severity": "additive",
-                        "schema_policy": policy,
-                        "schema_evolution": evolution,
-                        "propagated": [a.get("source") for a in applied],
-                        "backfill_recommended": evolution.get("backfill_recommended"),
-                    },
-                },
-            ]
-            out["schema_drift"] = drift
-        else:
-            # manual_review / type_locked review: human must acknowledge before green.
-            # Silently passing hides new columns that will not transfer.
-            if schema_drift_acknowledged and drift.get("saved_contract", True):
-                from datetime import datetime, timezone
-
-                ack = {
-                    "actor": (acknowledgment_actor or "operator").strip() or "operator",
-                    "at": datetime.now(timezone.utc).isoformat(),
-                    "reason": (
-                        acknowledgment_reason
-                        or "Operator acknowledged schema drift; existing mappings kept for this run"
-                    ).strip(),
-                }
-                out["gates"] = [
-                    *out["gates"],
-                    {
-                        "id": "schema_drift",
-                        "status": "pass",
-                        "message": (
-                            f"Schema change acknowledged — policy '{policy}' keeps "
-                            "existing mappings for this run (exception recorded)"
-                        ),
-                        "duration_ms": 0,
-                        "details": {
-                            "issues": list(drift.get("issues") or []),
-                            "severity": evolution.get("severity") or "warning",
-                            "schema_policy": policy,
-                            "schema_evolution": evolution,
-                            "acknowledged": True,
-                            "acknowledgment": ack,
-                            "rule_id": "schema_drift.acknowledged",
-                        },
-                    },
-                ]
-                out["schema_drift"] = {**drift, "acknowledged": True, "acknowledgment": ack}
-                from services.preflight_policy_gates import finalize_acknowledged_schema_drift
-
-                finalize_acknowledged_schema_drift(
-                    out,
-                    evolution=evolution if isinstance(evolution, dict) else {},
-                    acknowledgment=ack,
-                )
-            else:
-                from services.schema_drift import schema_review_copy
-
-                review = schema_review_copy(
-                    drift, policy=policy, column_phrase=column_phrase
-                )
-                drift_msg = str(review["message"])
-                drift_gate = {
-                    "id": str(review["gate_id"]),
-                    "status": "block",
-                    "message": drift_msg,
-                    "duration_ms": 0,
-                    "details": {
-                        "issues": list(drift.get("issues") or []),
-                        "severity": evolution.get("severity") or "warning",
-                        "schema_policy": policy,
-                        "schema_evolution": evolution,
-                        "rule_id": review["rule_id"],
-                        "remediation_kind": review["remediation_kind"],
-                        "ack_required": bool(review["ack_required"]),
-                    },
-                }
-                out["gates"] = [*out["gates"], drift_gate]
-                drift_blocker = enrich_blockers(
-                    [
-                        {
-                            "id": "schema_drift",
-                            "message": drift_msg,
-                            "details": drift_gate["details"],
-                        }
-                    ],
-                    dest_kind=dest_kind,
-                    validation_mode=validation_mode,
-                )
-                out["blockers"] = [*out["blockers"], *drift_blocker]
-                out["passed"] = False
-                out["passed_count"] = sum(
-                    1 for g in out["gates"] if g.get("status") == "pass"
-                )
-                out["total_gates"] = len(out["gates"])
-                out["readiness_score"] = round(
-                    out["passed_count"] / max(out["total_gates"], 1) * 100, 1
-                )
-                out["schema_drift"] = drift
-    elif drift.get("issues"):
-        # Soft notes (extra destination columns, etc.) — pass with evidence, no Execute lock.
-        note = str(drift["issues"][0])
-        out["gates"] = [
-            *out["gates"],
-            {
-                "id": "schema_drift",
-                "status": "pass",
-                "message": f"Schema notes (non-blocking): {note}",
-                "duration_ms": 0,
-                "details": {
-                    "issues": list(drift.get("issues") or []),
-                    "severity": drift.get("severity") or "none",
-                    "schema_evolution": evolution,
-                    "rule_id": "schema_drift.informational",
-                },
-            },
-        ]
-        out["schema_drift"] = drift
-        out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
-        out["total_gates"] = len(out["gates"])
-        out["readiness_score"] = round(
-            out["passed_count"] / max(out["total_gates"], 1) * 100, 1
-        )
 
     _ps._apply_overwrite_emptied_gate(
         out,
