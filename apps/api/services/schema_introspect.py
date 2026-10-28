@@ -272,7 +272,11 @@ def introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
         sampled_numeric_carriers_unbound,
     )
 
-    result = _introspect_schema(db_type, **kwargs)
+    from services.introspect_memo import memoized_introspection
+
+    result = memoized_introspection(
+        db_type, kwargs, lambda: _introspect_schema(db_type, **kwargs)
+    )
     if not destination_carriers_are_inferred(db_type):
         return result
     types = result.get("column_types")

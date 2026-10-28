@@ -669,6 +669,21 @@ def _plan_source_types_authoritative(
     return source_types_are_authoritative(kind, fmt)
 
 
+def _share_catalog_reads(fn):
+    """Run a read-only planning tool with one catalog read per object (D145)."""
+    import functools
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        from services.introspect_memo import introspect_memo_scope
+
+        with introspect_memo_scope():
+            return fn(*args, **kwargs)
+
+    return wrapper
+
+
+@_share_catalog_reads
 def plan_transfer(
     source_connector_id: str = "",
     source_connector_name: str = "",
