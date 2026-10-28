@@ -60,6 +60,8 @@ CASES = {
     # D51 — NaN / ±Infinity were quarantined as "non-finite float" invents.
     "D51_real_nonfinite": ("real", "'NaN'", "'Infinity'"),
     "D51_double_nonfinite": ("double precision", "'-Infinity'", "1.5"),
+    # D80 — the read-back rendered unbounded ranges as ``[1, None)``.
+    "D80_unbounded_range": ("int4range", "'[1,)'", "'(,5]'"),
 }
 
 
