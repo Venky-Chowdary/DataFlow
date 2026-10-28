@@ -84,7 +84,7 @@ def test_uuid_create_new_string_sink_stamps_domain_risk():
     assert "uuid_domain" in kinds or "precision_collapse" in kinds or "lossy_coercion" in kinds
 
 
-def _mysql_create_new_row(inferred_type: str) -> dict:
+def _mysql_create_new_row(inferred_type: str, sample: str = "2024-01-01T00:00:00Z") -> dict:
     from services.mapping_pipeline import run_mapping_pipeline
 
     result = run_mapping_pipeline(
@@ -93,7 +93,7 @@ def _mysql_create_new_row(inferred_type: str) -> dict:
         source_schemas=[{
             "name": "created_at",
             "inferred_type": inferred_type,
-            "samples": ["2024-01-01T00:00:00Z"],
+            "samples": [sample],
         }],
         destination_db_type="mysql",
         destination_table_exists=False,
@@ -105,12 +105,14 @@ def _mysql_create_new_row(inferred_type: str) -> dict:
 
 
 def test_create_new_mysql_timestamptz_pipeline_stamps_visible_risks():
-    """Declared nanoseconds into MySQL's microsecond carrier drop three digits.
+    """Nanoseconds in the data into MySQL's microsecond carrier drop three digits.
 
-    DATETIME(6) is still the right carrier (no 2038 cap), but a source that
-    declares ``(9)`` loses real digits, so the drop needs the Risk Contract.
+    DATETIME(6) is still the right carrier (no 2038 cap), but a source whose
+    cells hold nine fractional digits loses real digits, so the drop needs the
+    Risk Contract. A declared ``(9)`` whose sampled cells all fit loses nothing
+    and needs none (D49).
     """
-    row = _mysql_create_new_row("TIMESTAMPTZ(9)")
+    row = _mysql_create_new_row("TIMESTAMPTZ(9)", sample="2024-01-01T00:00:00.123456789Z")
     assert row["target_type"].upper().startswith("DATETIME(6)"), row["target_type"]
     assert row.get("requires_risk_contract") is True
     kinds = {r.get("kind") for r in row.get("create_new_risks") or []}
