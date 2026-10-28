@@ -430,6 +430,31 @@ ACK_KIND_BY_TOOL: dict[str, str] = {
 }
 
 
+def _endpoint_label(endpoint: dict[str, Any]) -> str:
+    """What to call a stored endpoint in a preview: its saved connector's name.
+
+    The stored endpoint carries ``connector_id`` and ``format`` (never a
+    ``connector_name`` or ``type``), so the preview of a rerun / retry / resume
+    showed blank source and destination (D172). Falls back to the engine and
+    then the file kind when the connector is gone or the endpoint is inline.
+    """
+    name = str(endpoint.get("connector_name") or endpoint.get("name") or "").strip()
+    connector_id = str(endpoint.get("connector_id") or "").strip()
+    if not name and connector_id:
+        try:
+            from services.connector_store import get_connector
+
+            saved = get_connector(connector_id)
+            name = str(getattr(saved, "name", "") or "").strip()
+        except Exception as exc:  # noqa: BLE001 - a preview label must not fail the tool
+            _logger.debug("connector name lookup failed for %s: %s", connector_id, exc)
+    return (
+        name
+        or str(endpoint.get("format") or endpoint.get("type") or "").strip()
+        or str(endpoint.get("kind") or "").strip()
+    )
+
+
 def _job_brief(job: dict[str, Any]) -> dict[str, Any]:
     req = job.get("transfer_request") or {}
     src = req.get("source") or {}
@@ -437,9 +462,10 @@ def _job_brief(job: dict[str, Any]) -> dict[str, Any]:
     return {
         "job_id": str(job.get("id") or job.get("job_id") or job.get("_id") or ""),
         "status": str(job.get("status") or ""),
-        "source": str(src.get("connector_name") or src.get("name") or src.get("type") or ""),
-        "destination": str(dst.get("connector_name") or dst.get("name") or dst.get("type") or ""),
-        "table": str(src.get("table") or req.get("source_table") or ""),
+        "source": _endpoint_label(src),
+        "destination": _endpoint_label(dst),
+        "table": str(src.get("table") or src.get("collection") or req.get("source_table") or ""),
+        "destination_table": str(dst.get("table") or dst.get("collection") or ""),
         "rows_written": job.get("rows_written"),
         "rejected_rows": _open_quarantine_count(job),
         "progress_pct": job.get("progress_pct"),

@@ -636,6 +636,58 @@ def resolve_endpoint(
     return EndpointConfig.from_dict(endpoint.kind, merged)
 
 
+def refresh_saved_endpoint(
+    endpoint: EndpointConfig, workspace_id: str | None = None
+) -> EndpointConfig:
+    """Re-resolve a saved connector's *current* settings for a replayed endpoint.
+
+    D172 — a job's stored ``transfer_request`` holds the host, credentials and
+    database the connection had when the job first ran, because they were
+    resolved before the request was persisted. Resolution lets inline values win
+    over the saved connector, so a rerun / retry / resume dialled the old server
+    after the connector was moved or its credentials rotated (and, if the old
+    server still answered, read or wrote the wrong database). Connection
+    identity therefore comes from the saved connector, by id, at run time; what
+    the job chose stays (table, collection, schema, extras, and a database the
+    operator explicitly overrode). Endpoints with no saved connector keep their
+    stored config. Raises ``ValueError`` when the connector no longer exists.
+    """
+    if not endpoint.connector_id:
+        return endpoint
+    import dataclasses
+
+    extra = dict(endpoint.extra or {})
+    identity = extra.pop("destination_identity", None)
+    # The database came from the saved connector (so it follows the connector)
+    # unless the operator chose it: an override or an inline-only database the
+    # connector never had stays as the job stored it.
+    from_connector = (
+        isinstance(identity, dict) and identity.get("authority") == "saved_connector"
+    )
+    stripped = dataclasses.replace(
+        endpoint,
+        host="",
+        port=0,
+        database="" if from_connector else endpoint.database,
+        username="",
+        password="",
+        connection_string="",
+        warehouse="",
+        ssl=False,
+        auth_mode="",
+        auth_role="",
+        auth_source="",
+        api_key="",
+        service_account="",
+        private_key="",
+        region="",
+        endpoint_url="",
+        path_style=False,
+        extra=extra,
+    )
+    return resolve_endpoint(stripped, workspace_id=workspace_id)
+
+
 def _lookup_saved_connector(
     connector_id: str, workspace_id: str | None = None
 ) -> dict[str, Any] | None:

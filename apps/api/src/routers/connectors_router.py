@@ -41,6 +41,16 @@ from services.ops_events import emit_event
 logger = logging.getLogger(__name__)
 
 
+def _refresh_saved_connectors(xfer_req: Any) -> None:
+    """Replay a stored request against the saved connectors' current settings (D172)."""
+    from ..transfer.engine import get_transfer_engine
+
+    try:
+        get_transfer_engine().refresh_saved_connectors(xfer_req)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
 def _job_contract_flags(xfer_req: Any) -> tuple[bool, bool]:
     """Whether the saved transfer request declares a merge key or a cursor.
 
@@ -698,6 +708,7 @@ async def retry_transfer_job(
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
         xfer_req = transfer_request_from_dict(payload)
+        _refresh_saved_connectors(xfer_req)
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,
@@ -883,6 +894,7 @@ async def rerun_transfer_job(
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
         xfer_req = transfer_request_from_dict(payload)
+        _refresh_saved_connectors(xfer_req)
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,
@@ -1041,6 +1053,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
         xfer_req_probe = transfer_request_from_dict(payload)
+        _refresh_saved_connectors(xfer_req_probe)
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,
