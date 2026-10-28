@@ -375,6 +375,11 @@ def mysql_default_is_legal(default_sql: str, dest_type: str, *, dialect: str = "
     if _MYSQL_ZERO_DATE_RE.search(expr):
         return False
     if clock:
+        if logical in {"date", "time"} and re.match(
+            r"^(?:current_timestamp|now|localtime|localtimestamp)\b", expr, re.I
+        ):
+            # 1067: a timestamp clock only sits on DATETIME/TIMESTAMP (D146).
+            return False
         return logical in _TEMPORAL_LOGICALS
     return True
 
@@ -2625,7 +2630,15 @@ def _mysql_clock_default(keyword: str, dest_type: str) -> str:
     ``timestamp DEFAULT now()`` failed every MySQL destination after Validate
     had passed. ``CURRENT_DATE``/``CURRENT_TIME`` are expression defaults and
     need the parenthesised form (MySQL 8.0.13+, MariaDB 10.2+).
+
+    A timestamp clock on a DATE or TIME column (PG ``date DEFAULT now()``) is
+    error 1067 too; that column's own clock is the same rule (D146).
     """
+    from services.type_system import normalize_logical_type
+
+    logical = normalize_logical_type(dest_type or "")
+    if keyword == "CURRENT_TIMESTAMP" and logical in {"date", "time"}:
+        keyword = "CURRENT_DATE" if logical == "date" else "CURRENT_TIME"
     if keyword == "CURRENT_TIMESTAMP":
         m = _MYSQL_FSP_RE.match((dest_type or "").strip())
         if m and int(m.group(1)) > 0:
