@@ -1825,8 +1825,10 @@ class UniversalTransferEngine:
         from services.cancel_check import (
             begin_run_attempt,
             cancel_check_for,
+            ProgressMeter,
             end_run_attempt,
             set_cancel_probe,
+            set_progress_meter,
         )
 
         try:
@@ -1838,6 +1840,9 @@ class UniversalTransferEngine:
             _probe_mongo = None
         set_cancel_probe(cancel_check_for(_probe_mongo, job_id))
         begin_run_attempt(_probe_mongo, job_id)
+        set_progress_meter(
+            ProgressMeter(_probe_mongo, job_id) if _probe_mongo is not None else None
+        )
         try:
             with bind_auto_create_job(job_id), bind_source_engine(
                 request.source.format or ""
@@ -1848,6 +1853,7 @@ class UniversalTransferEngine:
             raise
         finally:
             set_cancel_probe(None)
+            set_progress_meter(None)
             end_run_attempt()
         try:
             record_after_run(request, job_id, result)
