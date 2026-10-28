@@ -254,7 +254,11 @@ def bind_tenant_scope(scope: TenantScope | None) -> Iterator[None]:
             stamp = scope.target_workspace_id(write=True)
         except HTTPException:
             stamp = ""
-    with bound_workspace_filter(scope.filter if scope is not None else None, stamp):
+    with bound_workspace_filter(
+        scope.filter if scope is not None else None,
+        stamp,
+        scope.actor if scope is not None else "",
+    ):
         yield
 
 

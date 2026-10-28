@@ -133,13 +133,15 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         from ..ai.copilot.pilot_agent import carries_evidence
         from ..ai.copilot.tool_permissions import bind_request_principal
 
-        from services.effective_role import workspace_id_from_request_headers
+        from services.workspace_access import tenant_scope
 
         agent = get_copilot_agent()
         history = [{"role": m.role, "content": m.content} for m in request.history]
         role, _actor = _caller(http_request)
         data_context = dict(request.data_context or {})
-        ws = workspace_id_from_request_headers(http_request.headers)
+        # The workspace the turn works in is the actor's, never a bare header:
+        # a workspace they do not belong to is a 403 (D162).
+        ws = tenant_scope(http_request).requested_workspace_id
         if ws:
             data_context["workspace_id"] = ws
         else:
@@ -163,6 +165,8 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
             data_insight=result.data_insight,
             tools_used=getattr(result, "tools_used", []) or [],
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 

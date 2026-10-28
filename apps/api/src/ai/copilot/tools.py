@@ -3747,10 +3747,9 @@ class DataPilotTools:
         return update_schedule(self._resolve_schedule, schedule_id, name, cadence, new_name)
 
     def _list_contracts(self, limit: int = 50) -> ToolResult:
-        from services.contract_store import get_contract_store
+        from services.contract_store import visible_contracts
 
-        store = get_contract_store()
-        contracts = store.list_contracts(limit=max(1, min(int(limit or 50), 200)))
+        contracts, census = visible_contracts(limit=max(1, min(int(limit or 50), 200)))
         rows = []
         for c in contracts:
             if hasattr(c, "to_dict"):
@@ -3765,11 +3764,6 @@ class DataPilotTools:
                 "status": d.get("status"),
                 "updated_at": str(d.get("updated_at") or ""),
             })
-        census: dict = {}
-        try:
-            census = store.count_contracts_by_status() or {}
-        except Exception:
-            census = {}
         total = sum(int(n) for n in census.values()) if census else len(rows)
         return ToolResult(
             name="list_contracts",

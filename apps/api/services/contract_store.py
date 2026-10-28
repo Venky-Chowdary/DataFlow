@@ -12,6 +12,7 @@ from typing import Any
 
 from services.data_contract import CircuitBreaker, DataContract
 from services.value_serializer import bson_safe_document, python_document_from_bson
+from services.workspace_filter import bound_allows, current_workspace_filter
 
 
 class ContractStore(ABC):
@@ -230,6 +231,26 @@ def reset_contract_store() -> None:
     """Reset the singleton store (useful in tests)."""
     global _store_instance
     _store_instance = None
+
+
+def contract_visible(contract: Any) -> bool:
+    """Whether the tenant scope bound to this request covers a contract (D154)."""
+    meta = getattr(contract, "metadata", None) or {}
+    return bound_allows(meta.get("workspace_id"))
+
+
+def visible_contracts(limit: int = 200) -> tuple[list[DataContract], dict[str, int]]:
+    """Contracts the bound scope covers (newest first, at most ``limit``) plus
+    the status census of every visible contract — never another workspace's."""
+    store = get_contract_store()
+    if current_workspace_filter() is None:
+        return store.list_contracts(limit=limit), store.count_contracts_by_status()
+    every = [c for c in store.list_contracts(limit=100_000) if contract_visible(c)]
+    census: dict[str, int] = {}
+    for c in every:
+        status = str(getattr(c.status, "value", c.status) or "unknown").lower()
+        census[status] = census.get(status, 0) + 1
+    return every[:limit], census
 
 
 def assert_contract_breaker_allows(contract_id: str) -> None:
