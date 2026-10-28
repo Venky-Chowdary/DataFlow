@@ -43,10 +43,10 @@ logger = logging.getLogger(__name__)
 
 def _refresh_saved_connectors(xfer_req: Any) -> None:
     """Replay a stored request against the saved connectors' current settings (D172)."""
-    from ..transfer.engine import get_transfer_engine
+    from ..transfer.adapters import refresh_saved_connectors
 
     try:
-        get_transfer_engine().refresh_saved_connectors(xfer_req)
+        refresh_saved_connectors(xfer_req)
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
 

@@ -1707,23 +1707,6 @@ class UniversalTransferEngine:
             request.destination, workspace_id=request.workspace_id
         )
 
-    def refresh_saved_connectors(self, request: TransferRequest) -> None:
-        """Re-resolve saved connectors for a request replayed from a job record.
-
-        Rerun / retry / resume rebuild the request from the stored
-        ``transfer_request`` whose host and credentials are the ones the
-        connection had when the job first ran (D172). Raises ``ValueError``
-        when a referenced connector no longer exists.
-        """
-        from .adapters import refresh_saved_endpoint
-
-        request.source = refresh_saved_endpoint(
-            request.source, workspace_id=request.workspace_id
-        )
-        request.destination = refresh_saved_endpoint(
-            request.destination, workspace_id=request.workspace_id
-        )
-
     def execute_tracked(
         self, request: TransferRequest, job_id: str, resume: bool = False
     ) -> TransferResult:
