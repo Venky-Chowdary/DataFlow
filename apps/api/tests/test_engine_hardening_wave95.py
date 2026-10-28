@@ -346,7 +346,7 @@ class TestSchemalessAbsorptionIsThreadSafe:
         source = _stream_source()
         body = source.split("def _absorb_schemaless_discovered_attrs", 1)[1]
         body = body.split("\n    if not schema:", 1)[0]
-        assert "with _schema_absorb_lock:" in body
+        assert "with cfg._schema_absorb_lock:" in body
         assert "_schema_absorb_lock = threading.Lock()" in source
 
     def test_concurrent_union_under_a_lock_keeps_every_attribute(self):

@@ -8,8 +8,9 @@ from services.data_quality import BatchDriftDetector
 
 
 def test_stream_write_path_constructs_and_checks_detector():
-    src = Path(__file__).resolve().parents[1] / "src" / "transfer" / "stream.py"
-    text = src.read_text(encoding="utf-8")
+    transfer = Path(__file__).resolve().parents[1] / "src" / "transfer"
+    parts = [transfer / "stream.py", *sorted(transfer.glob("stream_db_*.py"))]
+    text = "\n".join(part.read_text(encoding="utf-8") for part in parts)
     assert "BatchDriftDetector()" in text
     assert "drift_detector.check(audit.stats or {})" in text
     assert 'validation_mode == "maximum"' in text

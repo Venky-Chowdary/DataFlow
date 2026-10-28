@@ -66,6 +66,24 @@ class RunConfig:
     source_filter: Any = None
     validation_mode: Any = None
     _tie_dedupe: Any = None
+    backfill_new_fields: Any = None
+    batch_quality_enabled: Any = None
+    drift_detector: Any = None
+    fingerprint_dest_types: Any = None
+    max_workers: Any = None
+    pk_source_col: Any = None
+    replay_safety: Any = None
+    retry: Any = None
+    route_drift_detectors: Any = None
+    row_apply_plan: Any = None
+    skip_preflight: Any = None
+    source_schema_catalog: Any = None
+    workspace_id: Any = None
+    write_mode: Any = None
+    chunks: Any = None
+    _schema_absorb_lock: Any = None
+    ddl_log: Any = None
+    _RECONCILE_SAMPLE_CAP: Any = None
 
 
 @dataclass
@@ -92,6 +110,18 @@ class RunTally:
 
     shape_divert_key_tuples: Any = None
     shape_diverted_total: Any = None
+    dest_summary: Any = None
+    ddl_state: Any = None
+    inline_fingerprints_used: Any = None
+    keyed_census_acc: Any = None
+    overwrite_keys_acc: Any = None
+    pg_conn_state: Any = None
+    sf_conn_state: Any = None
+    rejected_total: Any = None
+    route_backup_state: Any = None
+    route_fp_acc: Any = None
+    route_fp_cols: Any = None
+    written: Any = None
 
 
 @dataclass
