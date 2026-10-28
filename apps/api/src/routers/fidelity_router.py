@@ -79,7 +79,7 @@ def _endpoints_from_schedule(
     request: Request,
 ):
     from services.schedule_runner import (
-        _resolve_connector,
+        _resolve_connector_for_schedule,
         build_schedule_request,
     )
     from services.schedule_store import get_schedule
@@ -90,8 +90,8 @@ def _endpoints_from_schedule(
     _assert_resource_visible(request, str(getattr(sched, "workspace_id", "") or ""))
     _assert_connector_workspace(sched.source_connector_id, workspace_id, request)
     _assert_connector_workspace(sched.dest_connector_id, workspace_id, request)
-    src = _resolve_connector(sched.source_connector_id)
-    dst = _resolve_connector(sched.dest_connector_id)
+    src = _resolve_connector_for_schedule(sched.source_connector_id, sched)
+    dst = _resolve_connector_for_schedule(sched.dest_connector_id, sched)
     if not src or not dst:
         raise HTTPException(
             status_code=400,
