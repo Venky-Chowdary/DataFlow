@@ -2122,9 +2122,13 @@ def materialize_dest_ddl(
     raw = strip_identity_qualifier(carrier).strip()
     if raw:
         require_safe_type_stamp(raw, context=f"{db} column type")
-    return require_safe_type_stamp(
-        _materialize_dest_ddl_unchecked(db_type, carrier, source_type),
-        context=f"{db} column DDL",
+    # ``str()``: the checked-modules mypy run skips imports, so the gate's
+    # ``-> str`` is Any here and would trip ``no-any-return``.
+    return str(
+        require_safe_type_stamp(
+            _materialize_dest_ddl_unchecked(db_type, carrier, source_type),
+            context=f"{db} column DDL",
+        )
     )
 
 
