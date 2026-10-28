@@ -708,6 +708,7 @@ def plan_transfer(
     dedupe_key: str = "",
     cursor_column: str = "",
     cursor_semantics: str = "",
+    cursor_lookback_days: int = 0,
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     cadence: str = "",
@@ -980,6 +981,7 @@ def plan_transfer(
         catalog_key=_source_primary_key(src_info),
         cursor_column=cursor_column,
         cursor_semantics=cursor_semantics,
+        cursor_lookback_days=cursor_lookback_days,
     )
     if identity_error:
         return _tool_result(tool, success=False, error=identity_error)
@@ -1309,6 +1311,7 @@ def _identity_stream_contract(
     catalog_key: str,
     cursor_column: str = "",
     cursor_semantics: str = "",
+    cursor_lookback_days: int = 0,
 ) -> tuple[list[dict[str, Any]], str]:
     """The stream contract Execute and preflight both read.
 
@@ -1418,6 +1421,10 @@ def _identity_stream_contract(
         contract["cursor_field"] = cursor
     if semantics:
         contract["cursor_semantics"] = semantics
+    if cursor_lookback_days and int(cursor_lookback_days) > 0:
+        # business_date's re-read window (D48): it was advertised but could
+        # not be declared, so the verdict always refused the date cursor.
+        contract["cursor_lookback_days"] = int(cursor_lookback_days)
     if inferred:
         contract["cursor_inferred"] = True
     if mode:
@@ -2044,6 +2051,7 @@ def start_transfer(
     dedupe_key: str = "",
     cursor_column: str = "",
     cursor_semantics: str = "",
+    cursor_lookback_days: int = 0,
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     cadence: str = "",
@@ -2077,6 +2085,7 @@ def start_transfer(
         dedupe_key=dedupe_key,
         cursor_column=cursor_column,
         cursor_semantics=cursor_semantics,
+        cursor_lookback_days=cursor_lookback_days,
         rule_questions=rule_questions,
         applied_rules=applied_rules,
         cadence=cadence,

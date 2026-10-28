@@ -470,6 +470,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "and does not take a table cursor."
                     ),
                 },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
+                    ),
+                },
                 "cursor_semantics": {
                     "type": "string",
                     "description": (
@@ -549,6 +557,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Two candidates are not guessed. A column that is not on "
                         "the source is never invented. CDC uses the log position "
                         "and does not take a table cursor."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
                     ),
                 },
                 "cursor_semantics": {
@@ -661,6 +677,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Two candidates are not guessed. A column that is not on "
                         "the source is never invented. CDC uses the log position "
                         "and does not take a table cursor."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
                     ),
                 },
                 "cursor_semantics": {
@@ -886,6 +910,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Watermark column for incremental modes. When omitted and "
                         "the source has exactly one modification-timestamp column, "
                         "that column is selected. Two candidates are not guessed."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
                     ),
                 },
                 "cursor_semantics": {
@@ -3002,6 +3034,7 @@ class DataPilotTools:
         primary_key: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
         leftover_nl: str = "",
         contract_id: str = "",
         require_signed_contract: Any = None,
@@ -3045,6 +3078,7 @@ class DataPilotTools:
                 primary_key=primary_key,
                 cursor_column=cursor_column,
                 cursor_semantics=cursor_semantics,
+                cursor_lookback_days=cursor_lookback_days,
                 **bind,
             )
             if planned.success:
@@ -3969,6 +4003,7 @@ class DataPilotTools:
         dedupe_key: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         cadence: str = "",
@@ -4004,6 +4039,7 @@ class DataPilotTools:
             dedupe_key=dedupe_key,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             cadence=cadence,
@@ -4039,6 +4075,7 @@ class DataPilotTools:
         dedupe_key: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         cadence: str = "",
@@ -4074,6 +4111,7 @@ class DataPilotTools:
             dedupe_key=dedupe_key,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             cadence=cadence,
@@ -4139,6 +4177,7 @@ class DataPilotTools:
         name: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
         source_timezone: str = "",
         source_read_mode: str = "",
         procedure_call: str = "",
@@ -4176,6 +4215,7 @@ class DataPilotTools:
             name=name,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
             source_timezone=source_timezone,
             source_read_mode=source_read_mode,
             procedure_call=procedure_call,
