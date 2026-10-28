@@ -82,10 +82,15 @@ class _SQL:
         return "%s"
 
 
-def test_conflict_key_identity_collapses_reader_null_and_blank():
-    for wire in (None, SQL_NULL_SENTINEL, "__df_ddb_null__", "", "  "):
+def test_conflict_key_identity_collapses_reader_null_only():
+    for wire in (None, SQL_NULL_SENTINEL, "__df_ddb_null__"):
         assert _is_nullish_conflict_key(wire) is True
         assert _conflict_key_identity(wire) is None
+    # D53 / D70: '' and whitespace are keys, and 'a ' is not 'a'.
+    for value in ("", "  ", "a "):
+        assert _is_nullish_conflict_key(value) is False
+        assert _conflict_key_identity(value) == value
+    assert _is_nullish_conflict_key("", empty_is_null=True) is True
     assert _conflict_key_identity(0) == 0
     assert _conflict_key_identity(False) is False
     assert _conflict_key_identity("1") == "1"
@@ -194,5 +199,12 @@ def test_generic_sql_delete_by_keys_refuses_reader_null():
 
     with pytest.raises(ValueError, match="null/empty conflict key"):
         _delete_by_keys(None, None, [{"id": SQL_NULL_SENTINEL}], ["id"])
-    with pytest.raises(ValueError, match="null/empty conflict key"):
-        _delete_by_keys(None, None, [{"id": ""}], ["id"])
+    # An empty string is a real key: delete-by-keys must not refuse it (D53).
+    from unittest import mock
+
+    import sqlalchemy as sa
+
+    conn = mock.Mock()
+    table = sa.Table("t", sa.MetaData(), sa.Column("id", sa.String))
+    _delete_by_keys(conn, table, [{"id": ""}], ["id"])
+    conn.execute.assert_called_once()

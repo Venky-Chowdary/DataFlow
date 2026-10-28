@@ -30,7 +30,7 @@ def test_overwrite_keyset_reader_null_is_unusable():
     assert acc.export() is None
     blank = OverwriteSourceKeySet(1)
     blank.observe_tuples([("",)])
-    assert blank.export() is None
+    assert blank.export() == [("",)]
     none = OverwriteSourceKeySet(1)
     none.observe_tuples([(None,)])
     assert none.export() is None
@@ -50,6 +50,7 @@ def test_unique_source_keys_reader_null_is_unmeasured():
 
 def test_format_delete_keys_skips_reader_null():
     assert format_delete_keys([(SQL_NULL_SENTINEL,), (None,), ("",), (1,), (True,)]) == [
+        "",
         "1",
         "True",
     ]

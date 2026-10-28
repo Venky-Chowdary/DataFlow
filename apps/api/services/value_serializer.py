@@ -246,6 +246,23 @@ def present_cell_text(value: Any) -> str | None:
     return text
 
 
+def key_identity_text(value: Any) -> str | None:
+    """Exact text identity of one upsert / census key cell.
+
+    Unlike :func:`present_cell_text`, only SQL NULL / Missing is "no key": ``''``
+    is a value (a quoted file ``""`` and every database's ``''`` decode to it,
+    an unquoted empty file cell is already NULL) and text is never stripped, so
+    ``'a'`` and ``'a '`` stay two keys wherever the destination distinguishes
+    them (D53, D70). Collation folding belongs to the destination engine.
+    """
+    if is_reader_null_cell(value) or is_frame_missing(value):
+        return None
+    if isinstance(value, str):
+        return unescape_wire_text(value)
+    text = cell_to_string(value, preserve_sql_null=True)
+    return None if is_null_evidence(text) else text
+
+
 def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
     """Sample values usable as type evidence.
 

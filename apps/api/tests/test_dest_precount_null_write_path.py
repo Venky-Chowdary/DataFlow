@@ -3,7 +3,8 @@
 Reader-wired SQL_NULL_SENTINEL used to look like a present PK, so Iceberg
 key hits and artifact samples searched for the sentinel spelling. JSONL
 "1" and catalog 1 must share one key. True and dest "true" share one key.
-Empty / whitespace stay incomplete identity.
+Only NULL / Missing is incomplete identity: ``''`` is a key and ``'a '`` is
+not ``'a'`` (D53, D70).
 """
 
 from __future__ import annotations
@@ -32,8 +33,9 @@ from services.value_serializer import (  # noqa: E402
 
 def test_norm_dest_key_matches_reader_wire():
     assert _norm_dest_key((None,)) is None
-    assert _norm_dest_key(("",)) is None
-    assert _norm_dest_key(("   ",)) is None
+    assert _norm_dest_key(("",)) == ("",)
+    assert _norm_dest_key(("   ",)) == ("   ",)
+    assert _norm_dest_key(("a ",)) != _norm_dest_key(("a",))
     assert _norm_dest_key((SQL_NULL_SENTINEL,)) is None
     assert _norm_dest_key((DF_MISSING_SENTINEL,)) is None
     assert _norm_dest_key((Missing,)) is None
@@ -47,7 +49,7 @@ def test_norm_dest_key_matches_reader_wire():
 def test_row_values_skip_reader_null():
     assert _row_values_for_cols({"id": SQL_NULL_SENTINEL}, ["id"]) is None
     assert _row_values_for_cols({"id": None}, ["id"]) is None
-    assert _row_values_for_cols({"id": ""}, ["id"]) is None
+    assert _row_values_for_cols({"id": ""}, ["id"]) == ("",)
     assert _row_values_for_cols({"id": 1}, ["id"]) == (1,)
 
 
@@ -60,7 +62,8 @@ def test_unique_key_tuples_skip_and_dedup_wire():
 
 def test_records_to_key_tuples_reader_null_is_unmeasured():
     assert records_to_key_tuples([{"id": SQL_NULL_SENTINEL}], ["id"]) is None
-    assert records_to_key_tuples([{"id": ""}], ["id"]) is None
+    assert records_to_key_tuples([{"id": ""}], ["id"]) == [("",)]
+    assert records_to_key_tuples([{"id": "a"}, {"id": "a "}], ["id"]) == [("a",), ("a ",)]
 
 
 def test_records_to_key_tuples_bool_and_dest_true_are_one_key():

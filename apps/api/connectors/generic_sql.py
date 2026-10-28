@@ -4088,11 +4088,14 @@ def _upsert_batch(
     from connectors.writer_common import partition_dense_upsert_rows
 
     # Quarantine null/empty keys — never abort the whole MERGE chunk.
+    from services.reconciliation import destination_empty_string_is_null
+
     batch = partition_dense_upsert_rows(
         batch,
         conflict_cols,
         rejected_details=rejected_details,
         policy=policy,
+        empty_is_null=destination_empty_string_is_null(dialect_name),
     )
     if not batch:
         return 0

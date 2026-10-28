@@ -176,7 +176,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from services.value_serializer import is_null_evidence, present_cell_text
+from services.value_serializer import key_identity_text, present_cell_text
 
 if TYPE_CHECKING:
     from src.transfer.models import EndpointConfig
@@ -1002,7 +1002,7 @@ def records_to_key_tuples(
             raw = rec.get(field)
             if raw is None and field != target:
                 raw = rec.get(target)
-            if is_null_evidence(raw):
+            if key_identity_text(raw) is None:
                 return None
             row.append(raw)
         tup = tuple(row)
@@ -1055,7 +1055,7 @@ class OverwriteSourceKeySet:
 
         for raw in keys:
             tup = tuple(raw)
-            if len(tup) != self._width or any(is_null_evidence(v) for v in tup):
+            if len(tup) != self._width or any(key_identity_text(v) is None for v in tup):
                 self._failed = True
                 return
             coerced = tuple(coerce_pk_part(p) for p in tup)
@@ -1631,7 +1631,7 @@ def _snowflake_key_list(
     out: list[tuple[Any, ...]] = []
     for row in fetched:
         tup = tuple(row[:width])
-        if len(tup) != width or any(is_null_evidence(v) for v in tup):
+        if len(tup) != width or any(key_identity_text(v) is None for v in tup):
             continue
         out.append(tup)
     return out
@@ -1760,7 +1760,7 @@ def _bigquery_key_list(
             tup = tuple(row[c] for c in cols)
         except Exception:
             tup = tuple(row[i] for i in range(width))
-        if len(tup) != width or any(is_null_evidence(v) for v in tup):
+        if len(tup) != width or any(key_identity_text(v) is None for v in tup):
             continue
         out.append(tup)
     return out
@@ -3436,10 +3436,12 @@ def _iceberg_snapshot_rows(
 
 
 def _norm_dest_key(values: Sequence[Any]) -> tuple[str, ...] | None:
-    """Comparable dest key — JSONL strings and catalog ints must hit the same PK."""
+    """Comparable dest key — JSONL strings and catalog ints must hit the same PK.
+
+    Exact text: ``''`` is a key and ``'a '`` is not ``'a'`` (D53, D70)."""
     out: list[str] = []
     for value in values:
-        key = present_cell_text(value)
+        key = key_identity_text(value)
         if key is None:
             return None
         out.append(key)
@@ -3459,7 +3461,7 @@ def _row_values_for_cols(
             if lower is None:
                 lower = {str(k).lower(): v for k, v in row.items()}
             val = lower.get(col.lower())
-        if is_null_evidence(val):
+        if key_identity_text(val) is None:
             return None
         parts.append(val)
     return tuple(parts)

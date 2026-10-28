@@ -36,7 +36,7 @@ from collections.abc import Mapping, Sequence
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
-from services.value_serializer import present_cell_text
+from services.value_serializer import key_identity_text, present_cell_text
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,7 @@ def coerce_key_value(value: Any, domain: str) -> tuple[Any, bool]:
     if domain == OPAQUE_DOMAIN:
         return value, True
     if domain == TEXT_DOMAIN:
-        text = present_cell_text(value)
+        text = key_identity_text(value)
         return (text, True) if text is not None else (None, False)
     if domain == BOOL_DOMAIN:
         if isinstance(value, bool):

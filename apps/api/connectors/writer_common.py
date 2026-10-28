@@ -5386,15 +5386,21 @@ def overlay_physical_bind_types(
     return out
 
 
-def _is_nullish_conflict_key(val: Any) -> bool:
-    """True when a conflict-key cell cannot identify a dense upsert row."""
+def _is_nullish_conflict_key(val: Any, *, empty_is_null: bool = False) -> bool:
+    """True when a conflict-key cell cannot identify a dense upsert row.
+
+    Only SQL NULL / Missing can't: ``NULL = NULL`` is UNKNOWN. ``''`` and
+    whitespace are values — a file's quoted ``""`` and every database's ``''``
+    decode to ``''`` upstream, an unquoted empty file cell already arrives as
+    NULL — and ``'a'`` / ``'a '`` stay distinct keys (D53, D70).
+    ``empty_is_null`` is for a destination that stores ``''`` as NULL (Oracle
+    VARCHAR2): there the stored key would be NULL.
+    """
     from services.value_serializer import is_reader_null_cell
 
     if is_reader_null_cell(val):
         return True
-    if isinstance(val, str) and not val.strip():
-        return True
-    return False
+    return empty_is_null and isinstance(val, str) and val == ""
 
 
 def _conflict_key_identity(val: Any) -> Any:
@@ -5444,6 +5450,8 @@ def assert_dense_upsert_keys_present(
     rows: list[tuple] | list[list] | list[dict[str, Any]],
     conflict_columns: list[str],
     target_cols: list[str] | None = None,
+    *,
+    empty_is_null: bool = False,
 ) -> None:
     """Refuse null/empty conflict keys before dense MERGE / NULL-safe ON.
 
@@ -5460,7 +5468,7 @@ def assert_dense_upsert_keys_present(
     for row in rows:
         if isinstance(row, dict):
             for c in cols:
-                if _is_nullish_conflict_key(row.get(c)):
+                if _is_nullish_conflict_key(row.get(c), empty_is_null=empty_is_null):
                     raise ValueError(
                         f"dense upsert refused null/empty conflict key {c!r} — "
                         "NULL-safe MERGE would mass-touch destination rows"
@@ -5472,7 +5480,7 @@ def assert_dense_upsert_keys_present(
             )
         for c, idx in zip(cols, idxs):
             val = row[idx] if idx < len(row) else None
-            if _is_nullish_conflict_key(val):
+            if _is_nullish_conflict_key(val, empty_is_null=empty_is_null):
                 raise ValueError(
                     f"dense upsert refused null/empty conflict key {c!r} — "
                     "NULL-safe MERGE would mass-touch destination rows"
@@ -5487,8 +5495,9 @@ def partition_dense_upsert_rows(
     policy: str = "quarantine",
     row_offset: int = 0,
     source_row_numbers: list[int] | None = None,
+    empty_is_null: bool = False,
 ) -> list[Any]:
-    """Hold out null/empty conflict-key rows; return rows safe for MERGE.
+    """Hold out null conflict-key rows; return rows safe for MERGE.
 
     Preserves arrival order. When ``rejected_details`` is None, re-raises on the
     first bad row (fail-closed callers without a quarantine sink).
@@ -5505,7 +5514,10 @@ def partition_dense_upsert_rows(
     for i, row in enumerate(rows):
         try:
             assert_dense_upsert_keys_present(
-                [row], conflict_columns, target_cols=target_cols
+                [row],
+                conflict_columns,
+                target_cols=target_cols,
+                empty_is_null=empty_is_null,
             )
             kept.append(row)
         except ValueError as exc:
