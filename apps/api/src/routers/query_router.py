@@ -299,10 +299,19 @@ _DUCKDB_EXTERNAL_PREFIXES = (
     "postgres_", "mysql_", "odbc_", "http", "s3_", "azure_", "gcs_",
 )
 _DUCKDB_EXTERNAL_SUFFIXES = ("_scan",)
-_SQL_COMMENT_RE = re.compile(r"--[^\n]*|/\*.*?\*/", re.S)
-_SQL_QUOTED_IDENT_RE = re.compile(r'"((?:""|[^"])*)"')
-_DUCKDB_STRING_SCAN_RE = re.compile(r"\b(?:FROM|JOIN)[\s(]*'", re.I)
-_DUCKDB_PATHLIKE_IDENT_RE = re.compile(r'\b(?:FROM|JOIN)[\s(]*"((?:""|[^"])*)"', re.I)
+# Table references can follow FROM/JOIN or a comma of the FROM list. These
+# keywords end the FROM list at their paren depth.
+_DUCKDB_TOKEN_RE = re.compile(
+    r'"(?:""|[^"])*"|__DFQ\d+__|[A-Za-z_][A-Za-z0-9_$]*|[(),]'
+)
+_DUCKDB_FROM_LIST_END = frozenset({
+    "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "FETCH", "UNION",
+    "EXCEPT", "INTERSECT", "QUALIFY", "WINDOW", "SELECT", "ON", "USING",
+    "RETURNING", "SAMPLE",
+})
+# ``EXTRACT(year FROM '2020-01-01')`` and ``IS DISTINCT FROM 'x'`` take a
+# value after FROM, not a table.
+_DUCKDB_FROM_VALUE_FUNCTIONS = frozenset({"extract", "trim", "substring", "overlay", "position"})
 _DUCKDB_PATH_HINT_RE = re.compile(
     r"[/\\:*?]|\.(?:csv|tsv|txt|parquet|json|jsonl|ndjson|arrow|xlsx|"
     r"db|duckdb|sqlite|gz|zst)$",
@@ -321,27 +330,60 @@ def is_duckdb_engine(engine: Any) -> bool:
 
 
 def _duckdb_reads_external(sql: str) -> bool:
-    """True when DuckDB SQL would read a host file/URL or run SQL from a string."""
-    code = _SQL_COMMENT_RE.sub(" ", sql or "")
-    for match in _DUCKDB_PATHLIKE_IDENT_RE.finditer(code):
-        if _DUCKDB_PATH_HINT_RE.search(match.group(1)):
-            return True
-    if _DUCKDB_STRING_SCAN_RE.search(code):
-        return True
-    # A quoted function name is still a call: ``"read_csv"('/x')``.
-    code = re.sub(r"'(?:''|[^'])*'", " ", code)
-    code = _SQL_QUOTED_IDENT_RE.sub(
-        lambda m: m.group(1) if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", m.group(1)) else " ",
-        code,
-    )
-    for match in _FUNC_CALL_RE.finditer(code):
-        name = match.group(1).lower()
-        if (
-            name in _DUCKDB_EXTERNAL_FUNCTIONS
-            or name.startswith(_DUCKDB_EXTERNAL_PREFIXES)
-            or name.endswith(_DUCKDB_EXTERNAL_SUFFIXES)
-        ):
-            return True
+    """True when DuckDB SQL would read a host file/URL or run SQL from a string.
+
+    Comments and string literals are lexed away first (``sql_outside_literals``),
+    so a ``'--'`` literal cannot swallow a reader call and a quoted function
+    name is still a call. The connect-time ``enable_external_access = false``
+    in :func:`_duckdb_playground_engine` is the backstop for local DuckDB.
+    """
+    from services.sql_literals import sql_outside_literals
+
+    tokens = _DUCKDB_TOKEN_RE.findall(sql_outside_literals(sql or ""))
+    # Per paren depth: [inside a FROM list, FROM takes a value (EXTRACT & co)].
+    levels: list[list[bool]] = [[False, False]]
+    expect_table = False
+    for i, tok in enumerate(tokens):
+        upper = tok.upper()
+        prev = tokens[i - 1].lower() if i else ""
+        if tok == "(":
+            levels.append([False, prev in _DUCKDB_FROM_VALUE_FUNCTIONS])
+            continue
+        if tok == ")":
+            if len(levels) > 1:
+                levels.pop()
+            expect_table = False
+            continue
+        if tok == ",":
+            expect_table = levels[-1][0]
+            continue
+        if upper in ("FROM", "JOIN"):
+            if upper == "FROM" and (levels[-1][1] or prev == "distinct"):
+                expect_table = False
+            else:
+                levels[-1][0] = True
+                expect_table = True
+            continue
+        if upper in _DUCKDB_FROM_LIST_END:
+            levels[-1][0] = False
+            expect_table = False
+            continue
+        if expect_table:
+            if tok.startswith("__DFQ"):
+                return True
+            if tok.startswith('"') and _DUCKDB_PATH_HINT_RE.search(tok[1:-1].replace('""', '"')):
+                return True
+        expect_table = False
+        # A quoted function name is still a call: ``"read_csv"('/x')``.
+        if i + 1 < len(tokens) and tokens[i + 1] == "(":
+            name = tok[1:-1].replace('""', '"') if tok.startswith('"') else tok
+            name = name.lower()
+            if (
+                name in _DUCKDB_EXTERNAL_FUNCTIONS
+                or name.startswith(_DUCKDB_EXTERNAL_PREFIXES)
+                or name.endswith(_DUCKDB_EXTERNAL_SUFFIXES)
+            ):
+                return True
     return False
 
 
