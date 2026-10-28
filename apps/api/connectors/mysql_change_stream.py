@@ -30,6 +30,7 @@ from connectors.mysql_conn import get_connection
 from connectors.mysql_reader import read_table_batch, read_table_scan_batch
 from connectors.sql_identifiers import quote_table_ref
 from services.cdc_cursor_gap import CdcBinlogGapError
+from services.value_serializer import WireCell, wire_cell
 
 _DDL_RE = re.compile(
     r"\b(ALTER|CREATE|DROP|RENAME)\s+TABLE\b",
@@ -150,13 +151,10 @@ def consumed_reached_binlog_head(
 
 
 def _serialize(value: Any) -> str:
-    from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
-
-    if value is None:
-        return SQL_NULL_SENTINEL
+    """One binlog cell as a wire cell (marked, so apply encodes it once)."""
     if isinstance(value, datetime):
-        return value.isoformat()
-    return cell_to_string(value, preserve_sql_null=True)
+        return WireCell(value.isoformat())
+    return wire_cell(value)
 
 
 class MySqlChangeStreamCdc:
@@ -731,7 +729,12 @@ class MySqlChangeStreamCdc:
                         batch = read_table_batch(**_read_kw)
                     if not batch.rows:
                         break
-                    records = [dict(zip(batch.headers, row)) for row in batch.rows]
+                    # ``mysql_reader`` rows are wire strings (NULL already spelled
+                    # as the sentinel); mark them so apply does not encode twice.
+                    records = [
+                        {h: WireCell(c) for h, c in zip(batch.headers, row)}
+                        for row in batch.rows
+                    ]
                 table_offset += len(records)
                 table_last_pk = last_pk_from_records(records, pk_cols) or table_last_pk
                 token = {
