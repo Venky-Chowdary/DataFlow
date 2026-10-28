@@ -109,7 +109,7 @@ export function TransformLibraryPicker({
   };
 
   return (
-    <section className="df2-xform-panel" aria-label="Apply a library transform">
+    <section className="df2-xform-library" aria-label="Apply a library transform">
       <div className="df2-xform-card-head">
         <span className="df2-xform-title">From Transform Library</span>
         {applied ? (
