@@ -636,6 +636,22 @@ def resolve_endpoint(
     return EndpointConfig.from_dict(endpoint.kind, merged)
 
 
+def refresh_saved_connectors(request: Any) -> None:
+    """Re-resolve both endpoints of a request replayed from a job record.
+
+    Rerun / retry / resume rebuild the request from the stored
+    ``transfer_request``, whose host and credentials are those the connection
+    had when the job first ran (D172). Raises ``ValueError`` when a referenced
+    connector no longer exists.
+    """
+    request.source = refresh_saved_endpoint(
+        request.source, workspace_id=request.workspace_id
+    )
+    request.destination = refresh_saved_endpoint(
+        request.destination, workspace_id=request.workspace_id
+    )
+
+
 def refresh_saved_endpoint(
     endpoint: EndpointConfig, workspace_id: str | None = None
 ) -> EndpointConfig:

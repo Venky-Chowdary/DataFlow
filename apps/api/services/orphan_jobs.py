@@ -178,9 +178,9 @@ def _request_for(job: dict[str, Any]) -> tuple[Any | None, str]:
     except Exception as exc:  # noqa: BLE001
         return None, f"the stored transfer request could not be read ({exc})"
     try:
-        from src.transfer.engine import get_transfer_engine
+        from src.transfer.adapters import refresh_saved_connectors
 
-        get_transfer_engine().refresh_saved_connectors(request)
+        refresh_saved_connectors(request)
     except ValueError as exc:
         return None, f"a saved connector it uses is gone ({exc})"
     try:
