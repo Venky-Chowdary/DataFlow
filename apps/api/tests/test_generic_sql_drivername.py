@@ -119,9 +119,12 @@ def test_connect_timeout_reaches_driver_connect_args():
     assert _connect_args_for(url, {"connect_timeout": 15}) == {
         "connect_timeout": 15
     }
-    # Unset / junk / zero never emit args; sqlite ignores silently.
-    assert _connect_args_for(url, {}) == {}
-    assert _connect_args_for(url, {"connect_timeout": "abc"}) == {}
+    # Unset / junk fall back to the platform default (D169: an unset timeout
+    # used to mean "wait for the OS"); an explicit zero opts out; sqlite
+    # ignores silently.
+    assert _connect_args_for(url, {}) == {"connect_timeout": 15}
+    assert _connect_args_for(url, {"connect_timeout": "abc"}) == {"connect_timeout": 15}
+    assert _connect_args_for(url, {"connect_timeout": 0}) == {}
     assert _connect_args_for(
         sa.URL.create("sqlite", database=":memory:"), {"connect_timeout": 15}
     ) == {}

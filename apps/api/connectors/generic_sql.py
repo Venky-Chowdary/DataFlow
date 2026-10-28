@@ -1033,13 +1033,22 @@ _CONNECT_TIMEOUT_KWARGS: tuple[tuple[str, Any], ...] = (
 )
 
 
+#: Login/TCP handshake bound when the connector sets none.
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 15
+
+
 def _connect_args_for(url: Any, cfg: Mapping[str, Any]) -> dict[str, Any]:
     """Translate ``cfg['connect_timeout']`` seconds into driver connect args."""
     raw = cfg.get("connect_timeout")
     try:
-        seconds = int(float(str(raw))) if raw not in (None, "") else 0
+        # Unset means the platform default, not "wait for the OS" (D169): a
+        # host that takes the connection and never answers held every caller.
+        # An explicit 0 still means the driver's own behaviour.
+        seconds = (
+            int(float(str(raw))) if raw not in (None, "") else DEFAULT_CONNECT_TIMEOUT_SECONDS
+        )
     except (TypeError, ValueError):
-        seconds = 0
+        seconds = DEFAULT_CONNECT_TIMEOUT_SECONDS
     if seconds <= 0:
         return {}
     driver = str(getattr(url, "drivername", "") or "").lower()
