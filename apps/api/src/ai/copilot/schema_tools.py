@@ -646,13 +646,17 @@ def list_connector_objects(
         info = introspect_endpoint(endpoint)
         raw_objects = list(info.get("objects") or [])
         objects: list[str] = []
+        kinds: dict[str, str] = {}
         for obj in raw_objects:
             if isinstance(obj, dict):
                 name = str(obj.get("name") or obj.get("table") or obj.get("id") or "").strip()
+                kind = str(obj.get("type") or "").strip()
             else:
-                name = str(obj).strip()
+                name, kind = str(obj).strip(), ""
             if name:
                 objects.append(name)
+                if kind:
+                    kinds[name] = kind
         total = len(objects)
         objects = objects[: max(1, int(limit or 100))]
         return _tool_result(
@@ -664,6 +668,9 @@ def list_connector_objects(
                 "type": conn.get("type") or conn.get("format"),
                 "connected": bool(info.get("connected")),
                 "objects": objects,
+                # name -> kind (table / view / collection / …) for the objects above,
+                # so a view is not mistaken for a table (M18).
+                "object_kinds": {n: kinds[n] for n in objects if n in kinds},
                 "count": len(objects),
                 # Callers that resolve a name against this list need to know the
                 # difference between "not on this connector" and "not in the page

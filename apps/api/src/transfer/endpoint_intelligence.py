@@ -26,8 +26,10 @@ from services.connector_telemetry import connector_operation, driver_family
 
 def _list_sqlalchemy_tables(
     endpoint: EndpointConfig, fmt: str
-) -> tuple[bool, list[str], str]:
-    """``(ok, table names, error)`` for engines that list through introspect_schema.
+) -> tuple[bool, list[str], str, dict[str, str]]:
+    """``(ok, names, error, kinds)`` for engines that list through introspect_schema.
+
+    ``kinds`` maps name -> ``table`` / ``view`` where the engine reports it (M18).
 
     A failed catalog read is not an empty inventory. Callers must not report
     "connected, no tables" when the connection itself failed.
@@ -59,9 +61,9 @@ def _list_sqlalchemy_tables(
         )
         from .connector_registry import humanize_connection_error
 
-        return False, [], humanize_connection_error(fmt, exc)
+        return False, [], humanize_connection_error(fmt, exc), {}
     if not isinstance(info, dict) or not info.get("ok"):
-        return False, [], str((info or {}).get("error") or "object list failed")
+        return False, [], str((info or {}).get("error") or "object list failed"), {}
     names: list[str] = []
     seen: set[str] = set()
     for raw in info.get("tables") or []:
@@ -70,7 +72,7 @@ def _list_sqlalchemy_tables(
             continue
         seen.add(name)
         names.append(name)
-    return True, names, ""
+    return True, names, "", dict(info.get("table_types") or {})
 
 
 def _dest_table_schema_only(endpoint: EndpointConfig) -> bool:
@@ -820,7 +822,9 @@ def _introspect_endpoint_impl(
                     t for t in (probe.tables or [])
                     if t and not str(t).startswith("(")
                 ]
-                out["objects"] = [{"name": t, "type": "table"} for t in tables]
+                out["objects"] = _operator_visible_objects(
+                    tables, "table", getattr(probe, "table_types", None)
+                )
                 out["message"] = probe.message or f"SQLite connected — {len(tables)} tables"
                 out["connected"] = bool(probe.ok)
                 if not probe.ok and probe.error:
@@ -832,9 +836,9 @@ def _introspect_endpoint_impl(
         # without a table name, which left SQL Server (and the other engines on
         # this branch) connected with an empty object list while a named table
         # still sampled and transferred.
-        listed_ok, tables, list_error = _list_sqlalchemy_tables(endpoint, fmt)
+        listed_ok, tables, list_error, kinds = _list_sqlalchemy_tables(endpoint, fmt)
         if listed_ok:
-            out["objects"] = [{"name": name, "type": "table"} for name in tables]
+            out["objects"] = _operator_visible_objects(tables, "table", kinds)
             out["connected"] = True
             out["message"] = f"{fmt.title()} connected — {len(tables)} table(s)"
         else:

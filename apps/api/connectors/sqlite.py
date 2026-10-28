@@ -57,14 +57,21 @@ def test_sqlite(
         conn = sqlite3.connect(path, timeout=8)
         with conn:
             cur = conn.cursor()
-            cur.execute("SELECT name FROM sqlite_master WHERE type='table' ORDER BY name LIMIT 50")
-            tables = [row[0] for row in cur.fetchall()]
+            # Views are listed beside tables, each with its kind (M18).
+            cur.execute(
+                "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') "
+                "AND name NOT LIKE 'sqlite_%' ORDER BY name LIMIT 50"
+            )
+            fetched = cur.fetchall()
+            tables = [row[0] for row in fetched]
+            table_types = {row[0]: row[1] for row in fetched}
         conn.close()
         return ConnectResult(
             ok=True,
             tables=tables or ["(no tables)"],
             message=f"SQLite connected — {len(tables)} tables",
             driver="sqlite3",
+            table_types=table_types,
         )
     except Exception as exc:
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="sqlite3")

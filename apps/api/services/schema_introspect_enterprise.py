@@ -536,6 +536,11 @@ def _introspect_oracle(**kwargs) -> dict[str, Any]:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
 
+def _object_kind(table_type: Any) -> str:
+    """``information_schema`` TABLE_TYPE as the listing's ``table`` / ``view`` label."""
+    return "view" if str(table_type or "").upper() == "VIEW" else "table"
+
+
 def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
     """SQL Server INFORMATION_SCHEMA introspect with FLOAT≠DECIMAL honesty."""
     try:
@@ -574,36 +579,32 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
         with engine.connect() as conn:
             tables: list[str] = []
             if not table:
-                tables = [
-                    r[0]
-                    for r in conn.execute(
-                        sa.text(
-                            """
-                            SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES
-                            WHERE TABLE_TYPE = 'BASE TABLE' AND TABLE_SCHEMA = :schema
-                            ORDER BY TABLE_NAME
-                            """
-                        ),
-                        {"schema": schema},
-                    ).fetchall()
-                ]
+                # Views are listed beside tables, each with its kind (M18).
+                listed = conn.execute(
+                    sa.text(
+                        """
+                        SELECT TABLE_NAME, TABLE_TYPE FROM INFORMATION_SCHEMA.TABLES
+                        WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW') AND TABLE_SCHEMA = :schema
+                        ORDER BY TABLE_NAME
+                        """
+                    ),
+                    {"schema": schema},
+                ).fetchall()
+                tables = [r[0] for r in listed]
+                kinds = {r[0]: _object_kind(r[1]) for r in listed}
                 # Default dbo with no tables is the intermittent empty list:
                 # the objects live in another user schema. Qualify those names
                 # so the operator can pick them. A schema the operator named
                 # that really is empty stays empty.
                 if not tables and schema.lower() in {"", "dbo"}:
-                    tables = [
-                        (
-                            str(r[1])
-                            if str(r[0] or "").lower() in {"", "dbo"}
-                            else f"{r[0]}.{r[1]}"
-                        )
+                    other = [
+                        r
                         for r in conn.execute(
                             sa.text(
                                 """
-                                SELECT TABLE_SCHEMA, TABLE_NAME
+                                SELECT TABLE_SCHEMA, TABLE_NAME, TABLE_TYPE
                                 FROM INFORMATION_SCHEMA.TABLES
-                                WHERE TABLE_TYPE = 'BASE TABLE'
+                                WHERE TABLE_TYPE IN ('BASE TABLE', 'VIEW')
                                   AND TABLE_SCHEMA NOT IN ('sys', 'INFORMATION_SCHEMA', 'guest')
                                 ORDER BY TABLE_SCHEMA, TABLE_NAME
                                 """
@@ -611,7 +612,21 @@ def _introspect_sqlserver(**kwargs) -> dict[str, Any]:
                         ).fetchall()
                         if r[1]
                     ]
-                return {"ok": True, "columns": [], "tables": tables, "schema": schema}
+                    names = [
+                        str(r[1])
+                        if str(r[0] or "").lower() in {"", "dbo"}
+                        else f"{r[0]}.{r[1]}"
+                        for r in other
+                    ]
+                    tables = names
+                    kinds = {n: _object_kind(r[2]) for n, r in zip(names, other)}
+                return {
+                    "ok": True,
+                    "columns": [],
+                    "tables": tables,
+                    "table_types": kinds,
+                    "schema": schema,
+                }
 
             tables = [table]
             col_rows = conn.execute(

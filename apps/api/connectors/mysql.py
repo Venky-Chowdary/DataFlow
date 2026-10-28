@@ -47,27 +47,34 @@ def test_mysql(
                 row = cur.fetchone()
                 db_name = (row[0] if row else None) or ""
             tables: list[str] = []
+            table_types: dict[str, str] = {}
             truncated = False
             total = 0
             if db_name:
+                # Views are listed beside tables, each with its kind (M18).
                 cur.execute(
                     """
-                    SELECT table_name FROM information_schema.tables
-                    WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                    SELECT table_name, table_type FROM information_schema.tables
+                    WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
                     ORDER BY table_name
                     LIMIT %s
                     """,
                     (db_name, _TABLE_PAGE + 1),
                 )
-                fetched = [row[0] for row in cur.fetchall()]
+                fetched = [(row[0], row[1]) for row in cur.fetchall()]
                 truncated = len(fetched) > _TABLE_PAGE
-                tables = fetched[:_TABLE_PAGE]
+                fetched = fetched[:_TABLE_PAGE]
+                tables = [name for name, _kind in fetched]
+                table_types = {
+                    name: ("view" if str(kind).upper() == "VIEW" else "table")
+                    for name, kind in fetched
+                }
                 total = len(tables)
                 if truncated:
                     cur.execute(
                         """
                         SELECT count(*) FROM information_schema.tables
-                        WHERE table_schema = %s AND table_type = 'BASE TABLE'
+                        WHERE table_schema = %s AND table_type IN ('BASE TABLE', 'VIEW')
                         """,
                         (db_name,),
                     )
@@ -88,6 +95,7 @@ def test_mysql(
             message=message,
             driver="pymysql",
             tables_truncated=truncated,
+            table_types=table_types,
         )
     except Exception as exc:  # noqa: BLE001 — a probe reports the driver error
         return ConnectResult(ok=False, tables=[], error=str(exc), driver="pymysql")
