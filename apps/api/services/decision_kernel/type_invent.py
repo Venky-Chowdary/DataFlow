@@ -2346,16 +2346,44 @@ __all__ = [
 ]
 
 
+def population_fits_temporal_precision(population: object, digits: int) -> bool | None:
+    """True when every measured cell keeps no fractional digit beyond ``digits``.
+
+    ``None`` means nothing was measured (no population, or only SQL NULL): a
+    sample that was never taken is not proof the column fits.
+    """
+    from services.type_system import value_fractional_second_digits
+
+    if population is None:
+        return None
+    try:
+        values = list(population)  # type: ignore[call-overload]
+    except TypeError:
+        return None
+    measured = False
+    for value in values:
+        if value is None or (isinstance(value, str) and not value.strip()):
+            continue
+        measured = True
+        if value_fractional_second_digits(value) > digits:
+            return False
+    return True if measured else None
+
+
 def temporal_precision_would_narrow(
     source_type: str,
     target_type: str,
     *,
     dest_db: str = "",
+    population: object = None,
 ) -> bool:
     """True when source fractional seconds exceed destination TIME/TIMESTAMP(p).
 
     ``TIME(6)→TIME(0)`` / ``DATETIME2(7)→DATETIME2(0)`` silently truncates
     unless G3 blocks and write paths refuse inventing lower precision.
+
+    ``population`` is the measured cells for this column (see
+    :func:`population_fits_temporal_precision`).
 
     ``SMALLDATETIME`` is one-minute accuracy — any second/fraction datetime
     source into SMALLDATETIME is a silent round (Microsoft / UGO class).
@@ -2454,4 +2482,10 @@ def temporal_precision_would_narrow(
         and cap < src_p <= SQLSERVER_DEFAULT_TEMPORAL_FRACTIONAL_DIGITS
     ):
         return False
-    return src_p > tgt_p
+    if src_p <= tgt_p:
+        return False
+    # A declared ceiling (a warehouse's nanosecond default) narrows only if the
+    # rows use the digits being dropped. Measured cells that fit the
+    # destination lose nothing, and the writer quarantines any later cell that
+    # does not (D49).
+    return population_fits_temporal_precision(population, tgt_p) is not True

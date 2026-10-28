@@ -7019,13 +7019,14 @@ def temporal_precision_would_narrow(
     target_type: str,
     *,
     dest_db: str = "",
+    population: Any = None,
 ) -> bool:
     """Backward-compat shim — body in decision_kernel.type_invent."""
     from services.decision_kernel.type_invent import (
         temporal_precision_would_narrow as _impl,
     )
 
-    return _impl(source_type, target_type, dest_db=dest_db)
+    return _impl(source_type, target_type, dest_db=dest_db, population=population)
 
 
 

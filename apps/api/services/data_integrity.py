@@ -100,6 +100,9 @@ def _check_coercion_safety(
         dest_db_type=dest_kind or "",
         dest_table_exists=dest_table_exists,
         proven_width_narrowings=proven_width_narrowings,
+        # The measured cells decide questions a declared type cannot (a
+        # nanosecond column whose rows hold microseconds loses nothing).
+        sample_rows=rows,
     )
     mode = (validation_mode or "strict").strip().lower()
     if mode == "lenient" and _lenient_object_store_copy(source_db_type, dest_kind):
@@ -174,6 +177,7 @@ def _check_coercion_safety(
             is_lossy_coercion,
             is_precision_collapse_coercion,
         )
+        from services.column_case import column_population
         from services.type_system import resolve_mapping_target_type
 
         src_t = str(column_type_or_none(source_types, src) or source_types.get(src) or "")
@@ -183,11 +187,13 @@ def _check_coercion_safety(
             source_type=src_t,
             dest_db_type=dest_kind,
         )
+        population = column_population(sample_rows, src)
         if mapping and is_precision_collapse_coercion(
             src_t,
             tgt_t,
             dest_db=dest_kind,
             dest_table_exists=dest_table_exists,
+            population=population,
             source=str(mapping.get("source") or src),
             target=str(mapping.get("target") or ""),
             proven=proven_width_narrowings,
@@ -205,6 +211,7 @@ def _check_coercion_safety(
                 tgt_t,
                 dest_db=dest_kind,
                 dest_table_exists=dest_table_exists,
+                population=population,
                 source=str(mapping.get("source") or src),
                 target=str(mapping.get("target") or ""),
                 proven=proven_width_narrowings,

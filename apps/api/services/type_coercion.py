@@ -313,7 +313,9 @@ def is_precision_collapse_coercion(
         dest_table_exists=dest_table_exists,
     ):
         return True
-    if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
+    if temporal_precision_would_narrow(
+        source_type, target_type, dest_db=dest_db, population=population
+    ):
         return True
     return False
 
@@ -930,7 +932,9 @@ def is_lossy_coercion(
             return True
         if bfile_locator_would_collapse(source_type, target_type):
             return True
-        if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
+        if temporal_precision_would_narrow(
+        source_type, target_type, dest_db=dest_db, population=population
+    ):
             return True
         if src == LOGICAL_STRUCT and nested_struct_fields_incompatible(
             source_type, target_type, dest_db=dest_db
@@ -1131,7 +1135,9 @@ def is_lossy_coercion(
         return True
     if bfile_locator_would_collapse(source_type, target_type):
         return True
-    if temporal_precision_would_narrow(source_type, target_type, dest_db=dest_db):
+    if temporal_precision_would_narrow(
+        source_type, target_type, dest_db=dest_db, population=population
+    ):
         return True
     if document_domain_would_collapse(source_type, target_type, dest_db=dest_db):
         return True
