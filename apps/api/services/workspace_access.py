@@ -123,12 +123,23 @@ def workspace_resource_is_visible(
     return resource_scope == scope
 
 
-def assert_resource_workspace(request: Request, resource_workspace_id: str | None) -> None:
+def assert_resource_workspace(
+    request: Request,
+    resource_workspace_id: str | None,
+    *,
+    write: bool = False,
+) -> None:
     """404 an id-addressed resource the request's tenant scope does not cover.
 
     Same rule as the lists: foreign workspaces, a workspace other than the
     declared header scope, and (isolation enforced) unscoped legacy rows for
-    anyone but a platform admin.
+    anyone but a platform admin. ``write=True`` is required on every route
+    that mutates the resource: the caller's RBAC permission comes from their
+    role, which is independent of the resource's workspace, so read
+    membership there must not be enough to change what lives in it (403).
     """
-    if not resolve_tenant_scope(request).allows(resource_workspace_id):
+    scope = resolve_tenant_scope(request)
+    if not scope.allows(resource_workspace_id):
         raise HTTPException(status_code=404, detail="Not found")
+    if write and not scope.can_write(resource_workspace_id):
+        raise HTTPException(status_code=403, detail="Write access to workspace denied")

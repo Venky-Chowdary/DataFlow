@@ -37,6 +37,8 @@ class World:
     ws_a: str
     ws_b: str
     ids: dict[str, str]
+    a_email: str = ""
+    b_email: str = ""
 
 
 def _login(email: str, password: str) -> TestClient:
@@ -151,7 +153,10 @@ def build_world(tmp_path, monkeypatch, *, signup: bool) -> World:
         m = _admin_account(admin, f"nomember-{tag}@example.com")
 
     ids = seed(tag=tag, ws_a=ws_a, a_email=a_email, memory=memory)
-    return World(tag=tag, admin=admin, a=a, b=b, m=m, ws_a=ws_a, ws_b=ws_b, ids=ids)
+    return World(
+        tag=tag, admin=admin, a=a, b=b, m=m, ws_a=ws_a, ws_b=ws_b, ids=ids,
+        a_email=a_email, b_email=b_email,
+    )
 
 
 def owner_marker(label: str, tag: str) -> str:
