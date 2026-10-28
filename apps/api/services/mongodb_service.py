@@ -575,7 +575,6 @@ class MongoDBService:
 
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
-        _failure_message_to_headline(status, updates)
 
         prev_doc = None
         try:
@@ -605,6 +604,7 @@ class MongoDBService:
         except Exception:
             prev_doc = None
         previous_status = (prev_doc or {}).get("status")
+        _terminal_message_over_progress(status, updates, prev_doc)
 
         # One owner: services.job_status.refuse_job_status_write.
         # Sticky terminal + cancel_requested so a late COPY `completed` cannot
@@ -1338,19 +1338,41 @@ class MongoDBService:
         return out
 
 
-def _failure_message_to_headline(status: str, fields: dict) -> None:
-    """A failed job's message names the failure, not the last progress text.
+_TERMINAL_MESSAGE_FALLBACK = {
+    "failed": "Failed",
+    "error": "Failed",
+    "cancelled": "Cancelled",
+    "completed": "Completed",
+    "completed_with_quarantine": "Completed with quarantined rows",
+    "completed_with_warnings": "Completed with warnings",
+}
 
-    Callers historically updated status+error but left ``message`` at the
-    progress copy ("Validating mapping and schema…"), so failed-at-Validate
-    jobs displayed "Validating…" while ``error`` held the reason (C23).
-    ``cancelled``/``completed_with_quarantine`` keep their own messages —
-    D102 writes a committed-row report there.
+
+def _terminal_message_over_progress(
+    status: str, fields: dict, previous: dict | None = None
+) -> None:
+    """A finished job's message never keeps an in-flight progress text.
+
+    A terminal write that carries no ``message`` of its own would leave the last
+    progress copy on the record ("Validating mapping and schema…", "Connecting
+    to destination…") next to a failed or completed status. A failed job's
+    message names the failure (C23); any other terminal status gets a neutral
+    terminal line. The previous message is progress by construction when the
+    job was not terminal yet; a repeat terminal write keeps its own message.
+    ``cancelled``/``completed_with_quarantine`` callers that report committed
+    rows (D102) pass their own ``message`` and are untouched.
     """
-    if str(status or "").lower() not in {"failed", "error"}:
+    from services.job_status import is_terminal
+
+    status_l = str(status or "").lower()
+    if status_l not in _TERMINAL_MESSAGE_FALLBACK or "message" in fields:
         return
-    if "message" not in fields and fields.get("error"):
+    if status_l in {"failed", "error"} and fields.get("error"):
         fields["message"] = str(fields["error"])[:500]
+        return
+    prev = previous or {}
+    if str(prev.get("message") or "").strip() and not is_terminal(prev.get("status")):
+        fields["message"] = _TERMINAL_MESSAGE_FALLBACK[status_l]
 
 def _created_sort_stamp(value: Any) -> str:
     """One comparable stamp. Memory jobs mix datetime and ISO strings."""
@@ -1559,7 +1581,6 @@ class MemoryMongoDBService:
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         only_from_status = kwargs.pop("only_from_status", None)
         operator_command = bool(kwargs.pop("operator_command", False))
-        _failure_message_to_headline(status, kwargs)
         rec = self._jobs.get(job_id)
         if only_from_status is not None and rec is None:
             return False
@@ -1612,6 +1633,7 @@ class MemoryMongoDBService:
                 return False
             kwargs["lease_fence"] = fence
 
+        _terminal_message_over_progress(status, kwargs, rec)
         try:
             from services.job_trust import attach_trust_to_updates
 
