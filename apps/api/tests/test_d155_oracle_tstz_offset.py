@@ -186,3 +186,47 @@ def test_offset_text_lands_as_utc_in_mariadb_datetime(instant: datetime) -> None
     # wire text into a zone-less DATETIME is stored as its UTC clock.
     bound = coerce_sql_temporal(_to_char(instant), "DATETIME(6)", engine="mariadb")
     assert bound == instant.astimezone(timezone.utc).replace(tzinfo=None)
+
+
+def test_ltz_is_rendered_without_a_tzh_tzm_element():
+    """D167: Oracle rejects TZH/TZM on WITH LOCAL TIME ZONE (ORA-01821)."""
+    import sqlalchemy as sa
+
+    from connectors.oracle_tstz import oracle_tz_select_list, oracle_tz_to_char
+
+    description = [
+        ("ID", _DbType("DB_TYPE_NUMBER")),
+        ("A", _DbType("DB_TYPE_TIMESTAMP_TZ")),
+        ("B", _DbType("DB_TYPE_TIMESTAMP_LTZ")),
+        ("C", _DbType("DB_TYPE_TIMESTAMP")),
+    ]
+    sql = oracle_tz_select_list(description)
+    tz_item = re.search(r'TO_CHAR\("A".*? AS "A"', sql).group(0)
+    ltz_item = re.search(r'TO_CHAR\(SYS_EXTRACT_UTC\("B"\).*? AS "B"', sql).group(0)
+    assert "TZH:TZM" in tz_item and "SYS_EXTRACT_UTC" not in tz_item
+    assert "SYS_EXTRACT_UTC" in ltz_item and "TZH" not in ltz_item and "+00:00" in ltz_item
+    assert '"C"' in sql and 'TO_CHAR("C"' not in sql
+    assert "TZH" not in oracle_tz_to_char('"B"', "ltz")
+    # The format's ':MI' ':SS' ':TZM' must not be read as bind variables.
+    assert sa.text(f"SELECT {sql} FROM t").compile().params == {}
+
+
+def test_typed_projection_renders_ltz_as_utc_text():
+    import sqlalchemy as sa
+    from sqlalchemy.dialects import oracle
+
+    table = sa.Table(
+        "t",
+        sa.MetaData(),
+        sa.Column("tz", oracle.TIMESTAMP(timezone=True)),
+        sa.Column("ltz", oracle.TIMESTAMP(local_timezone=True)),
+    )
+    projected = _tz_safe_projection({"type": "oracle"}, list(table.c))
+    sql = str(
+        sa.select(*projected).compile(
+            dialect=oracle.dialect(), compile_kwargs={"literal_binds": True}
+        )
+    )
+    tz_part, ltz_part = sql.split(" AS tz, ")
+    assert "TZH:TZM" in tz_part
+    assert "sys_extract_utc(t.ltz)" in ltz_part and "TZH" not in ltz_part
