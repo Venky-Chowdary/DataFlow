@@ -1892,7 +1892,6 @@ class DataPilotTools:
                 "port": port,
                 "database": database,
                 "username": username,
-                "password": password,
                 "connection_string": connection_string,
                 "service_account": service_account,
                 "ssl": ssl,

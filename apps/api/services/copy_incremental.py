@@ -193,7 +193,6 @@ def pg_cursor_predicate_sql(
     if bookmark is None:
         return ""
     cursor_ident = _quote(cursor_column)
-    pk = (pk_column or "").strip()
     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
     # D60/D98 — the run watermark re-reads the whole tie group: rows sharing
     # the watermark cursor value must be re-delivered regardless of their
@@ -219,7 +218,6 @@ def mysql_cursor_predicate_sql(
     if bookmark is None:
         return ""
     cursor_ident = _mysql_ident(cursor_column)
-    pk = (pk_column or "").strip()
     # D60/D98 — run watermark re-reads the whole tie group (>=).
     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
     clause = f"{cursor_ident} >= %s"
@@ -309,7 +307,6 @@ def sqlite_cursor_predicate_sql(
     if bookmark is None:
         return ""
     cursor_ident = sqlite_ident(cursor_column)
-    pk = (pk_column or "").strip()
     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
     cursor_ident = sqlite_cursor_operand(cursor_ident, str(cur_val))
     cur_val = sqlite_normalize_cursor_watermark(str(cur_val))

@@ -1656,7 +1656,6 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         cols = list(details.get("upsert_key_columns") or [])
         planned_ddl = str(details.get("planned_ddl") or "")
         dup_keys = details.get("duplicate_key_count")
-        approved = bool(details.get("ddl_acknowledged"))
         if dup_keys:
             summary = (
                 f"Upsert into this existing table keys on "

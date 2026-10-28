@@ -936,10 +936,6 @@ def _transform_applied_proof(
         re.I,
     )
 
-    _NUMERIC_DDL = re.compile(
-        r"NUMERIC|DECIMAL|INT|FLOAT|DOUBLE|REAL|MONEY", re.I
-    )
-
     def _key_norm(v: Any) -> str:
         # Join keys + source-side row hashes. Strings stay literal — a text
         # key '01' never collapses into '1' or 'A ' into 'A'. Non-str driver

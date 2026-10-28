@@ -1388,22 +1388,6 @@ def _open_finding(
         logger.exception("Schedule %s could not be parked on a decision", schedule_id)
 
 
-def _abandon_unclaimed_schedule_job(job_id: str) -> None:
-    """A pending job that lost the schedule claim must not stay runnable."""
-    if not str(job_id or "").strip():
-        return
-    try:
-        from services.mongodb_service import get_mongodb_service
-
-        get_mongodb_service().update_job_status(
-            job_id,
-            "cancelled",
-            message="Schedule claim was already held; this attempt was not started.",
-        )
-    except Exception:
-        logger.debug("unclaimed schedule job %s was not cancelled", job_id, exc_info=True)
-
-
 def _record_authorization_use(schedule_id: str, *, rebind: bool = False) -> None:
     from services.schedule_approvals import record_authorization_use
 
