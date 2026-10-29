@@ -182,12 +182,23 @@ def omit_missing_fields(
     return out
 
 
+def _is_document_column(col: str, dest_types: dict[str, str] | None) -> bool:
+    declared = str((dest_types or {}).get(col) or "")
+    if not declared:
+        return False
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(declared) in {"json", "array", "object", "struct", "map"}
+
+
 def mapped_row_to_json_record(
     row: tuple | list,
     target_cols: list[str],
     dest_types: dict[str, str] | None = None,
     *,
     omit_sql_null: bool = False,
+    exact_decimal: bool = False,
+    omit_document_sql_null: bool = False,
 ) -> dict[str, Any]:
     """One object-store JSON record — omit ``DF_MISSING`` keys (Kafka-class)."""
 
@@ -196,8 +207,12 @@ def mapped_row_to_json_record(
     for col, val in zip(target_cols, row):
         if is_missing_sentinel(val):
             continue
-        converted = to_json_value(val, col, dest_types)
-        if omit_sql_null and converted is None:
+        converted = to_json_value(val, col, dest_types, exact_decimal=exact_decimal)
+        if converted is None and (
+            omit_sql_null or (omit_document_sql_null and _is_document_column(col, dest_types))
+        ):
+            # A document column can hold JSON null as a value, so its SQL NULL
+            # is the absent key. Every other column keeps its key (D144).
             continue
         rec[col] = converted
     return rec
@@ -209,11 +224,14 @@ def iter_mapped_json_records(
     dest_types: dict[str, str] | None = None,
     *,
     omit_sql_null: bool = False,
+    exact_decimal: bool = False,
+    omit_document_sql_null: bool = False,
 ):
     """Yield JSON records without materializing the full list."""
     for row in mapped_rows:
         yield mapped_row_to_json_record(
-            row, target_cols, dest_types, omit_sql_null=omit_sql_null)
+            row, target_cols, dest_types, omit_sql_null=omit_sql_null,
+            exact_decimal=exact_decimal, omit_document_sql_null=omit_document_sql_null)
 
 
 def iter_mapped_delimited_records(
@@ -589,7 +607,12 @@ def to_delimited_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
     return parsed
 
 
-def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
+_EXACT_DECIMAL_TEXT = re.compile(r"^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$")
+
+
+def to_json_value(
+    value: Any, col: str, dest_types: dict[str, str], *, exact_decimal: bool = False
+) -> Any:
     """Convert a mapped cell to a JSON-serializable scalar.
 
     Preserves strings/dates as text; parses structural and numeric JSON values
@@ -651,6 +674,18 @@ def to_json_value(value: Any, col: str, dest_types: dict[str, str]) -> Any:
         if coerced is not value:
             return coerced
         return value
+    if exact_decimal and ctype in {"decimal", "numeric"} and not isinstance(value, bool):
+        # A JSON number has no binary64 limit. The file sinks dump with
+        # ``json_dumps_exact_numbers``, so a DECIMAL cell is written with the
+        # digits and scale the source stated: ``0.1000000000`` and ``1`` stay
+        # that, instead of ``0.1`` / ``1.0`` beside quoted text for the values
+        # binary64 could not hold (D144).
+        if isinstance(value, Decimal) and value.is_finite():
+            return value
+        if isinstance(value, int):
+            return value
+        if isinstance(value, str) and _EXACT_DECIMAL_TEXT.match(value.strip()):
+            return Decimal(value.strip())
     if ctype in {
         "integer",
         "int",

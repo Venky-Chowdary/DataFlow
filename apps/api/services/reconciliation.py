@@ -3141,6 +3141,18 @@ def fingerprint_for_reconcile(
         # that really did store an empty string.
         wire = None
         value = None
+    if wire is not None and type(wire).__name__ == "JsonNullToken" and ddl_type:
+        # A file read-back hands a present JSONL ``null`` over as the JSON-null
+        # token. Only a document column can hold JSON null as a value; on
+        # every other column the file's ``null`` is the SQL NULL the writer
+        # emitted for it (D144 — the key is no longer dropped).
+        from services.type_system import normalize_logical_type
+
+        if normalize_logical_type(ddl_type) not in {
+            "json", "array", "object", "struct", "map",
+        }:
+            wire = None
+            value = None
     if isinstance(wire, str):
         # Wire decode before any stage re-encodes: ``__DF_ESC__x`` is the
         # literal ``x`` (one layer — the recursive escape stays provable), so

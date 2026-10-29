@@ -40,6 +40,7 @@ _TOKEN_RE = re.compile(
     |'(?:[^']|'')*'                  # 'string' literal with '' escape
     |"(?:[^"]|"")*"                  # "quoted identifier"
     |\[[^\]]+\]                      # [bracketed identifier]
+    |`(?:[^`]|``)*`                  # `backtick identifier` (MySQL)
     |-?\d+(?:\.\d+)?                 # number literal
     |[a-z_][a-z0-9_.$#]*             # bare identifier / keyword
     |\s+|[^\s]                       # whitespace (skip) / other token
@@ -168,6 +169,10 @@ class _Parser:
             inner = self.parse_or()
             if self.next() != ")":
                 raise _ParseFail("missing )")
+            # SQL Server stores ``[amount]>=(0)``: a parenthesised operand is
+            # its value, not a boolean test of it.
+            if isinstance(inner, tuple) and inner and inner[0] == "truthy":
+                return inner[1]
             return inner
         if tok.startswith("'"):
             val = tok[1:-1].replace("''", "'")
@@ -184,6 +189,8 @@ class _Parser:
             ident = tok[1:-1].replace('""', '"')
         elif tok.startswith("["):
             ident = tok[1:-1]
+        elif tok.startswith("`"):
+            ident = tok[1:-1].replace("``", "`")
         else:
             ident = tok
         # schema.table.column → column
@@ -210,6 +217,15 @@ def _compile(predicate: str) -> Any:
     folded: list[str] = []
     i = 0
     while i < len(tokens):
+        # MySQL prints string literals with a charset introducer
+        # (``_utf8mb4'paid'``); the introducer carries no value.
+        if (
+            i + 1 < len(tokens)
+            and re.fullmatch(r"_[a-zA-Z0-9]+", tokens[i])
+            and tokens[i + 1].startswith("'")
+        ):
+            i += 1
+            continue
         if (
             i + 2 < len(tokens)
             and tokens[i] == ":"

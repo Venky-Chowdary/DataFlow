@@ -4752,20 +4752,22 @@ def count_avro_records(content: bytes | str | Path | Any) -> int | None:
 
 
 def _json_null_cells_as_engine_text(records: Any) -> Any:
-    """A present JSON null is the engine token ``null``, not SQL NULL.
+    """A present JSON null is the JSON-null token, not SQL NULL.
 
     Postgres projects ``jsonb`` with ``col::text``, so JSON null arrives as
     the four characters ``null`` and SQL NULL arrives as Python ``None``.
-    The export writes SQL NULL by omitting the key and JSON null as a bare
-    ``null``. ``json.loads`` turns that bare null into ``None``, which
-    Gate-8 then fingerprints as SQL NULL and fails a faithful Postgres → S3
-    load. Missing keys stay missing so a real SQL NULL still compares as NULL.
+    The export writes SQL NULL on a document column by omitting the key and
+    JSON null as a bare ``null``; every other column keeps its key and writes
+    SQL NULL as ``null`` (D144). The token fingerprints as ``null`` on a
+    document column and as SQL NULL on any other typed column.
     """
+    from services.value_serializer import JSON_NULL
+
     for rec in records:
         if not isinstance(rec, dict):
             yield rec
             continue
-        yield {key: ("null" if value is None else value) for key, value in rec.items()}
+        yield {key: (JSON_NULL if value is None else value) for key, value in rec.items()}
 
 
 def _iter_streaming_kind(kind: str, source: Any, *, name: str) -> Any:
