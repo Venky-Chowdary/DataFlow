@@ -440,6 +440,13 @@ def stamp_additive_mapping_types(
             or column_type_or_none(src_types, str(row.get("source") or ""))
             or "TEXT"
         )
+        # A zone the operator declared on this mapping makes a naive column an
+        # instant. The stamp is the CREATE the gates then judge the source
+        # against, so inventing it from the zoneless type created NTZ and
+        # blocked the run the declaration had just unblocked (D11).
+        from services.timezone_policy import effective_source_type
+
+        src = effective_source_type(src, row.get("transform"))
         # Source-as-dest FE bootstrap (target_type == source_type) is NOT Kernel
         # invent — must still run invent_dest_type (BQ UUID→STRING, etc.).
         # Casefold alone is unsafe: bare logical ``integer`` uppercases to the

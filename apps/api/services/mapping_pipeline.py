@@ -760,6 +760,34 @@ def _existing_open_text_column(
     return normalize_logical_type(declared) in _UNTYPED_TEXT_LOGICALS
 
 
+def _with_declared_zones(
+    source_schemas: list[dict] | None, prior_mappings: list[dict] | None
+) -> list[dict] | None:
+    """Source schemas as the operator's zone declarations make them true.
+
+    A kept ``assume_timezone:`` transform turns a naive column into an instant,
+    but the create-new stamps below are invented from the schema types, so a
+    schema still saying TIMESTAMP stamped TIMESTAMP_NTZ and the gates then
+    blocked the very declaration the operator had made (D11). Projected once
+    here so the mapper and this pipeline read the same type.
+    """
+    if not source_schemas or not prior_mappings:
+        return source_schemas
+    from services.timezone_policy import declared_source_column_types
+
+    out: list[dict] = []
+    for schema in source_schemas:
+        entry = dict(schema)
+        name = str(entry.get("name") or "")
+        for key in ("inferred_type", "native_type"):
+            if entry.get(key):
+                entry[key] = declared_source_column_types(
+                    {name: str(entry[key])}, prior_mappings
+                )[name]
+        out.append(entry)
+    return out
+
+
 def run_mapping_pipeline(
     source_columns: list[str],
     target_columns: list[str],
@@ -814,6 +842,7 @@ def run_mapping_pipeline(
             )
     from services.semantic_analyzer import analyze_schema
 
+    source_schemas = _with_declared_zones(source_schemas, prior_mappings)
     classification = classify_format(source_columns, file_format)
     # Capture what the schema actually declared before canonicalization collapses
     # VARCHAR(500) to VARCHAR. Without this the fidelity verdict cannot see a
