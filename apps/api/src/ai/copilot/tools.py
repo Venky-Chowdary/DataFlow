@@ -30,7 +30,7 @@ from ..rag.query_analysis import (
 )
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
-from .tool_deadline import DEADLINE_TOOLS, run_with_deadline
+from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
 from .unsupported_question import (
@@ -1685,8 +1685,8 @@ class DataPilotTools:
                     reason="invalid_arguments",
                     role=role,
                 )
-            if name in DEADLINE_TOOLS:
-                # D169: a source that accepts and never answers must fail this
+            if name in DEADLINE_TOOLS | QUERY_DEADLINE_TOOLS:
+                # D169/D181: a source that accepts and never answers must fail this
                 # call with the host named, not hold it until the client's
                 # -32001 timeout.
                 result = run_with_deadline(

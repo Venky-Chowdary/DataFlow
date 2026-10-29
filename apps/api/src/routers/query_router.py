@@ -1268,6 +1268,47 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
         )
 
 
+#: Interactive statement bound; ``0`` switches it off (D181).
+DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS = 120.0
+
+
+def _apply_statement_timeout(conn: Any, db_type: str) -> None:
+    """Have the server cancel an interactive query that outlives the tool deadline.
+
+    The deadline frees the caller; this frees the database and the worker, which
+    would otherwise keep executing for nobody. Best-effort per dialect.
+    """
+    import os
+
+    raw = os.environ.get("DATAFLOW_QUERY_STATEMENT_TIMEOUT_SECONDS", "").strip()
+    try:
+        seconds = float(raw) if raw else DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
+    except ValueError:
+        seconds = DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
+    if seconds <= 0:
+        return
+    millis = int(seconds * 1000)
+    db = (db_type or "").lower()
+    if db in {"postgresql", "postgres", "cockroachdb", "greenplum", "yugabytedb"}:
+        statement = f"SET LOCAL statement_timeout = {millis}"
+    elif db in {"mysql", "tidb"}:
+        statement = f"SET SESSION MAX_EXECUTION_TIME = {millis}"
+    elif db in {"sqlserver", "mssql"}:
+        # Bounds lock waits, the usual reason a read stalls; SQL Server has no
+        # per-statement execution cap.
+        statement = f"SET LOCK_TIMEOUT {millis}"
+    else:
+        return
+    try:
+        from sqlalchemy import text
+
+        conn.execute(text(statement))
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "statement timeout not applied on %s: %s", db, exc
+        )
+
+
 def _catalog_declared_columns(
     conn: Any, sql: str, columns: list[str], dialect: str
 ) -> dict[str, str]:
@@ -1446,6 +1487,7 @@ def _run_sql_query(connector, body):
 
         with engine.connect() as conn:
             _apply_read_only_session(conn, connector.type)
+            _apply_statement_timeout(conn, connector.type)
             from services.sql_literals import escape_sqlalchemy_literal_colons
 
             tz_positions: frozenset[int] = frozenset()

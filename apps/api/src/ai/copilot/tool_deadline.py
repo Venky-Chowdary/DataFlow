@@ -1,4 +1,4 @@
-"""A deadline for pilot/MCP tools that reach out to a customer's database (D169).
+"""A deadline for pilot/MCP tools that reach out to a customer's database (D169, D181).
 
 ``start_transfer`` / ``plan_transfer`` introspect the source and destination and
 run a preflight on the request path. Against a source that accepts the TCP
@@ -9,7 +9,9 @@ and the steps stack, so the MCP client gave up first with a bare
 ``run_with_deadline`` bounds the whole call. When the deadline passes it returns
 a failure that names the host:port and the step that was waiting. The abandoned
 worker keeps running only until its driver's own (bounded) timeout fires; it
-cannot hold a request, the event loop or a pool slot of the caller.
+cannot hold a request or the event loop. It runs on the connector executor
+(``services.connector_executor``): a pool of its own with a per-workspace cap,
+where a worker that outlives the deadline is counted until it really ends.
 """
 
 from __future__ import annotations
@@ -28,6 +30,10 @@ logger = logging.getLogger(__name__)
 #: Under the MCP client's own request timeout, so the caller gets our answer.
 DEFAULT_DEADLINE_SECONDS = 45.0
 
+#: Interactive reads/probes the operator waits on. A legitimate query can run
+#: longer than a plan/preflight, so these get a more generous default (D181).
+DEFAULT_QUERY_DEADLINE_SECONDS = 120.0
+
 #: Tools that open connections to a customer system on the request path.
 DEADLINE_TOOLS = frozenset(
     {
@@ -45,14 +51,25 @@ DEADLINE_TOOLS = frozenset(
     }
 )
 
+#: Interactive tools that also dial out but had no deadline at all (D181).
+QUERY_DEADLINE_TOOLS = frozenset({"run_query", "test_connector", "aggregate_data"})
 
-def deadline_seconds() -> float:
-    raw = os.environ.get("DATAFLOW_TOOL_DEADLINE_SECONDS", "")
+
+def _seconds_from_env(name: str, default: float) -> float:
+    raw = os.environ.get(name, "")
     try:
-        value = float(raw) if raw.strip() else DEFAULT_DEADLINE_SECONDS
+        value = float(raw) if raw.strip() else default
     except ValueError:
-        value = DEFAULT_DEADLINE_SECONDS
-    return value if value > 0 else DEFAULT_DEADLINE_SECONDS
+        value = default
+    return value if value > 0 else default
+
+
+def deadline_seconds(tool: str = "") -> float:
+    if tool in QUERY_DEADLINE_TOOLS:
+        return _seconds_from_env(
+            "DATAFLOW_QUERY_TOOL_DEADLINE_SECONDS", DEFAULT_QUERY_DEADLINE_SECONDS
+        )
+    return _seconds_from_env("DATAFLOW_TOOL_DEADLINE_SECONDS", DEFAULT_DEADLINE_SECONDS)
 
 
 @dataclass
@@ -127,32 +144,35 @@ def run_with_deadline(
     *,
     seconds: float | None = None,
 ) -> Any:
-    """Run ``fn`` and return its value, or ``on_timeout(message)`` at the deadline."""
-    limit = deadline_seconds() if seconds is None else seconds
-    progress = _Progress()
-    outcome: dict[str, Any] = {}
-    done = threading.Event()
-    ctx = contextvars.copy_context()
+    """Run ``fn`` on the connector executor; return its value or ``on_timeout(message)``.
 
-    def work() -> None:
-        _progress.set(progress)
-        try:
-            outcome["value"] = fn()
-        except BaseException as exc:  # noqa: BLE001 - re-raised in the caller
-            outcome["error"] = exc
-        finally:
-            done.set()
-
-    # ``ctx.run`` carries the caller's principal / tenant scope / MCP request
-    # into the worker; ``_progress`` is set inside it so only this call sees it.
-    thread = threading.Thread(
-        target=lambda: ctx.run(work), name=f"tool-{tool}", daemon=True
+    The deadline, a workspace already at its share of calls, and a stuck worker
+    that is still being counted all answer through ``on_timeout`` with a message
+    that names what was waiting.
+    """
+    from services.connector_executor import (
+        ConnectorCallTimeout,
+        ConnectorCapacityExceeded,
+        get_executor,
     )
-    thread.start()
-    if not done.wait(limit):
-        message = _timeout_message(tool, limit, progress)
-        logger.warning("tool %s exceeded its %.0fs deadline: %s", tool, limit, message)
-        return on_timeout(message)
-    if "error" in outcome:
-        raise outcome["error"]
-    return outcome["value"]
+    from services.workspace_filter import current_workspace_stamp
+
+    limit = deadline_seconds(tool) if seconds is None else seconds
+    progress = _Progress()
+
+    def work() -> Any:
+        # ``_progress`` is set on the worker's copy of the caller's context, so
+        # only this call sees it.
+        _progress.set(progress)
+        return fn()
+
+    try:
+        return get_executor().run(
+            tool,
+            work,
+            workspace=current_workspace_stamp(),
+            seconds=limit,
+            describe_timeout=lambda: _timeout_message(tool, limit, progress),
+        )
+    except (ConnectorCallTimeout, ConnectorCapacityExceeded) as exc:
+        return on_timeout(str(exc))
