@@ -34,6 +34,7 @@ from typing import Any, Literal, Protocol
 from services.type_system import (
     is_accent_insensitive_collation,
     is_case_insensitive_collation,
+    normalize_logical_type,
     parse_collation,
 )
 
@@ -198,7 +199,7 @@ def _mysql_declared_charset(dest_type: str) -> str:
     return (m.group(1) if m else "").strip().lower()
 
 
-def _collation_for_charset(charset: str, eq: EqualityClass) -> str:
+def _collation_for_charset(charset: str, eq: EqualityClass, dialect: str = "mysql") -> str:
     """Collation in ``charset``'s own family preserving ``eq``'s polarity."""
     cs = (charset or "").strip().lower()
     if cs == "utf8":
@@ -209,6 +210,14 @@ def _collation_for_charset(charset: str, eq: EqualityClass) -> str:
         return f"{cs}_bin"
     if eq.case == "insensitive" and eq.accent == "insensitive":
         return f"{cs}_unicode_ci" if cs.startswith("utf8") else f"{cs}_general_ci"
+    if (
+        eq.case == "insensitive"
+        and eq.accent == "sensitive"
+        and cs == "utf8mb4"
+        and dialect == "mysql"
+        and eq.native_name
+    ):
+        return "utf8mb4_0900_as_ci"
     return ""
 
 
@@ -268,7 +277,7 @@ def classify_equality(
     return EqualityClass(case=case, accent=accent, native_name=name, charset=cs)
 
 
-def _mysql_dest_spelling(eq: EqualityClass) -> tuple[str, str, str]:
+def _mysql_dest_spelling(eq: EqualityClass, dialect: str = "mysql") -> tuple[str, str, str]:
     """(charset, collation, refusal). Portable names only — no UCA-version invent.
 
     PostgreSQL reports ``UTF8``. MySQL ``utf8``/``UTF8`` is utf8mb3 (BMP). Copying
@@ -288,10 +297,15 @@ def _mysql_dest_spelling(eq: EqualityClass) -> tuple[str, str, str]:
             return charset, native, ""
         return charset, "utf8mb4_unicode_ci", ""
     if eq.case == "insensitive" and eq.accent == "sensitive":
+        if dialect == "mysql" and charset == "utf8mb4" and eq.native_name:
+            # MySQL 8's own accent-sensitive CI (SQL Server CI_AS). The table
+            # DataFlow creates must carry the source's polarity, or its second
+            # run is refused for an accent-polarity change it introduced (D149).
+            return charset, "utf8mb4_0900_as_ci", ""
         return "", "", (
-            "MySQL/MariaDB have no portable accent-sensitive CI collation "
-            "(utf8mb4_0900_as_ci is version-gated). Refusing a unicode_ci "
-            "stand-in that would equate café and cafe."
+            "MariaDB and non-utf8mb4 MySQL columns have no accent-sensitive CI "
+            "collation (utf8mb4_0900_as_ci is MySQL 8 only). Refusing a "
+            "unicode_ci stand-in that would equate café and cafe."
         )
     return "", "", "Source collation equality class is unknown; refusing a guessed dest COLLATE."
 
@@ -402,7 +416,7 @@ def plan_collation_carry(
             collation = eq.native_name
             charset = eq.charset if dest in {"mysql", "mariadb"} else ""
         elif dest in {"mysql", "mariadb"}:
-            charset, collation, refusal = _mysql_dest_spelling(eq)
+            charset, collation, refusal = _mysql_dest_spelling(eq, dest)
         elif dest == "postgresql":
             if eq.case == "sensitive":
                 # Default PG equality is CS. Emitting COLLATE "C" is optional;
@@ -445,7 +459,7 @@ def plan_collation_carry(
                 # is a syntax error, and a collation from another charset's
                 # family is refused outright, so the equality polarity is
                 # re-spelled in the family the column actually stores.
-                in_family = _collation_for_charset(declared, eq)
+                in_family = _collation_for_charset(declared, eq, dest)
                 if not in_family and collation:
                     refusal = (
                         f"Destination column already stores {declared}; the "
@@ -611,6 +625,11 @@ def apply_dest_native_collation(
     if re.search(r"\bCOLLATE\b", text, re.I):
         return ddl
     if not _accepts_collation(text):
+        return ddl
+    if normalize_logical_type(source_type) in {"datetime", "date", "time"}:
+        # A temporal source stored as text (offset-bearing timestamp onto
+        # VARCHAR(64)) has no string equality to carry. Stamping the engine's
+        # default string collation made two carriers for one tstz (D144).
         return ddl
     src = _norm(source_dialect)
     declared = (parse_collation(source_type) or "").strip()

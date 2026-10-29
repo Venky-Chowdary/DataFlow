@@ -341,6 +341,7 @@ def probe_destination_privileges(
                 username=username,
                 password=password,
                 connection_string=connection_string,
+                ssl=ssl,
                 table_exists=table_exists,
                 need_update=need_update,
             )
@@ -677,6 +678,7 @@ def _probe_postgres_family(
     username: str,
     password: str,
     connection_string: str,
+    ssl: bool,
     table_exists: bool | None,
     need_update: bool,
 ) -> PrivilegeProbeResult:
@@ -689,7 +691,7 @@ def _probe_postgres_family(
         username=username,
         password=password,
         connection_string=connection_string,
-        ssl=True,
+        ssl=ssl,
     )
     # Each capability is measured on its own. ``None`` stays None when a
     # capability could not be measured, so an unmeasured one is never reported

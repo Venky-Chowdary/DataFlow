@@ -382,10 +382,10 @@ def _lsn_at_or_before(candidate: str, watermark: str) -> bool:
 
 def _parse_value(raw: str) -> str:
     """Strip PostgreSQL test_decoding quotes and null markers."""
-    from services.value_serializer import SQL_NULL_SENTINEL
+    from services.value_serializer import SQL_NULL_SENTINEL, WireCell
 
     if raw == "null" or raw == "None":
-        return SQL_NULL_SENTINEL
+        return WireCell(SQL_NULL_SENTINEL)
     if len(raw) >= 2 and raw.startswith("'") and raw.endswith("'"):
         return raw[1:-1].replace("''", "'")
     return raw
@@ -1326,7 +1326,7 @@ class PostgreSqlChangeStreamCdc:
         3. Persist ``phase=streaming`` + LSN so poll resumes without a gap window
            outside the slot (duplicates during the dump are possible; upserts OK).
         """
-        from connectors.postgresql_reader import _cell, _order_by_clause
+        from connectors.postgresql_reader import _order_by_clause
         from connectors.sql_identifiers import quote_column_list, quote_table_ref
         from connectors.sql_snapshot_scan import fetch_scan_page
         from services.cdc_snapshot_resume import (
@@ -1335,6 +1335,7 @@ class PostgreSqlChangeStreamCdc:
             quoted_pk_columns,
             snapshot_keyset_sql,
         )
+        from services.value_serializer import wire_cell
 
         # pgoutput requires the publication before the slot retains WAL for it.
         if self.output_plugin == "pgoutput":
@@ -1405,7 +1406,7 @@ class PostgreSqlChangeStreamCdc:
                             if cur.description:
                                 headers = [desc[0] for desc in cur.description]
                             records = [
-                                {headers[i]: _cell(v) for i, v in enumerate(row)}
+                                {headers[i]: wire_cell(v) for i, v in enumerate(row)}
                                 for row in fetched
                             ]
                             table_last_pk = (

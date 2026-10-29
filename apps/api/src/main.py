@@ -14,10 +14,12 @@ from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from services import connector_executor
 from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
 from services.safe_errors import public_error
+from services.upload_limits import PayloadTooLarge
 from services.audit_coverage import AuditAccessMiddleware, http_route_template
 
 # Tests and callers historically import the route-template helper from the
@@ -39,6 +41,7 @@ from services.api_errors import ApiError, api_error_handler
 from .middleware.auth_middleware import AuthMiddleware
 from .middleware.production_config_middleware import ProductionConfigMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
+from .middleware.tenant_scope_middleware import TenantScopeMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
@@ -98,6 +101,10 @@ async def lifespan(app: FastAPI):
         for msg in config_errors:
             print(f"[FATAL] Production config: {msg}")
         print("[!] Refusing traffic except /health until production config is fixed")
+    from services.platform_config import persistent_storage_warnings
+
+    for msg in persistent_storage_warnings():
+        print(f"[!] Persistent storage: {msg}")
     # Configure logging before anything else can emit a line, so no startup
     # message escapes with Uvicorn's default handler and no correlation fields.
     try:
@@ -393,6 +400,7 @@ _cors_origin_regex = os.getenv("CORS_ORIGIN_REGEX")
 if not _cors_origin_regex and is_railway():
     _cors_origin_regex = r"https://[a-zA-Z0-9_-]+\.up\.railway\.app$"
 
+app.add_middleware(TenantScopeMiddleware)
 app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
 app.add_middleware(AuthMiddleware)
@@ -733,6 +741,9 @@ async def health_check():
         "version": "1.0.0",
         "commit": _BUILD_COMMIT,
         "ready": bool(getattr(app.state, "ready", False)) and not errors,
+        # Cheap in-memory counters (D181): liveness stays liveness, but the
+        # numbers show a pool held by stuck connector calls.
+        "connector_pool": connector_executor.snapshot(),
         # Present only after proxy-write hardening is deployed. Use this to
         # confirm Railway is not still running a pre-fix API image.
         "features": {
@@ -757,6 +768,11 @@ async def health_ready():
     to a pod that cannot accept transfer jobs.
     """
     payload = aggregate_health()
+    pool = connector_executor.readiness()
+    payload["connector_pool"] = pool
+    if not pool["ok"] and payload.get("status") == "healthy":
+        payload["status"] = "degraded"
+        payload["detail"] = pool["reason"]
     warm = bool(getattr(app.state, "ready", False))
     payload["ready"] = warm and payload.get("status") == "healthy"
     if not payload["ready"] and payload.get("status") == "healthy":
@@ -830,6 +846,21 @@ async def connector_store_error_handler(request: Request, exc: ConnectorStoreErr
         status_code=503,
         content={"error": "connector_store_unavailable", "detail": str(exc)},
     )
+
+
+@app.exception_handler(PayloadTooLarge)
+async def payload_too_large_handler(request: Request, exc: PayloadTooLarge):
+    """An upload or its gzip expansion crossed the configured byte ceiling."""
+    logger.warning("Payload refused on %s: %s", request.url.path, exc)
+    content: dict[str, object] = {
+        "error": "payload_too_large",
+        "detail": str(exc),
+        "limit_bytes": exc.limit,
+        "setting": f"DATAFLOW_{exc.setting}",
+    }
+    if exc.actual is not None:
+        content["actual_bytes"] = exc.actual
+    return JSONResponse(status_code=413, content=content)
 
 
 @app.exception_handler(Exception)

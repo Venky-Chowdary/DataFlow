@@ -94,20 +94,20 @@ def test_fix_bad_data_not_offered_on_structural_failures(err):
 # ── Failed-at-Validate message names the reason ────────────────────────────
 
 def test_failed_job_message_carries_error_not_progress_text():
-    from services.mongodb_service import _failure_message_to_headline
+    from services.mongodb_service import _terminal_message_over_progress
 
     fields = {"error": "Validate gate g9 blocked: dest DDL incompatible"}
-    _failure_message_to_headline("failed", fields)
+    _terminal_message_over_progress("failed", fields)
     assert fields["message"] == fields["error"]
 
     # An explicit caller message is not clobbered.
     fields = {"error": "e", "message": "custom"}
-    _failure_message_to_headline("failed", fields)
+    _terminal_message_over_progress("failed", fields)
     assert fields["message"] == "custom"
 
     # Non-failure statuses are untouched.
     fields = {"error": "e"}
-    _failure_message_to_headline("completed", fields)
+    _terminal_message_over_progress("completed", fields)
     assert "message" not in fields
 
 

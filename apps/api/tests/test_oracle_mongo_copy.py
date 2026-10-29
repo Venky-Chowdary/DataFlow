@@ -243,7 +243,7 @@ def test_live_oracle_mongo_varchar2_empty_is_null():
         ora.close()
 
 
-def test_live_oracle_mongo_skip_when_dest_count_matches():
+def test_live_oracle_mongo_equal_count_append_declines():
     pytest.importorskip("pymongo")
     ora = _ora_connect()
     tag = uuid.uuid4().hex[:8].upper()
@@ -264,17 +264,19 @@ def test_live_oracle_mongo_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_oracle_to_mongo(
-            source_cfg=_ora_cfg(),
-            source_table=src,
-            dest_cfg=_mongo_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            mongo_ddls=["NUMBER", "VARCHAR2(32)"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
+        # An append into an occupied Mongo destination is never skipped on a
+        # matching COUNT: equal counts do not prove equal content and an
+        # identity insert would duplicate. The route declines to the row path.
+        with pytest.raises(FastPathUnavailable, match="occupied Mongo dest"):
+            copy_oracle_to_mongo(
+                source_cfg=_ora_cfg(),
+                source_table=src,
+                dest_cfg=_mongo_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                mongo_ddls=["NUMBER", "VARCHAR2(32)"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         _drop_ora(ora.cursor(), src)

@@ -129,7 +129,7 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Mapping, MutableMapping, Sequence
 
-from services.value_serializer import is_null_evidence
+from services.value_serializer import key_identity_text
 from services.dest_precount import (
     ARTIFACT_COUNT_KEY,
     CURRENT_ROWS_KEY,
@@ -521,7 +521,7 @@ def format_delete_keys(keys: Sequence[tuple[Any, ...]]) -> list[str]:
 
     out: list[str] = []
     for tup in keys:
-        if any(is_null_evidence(p) for p in tup):
+        if any(key_identity_text(p) is None for p in tup):
             continue
         parts = [str(coerce_pk_part(p)) for p in tup]
         out.append(_PK_SEP.join(parts) if len(parts) > 1 else parts[0])
@@ -683,7 +683,7 @@ def _unique_source_keys(
     seen: set[tuple[Any, ...]] = set()
     for raw in keys:
         tup = tuple(raw)
-        if len(tup) != width or any(is_null_evidence(v) for v in tup):
+        if len(tup) != width or any(key_identity_text(v) is None for v in tup):
             return None
         if tup in seen:
             return None

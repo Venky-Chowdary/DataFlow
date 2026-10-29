@@ -265,7 +265,7 @@ def test_postgres_null_csv_readback_is_not_an_empty_string():
     recs = list(iter_csv_records(_io.StringIO(text)))
     assert recs[1][1] is None
     assert recs[2][1] == ""
-    rows = list(iter_csv_dicts(body))
+    list(iter_csv_dicts(body))
     source_null = fingerprint_for_reconcile(None, ddl_type="TEXT", engine="postgresql")
     dest_null = fingerprint_for_reconcile(recs[1][1], ddl_type="TEXT", engine="s3")
     dest_empty = fingerprint_for_reconcile(recs[2][1], ddl_type="TEXT", engine="s3")

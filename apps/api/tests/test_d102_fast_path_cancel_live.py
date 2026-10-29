@@ -167,3 +167,35 @@ def test_sqlite_to_sqlserver_copy_stops_on_cancel(tmp_path, cancel_at_first_batc
         assert not n  # table rolled back / dropped, or present with 0 rows
     finally:
         _ss_drop(dest)
+
+
+def test_sqlite_to_mongo_copy_stops_on_cancel(tmp_path, cancel_at_first_batch):
+    """Every route into Mongo lands through insert_many_documents, so one poll
+    there covers SQLite/MySQL/PG/SQL Server/Oracle/Iceberg/S3 -> Mongo."""
+    if not _reachable(27017):
+        pytest.skip("MongoDB 27017 not reachable")
+    pymongo = pytest.importorskip("pymongo")
+    from services.copy_sqlite_mongo import copy_sqlite_to_mongo
+
+    src_db = tmp_path / "src.db"
+    _seed_sqlite(src_db, "src_t", 500)
+    dest = f"d102_mongo_{uuid.uuid4().hex[:8]}"
+    client = pymongo.MongoClient("mongodb://127.0.0.1:27017", serverSelectionTimeoutMS=3000)
+    try:
+        with pytest.raises(TransferCancelled):
+            copy_sqlite_to_mongo(
+                source_cfg={"type": "sqlite", "format": "sqlite",
+                            "database": str(src_db), "table": "src_t"},
+                source_table="src_t",
+                dest_cfg={"type": "mongodb", "host": "127.0.0.1", "port": 27017,
+                          "database": "dataflow", "table": dest, "collection": dest},
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                mongo_ddls=["INTEGER", "TEXT"],
+                replace_destination=True,
+            )
+        assert cancel_at_first_batch["n"] >= 1
+        assert client["dataflow"][dest].count_documents({}) == 0
+    finally:
+        client["dataflow"][dest].drop()
+        client.close()

@@ -111,6 +111,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [egressTenant, setEgressTenant] = useState<{ workspace_id?: string; egress_allowlist?: string[] } | null | undefined>(undefined);
   const postureRequest = useRef(0);
   const workspaceManage = useWriteGate(PERMISSIONS.workspaceManage);
+  // The key store is deployment-wide, so keys are IAM administration (iam.manage).
+  const iamManage = useWriteGate(PERMISSIONS.iamManage);
   const retentionPurgeDisabled = !workspaceManage.allowed
     || retentionLoading
     || !retentionResult?.dry_run
@@ -1240,11 +1242,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </div>
                 </div>
                 <PermissionNotice
-                  allowed={workspaceManage.allowed}
-                  reason={workspaceManage.reason}
-                  what="API keys are administered by workspace admins."
+                  allowed={iamManage.allowed}
+                  reason={iamManage.reason}
+                  what="API keys are administered by platform admins."
                 />
-                {apiKeysError && workspaceManage.allowed && (
+                {apiKeysError && iamManage.allowed && (
                   <div className="df2-permission-notice" role="alert" data-testid="api-keys-load-error">
                     <DtIcon name="alert" size={16} />
                     <p>
@@ -1296,8 +1298,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <button
                       type="button"
                       className="df2-btn df2-btn-primary"
-                      disabled={apiKeyGenerating || !workspaceManage.allowed}
-                      title={workspaceManage.reason || undefined}
+                      disabled={apiKeyGenerating || !iamManage.allowed}
+                      title={iamManage.reason || undefined}
                       onClick={() => void generateApiKey()}
                     >
                       <DtIcon name="plus" size={14} />
@@ -1371,8 +1373,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             <button
                               type="button"
                               className="df2-btn df2-btn-sm df2-btn-danger"
-                              disabled={revokingKeyId === key.id || !workspaceManage.allowed}
-                              title={workspaceManage.reason || undefined}
+                              disabled={revokingKeyId === key.id || !iamManage.allowed}
+                              title={iamManage.reason || undefined}
                               onClick={() => void revokeKey(key.id, key.name)}
                             >
                               {revokingKeyId === key.id ? "Revoking…" : "Revoke"}

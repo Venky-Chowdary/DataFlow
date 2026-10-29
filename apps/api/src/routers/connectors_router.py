@@ -28,7 +28,9 @@ from services.workspace_access import (
     tenant_scope,
 )
 from services.value_serializer import json_default
+from services.upload_limits import PayloadTooLarge, read_upload
 from services.connector_telemetry import connector_operation, driver_family
+from services.rbac import require_admin_connector_access
 
 from ..services.file_parser import FileParser
 from ..services.mongodb_service import get_mongodb_service
@@ -39,6 +41,16 @@ router = APIRouter(prefix="/connectors", tags=["Connectors"])
 from services.ops_events import emit_event
 
 logger = logging.getLogger(__name__)
+
+
+def _refresh_saved_connectors(xfer_req: Any) -> None:
+    """Replay a stored request against the saved connectors' current settings (D172)."""
+    from ..transfer.adapters import refresh_saved_connectors
+
+    try:
+        refresh_saved_connectors(xfer_req)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 def _job_contract_flags(xfer_req: Any) -> tuple[bool, bool]:
@@ -201,7 +213,8 @@ class TransferRequest(BaseModel):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @router.post("/test")
-async def test_connection(request: TestConnectionRequest):
+async def test_connection(request: TestConnectionRequest, http_request: Request):
+    require_admin_connector_access(http_request, request.type)
     with connector_operation(
         "probe",
         driver_family="unknown",
@@ -327,6 +340,19 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
         }
 
 
+def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
+    """Refuse to persist a connector whose dial targets break the egress policy.
+
+    Audit-first for private hosts and never applied to an unchanged target
+    (``connector_save_refusal``); metadata and link-local always refuse.
+    """
+    from services.egress_guard import connector_save_refusal
+
+    refusal = connector_save_refusal(data)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+
+
 @router.post("/", response_model=ConnectorResponse)
 async def create_connector(
     config: ConnectorConfig,
@@ -335,6 +361,7 @@ async def create_connector(
 ):
     """Create and save a new connector configuration (file store + MongoDB when available)."""
     workspace_id = resolve_write_workspace(request, workspace_id)
+    require_admin_connector_access(request, config.type)
     connector_data = {
         "name": config.name,
         "type": config.type,
@@ -361,6 +388,7 @@ async def create_connector(
         "workspace_id": workspace_id,
         "status": "configured",
     }
+    _refuse_unsafe_egress(connector_data)
 
     # Canonical persistence: file-backed store (always works without MongoDB)
     try:
@@ -698,6 +726,7 @@ async def retry_transfer_job(
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
         xfer_req = transfer_request_from_dict(payload)
+        _refresh_saved_connectors(xfer_req)
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,
@@ -850,20 +879,83 @@ async def retry_transfer_job(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class RerunRequest(BaseModel):
+    """Optional body of a rerun: what the operator accepts for this run."""
+
+    force: bool = False
+    #: ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}`` -
+    #: the same acceptance ``plan_transfer`` takes. Signs a continue-policy Risk
+    #: Contract on the replayed mappings so rows that no longer cast (the source
+    #: changed since the first run) are quarantined instead of refusing the run.
+    risk_acceptance: dict[str, Any] | None = None
+
+
+def _sign_rerun_risk_acceptance(xfer_req: Any, acceptance: dict[str, Any]) -> list[str]:
+    """Sign the operator's acceptance onto the replayed request's mappings (D170).
+
+    Returns the columns that gained a contract. Refuses (400) rather than
+    silently ignoring an acceptance that signs nothing.
+    """
+    from ..ai.copilot.transfer_tools import _sign_required_risk_contracts
+
+    mappings = [dict(m) for m in (xfer_req.mappings or []) if isinstance(m, dict)]
+    if not mappings:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This job has no saved column mappings to attach a Risk Contract "
+                "to — re-plan with plan_transfer (risk_acceptance) instead."
+            ),
+        )
+    named = {
+        str(c).strip() for c in (acceptance.get("columns") or []) if str(c or "").strip()
+    }
+    table = str(
+        getattr(xfer_req.destination, "table", "")
+        or getattr(xfer_req.destination, "collection", "")
+        or ""
+    )
+    try:
+        signed = _sign_required_risk_contracts(
+            mappings, acceptance, table=table, force_columns=named or None
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    gained = [
+        str(new.get("source") or new.get("target") or "")
+        for old, new in zip(mappings, signed)
+        if new.get("risk_contract") and not old.get("risk_contract")
+    ]
+    if not gained:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "risk_acceptance signed nothing: no mapped column needs a Risk "
+                "Contract (name the columns that fail in risk_acceptance.columns)."
+            ),
+        )
+    xfer_req.mappings = signed
+    return gained
+
+
 @router.post("/jobs/{job_id}/rerun")
 async def rerun_transfer_job(
     job_id: str,
     background_tasks: BackgroundTasks,
     request: Request,
     force: bool = False,
+    body: RerunRequest | None = None,
 ):
     """Start a finished or cancelled job again as a new job.
 
     The new job records ``rerun_of`` and keeps preflight (``skip_preflight``
     stays false), so Execute re-validates. Allowed for completed,
     completed-with-quarantine, and cancelled. Append that already committed
-    rows is refused unless ``force=true``. A failed job uses ``/retry``.
+    rows is refused unless ``force=true``. A failed job uses ``/retry``. An
+    optional ``risk_acceptance`` body signs a continue-policy Risk Contract so
+    rows that no longer cast are quarantined instead of refusing the run (D170).
     """
+    force = bool(force or (body is not None and body.force))
     try:
         from ..transfer.background import run_transfer_async
         from ..transfer.engine import get_transfer_engine
@@ -883,6 +975,7 @@ async def rerun_transfer_job(
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
         xfer_req = transfer_request_from_dict(payload)
+        _refresh_saved_connectors(xfer_req)
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,
@@ -920,6 +1013,9 @@ async def rerun_transfer_job(
         # D6: record who triggered the rerun and what they acknowledged.
         actor = _actor_email(request)
         xfer_req.triggered_by = actor or f"rerun of {job_id}"
+        risk_columns: list[str] = []
+        if body is not None and body.risk_acceptance:
+            risk_columns = _sign_rerun_risk_acceptance(xfer_req, body.risk_acceptance)
         forced = bool(force and not decision["allowed"])
         if forced:
             xfer_req.acknowledgment_actor = actor
@@ -943,6 +1039,7 @@ async def rerun_transfer_job(
             "action": "rerun",
             "of": job_id,
             "forced": forced,
+            "risk_accepted_columns": risk_columns,
             "at": datetime.now(timezone.utc).isoformat(),
         }
         mongo.update_job_status(
@@ -1020,6 +1117,53 @@ def _resume_restarts_from_scratch(xfer_req: Any) -> bool:
     )
 
 
+#: Resume asks whether a CDC stream can attach before it re-queues the job; a
+#: source that does not answer inside this window refuses instead of leaving the
+#: job "running" at 5% with a frozen ``updated_at`` (D176).
+RESUME_ATTACH_DEADLINE_SECONDS = 20.0
+
+
+async def _cdc_resume_attach_refusal(xfer_req: Any) -> str:
+    """Why a CDC job's change-log stream cannot attach now; empty when it can.
+
+    Runs the same g9c log-capture check Validate runs, so Resume and Validate
+    cannot disagree, bounded by :data:`RESUME_ATTACH_DEADLINE_SECONDS`.
+    """
+    from services.preflight_population import GateStatus, _cdc_log_capture_gates
+    from services.sync_cursor import normalize_sync_mode
+
+    from ..transfer.adapters import resolve_connector_config
+    from ..transfer.cdc_transfer import cdc_source_type
+
+    if normalize_sync_mode(getattr(xfer_req, "sync_mode", "") or "", default="") != "cdc":
+        return ""
+    source = xfer_req.source
+    if getattr(source, "kind", "") in {"file", "cloud"}:
+        return ""
+    try:
+        gates = await asyncio.wait_for(
+            asyncio.to_thread(
+                _cdc_log_capture_gates,
+                list(getattr(xfer_req, "stream_contracts", None) or []),
+                source_type=cdc_source_type(source),
+                source_config=resolve_connector_config(source),
+                source_table=getattr(source, "table", "") or getattr(source, "collection", "") or "",
+                catalog_primary_key_columns=None,
+                mappings=getattr(xfer_req, "mappings", None),
+            ),
+            timeout=RESUME_ATTACH_DEADLINE_SECONDS,
+        )
+    except asyncio.TimeoutError:
+        return (
+            f"The CDC stream did not attach within {RESUME_ATTACH_DEADLINE_SECONDS:g}s. "
+            "Check that the source is reachable and the user holds REPLICATION SLAVE and "
+            "REPLICATION CLIENT, then resume again."
+        )
+    return " ".join(
+        str(g.get("message") or "") for g in gates if g.get("status") == GateStatus.BLOCK.value
+    ).strip()
+
+
 @router.post("/jobs/{job_id}/resume")
 async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, request: Request):
     """Resume a failed or paused transfer from its last durable checkpoint."""
@@ -1041,6 +1185,7 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
                 detail="This job has no saved configuration — re-run from Transfer Studio.",
             )
         xfer_req_probe = transfer_request_from_dict(payload)
+        _refresh_saved_connectors(xfer_req_probe)
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,
@@ -1093,11 +1238,24 @@ async def resume_transfer_job(job_id: str, background_tasks: BackgroundTasks, re
         # Resume is the one sanctioned exit from a terminal status, and it must
         # also drop any stale cancel request or the resumed run would abort at
         # its first checkpoint.
+        # A CDC job re-enters with the stored failure on it. Refuse while the
+        # stream still cannot attach (the failure stays visible); otherwise a
+        # resume sat "running" with the old error and no progress (D176).
+        attach_refusal = await _cdc_resume_attach_refusal(xfer_req)
+        if attach_refusal:
+            raise HTTPException(
+                status_code=409,
+                detail={
+                    "error": "Resume refused — the CDC stream cannot attach",
+                    "reasons": [attach_refusal],
+                },
+            )
         mongo.clear_job_cancel(job_id)
         mongo.update_job_status(
             job_id,
             "pending",
             message=f"Resume requested for job {job_id}",
+            error="",
             allow_terminal_exit=True,
         )
         background_tasks.add_task(
@@ -2378,7 +2536,7 @@ async def delete_connector(connector_id: str, request: Request):
         connector = mongo.get_connector(connector_id)
         if not connector:
             raise HTTPException(status_code=404, detail="Connector not found")
-        assert_resource_workspace(request, str(connector.get("workspace_id") or ""))
+        assert_resource_workspace(request, str(connector.get("workspace_id") or ""), write=True)
         success = mongo.delete_connector(connector_id)
 
         if not success:
@@ -2411,7 +2569,7 @@ async def upload_file(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     try:
-        content = await file.read()
+        content = await read_upload(file)
         use_ocr = enable_ocr.lower() in ("true", "1", "yes")
         result = FileParser.parse(
             content,
@@ -2492,7 +2650,7 @@ async def upload_file(
             "ocr_status": ocr_dependency_status(),
         }
 
-    except HTTPException:
+    except (HTTPException, PayloadTooLarge):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -2543,7 +2701,7 @@ async def transfer_data(
         if ident_err:
             raise HTTPException(status_code=400, detail=ident_err)
 
-        content = await file.read()
+        content = await read_upload(file)
         src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
         if src_fmt == "unknown":
             src_fmt = "csv"
@@ -2639,7 +2797,7 @@ async def transfer_data(
             "ddl_executed": result.ddl_executed,
             "operation": result.operation,
         }
-    except HTTPException:
+    except (HTTPException, PayloadTooLarge):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

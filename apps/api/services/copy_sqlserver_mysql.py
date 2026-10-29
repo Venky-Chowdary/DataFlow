@@ -84,9 +84,8 @@ def _select_into_mysql_load_data(
 ) -> None:
     from connectors.mysql_load_data import (
         blocking_load_data_warnings,
-        build_load_data_sql,
+        execute_load_data_local,
         mysql_load_data_session_ready,
-        quote_load_data_path,
     )
 
     ready, why = mysql_load_data_session_ready(dst_cur, dest_conn)
@@ -112,16 +111,20 @@ def _select_into_mysql_load_data(
                 # D102: a cancel stops the copy between fetch batches.
                 cancel_checkpoint()
                 batch = cur.fetchmany(_FETCH_BATCH)
+                # D168: rows read per fetch batch feed the job's progress.
+                from services.cancel_check import report_rows
+
+                report_rows(len(batch))
                 if not batch:
                     break
                 payload = "\n".join(join(encode(v) for v in row) for row in batch)
                 writer.write((payload + "\n").encode("utf-8"))
-        load_sql = build_load_data_sql(
+        execute_load_data_local(
+            dst_cur,
+            path=path,
             table_q=table_q,
             columns=columns,
-            infile_sql=quote_load_data_path(path),
         )
-        dst_cur.execute(load_sql)
         dst_cur.execute("SHOW WARNINGS")
         blocked = blocking_load_data_warnings(list(dst_cur.fetchall() or []))
         if blocked:

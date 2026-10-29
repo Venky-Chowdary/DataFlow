@@ -471,6 +471,28 @@ def quote_char_for(driver: str | None) -> str:
     return '"'
 
 
+def stored_identifier(driver: str | None, name: str) -> str:
+    """``name`` as a table DataFlow creates on this engine stores it.
+
+    The one identifier rule for hand-built SQL (SCD2 / mirror). Snowflake
+    stores what DataFlow creates folded — the writer folds create-new names
+    (``snowflake_conn.snowflake_column_ref``) and SQLAlchemy emits lower-case
+    names unquoted — and its quoted identifiers are case-sensitive, so quoting
+    the logical ``"id"`` never matched the stored ``ID`` (D47). It is also the
+    spelling a rerun reads back, so anything keyed by column name (the SCD2
+    row hash) stays stable across runs. It takes the same fold the writer
+    applies; every other engine keeps the verbatim name.
+    """
+    return fold_identifier(driver, name) if normalize_driver(driver) == "snowflake" else name
+
+
+def quote_stored_identifier(driver: str | None, name: str) -> str:
+    """:func:`stored_identifier`, quoted in the engine's own quote character."""
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    return quote_sql_identifier(stored_identifier(driver, name), quote_char_for(driver) or '"')
+
+
 def stores_boolean_as_numeric(driver: str | None) -> bool:
     """True when BOOLEAN is INTEGER/BIT/NUMBER(1), not ANSI BOOLEAN.
 

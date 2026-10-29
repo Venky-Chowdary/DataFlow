@@ -95,7 +95,7 @@ def test_new_code_voids_old():
     old_mail = await_outbox("ada@example.com")[-1]
     _age_last_sent(cid, 61)
     c.post("/api/v1/auth/resend", json={"challenge_id": cid})
-    new_mail = await_outbox("ada@example.com", min_count=2)[-1]
+    await_outbox("ada@example.com", min_count=2)[-1]
     import re
     old_code = re.search(r"\b(\d{6})\b", old_mail.text).group(1)
     # old code no longer verifies (hash was replaced)

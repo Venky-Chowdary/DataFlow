@@ -37,9 +37,15 @@ def test_sdk_registry_has_a_descriptor_for_every_registered_connector() -> None:
     } <= registered_ids
 
 
-def test_sdk_descriptors_match_discovered_sync_modes(tmp_path: Path) -> None:
-    script = tmp_path / "synthetic_tap.py"
+def test_sdk_descriptors_match_discovered_sync_modes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    taps = tmp_path / "taps"
+    taps.mkdir()
+    monkeypatch.setenv("DATAWRAP_SINGER_TAPS_DIR", str(taps))
+    script = taps / "tap-synthetic"
     script.write_text(
+        "#!" + sys.executable + "\n"
         "import json\n"
         "print(json.dumps({'type':'SCHEMA','stream':'items',"
         "'schema':{'type':'object','properties':{'id':{'type':'string'},"
@@ -48,6 +54,7 @@ def test_sdk_descriptors_match_discovered_sync_modes(tmp_path: Path) -> None:
         "'INCREMENTAL','replication-key':'updated_at'}}]}))\n",
         encoding="utf-8",
     )
+    script.chmod(0o755)
     manifest = {
         "name": "acme",
         "base_url": "http://127.0.0.1:1",
@@ -71,7 +78,7 @@ def test_sdk_descriptors_match_discovered_sync_modes(tmp_path: Path) -> None:
     }
     connectors = [
         HubSpotCDKConnector({"api_key": "synthetic-secret"}),
-        SingerTapBridge({"tap_command": [sys.executable, str(script)]}),
+        SingerTapBridge({"tap_command": ["tap-synthetic"]}),
         DeclarativeSource({"manifest": manifest}),
         DeclarativeHttpConnector(
             {

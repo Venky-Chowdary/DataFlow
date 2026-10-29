@@ -12,6 +12,8 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from services.api_errors import ApiError
+from services.rbac import require_admin_connector_access, require_admin_for_endpoints
 from src.services import auth_service
 
 _logger = logging.getLogger(__name__)
@@ -133,13 +135,15 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
         from ..ai.copilot.pilot_agent import carries_evidence
         from ..ai.copilot.tool_permissions import bind_request_principal
 
-        from services.effective_role import workspace_id_from_request_headers
+        from services.workspace_access import tenant_scope
 
         agent = get_copilot_agent()
         history = [{"role": m.role, "content": m.content} for m in request.history]
         role, _actor = _caller(http_request)
         data_context = dict(request.data_context or {})
-        ws = workspace_id_from_request_headers(http_request.headers)
+        # The workspace the turn works in is the actor's, never a bare header:
+        # a workspace they do not belong to is a 403 (D162).
+        ws = tenant_scope(http_request).requested_workspace_id
         if ws:
             data_context["workspace_id"] = ws
         else:
@@ -163,6 +167,8 @@ async def copilot_chat(request: CopilotChatRequest, http_request: Request):
             data_insight=result.data_insight,
             tools_used=getattr(result, "tools_used", []) or [],
         )
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -221,6 +227,7 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
 
     src = dict(payload.get("source") or {})
     dst = dict(payload.get("destination") or {})
+    require_admin_for_endpoints(None, src.get("workspace_id") or dst.get("workspace_id"), src, dst)
     try:
         request_obj = transfer_request_from_ack(payload)
     except ValueError as exc:
@@ -236,6 +243,13 @@ async def _start_confirmed_transfer(payload: dict) -> dict:
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     engine = get_transfer_engine()
+    from services.confirmed_transfer import assert_source_schema_unchanged
+
+    try:
+        # Staging mapped the source as it was then; Confirm checks it still is.
+        assert_source_schema_unchanged(request_obj)
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     job_id = engine._create_pending_job(request_obj)
     run_transfer_async(job_id, request_obj)
     if request_obj.source.kind == "file":
@@ -289,6 +303,9 @@ async def _run_lifecycle_confirm(
                 background_tasks,
                 http_request,
                 force=bool(payload.get("force")),
+                body=connectors_router.RerunRequest(
+                    risk_acceptance=payload.get("risk_acceptance") or None
+                ),
             )
         )
     if kind == "resume_job":
@@ -622,7 +639,7 @@ async def copilot_confirm(
         except DuplicateTransferSubmission:
             ledger.release_claim(ack_id)
             raise
-        except HTTPException:
+        except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise
         except Exception as exc:
@@ -656,7 +673,7 @@ async def copilot_confirm(
             # and no job to open.
             ledger.release_claim(ack_id)
             raise
-        except HTTPException:
+        except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise
         except Exception as exc:
@@ -680,6 +697,11 @@ async def copilot_confirm(
         return {"ok": True, "idempotent": False, "kind": kind, **result}
 
     if kind == "create_connector":
+        try:
+            require_admin_connector_access(None, payload.get("type"))
+        except (HTTPException, ApiError):
+            ledger.release_claim(ack_id)
+            raise
         from services.connector_store import (
             connector_name_conflict_message,
             connector_name_taken,
@@ -737,6 +759,9 @@ async def copilot_confirm(
             except ScheduleStartError as exc:
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+            except ApiError:
+                ledger.release_claim(ack_id)
+                raise
             if not job_id:
                 ledger.release_claim(ack_id)
                 raise HTTPException(
@@ -747,7 +772,7 @@ async def copilot_confirm(
                         "connectors still resolve."
                     ),
                 )
-        except HTTPException:
+        except (HTTPException, ApiError):
             raise
         except Exception as exc:
             ledger.release_claim(ack_id)
@@ -804,7 +829,7 @@ async def copilot_confirm(
     if kind in ACK_KIND_BY_TOOL.values():
         try:
             result = await _run_lifecycle_confirm(kind, payload, http_request, background_tasks)
-        except HTTPException:
+        except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise
         except Exception as exc:

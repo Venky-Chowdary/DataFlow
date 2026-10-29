@@ -45,6 +45,7 @@ from .schema_tools import (
     _safe_connector,
     introspect_connector_table as _introspect,
 )
+from .tool_deadline import note_step
 
 _LOG = logging.getLogger(__name__)
 
@@ -708,6 +709,7 @@ def plan_transfer(
     dedupe_key: str = "",
     cursor_column: str = "",
     cursor_semantics: str = "",
+    cursor_lookback_days: int = 0,
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     cadence: str = "",
@@ -863,6 +865,7 @@ def plan_transfer(
                 ),
             )
 
+    note_step(f"reading destination table {dst_table}", dst_conn, role="destination")
     try:
         dst_info = _introspect(dst_conn, dst_table, purpose="destination")
     except Exception as exc:
@@ -883,6 +886,7 @@ def plan_transfer(
             )
         sample_rows = list(src_info.get("sample_rows") or [])
     else:
+        note_step(f"reading source table {src_table}", src_conn, role="source")
         try:
             src_info = _introspect(src_conn, src_table, purpose="source", execute_shape=True)
         except Exception as exc:
@@ -898,6 +902,7 @@ def plan_transfer(
                     + '. Ask me to "list tables on that connector".'
                 ),
             )
+        note_step(f"sampling source table {src_table}", src_conn, role="source")
         sample_rows = _sample_rows(src_conn, src_table)
 
     src_names = [str(c.get("name")) for c in src_info["columns"] if c.get("name")]
@@ -953,6 +958,11 @@ def plan_transfer(
         source_samples=samples,
         validation_mode=validation_mode,
         destination_db_type=str(dst_info.get("db_type") or ""),
+        # The engine route maps under the source engine's identity
+        # (``_auto_map``). Without it a BSON date read as a zoneless TIMESTAMP
+        # and a PostgreSQL / Mongo VARCHAR as a code-page one, so the plan
+        # demanded a risk contract for columns Execute stamps preserve (D147).
+        source_db_type=str(src_info.get("db_type") or ""),
         schema_policy=schema_policy,
         sync_mode=mode,
         destination_table_exists=dest_exists,
@@ -980,6 +990,7 @@ def plan_transfer(
         catalog_key=_source_primary_key(src_info),
         cursor_column=cursor_column,
         cursor_semantics=cursor_semantics,
+        cursor_lookback_days=cursor_lookback_days,
     )
     if identity_error:
         return _tool_result(tool, success=False, error=identity_error)
@@ -1012,6 +1023,7 @@ def plan_transfer(
             except ValueError as exc:
                 return _tool_result(tool, success=False, error=str(exc))
 
+        note_step("running the preflight checks", src_conn, role="source")
         preflight = _run_preflight(
             src_conn=src_conn,
             dst_conn=dst_conn,
@@ -1309,6 +1321,7 @@ def _identity_stream_contract(
     catalog_key: str,
     cursor_column: str = "",
     cursor_semantics: str = "",
+    cursor_lookback_days: int = 0,
 ) -> tuple[list[dict[str, Any]], str]:
     """The stream contract Execute and preflight both read.
 
@@ -1366,10 +1379,34 @@ def _identity_stream_contract(
     cursor = ""
     semantics = ""
     inferred = False
+    poll_cursor = ""
+    poll_semantics = ""
     if mode == "cdc":
         # The log is the cursor. A table column here would make the snapshot
         # reader filter on it and skip rows the log had already captured.
         semantics = "cdc_position"
+        # A source with no readable change log falls back to polling a column
+        # (D28). The operator's column rides separately so the fallback uses it
+        # instead of the primary key, which no UPDATE ever moves.
+        raw_poll = (cursor_column or "").strip()
+        if raw_poll:
+            known = {col.lower(): col for col in source_columns}
+            poll_cursor = known.get(raw_poll.lower(), "")
+            if not poll_cursor:
+                listed = ", ".join(source_columns[:12]) or "none readable"
+                return [], (
+                    f"Source has no column `{raw_poll}`, so I cannot poll on "
+                    f"it. Columns I can see: {listed}."
+                )
+            from services.cursor_semantics import CURSOR_SEMANTICS
+
+            raw_poll_sem = (cursor_semantics or "").strip().lower()
+            if raw_poll_sem and raw_poll_sem not in CURSOR_SEMANTICS:
+                return [], (
+                    f"Unknown cursor semantics '{raw_poll_sem}' — declare one of: "
+                    + ", ".join(sorted(CURSOR_SEMANTICS))
+                )
+            poll_semantics = raw_poll_sem
     else:
         raw_cursor = (cursor_column or "").strip()
         if raw_cursor:
@@ -1418,6 +1455,10 @@ def _identity_stream_contract(
         contract["cursor_field"] = cursor
     if semantics:
         contract["cursor_semantics"] = semantics
+    if cursor_lookback_days and int(cursor_lookback_days) > 0:
+        # business_date's re-read window (D48): it was advertised but could
+        # not be declared, so the verdict always refused the date cursor.
+        contract["cursor_lookback_days"] = int(cursor_lookback_days)
     if inferred:
         contract["cursor_inferred"] = True
     if mode:
@@ -1427,6 +1468,10 @@ def _identity_stream_contract(
     if mode == "cdc":
         # Debezium default: snapshot when no resume exists, then tail the log.
         contract["snapshot_mode"] = "initial"
+        if poll_cursor:
+            contract["poll_cursor_field"] = poll_cursor
+            if poll_semantics:
+                contract["poll_cursor_semantics"] = poll_semantics
     return [contract], ""
 
 
@@ -1527,6 +1572,7 @@ def _run_preflight(
     schema_drift_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
+    from services.population_fit_scan import STUDIO_FIT_SCAN_SECONDS
     from services.preflight_run_store import save_preflight_run
     from services.preflight_service import (
         apply_policy_gates,
@@ -1672,6 +1718,11 @@ def _run_preflight(
             source_connector_id=str(src_conn.get("id") or ""),
             source_config=source_config,
             confidence_threshold=confidence_threshold_for_mode(validation_mode),
+            # An MCP request has a client timeout (-32001). The population walk
+            # behind g3f read every row of the source on this thread — 148 s for
+            # 200k Oracle rows (D145). Studio's budget applies here too: rows
+            # past it stay unproven (PARTIAL) and write-time checks still bind.
+            fit_scan_seconds=STUDIO_FIT_SCAN_SECONDS,
             # Key-addressed destinations (Mongo, Redis, vector stores) refuse a
             # write they cannot address. Studio carries the key on a stream
             # contract; the Pilot has no Map screen to fill one in, so without
@@ -1880,10 +1931,27 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
     would turn preflight into theatre, so an unavailable sample yields an empty
     list and lets those gates report SKIP honestly.
     """
+    from connectors.header_union import SCHEMALESS_SOURCE_TYPES
     from services.preflight_sample import engine_sample_rows
+    from src.transfer.connector_capabilities import resolve_driver_type
 
     from .query_tools import sample_connector_object
 
+    # A document store's preview is its raw JSON; Execute reads it through the
+    # reader, which stamps a BSON date as the UTC instant it is. Judging the
+    # preview's zoneless text refused the instant carrier ("TIMESTAMPTZ refuses
+    # naive wall-clock") for a column Execute loads cleanly (D147). The gates
+    # judge the rows Execute will read.
+    if resolve_driver_type(str(conn.get("type") or "")) in SCHEMALESS_SOURCE_TYPES:
+        read = engine_sample_rows(
+            source_kind="database",
+            source_format=str(conn.get("type") or ""),
+            source_connector_id=str(conn.get("id") or ""),
+            source_table=table,
+            limit=limit,
+        ).rows
+        if read:
+            return read
     try:
         res = sample_connector_object(
             connector_id=str(conn.get("id") or ""),
@@ -1931,12 +1999,14 @@ def _preview_bound_contract(
     """
     cid = str(contract_id or "").strip()
     require = _require_signed_flag(cid, require_signed_contract)
-    from services.contract_store import bound_contract_preview, get_contract_store
+    from services.contract_store import bound_contract_preview, contract_visible, get_contract_store
 
     preview = bound_contract_preview(cid, require_signed=require)
     if not cid:
         return preview
     contract = get_contract_store().get_contract(cid)
+    if contract is not None and not contract_visible(contract):
+        contract = None  # another workspace's contract does not exist here
     preview["contract_status"] = (
         str(getattr(contract.status, "value", contract.status)).upper()
         if contract is not None
@@ -2044,6 +2114,7 @@ def start_transfer(
     dedupe_key: str = "",
     cursor_column: str = "",
     cursor_semantics: str = "",
+    cursor_lookback_days: int = 0,
     rule_questions: list[str] | None = None,
     applied_rules: list[str] | None = None,
     cadence: str = "",
@@ -2077,6 +2148,7 @@ def start_transfer(
         dedupe_key=dedupe_key,
         cursor_column=cursor_column,
         cursor_semantics=cursor_semantics,
+        cursor_lookback_days=cursor_lookback_days,
         rule_questions=rule_questions,
         applied_rules=applied_rules,
         cadence=cadence,

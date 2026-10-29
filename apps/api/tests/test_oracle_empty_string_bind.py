@@ -209,15 +209,15 @@ def test_overlay_promotes_clickhouse_nullable_int64_datetime64():
     assert getattr(aware, "tzinfo", None) is not None
 
 
-def test_run_sparse_cdc_upsert_quarantines_empty_pk():
+def test_run_sparse_cdc_upsert_quarantines_null_pk():
     from connectors.writer_common import run_sparse_cdc_upsert
-    from services.value_serializer import DF_MISSING_SENTINEL
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
     details: list[dict] = []
     written, skipped, checksum = run_sparse_cdc_upsert(
         target_cols=["id", "note"],
         conflict_columns=["id"],
-        sparse_rows=[("", "bad"), ("2", "ok")],
+        sparse_rows=[(SQL_NULL_SENTINEL, "bad"), ("2", "ok")],
         fetch_existing_row=lambda pk: ("2", "old") if pk == ["2"] else None,
         update_non_pk=lambda non_pk, pk: 1,
         insert_present=lambda present: None,
@@ -444,10 +444,26 @@ def test_partition_dense_upsert_rows_quarantines_empty_pk():
         ["id"],
         rejected_details=details,
         policy="quarantine",
+        empty_is_null=True,
     )
     assert out == [{"id": "2", "n": 2}]
     assert details
     assert any("null/empty conflict key" in str(d.get("reason") or "") for d in details)
+
+
+def test_partition_dense_upsert_rows_keeps_empty_pk_where_empty_is_a_value():
+    """D53: only Oracle-style destinations (``''`` stored as NULL) quarantine it."""
+    from connectors.writer_common import partition_dense_upsert_rows
+
+    details: list[dict] = []
+    out = partition_dense_upsert_rows(
+        [{"id": "", "n": 1}, {"id": "2", "n": 2}],
+        ["id"],
+        rejected_details=details,
+        policy="quarantine",
+    )
+    assert out == [{"id": "", "n": 1}, {"id": "2", "n": 2}]
+    assert not details
 
 
 def test_pg_write_mapped_rows_bind_helper_not_unbound_local():

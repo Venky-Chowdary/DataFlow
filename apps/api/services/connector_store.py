@@ -21,6 +21,7 @@ from services.platform_config import data_dir
 from services.log_redaction import REDACTED
 from services.secret_config import mask_secrets_in_text
 from services.secret_vault import decrypt_secret, encrypt_secret, tenant_id_from_workspace
+from services.workspace_filter import bound_allows, bound_workspace_filter, current_workspace_filter
 
 _CONNECTOR_SECRET_KEYS = (
     "password",
@@ -146,6 +147,53 @@ def listen_port_for_connector(conn_type: str, raw: Any) -> int:
     return stored_listen_port(conn_type, raw)
 
 
+# --- TLS requirement -------------------------------------------------------
+# ``ssl_mode`` records what the USER chose, so "TLS required" is a fact and not
+# the stored default:
+#   "require" - the user turned SSL/TLS on. The connection is strictly
+#               encrypted and is never retried in plaintext.
+#   "prefer"  - negotiate TLS, plaintext allowed (explicit, API/import only).
+#   ""        - unset: the user never asked for TLS. Negotiates like "prefer".
+# Documents written before this field existed carry only the boolean ``ssl``,
+# which this store used to default to True when a caller omitted it - so a
+# legacy ``ssl=True`` cannot be told apart from an injected default. Such
+# documents are read as unset ("") until the connector is saved again.
+# For the PostgreSQL family ``SavedConnector.ssl`` is the derived strict flag
+# (``ssl_mode == "require"``), so every downstream ``ssl=True`` means required.
+SSL_MODES = ("", "prefer", "require")
+_TLS_MODE_TYPES = frozenset({"postgresql", "redshift"})
+
+
+def default_ssl(conn_type: str) -> bool:
+    """The ``ssl`` value for a caller that never said anything about TLS.
+
+    Engines with an explicit TLS mode (PostgreSQL family) negotiate: only a user's
+    choice may make TLS mandatory. Every other engine keeps its historical True.
+    """
+    return (conn_type or "").strip().lower() not in _TLS_MODE_TYPES
+
+
+def stamp_ssl_mode(doc: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    """Record the user's TLS choice from a create/update payload onto ``doc``.
+
+    A payload that says nothing about TLS leaves ``doc`` untouched.
+    """
+    if patch.get("ssl_mode") in SSL_MODES:
+        doc["ssl_mode"] = patch["ssl_mode"]
+    elif "ssl" in patch:
+        doc["ssl_mode"] = "require" if patch["ssl"] else ""
+    return doc
+
+
+def resolve_tls(conn_type: str, data: Mapping[str, Any]) -> tuple[bool, str]:
+    """Return ``(ssl, ssl_mode)`` for a stored or incoming connector document."""
+    mode = data.get("ssl_mode")
+    mode = mode if mode in SSL_MODES else ""
+    if conn_type in _TLS_MODE_TYPES:
+        return mode == "require", mode
+    return bool(data.get("ssl", True)), mode
+
+
 @dataclass
 class SavedConnector:
     id: str
@@ -160,6 +208,8 @@ class SavedConnector:
     schema: str = ""  # filled via dialect_profiles — never assume Postgres public
     connection_string: str = ""
     ssl: bool = True
+    #: What the user chose for TLS (see SSL_MODES above); "" = never asked.
+    ssl_mode: str = ""
     warehouse: str = ""
     auth_mode: str = ""
     auth_role: str = ""
@@ -220,6 +270,7 @@ class SavedConnector:
             }
         )
         password = str(lifted.get("password") or "")
+        ssl, ssl_mode = resolve_tls(conn_type, data)
         return cls(
             id=data["id"],
             name=data["name"],
@@ -232,7 +283,8 @@ class SavedConnector:
             password=password,
             schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
             connection_string=conn_str,
-            ssl=bool(data.get("ssl", True)),
+            ssl=ssl,
+            ssl_mode=ssl_mode,
             warehouse=data.get("warehouse", ""),
             auth_mode=data.get("auth_mode", ""),
             auth_role=data.get("auth_role", ""),
@@ -513,10 +565,26 @@ def _seed_defaults() -> list[SavedConnector]:
     return defaults
 
 
+def _legacy_visible() -> bool:
+    """Whether unscoped (legacy) connectors are visible to the bound caller.
+
+    Always for system scope; for a request, only when its tenant scope says so
+    (a fresh signup account's never does - D162)."""
+    return bound_allows("")
+
+
+def _workspace_or_legacy(workspace_id: str) -> dict[str, Any]:
+    """Mongo filter: this workspace, plus the legacy rows when the caller may see them."""
+    arms: list[dict[str, Any]] = [{"workspace_id": workspace_id}]
+    if _legacy_visible():
+        arms.append({"workspace_id": {"$in": ["", None]}})
+    return {"$or": arms}
+
+
 def _list_file(role: str | None, workspace_id: str | None = None) -> list[SavedConnector]:
     items = _load_all()
     if workspace_id is not None:
-        items = [c for c in items if c.workspace_id == workspace_id or c.workspace_id == ""]
+        items = [c for c in items if c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible())]
     if role:
         items = [c for c in items if c.role == role or c.role == "both"]
     return items
@@ -528,7 +596,7 @@ def _list_mongo(role: str | None, workspace_id: str | None = None) -> list[Saved
     if role:
         filters.append({"$or": [{"role": role}, {"role": "both"}]})
     if workspace_id is not None:
-        filters.append({"$or": [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]})
+        filters.append(_workspace_or_legacy(workspace_id))
     query = {"$and": filters} if len(filters) > 1 else (filters[0] if filters else {})
     return _materialize_docs(coll.find(query))
 
@@ -569,18 +637,35 @@ def _workspace_scope(workspace_id: str | None) -> str | None:
 
 
 def list_connectors(role: str | None = None, workspace_id: str | None = None) -> list[SavedConnector]:
+    """Saved connectors, limited to the tenant scope bound to this request.
+
+    ``workspace_id`` narrows further. With nothing bound (schedulers, workers,
+    scripts) this is system scope; inside a request a caller that forgot to
+    pass a filter still cannot read another workspace's credentials (D154).
+    """
     workspace_id = _workspace_scope(workspace_id)
     if _use_mongo():
         try:
-            return _list_mongo(role, workspace_id)
+            return _visible_connectors(_list_mongo(role, workspace_id))
         except Exception as exc:
             logger.warning("MongoDB list_connectors failed, falling back to file: %s", exc)
-    return _list_file(role, workspace_id)
+    return _visible_connectors(_list_file(role, workspace_id))
+
+
+def _visible_connectors(connectors: list[SavedConnector]) -> list[SavedConnector]:
+    visible = current_workspace_filter()
+    if visible is None:
+        return connectors
+    return [c for c in connectors if visible.matches(c.workspace_id)]
 
 
 def _get_file(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     for c in _load_all():
-        if c.id == connector_id and (workspace_id is None or c.workspace_id == workspace_id or c.workspace_id == ""):
+        if c.id == connector_id and (
+            workspace_id is None
+            or c.workspace_id == workspace_id
+            or (c.workspace_id == "" and _legacy_visible())
+        ):
             return c
     return None
 
@@ -599,7 +684,7 @@ def _connector_id_query(connector_id: str, workspace_id: str | None = None) -> d
         query = {
             "$and": [
                 query,
-                {"$or": [{"workspace_id": workspace_id}, {"workspace_id": {"$in": ["", None]}}]},
+                _workspace_or_legacy(workspace_id),
             ]
         }
     return query
@@ -613,12 +698,29 @@ def _get_mongo(connector_id: str, workspace_id: str | None = None) -> SavedConne
 
 def get_connector(connector_id: str, workspace_id: str | None = None) -> SavedConnector | None:
     workspace_id = _workspace_scope(workspace_id)
+    found: SavedConnector | None
     if _use_mongo():
         try:
-            return _get_mongo(connector_id, workspace_id)
+            found = _get_mongo(connector_id, workspace_id)
+            return found if found is None or bound_allows(found.workspace_id) else None
         except Exception as exc:
             logger.warning("MongoDB get_connector failed, falling back to file: %s", exc)
-    return _get_file(connector_id, workspace_id)
+    found = _get_file(connector_id, workspace_id)
+    return found if found is None or bound_allows(found.workspace_id) else None
+
+
+def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
+    """``(exists, workspace_id)`` for an id, read without the caller's scope.
+
+    Only for authorization: a router asks who owns an id so it can refuse a
+    caller outside that workspace (404) or without write access to it (403)
+    instead of silently treating the connector as missing.
+    """
+    with bound_workspace_filter(None):
+        conn = get_connector(connector_id)
+    if conn is None:
+        return False, ""
+    return True, str(getattr(conn, "workspace_id", "") or "")
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
@@ -626,6 +728,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
 
     data = apply_sftp_uri_endpoint(data)
     conn_type = data["type"]
+    ssl, ssl_mode = resolve_tls(conn_type, stamp_ssl_mode(dict(data), data))
     conn = SavedConnector(
         id=str(uuid.uuid4()),
         name=data["name"],
@@ -638,7 +741,8 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         password=data.get("password", ""),
         schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
         connection_string=data.get("connection_string", ""),
-        ssl=bool(data.get("ssl", True)),
+        ssl=ssl,
+        ssl_mode=ssl_mode,
         warehouse=data.get("warehouse", ""),
         auth_mode=data.get("auth_mode", ""),
         auth_role=data.get("auth_role", ""),
@@ -716,8 +820,10 @@ def _coerce_secret_update(new: Any, existing: Any) -> Any:
 
 def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str | None = None) -> SavedConnector | None:
     workspace_id = _workspace_scope(workspace_id)
+    if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
+        return None
     def _merge(existing: SavedConnector) -> SavedConnector:
-        merged = {**existing.to_dict(), **data, "id": connector_id}
+        merged = stamp_ssl_mode({**existing.to_dict(), **data, "id": connector_id}, data)
         # Never let a masked UI payload overwrite a saved secret / connection string.
         for secret_field in ("password", "api_key", "service_account", "private_key"):
             merged[secret_field] = _coerce_secret_update(merged.get(secret_field), existing.to_dict().get(secret_field))
@@ -742,7 +848,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             # only a masked/empty placeholder, and a legacy plaintext secret is
             # re-encrypted by _encrypt_connector_doc — every successful update
             # heals the record instead of refusing it.
-            merged = {**raw, **data, "_id": raw.get("_id")}
+            merged = stamp_ssl_mode({**raw, **data, "_id": raw.get("_id")}, data)
             merged.pop("id", None)
             for secret_field in _DOC_SECRET_KEYS:
                 merged[secret_field] = _coerce_secret_update(
@@ -781,6 +887,8 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
 
 def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool:
     workspace_id = _workspace_scope(workspace_id)
+    if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
+        return False
     if _use_mongo():
         try:
             coll = _mongo_collection()
@@ -795,7 +903,7 @@ def delete_connector(connector_id: str, workspace_id: str | None = None) -> bool
         c for c in connectors
         if not (
             c.id == connector_id
-            and (workspace_id is None or c.workspace_id == workspace_id or c.workspace_id == "")
+            and (workspace_id is None or c.workspace_id == workspace_id or (c.workspace_id == "" and _legacy_visible()))
         )
     ]
     if len(filtered) == before:

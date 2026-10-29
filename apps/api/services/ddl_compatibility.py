@@ -192,6 +192,21 @@ def evaluate_ddl_compatibility(
     if not mappings:
         return False, ["No column mappings defined"]
 
+    if relational_ddl:
+        # D54: names the writer sanitises to the same identifier. Found here
+        # they are a rename; found at write they are a driver error after DDL.
+        from connectors.sql_identifiers import sanitized_name_collisions
+        from services.mapping_constraints import write_mappings
+
+        for ident, originals in sanitized_name_collisions(
+            [str(m.get("target") or "") for m in write_mappings(mappings)], dest_kind
+        ):
+            issues.append(
+                "Column names collide once made legal for the destination: "
+                + " and ".join(repr(o) for o in originals)
+                + f" both become {ident!r}. Rename one of them in Map."
+            )
+
     from services.batch_progress import effective_backfill_new_fields
 
     # CREATE TABLE permission ≠ ALTER ADD COLUMN. Missing columns on an existing

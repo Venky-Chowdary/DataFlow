@@ -15,11 +15,12 @@ from typing import Any, Optional
 
 from pymongo import MongoClient
 
+
 # Callers import the terminal-status set from this module (cancel-race guard).
 from services.job_status import COMPLETED_STATUSES, TERMINAL_STATUSES as TERMINAL_JOB_STATUSES
 from services.ops_events import emit_event
 from services.runtime_estimate import append_throughput_mark
-from services.workspace_filter import WorkspaceFilter
+from services.workspace_filter import WorkspaceFilter, bound_allows
 
 
 logger = logging.getLogger(__name__)
@@ -383,6 +384,8 @@ class MongoDBService:
         id_clauses.append({"id": connector_id})
 
         result = collection.find_one({"$or": id_clauses})
+        if result and not bound_allows(result.get("workspace_id")):
+            return None
         if result:
             result["_id"] = str(result["_id"])
             return _decrypt_connector_secrets(result)
@@ -395,6 +398,8 @@ class MongoDBService:
 
         connectors = []
         for doc in collection.find().sort("created_at", -1):
+            if not bound_allows(doc.get("workspace_id")):
+                continue
             doc["_id"] = str(doc["_id"])
             connectors.append(_decrypt_connector_secrets(doc) or doc)
         return connectors
@@ -459,7 +464,7 @@ class MongoDBService:
 
     def get_client_for_connector(self, connector_id: str):
         """Build MongoClient from saved connector config (file store or platform MongoDB)."""
-        from pymongo import MongoClient
+        from connectors.mongodb_common import guarded_mongo_client
         from src.transfer.adapters import (
             _lookup_saved_connector,
             mongodb_connection_string,
@@ -469,7 +474,11 @@ class MongoDBService:
         if not connector:
             return None, None
         conn_str = mongodb_connection_string(connector)
-        return MongoClient(conn_str, serverSelectionTimeoutMS=10000), connector
+        return guarded_mongo_client(
+            conn_str,
+            workspace_id=str(connector.get("workspace_id") or ""),
+            serverSelectionTimeoutMS=10000,
+        ), connector
 
     def create_collection_from_schema(self, database: str, collection: str, schema: dict, client=None) -> dict:
         """Create a collection with optional schema validation"""
@@ -575,7 +584,6 @@ class MongoDBService:
 
         updates = {"status": status, "updated_at": datetime.now(timezone.utc)}
         updates.update(kwargs)
-        _failure_message_to_headline(status, updates)
 
         prev_doc = None
         try:
@@ -605,6 +613,13 @@ class MongoDBService:
         except Exception:
             prev_doc = None
         previous_status = (prev_doc or {}).get("status")
+        _terminal_message_over_progress(status, updates, prev_doc)
+        from services.job_status import terminal_exit_resets
+
+        for _key, _value in terminal_exit_resets(
+            previous_status, status, allow_terminal_exit
+        ).items():
+            updates.setdefault(_key, _value)
 
         # One owner: services.job_status.refuse_job_status_write.
         # Sticky terminal + cancel_requested so a late COPY `completed` cannot
@@ -639,6 +654,13 @@ class MongoDBService:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, updates, previous=prev_doc)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.phase_profile import attach_phase_timings_to_updates
+
+            attach_phase_timings_to_updates(status, updates, previous=prev_doc)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1338,19 +1360,41 @@ class MongoDBService:
         return out
 
 
-def _failure_message_to_headline(status: str, fields: dict) -> None:
-    """A failed job's message names the failure, not the last progress text.
+_TERMINAL_MESSAGE_FALLBACK = {
+    "failed": "Failed",
+    "error": "Failed",
+    "cancelled": "Cancelled",
+    "completed": "Completed",
+    "completed_with_quarantine": "Completed with quarantined rows",
+    "completed_with_warnings": "Completed with warnings",
+}
 
-    Callers historically updated status+error but left ``message`` at the
-    progress copy ("Validating mapping and schema…"), so failed-at-Validate
-    jobs displayed "Validating…" while ``error`` held the reason (C23).
-    ``cancelled``/``completed_with_quarantine`` keep their own messages —
-    D102 writes a committed-row report there.
+
+def _terminal_message_over_progress(
+    status: str, fields: dict, previous: dict | None = None
+) -> None:
+    """A finished job's message never keeps an in-flight progress text.
+
+    A terminal write that carries no ``message`` of its own would leave the last
+    progress copy on the record ("Validating mapping and schema…", "Connecting
+    to destination…") next to a failed or completed status. A failed job's
+    message names the failure (C23); any other terminal status gets a neutral
+    terminal line. The previous message is progress by construction when the
+    job was not terminal yet; a repeat terminal write keeps its own message.
+    ``cancelled``/``completed_with_quarantine`` callers that report committed
+    rows (D102) pass their own ``message`` and are untouched.
     """
-    if str(status or "").lower() not in {"failed", "error"}:
+    from services.job_status import is_terminal
+
+    status_l = str(status or "").lower()
+    if status_l not in _TERMINAL_MESSAGE_FALLBACK or "message" in fields:
         return
-    if "message" not in fields and fields.get("error"):
+    if status_l in {"failed", "error"} and fields.get("error"):
         fields["message"] = str(fields["error"])[:500]
+        return
+    prev = previous or {}
+    if str(prev.get("message") or "").strip() and not is_terminal(prev.get("status")):
+        fields["message"] = _TERMINAL_MESSAGE_FALLBACK[status_l]
 
 def _created_sort_stamp(value: Any) -> str:
     """One comparable stamp. Memory jobs mix datetime and ISO strings."""
@@ -1479,7 +1523,7 @@ class MemoryMongoDBService:
                 (c for c in self._connectors.values() if str(c.get("id") or "") == str(connector_id)),
                 None,
             )
-        if rec:
+        if rec and bound_allows(rec.get("workspace_id")):
             rec = dict(rec)
             rec["_id"] = str(rec["_id"])
             return _decrypt_connector_secrets(rec)
@@ -1493,6 +1537,8 @@ class MemoryMongoDBService:
         )
         out = []
         for c in items:
+            if not bound_allows(c.get("workspace_id")):
+                continue
             row = dict(c, _id=str(c["_id"]))
             out.append(_decrypt_connector_secrets(row) or row)
         return out
@@ -1559,7 +1605,6 @@ class MemoryMongoDBService:
     def update_job_status(self, job_id: str, status: str, **kwargs) -> bool:
         only_from_status = kwargs.pop("only_from_status", None)
         operator_command = bool(kwargs.pop("operator_command", False))
-        _failure_message_to_headline(status, kwargs)
         rec = self._jobs.get(job_id)
         if only_from_status is not None and rec is None:
             return False
@@ -1572,7 +1617,7 @@ class MemoryMongoDBService:
                 return False
         allow_terminal_exit = bool(kwargs.pop("allow_terminal_exit", False))
         previous_status = rec.get("status")
-        from services.job_status import refuse_job_status_write
+        from services.job_status import refuse_job_status_write, terminal_exit_resets
 
         refuse_reason = refuse_job_status_write(
             previous_status=previous_status,
@@ -1596,6 +1641,10 @@ class MemoryMongoDBService:
             }
             if str(previous_status or "").strip().lower() not in allowed:
                 return False
+        for _key, _value in terminal_exit_resets(
+            previous_status, status, allow_terminal_exit
+        ).items():
+            kwargs.setdefault(_key, _value)
         fence = kwargs.pop("lease_fence", None)
         if operator_command:
             fence = None
@@ -1612,10 +1661,18 @@ class MemoryMongoDBService:
                 return False
             kwargs["lease_fence"] = fence
 
+        _terminal_message_over_progress(status, kwargs, rec)
         try:
             from services.job_trust import attach_trust_to_updates
 
             attach_trust_to_updates(status, kwargs, previous=rec)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
+
+        try:
+            from services.phase_profile import attach_phase_timings_to_updates
+
+            attach_phase_timings_to_updates(status, kwargs, previous=rec)
         except Exception as exc:
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 

@@ -211,4 +211,10 @@ def test_talking_to_pilot_is_ai_use_and_training_is_workspace_administration():
         _required_permission("POST", "/api/v1/copilot/train")
         == Permission.WORKSPACE_MANAGE
     )
+    # Same for the shared RAG corpus behind /ai/rag/query.
+    assert (
+        _required_permission("POST", "/api/v1/ai/rag/ingest")
+        == Permission.WORKSPACE_MANAGE
+    )
+    assert _required_permission("POST", "/api/v1/ai/rag/query") == Permission.AI_USE
     assert Permission.WORKSPACE_MANAGE not in role_permissions("editor")

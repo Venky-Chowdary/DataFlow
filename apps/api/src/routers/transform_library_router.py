@@ -23,10 +23,12 @@ from services.transform_recipe import (
     preview_recipe,
 )
 from services.transform_recipe_templates import clone_template, list_templates
+from services.workspace_filter import WorkspaceFilter
 from services.workspace_access import (
     assert_resource_workspace,
     resolve_read_workspace,
     resolve_write_workspace,
+    tenant_scope,
 )
 
 router = APIRouter(prefix="/transform-library", tags=["Transform Library"])
@@ -119,8 +121,8 @@ def list_recipes(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ) -> list[dict[str, Any]]:
-    ws = resolve_read_workspace(request, workspace_id)
-    return [r.to_dict() for r in get_transform_library().list(ws)]
+    scope = tenant_scope(request, workspace_id)
+    return [r.to_dict() for r in get_transform_library().list() if scope.allows(r.workspace_id)]
 
 
 @router.get("/ops")
@@ -200,7 +202,9 @@ def list_versions(
     return {"recipe_id": recipe_id, "versions": sorted(set(versions))}
 
 
-def _schedule_users(recipe_id: str, latest_version: int) -> list[dict[str, Any]]:
+def _schedule_users(
+    recipe_id: str, latest_version: int, workspace_filter: WorkspaceFilter | None = None
+) -> list[dict[str, Any]]:
     """Schedules that bind this recipe — the where-used scan.
 
     Scope is schedules only: a schedule re-resolves a follow-latest recipe at
@@ -212,7 +216,7 @@ def _schedule_users(recipe_id: str, latest_version: int) -> list[dict[str, Any]]
     from services.schedule_store import list_schedules
 
     users: list[dict[str, Any]] = []
-    for sched in list_schedules():
+    for sched in list_schedules(workspace_filter):
         if getattr(sched, "transform_recipe_id", "") != recipe_id:
             continue
         users.append(
@@ -246,7 +250,9 @@ def where_used(
     assert_resource_workspace(request, recipe.workspace_id or "")
     return {
         "recipe_id": recipe_id,
-        "used_by": _schedule_users(recipe_id, recipe.version),
+        "used_by": _schedule_users(
+            recipe_id, recipe.version, tenant_scope(request, workspace_id).filter
+        ),
         "scope": "schedules",
     }
 
@@ -286,7 +292,7 @@ def update_recipe(
     recipe = store.get(recipe_id, workspace_id=ws)
     if not recipe:
         raise HTTPException(status_code=404, detail="Transform recipe not found")
-    assert_resource_workspace(request, recipe.workspace_id or "")
+    assert_resource_workspace(request, recipe.workspace_id or "", write=True)
 
     if body.expected_version is not None and int(body.expected_version) != int(
         recipe.version or 0
@@ -330,7 +336,7 @@ def delete_recipe(
     recipe = store.get(recipe_id, workspace_id=ws)
     if not recipe:
         raise HTTPException(status_code=404, detail="Transform recipe not found")
-    assert_resource_workspace(request, recipe.workspace_id or "")
+    assert_resource_workspace(request, recipe.workspace_id or "", write=True)
     bound = _schedule_users(recipe_id, recipe.version)
     if bound:
         names = ", ".join(u["schedule_name"] for u in bound[:10])
@@ -482,7 +488,9 @@ def upgrade_preview(
         ),
         "rollback": int(target_version) < int(bound_version),
         "enabled_changed": bool(old.enabled) != bool(new.enabled),
-        "used_by": _schedule_users(recipe_id, int(recipe.version or 1)),
+        "used_by": _schedule_users(
+            recipe_id, int(recipe.version or 1), tenant_scope(request, workspace_id).filter
+        ),
         "mutates_nothing": True,
     }
 

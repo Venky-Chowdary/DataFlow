@@ -22,8 +22,8 @@ from services.csv_profiler import (
 from services.platform_config import data_dir, upload_dir
 from services.read_options import ReadOptions, ReadOptionsError
 from services.schema_inference import infer_columns_from_rows
-from services.tabular_rows import is_blank_row
 from services.tabular_window import header_and_rows, row_to_record
+from services.upload_limits import PayloadTooLarge, gunzip_capped, read_all_bounded
 from services.value_serializer import cell_to_string, json_default, json_loads_exact
 
 UPLOAD_DIR = upload_dir()
@@ -1464,7 +1464,9 @@ class FileParser:
         # Transparent gzip decompression for in-memory payloads.
         if isinstance(content, bytes) and raw_bytes[:2] == b"\x1f\x8b":
             try:
-                raw_bytes = gzip.decompress(raw_bytes)
+                raw_bytes = gunzip_capped(raw_bytes)
+            except PayloadTooLarge:
+                raise
             except Exception as exc:
                 logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
@@ -1797,7 +1799,7 @@ def _xml_count_as_text(content: bytes | str | Path) -> str | None:
 
         source, closer = artifact_byte_source(content)
         try:
-            raw = source.read()
+            raw = read_all_bounded(source)
         finally:
             if closer is not None:
                 closer()

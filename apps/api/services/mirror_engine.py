@@ -25,6 +25,7 @@ import logging
 from collections.abc import Iterable, Iterator
 from typing import Any
 
+from services.dialect_profiles import quote_stored_identifier
 from services.engine_pool import release_engine
 from services.staging_reaper import (
     drop_staging_table,
@@ -118,33 +119,20 @@ def _dialect_of(conn: Any) -> str:
     return str(getattr(getattr(conn, "dialect", None), "name", "") or "")
 
 
-def _qchar(dialect: str) -> str:
-    """Identifier quote character for this destination engine.
-
-    ANSI double quotes are not universal: MySQL reads ``\"sp_dst\"`` as a string
-    literal and raises a syntax error, so a dialect-blind mirror pass could
-    never soft-delete on MySQL. One owner: ``dialect_profiles.quote_char_for``.
-    """
-    from services.dialect_profiles import quote_char_for
-
-    return quote_char_for(dialect) or '"'
-
-
 def _probe_physical_lattice(conn: Any, table_obj: Any) -> tuple[str, ...]:
     """SELECT 1=0 of the lattice column. Failure must not abort the write txn."""
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
 
-    q = _qchar(_dialect_of(conn))
-    col_q = quote_sql_identifier(SOFT_DELETE_COLUMN, q)
+    dialect = _dialect_of(conn)
+    col_q = quote_stored_identifier(dialect, SOFT_DELETE_COLUMN)
     parts: list[str] = []
     schema = getattr(table_obj, "schema", None)
     if schema:
-        parts.append(quote_sql_identifier(str(schema), q))
+        parts.append(quote_stored_identifier(dialect, str(schema)))
     name = getattr(table_obj, "name", None)
     if not name:
         return ()
-    parts.append(quote_sql_identifier(str(name), q))
+    parts.append(quote_stored_identifier(dialect, str(name)))
     qualified = ".".join(parts)
     nested = None
     try:
@@ -195,11 +183,9 @@ def strip_lattice_from_upsert(
 
 
 def _qualified_name(table: str, schema: str | None, dialect: str = "") -> str:
-    from connectors.writer_common import quote_sql_identifier
 
-    q = _qchar(dialect)
-    table_quoted = quote_sql_identifier(table, q)
-    schema_quoted = quote_sql_identifier(schema, q) if schema else None
+    table_quoted = quote_stored_identifier(dialect, table)
+    schema_quoted = quote_stored_identifier(dialect, schema) if schema else None
     return f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
 
 
@@ -261,7 +247,6 @@ def _ensure_soft_delete_column(
     soft_delete_column: str,
 ) -> None:
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
     from services.dialect_profiles import (
         sql_bool_false_literal,
         stores_boolean_as_numeric,
@@ -269,7 +254,7 @@ def _ensure_soft_delete_column(
     )
 
     dialect_name = _dialect_of(conn)
-    col_quoted = quote_sql_identifier(soft_delete_column, _qchar(dialect_name))
+    col_quoted = quote_stored_identifier(dialect_name, soft_delete_column)
     false_lit = sql_bool_false_literal(dialect_name)
     family = warehouse_sql_quote_dialect(dialect_name)
     if family == "sqlserver" or dialect_name.lower().startswith("mssql"):
@@ -303,11 +288,10 @@ def _update_deleted_batch(
     soft_delete_column: str,
 ) -> tuple[int, int]:
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
     from services.dialect_profiles import sql_bool_false_literal, sql_bool_true_literal
 
     dialect_name = _dialect_of(conn)
-    col_quoted = quote_sql_identifier(soft_delete_column, _qchar(dialect_name))
+    col_quoted = quote_stored_identifier(dialect_name, soft_delete_column)
     true_lit = sql_bool_true_literal(dialect_name)
     false_lit = sql_bool_false_literal(dialect_name)
     activated = 0
@@ -357,15 +341,13 @@ def _compute_active_checksum(
     text carrier hashes by spelling on one side and by value on the other.
     """
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
     from services.dialect_profiles import sql_bool_is_not_true
     from services.reconciliation_api import stream_select_checksum
 
     dialect_name = _dialect_of(conn)
-    q = _qchar(dialect_name)
-    cols_quoted = ",".join(quote_sql_identifier(c, q) for c in target_cols)
+    cols_quoted = ",".join(quote_stored_identifier(dialect_name, c) for c in target_cols)
     if soft_delete_column:
-        col_quoted = quote_sql_identifier(soft_delete_column, q)
+        col_quoted = quote_stored_identifier(dialect_name, soft_delete_column)
         pred = sql_bool_is_not_true(dialect_name, col_quoted)
         sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {pred}"  # nosec B608
     else:
@@ -433,7 +415,6 @@ def apply_inferred_deletes_via_staging(
     Gate-8. Unmeasured COUNT stays ``None``.
     """
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
     from services.dialect_profiles import (
         sql_bool_false_literal,
         sql_bool_is_not_true,
@@ -443,18 +424,17 @@ def apply_inferred_deletes_via_staging(
 
     delete_mode = (delete_mode or "soft").strip().lower()
     dialect_name = dialect or _dialect_of(conn)
-    q = _qchar(dialect_name)
-    col_quoted = quote_sql_identifier(soft_delete_column, q)
+    col_quoted = quote_stored_identifier(dialect_name, soft_delete_column)
     true_lit = sql_bool_true_literal(dialect_name)
     false_lit = sql_bool_false_literal(dialect_name)
     deleted_pred = sql_bool_is_true(dialect_name, col_quoted)
     active_pred = sql_bool_is_not_true(dialect_name, col_quoted)
-    outer_ref = quote_sql_identifier(target_table, q) if target_table else target_qualified
+    outer_ref = quote_stored_identifier(dialect_name, target_table) if target_table else target_qualified
     stg_alias = "df_stg"
     staging_from = f"{staging_qualified} {stg_alias}"
     join_pred = " AND ".join(
-        f"{stg_alias}.{quote_sql_identifier(c, q)} = "
-        f"{outer_ref}.{quote_sql_identifier(c, q)}"
+        f"{stg_alias}.{quote_stored_identifier(dialect_name, c)} = "
+        f"{outer_ref}.{quote_stored_identifier(dialect_name, c)}"
         for c in pk_columns
     )
 
@@ -597,9 +577,9 @@ def mirror_pk_sources(
 def complete_mirror_pk_tuple(values: Iterable[Any]) -> tuple[Any, ...] | None:
     """Return the PK tuple, or None when identity is incomplete.
 
-    Incomplete is skip, not invent: None, empty string, ``DF_MISSING``, or
-    extract reader-null (``SQL_NULL_SENTINEL``). A missing CDC field is not
-    a key. Do not coerce it to NULL or ``""``.
+    Incomplete is skip, not invent: None, ``DF_MISSING``, or extract
+    reader-null (``SQL_NULL_SENTINEL``). A missing CDC field is not a key. Do
+    not coerce it to NULL or ``""``; an empty string is a valid key (D53).
     """
     from connectors.writer_common import _is_nullish_conflict_key
 
@@ -856,7 +836,6 @@ def apply_inferred_soft_deletes(
     schema_name = get_sql_schema(cfg)
 
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
 
     target_cols = _target_columns(columns, mappings, schema)
     engine = get_sqlalchemy_engine(cfg)
@@ -865,7 +844,7 @@ def apply_inferred_soft_deletes(
     stg_name = _staging_table_name()
     stg_qualified = _qualified_name(stg_name, schema_name, engine_dialect)
     pk_quoted = ", ".join(
-        quote_sql_identifier(c, _qchar(engine_dialect)) for c in pk_columns
+        quote_stored_identifier(engine_dialect, c) for c in pk_columns
     )
     placeholders = ", ".join(f":p{i}" for i in range(len(pk_columns)))
     insert_sql = (

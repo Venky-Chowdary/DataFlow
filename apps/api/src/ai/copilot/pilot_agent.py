@@ -17,6 +17,7 @@ from typing import Any
 
 from services.tracing import submit_in_context
 from services.value_serializer import json_default
+from services.workspace_filter import current_actor
 from ..knowledge.copilot_knowledge import DATA_PILOT_PERSONA, SUGGESTED_PROMPTS
 from ..rag.evidence import contradicts_draft, keeps_draft_facts, strip_chat_filler
 from .agent import CopilotResponse
@@ -1990,9 +1991,17 @@ class DataPilotAgent:
         ephemeral id so same-process multi-turn stays coherent.
         """
         ctx = dict(data_context or {})
-        if str(ctx.get("pilot_session_id") or "").strip():
+        # Working memory and stored result sets are keyed by session id. This
+        # agent is one process-wide instance, so the fallback id and any id a
+        # client sends are namespaced by the authenticated actor: another
+        # account can neither inherit nor guess a conversation's focus (the
+        # last connector, table and rows) (D162).
+        actor = current_actor()
+        sid = str(ctx.get("pilot_session_id") or "").strip()
+        if sid:
+            ctx["pilot_session_id"] = f"{actor}|{sid}" if actor else sid
             return ctx
-        ctx["pilot_session_id"] = self._ephemeral_session
+        ctx["pilot_session_id"] = f"{actor}|{self._ephemeral_session}" if actor else self._ephemeral_session
         # Keep a short transcript digest for LLM narration (not used for hashing).
         if history:
             ctx["_history_turns"] = len(history)

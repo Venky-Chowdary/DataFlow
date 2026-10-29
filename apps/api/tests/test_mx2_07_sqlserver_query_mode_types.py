@@ -124,6 +124,24 @@ def test_mixed_python_types_give_no_carrier():
     assert python_carriers_of_rows(["v"], [(1,), ("a",)]) == {}
 
 
+def test_pyodbc_python_class_type_codes_are_not_read_as_decimal_precision():
+    """pyodbc puts a Python class in the type slot and the column SIZE in the
+    precision slot for every type. Only ``Decimal`` is an exact numeric."""
+    description = (
+        ("id", int, None, 10, 10, 0, False),
+        ("sku", str, None, 20, 20, 0, True),
+        ("weight_kg", float, None, 53, 53, 0, True),
+        ("price", Decimal, None, 10, 10, 2, True),
+        ("created_at", str, None, 33, 33, 6, True),
+        ("active", bool, None, 1, 1, 0, True),
+    )
+    headers = [c[0] for c in description]
+    declared = cursor_declared_carriers(headers, description, dialect="sqlserver")
+    assert declared.get("price") == "DECIMAL(10,2)"
+    for name in ("sku", "weight_kg", "created_at", "active"):
+        assert not declared.get(name, "").startswith("DECIMAL"), (name, declared)
+
+
 # ---------------------------------------------------------------- live
 _MSSQL = {
     "host": os.environ.get("DATAFLOW_TEST_MSSQL_HOST", "localhost"),
@@ -180,7 +198,16 @@ def products_db():
         "(3,'00042',N'Thing','misc',2.0,0.01,N'third','2024-03-03 00:00:00 +00:00',1)"
     )
     conn.close()
-    yield {**_MSSQL, "type": "sqlserver", "database": "dataflow_mx207", "connection_string": "", "ssl": False}
+    # The local test container presents a self-signed certificate; trusting it is
+    # an explicit, operator-declared connector option (never a silent default).
+    yield {
+        **_MSSQL,
+        "type": "sqlserver",
+        "database": "dataflow_mx207",
+        "connection_string": "",
+        "ssl": False,
+        "trust_server_certificate": True,
+    }
 
 
 @live
@@ -190,13 +217,15 @@ def test_live_sqlserver_query_peek_types(products_db):
     cfg = {**products_db, "source_read_mode": "query", "source_query": "SELECT * FROM dbo.products"}
     batch = read_callable_batch(cfg, offset=0, limit=10, peek=True)
     types = batch.meta["native_types"]
+    # pymssql names no precision (bare DECIMAL); the ODBC driver the connector
+    # prefers reports the declared DECIMAL(10,2). Both are the declared carrier.
+    assert types.pop("price") in {"DECIMAL", "DECIMAL(10,2)"}, types
     assert types == {
         "id": "INTEGER",
         "sku": "VARCHAR",
         "name": "VARCHAR",
         "category": "VARCHAR",
         "weight_kg": "DOUBLE",
-        "price": "DECIMAL",
         "description": "VARCHAR",
         "created_at": "TIMESTAMPTZ",
         "active": "BOOLEAN",
@@ -228,7 +257,12 @@ def test_live_sqlserver_query_to_sqlite_runs_with_preflight(products_db, tmp_pat
             password=products_db["password"],
             # The studio/Pilot names the stream from the SELECT before Execute.
             table="products_q",
-            extra={"source_read_mode": "query", "source_query": "SELECT * FROM dbo.products"},
+            extra={
+                "source_read_mode": "query",
+                "source_query": "SELECT * FROM dbo.products",
+                # Self-signed local container: declared, not defaulted.
+                "trust_server_certificate": True,
+            },
         ),
         destination=EndpointConfig(kind="database", format="sqlite", database=str(dst), table="ms_q"),
         sync_mode="full_refresh_overwrite",

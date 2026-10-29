@@ -14,6 +14,7 @@ from typing import Any
 from services.ops_events import emit_event
 from services.platform_config import data_dir
 from services.value_serializer import json_default
+from services.workspace_filter import WorkspaceFilter, bound_allows, current_workspace_stamp
 
 STORE_PATH = data_dir() / "preflight_runs.jsonl"
 _LOCK = threading.Lock()
@@ -40,6 +41,8 @@ def save_preflight_run(
     blockers = enriched.get("blockers") or []
     record = {
         "run_id": run_id,
+        # The workspace this request acts in (D154); "" = unscoped legacy.
+        "workspace_id": current_workspace_stamp(),
         "created_at": _now(),
         "passed": bool(enriched.get("passed")),
         "readiness_score": enriched.get("readiness_score"),
@@ -121,13 +124,46 @@ def get_preflight_run(run_id: str) -> dict[str, Any] | None:
         return None
     for row in reversed(_read_all()):
         if str(row.get("run_id")) == rid:
-            return row
+            # A run of another workspace does not exist for this caller (D154).
+            return row if bound_allows(row.get("workspace_id")) else None
     return None
 
 
 def list_preflight_runs(limit: int = 20) -> list[dict[str, Any]]:
-    rows = _read_all()
+    rows = [r for r in _read_all() if bound_allows(r.get("workspace_id"))]
     return list(reversed(rows[-max(1, min(limit, 100)) :]))
+
+
+def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
+    """Stamp legacy unscoped runs with ``workspace_for(run)`` (D154 backfill).
+
+    Runs carry no owner, so ``workspace_for`` decides (the platform owner's
+    workspace). Scoped runs are never touched.
+    """
+    unscoped = WorkspaceFilter.only("")
+    counts = {"assigned": 0, "skipped": 0}
+    if not STORE_PATH.exists():
+        return counts
+    with _LOCK:
+        lines = STORE_PATH.read_text(encoding="utf-8").splitlines()
+        out: list[str] = []
+        for line in lines:
+            try:
+                row = json.loads(line) if line.strip() else None
+            except json.JSONDecodeError:
+                row = None
+            if isinstance(row, dict) and unscoped.matches(row.get("workspace_id")):
+                ws = (workspace_for(row) or "").strip()
+                counts["assigned" if ws else "skipped"] += 1
+                if ws:
+                    row["workspace_id"] = ws
+                    line = json.dumps(row, default=json_default)
+            out.append(line)
+        if apply and counts["assigned"]:
+            tmp = STORE_PATH.with_suffix(STORE_PATH.suffix + ".tmp")
+            tmp.write_text("\n".join(out) + "\n", encoding="utf-8")
+            tmp.replace(STORE_PATH)
+    return counts
 
 
 def _suggest_remediations(blockers: list[Any]) -> list[dict[str, str]]:

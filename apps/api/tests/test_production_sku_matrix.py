@@ -174,7 +174,9 @@ def test_production_sku_transfer(
         destination=destination,
         source_content=source_content,
         source_filename=source_filename,
-        sync_mode="full_refresh_overwrite",
+        # A Kafka topic is append-only: published messages are final, so the
+        # destination refuses overwrite/dedupe/merge by design.
+        sync_mode="full_refresh_append" if dst_fmt == "kafka" else "full_refresh_overwrite",
         # Preflight ON — PRODUCTION_SKU proves Validate + transfer, not write-only.
         skip_preflight=False,
         validation_mode=validation_mode,

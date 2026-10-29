@@ -2,8 +2,8 @@
 
 Reader-wired SQL_NULL_SENTINEL used to look like a present batch key, so
 the probe searched for the sentinel spelling and True vs dest "true"
-missed. NULL keys stay skipped (not an IN-list token). Empty / whitespace
-stay blank.
+missed. NULL keys stay skipped (not an IN-list token). ``''`` and ``'a '``
+are exact keys (D53, D70), so the collision probe keeps them.
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ def test_present_cell_text_matches_reader_wire():
 def test_batch_keys_skip_reader_null():
     assert batch_key_texts(
         [SQL_NULL_SENTINEL, None, "", "   ", DF_MISSING_SENTINEL, Missing, 1, True, "true"]
-    ) == ["1", "true", "true"]
+    ) == ["", "   ", "1", "true", "true"]
 
 
 def test_sentinel_only_batch_is_skipped_no_values():
@@ -52,7 +52,7 @@ def test_sentinel_only_batch_is_skipped_no_values():
         destination_db_type="sqlite",
         destination_table="jobs",
         key_column="id",
-        values=[SQL_NULL_SENTINEL, None, ""],
+        values=[SQL_NULL_SENTINEL, None, DF_MISSING_SENTINEL],
     )
     assert res.status == "skipped_no_values"
     assert res.values_probed == 0

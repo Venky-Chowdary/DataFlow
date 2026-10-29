@@ -274,7 +274,7 @@ def test_neo4j_streaming_read_pages_by_offset(monkeypatch):
         return ReadBatch(headers=["_neo4j_element_id"], rows=[["e1"]])
 
     monkeypatch.setattr("connectors.neo4j.read_object", fake)
-    batch = _read_batch_impl("neo4j", {"host": "graph.internal", "port": 7474}, "Person", None, 20, 50)
+    batch = _read_batch_impl("neo4j", {"host": "graph.example.com", "port": 7474}, "Person", None, 20, 50)
     assert batch.headers == ["_neo4j_element_id"]
     assert seen["object"] == "Person"
     assert seen["offset"] == 20

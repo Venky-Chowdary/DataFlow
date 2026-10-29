@@ -5127,7 +5127,7 @@ export async function fetchRepairProposal(proposalId: string): Promise<RepairPro
 
 export async function decideRepairProposal(
   proposalId: string,
-  body: { approve: boolean; actor?: string; mappings?: RepairMapping[] },
+  body: { approve: boolean; mappings?: RepairMapping[] },
 ): Promise<RepairProposal> {
   const res = await apiFetch(
     `${API_BASE}/repair/proposals/${encodeURIComponent(proposalId)}/decide`,
@@ -5136,7 +5136,6 @@ export async function decideRepairProposal(
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         approve: body.approve,
-        actor: body.actor || "operator",
         mappings: body.mappings || [],
       }),
     },

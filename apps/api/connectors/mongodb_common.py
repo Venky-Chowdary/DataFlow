@@ -14,6 +14,24 @@ _mongo_client_cache: dict[str, Any] = {}
 logger = logging.getLogger(__name__)
 
 
+def guarded_mongo_client(conn_str: str, *, workspace_id: str = "", **options: Any) -> Any:
+    """Build a MongoClient only after the URI's hosts pass the egress policy.
+
+    Every connector-facing Mongo dial (transfer, introspect, precount, undo,
+    probes) goes through here so a user URI cannot reach a private, loopback
+    or metadata address. ``mongodb+srv`` names resolve again at dial time
+    under ``pinned_egress``.
+    """
+    from pymongo import MongoClient
+
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(
+        str(conn_str or ""), workspace_id=workspace_id, point="mongo_client"
+    )
+    return MongoClient(conn_str, **options)
+
+
 def _new_mongo_client(conn_str: str) -> Any:
     """Build a fresh, *uncached* MongoClient.
 
@@ -23,9 +41,7 @@ def _new_mongo_client(conn_str: str) -> Any:
     and writer on the same URI. Bulk paths use :func:`_mongo_client` (pooled);
     streaming paths use this.
     """
-    from pymongo import MongoClient
-
-    return MongoClient(
+    return guarded_mongo_client(
         conn_str,
         serverSelectionTimeoutMS=10000,
         socketTimeoutMS=120000,

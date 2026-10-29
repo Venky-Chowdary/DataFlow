@@ -176,7 +176,7 @@ from contextlib import closing, contextmanager
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from services.value_serializer import is_null_evidence, present_cell_text
+from services.value_serializer import key_identity_text, present_cell_text
 
 if TYPE_CHECKING:
     from src.transfer.models import EndpointConfig
@@ -292,6 +292,17 @@ _STREAMING_COUNT_KINDS = frozenset(
     {"csv", "tsv", "json", "jsonl", "xml", "avro", "yaml", "fixed_width"}
 )
 _BYTE_IMAGE_KINDS = frozenset({"parquet", "orc", "excel"})
+
+
+def _sqlite_cfg_path(cfg: Mapping[str, Any]) -> str:
+    """Confined SQLite path for a dest config (see ``connectors.sqlite_common``)."""
+    from connectors.sqlite_common import sqlite_file_path
+
+    return sqlite_file_path(
+        str(cfg.get("database") or ""),
+        str(cfg.get("connection_string") or ""),
+        str(cfg.get("host") or ""),
+    )
 
 
 class UnmeasuredArtifact(Exception):
@@ -743,11 +754,14 @@ def destination_row_count(
 
         if db_type == "mongodb":
             from pymongo import MongoClient
+            from connectors.mongodb_common import guarded_mongo_client
 
             from src.transfer.adapters import mongodb_connection_string
 
-            client: MongoClient = MongoClient(
-                mongodb_connection_string(cfg), serverSelectionTimeoutMS=5000
+            client: MongoClient = guarded_mongo_client(
+                mongodb_connection_string(cfg),
+                workspace_id=str(cfg.get("workspace_id") or ""),
+                serverSelectionTimeoutMS=5000,
             )
             try:
                 database = str(cfg.get("database") or "")
@@ -1002,7 +1016,7 @@ def records_to_key_tuples(
             raw = rec.get(field)
             if raw is None and field != target:
                 raw = rec.get(target)
-            if is_null_evidence(raw):
+            if key_identity_text(raw) is None:
                 return None
             row.append(raw)
         tup = tuple(row)
@@ -1055,7 +1069,7 @@ class OverwriteSourceKeySet:
 
         for raw in keys:
             tup = tuple(raw)
-            if len(tup) != self._width or any(is_null_evidence(v) for v in tup):
+            if len(tup) != self._width or any(key_identity_text(v) is None for v in tup):
                 self._failed = True
                 return
             coerced = tuple(coerce_pk_part(p) for p in tup)
@@ -1631,7 +1645,7 @@ def _snowflake_key_list(
     out: list[tuple[Any, ...]] = []
     for row in fetched:
         tup = tuple(row[:width])
-        if len(tup) != width or any(is_null_evidence(v) for v in tup):
+        if len(tup) != width or any(key_identity_text(v) is None for v in tup):
             continue
         out.append(tup)
     return out
@@ -1760,7 +1774,7 @@ def _bigquery_key_list(
             tup = tuple(row[c] for c in cols)
         except Exception:
             tup = tuple(row[i] for i in range(width))
-        if len(tup) != width or any(is_null_evidence(v) for v in tup):
+        if len(tup) != width or any(key_identity_text(v) is None for v in tup):
             continue
         out.append(tup)
     return out
@@ -1906,14 +1920,17 @@ def _mongodb_key_list(
 ) -> list[tuple[Any, ...]] | None:
     """Collection PK tuples. Exact find projection — never estimatedCount."""
     from pymongo import MongoClient
+    from connectors.mongodb_common import guarded_mongo_client
 
     from src.transfer.adapters import mongodb_connection_string
 
     database = str(cfg.get("database") or "")
     if not database or not table_name:
         return None
-    client: MongoClient = MongoClient(
-        mongodb_connection_string(dict(cfg)), serverSelectionTimeoutMS=5000
+    client: MongoClient = guarded_mongo_client(
+        mongodb_connection_string(dict(cfg)),
+        workspace_id=str(cfg.get("workspace_id") or ""),
+        serverSelectionTimeoutMS=5000,
     )
     try:
         coll = client[database][table_name]
@@ -2156,7 +2173,7 @@ def _key_list_sql(
     if dialect == "sqlite":
         import sqlite3
 
-        database = str(cfg.get("database") or "")
+        database = _sqlite_cfg_path(cfg)
         if not database:
             return None
         with closing(sqlite3.connect(database)) as conn:
@@ -2236,7 +2253,7 @@ def _key_hits_sql(
     if dialect == "sqlite":
         import sqlite3
 
-        database = str(cfg.get("database") or "")
+        database = _sqlite_cfg_path(cfg)
         if not database:
             return None
         with closing(sqlite3.connect(database)) as conn:
@@ -3436,10 +3453,12 @@ def _iceberg_snapshot_rows(
 
 
 def _norm_dest_key(values: Sequence[Any]) -> tuple[str, ...] | None:
-    """Comparable dest key — JSONL strings and catalog ints must hit the same PK."""
+    """Comparable dest key — JSONL strings and catalog ints must hit the same PK.
+
+    Exact text: ``''`` is a key and ``'a '`` is not ``'a'`` (D53, D70)."""
     out: list[str] = []
     for value in values:
-        key = present_cell_text(value)
+        key = key_identity_text(value)
         if key is None:
             return None
         out.append(key)
@@ -3459,7 +3478,7 @@ def _row_values_for_cols(
             if lower is None:
                 lower = {str(k).lower(): v for k, v in row.items()}
             val = lower.get(col.lower())
-        if is_null_evidence(val):
+        if key_identity_text(val) is None:
             return None
         parts.append(val)
     return tuple(parts)
@@ -5751,7 +5770,7 @@ def _sqlite_scd2_populations(
     is_current = (
         str(is_current_column or "").strip() or IS_CURRENT_COLUMN
     )
-    database = str(cfg.get("database") or "")
+    database = _sqlite_cfg_path(cfg)
     if not database:
         return None
     with closing(sqlite3.connect(database)) as conn:

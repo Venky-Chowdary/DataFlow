@@ -63,6 +63,11 @@ def _client(cfg: dict[str, Any]):
     else:
         scheme = "https" if cfg.get("ssl") or int(cfg.get("port") or 9200) == 443 else "http"
         url = f"{scheme}://{cfg.get('host') or 'localhost'}:{cfg.get('port') or 9200}"
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(
+        str(url), workspace_id=str(cfg.get("workspace_id") or ""), point="http_client"
+    )
     kwargs: dict[str, Any] = {
         "hosts": [url],
         "request_timeout": 60,

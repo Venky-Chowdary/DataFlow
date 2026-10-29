@@ -146,10 +146,33 @@ def leading_statement_kind(text: str) -> str:
     return ""
 
 
+# Leaf-name prefixes of SQL Server system procedures that are admin calls or
+# run their own string arguments as SQL. String literals are masked before the
+# deny-token scan, so a procedure that evaluates its argument would otherwise
+# carry arbitrary SQL past it (``EXEC sp_msforeachtable @command1 = '…'``).
 _DENIED_NAME_PREFIXES = (
     "xp_",
     "sp_configure",
-    "sp_executesql",
+    "sp_execute",
+    "sp_sqlexec",
+    "sp_prepare",
+    "sp_prepexec",
+    "sp_cursoropen",
+    "sp_cursorprepare",
+    "sp_cursorprepexec",
+    "sp_msforeach",
+    "sp_oa",
+    "sp_send_dbmail",
+    "sp_invoke_external_rest_endpoint",
+    "sp_addextendedproc",
+    "sp_add_job",
+    "sp_start_job",
+    "sp_addlinkedserver",
+    "sp_addlinkedsrvlogin",
+    "sp_serveroption",
+    "sp_addsrvrolemember",
+    "sp_addrolemember",
+    "sp_setapprole",
     "sp_password",
     "sp_addlogin",
     "sp_droplogin",
@@ -514,12 +537,13 @@ def parse_callable_source(
     if definition:
         raise ProcedureSourceError(definition)
     # Semicolons and DDL words inside a string are data (QA R2-001, R2-002).
-    code = _sql_outside_literals(stripped)
-    if ";" in code.rstrip().rstrip(";"):
+    # A quote inside a comment is not a literal; every engine lexing must agree.
+    views = _sql_code_views(stripped)
+    if any(";" in code.rstrip().rstrip(";") for code in views):
         raise ProcedureSourceError(
             "Only one statement is allowed — remove extra semicolons."
         )
-    if _DENIED_TOKENS.search(code):
+    if any(_DENIED_TOKENS.search(code) for code in views):
         raise ProcedureSourceError(
             "This statement is not an extract — DDL, DML, and admin calls are blocked."
         )
@@ -836,10 +860,10 @@ def callable_sync_gate(
 # ---------------------------------------------------------------------------
 
 
-def _sql_outside_literals(text: str) -> str:
-    from services.sql_literals import sql_outside_literals
+def _sql_code_views(text: str) -> tuple[str, ...]:
+    from services.sql_literals import sql_code_views
 
-    return sql_outside_literals(text)
+    return sql_code_views(text)
 
 
 def _strip_comments(text: str) -> str:
@@ -883,11 +907,16 @@ def _query_is_safe(text: str) -> bool:
 
     Imported ``query_router._is_safe_sql`` pulls FastAPI via ``src.routers``
     package init; keep the extract path import-light and fail closed.
-    Keywords are judged on the code outside string literals.
+    Keywords are judged on the code outside string literals. ``PRAGMA`` and
+    bare ``ANALYZE`` are refused: both write state (pragma assignments,
+    planner statistics) and neither is a row extract.
     """
-    code = _sql_outside_literals(text)
+    return all(_query_view_is_safe(code) for code in _sql_code_views(text))
+
+
+def _query_view_is_safe(code: str) -> bool:
     if not re.match(
-        r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|ANALYZE|PRAGMA|VALUES)\b",
+        r"^\s*(SELECT|WITH|EXPLAIN|SHOW|DESCRIBE|DESC|VALUES)\b",
         code,
         re.IGNORECASE,
     ):

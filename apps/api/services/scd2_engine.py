@@ -26,6 +26,7 @@ from collections.abc import Iterator
 from datetime import date, datetime, timezone
 from typing import Any
 
+from services.dialect_profiles import quote_stored_identifier, stored_identifier
 from services.engine_pool import release_engine
 
 VALID_FROM_COLUMN = "valid_from"
@@ -153,17 +154,6 @@ def _compose_key(row: dict[str, Any], columns: list[str]) -> str:
     return _KEY_SEP.join(conflict_key_wire(row.get(c)) for c in columns)
 
 
-def _qchar(dialect: str) -> str:
-    """Identifier quote character for this destination engine.
-
-    MySQL parses ``\"col\"`` as a string literal, so ANSI-only quoting made every
-    SCD2 statement a syntax error there. One owner: ``dialect_profiles``.
-    """
-    from services.dialect_profiles import quote_char_for
-
-    return quote_char_for(dialect) or '"'
-
-
 # Keys per membership predicate. Bounded by the tightest engine limits the
 # statement can hit: SQLite's expression-tree depth (1000) for OR chains,
 # Oracle's 1000-element IN list, SQL Server's 2100 bind parameters.
@@ -240,7 +230,6 @@ def _pk_or_clause(
     ``column_types`` (see :func:`key_column_types`) binds each segment in the
     destination column's Python carrier via :func:`typed_key_bind`.
     """
-    from connectors.writer_common import quote_sql_identifier
 
     if not keys or not columns:
         return "1=0", {}
@@ -250,7 +239,7 @@ def _pk_or_clause(
             "chunk with iter_pk_key_chunks"
         )
     types = column_types or {}
-    quoted = [quote_sql_identifier(c, _qchar(dialect)) for c in columns]
+    quoted = [quote_stored_identifier(dialect, c) for c in columns]
     params: dict[str, Any] = {}
     if len(columns) == 1:
         names: list[str] = []
@@ -283,11 +272,9 @@ def _pk_or_clause(
 
 
 def _qualified_name(table: str, schema: str | None, dialect: str = "") -> str:
-    from connectors.writer_common import quote_sql_identifier
 
-    q = _qchar(dialect)
-    table_quoted = quote_sql_identifier(table, q)
-    schema_quoted = quote_sql_identifier(schema, q) if schema else None
+    table_quoted = quote_stored_identifier(dialect, table)
+    schema_quoted = quote_stored_identifier(dialect, schema) if schema else None
     return f"{schema_quoted}.{table_quoted}" if schema_quoted else table_quoted
 
 
@@ -306,8 +293,13 @@ def _row_hash(
     *,
     tracked: list[str] | None = None,
     stamp_set: set[str] | None = None,
+    dialect: str = "",
 ) -> str:
     """Stable hash of the non-SCD target attribute values.
+
+    Columns are named by their stored spelling: a Snowflake rerun maps onto
+    the existing table's ``NAME`` where the first run wrote ``name``, and a
+    case-sensitive name made every unchanged row look changed (D47).
 
     ``tracked`` narrows change detection to the recipe-declared columns;
     an untracked change never opens a new version (Type-1 in place when
@@ -328,7 +320,7 @@ def _row_hash(
         val = row.get(c)
         if is_missing_sentinel(val):
             continue
-        parts.append(f"{c}={conflict_key_wire(val)}")
+        parts.append(f"{stored_identifier(dialect, c)}={conflict_key_wire(val)}")
     return hashlib.sha256("|".join(parts).encode("utf-8")).hexdigest()
 
 
@@ -372,7 +364,6 @@ def _ensure_scd_columns(
     table_name = table_obj.name
     existing = {c["name"] for c in inspector.get_columns(table_name, schema=schema)}
     from connectors.generic_sql import _sa_type_for_logical
-    from connectors.writer_common import quote_sql_identifier
 
     # timestamptz: stamps are tz-aware instants; engines with a zone
     # carrier keep it (TIMESTAMPTZ / TIMESTAMP_TZ / DATETIMEOFFSET),
@@ -394,7 +385,7 @@ def _ensure_scd_columns(
 
     qualified = _qualified_name(table_name, schema, dialect_name)
     for col_name, sa_type in additions:
-        col_quoted = quote_sql_identifier(col_name, _qchar(dialect_name))
+        col_quoted = quote_stored_identifier(dialect_name, col_name)
         type_ddl = sa_type.compile(dialect=engine.dialect)
         ddl = f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} {type_ddl}"
         with engine.begin() as conn:
@@ -464,7 +455,6 @@ def _fetch_current_snapshots(
 ) -> dict[str, dict[str, Any]]:
     """Return {composite_key: {hash, attrs, version}} for current rows in ``keys``."""
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
 
     cols = cols or resolve_scd2_cols()
     stamps = _stamp_set(cols)
@@ -475,9 +465,8 @@ def _fetch_current_snapshots(
     select_cols = list(
         dict.fromkeys(list(pk_columns) + [cols["row_hash"]] + extra_selects + attr_cols)
     )
-    q = _qchar(dialect_name)
-    cols_quoted = ", ".join(quote_sql_identifier(c, q) for c in select_cols)
-    current_quoted = quote_sql_identifier(cols["is_current"], q)
+    cols_quoted = ", ".join(quote_stored_identifier(dialect_name, c) for c in select_cols)
+    current_quoted = quote_stored_identifier(dialect_name, cols["is_current"])
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     out: dict[str, dict[str, Any]] = {}
     for chunk in iter_pk_key_chunks(keys):
@@ -490,7 +479,9 @@ def _fetch_current_snapshots(
             f"WHERE {where_keys} AND {current_pred}"
         )
         for row in conn.execute(sa.text(sql), params):
-            mapping = dict(row._mapping)
+            # Positional: the Snowflake dialect reports a stored ``ID`` as
+            # ``id``, so a name lookup read every key as empty (D47).
+            mapping = dict(zip(select_cols, row))
             key = _compose_key(mapping, pk_columns)
             attrs = {c: mapping.get(c) for c in attr_cols}
             version_val = (
@@ -548,14 +539,12 @@ def _expire_rows(
     chain instead of every close stamped at the load clock.
     """
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
 
     cols = cols or resolve_scd2_cols()
     if not keys or not pk_columns:
         return 0
-    q = _qchar(dialect_name)
-    current_quoted = quote_sql_identifier(cols["is_current"], q)
-    valid_to_quoted = quote_sql_identifier(cols["valid_to"], q)
+    current_quoted = quote_stored_identifier(dialect_name, cols["is_current"])
+    valid_to_quoted = quote_stored_identifier(dialect_name, cols["valid_to"])
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     false_lit = scd2_is_current_false_sql(dialect_name)
     expired = 0
@@ -591,15 +580,13 @@ def _iter_current_keys(
 ):
     """Stream the composite keys of every current version. Never OFFSET."""
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
     from services.reconciliation_api import iter_select_row_dicts
 
     cols = cols or resolve_scd2_cols()
-    q = _qchar(dialect_name)
     current_pred = scd2_is_current_predicate(
-        dialect_name, quote_sql_identifier(cols["is_current"], q)
+        dialect_name, quote_stored_identifier(dialect_name, cols["is_current"])
     )
-    cols_quoted = ", ".join(quote_sql_identifier(c, q) for c in pk_columns)
+    cols_quoted = ", ".join(quote_stored_identifier(dialect_name, c) for c in pk_columns)
     sql = f"SELECT {cols_quoted} FROM {qualified} WHERE {current_pred}"  # nosec B608
     for batch in iter_select_row_dicts(
         conn, sa.text(sql), pk_columns, itersize=max(1, int(batch_size))
@@ -672,19 +659,17 @@ def close_versions_missing_from_snapshot(
     driver ``rowcount``.
     """
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
 
     cols = cols or resolve_scd2_cols()
     if not pk_columns:
         return {"closed_missing_rows": 0}
-    q = _qchar(dialect)
-    current_quoted = quote_sql_identifier(cols["is_current"], q)
-    valid_to_quoted = quote_sql_identifier(cols["valid_to"], q)
+    current_quoted = quote_stored_identifier(dialect, cols["is_current"])
+    valid_to_quoted = quote_stored_identifier(dialect, cols["valid_to"])
     current_pred = scd2_is_current_predicate(dialect, current_quoted)
     false_lit = scd2_is_current_false_sql(dialect)
     join_pred = " AND ".join(
-        f"{snapshot_qualified}.{quote_sql_identifier(c, q)} = "
-        f"{target_qualified}.{quote_sql_identifier(c, q)}"
+        f"{snapshot_qualified}.{quote_stored_identifier(dialect, c)} = "
+        f"{target_qualified}.{quote_stored_identifier(dialect, c)}"
         for c in pk_columns
     )
     missing_pred = (
@@ -734,16 +719,14 @@ def _active_checksum(
     :func:`iter_pk_key_chunks` like every other key predicate.
     """
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
     from services.reconciliation_api import stream_select_checksum
 
     cols = cols or resolve_scd2_cols()
     stamps = _stamp_set(cols)
-    q = _qchar(dialect_name)
-    current_quoted = quote_sql_identifier(cols["is_current"], q)
+    current_quoted = quote_stored_identifier(dialect_name, cols["is_current"])
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     attr_cols = [c for c in target_cols if c not in stamps]
-    cols_quoted = ",".join(quote_sql_identifier(c, q) for c in attr_cols)
+    cols_quoted = ",".join(quote_stored_identifier(dialect_name, c) for c in attr_cols)
     where = current_pred
     params: dict[str, Any] = {}
     if exclude_keys and pk_columns:
@@ -849,7 +832,7 @@ def _pk_validate_mapped_rows(
                     "value": "",
                     "reason": (
                         "SCD2 primary key cannot be DF_MISSING / STOP_COLUMN omit "
-                        "or extract SQL NULL"
+                        "or extract SQL NULL (an empty string is a valid key)"
                     ),
                     "policy": "quarantine",
                     "chars": [],
@@ -1064,12 +1047,10 @@ def _type1_update_rows(
     """
     import sqlalchemy as sa
     from connectors.writer_common import conflict_key_wire as _ckw  # noqa: F401
-    from connectors.writer_common import quote_sql_identifier
 
     if not updates:
         return 0
-    q = _qchar(dialect_name)
-    current_quoted = quote_sql_identifier(cols["is_current"], q)
+    current_quoted = quote_stored_identifier(dialect_name, cols["is_current"])
     current_pred = scd2_is_current_predicate(dialect_name, current_quoted)
     # One UPDATE per key at 20k untracked changes is 20k round-trips; group
     # by the updated-column signature and send each group's parameter sets
@@ -1083,7 +1064,7 @@ def _type1_update_rows(
     for sig, members in groups.items():
         cols_list = list(sig)
         set_clause = ", ".join(
-            f"{quote_sql_identifier(c, q)} = :__v{i}"
+            f"{quote_stored_identifier(dialect_name, c)} = :__v{i}"
             for i, c in enumerate(cols_list)
         )
         sql = None
@@ -1119,11 +1100,9 @@ def _fetch_max_versions(
     """max(version) per key across every version row — used to number a
     reopened key after a soft close."""
     import sqlalchemy as sa
-    from connectors.writer_common import quote_sql_identifier
 
-    q = _qchar(dialect_name)
-    ver_q = quote_sql_identifier(cols["version"], q)
-    pk_sql = ", ".join(quote_sql_identifier(c, q) for c in pk_columns)
+    ver_q = quote_stored_identifier(dialect_name, cols["version"])
+    pk_sql = ", ".join(quote_stored_identifier(dialect_name, c) for c in pk_columns)
     out: dict[str, int] = {}
     for chunk in iter_pk_key_chunks(list(keys)):
         pred, params = _pk_or_clause(
@@ -1137,7 +1116,7 @@ def _fetch_max_versions(
             ),
             params,
         ):
-            m = dict(row._mapping)
+            m = dict(zip([*pk_columns, "_mx"], row))
             out[_compose_key(m, pk_columns)] = int(m.get("_mx") or 0)
     return out
 
@@ -1162,9 +1141,8 @@ def _merge_scd2_bundle(
     tracked_set = set(tracked) if tracked else None
     keys: set[str] = set()
     for row in batch:
-        key = _compose_key(row, pk_columns)
-        if key and not all(p == "" for p in key.split(_KEY_SEP)):
-            keys.add(key)
+        # NULL keys were quarantined upstream; '' is a key (D53).
+        keys.add(_compose_key(row, pk_columns))
     pk_types = key_column_types(table_obj, pk_columns)
     current_snaps = _fetch_current_snapshots(
         conn, qualified, pk_columns, target_cols, keys, dialect_name,
@@ -1202,8 +1180,6 @@ def _merge_scd2_bundle(
 
     for row in batch:
         key = _compose_key(row, pk_columns)
-        if not key or all(p == "" for p in key.split(_KEY_SEP)):
-            continue
         snap = current_snaps.get(key)
         hydrated = _hydrate_scd2_omit(
             row,
@@ -1212,7 +1188,8 @@ def _merge_scd2_bundle(
             stamp_set=stamps,
         )
         new_hash = _row_hash(
-            hydrated, target_cols, tracked=tracked or None, stamp_set=stamps
+            hydrated, target_cols, tracked=tracked or None, stamp_set=stamps,
+            dialect=dialect_name,
         )
         hydrated[cols["row_hash"]] = new_hash
         if key in current_hashes and current_hashes[key] == new_hash:
@@ -1611,14 +1588,12 @@ def verify_scd2_history(
     import sqlalchemy as sa
 
     from connectors.generic_sql import get_sqlalchemy_engine
-    from connectors.writer_common import quote_sql_identifier
 
     cols = resolve_scd2_cols(cols)
     engine = None
     try:
         engine = get_sqlalchemy_engine(cfg)
         dialect_name = engine.dialect.name if engine.dialect else ""
-        q = _qchar(dialect_name)
         qualified = _qualified_name(table_name, schema or None, dialect_name)
         select_cols = list(
             dict.fromkeys(
@@ -1631,9 +1606,9 @@ def verify_scd2_history(
                 + ([cols["version"]] if cols.get("version") else [])
             )
         )
-        col_sql = ", ".join(quote_sql_identifier(c, q) for c in select_cols)
-        order_sql = ", ".join(quote_sql_identifier(c, q) for c in pk_columns) + (
-            ", " + quote_sql_identifier(cols["valid_from"], q)
+        col_sql = ", ".join(quote_stored_identifier(dialect_name, c) for c in select_cols)
+        order_sql = ", ".join(quote_stored_identifier(dialect_name, c) for c in pk_columns) + (
+            ", " + quote_stored_identifier(dialect_name, cols["valid_from"])
         )
         versions: dict[str, list[dict[str, Any]]] = {}
         with engine.connect() as conn:
@@ -1643,7 +1618,7 @@ def verify_scd2_history(
                     f"ORDER BY {order_sql}"
                 )
             ):
-                m = dict(row._mapping)
+                m = dict(zip(select_cols, row))
                 key = _compose_key(m, pk_columns)
                 versions.setdefault(key, []).append(m)
 
@@ -1938,7 +1913,6 @@ def preview_scd2_merge(
                         _compose_key(row, pk_columns)
                         for row in pk_ok
                     }
-                    keys.discard("")
                     seen_keys.update(keys)
                     snaps = _fetch_current_snapshots(
                         conn,
@@ -1951,10 +1925,6 @@ def preview_scd2_merge(
                     )
                     for row in pk_ok:
                         key = _compose_key(row, pk_columns)
-                        if not key or all(
-                            p == "" for p in key.split(_KEY_SEP)
-                        ):
-                            continue
                         label = key.replace(_KEY_SEP, "|")[:80]
                         snap = snaps.get(key)
                         hydrated = _hydrate_scd2_omit(
@@ -1968,6 +1938,7 @@ def preview_scd2_merge(
                             target_cols,
                             tracked=tracked or None,
                             stamp_set=stamps,
+                            dialect=dialect_name,
                         )
                         if snap is None:
                             opens.append(label)

@@ -19,7 +19,7 @@ import pytest
 os.environ.setdefault("DATAFLOW_JOB_STORE", "memory")
 os.environ.setdefault("DATAFLOW_DISABLE_OBJECT_STORE", "1")
 
-from src.transfer.engine import _commit_kafka_offsets_on_accept  # noqa: E402
+from src.transfer.engine_kafka import commit_kafka_offsets_on_accept  # noqa: E402
 from src.transfer.models import EndpointConfig, TransferRequest  # noqa: E402
 from src.transfer.stream import (  # noqa: E402
     _kafka_accumulate_offsets,
@@ -74,13 +74,13 @@ def test_kafka_offsets_committed_once_on_success(monkeypatch):
         lambda cfg, cursor: calls.append(cursor),
     )
     monkeypatch.setattr(
-        "src.transfer.engine.resolve_connector_config", lambda ep: {"host": "b:9092"}
+        "src.transfer.engine_kafka.resolve_connector_config", lambda ep: {"host": "b:9092"}
     )
     ds = {"kafka_offsets": {
         "group_id": "g", "topic": "t",
         "pending_offsets": [{"topic": "t", "partition": 0, "offset": 40}],
     }}
-    _commit_kafka_offsets_on_accept(_kafka_request(), ds)
+    commit_kafka_offsets_on_accept(_kafka_request(), ds)
     assert len(calls) == 1
     assert calls[0]["pending_offsets"] == [{"topic": "t", "partition": 0, "offset": 40}]
     assert calls[0]["group_id"] == "g"

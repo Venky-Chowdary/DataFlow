@@ -22,7 +22,7 @@ from services.foreign_key_metadata import probe_foreign_keys
 from services.identity_carry import apply_identity_probe
 from services.physical_storage_metadata import probe_physical_storage
 from services.secondary_indexes import probe_secondary_indexes
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string, evidence_text, json_default
 
 logger = logging.getLogger(__name__)
 _si = sys.modules[__name__]
@@ -180,9 +180,15 @@ def _refine_columns_by_samples(
     if not candidates:
         return columns
 
+    from connectors.sql_identifiers import quote_sql_identifier
+
     q = quote_char
-    cols_sql = ", ".join(f"{q}{c['name']}{q}" for c in candidates)
-    qualified = f"{q}{schema}{q}.{q}{table}{q}" if schema else f"{q}{table}{q}"
+    cols_sql = ", ".join(quote_sql_identifier(c["name"], q) for c in candidates)
+    qualified = (
+        f"{quote_sql_identifier(schema, q)}.{quote_sql_identifier(table, q)}"
+        if schema
+        else quote_sql_identifier(table, q)
+    )
     try:
         with conn.cursor() as cur:
             cur.execute(f"SELECT {cols_sql} FROM {qualified} LIMIT %s", (sample_limit,))  # nosec B608
@@ -292,7 +298,27 @@ def introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
     return result
 
 
-def _introspect_schema(
+def _introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
+    """Introspect under the connector egress policy (pre-dial check + DNS pin)."""
+    from services.egress_guard import connector_dial_scope
+
+    reader_cfg = kwargs.get("reader_cfg") or {}
+    scope_cfg = {
+        "host": str(kwargs.get("host") or ""),
+        "connection_string": str(kwargs.get("connection_string") or ""),
+        "endpoint_url": str(kwargs.get("endpoint_url") or ""),
+        "type": db_type,
+        "workspace_id": str(
+            kwargs.get("workspace_id")
+            or (reader_cfg.get("workspace_id") if isinstance(reader_cfg, dict) else "")
+            or ""
+        ),
+    }
+    with connector_dial_scope(scope_cfg, db_type=db_type, point="introspect"):
+        return _introspect_schema_unscoped(db_type, **kwargs)
+
+
+def _introspect_schema_unscoped(
     db_type: str,
     *,
     host: str = "",
@@ -302,7 +328,7 @@ def _introspect_schema(
     password: str = "",
     schema: str = "public",
     connection_string: str = "",
-    ssl: bool = True,
+    ssl: bool | None = None,
     warehouse: str = "",
     table: str | None = None,
     catalog_type: str = "",
@@ -338,6 +364,11 @@ def _introspect_schema(
     # planned engine does not inherit a live schema probe.
     if db_type in {"timescaledb", "timescale"}:
         db_type = "postgresql"
+    if ssl is None:
+        # A caller that never said anything about TLS must not make it mandatory.
+        from services.connector_store import default_ssl
+
+        ssl = default_ssl(db_type)
     if db_type in {
         "generic_sql",
         "duckdb",
@@ -1280,6 +1311,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
             password=kwargs.get("password", ""),
             connection_string=kwargs.get("connection_string", ""),
             ssl=kwargs.get("ssl", True),
+            purpose="introspect",
         )
         with conn.cursor() as cur:
             # MySQL has no separate schema layer — database is the namespace.
@@ -3053,7 +3085,7 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
     table = kwargs.get("table")
     try:
         from connectors.mongodb_common import normalize_mongodb_connection_string
-        from pymongo import MongoClient
+        from connectors.mongodb_common import guarded_mongo_client
 
         conn_str = normalize_mongodb_connection_string(
             kwargs.get("connection_string", ""),
@@ -3065,7 +3097,7 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
             ssl=bool(kwargs.get("ssl")),
             auth_source=kwargs.get("auth_source", ""),
         )
-        client = MongoClient(conn_str, serverSelectionTimeoutMS=10000)
+        client = guarded_mongo_client(conn_str, serverSelectionTimeoutMS=10000)
         db_name = kwargs.get("database") or "test"
         db = client[db_name]
         tables = db.list_collection_names()[:100]
@@ -3096,19 +3128,23 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
         homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(docs)
         for doc in docs:
             for key, val in list(doc.items()):
-                sample_text = "" if val is None else str(val)
+                sample_text = "" if val is None else evidence_text(val)
                 if key not in columns:
                     # Null-first fields stay untyped until a non-null sample
                     # votes — do not invent TEXT from BSON null alone.
                     columns[key] = {
                         "name": key,
                         "inferred_type": _sample_logical_type(val, key),
-                        "nullable": val is None,
+                        # A document store enforces no NOT NULL but ``_id``: a
+                        # field the sampled documents carry is still NULL (absent)
+                        # in the next one that omits it, and in every row an
+                        # empty sub-document flattens to. Reporting it required
+                        # made the destination column NOT NULL and the sparse row
+                        # an EMPTY_VALUE_NOT_NULLABLE block (D147).
+                        "nullable": key != "_id",
                         "samples": [sample_text] if sample_text else [],
                     }
                 else:
-                    if val is None:
-                        columns[key]["nullable"] = True
                     samples = columns[key].setdefault("samples", [])
                     if sample_text and len(samples) < 8 and sample_text not in samples:
                         samples.append(sample_text)

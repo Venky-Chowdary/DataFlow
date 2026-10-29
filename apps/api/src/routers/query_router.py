@@ -32,6 +32,9 @@ _TYPE_SAMPLE_ROWS = 200
 _READ_ONLY_SQL_PATTERN = re.compile(r"^\s*SELECT\s+", re.IGNORECASE)
 
 _MONGODB_WRITE_STAGES = {"$out", "$merge"}
+# Operators that run server-side JavaScript; read-only playground never needs them.
+_MONGODB_JS_OPERATORS = {"$where", "$function", "$accumulator", "$mapReduce"}
+_MONGODB_FORBIDDEN_OPERATORS = _MONGODB_WRITE_STAGES | _MONGODB_JS_OPERATORS
 
 
 def _is_safe_sql(raw_query: str) -> bool:
@@ -39,26 +42,77 @@ def _is_safe_sql(raw_query: str) -> bool:
 
     Uses ``sqlparse`` when installed; otherwise a conservative regex fallback so
     Datawrap Pilot / query playground never hard-fail on a missing optional dep.
+    Every lexing in ``sql_code_views`` must pass: a quote inside a comment or a
+    quoted identifier is not a literal, and text one engine reads as a comment
+    can be a second statement on another.
     """
     try:
-        import sqlparse
-        from sqlparse.sql import TokenList
-        from sqlparse.tokens import Comment, Keyword, Newline, Whitespace
+        import sqlparse  # noqa: F401
     except ImportError:
         return _is_safe_sql_fallback(raw_query)
 
-    from services.sql_literals import sql_outside_literals
+    from services.sql_literals import sql_code_views
 
-    # A semicolon or DROP inside a quote is not a second statement (QA R2-001/002).
+    if _raw_has_second_statement(raw_query):
+        return False
+    heads: set[str] = set()
+    for code in sql_code_views(raw_query):
+        head = _read_only_head(code)
+        if head is None:
+            return False
+        heads.add(head)
+    if _has_side_effect_functions(raw_query):
+        return False
+    if "PRAGMA" in heads and not _pragma_is_readonly(raw_query):
+        return False
+    return bool(heads)
+
+
+_DESTRUCTIVE_KEYWORDS = frozenset({
+    "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
+    "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
+    "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
+})
+_SAFE_STARTS = frozenset({
+    "SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES",
+})
+
+
+def _raw_has_second_statement(raw_query: str) -> bool:
+    """Cross-check on the unmasked text with sqlparse's own lexer.
+
+    A ``;`` token followed by anything but comments is a second statement.
+    """
+    import sqlparse
+    from sqlparse.tokens import Comment, Newline, Punctuation, Whitespace
+
+    seen_semicolon = False
+    for ttype, value in sqlparse.lexer.tokenize(raw_query or ""):
+        if ttype in (Whitespace, Newline) or ttype in Comment:
+            continue
+        if ttype is Punctuation and value == ";":
+            seen_semicolon = True
+            continue
+        if seen_semicolon:
+            return True
+    return False
+
+
+def _read_only_head(code: str) -> str | None:
+    """Safe leading keyword of one masked view, or ``None`` when it is a write."""
+    import sqlparse
+    from sqlparse.sql import TokenList
+    from sqlparse.tokens import Comment, Keyword, Newline, Whitespace
+
     try:
-        parsed = sqlparse.parse(sql_outside_literals(raw_query).strip())
+        parsed = sqlparse.parse(code.strip())
     except Exception:
         # sqlparse's grouping pass refuses left-associative chains deeper than
         # 100 (a 250-column ``||`` concat is valid SQL — M19). Re-validate on
         # the ungrouped token stream: the keyword scan needs no nesting.
-        return _is_safe_sql_flat(raw_query)
+        return _flat_read_only_head(code)
     if not parsed or len(parsed) != 1:
-        return False
+        return None
 
     stmt = parsed[0]
 
@@ -68,41 +122,27 @@ def _is_safe_sql(raw_query: str) -> bool:
             for child in token.tokens:
                 yield from _walk_tokens(child)
 
-    destructive = {
-        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-        "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
-        "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
-    }
-    safe_starts = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES"}
     first_keyword = None
-
     for token in _walk_tokens(stmt):
         if token.ttype in (Whitespace, Newline) or Comment in (token.ttype, getattr(token.ttype, "__class__", None)):
             continue
         if token.is_whitespace:
             continue
         kw = token.value.upper() if token.value else ""
-        if first_keyword is None and kw in safe_starts:
+        if first_keyword is None and kw in _SAFE_STARTS:
             first_keyword = kw
         if token.ttype in Keyword or (hasattr(token.ttype, "parents") and Keyword in token.ttype.parents):
-            if kw in destructive:
-                return False
+            if kw in _DESTRUCTIVE_KEYWORDS:
+                return None
             # SELECT ... INTO / WITH ... INTO creates tables; block it.
             if kw == "INTO" and first_keyword in {"SELECT", "WITH"}:
-                return False
+                return None
 
     # If sqlparse reports a concrete DML/DDL statement type that is not SELECT, reject it.
     stmt_type = (stmt.get_type() or "").upper()
     if stmt_type and stmt_type not in {"SELECT", "UNKNOWN"}:
-        return False
-
-    if _has_side_effect_functions(raw_query):
-        return False
-
-    if first_keyword == "PRAGMA" and not _pragma_is_readonly(raw_query):
-        return False
-
-    return first_keyword in safe_starts
+        return None
+    return first_keyword if first_keyword in _SAFE_STARTS else None
 
 
 _READ_ONLY_REFUSAL = (
@@ -168,9 +208,12 @@ _READONLY_PRAGMAS = frozenset({
 
 
 def _pragma_is_readonly(sql: str) -> bool:
-    from services.sql_literals import sql_outside_literals
+    from services.sql_literals import sql_code_views
 
-    code = sql_outside_literals(sql or "")
+    return all(_pragma_view_is_readonly(code) for code in sql_code_views(sql or ""))
+
+
+def _pragma_view_is_readonly(code: str) -> bool:
     match = re.match(
         r"\s*PRAGMA\s+(?:[A-Za-z_][A-Za-z0-9_]*\.)?([A-Za-z_][A-Za-z0-9_]*)",
         code,
@@ -229,15 +272,144 @@ _FUNC_CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
 
 def _has_side_effect_functions(sql: str) -> bool:
     """True when a read query invokes a function with session/server side effects."""
-    scrubbed = re.sub(r"'(?:''|[^'])*'", " ", sql or "")
-    scrubbed = re.sub(r'"(?:""|[^"])*"', " ", scrubbed)
-    for match in _FUNC_CALL_RE.finditer(scrubbed):
-        name = match.group(1).lower()
-        if name in _SIDE_EFFECT_FUNCTIONS:
-            return True
-        if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
-            return True
+    from services.sql_literals import sql_call_views
+
+    for scrubbed in sql_call_views(sql or ""):
+        for match in _FUNC_CALL_RE.finditer(scrubbed):
+            name = match.group(1).lower()
+            if name in _SIDE_EFFECT_FUNCTIONS:
+                return True
+            if any(name.startswith(prefix) for prefix in _SIDE_EFFECT_PREFIXES):
+                return True
     return False
+
+
+# DuckDB reads host files and URLs from a plain SELECT: reader table
+# functions (read_csv, read_text, glob, *_scan), SQL-in-a-string runners
+# (query(), json_execute_serialized_sql) and replacement scans
+# (``FROM '/etc/passwd'``). A DuckDB file bind is exempt from the egress
+# guard, so the playground refuses these up front and, for local DuckDB,
+# also opens the connection with ``enable_external_access = false``.
+_DUCKDB_EXTERNAL_FUNCTIONS = frozenset({
+    "glob", "sniff_csv", "query", "query_table", "json_execute_serialized_sql",
+    "getenv", "load_aws_credentials", "duckdb_secrets", "which_secret",
+})
+_DUCKDB_EXTERNAL_PREFIXES = (
+    "read_", "parquet_", "iceberg_", "delta_", "ducklake_", "sqlite_",
+    "postgres_", "mysql_", "odbc_", "http", "s3_", "azure_", "gcs_",
+)
+_DUCKDB_EXTERNAL_SUFFIXES = ("_scan",)
+# Table references can follow FROM/JOIN or a comma of the FROM list. These
+# keywords end the FROM list at their paren depth.
+_DUCKDB_TOKEN_RE = re.compile(
+    r'"(?:""|[^"])*"|__DFQ\d+__|[A-Za-z_][A-Za-z0-9_$]*|[(),]'
+)
+_DUCKDB_FROM_LIST_END = frozenset({
+    "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "FETCH", "UNION",
+    "EXCEPT", "INTERSECT", "QUALIFY", "WINDOW", "SELECT", "ON", "USING",
+    "RETURNING", "SAMPLE",
+})
+# ``EXTRACT(year FROM '2020-01-01')`` and ``IS DISTINCT FROM 'x'`` take a
+# value after FROM, not a table.
+_DUCKDB_FROM_VALUE_FUNCTIONS = frozenset({"extract", "trim", "substring", "overlay", "position"})
+_DUCKDB_PATH_HINT_RE = re.compile(
+    r"[/\\:*?]|\.(?:csv|tsv|txt|parquet|json|jsonl|ndjson|arrow|xlsx|"
+    r"db|duckdb|sqlite|gz|zst)$",
+    re.I,
+)
+_DUCKDB_EXTERNAL_REFUSAL = (
+    "DuckDB file and network readers (read_csv, read_text, glob, *_scan, "
+    "FROM '<path>') are not allowed in the playground. Query tables in the "
+    "connected database."
+)
+
+
+def is_duckdb_engine(engine: Any) -> bool:
+    url = getattr(engine, "url", None)
+    return str(getattr(url, "drivername", "") or "").lower().startswith("duckdb")
+
+
+def _duckdb_reads_external(sql: str) -> bool:
+    """True when DuckDB SQL would read a host file/URL or run SQL from a string.
+
+    Comments and string literals are lexed away first (``sql_outside_literals``),
+    so a ``'--'`` literal cannot swallow a reader call and a quoted function
+    name is still a call. The connect-time ``enable_external_access = false``
+    in :func:`_duckdb_playground_engine` is the backstop for local DuckDB.
+    """
+    from services.sql_literals import sql_outside_literals
+
+    tokens = _DUCKDB_TOKEN_RE.findall(sql_outside_literals(sql or ""))
+    # Per paren depth: [inside a FROM list, FROM takes a value (EXTRACT & co)].
+    levels: list[list[bool]] = [[False, False]]
+    expect_table = False
+    for i, tok in enumerate(tokens):
+        upper = tok.upper()
+        prev = tokens[i - 1].lower() if i else ""
+        if tok == "(":
+            levels.append([False, prev in _DUCKDB_FROM_VALUE_FUNCTIONS])
+            continue
+        if tok == ")":
+            if len(levels) > 1:
+                levels.pop()
+            expect_table = False
+            continue
+        if tok == ",":
+            expect_table = levels[-1][0]
+            continue
+        if upper in ("FROM", "JOIN"):
+            if upper == "FROM" and (levels[-1][1] or prev == "distinct"):
+                expect_table = False
+            else:
+                levels[-1][0] = True
+                expect_table = True
+            continue
+        if upper in _DUCKDB_FROM_LIST_END:
+            levels[-1][0] = False
+            expect_table = False
+            continue
+        if expect_table:
+            if tok.startswith("__DFQ"):
+                return True
+            if tok.startswith('"') and _DUCKDB_PATH_HINT_RE.search(tok[1:-1].replace('""', '"')):
+                return True
+        expect_table = False
+        # A quoted function name is still a call: ``"read_csv"('/x')``.
+        if i + 1 < len(tokens) and tokens[i + 1] == "(":
+            name = tok[1:-1].replace('""', '"') if tok.startswith('"') else tok
+            name = name.lower()
+            if (
+                name in _DUCKDB_EXTERNAL_FUNCTIONS
+                or name.startswith(_DUCKDB_EXTERNAL_PREFIXES)
+                or name.endswith(_DUCKDB_EXTERNAL_SUFFIXES)
+            ):
+                return True
+    return False
+
+
+def _duckdb_playground_engine(engine: Any) -> Any:
+    """Same DuckDB target, opened with external (file/network) access disabled.
+
+    ``SET enable_external_access = false`` at runtime is global to the
+    database instance and cannot be undone while it is open, so a shared
+    connection would be crippled for a concurrent transfer. A connect-time
+    config keeps it scoped to this playground connection. MotherDuck
+    (``md:``) loads its extension through external access, so it relies on
+    the SQL refusal alone.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.pool import NullPool
+
+    database = str(getattr(engine.url, "database", "") or "")
+    if database.startswith("md:"):
+        return engine
+    guarded = create_engine(
+        engine.url,
+        poolclass=NullPool,
+        connect_args={"config": {"enable_external_access": False}},
+    )
+    guarded.dialect.supports_native_decimal = True
+    return guarded
 
 
 def _is_safe_sql_flat(raw_query: str) -> bool:
@@ -247,61 +419,65 @@ def _is_safe_sql_flat(raw_query: str) -> bool:
     (a 250-column ``||`` concat is valid SQL — M19). The read-only policy —
     one statement, a safe head, no destructive keywords, no SELECT INTO, the
     existing side-effect/pragma checks — needs no nesting, so this walks the
-    lexer's flat token stream instead. ``sql_outside_literals`` keeps quoted
-    content out of the scan, so a ``;`` or DROP inside a string cannot spoof
-    a second statement (QA R2-001/002).
+    lexer's flat token stream of every ``sql_code_views`` lexing instead.
     """
+    from services.sql_literals import sql_code_views
+
+    if _raw_has_second_statement(raw_query):
+        return False
+    heads: set[str] = set()
+    for code in sql_code_views(raw_query):
+        head = _flat_read_only_head(code)
+        if head is None:
+            return False
+        heads.add(head)
+    if _has_side_effect_functions(raw_query):
+        return False
+    if "PRAGMA" in heads and not _pragma_is_readonly(raw_query):
+        return False
+    return bool(heads)
+
+
+def _flat_read_only_head(code: str) -> str | None:
     import sqlparse
     from sqlparse.tokens import Comment, Keyword, Newline, Punctuation, Whitespace
 
-    from services.sql_literals import sql_outside_literals
-
-    destructive = {
-        "INSERT", "UPDATE", "DELETE", "DROP", "CREATE", "ALTER",
-        "TRUNCATE", "GRANT", "REVOKE", "EXEC", "EXECUTE", "MERGE",
-        "COPY", "LOAD", "CALL", "DO", "LOCK", "UNLOCK",
-    }
-    safe_starts = {"SELECT", "WITH", "EXPLAIN", "SHOW", "DESCRIBE", "ANALYZE", "PRAGMA", "VALUES"}
-
-    tokens = sqlparse.lexer.tokenize(sql_outside_literals(raw_query).strip())
     first_keyword = None
-    for ttype, value in tokens:
+    for ttype, value in sqlparse.lexer.tokenize(code.strip().rstrip(";")):
         if ttype in (Whitespace, Newline) or ttype in Comment:
             continue
         kw = str(value or "").upper()
         if ttype is Punctuation and kw == ";":
             # A real semicolon token means a second statement follows.
-            return False
-        if first_keyword is None and kw in safe_starts:
+            return None
+        if first_keyword is None and kw in _SAFE_STARTS:
             first_keyword = kw
         if ttype in Keyword or (
             hasattr(ttype, "parents") and Keyword in ttype.parents
         ):
-            if kw in destructive:
-                return False
+            if kw in _DESTRUCTIVE_KEYWORDS:
+                return None
             if kw == "INTO" and first_keyword in {"SELECT", "WITH"}:
-                return False
-    if _has_side_effect_functions(raw_query):
-        return False
-    if first_keyword == "PRAGMA" and not _pragma_is_readonly(raw_query):
-        return False
-    return first_keyword in safe_starts
+                return None
+    return first_keyword if first_keyword in _SAFE_STARTS else None
 
 
 def _is_safe_sql_fallback(raw_query: str) -> bool:
     """Conservative read-only gate when sqlparse is unavailable."""
-    import re
-
-    from services.sql_literals import mask_sql_string_literals
+    from services.sql_literals import sql_code_views
 
     text = (raw_query or "").strip()
     if not text:
         return False
-    # Reject multi-statement payloads. Literals are masked first so a
-    # semicolon or DROP inside quotes is not a second statement.
-    code, _literals = mask_sql_string_literals(text)
-    code = re.sub(r"--[^\n]*", " ", code)
-    code = re.sub(r"/\*.*?\*/", " ", code, flags=re.S)
+    views = sql_code_views(text)
+    if not all(_fallback_view_is_safe(code, text) for code in views):
+        return False
+    return not _has_side_effect_functions(text)
+
+
+def _fallback_view_is_safe(code: str, text: str) -> bool:
+    # Reject multi-statement payloads. Literals and comments are masked first
+    # so a semicolon or DROP inside quotes is not a second statement.
     if ";" in code.rstrip().rstrip(";"):
         return False
     upper = code.upper()
@@ -325,15 +501,45 @@ def _is_safe_sql_fallback(raw_query: str) -> bool:
     return True
 
 
+def _reject_mongodb_operator(key: str) -> None:
+    kind = "aggregation stage" if key in _MONGODB_WRITE_STAGES else "operator"
+    raise HTTPException(
+        status_code=400,
+        detail=f"MongoDB {kind} '{key}' is not allowed in the query playground",
+    )
+
+
+def _validate_mongodb_query_tree(node: Any) -> None:
+    """Reject write stages and server-side JavaScript anywhere in a filter/pipeline.
+
+    Walks every nested document and array, so sub-pipelines (``$lookup``,
+    ``$facet``, ``$unionWith``) and ``$expr`` bodies are covered too.
+    """
+    try:
+        from bson.code import Code
+    except ImportError:  # pragma: no cover - pymongo ships bson
+        Code = ()  # type: ignore[assignment]
+
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if Code and isinstance(current, Code):
+            _reject_mongodb_operator("$code")
+        if isinstance(current, dict):
+            for key, value in current.items():
+                if isinstance(key, str) and key in _MONGODB_FORBIDDEN_OPERATORS:
+                    _reject_mongodb_operator(key)
+                stack.append(value)
+        elif isinstance(current, (list, tuple)):
+            stack.extend(current)
+
+
 def _validate_mongodb_aggregate(pipeline: list[dict]) -> None:
-    for stage in pipeline:
-        if isinstance(stage, dict):
-            for key in stage:
-                if key in _MONGODB_WRITE_STAGES:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"MongoDB aggregation stage '{key}' is not allowed in the query playground",
-                    )
+    _validate_mongodb_query_tree(pipeline)
+
+
+def _validate_mongodb_filter(query_filter: dict) -> None:
+    _validate_mongodb_query_tree(query_filter)
 
 
 class QueryExecuteRequest(BaseModel):
@@ -353,7 +559,10 @@ class QueryExecuteRequest(BaseModel):
 
 class QueryExportRequest(QueryExecuteRequest):
     format: str = Field("csv", description="csv, json, jsonl, tsv, excel, parquet")
-    output_path: str = Field("", description="Optional server-local path; empty uses exports folder")
+    output_path: str = Field(
+        "",
+        description="Optional file name inside the server exports folder; empty generates one",
+    )
     destination_connector_id: str = Field("", description="Optional saved connector to write results to instead of a file")
     destination: str = Field("", description="Target table, collection, or object name for destination_connector_id")
     sync_mode: str = Field(
@@ -460,6 +669,18 @@ def _check_workspace_write(request: Request, workspace_id: str | None):
         raise HTTPException(status_code=403, detail="Workspace write access denied")
 
 
+def _check_connector_read(request: Request, connector_id: str | None) -> None:
+    from services.workspace_access import assert_connector_accessible
+
+    assert_connector_accessible(request, connector_id)
+
+
+def _check_connector_write(request: Request, connector_id: str | None) -> None:
+    from services.workspace_access import assert_connector_accessible
+
+    assert_connector_accessible(request, connector_id, write=True)
+
+
 @router.post("/execute", response_model=QueryResult)
 async def query_execute(
     body: QueryExecuteRequest,
@@ -469,6 +690,7 @@ async def query_execute(
     """Run a read-only query against a saved connector and return rows."""
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
+    _check_connector_read(request, body.connector_id)
     connector = connector_store.get_connector(body.connector_id, workspace_id=workspace_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -514,6 +736,7 @@ async def query_export(
     """Run a query and export the results to a file or a destination connector."""
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
+    _check_connector_read(request, body.connector_id)
     connector = connector_store.get_connector(body.connector_id, workspace_id=workspace_id)
     if not connector:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -558,20 +781,22 @@ async def query_export(
         import uuid
         from pathlib import Path
 
-        api_root = Path(__file__).resolve().parents[2]
+        from services.export_paths import (
+            ExportPathError,
+            generated_export_path,
+            resolve_export_path,
+        )
+
         ext = Path(export_name).suffix.lstrip(".") or body.format
-        if body.output_path:
-            out_path = (api_root / body.output_path).resolve()
-            if not str(out_path).startswith(str(api_root)):
-                raise HTTPException(status_code=400, detail="Output path must be inside the application workspace")
-            out_path.parent.mkdir(parents=True, exist_ok=True)
-            final_path = out_path
-            filename = out_path.name
-        else:
-            export_dir = api_root / "exports"
-            export_dir.mkdir(parents=True, exist_ok=True)
-            filename = f"query_{uuid.uuid4().hex[:16]}.{ext}"
-            final_path = export_dir / filename
+        try:
+            if body.output_path.strip():
+                final_path = resolve_export_path(body.output_path, default_ext=ext)
+            else:
+                final_path = generated_export_path(f"query_{uuid.uuid4().hex[:16]}.{ext}")
+        except ExportPathError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        final_path.parent.mkdir(parents=True, exist_ok=True)
+        filename = final_path.name
 
         final_path.write_bytes(export_bytes)
         return QueryExportResult(
@@ -582,6 +807,8 @@ async def query_export(
             row_count=len(rows),
             format=body.format,
         )
+    except HTTPException:
+        raise
     except Exception as exc:
         detail, _cid = public_error(
             exc,
@@ -614,6 +841,7 @@ async def query_schema(
     """
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
+    _check_connector_read(request, body.connector_id)
 
     from services.connector_probe import endpoint_from_saved_connector
 
@@ -729,6 +957,7 @@ async def query_schemas(
     """
     workspace_id = x_workspace_id or ""
     _check_workspace_read(request, workspace_id)
+    _check_connector_read(request, body.connector_id)
 
     from services.connector_probe import endpoint_from_saved_connector
     from services.query_catalog import build_catalog_tree, live_schema_names
@@ -773,6 +1002,7 @@ def _export_to_connector(
 ) -> QueryExportResult:
     """Write query results to a saved database, warehouse, or object-store connector."""
     _check_workspace_write(request, workspace_id)
+    _check_connector_write(request, body.destination_connector_id)
     dest_connector = connector_store.get_connector(body.destination_connector_id, workspace_id=workspace_id)
     if not dest_connector:
         raise HTTPException(status_code=404, detail="Destination connector not found")
@@ -923,6 +1153,7 @@ def _run_mongodb_query(connector, body):
         try:
             parsed = _parse_mongodb_json(body.query)
             if isinstance(parsed, dict):
+                _validate_mongodb_filter(parsed)
                 query_filter = parsed
             elif isinstance(parsed, list):
                 _validate_mongodb_aggregate(parsed)
@@ -1026,11 +1257,55 @@ def _apply_read_only_session(conn: Any, db_type: str) -> None:
             # Transaction-scoped, not SESSION: a pooled connection must not
             # hand a stale read-only mode to the next write query.
             conn.execute(text("SET TRANSACTION READ ONLY"))
-        elif db in {"sqlite", "duckdb"}:
+        elif db == "sqlite":
+            # DuckDB has no query_only PRAGMA; the failed statement aborts the
+            # transaction. Its guard is the connect-time config in
+            # _duckdb_playground_engine.
             conn.execute(text("PRAGMA query_only = ON"))
     except Exception as exc:
         logging.getLogger(__name__).debug(
             "read-only session option not applied on %s: %s", db, exc
+        )
+
+
+#: Interactive statement bound; ``0`` switches it off (D181).
+DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS = 120.0
+
+
+def _apply_statement_timeout(conn: Any, db_type: str) -> None:
+    """Have the server cancel an interactive query that outlives the tool deadline.
+
+    The deadline frees the caller; this frees the database and the worker, which
+    would otherwise keep executing for nobody. Best-effort per dialect.
+    """
+    import os
+
+    raw = os.environ.get("DATAFLOW_QUERY_STATEMENT_TIMEOUT_SECONDS", "").strip()
+    try:
+        seconds = float(raw) if raw else DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
+    except ValueError:
+        seconds = DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
+    if seconds <= 0:
+        return
+    millis = int(seconds * 1000)
+    db = (db_type or "").lower()
+    if db in {"postgresql", "postgres", "cockroachdb", "greenplum", "yugabytedb"}:
+        statement = f"SET LOCAL statement_timeout = {millis}"
+    elif db in {"mysql", "tidb"}:
+        statement = f"SET SESSION MAX_EXECUTION_TIME = {millis}"
+    elif db in {"sqlserver", "mssql"}:
+        # Bounds lock waits, the usual reason a read stalls; SQL Server has no
+        # per-statement execution cap.
+        statement = f"SET LOCK_TIMEOUT {millis}"
+    else:
+        return
+    try:
+        from sqlalchemy import text
+
+        conn.execute(text(statement))
+    except Exception as exc:
+        logging.getLogger(__name__).debug(
+            "statement timeout not applied on %s: %s", db, exc
         )
 
 
@@ -1148,6 +1423,12 @@ def _to_pyformat(sql: str, params: dict[str, Any]) -> str:
     return pattern.sub(lambda m: f"%({m.group(1)})s", sql)
 
 
+def _is_oracle_connector(connector_type: object) -> bool:
+    from connectors.generic_sql import _is_oracle_wire
+
+    return _is_oracle_wire("", str(connector_type or ""))
+
+
 def _run_sql_query(connector, body):
     raw_query = body.query.strip()
     if not raw_query:
@@ -1187,6 +1468,11 @@ def _run_sql_query(connector, body):
             ),
         ) from exc
 
+    if is_duckdb_engine(engine):
+        if _duckdb_reads_external(raw_query):
+            raise HTTPException(status_code=400, detail=_DUCKDB_EXTERNAL_REFUSAL)
+        engine = _duckdb_playground_engine(engine)
+
     from services.dialect_profiles import append_result_limit
 
     # Oracle/DB2 reject LIMIT (ORA-03047). A query that already has FETCH or TOP
@@ -1201,8 +1487,28 @@ def _run_sql_query(connector, body):
 
         with engine.connect() as conn:
             _apply_read_only_session(conn, connector.type)
+            _apply_statement_timeout(conn, connector.type)
             from services.sql_literals import escape_sqlalchemy_literal_colons
 
+            tz_positions: frozenset[int] = frozenset()
+            if _is_oracle_connector(connector.type):
+                # python-oracledb reads TIMESTAMP WITH [LOCAL] TIME ZONE naive,
+                # and this result feeds the preflight sample: a naive cell for
+                # a tz-aware target blocked g3 (D155).
+                from connectors.oracle_tstz import tz_projected_query
+
+                def _probe_description(sql: str):
+                    probe = conn.execute(
+                        text(escape_sqlalchemy_literal_colons(sql)),
+                        dict(body.params or {}),
+                    )
+                    desc = getattr(getattr(probe, "cursor", None), "description", None)
+                    probe.close()
+                    return desc
+
+                clean_query, tz_positions = tz_projected_query(
+                    _probe_description, clean_query
+                )
             result = conn.execute(
                 text(escape_sqlalchemy_literal_colons(clean_query)),
                 dict(body.params or {}),
@@ -1220,6 +1526,10 @@ def _run_sql_query(connector, body):
                 if i >= body.limit:
                     withheld += 1
                     break
+                if tz_positions:
+                    from connectors.oracle_tstz import parse_oracle_tz_row
+
+                    row = parse_oracle_tz_row(row, tz_positions)
                 rows.append({columns[j]: _jsonify_value(v) for j, v in enumerate(row)})
             try:
                 result.close()

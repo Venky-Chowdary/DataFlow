@@ -126,13 +126,18 @@ def reap_orphan_staging(
     """
     import sqlalchemy as sa
 
+    from services.dialect_profiles import stored_identifier
     from services.mirror_engine import _qualified_name
 
+    # The catalog holds names as the engine stored them, and Snowflake's LIKE
+    # and = are case-sensitive: the lower-case prefix never matched its UPPER
+    # spools, so they were never swept.
     sql = "SELECT table_name FROM information_schema.tables WHERE table_name LIKE :pat"
-    params: dict[str, Any] = {"pat": f"{prefix}%"}
+    params: dict[str, Any] = {"pat": f"{stored_identifier(dialect_name, prefix)}%"}
     if schema_name:
         sql += " AND table_schema = :schema"
-        params["schema"] = schema_name
+        params["schema"] = stored_identifier(dialect_name, schema_name)
+    keep = stored_identifier(dialect_name, keep) if keep else ""
     try:
         rows = conn.execute(sa.text(sql), params).fetchall()
     except Exception as exc:  # noqa: BLE001 - no catalog access is not a failure

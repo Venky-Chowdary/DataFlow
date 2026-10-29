@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from services.ops_events import emit_event
 from services.value_serializer import json_default
+from services.workspace_filter import bound_allows, current_workspace_filter
 
 from ..rag.product_docs import (
     cited_sources,
@@ -29,6 +30,7 @@ from ..rag.query_analysis import (
 )
 from .data_analyst import get_data_analyst
 from .lifecycle_tools import LIFECYCLE_TOOL_DEFINITIONS, plan_lifecycle_operation
+from .tool_deadline import DEADLINE_TOOLS, QUERY_DEADLINE_TOOLS, run_with_deadline
 from .tool_permissions import current_caller_role, denial_message, is_tool_allowed
 from .transfer_rules import parse_transfer_data_rules
 from .unsupported_question import (
@@ -470,6 +472,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "and does not take a table cursor."
                     ),
                 },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
+                    ),
+                },
                 "cursor_semantics": {
                     "type": "string",
                     "description": (
@@ -549,6 +559,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Two candidates are not guessed. A column that is not on "
                         "the source is never invented. CDC uses the log position "
                         "and does not take a table cursor."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
                     ),
                 },
                 "cursor_semantics": {
@@ -661,6 +679,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Two candidates are not guessed. A column that is not on "
                         "the source is never invented. CDC uses the log position "
                         "and does not take a table cursor."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
                     ),
                 },
                 "cursor_semantics": {
@@ -886,6 +912,14 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Watermark column for incremental modes. When omitted and "
                         "the source has exactly one modification-timestamp column, "
                         "that column is selected. Two candidates are not guessed."
+                    ),
+                },
+                "cursor_lookback_days": {
+                    "type": "integer",
+                    "description": (
+                        "Days each run re-reads behind the watermark. Required "
+                        "with cursor_semantics business_date; re-reads collapse "
+                        "on the upsert key."
                     ),
                 },
                 "cursor_semantics": {
@@ -1651,7 +1685,19 @@ class DataPilotTools:
                     reason="invalid_arguments",
                     role=role,
                 )
-            result = handler(**bound)
+            if name in DEADLINE_TOOLS | QUERY_DEADLINE_TOOLS:
+                # D169/D181: a source that accepts and never answers must fail this
+                # call with the host named, not hold it until the client's
+                # -32001 timeout.
+                result = run_with_deadline(
+                    name,
+                    lambda: handler(**bound),
+                    lambda message: ToolResult(
+                        name=name, success=False, output=None, error=message
+                    ),
+                )
+            else:
+                result = handler(**bound)
         except TypeError as e:
             return _tool_executed(
                 ToolResult(
@@ -1892,7 +1938,6 @@ class DataPilotTools:
                 "port": port,
                 "database": database,
                 "username": username,
-                "password": password,
                 "connection_string": connection_string,
                 "service_account": service_account,
                 "ssl": ssl,
@@ -2233,6 +2278,8 @@ class DataPilotTools:
 
         from services.job_status import job_timestamp_iso
 
+        from services.phase_profile import job_phase_timings
+
         from .job_reads import job_governance, job_lineage, read_transfer_job
 
         job = read_transfer_job((job_id or "").strip())
@@ -2326,6 +2373,7 @@ class DataPilotTools:
                 "updated_at": job_timestamp_iso(job.get("updated_at")),
                 "completed_at": job_timestamp_iso(job.get("completed_at")),
                 "governance": job_governance(job),
+                "phase_timings": job_phase_timings(job),
                 "sync_mode": route.get("sync_mode"),
                 "route": route,
                 "live_source_schema": live_schema,
@@ -3000,6 +3048,7 @@ class DataPilotTools:
         primary_key: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
         leftover_nl: str = "",
         contract_id: str = "",
         require_signed_contract: Any = None,
@@ -3043,6 +3092,7 @@ class DataPilotTools:
                 primary_key=primary_key,
                 cursor_column=cursor_column,
                 cursor_semantics=cursor_semantics,
+                cursor_lookback_days=cursor_lookback_days,
                 **bind,
             )
             if planned.success:
@@ -3437,15 +3487,13 @@ class DataPilotTools:
         sid = (schedule_id or "").strip()
         if sid:
             sched = get_schedule(sid)
-            if sched:
+            if sched and bound_allows(sched.workspace_id):
                 return sched, None
         needle = (name or "").strip().lower()
         if not needle:
             return None, None
         # Full name only. A substring used to run or delete a different
         # pipeline, and two schedules were allowed to share a name.
-        from services.tenant_scope import current_workspace_filter
-
         exact = [
             s for s in list_schedules(current_workspace_filter())
             if (s.name or "").strip().lower() == needle
@@ -3516,7 +3564,6 @@ class DataPilotTools:
 
     def _list_schedules(self, limit: int = 20) -> ToolResult:
         from services.schedule_store import list_schedules
-        from services.tenant_scope import current_workspace_filter
 
         visible = list_schedules(current_workspace_filter())
         rows = [self._schedule_summary(s) for s in visible[: max(1, min(int(limit or 20), 100))]]
@@ -3604,10 +3651,22 @@ class DataPilotTools:
 
         return _job_tool("retry_job", job_id, selector)
 
-    def _rerun_job(self, job_id: str = "", selector: str = "", force: bool = False) -> ToolResult:
+    def _rerun_job(
+        self,
+        job_id: str = "",
+        selector: str = "",
+        force: bool = False,
+        risk_acceptance: dict | None = None,
+    ) -> ToolResult:
         from .lifecycle_tools import _job_tool
 
-        return _job_tool("rerun_job", job_id, selector, force=bool(force))
+        return _job_tool(
+            "rerun_job",
+            job_id,
+            selector,
+            force=bool(force),
+            risk_acceptance=risk_acceptance,
+        )
 
     def _resume_job(self, job_id: str = "", selector: str = "") -> ToolResult:
         from .lifecycle_tools import _job_tool
@@ -3749,10 +3808,9 @@ class DataPilotTools:
         return update_schedule(self._resolve_schedule, schedule_id, name, cadence, new_name)
 
     def _list_contracts(self, limit: int = 50) -> ToolResult:
-        from services.contract_store import get_contract_store
+        from services.contract_store import visible_contracts
 
-        store = get_contract_store()
-        contracts = store.list_contracts(limit=max(1, min(int(limit or 50), 200)))
+        contracts, census = visible_contracts(limit=max(1, min(int(limit or 50), 200)))
         rows = []
         for c in contracts:
             if hasattr(c, "to_dict"):
@@ -3767,11 +3825,6 @@ class DataPilotTools:
                 "status": d.get("status"),
                 "updated_at": str(d.get("updated_at") or ""),
             })
-        census: dict = {}
-        try:
-            census = store.count_contracts_by_status() or {}
-        except Exception:
-            census = {}
         total = sum(int(n) for n in census.values()) if census else len(rows)
         return ToolResult(
             name="list_contracts",
@@ -3967,6 +4020,7 @@ class DataPilotTools:
         dedupe_key: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         cadence: str = "",
@@ -4002,6 +4056,7 @@ class DataPilotTools:
             dedupe_key=dedupe_key,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             cadence=cadence,
@@ -4037,6 +4092,7 @@ class DataPilotTools:
         dedupe_key: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
         rule_questions: list | None = None,
         applied_rules: list | None = None,
         cadence: str = "",
@@ -4072,6 +4128,7 @@ class DataPilotTools:
             dedupe_key=dedupe_key,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
             rule_questions=rule_questions,
             applied_rules=applied_rules,
             cadence=cadence,
@@ -4137,6 +4194,7 @@ class DataPilotTools:
         name: str = "",
         cursor_column: str = "",
         cursor_semantics: str = "",
+        cursor_lookback_days: int = 0,
         source_timezone: str = "",
         source_read_mode: str = "",
         procedure_call: str = "",
@@ -4174,6 +4232,7 @@ class DataPilotTools:
             name=name,
             cursor_column=cursor_column,
             cursor_semantics=cursor_semantics,
+            cursor_lookback_days=cursor_lookback_days,
             source_timezone=source_timezone,
             source_read_mode=source_read_mode,
             procedure_call=procedure_call,

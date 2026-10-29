@@ -14,6 +14,7 @@ from collections.abc import Callable
 from typing import Any
 
 from connectors.writer_common import resolve_target_columns
+from services.dialect_profiles import quote_stored_identifier
 from services.engine_pool import release_engine
 
 from .adapters import resolve_connector_config
@@ -31,13 +32,9 @@ def _qualified(table: str, schema: str | None, dialect: str = "") -> str:
     quotes elsewhere. Emitting ANSI quotes everywhere made every SCD2 / mirror
     statement a syntax error on MySQL.
     """
-    from connectors.writer_common import quote_sql_identifier
-    from services.dialect_profiles import quote_char_for
-
-    q = quote_char_for(dialect) or '"'
-    table_q = quote_sql_identifier(table, q)
+    table_q = quote_stored_identifier(dialect, table)
     if schema:
-        return f"{quote_sql_identifier(schema, q)}.{table_q}"
+        return f"{quote_stored_identifier(dialect, schema)}.{table_q}"
     return table_q
 
 
@@ -403,26 +400,23 @@ def stream_scd2_mirror_transfer(
                     from services.scd2_engine import (
                         _active_checksum as _scd2_active_checksum,
                         _compose_key,
-                        _qchar as _scd2_qchar,
                         scd2_is_current_predicate,
                     )
-                    from connectors.writer_common import quote_sql_identifier
 
                     engine = get_sqlalchemy_engine(dest_cfg)
                     try:
                         with engine.connect() as conn:
-                            _q = _scd2_qchar(dest_type)
                             _cpred = scd2_is_current_predicate(
                                 dest_type,
-                                quote_sql_identifier(_scd2_cols["is_current"], _q),
+                                quote_stored_identifier(dest_type, _scd2_cols["is_current"]),
                             )
                             _join = " AND ".join(
-                                f"{staging_qualified}.{quote_sql_identifier(c, _q)}"
-                                f" = {target_qualified}.{quote_sql_identifier(c, _q)}"
+                                f"{staging_qualified}.{quote_stored_identifier(dest_type, c)}"
+                                f" = {target_qualified}.{quote_stored_identifier(dest_type, c)}"
                                 for c in conflict_columns
                             )
                             _pkq = ", ".join(
-                                quote_sql_identifier(c, _q) for c in conflict_columns
+                                quote_stored_identifier(dest_type, c) for c in conflict_columns
                             )
                             import sqlalchemy as sa
                             from services.reconciliation_api import (
@@ -459,7 +453,7 @@ def stream_scd2_mirror_transfer(
                                 if c not in _stamp_set(_scd2_cols)
                             ]
                             _attrq = ", ".join(
-                                quote_sql_identifier(c, _q) for c in _attr
+                                quote_stored_identifier(dest_type, c) for c in _attr
                             )
                             _srows, _sdigest = stream_select_checksum(
                                 conn,
@@ -657,18 +651,14 @@ def _read_staging_batches(
     """Yield batches from staging via one streamed SELECT. Never OFFSET."""
     import sqlalchemy as sa
     from connectors.generic_sql import get_sqlalchemy_engine
-    from connectors.writer_common import quote_sql_identifier
     from services.reconciliation_api import iter_select_row_dicts
 
     engine = get_sqlalchemy_engine(cfg)
-    from services.dialect_profiles import quote_char_for
-
     dialect = str(getattr(getattr(engine, "dialect", None), "name", "") or "")
-    qchar = quote_char_for(dialect) or '"'
     qualified = _qualified(endpoint.table, schema_name, dialect)
     try:
         with engine.connect() as conn:
-            cols = ",".join(quote_sql_identifier(c, qchar) for c in columns)
+            cols = ",".join(quote_stored_identifier(dialect, c) for c in columns)
             sql = f"SELECT {cols} FROM {qualified}"  # nosec B608
             yield from iter_select_row_dicts(
                 conn, sa.text(sql), columns, itersize=batch_size

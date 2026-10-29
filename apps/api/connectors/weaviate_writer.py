@@ -41,15 +41,22 @@ def _requests_session() -> Any:
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
+    from services.egress_guard import redirect_guard_hook
+
+    session.hooks["response"].append(redirect_guard_hook())
     return session
 
 
 def _base_url(host: str, port: int, ssl: bool, connection_string: str = "") -> str:
-    if connection_string.strip():
-        return connection_string.rstrip("/")
     from connectors.url_authority import http_service_base_url
+    from services.egress_guard import assert_connector_dial_allowed
 
-    return http_service_base_url(host, port, ssl, 8080)
+    if connection_string.strip():
+        url = connection_string.rstrip("/")
+    else:
+        url = http_service_base_url(host, port, ssl, 8080)
+    assert_connector_dial_allowed(url, point="http_client")
+    return url
 
 
 def _headers(api_key: str) -> dict[str, str]:
@@ -259,7 +266,7 @@ def _ensure_class(
         timeout=15,
     )
     if resp.status_code not in {200, 201}:
-        raise RuntimeError(f"Weaviate create class failed: {resp.status_code} {resp.text}")
+        raise RuntimeError(f"Weaviate create class failed: {resp.status_code} {resp.text[:200]}")
 
 
 def _weaviate_property_to_carrier(data_types: Any) -> str:
@@ -989,7 +996,7 @@ def write_mapped_rows(
                 timeout=60,
             )
             if resp.status_code not in {200, 201}:
-                raise RuntimeError(f"Weaviate batch upsert failed: {resp.status_code} {resp.text}")
+                raise RuntimeError(f"Weaviate batch upsert failed: {resp.status_code} {resp.text[:200]}")
             response_items = resp.json() if getattr(resp, "content", None) else []
             if not isinstance(response_items, list) or len(response_items) != len(batch):
                 raise RuntimeError(

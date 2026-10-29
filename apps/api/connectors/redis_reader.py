@@ -96,6 +96,9 @@ def _redis_client(cfg: dict[str, Any], *, socket_timeout: float = 30):
     from redis.backoff import NoBackoff
     from redis.retry import Retry
 
+    from services.egress_guard import assert_cfg_dial_allowed
+
+    assert_cfg_dial_allowed(cfg, db_type="redis", point="redis_client")
     bounded = {
         "socket_timeout": socket_timeout,
         "socket_connect_timeout": min(REDIS_CONNECT_TIMEOUT_SEC, float(socket_timeout)),

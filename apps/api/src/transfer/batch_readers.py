@@ -29,7 +29,17 @@ CONTINUATION_KWARG: dict[str, str] = {
 }
 
 
-def _read_batch_impl(
+def _read_batch_impl(src_type: str, cfg: dict[str, Any], *args: Any, **kwargs: Any):
+    """Read one batch under the connector egress policy (pre-dial + DNS pin)."""
+    from services.egress_guard import connector_dial_scope
+
+    with connector_dial_scope(
+        cfg, db_type=str((cfg or {}).get("type") or src_type or ""), point="transfer"
+    ):
+        return _read_batch_unscoped(src_type, cfg, *args, **kwargs)
+
+
+def _read_batch_unscoped(
     src_type: str,
     cfg: dict[str, Any],
     table: str,

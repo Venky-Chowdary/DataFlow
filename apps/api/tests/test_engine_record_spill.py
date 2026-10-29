@@ -291,8 +291,9 @@ def test_spill_key_spool_matches_record_census():
         streamed = unique_mirror_pk_tuples(
             iter_mirror_pk_tuples_from_spool(spill.key_spool, ["id"])
         )
-        assert streamed == expected == [("1",), ("2",)]
-        assert spill.key_spool.row_count == 3  # duplicate id kept; incomplete skipped
+        # '' is an exact key (D53); only None / missing / SQL NULL are incomplete.
+        assert streamed == expected == [("1",), ("2",), ("",)]
+        assert spill.key_spool.row_count == 4  # duplicate id kept; NULL skipped
     finally:
         spill.close()
 
@@ -302,7 +303,7 @@ def test_df_missing_pk_is_incomplete_identity():
 
     assert complete_mirror_pk_tuple([DF_MISSING_SENTINEL]) is None
     assert complete_mirror_pk_tuple([None]) is None
-    assert complete_mirror_pk_tuple([""]) is None
+    assert complete_mirror_pk_tuple([""]) == ("",)  # '' is a valid key (D53)
     assert complete_mirror_pk_tuple(["1"]) == ("1",)
     assert _source_pk_tuples(
         [{"id": DF_MISSING_SENTINEL}, {"id": "9"}], ["id"]

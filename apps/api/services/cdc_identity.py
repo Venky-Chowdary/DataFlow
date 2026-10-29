@@ -56,6 +56,12 @@ def is_present_cdc_row_key(value: Any) -> bool:
     ``SQL_NULL_SENTINEL`` / DuckDB null / ``DF_MISSING`` / blank must not
     pass — they are not valid HASH/PK identity. ``True`` and dest ``true``
     share one present token. ``0`` stays present.
+
+    This is the rule for stores whose id space cannot hold an empty id
+    (Redis/vector/Kafka/Dynamo targets, change-stream keys that arrive
+    stringified, where NULL and ``''`` are already the same text). Relational
+    and document writers use ``writer_common._is_nullish_conflict_key``, for
+    which ``''`` is a key (D53).
     """
     from services.value_serializer import present_cell_text
 

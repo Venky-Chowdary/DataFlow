@@ -18,6 +18,7 @@ import logging
 from typing import Any, Final
 
 from connectors.oracle_tstz import (
+    oracle_tz_kinds,
     oracle_tz_positions,
     oracle_tz_select_list,
     oracle_tz_to_char,
@@ -279,21 +280,24 @@ def read_oracle_target_sample(
             tz_positions = oracle_tz_positions(description)
         else:
             # Same TSTZ rule as the checksum read-back (D155), per named column.
-            tz_names = {
-                str(description[i][0]).upper()
-                for i in oracle_tz_positions(description)
+            kinds_by_name = {
+                str(description[i][0]).upper(): kind
+                for i, kind in oracle_tz_kinds(description).items()
             }
             stored = [
                 require_safe_identifier(col_map.get(c, c), preserve_case=True)
                 for c in cols
             ]
-            tz_positions = frozenset(
-                i for i, name in enumerate(stored) if name.upper() in tz_names
-            )
+            col_kinds = {
+                i: kinds_by_name[name.upper()]
+                for i, name in enumerate(stored)
+                if name.upper() in kinds_by_name
+            }
+            tz_positions = frozenset(col_kinds)
             if col_map or tz_positions:
                 quoted = [quote_sql_identifier(name) for name in stored]
                 ora_col_sql = ", ".join(
-                    f"{oracle_tz_to_char(q)} AS {q}" if i in tz_positions else q
+                    f"{oracle_tz_to_char(q, col_kinds[i])} AS {q}" if i in col_kinds else q
                     for i, q in enumerate(quoted)
                 )
         sort_key_stored = col_map.get(sort_key, sort_key) if sort_key else ""

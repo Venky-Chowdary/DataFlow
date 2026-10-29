@@ -123,7 +123,7 @@ def test_keyed_upsert_join_token_is_read_as_cardinality_too():
     )
 
 
-def test_engine_copy_reports_count_proof_without_claiming_value_fidelity(tmp_path: Path):
+def _engine_copy_report(tmp_path: Path) -> dict:
     src_path = tmp_path / "count_src.db"
     dst_path = tmp_path / "count_dst.db"
     src = sqlite3.connect(str(src_path))
@@ -152,9 +152,30 @@ def test_engine_copy_reports_count_proof_without_claiming_value_fidelity(tmp_pat
     assert result.success, result.error
     report = result.reconciliation or {}
     assert report.get("target_rows") == 3
-    # Cardinality proven, value fidelity explicitly not compared.
+    return report
+
+
+def test_engine_copy_reports_count_proof_only_when_the_digest_is_off(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("DATAFLOW_ENGINE_DIGEST", raising=False)
+    report = _engine_copy_report(tmp_path)
+    # Default: cardinality only, and the claim says exactly that.
+    assert report.get("checksum_scope") == "dest_count_equals_source_snapshot_count"
     assert report.get("checksum_scope") != "full_checksum"
     assert not report.get("source_checksum")
+
+
+def test_engine_copy_reports_count_proof_and_verify_time_digest_honestly(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_ENGINE_DIGEST", "1")
+    report = _engine_copy_report(tmp_path)
+    # With DATAFLOW_ENGINE_DIGEST=1 the engine copy re-reads BOTH populations at
+    # verify time and digests them order-independently, so a matching pair is real
+    # value-fidelity evidence. The claim must say where it came from (a verify-time
+    # re-read, not a writer-side digest) and be backed by equal digests.
+    assert report.get("checksum_scope") == "verify_time_population_digest"
+    assert report.get("checksum_scope") != "full_checksum"
+    assert report.get("source_checksum")
+    assert report.get("source_checksum") == report.get("target_checksum")
+    assert report.get("checksum_match") is True
 
 
 def test_multi_stream_sqlite_copy_keeps_declared_integer_key(tmp_path: Path):

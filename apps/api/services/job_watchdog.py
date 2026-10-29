@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 from datetime import datetime, timezone
-from typing import Any, Callable
+from typing import Any
 
 from services.brand_env import getenv_brand
 from services.job_status import UNFINISHED_JOB_STATUSES

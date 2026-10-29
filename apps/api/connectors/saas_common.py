@@ -279,6 +279,11 @@ def request(
 
     body = sanitize_json_value(data) if data is not None else None
 
+    from services.egress_guard import assert_connector_dial_allowed, redirect_guard_hook
+
+    assert_connector_dial_allowed(url, point="http_client")
+    hooks = {"response": [redirect_guard_hook(url)]}
+
     def _call() -> requests.Response:
         resp = requests.request(
             method=method,
@@ -287,6 +292,7 @@ def request(
             params=params,
             json=body,
             timeout=timeout,
+            hooks=hooks,
         )
         resp.raise_for_status()
         return resp

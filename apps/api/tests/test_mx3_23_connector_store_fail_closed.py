@@ -53,7 +53,15 @@ def test_update_connector_vault_refusal_fails_closed(monkeypatch, mongo_backend)
     def _refuse(*_a, **_k):
         raise SecretVaultError(_VAULT_MSG)
 
-    monkeypatch.setattr(cs, "_get_mongo", _refuse)
+    # update_connector merges on the raw Mongo document and encrypts it via
+    # _encrypt_connector_doc; that is where the production vault refuses a
+    # plaintext secret (it no longer goes through _get_mongo).
+    class _Coll(_FailingColl):
+        def find_one(self, *_a, **_k):
+            return {"_id": "c-1", "name": "pg", "type": "postgresql"}
+
+    monkeypatch.setattr(cs, "_mongo_collection", lambda: _Coll(RuntimeError("unused")))
+    monkeypatch.setattr(cs, "_encrypt_connector_doc", _refuse)
     with pytest.raises(cs.ConnectorStoreError) as exc_info:
         cs.update_connector("c-1", {"name": "pg", "password": "new-secret"})
     assert "Fernet-encrypted" in str(exc_info.value)

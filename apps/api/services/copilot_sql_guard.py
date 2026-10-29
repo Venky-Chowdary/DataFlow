@@ -57,6 +57,84 @@ _CATALOG_OBJECTS = frozenset({
     "indisunique", "indisprimary", "relkind", "relnamespace",
     "oid", "name", "type", "sql", "tbl_name", "rootpage",
 })
+#: Catalog objects that hold credentials, other sessions' SQL text or raw
+#: large-object bytes. Pilot never needs them, so they are refused even when
+#: a same-named relation sits in the introspected allow-list.
+#: PostgreSQL resolves ``pg_catalog`` implicitly, so these match unqualified.
+_SECRET_CATALOG_OBJECTS = frozenset({
+    "pg_authid", "pg_shadow", "pg_auth_members", "pg_user_mapping",
+    "pg_user_mappings", "pg_largeobject", "pg_stat_activity",
+    "pg_stat_statements", "pg_hba_file_rules", "pg_ident_file_mappings",
+    "pg_file_settings", "pg_subscription",
+})
+#: Secret-bearing objects whose bare names are common user table names
+#: (``user``, ``db``), refused only when qualified with their catalog schema.
+_SECRET_QUALIFIED_CATALOG_OBJECTS: dict[str, frozenset[str]] = {
+    "mysql": frozenset({
+        "user", "global_priv", "db", "tables_priv", "columns_priv",
+        "procs_priv", "proxies_priv", "password_history", "role_edges",
+        "default_roles", "servers", "slave_master_info",
+        "replication_connection_configuration", "general_log", "slow_log",
+    }),
+    "sys": frozenset({
+        "sql_logins", "syslogins", "credentials", "database_credentials",
+        "database_scoped_credentials", "linked_logins", "server_principals",
+        "dm_exec_sql_text", "dm_exec_requests", "dm_exec_sessions",
+        "dm_exec_connections", "processlist", "x$processlist", "session",
+        "x$session",
+    }),
+    "performance_schema": frozenset({
+        "threads", "processlist", "events_statements_current",
+        "events_statements_history", "events_statements_history_long",
+        "events_statements_summary_by_digest", "replication_connection_configuration",
+    }),
+    "information_schema": frozenset({"processlist", "user_attributes"}),
+}
+#: SQL Server catalog views Pilot needs to introspect (``sys.objects``,
+#: ``sys.databases``). Their bare names are too ordinary to join the global
+#: column vocabulary above, so they pass only when ``sys``-qualified. Every
+#: other unlisted catalog relation still has to be allow-listed by name.
+_SAFE_QUALIFIED_CATALOG_OBJECTS: dict[str, frozenset[str]] = {
+    "sys": frozenset({
+        "objects", "all_objects", "schemas", "indexes", "index_columns",
+        "databases", "types", "all_columns", "all_views", "foreign_keys",
+        "foreign_key_columns", "key_constraints", "identity_columns",
+        "computed_columns", "default_constraints", "check_constraints",
+    }),
+}
+_QUALIFIED_NAME = re.compile(
+    r"[A-Za-z_][\w$]*(?:\s*\.\s*[A-Za-z_][\w$]*)*"
+)
+
+
+def _is_secret_catalog_object(schema: str, name: str) -> bool:
+    if name in _SECRET_CATALOG_OBJECTS:
+        return True
+    return name in _SECRET_QUALIFIED_CATALOG_OBJECTS.get(schema, frozenset())
+
+
+def secret_catalog_references(sql: str) -> set[str]:
+    """Secret-bearing catalog relations named anywhere in ``sql``.
+
+    Parser-independent: literals and comments are removed and identifier
+    quotes dropped, so ``"pg_catalog"."pg_authid"`` and ``mysql . user``
+    are caught on both the sqlglot and the regex path.
+    """
+    from services.sql_literals import sql_call_views
+
+    found: set[str] = set()
+    # Lexed once per engine flavour (comments blanked, literals masked, quoted
+    # identifiers kept by name): a quote inside a comment cannot hide a name.
+    for text in sql_call_views(sql or ""):
+        for match in _QUALIFIED_NAME.finditer(text):
+            parts = [p.strip().lower() for p in match.group(0).split(".")]
+            for i, name in enumerate(parts):
+                schema = parts[i - 1] if i else ""
+                if _is_secret_catalog_object(schema, name):
+                    found.add(f"{schema}.{name}" if schema else name)
+    return found
+
+
 #: Date/time field names and unit literals that are arguments to functions
 #: (extract/datediff/date_part), never schema identifiers (D17).
 _SQL_NON_IDENT_TOKENS = frozenset({
@@ -208,14 +286,37 @@ def _sqlglot_identifiers(sql: str, dialect: str = "") -> set[str] | None:
         for t in tree.find_all(exp.Table)
         if getattr(t, "alias", None)
     )
+    cte_names = {
+        str(cte.alias).lower()
+        for cte in tree.find_all(exp.CTE)
+        if getattr(cte, "alias", None)
+    }
     found: set[str] = set()
     for table in tree.find_all(exp.Table):
-        # information_schema.columns / pg_catalog.pg_class are catalogs, not
-        # user tables — the read-only allowlist owns them.
-        if (table.catalog or table.db or "").lower() in _CATALOG_RELATIONS:
-            continue
         name = str(table.name or "").strip().lower()
-        if name and name not in query_defined:
+        schema = str(table.db or "").strip().lower()
+        catalog = str(table.catalog or "").strip().lower()
+        if schema in _CATALOG_RELATIONS or catalog in _CATALOG_RELATIONS:
+            # information_schema.columns / pg_catalog.pg_class are read-only
+            # catalog views the allowlist owns. Any other catalog-qualified
+            # relation (pg_catalog.pg_authid, mysql.user) or table function
+            # (pg_catalog.pg_read_file(...)) must be allow-listed by its
+            # qualified name — the bare name may be an unrelated user table.
+            if not name and isinstance(table.this, exp.Func):
+                name = str(table.this.name or "").strip().lower()
+            owner = schema or catalog
+            if _is_secret_catalog_object(owner, name):
+                found.add(f"{owner}.{name}")
+                continue
+            if name in _CATALOG_OBJECTS or name in _SAFE_QUALIFIED_CATALOG_OBJECTS.get(
+                owner, frozenset()
+            ):
+                continue
+            found.add(f"{schema or catalog}.{name or '?'}")
+            continue
+        # Only a CTE can stand in for a relation; a table alias equal to its
+        # own name (``FROM t AS t``) must not hide the relation from the check.
+        if name and name not in cte_names:
             found.add(name)
     for col in tree.find_all(exp.Column):
         name = str(col.name or "").strip().lower()
@@ -350,8 +451,11 @@ def assert_identifiers_allowed(
         # rather than fail open or refuse valid syntax outright.
         parsed = extract_sql_identifiers(sql, dialect)
     unknown = sorted(
-        parsed - allowed - _CATALOG_RELATIONS - _CATALOG_OBJECTS
-        - _SQL_NON_IDENT_TOKENS
+        (
+            parsed - allowed - _CATALOG_RELATIONS - _CATALOG_OBJECTS
+            - _SQL_NON_IDENT_TOKENS
+        )
+        | secret_catalog_references(sql)
     )
     if unknown:
         preview = ", ".join(unknown[:12])

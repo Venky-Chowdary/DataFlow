@@ -394,6 +394,8 @@ def test_readers_accept_cursor_inclusive():
         gs.read_table_cursor_batch,
         sfr.read_table_cursor_batch,
         bqr.read_table_cursor_batch,
-        batch_readers._read_batch_impl,
+        # _read_batch_impl is a thin egress-scope wrapper (*args/**kwargs);
+        # the real signature lives on the unscoped reader it forwards to.
+        batch_readers._read_batch_unscoped,
     ):
         assert "cursor_inclusive" in inspect.signature(fn).parameters, fn

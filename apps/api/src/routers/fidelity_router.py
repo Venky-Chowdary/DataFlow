@@ -60,17 +60,14 @@ def _assert_resource_visible(request: Request, resource_workspace_id: str) -> No
         _deny_cross_workspace(request)
 
 
-def _assert_connector_workspace(
-    connector_id: str,
-    workspace_id: str,
-    request: Request,
-) -> None:
-    from services.connector_store import get_connector
+def _assert_connector_workspace(connector_id: str, request: Request) -> None:
+    from services.connector_store import connector_owner_workspace
 
-    scoped = get_connector(connector_id, workspace_id=workspace_id or None)
-    connector = scoped or get_connector(connector_id)
-    if connector is not None:
-        _assert_resource_visible(request, str(getattr(connector, "workspace_id", "") or ""))
+    # The owner, not a scoped read: a scoped lookup hides a foreign connector,
+    # which would let its id through as if it did not exist.
+    exists, owner = connector_owner_workspace(connector_id)
+    if exists:
+        _assert_resource_visible(request, owner)
 
 
 def _endpoints_from_schedule(
@@ -79,7 +76,7 @@ def _endpoints_from_schedule(
     request: Request,
 ):
     from services.schedule_runner import (
-        _resolve_connector,
+        _resolve_connector_for_schedule,
         build_schedule_request,
     )
     from services.schedule_store import get_schedule
@@ -88,10 +85,10 @@ def _endpoints_from_schedule(
     if sched is None:
         raise HTTPException(status_code=404, detail="Schedule not found")
     _assert_resource_visible(request, str(getattr(sched, "workspace_id", "") or ""))
-    _assert_connector_workspace(sched.source_connector_id, workspace_id, request)
-    _assert_connector_workspace(sched.dest_connector_id, workspace_id, request)
-    src = _resolve_connector(sched.source_connector_id)
-    dst = _resolve_connector(sched.dest_connector_id)
+    _assert_connector_workspace(sched.source_connector_id, request)
+    _assert_connector_workspace(sched.dest_connector_id, request)
+    src = _resolve_connector_for_schedule(sched.source_connector_id, sched)
+    dst = _resolve_connector_for_schedule(sched.dest_connector_id, sched)
     if not src or not dst:
         raise HTTPException(
             status_code=400,
@@ -134,7 +131,7 @@ def check_fidelity(
     for endpoint in (body.source, body.destination):
         connector_id = str(endpoint.get("connector_id") or "").strip()
         if connector_id:
-            _assert_connector_workspace(connector_id, ws, request)
+            _assert_connector_workspace(connector_id, request)
 
     source = EndpointConfig.from_dict(
         str(body.source.get("kind") or "database"), body.source

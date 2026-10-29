@@ -1,13 +1,9 @@
 """M14: Kafka poison messages are quarantined with broker coordinates instead
 of landing as all-NULL rows; tombstones are counted, not silently skipped;
 key/partition/offset are exposed as optional metadata columns."""
-import json
-
-import pytest
 
 from connectors.kafka_debezium_bridge import kafka_value_to_row
 from connectors import kafka_reader
-from connectors.base import ReadBatch
 
 
 def test_poison_value_carries_marker_and_broker_coordinates():
@@ -86,6 +82,13 @@ class _FakeConsumer:
 
     def has_assignment(self):
         return True
+
+    # The reader asks the bridge whether the run reached its frozen end (D151).
+    def exhausted(self):
+        return False
+
+    def end_offsets_snapshot(self):
+        return []
 
     def close(self):
         pass

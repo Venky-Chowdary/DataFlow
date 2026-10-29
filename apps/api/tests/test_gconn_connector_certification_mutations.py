@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+
+import pytest
 from typing import Any, Iterator
 
 from connectors.sdk import RecordBatch
@@ -14,8 +16,9 @@ from tests.connector_certification.harness import CertificationCase, certify
 
 def test_certify_rejects_broken_connector_claims_at_the_related_step(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    base = build_certification_cases(tmp_path)["declarative_source"]
+    base = build_certification_cases(tmp_path, monkeypatch)["declarative_source"]
 
     class MutatedSource(DeclarativeSource):
         def __init__(self, config: dict[str, Any], phase: str, secret: str) -> None:

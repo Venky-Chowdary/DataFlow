@@ -230,6 +230,10 @@ def copy_sqlserver_to_sqlite(
                 # D102: a cancel stops the copy between fetch batches.
                 cancel_checkpoint()
                 rows = cur.fetchmany(_FETCH_BATCH)
+                # D168: rows read per fetch batch feed the job's progress.
+                from services.cancel_check import report_rows
+
+                report_rows(len(rows))
                 if not rows:
                     break
                 for row in rows:

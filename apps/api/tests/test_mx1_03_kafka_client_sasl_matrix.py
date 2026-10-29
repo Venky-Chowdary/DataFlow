@@ -177,6 +177,12 @@ def test_read_topic_batch_hands_sasl_to_the_bridge(monkeypatch):
         def pending_offsets(self):
             return []
 
+        def exhausted(self):
+            return False
+
+        def end_offsets_snapshot(self):
+            return []
+
         def close(self):
             pass
 

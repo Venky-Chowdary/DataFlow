@@ -357,6 +357,16 @@ class CheckpointService:
         hard failure (prefer ``require_save``) only when the sidecar also failed.
         """
         mongo = self._mongo()
+        from services.cancel_check import attempt_superseded
+        from services.error_handling import TransferCancelled
+
+        if attempt_superseded(mongo, checkpoint.job_id):
+            # A newer attempt owns this job: never overwrite its checkpoint.
+            raise TransferCancelled(
+                "Transfer superseded by a newer attempt of this job",
+                rows_written=int(getattr(checkpoint, "rows_processed", 0) or 0),
+                superseded=True,
+            )
         token = durable_resume_token(checkpoint)
         sidecar_ok = _persist_resume_token(mongo, checkpoint.job_id, token)
         job_ok = False
@@ -403,6 +413,17 @@ class CheckpointService:
         the job instead of continuing with resume risk.
         """
         if not self.save(checkpoint):
+            # D168: a cancelled job's document is terminal and refuses the
+            # write. That refusal is the cancel arriving, not a store fault -
+            # report it as the cancel it is (the committed prefix stays).
+            from services.cancel_check import job_cancel_requested
+            from services.error_handling import TransferCancelled
+
+            if job_cancel_requested(self._mongo(), checkpoint.job_id):
+                raise TransferCancelled(
+                    "Transfer cancelled by user",
+                    rows_written=int(getattr(checkpoint, "rows_processed", 0) or 0),
+                )
             raise CheckpointPersistenceError(CHECKPOINT_PERSISTENCE_FAILED)
 
     def load(self, job_id: str) -> Checkpoint | None:

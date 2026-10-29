@@ -55,15 +55,15 @@ def test_route_group_is_per_route_and_stable():
 
 
 def test_explicit_group_wins_over_the_route_group():
-    from src.transfer.engine import _stamp_kafka_route_group
+    from src.transfer.engine_kafka import stamp_kafka_source
 
     explicit = TransferRequest(source=_kafka("orders", group_id="team-g"), destination=_sqlite("a"))
-    _stamp_kafka_route_group(explicit)
+    stamp_kafka_source(explicit)
     assert KAFKA_ROUTE_GROUP_KEY not in explicit.source.extra
     assert configured_kafka_group_id(explicit.source.extra) == "team-g"
 
     derived = TransferRequest(source=_kafka("orders"), destination=_sqlite("a"))
-    _stamp_kafka_route_group(derived)
+    stamp_kafka_source(derived)
     assert configured_kafka_group_id(derived.source.extra) == kafka_route_group_id(
         derived.source, derived.destination
     )
@@ -85,6 +85,12 @@ def test_unconfigured_read_never_joins_a_shared_or_username_group(monkeypatch):
             return True
 
         def pending_offsets(self):
+            return []
+
+        def exhausted(self):
+            return False
+
+        def end_offsets_snapshot(self):
             return []
 
         def close(self):

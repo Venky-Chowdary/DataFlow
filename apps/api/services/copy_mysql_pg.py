@@ -138,6 +138,9 @@ def _pg_create_sql(
     pg_ddls: list[str],
     primary_key: list[str],
 ) -> str:
+    from services.type_stamp_grammar import require_safe_type_stamps
+
+    require_safe_type_stamps(pg_ddls, context="postgresql COPY CREATE TABLE column")
     dest_ref = _table_ref(schema, table)
     create = plan_fast_path_create(
         dest_dialect="postgresql", pairs=pairs, ddls=pg_ddls, primary_key=primary_key,
@@ -246,6 +249,10 @@ def _fifo_mysql_into_pg(
 
                     cancel_checkpoint()
                     batch = stream.fetchmany(_FETCH_BATCH)
+                    # D168: rows read per fetch batch feed the job's progress.
+                    from services.cancel_check import report_rows
+
+                    report_rows(len(batch))
                     if not batch:
                         break
                     payload = "\n".join(join(encode(v) for v in row) for row in batch)

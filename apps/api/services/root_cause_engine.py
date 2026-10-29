@@ -458,7 +458,11 @@ def _is_uniqueness_probe_signal(
 
 _EXPECTATION_ISSUE_RE = re.compile(r"^expect_[a-z0-9_]+", re.I)
 #: G9 ``null_keys`` finding (D46): population rows with a NULL upsert key.
-_NULL_KEY_ISSUE_RE = re.compile(r"source row\(s\) have a NULL upsert key", re.I)
+_NULL_KEY_ISSUE_RE = re.compile(
+    r"source row\(s\) have a NULL upsert key"
+    r"|source row\(s\) share a key only after the key's transform",
+    re.I,
+)
 
 
 def _is_expectation_signal(
@@ -841,6 +845,19 @@ def _root_id(kind: str, columns: list[str], gate_ids: list[str]) -> str:
     raw = f"{kind}|{','.join(sorted(columns))}|{','.join(sorted(gate_ids))}"
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()[:12]
     return f"rc-{kind.replace('_', '-')}-{digest}"
+
+
+#: Title of the root cause the engine raises for sample cast / transform failures.
+CAST_FAILURE_ROOT_TITLE = "Sample transform / cast failures"
+
+#: The way out that keeps the valid rows: load them and hold the failing ones out
+#: in quarantine instead of refusing the whole run (D170).
+QUARANTINE_REPLAN_FIX = (
+    "Re-plan with quarantine: pass risk_acceptance {execution_policy: "
+    "CAST_AND_CONTINUE, on_cast_failure: quarantine, approved_by, reason} to "
+    "plan_transfer / start_transfer, or to rerun_job, so the failing rows are held "
+    "out for review and the valid rows load"
+)
 
 
 def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCause]:
@@ -1387,9 +1404,10 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         title = (
             f"Unknown transform: {unknown_name}"
             if unknown_name
-            else "Sample transform / cast failures"
+            else CAST_FAILURE_ROOT_TITLE
         )
         alternative_fixes = [
+            QUARANTINE_REPLAN_FIX,
             "Widen FLOAT/DECIMAL→INT to DOUBLE (preserve numeric meaning before text)",
             "Empty→typed: allow NULL / default or sign QUARANTINE_ROW",
             "Remap image/url columns off the url semantic transform",
@@ -1656,7 +1674,6 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         cols = list(details.get("upsert_key_columns") or [])
         planned_ddl = str(details.get("planned_ddl") or "")
         dup_keys = details.get("duplicate_key_count")
-        approved = bool(details.get("ddl_acknowledged"))
         if dup_keys:
             summary = (
                 f"Upsert into this existing table keys on "

@@ -424,17 +424,24 @@ def assess_create_new_type_risk(
     *,
     destination_db_type: str = "",
     samples: list | None = None,
+    source_types_declared: bool = False,
 ) -> list[dict]:
     """Risk chips for create-new columns before Validate/write.
 
     Returns a list of ``{kind, severity, message}`` — empty when lossless.
+
+    ``source_types_declared`` is True when the source handed us real DDL. A
+    declared DOUBLE already is the IEEE float; its long fractional digits are
+    the value, not residue left by an Excel/CSV export, so the
+    ``ieee_float_artifact`` chip (which asks the operator to reconsider an
+    *invented* FLOAT) does not apply (D161).
     """
     risks: list[dict] = []
     src = (source_type or "").strip() or "VARCHAR"
     tgt = (target_type or "").strip() or src
     db = (destination_db_type or "").strip().lower()
 
-    if samples:
+    if samples and not source_types_declared:
         from services.decimal_observe import (
             ieee_float_create_new_risk,
             observe_numeric_samples,

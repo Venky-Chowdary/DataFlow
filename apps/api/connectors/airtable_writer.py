@@ -273,11 +273,19 @@ def _id_from_response(body: Any) -> str | None:
     return None
 
 
+def _airtable_blank(value: Any) -> bool:
+    """Airtable has no NULL and no empty string: NULL, ``''`` and whitespace are
+    all an empty cell, so none of them can be a merge key or a field to send."""
+    return _is_nullish_conflict_key(value, empty_is_null=True) or (
+        isinstance(value, str) and not value.strip()
+    )
+
+
 def _airtable_record_id(row: dict[str, Any]) -> Any | None:
     """Present Airtable record id, or None when reader-null / blank."""
     for key in ("id", "Id"):
         val = row.get(key)
-        if not _is_nullish_conflict_key(val):
+        if not _airtable_blank(val):
             return val
     return None
 
@@ -290,7 +298,7 @@ def _present_fields(row: Any, target_cols: list[str]) -> dict[str, Any]:
     way to leave a cell untouched, so the filter is a fidelity rule, not tidying.
     """
     def _present(value: Any) -> bool:
-        return not _is_nullish_conflict_key(value)
+        return not _airtable_blank(value)
 
     if isinstance(row, dict):
         return {k: v for k, v in row.items() if _present(v)}
@@ -354,7 +362,7 @@ def _drop_rows_missing_merge_field(
     dropped = 0
     for j, row in enumerate(batch_dicts):
         merge_val = row.get(merge_field)
-        if _is_nullish_conflict_key(merge_val):
+        if _airtable_blank(merge_val):
             dropped += 1
             _quarantine_row(
                 rejected,
@@ -430,7 +438,7 @@ def _quarantine_empty_payload(
             continue
         if update and merge_field:
             merge_val = row.get(merge_field)
-            if _is_nullish_conflict_key(merge_val):
+            if _airtable_blank(merge_val):
                 continue
         _quarantine_row(
             rejected,

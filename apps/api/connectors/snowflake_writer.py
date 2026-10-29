@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from services.decision_kernel import ddl_type, materialize_dest_ddl, normalize_logical_type
+from services.type_stamp_grammar import require_safe_type_stamp, require_safe_type_stamps
 from services.value_serializer import cell_to_string
 
 from connectors.driver_guard import stub_writes_allowed
@@ -924,6 +925,21 @@ def _sf_apply_sparse_upsert(
     return written, skipped, checksum_rows
 
 
+def _json_select_expr(sf_type: str, source: str) -> str:
+    """``PARSE_JSON(source)``, cast to the declared type when that is structured.
+
+    ``PARSE_JSON`` yields a VARIANT. Snowflake does not assign a VARIANT to a
+    structured ``ARRAY(NUMBER(38,0))`` / ``OBJECT(...)`` / ``MAP(...)`` column
+    without a cast ("Expression type does not match column data type"), and
+    DataFlow creates exactly those carriers for typed arrays (D77). Plain
+    VARIANT / ARRAY / OBJECT take the parsed value as is.
+    """
+    parsed = f"PARSE_JSON({source})"
+    if "(" in (sf_type or ""):
+        return f"{parsed}::{sf_type.strip()}"
+    return parsed
+
+
 def _is_json_type(sf_type: str) -> bool:
     return sf_type and sf_type.split("(")[0].upper() in {
         "VARIANT",
@@ -955,7 +971,7 @@ def _batch_insert_rows(
     select_items = []
     for i, t in enumerate(target_types, start=1):
         if _is_json_type(t):
-            select_items.append(f"PARSE_JSON(column{i})")
+            select_items.append(_json_select_expr(t, f"column{i}"))
         else:
             select_items.append(f"column{i}")
     select_sql = ", ".join(select_items)
@@ -1164,6 +1180,7 @@ def _merge_batch_via_temp(
     temp = f"_DF_UPSERT_{uuid.uuid4().hex[:12]}"
     # Temp columns take the SAME resolved names as the target so the MERGE's
     # s."col" references line up (M5: resolved live-first / folded).
+    require_safe_type_stamps(target_types, context="snowflake MERGE staging column")
     col_defs = ", ".join(
         f"{snowflake_column_ref(c, physical_names)} {t}"
         for c, t in zip(target_cols, target_types)
@@ -1224,7 +1241,7 @@ def _copy_into_table(
         select_items = []
         for i, (c, t) in enumerate(zip(target_cols, target_types), start=1):
             if _is_json_type(t):
-                select_items.append(f"PARSE_JSON(${i})")
+                select_items.append(_json_select_expr(t, f"${i}"))
             else:
                 select_items.append(f"${i}")
         select_sql = ", ".join(select_items)
@@ -1645,6 +1662,7 @@ def write_mapped_rows(
             physical_names = snowflake_physical_name_map(cur, schema, table_name)
 
             if create_table:
+                require_safe_type_stamps(target_types, context="snowflake CREATE TABLE column")
                 conflict_keys = {str(c).upper() for c in (conflict or [])}
                 col_defs = ", ".join(
                     f"{snowflake_column_ref(c, physical_names)} {t}"
@@ -1724,6 +1742,9 @@ def write_mapped_rows(
                 for col, typ in zip(target_cols, target_types):
                     if col.upper() not in existing:
                         col_q = quote_sql_identifier(col)
+                        typ = require_safe_type_stamp(
+                            typ, context="snowflake ALTER TABLE ADD COLUMN"
+                        )
                         cur.execute(f"ALTER TABLE {tbl_q} ADD COLUMN {col_q} {typ}")
 
             physical = _fetch_snowflake_column_types(cur, schema, table_name)

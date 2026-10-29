@@ -7,8 +7,10 @@ the request; ``None`` in a store signature means system scope (no filter).
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterator
 
 
 def norm_workspace_id(workspace_id: Any) -> str:
@@ -62,3 +64,62 @@ class WorkspaceFilter:
         if self.include_unscoped:
             arms.append({field: {"$in": unscoped}})
         return arms[0] if len(arms) == 1 else {"$or": arms}
+
+
+# The filter of the request (or Pilot/MCP turn) being served. Stores that can
+# be reached without a request in hand (connectors, Pilot tool reads) consult
+# it so a caller that forgot to pass a filter still cannot read another
+# workspace's rows. Nothing bound = system scope (schedulers, workers, scripts).
+_bound: contextvars.ContextVar[WorkspaceFilter | None] = contextvars.ContextVar(
+    "bound_workspace_filter", default=None
+)
+
+
+# The workspace a row written during this request belongs to ("" = unscoped).
+_bound_stamp: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "bound_workspace_stamp", default=""
+)
+
+
+# Who is acting ("" = nobody bound: the single operator, or system code).
+_bound_actor: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "bound_workspace_actor", default=""
+)
+
+
+@contextlib.contextmanager
+def bound_workspace_filter(
+    workspace_filter: WorkspaceFilter | None, stamp: str = "", actor: str = ""
+) -> Iterator[None]:
+    token = _bound.set(workspace_filter)
+    stamp_token = _bound_stamp.set(stamp)
+    actor_token = _bound_actor.set(actor)
+    try:
+        yield
+    finally:
+        _bound_actor.reset(actor_token)
+        _bound_stamp.reset(stamp_token)
+        _bound.reset(token)
+
+
+def current_actor() -> str:
+    """The authenticated actor of this request, for state that must not be
+    shared between accounts (Pilot working memory)."""
+    return _bound_actor.get()
+
+
+def current_workspace_stamp() -> str:
+    """The workspace for a row this request writes into a store that has no
+    explicit workspace parameter (preflight runs, plans, drafts)."""
+    return _bound_stamp.get()
+
+
+def current_workspace_filter() -> WorkspaceFilter | None:
+    return _bound.get()
+
+
+def bound_allows(workspace_id: Any) -> bool:
+    """Whether the bound filter covers a workspace (always, when none is bound)."""
+    visible = _bound.get()
+    return visible is None or visible.matches(workspace_id)
+

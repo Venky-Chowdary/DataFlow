@@ -140,7 +140,7 @@ def test_timescaledb_destination_schema_uses_postgres(monkeypatch) -> None:
 
     info = introspect_schema(
         "timescaledb",
-        host="ts.internal",
+        host="ts.example.com",
         port=5432,
         database="metrics",
         username="u",

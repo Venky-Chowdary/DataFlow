@@ -857,8 +857,6 @@ def test_concurrent_drains_send_each_row_once(monkeypatch, tmp_path):
     rows = mail_outbox.queued()
     assert len(rows) == 1
 
-    sends = []
-    lock = threading.Lock()
 
     def deliver(r):
         signup_service._deliver_outbox_row(r)

@@ -1351,7 +1351,24 @@ def _guard_schedule_destination(connector_id: str, table: str) -> None:
         raise ValueError(reason)
 
 
+def _assert_schedule_connectors_allowed(data: Mapping[str, Any], *, require_taps: bool) -> None:
+    """Refuse a schedule over an admin-only connector for a non-admin request principal.
+
+    ``require_taps`` also refuses a Singer endpoint while taps are disabled
+    (``singer_taps_dir_unset``), so a schedule that could never fire is not saved.
+    """
+    from services.request_principal import assert_bound_principal_may_use_endpoints
+
+    assert_bound_principal_may_use_endpoints(
+        data.get("workspace_id") or None,
+        {"connector_id": data.get("source_connector_id")},
+        {"connector_id": data.get("dest_connector_id")},
+        require_taps=require_taps,
+    )
+
+
 def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
+    _assert_schedule_connectors_allowed(data, require_taps=bool(data.get("enabled", True)))
     payload = dict(data)
     from services.duplicate_policy import validate_schedule_file_policy
 
@@ -1554,6 +1571,13 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
         sync_mode = _validate_cadence(interval, cron, tz, sync_mode)
         data = {**data, "sync_mode": sync_mode}
         merged = {**s.to_dict(), **data, "id": schedule_id}
+        # Pausing or renaming a schedule must work while taps are disabled; only
+        # enabling it, or pointing it at other connectors, needs a usable tap.
+        _assert_schedule_connectors_allowed(
+            merged,
+            require_taps=bool(merged.get("enabled", True))
+            and bool({"enabled", "source_connector_id", "dest_connector_id"} & set(data)),
+        )
         binding_keys = (
             "transform_recipe_id",
             "transform_recipe_version",

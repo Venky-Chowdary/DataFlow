@@ -4,9 +4,9 @@ This is **not** ``mongoimport``. One PostgreSQL ``REPEATABLE READ``
 snapshot streams ``COPY (SELECT …) TO STDOUT`` text; decoded rows become
 BSON documents and ``insert_many`` (unordered) loads them. Dest COUNT is
 ``count_documents({})`` — never ``estimatedDocumentCount``. Empty dest
-is insert, **not** upsert / ``ReplaceOne``. Occupied dest whose COUNT
-already equals the source snapshot is skip-complete. Occupied dest with
-a different COUNT declines (identity COPY would duplicate).
+is insert, **not** upsert / ``ReplaceOne``. An occupied dest
+declines whatever its COUNT (equal counts do not prove equal content, and
+identity COPY would duplicate).
 
 ``_id`` is not invented from row bytes. Map ``_id`` explicitly or let
 Mongo assign ObjectIds. SQL NULL is BSON null (field present). Empty

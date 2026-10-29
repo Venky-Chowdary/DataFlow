@@ -276,6 +276,33 @@ def build_load_data_sql(
     )
 
 
+def execute_load_data_local(
+    cursor: Any,
+    *,
+    path: str,
+    table_q: str,
+    columns: list[str],
+    field_terminator: str = "\t",
+    optionally_enclosed: bool = False,
+    ignore_lines: int = 0,
+    conn: Any | None = None,
+) -> None:
+    """Run ``LOAD DATA LOCAL INFILE`` for ``path``, the only file the server may read."""
+    from connectors.mysql_conn import local_infile_allowed
+
+    sql = build_load_data_sql(
+        table_q=table_q,
+        columns=columns,
+        infile_sql=quote_load_data_path(path),
+        field_terminator=field_terminator,
+        optionally_enclosed=optionally_enclosed,
+        ignore_lines=ignore_lines,
+    )
+    connection = conn if conn is not None else getattr(cursor, "connection", None)
+    with local_infile_allowed(connection, path):
+        cursor.execute(sql)
+
+
 def blocking_load_data_warnings(warning_rows: list[tuple[Any, ...]]) -> list[str]:
     """Warning/Error SHOW WARNINGS must not be committed. Notes may pass."""
     blocked: list[str] = []
@@ -314,13 +341,14 @@ def try_mysql_load_data_local(
             for row in rows:
                 handle.write("\t".join(load_data_text_value(v) for v in row))
                 handle.write("\n")
-        sql = build_load_data_sql(
-            table_q=table_q,
-            columns=columns,
-            infile_sql=quote_load_data_path(path),
-        )
         try:
-            cursor.execute(sql)
+            execute_load_data_local(
+                cursor,
+                path=path,
+                table_q=table_q,
+                columns=columns,
+                conn=connection,
+            )
         except Exception as exc:
             from connectors.write_resilience import is_connection_lost
 

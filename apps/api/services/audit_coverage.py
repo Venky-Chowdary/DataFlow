@@ -23,6 +23,8 @@ SECURITY_EVENTS: dict[str, str] = {
     "auth.request.rejected": "An HTTP request was rejected during authentication.",
     "authz.tenant_bind.denied": "Authenticated access was denied by tenant binding.",
     "authz.denied": "An authenticated request lacked the required permission.",
+    "authz.workspace_admin_iam.would_deny": "A workspace admin without the platform admin role was admitted to IAM/SCIM administration because DATAFLOW_WORKSPACE_ADMIN_IAM is on.",
+    "tenant.ip_allowlist.would_block": "A request outside the tenant IP allowlist was admitted because enforcement is off.",
     "auth.login": "A password authentication attempt completed.",
     "auth.login.locked": "A password login attempt triggered an account lockout.",
     "auth.logout": "An authenticated session was revoked.",

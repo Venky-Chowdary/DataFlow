@@ -48,7 +48,7 @@ async function buildValidOrdersChain(page: Page): Promise<void> {
   await page.locator(".df2-canvas-op[data-op='trim']").click();
   await page.locator(".df2-canvas-op[data-op='drop_column']").click();
   await page.locator(".df2-canvas-op[data-op='filter_rows']").click();
-  await page.locator("#canvas-opt-condition-field").click();
+  await page.locator("#canvas-opt-condition-field-0").click();
   await page.getByRole("option", { name: "status", exact: true }).click();
   await page.getByRole("button", { name: "Add step" }).click();
   await expect(page.locator(".df2-canvas-node")).toHaveCount(3);
@@ -279,7 +279,7 @@ test.describe("studio next", () => {
 
     await openMenuAction(page, "Rules and suggestions");
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toBeVisible();
-    await page.getByRole("button", { name: "Close" }).click();
+    await page.getByRole("button", { name: "Close", exact: true }).click();
     await expect(page.getByRole("heading", { name: "Suggested repairs" })).toHaveCount(0);
 
     await setPalette(page, true);
@@ -454,11 +454,12 @@ conn.commit()
     await page.getByRole("button", { name: "Fit", exact: true }).click();
     await page.getByRole("button", { name: "Auto-arrange" }).click();
     await expect(node).toBeVisible();
-    await page.getByLabel("Search operations").fill("join");
-    const join = page.locator(".df2-canvas-op[data-op='join']").filter({ visible: true });
-    await expect(join).toHaveAttribute("data-executable", "false");
-    await expect(join).toBeDisabled();
-    await expect(join).toHaveAttribute("data-icon", "join");
+    // join/union/lookup graduated to in-flight row steps; pivot is still post-load only.
+    await page.getByLabel("Search operations").fill("pivot");
+    const pivot = page.locator(".df2-canvas-op[data-op='pivot']").filter({ visible: true });
+    await expect(pivot).toHaveAttribute("data-executable", "false");
+    await expect(pivot).toBeDisabled();
+    await expect(pivot).toHaveAttribute("data-icon", "pivot");
     await page.getByRole("button", { name: "Preview this step" }).click();
     await expect(page.getByTestId("canvas-node-preview")).toContainText(/sample|Preview|row/i);
     await expect(page.getByTestId("transform-canvas")).toHaveAttribute("data-document", "chain");
@@ -517,6 +518,9 @@ conn.commit()
     await page.setViewportSize({ width: 390, height: 844 });
     await openStudio(page);
     await reachTransform(page);
+    // A toast docks in-flow in the header (D-BP-20) and, at 390, leaves the canvas
+    // 12px short of its 232px stage plus drawers. Measure the idle layout.
+    await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
     const trim = page.locator(".df2-canvas-op[data-op='trim']");
     await expect(trim).toBeVisible();
@@ -929,6 +933,10 @@ conn.commit()
   test("dragging one node leaves the other in place and the drop stays under the pointer", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
+    // Toasts dock in-flow in the header chrome (D-BP-20), so one expiring mid-test
+    // moves the whole stage up by its 48px height. The drop offset compares a stage
+    // box read earlier with a node box read later; let the sample-load toasts clear.
+    await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
     await setPalette(page, true);
     const stage = page.getByTestId("transform-canvas-stage");
     await page.locator(".df2-canvas-op[data-op='trim']").dragTo(stage, { targetPosition: { x: 180, y: 80 } });
@@ -1292,7 +1300,7 @@ test.describe("transfer wizard stepper", () => {
       await preview.evaluate((node: HTMLButtonElement) => node.click());
     }
     await expect(marker).toBeVisible();
-    await expect(page.locator(".df2-wizard-step")).toHaveCount(canvas ? 3 : 6);
+    await expect(page.locator(".df2-wizard-step")).toHaveCount(6);
   }
 
   test("step icons sit beside their labels and separators stay clear", async ({ page }) => {
@@ -1306,6 +1314,9 @@ test.describe("transfer wizard stepper", () => {
           await next.click();
           await expect(page.locator(".df2-wizard-line.done")).toHaveCount(1);
         }
+        // Toasts dock in-flow inside the chrome (D-BP-20) and grow the band on
+        // purpose. This test pins the idle chrome, so let them expire first.
+        await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
         for (const width of widths) {
           await page.setViewportSize({ width, height: width === 1920 ? 1080 : 900 });
           const where = `${canvas ? "flags" : "classic"} ${theme} ${width}`;
@@ -1401,12 +1412,15 @@ test.describe("transfer wizard stepper", () => {
               : false;
             return { steps: steps.length, lines: lines.length, pairs, border, chrome, trackOverflow };
           });
-          expect(report.steps, where).toBe(canvas ? 3 : 6);
+          expect(report.steps, where).toBe(6);
           expect(report.lines, where).toBe(report.steps - 1);
-          // Classic chrome stays 54px through 1440 (58px at 1920, where the
-          // full names and the larger marker already sat before this fix).
-          // Flags-on chrome is the 44px studio shell and must not grow.
-          expect(report.chrome, where).toBe(canvas ? 44 : width >= 1920 ? 58 : 54);
+          // Idle classic chrome: the stepper row (54px below 1440, 58px from 1440,
+          // where the full names and the larger marker sit) plus the 8px the empty
+          // toast dock holds as a row of the chrome grid (D-BP-20; the screenshot
+          // baselines are taken with that row). At 1280 and below the route bar
+          // stacks under the stepper (D-BP-23): 86px plus the dock row. Flags-on
+          // chrome is the 44px studio shell and must not grow.
+          expect(report.chrome, where).toBe(canvas ? 44 : width <= 1280 ? 94 : width >= 1440 ? 66 : 62);
           for (const pair of report.pairs) {
             expect(pair.iconHitsLabel, `${where} ${pair.text}`).toBe(false);
             expect(pair.position, `${where} ${pair.text}`).toBe("static");
@@ -1427,9 +1441,8 @@ test.describe("transfer wizard stepper", () => {
           const spread = Math.max(...lineGaps) - Math.min(...lineGaps);
           expect(spread, where).toBeLessThanOrEqual(1);
           expect(report.trackOverflow, where).toBe(false);
-          const fullNames = canvas
-            ? ["Connect", "Review", "Run"]
-            : ["Source", "Destination", "Transform", "Map", "Validate", "Run"];
+          // Flags-on shows the same six-step flow (P1-3), not a Connect/Review/Run trio.
+          const fullNames = ["Source", "Destination", "Transform", "Map", "Validate", "Run"];
           expect(report.pairs.map((pair) => pair.text), where).toEqual(fullNames);
           const active = report.pairs.find((pair) => pair.active);
           const inactive = report.pairs.find((pair) => !pair.active);

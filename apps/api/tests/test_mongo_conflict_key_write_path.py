@@ -21,11 +21,15 @@ from connectors.mongodb_writer import (  # noqa: E402
 from services.value_serializer import SQL_NULL_SENTINEL  # noqa: E402
 
 
-def test_mongo_incomplete_pk_treats_reader_null_and_blank():
+def test_mongo_incomplete_pk_treats_reader_null_only():
     pk = ["id"]
-    for wire in (None, SQL_NULL_SENTINEL, "__df_ddb_null__", "", "  "):
+    for wire in (None, SQL_NULL_SENTINEL, "__df_ddb_null__"):
         assert _mongo_incomplete_pk_cols({"id": wire}, pk) == ["id"]
         assert _mongo_conflict_key({"id": wire}, pk) == (None,)
+    # D53: '' is a valid Mongo _id / key value, and 'a ' is not 'a'.
+    for value in ("", "  ", "a "):
+        assert _mongo_incomplete_pk_cols({"id": value}, pk) == []
+        assert _mongo_conflict_key({"id": value}, pk) == (value,)
 
 
 def test_mongo_present_zero_and_false_are_complete_keys():

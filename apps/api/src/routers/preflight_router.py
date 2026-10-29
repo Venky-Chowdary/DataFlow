@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, HTTPException, Request
+from pydantic import BaseModel, Field, field_validator
 
 from services.acknowledgment_contract import (
     AcknowledgmentRefused,
@@ -40,6 +40,15 @@ class MappingItem(BaseModel):
     transform: str | None = None
     target_type: str | None = None
     source_type: str | None = None
+
+    @field_validator("target_type")
+    @classmethod
+    def _type_stamp_is_a_type(cls, value: str | None) -> str | None:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        if value is not None and value.strip():
+            validate_mapping_type_stamps([{"target_type": value}], context="Map")
+        return value
     requires_review: bool = False
     score_gap: float = 1.0
     user_override: bool = False
@@ -205,11 +214,17 @@ def _probe_saved_connector(connector_id: str) -> tuple[bool, str]:
 
 
 @router.post("/run")
-async def run_preflight(body: PreflightRequest):
+async def run_preflight(body: PreflightRequest, http_request: Request):
     """
     Run core G1–G9 preflight gates before a transfer.
     Blocks transfer if any gate fails — no mocked pass when connectors or samples are missing.
     """
+    from services.workspace_access import assert_connector_accessible
+
+    # Preflight probes and introspects saved connectors with their stored
+    # credentials: authorize each against its own workspace first (404).
+    assert_connector_accessible(http_request, body.connector_id)
+    assert_connector_accessible(http_request, body.source_connector_id)
     if not body.columns:
         raise HTTPException(status_code=400, detail="No columns provided for preflight")
     if not body.mappings:

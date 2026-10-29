@@ -29,13 +29,6 @@ except (
 ):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
     from src.services.mongodb_service import get_mongodb_service
 
-try:
-    from services.value_serializer import cell_to_string, json_default  # noqa: F401
-except (
-    ImportError
-):  # pragma: no cover - compatibility for tests with api root on PYTHONPATH
-    pass
-
 from connectors.sql_dsn import is_masked_secret, sync_credentials_into_connection_string
 from services.read_options import ReadOptions
 
@@ -634,6 +627,83 @@ def resolve_endpoint(
     # its stored driver type is authoritative; otherwise keep the inline format.
     merged["format"] = merged.get("type") or merged.get("format") or endpoint.format
     return EndpointConfig.from_dict(endpoint.kind, merged)
+
+
+def refresh_saved_connectors(request: Any) -> None:
+    """Re-resolve both endpoints of a request replayed from a job record.
+
+    Rerun / retry / resume rebuild the request from the stored
+    ``transfer_request``, whose host and credentials are those the connection
+    had when the job first ran (D172). Raises ``ValueError`` when a referenced
+    connector no longer exists.
+    """
+    request.source = refresh_saved_endpoint(
+        request.source, workspace_id=request.workspace_id
+    )
+    request.destination = refresh_saved_endpoint(
+        request.destination, workspace_id=request.workspace_id
+    )
+
+
+def refresh_saved_endpoint(
+    endpoint: EndpointConfig, workspace_id: str | None = None
+) -> EndpointConfig:
+    """Re-resolve a saved connector's *current* settings for a replayed endpoint.
+
+    D172 — a job's stored ``transfer_request`` holds the host, credentials and
+    database the connection had when the job first ran, because they were
+    resolved before the request was persisted. Resolution lets inline values win
+    over the saved connector, so a rerun / retry / resume dialled the old server
+    after the connector was moved or its credentials rotated (and, if the old
+    server still answered, read or wrote the wrong database). Connection
+    identity therefore comes from the saved connector, by id, at run time; what
+    the job chose stays (table, collection, schema, extras, and a database the
+    operator explicitly overrode). Endpoints with no saved connector keep their
+    stored config. Raises ``ValueError`` when the connector no longer exists.
+    """
+    if not endpoint.connector_id:
+        return endpoint
+    import dataclasses
+
+    # Existence and scope are checked against the job's workspace first: the
+    # generic lookup below may fall back to an unscoped store read, and a
+    # deleted or out-of-scope connector must fail, never resolve to something
+    # else or to the frozen snapshot.
+    from services.connector_store import get_connector
+
+    if get_connector(endpoint.connector_id, workspace_id=workspace_id) is None:
+        raise ValueError(f"Connector {endpoint.connector_id} no longer exists")
+
+    extra = dict(endpoint.extra or {})
+    identity = extra.pop("destination_identity", None)
+    # The database came from the saved connector (so it follows the connector)
+    # unless the operator chose it: an override or an inline-only database the
+    # connector never had stays as the job stored it.
+    from_connector = (
+        isinstance(identity, dict) and identity.get("authority") == "saved_connector"
+    )
+    stripped = dataclasses.replace(
+        endpoint,
+        host="",
+        port=0,
+        database="" if from_connector else endpoint.database,
+        username="",
+        password="",
+        connection_string="",
+        warehouse="",
+        ssl=False,
+        auth_mode="",
+        auth_role="",
+        auth_source="",
+        api_key="",
+        service_account="",
+        private_key="",
+        region="",
+        endpoint_url="",
+        path_style=False,
+        extra=extra,
+    )
+    return resolve_endpoint(stripped, workspace_id=workspace_id)
 
 
 def _lookup_saved_connector(
@@ -1277,7 +1347,10 @@ def read_source_database(
         topic = endpoint.table or endpoint.database or endpoint.collection or ""
         if not topic:
             raise ValueError("Kafka source topic name required")
-        batch, _cursor = read_topic_batch(cfg=cfg, topic=topic, limit=limit or 500)
+        batch, kafka_cursor = read_topic_batch(cfg=cfg, topic=topic, limit=limit or 500)
+        if stamp_total is not None:
+            # The caller that owns the run commits these on acceptance (D85).
+            stamp_total["kafka_cursor"] = kafka_cursor
         if raise_on_truncate:
             _guard_truncated_read(batch, db_type, topic)
         records = [dict(zip(batch.headers, row)) for row in batch.rows]

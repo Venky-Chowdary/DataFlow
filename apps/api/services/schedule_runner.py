@@ -189,6 +189,23 @@ def _resolve_connector(connector_id: str) -> dict | None:
         return None
 
 
+def _resolve_connector_for_schedule(connector_id: str, sched: Any) -> dict | None:
+    """Current settings of a connector a schedule uses, inside its workspace (D172).
+
+    A schedule stores connector ids, never hosts, so every fire reads the
+    connector as it is now. A connector that belongs to another workspace is
+    treated as absent - same rule as ``connector_store.get_connector``
+    (matching workspace, or a legacy unscoped connector).
+    """
+    conn = _resolve_connector(connector_id)
+    workspace = str(getattr(sched, "workspace_id", "") or "").strip()
+    if conn and workspace:
+        owner = str(conn.get("workspace_id") or "").strip() if isinstance(conn, dict) else ""
+        if owner and owner != workspace:
+            return None
+    return conn
+
+
 def _apply_callable_schedule_source(source, sched) -> None:
     """Stamp CALL/SELECT fields onto the endpoint so the reader is not a table scan."""
     mode = str(getattr(sched, "source_read_mode", "") or "").strip().lower()
@@ -502,10 +519,12 @@ def build_schedule_request(
         validation_mode=sched.validation_mode or "strict",
         delivery_guarantee=getattr(sched, "delivery_guarantee", None)
         or "at_least_once",
+        # The stored mappings were stamped create_new by the run that created
+        # the table; they do not arm ADD COLUMN for this one. Execute derives
+        # that from the live destination.
         backfill_new_fields=effective_backfill_new_fields(
             backfill_new_fields=bool(sched.backfill_new_fields),
             schema_policy=schema_policy,
-            mappings=mappings,
         ),
         write_via_staging=bool(getattr(sched, "write_via_staging", False)),
         priority_column=str(getattr(sched, "priority_column", "") or ""),
@@ -760,10 +779,14 @@ def _schema_types_from_probe(info: dict[str, Any]) -> dict[str, str]:
 
 def _unmapped_added_columns(sched: Any, request: Any, verdict: Any) -> list[str]:
     """New source columns nobody mapped, under a policy that does not propagate."""
-    from services.schema_drift import PROPAGATE_POLICIES
+    from services.schema_drift import PROPAGATE_POLICIES, effective_schema_policy
     from services.source_schema_memory import REVIEW, mapped_source_columns
 
-    policy = str(getattr(sched, "schema_policy", "") or "manual_review").strip().lower()
+    # A backfill request is a propagate request (see effective_schema_policy).
+    policy = effective_schema_policy(
+        str(getattr(sched, "schema_policy", "") or "manual_review"),
+        backfill_new_fields=bool(getattr(sched, "backfill_new_fields", False)),
+    )
     if getattr(verdict, "verdict", "") != REVIEW or policy in PROPAGATE_POLICIES:
         return []
     read = mapped_source_columns(list(getattr(request, "mappings", None) or []))
@@ -997,8 +1020,8 @@ def _observe_parallel_run(sched: Any, job_doc: dict | None = None) -> None:
 
     if not population_comparable(getattr(sched, "sync_mode", None)):
         return
-    src = _resolve_connector(sched.source_connector_id)
-    dst = _resolve_connector(sched.dest_connector_id)
+    src = _resolve_connector_for_schedule(sched.source_connector_id, sched)
+    dst = _resolve_connector_for_schedule(sched.dest_connector_id, sched)
     if not src or not dst:
         return
     campaign = dict(getattr(sched, "fidelity_campaign", None) or {})
@@ -1388,22 +1411,6 @@ def _open_finding(
         logger.exception("Schedule %s could not be parked on a decision", schedule_id)
 
 
-def _abandon_unclaimed_schedule_job(job_id: str) -> None:
-    """A pending job that lost the schedule claim must not stay runnable."""
-    if not str(job_id or "").strip():
-        return
-    try:
-        from services.mongodb_service import get_mongodb_service
-
-        get_mongodb_service().update_job_status(
-            job_id,
-            "cancelled",
-            message="Schedule claim was already held; this attempt was not started.",
-        )
-    except Exception:
-        logger.debug("unclaimed schedule job %s was not cancelled", job_id, exc_info=True)
-
-
 def _record_authorization_use(schedule_id: str, *, rebind: bool = False) -> None:
     from services.schedule_approvals import record_authorization_use
 
@@ -1454,8 +1461,8 @@ def _dispatch_transfer(
         return None
     if not sched.enabled and not allow_paused:
         return None
-    src = _resolve_connector(sched.source_connector_id)
-    dst = _resolve_connector(sched.dest_connector_id)
+    src = _resolve_connector_for_schedule(sched.source_connector_id, sched)
+    dst = _resolve_connector_for_schedule(sched.dest_connector_id, sched)
     if not src or not dst:
         # A connector this schedule cannot resolve does not come back on its own:
         # someone has to re-point the schedule or restore the connection. Every
@@ -1464,12 +1471,14 @@ def _dispatch_transfer(
         logger.warning("Schedule %s skipped — connector missing", schedule_id)
         emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="connector_missing", schedule_id=schedule_id)
         missing = "source" if not src else "destination"
+        missing_id = sched.source_connector_id if not src else sched.dest_connector_id
         _park_on_decision(
             schedule_id,
             RuntimeError(
-                f"Schedule cannot run — its {missing} connector is missing or "
-                "unavailable. Re-select the connection on this schedule, or "
-                "restore the deleted connector, then resume."
+                f"Schedule cannot run — Connector {missing_id} no longer exists: "
+                f"its {missing} connector is missing or unavailable. Re-select "
+                "the connection on this schedule, or restore the deleted "
+                "connector, then resume."
             ),
             attempt=attempt,
         )
@@ -1645,6 +1654,16 @@ def _run_schedule(
         return None
     if not sched.enabled and not manual:
         return None
+    from services.request_principal import assert_bound_principal_may_use_endpoints
+
+    assert_bound_principal_may_use_endpoints(
+        getattr(sched, "workspace_id", "") or None,
+        {"connector_id": sched.source_connector_id},
+        {"connector_id": sched.dest_connector_id},
+        # An unattended beat runs the tap and the job records why it failed; a
+        # person pressing Run now is told at once.
+        require_taps=manual,
+    )
     # Cadence already releases create-new dest-exists parks before the beat.
     # Run now must do the same or the first unattended fire stays parked.
     from services.schedule_approvals import release_create_new_dest_exists_false_refuse

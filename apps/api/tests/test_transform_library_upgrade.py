@@ -71,7 +71,7 @@ def test_upgrade_preview_returns_diff_and_mutates_nothing(monkeypatch):
         id="sched-1", name="nightly", transform_recipe_id="rec-1",
         transform_recipe_version=1, transform_recipe_version_mode="pin",
     )
-    monkeypatch.setattr(schedule_store, "list_schedules", lambda: [sched])
+    monkeypatch.setattr(schedule_store, "list_schedules", lambda *_filter: [sched])
     monkeypatch.setattr(schedule_store, "get_schedule", lambda sid: sched)
     body = router.UpgradePreviewPayload(schedule_id="sched-1")
     out = router.upgrade_preview("rec-1", body, Request(_scope()), workspace_id="")
@@ -170,7 +170,7 @@ def _scope_ws(ws, method="POST", path="/"):
 def test_upgrade_preview_returns_diff_hash(monkeypatch):
     monkeypatch.setattr(router, "get_transform_library", lambda: _Store())
     sched = _sched()
-    monkeypatch.setattr(schedule_store, "list_schedules", lambda: [sched])
+    monkeypatch.setattr(schedule_store, "list_schedules", lambda *_filter: [sched])
     monkeypatch.setattr(schedule_store, "get_schedule", lambda sid: sched)
     body = router.UpgradePreviewPayload(schedule_id="sched-1")
     out = router.upgrade_preview("rec-1", body, Request(_scope()), workspace_id="")
@@ -210,7 +210,7 @@ def test_upgrade_accepts_preview_diff_hash(monkeypatch):
     """The hash the preview returns is accepted by upgrade end-to-end."""
     monkeypatch.setattr(router, "get_transform_library", lambda: _Store())
     sched = _sched(version=1)
-    monkeypatch.setattr(schedule_store, "list_schedules", lambda: [sched])
+    monkeypatch.setattr(schedule_store, "list_schedules", lambda *_filter: [sched])
     monkeypatch.setattr(schedule_store, "get_schedule", lambda sid: sched)
     prev = router.upgrade_preview(
         "rec-1",

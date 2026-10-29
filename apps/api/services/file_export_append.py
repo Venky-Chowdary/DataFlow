@@ -49,10 +49,6 @@ def export_append_refusal(fmt: str, path: str) -> str:
     )
 
 
-def _workspace_root() -> str:
-    return os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-
-
 def land_export_bytes(
     destination: Any,
     export_bytes: bytes,
@@ -63,47 +59,34 @@ def land_export_bytes(
 ) -> dict[str, str]:
     """Write an export to disk and describe where it landed.
 
-    ``ValueError`` is raised for an escape from the workspace and for an append
-    the target file cannot carry — both refuse before touching the operator's
-    file rather than replacing it.
+    ``ValueError`` is raised for a path outside the exports folder and for an
+    append the target file cannot carry — both refuse before touching the
+    operator's file rather than replacing it.
     """
+    from services.export_paths import generated_export_path, resolve_export_path
     from services.sync_cursor import is_append_sync, resolve_effective_sync_mode
 
-    root = _workspace_root()
+    fmt = str(getattr(destination, "format", "") or "")
+    ext = os.path.splitext(export_name)[1].lstrip(".") or fmt or "json"
     configured = str(getattr(destination, "output_path", "") or "").strip()
     if configured:
-        export_path = (
-            os.path.abspath(configured)
-            if os.path.isabs(configured)
-            else os.path.abspath(os.path.join(root, configured))
-        )
-        if not export_path.startswith(root):
-            raise ValueError(
-                "File export path must be inside the application workspace "
-                f"({root}) — pass a path under that directory or a relative "
-                "export name."
-            )
-        os.makedirs(os.path.dirname(export_path) or ".", exist_ok=True)
+        target = resolve_export_path(configured, default_ext=ext)
+        export_path = str(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
         appending = is_append_sync(
             resolve_effective_sync_mode(sync_mode)
         ) and os.path.exists(export_path)
-        fmt = str(getattr(destination, "format", "") or "csv")
         if appending:
-            payload = append_payload(fmt, export_path, export_bytes)
+            payload = append_payload(fmt or "csv", export_path, export_bytes)
             with open(export_path, "ab") as fh:
                 fh.write(payload)
         else:
             with open(export_path, "wb") as fh:
                 fh.write(export_bytes)
-        name = os.path.basename(export_path)
+        name = target.name
     else:
-        ext = os.path.splitext(export_name)[1].lstrip(".") or (
-            str(getattr(destination, "format", "") or "json")
-        )
         name = f"export_{job_id}.{ext}"
-        export_dir = os.path.join(root, "exports")
-        os.makedirs(export_dir, exist_ok=True)
-        export_path = os.path.join(export_dir, name)
+        export_path = str(generated_export_path(name))
         with open(export_path, "wb") as fh:
             fh.write(export_bytes)
     return {

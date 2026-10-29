@@ -15,7 +15,7 @@ import uuid as uuid_lib
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation, Overflow
 from collections.abc import Iterable
-from typing import Any, Callable
+from typing import Any, Callable, Final
 
 from services.pii_guard import mask as pii_mask
 from services.semantic_types import (
@@ -388,6 +388,10 @@ def infer_number_locale(
 def _looks_like_grouped_number(raw: str) -> bool:
     text = str(raw or "").strip()
     if not text or not any(ch.isdigit() for ch in text):
+        return False
+    # A colon is a clock, never a grouping: "01.02.2024 10:30" is a day-first
+    # timestamp, and the locale warning must not fire on it (D61).
+    if ":" in text:
         return False
     return "," in text or "." in text
 

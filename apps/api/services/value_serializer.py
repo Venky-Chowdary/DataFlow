@@ -94,6 +94,24 @@ class WireLiteral(str):
     """
 
 
+class WireCell(str):
+    """A cell a reader already encoded for the transfer wire (D174).
+
+    ``cell_to_string(None, preserve_sql_null=True)`` is ``"__DF_SQL_NULL__"`` and
+    a user text that spells a sentinel is escaped. Encoding that result again
+    escapes the NULL sentinel into the *text* ``"__DF_SQL_NULL__"`` and escapes a
+    user literal twice. A bare ``str`` cannot say which side of the encode it is
+    on, so a reader that hands the engine wire cells marks them and
+    :func:`cell_to_string` passes a marked cell through unchanged. Raw values (a
+    ``None``, a ``Decimal``, a user ``str``) stay unmarked and are encoded once.
+    """
+
+
+def wire_cell(value: Any) -> WireCell:
+    """Encode ``value`` once for the wire and mark the result as encoded."""
+    return WireCell(cell_to_string(value, preserve_sql_null=True))
+
+
 def driver_bind_value(value: Any) -> Any:
     """The value a database driver binds: a :class:`WireLiteral` leaves as ``str``.
 
@@ -246,6 +264,23 @@ def present_cell_text(value: Any) -> str | None:
     return text
 
 
+def key_identity_text(value: Any) -> str | None:
+    """Exact text identity of one upsert / census key cell.
+
+    Unlike :func:`present_cell_text`, only SQL NULL / Missing is "no key": ``''``
+    is a value (a quoted file ``""`` and every database's ``''`` decode to it,
+    an unquoted empty file cell is already NULL) and text is never stripped, so
+    ``'a'`` and ``'a '`` stay two keys wherever the destination distinguishes
+    them (D53, D70). Collation folding belongs to the destination engine.
+    """
+    if is_reader_null_cell(value) or is_frame_missing(value):
+        return None
+    if isinstance(value, str):
+        return unescape_wire_text(value)
+    text = cell_to_string(value, preserve_sql_null=True)
+    return None if is_null_evidence(text) else text
+
+
 def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
     """Sample values usable as type evidence.
 
@@ -254,8 +289,25 @@ def evidence_samples(values: Any, *, limit: int | None = None) -> list[str]:
     like non-numeric strings, so Map invented a lossy ``<col>_text`` LONGTEXT
     destination for a column whose declared type was perfectly representable.
     """
-    out = [str(v).strip() for v in (values or []) if not is_null_evidence(v)]
+    out = [evidence_text(v) for v in (values or []) if not is_null_evidence(v)]
     return out[:limit] if limit else out
+
+
+def evidence_text(value: Any) -> str:
+    """One sample cell as the text a type parser reads.
+
+    A driver hands a JSON / JSONB / document cell over already parsed, and
+    ``str()`` of a dict is a Python repr (``{'k': 1}``): not JSON, so the sample
+    validator failed every cell of a column whose values were fine and demoted
+    DataFlow's own embedded-document field on run 2 (D179). Containers carry as
+    the JSON document they are.
+    """
+    if isinstance(value, (dict, list, tuple)):
+        try:
+            return json_dumps_exact_numbers(value)
+        except (TypeError, ValueError):
+            pass
+    return str(value).strip()
 
 
 def public_mapped_cell(value: Any, *, dense_null: bool = False) -> Any:
@@ -884,6 +936,9 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
     * numpy / pandas scalars -> their scalar .item() representation
     * unknown -> str(value) (never repr)
     """
+    if isinstance(value, WireCell):
+        return str(value)
+
     if value is None:
         return SQL_NULL_SENTINEL if preserve_sql_null else ""
 

@@ -12,6 +12,7 @@ from typing import Any, Callable
 
 from services.error_handling import TransferCancelled  # noqa: E402
 from services.decision_kernel import materialize_dest_ddl
+from services.type_stamp_grammar import require_safe_type_stamp, require_safe_type_stamps
 
 from connectors.sqlite_common import sqlite_file_path, tune_sqlite_connection
 from connectors.write_resilience import (
@@ -1495,6 +1496,9 @@ def write_mapped_rows(
                             )
                         _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                     else:
+                        require_safe_type_stamps(
+                            target_types, context="sqlite CREATE TABLE column"
+                        )
                         col_defs = ", ".join(
                             f"{quote_sql_identifier(c)} {t}"
                             for c, t in zip(target_cols, target_types)
@@ -1549,6 +1553,9 @@ def write_mapped_rows(
                         )
                     for col, typ in zip(target_cols, target_types):
                         if col not in existing:
+                            typ = require_safe_type_stamp(
+                                typ, context="sqlite ALTER TABLE ADD COLUMN"
+                            )
                             try:
                                 cur.execute(
                                     f"ALTER TABLE {table_quoted} ADD COLUMN {quote_sql_identifier(col)} {typ}"

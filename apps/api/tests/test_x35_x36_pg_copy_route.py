@@ -320,9 +320,6 @@ def test_x36_pg_dest_tamper_drops_created_table(monkeypatch):
         "the table this run created must be dropped on reconcile failure"
     )
     recon = res.reconciliation or {}
-    culprits = str(recon.get("culprit_keys") or "") + str(
-        recon.get("culprit_columns") or ""
-    )
     assert "postgres-to-postgres" not in str(
         recon.get("culprit_keys_unavailable_reason") or ""
     )

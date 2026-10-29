@@ -468,7 +468,13 @@ def _delete_all_rows(
     from connectors.sql_identifiers import quote_table_ref
 
     if db_type == "sqlite":
-        database = str(cfg.get("database") or "")
+        from connectors.sqlite_common import sqlite_file_path
+
+        database = sqlite_file_path(
+            str(cfg.get("database") or ""),
+            str(cfg.get("connection_string") or ""),
+            str(cfg.get("host") or ""),
+        )
         if not database:
             return False
         ref = quote_table_ref(table_name, dialect="sqlite")
@@ -529,14 +535,17 @@ def _delete_all_rows(
 
     if db_type in {"mongodb", "mongo"}:
         from pymongo import MongoClient
+        from connectors.mongodb_common import guarded_mongo_client
 
         from src.transfer.adapters import mongodb_connection_string
 
         database = str(cfg.get("database") or "")
         if not database:
             return False
-        client: MongoClient = MongoClient(
-            mongodb_connection_string(cfg), serverSelectionTimeoutMS=5000
+        client: MongoClient = guarded_mongo_client(
+            mongodb_connection_string(cfg),
+            workspace_id=str(cfg.get("workspace_id") or ""),
+            serverSelectionTimeoutMS=5000,
         )
         try:
             client[database][table_name].delete_many({})

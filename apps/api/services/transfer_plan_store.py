@@ -12,6 +12,7 @@ from services.atomic_file import write_json_atomic
 from services.platform_config import data_dir
 from services.schema_fingerprint import fingerprint_mappings, fingerprint_schema
 from services.value_serializer import json_default
+from services.workspace_filter import WorkspaceFilter, bound_allows, current_workspace_stamp
 
 STORE_PATH = data_dir() / "transfer_plans.json"
 
@@ -99,6 +100,8 @@ class TransferPlanRecord:
     job_ids: list[str] = field(default_factory=list)
     created_at: str = field(default_factory=_now)
     updated_at: str = field(default_factory=_now)
+    #: Owning workspace (D154); "" = unscoped legacy plan.
+    workspace_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -128,6 +131,7 @@ class TransferPlanRecord:
             job_ids=list(data.get("job_ids") or []),
             created_at=data.get("created_at", _now()),
             updated_at=data.get("updated_at", _now()),
+            workspace_id=str(data.get("workspace_id") or ""),
         )
 
     def active_revision(self) -> PlanRevision | None:
@@ -159,15 +163,33 @@ def _save_all(plans: list[TransferPlanRecord]) -> None:
 
 
 def list_plans(*, limit: int = 50) -> list[TransferPlanRecord]:
-    plans = sorted(_load_all(), key=lambda p: p.updated_at, reverse=True)
-    return plans[:limit]
+    visible = [p for p in _load_all() if bound_allows(p.workspace_id)]
+    return sorted(visible, key=lambda p: p.updated_at, reverse=True)[:limit]
 
 
 def get_plan(plan_id: str) -> TransferPlanRecord | None:
+    """A plan of the caller's tenant scope; another workspace's does not exist."""
     for p in _load_all():
         if p.id == plan_id:
-            return p
+            return p if bound_allows(p.workspace_id) else None
     return None
+
+
+def assign_unscoped_workspaces(workspace_for, *, apply: bool) -> dict[str, int]:
+    """Stamp legacy unscoped plans with ``workspace_for(plan.to_dict())`` (D154 backfill)."""
+    unscoped = WorkspaceFilter.only("")
+    counts = {"assigned": 0, "skipped": 0}
+    plans = _load_all()
+    for plan in plans:
+        if not unscoped.matches(plan.workspace_id):
+            continue
+        ws = (workspace_for(plan.to_dict()) or "").strip()
+        counts["assigned" if ws else "skipped"] += 1
+        if ws:
+            plan.workspace_id = ws
+    if apply and counts["assigned"]:
+        _save_all(plans)
+    return counts
 
 
 def create_plan(data: dict[str, Any]) -> TransferPlanRecord:
@@ -187,6 +209,7 @@ def create_plan(data: dict[str, Any]) -> TransferPlanRecord:
         row_count_estimate=int(data.get("row_count_estimate") or 0),
         sample_rows=list(data.get("sample_rows") or [])[:100],
         policies=dict(data.get("policies") or {}),
+        workspace_id=current_workspace_stamp(),
     )
     plans.append(plan)
     _save_all(plans)

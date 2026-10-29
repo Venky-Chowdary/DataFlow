@@ -325,7 +325,7 @@ def test_live_iceberg_mongo_empty_string_and_null_preserved():
 
 
 @requires_rest
-def test_live_iceberg_mongo_skip_when_dest_count_matches():
+def test_live_iceberg_mongo_equal_count_append_declines():
     pytest.importorskip("pyiceberg")
     pytest.importorskip("pyarrow")
     pytest.importorskip("pymongo")
@@ -348,20 +348,20 @@ def test_live_iceberg_mongo_skip_when_dest_count_matches():
             replace_destination=False,
         )
         assert first.target_rows == 800
-        second = copy_iceberg_to_mongo(
-            source_cfg=_iceberg_cfg(ice),
-            source_schema="default",
-            source_table=ice,
-            dest_cfg=_mongo_cfg(dest),
-            dest_table=dest,
-            pairs=[("id", "id"), ("label", "label")],
-            mongo_ddls=["long", "string"],
-            replace_destination=False,
-        )
-        assert second.source_snapshot.get("copy_split") == "skip"
-        assert second.source_snapshot.get("partitions_skipped") == 1
-        assert second.source_snapshot.get("iceberg_read") == "skip"
-        assert second.source_snapshot.get("mongo_write") == "skip"
+        # An append into an occupied Mongo destination is never skipped on a
+        # matching COUNT: equal counts do not prove equal content and an
+        # identity insert would duplicate. The route declines to the row path.
+        with pytest.raises(FastPathUnavailable, match="occupied Mongo dest"):
+            copy_iceberg_to_mongo(
+                source_cfg=_iceberg_cfg(ice),
+                source_schema="default",
+                source_table=ice,
+                dest_cfg=_mongo_cfg(dest),
+                dest_table=dest,
+                pairs=[("id", "id"), ("label", "label")],
+                mongo_ddls=["long", "string"],
+                replace_destination=False,
+            )
         assert _dest_count(dest) == 800
     finally:
         with mysql.cursor() as cur:

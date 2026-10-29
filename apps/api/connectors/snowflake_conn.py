@@ -807,6 +807,13 @@ def _snowflake_connector_module() -> Any:
 
 _converter_class: type | None = None
 
+_SHORT_YEAR = re.compile(r"^(\d{1,3})(?=-)")
+
+
+def _iso_year(text: str) -> str:
+    """Zero-pad a leading year to the four digits ISO 8601 requires."""
+    return _SHORT_YEAR.sub(lambda m: m.group(1).zfill(4), text, count=1)
+
 
 def snowflake_converter_class() -> type:
     """``converter_class`` for every DataFlow Snowflake connection.
@@ -834,6 +841,33 @@ def snowflake_converter_class() -> type:
                 return super().to_snowflake_bindings(
                     snowflake_type, driver_bind_value(value)
                 )
+
+            # D64. The connector spells a client-side bound year with ``{year:d}``
+            # (year 1 -> ``1-01-01``); a literal needs the ISO four digits.
+            def _datetime_to_snowflake(self, value: Any) -> str:
+                return _iso_year(super()._datetime_to_snowflake(value))
+
+            def _date_to_snowflake(self, value: Any) -> str:
+                return _iso_year(super()._date_to_snowflake(value))
+
+            # D64. A TIMESTAMP_LTZ is read into the session zone; west of UTC the
+            # earliest instants land in year 0, which ``datetime`` cannot hold.
+            # The instant is what matters, so such a value is read as UTC.
+            def _TIMESTAMP_LTZ_to_python(self, ctx: dict[str, Any]) -> Any:
+                session_read = super()._TIMESTAMP_LTZ_to_python(ctx)
+                from datetime import timezone as _tz
+
+                def read(value: str) -> Any:
+                    try:
+                        return session_read(value)
+                    except OverflowError:
+                        return SnowflakeConverter.create_timestamp_from_string(
+                            value, ctx["scale"], _tz.utc
+                        )
+
+                return read
+
+            _TIMESTAMP_to_python = _TIMESTAMP_LTZ_to_python
 
         _converter_class = _DataflowSnowflakeConverter
     return _converter_class

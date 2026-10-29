@@ -94,6 +94,12 @@ def _request_with_retry(
     429 and transient 5xx.  We honor ``Retry-After`` when present and fall back
     to exponential backoff.  Non-transient 4xx errors fail fast.
     """
+    from services.egress_guard import assert_connector_dial_allowed, redirect_guard_hook
+
+    assert_connector_dial_allowed(url, point="http_client")
+    hooks = dict(kwargs.pop("hooks", None) or {})
+    hooks["response"] = [*list(hooks.get("response") or []), redirect_guard_hook(url)]
+    kwargs["hooks"] = hooks
     last_exc: Exception | None = None
     for attempt in range(max_retries):
         try:
@@ -337,9 +343,18 @@ def _resolve_config(cfg: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get_url(cfg: dict[str, Any], pagination: dict[str, Any], next_url: str | None = None) -> str:
-    if next_url:
-        return next_url
     host = cfg["host"].rstrip("/")
+    if next_url:
+        from urllib.parse import urljoin
+
+        from services.egress_guard import EgressRefused, follow_url_allowed
+
+        target = urljoin(f"{host}/", next_url)
+        if not follow_url_allowed(target, host):
+            raise EgressRefused(
+                "REST API pagination URL leaves the configured host for a refused address"
+            )
+        return target
     obj = cfg["object_path"].strip("/")
     suffix = (cfg.get("path_suffix") or "").strip()
     if obj and suffix and not obj.endswith(suffix):

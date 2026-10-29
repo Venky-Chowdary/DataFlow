@@ -31,11 +31,14 @@ def test_update_insert_refuses_reader_null_conflict_key():
         )
 
 
-def test_update_insert_refuses_blank_conflict_key():
-    with pytest.raises(ValueError, match="null/empty conflict key"):
+def test_update_insert_does_not_treat_empty_string_as_null_key():
+    """D53: '' is a value; the guard only fires on NULL (it would otherwise
+    reach the missing connection below instead of raising ValueError)."""
+    with pytest.raises(Exception) as caught:
         update_insert_upsert(
             None, None, [{"id": "", "v": "x"}], ["id"], ["id", "v"]
         )
+    assert "null/empty conflict key" not in str(caught.value)
 
 
 def test_update_insert_empty_batch_is_noop():

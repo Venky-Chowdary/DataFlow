@@ -109,6 +109,7 @@ from services.reconciliation import (
     FingerprintAccumulator,
 )
 from services.tabular_window import header_and_rows, row_to_record
+from services.upload_limits import read_all_bounded
 from services.value_serializer import payload_record_wire
 
 try:
@@ -245,13 +246,18 @@ def prepare_stream_content(
 ) -> bytes | str:
     """Return the most efficient source reference for streaming.
 
-    If an explicit ``source_path`` is provided and exists, it is used.
+    If an explicit ``source_path`` is provided and exists, it is used. It must
+    resolve inside the upload/staging roots; anything else raises ``ValueError``.
     If ``content`` is larger than ``FILE_SPILL_THRESHOLD`` bytes, it is written
     to a temporary file and that path is returned so iteration can stream from
     disk.  Otherwise the original ``bytes`` payload is returned.
     """
-    if source_path and os.path.isfile(source_path):
-        return source_path
+    if source_path:
+        from services.dataset_file import confine_source_path
+
+        confined = confine_source_path(source_path)
+        if confined.is_file():
+            return str(confined)
     if not content:
         return content
     if len(content) <= FILE_SPILL_THRESHOLD:
@@ -565,7 +571,7 @@ def _peek_parsed_file_source(
             raw = content if isinstance(content, (bytes, bytearray)) else None
             if raw is None:
                 with _open_binary(content) as bio:
-                    raw = bio.read()
+                    raw = read_all_bounded(bio)
             records = load_json_records(bytes(raw))
             total = len(records)
             sample_objs = [r for r in records[:100] if isinstance(r, dict)]
@@ -1559,15 +1565,27 @@ def stream_file_to_database(
     # A non-text schema declaration must override the text carrier here or
     # the two sides of Gate-8 hash the same value on different bases.
     _schema_decl_types: dict[str, str] = {}
+    # A column whose Map stamp names a target_type is an approved carrier, even
+    # when that carrier is TEXT (a SQLite/DuckDB DECIMAL rematerialised to
+    # TEXT): the destination stores the stamped type, so the source digest has
+    # to hash on it, not on the sample-inferred DECIMAL(17,2).
+    _stamped_targets: set[str] = set()
     for _m in mappings or []:
         if not isinstance(_m, dict):
             continue
         _t = str(_m.get("target") or _m.get("source") or "")
+        if _t and _m.get("target_type"):
+            _stamped_targets.add(_t)
+            continue
         _s = str(_m.get("source") or _t)
         if _t and schema.get(_s):
             _schema_decl_types[_t] = str(schema[_s])
     for _tc in target_cols:
-        if _tc not in _schema_decl_types and schema.get(_tc):
+        if (
+            _tc not in _schema_decl_types
+            and _tc not in _stamped_targets
+            and schema.get(_tc)
+        ):
             _schema_decl_types[_tc] = str(schema[_tc])
     # Inferred schema types fill ONLY a text carrier — an approved mapping
     # type (DECIMAL(38,10)) always wins over a sample-inferred declaration

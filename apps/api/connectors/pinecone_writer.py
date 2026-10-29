@@ -39,16 +39,24 @@ def _requests_session() -> Any:
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
+    from services.egress_guard import redirect_guard_hook
+
+    session.hooks["response"].append(redirect_guard_hook())
     return session
 
 
 def _index_url(host: str, connection_string: str = "") -> str:
+    from services.egress_guard import assert_connector_dial_allowed
+
     raw = (connection_string or host or "").strip()
     if not raw:
         return ""
     if raw.startswith("http://") or raw.startswith("https://"):
-        return raw.rstrip("/")
-    return f"https://{raw.rstrip('/')}"
+        url = raw.rstrip("/")
+    else:
+        url = f"https://{raw.rstrip('/')}"
+    assert_connector_dial_allowed(url, point="http_client")
+    return url
 
 
 def _headers(api_key: str) -> dict[str, str]:

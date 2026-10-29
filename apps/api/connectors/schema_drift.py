@@ -660,6 +660,14 @@ def _fetch_existing_columns(
     return {}
 
 
+#: MariaDB lists clock defaults as bare functions with no DEFAULT_GENERATED flag.
+_MARIADB_CLOCK_DEFAULT_RE = re.compile(
+    r"(?:current_timestamp|localtimestamp|now|curdate|current_date|curtime|current_time)"
+    r"(?:\(\d*\))?",
+    re.IGNORECASE,
+)
+
+
 def _mysql_preserved_column_clause(
     cursor: Any,
     schema: str | None,
@@ -699,9 +707,18 @@ def _mysql_preserved_column_clause(
     extra_s = str(extra or "")
     if default is not None and str(default).strip() != "":
         expr = str(default).strip()
-        if "DEFAULT_GENERATED" in extra_s.upper():
+        if "DEFAULT_GENERATED" in extra_s.upper() or _MARIADB_CLOCK_DEFAULT_RE.fullmatch(expr):
             if re.fullmatch(r"[A-Za-z0-9_(). ]+", expr):
                 parts.append(f"DEFAULT {expr}")
+        elif expr.upper() == "NULL":
+            # MariaDB reports the *text* NULL for a nullable column with no
+            # default (MySQL reports SQL NULL). Quoting it restated
+            # ``DATETIME(6) DEFAULT 'NULL'``, which MariaDB refuses with
+            # (1067) Invalid default value after a green preflight (D146).
+            pass
+        elif len(expr) >= 2 and expr[0] == "'" and expr[-1] == "'":
+            # MariaDB returns string literals already quoted.
+            parts.append(f"DEFAULT {expr}")
         else:
             literal = expr.replace("'", "''")
             parts.append(f"DEFAULT '{literal}'")

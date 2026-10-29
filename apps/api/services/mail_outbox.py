@@ -305,7 +305,6 @@ def extend_lease(row_id: str, claim_token: str,
     second replica mid-flight. False when the claim is already lost
     (expired and reclaimed, or terminal) — the caller must not send."""
     now = datetime.now(UTC)
-    now_s = now.isoformat()
     until = (now + timedelta(seconds=lease_sec)).isoformat()
     db = _database()
     if db is not None:

@@ -554,6 +554,11 @@ def _fail_runtime_job(
     connection-lost error stamped by ``_raise_write_failure``), persist DLQ
     before marking the job failed so quarantine cannot disappear.
     """
+    if getattr(exc, "superseded", False):
+        # A newer attempt of this job owns the record now (resume): this one
+        # stops quietly rather than marking the live attempt cancelled/failed.
+        logger.warning("Job %s: attempt superseded by a newer one; stopping", job_id)
+        return str(exc), {}
     stamped_details = list(getattr(exc, "rejected_details", None) or [])
     if stamped_details:
         summary = dict(getattr(exc, "dest_summary", None) or {})
@@ -820,6 +825,17 @@ def _fail_job_preflight(
         or "; ".join(str(x) for x in blocker_reasons if x)
         or "Preflight blocked transfer"
     )
+    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, QUARANTINE_REPLAN_FIX
+
+    if any(
+        isinstance(b, dict)
+        and (b.get("details") or {}).get("root_cause")
+        and (b.get("details") or {}).get("title") == CAST_FAILURE_ROOT_TITLE
+        for b in pf.get("blockers", [])
+    ):
+        # D170: the run was refused whole; say how to load the valid rows.
+        error_message = f"{error_message.rstrip('. ')}. {QUARANTINE_REPLAN_FIX}."
+        error_details["remediation"] = QUARANTINE_REPLAN_FIX
     lineage.emit_preflight_completed(
         run_id=job_id,
         passed=False,

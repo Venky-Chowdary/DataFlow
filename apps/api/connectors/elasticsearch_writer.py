@@ -734,6 +734,8 @@ def write_mapped_rows(
                     target_cols=target_cols,
                     rejected_details=rejected_details,
                     policy=policy,
+                    # An empty string is not a valid Elasticsearch ``_id``.
+                    empty_is_null=True,
                 )
 
         from elasticsearch.helpers import bulk

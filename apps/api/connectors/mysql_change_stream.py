@@ -27,9 +27,16 @@ from services.cdc_schema_history import (
 )
 
 from connectors.mysql_conn import get_connection
-from connectors.mysql_reader import read_table_batch, read_table_scan_batch
+from connectors.mysql_reader import (
+    _instant_set_from_types,
+    _mysql_column_types,
+    read_table_batch,
+    read_table_scan_batch,
+)
 from connectors.sql_identifiers import quote_table_ref
 from services.cdc_cursor_gap import CdcBinlogGapError
+from services.timezone_policy import mysql_timestamp_instant_wire
+from services.value_serializer import WireCell, wire_cell
 
 _DDL_RE = re.compile(
     r"\b(ALTER|CREATE|DROP|RENAME)\s+TABLE\b",
@@ -149,14 +156,84 @@ def consumed_reached_binlog_head(
     return consumed_at >= head_at
 
 
-def _serialize(value: Any) -> str:
-    from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+def _decode_binlog_json(value: Any) -> Any:
+    """Turn the ``bytes`` keys and string leaves of a binlog JSON document into ``str``.
 
-    if value is None:
-        return SQL_NULL_SENTINEL
+    python-mysql-replication decodes a MySQL binary JSON column into Python
+    containers whose keys and string values are ``bytes``. Serialised as is,
+    the keys read ``"b'k'"`` and the strings base64. A container can only come
+    from a JSON column (a BLOB stays ``bytes``), so decoding inside containers
+    never touches real binary data.
+    """
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    if isinstance(value, dict):
+        return {_decode_binlog_json(k): _decode_binlog_json(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_decode_binlog_json(v) for v in value]
+    return value
+
+
+_ROLE_GRANT = re.compile(r"^GRANT\s+(`[^`]+`(?:@`[^`]*`)?(?:\s*,\s*`[^`]+`(?:@`[^`]*`)?)*)\s+TO\s", re.I)
+_GLOBAL_GRANT = re.compile(r"^GRANT\s+(.+?)\s+ON\s+\*\.\*\s+TO\s", re.I)
+#: Global privileges that satisfy each binlog requirement (``ALL PRIVILEGES``
+#: satisfies both). SUPER and MariaDB's BINLOG MONITOR also allow SHOW MASTER STATUS.
+_BINLOG_PRIVILEGES = {
+    "REPLICATION SLAVE": {"REPLICATION SLAVE"},
+    "REPLICATION CLIENT": {"REPLICATION CLIENT", "SUPER", "BINLOG MONITOR"},
+}
+
+
+def _global_privileges(cur: Any, statement: str) -> tuple[set[str], list[str]]:
+    """Global (``*.*``) privileges and role names listed by a SHOW GRANTS statement."""
+    cur.execute(statement)
+    privileges: set[str] = set()
+    roles: list[str] = []
+    for (line,) in cur.fetchall():
+        text = str(line).strip()
+        role_match = _ROLE_GRANT.match(text)
+        if role_match:
+            roles.extend(part.strip() for part in role_match.group(1).split(","))
+            continue
+        global_match = _GLOBAL_GRANT.match(text)
+        if global_match:
+            privileges.update(p.strip().upper() for p in global_match.group(1).split(","))
+    return privileges, roles
+
+
+def _missing_replication_privileges(cur: Any) -> list[str]:
+    """Binlog privileges the current user lacks; empty when satisfied or unknowable."""
+    try:
+        privileges, roles = _global_privileges(cur, "SHOW GRANTS FOR CURRENT_USER()")
+        if roles:
+            privileges |= _global_privileges(
+                cur, f"SHOW GRANTS FOR CURRENT_USER() USING {', '.join(roles)}"
+            )[0]
+    except Exception as exc:
+        _logger.warning("MySQL CDC grant check inconclusive: %s", exc)
+        return []
+    if "ALL PRIVILEGES" in privileges or "ALL" in privileges:
+        return []
+    return [
+        name for name, accepted in _BINLOG_PRIVILEGES.items() if not privileges & accepted
+    ]
+
+
+def _serialize(value: Any, *, instant: bool = False) -> str:
+    """One binlog/keyset cell as a wire cell (marked, so apply encodes it once).
+
+    ``instant`` is a MySQL ``TIMESTAMP`` column: its digits are the UTC instant
+    (binlog and a UTC-pinned session both hand back naive UTC), so the wire
+    carries the offset the way ``mysql_reader`` does. A ``DATETIME`` stays
+    zoneless wall-clock.
+    """
+    if isinstance(value, (dict, list, tuple)):
+        value = _decode_binlog_json(value)
+    if instant:
+        value = mysql_timestamp_instant_wire(value)
     if isinstance(value, datetime):
-        return value.isoformat()
-    return cell_to_string(value, preserve_sql_null=True)
+        return WireCell(value.isoformat())
+    return wire_cell(value)
 
 
 class MySqlChangeStreamCdc:
@@ -203,6 +280,8 @@ class MySqlChangeStreamCdc:
         # remapped every captured table's positional UNKNOWN_COLn keys into
         # the wrong columns, so deletes removed the wrong destination rows.
         self._column_names_cache: dict[str, list[str]] = {}
+        #: Per-table ``TIMESTAMP`` columns (instants on the wire), same keying.
+        self._instant_columns_cache: dict[str, frozenset[str]] = {}
         self.source_key = connection_fingerprint(
             {**cfg, "type": "mysql"},
             connector_id=str(cfg.get("connector_id") or ""),
@@ -329,9 +408,10 @@ class MySqlChangeStreamCdc:
     def is_available(self) -> bool:
         """True when binlog is ON + ROW format and pymysqlreplication is importable.
 
-        Stream open is best-effort: missing REPLICATION privileges still return
-        True when server vars are correct so CI/integration can proceed; poll()
-        surfaces privilege errors clearly.
+        Also False when the connecting user lacks ``REPLICATION SLAVE`` or
+        ``REPLICATION CLIENT`` (D176): the snapshot would otherwise commit and
+        the run die afterwards on error 1227. When the grants cannot be read
+        the check is inconclusive and does not block; poll() still raises.
 
         A ``False`` answer records :attr:`unavailable_reason` so the caller can
         separate "this server does not write a ROW binlog" (degrade, declared)
@@ -373,6 +453,14 @@ class MySqlChangeStreamCdc:
                     raise RuntimeError(
                         f"binlog_row_image={row[1]} — FULL required so upserts do not NULL-wipe"
                     )
+                missing = _missing_replication_privileges(cur)
+                if missing:
+                    conn.close()
+                    raise RuntimeError(
+                        f"the MySQL user needs REPLICATION SLAVE and REPLICATION CLIENT "
+                        f"on *.* to read the binlog; missing {' and '.join(missing)} "
+                        "(access denied for binlog streaming, error 1227)"
+                    )
             conn.close()
 
             try:
@@ -382,7 +470,7 @@ class MySqlChangeStreamCdc:
                 stream = BinLogStreamReader(**kwargs)
                 stream.close()
             except Exception as exc:
-                # Vars OK — treat as available; poll will raise with detail.
+                # Vars and grants OK — treat as available; poll will raise with detail.
                 _logger.warning("Exception suppressed: %s", exc, exc_info=exc)
             return True
         except Exception as exc:
@@ -731,7 +819,12 @@ class MySqlChangeStreamCdc:
                         batch = read_table_batch(**_read_kw)
                     if not batch.rows:
                         break
-                    records = [dict(zip(batch.headers, row)) for row in batch.rows]
+                    # ``mysql_reader`` rows are wire strings (NULL already spelled
+                    # as the sentinel); mark them so apply does not encode twice.
+                    records = [
+                        {h: WireCell(c) for h, c in zip(batch.headers, row)}
+                        for row in batch.rows
+                    ]
                 table_offset += len(records)
                 table_last_pk = last_pk_from_records(records, pk_cols) or table_last_pk
                 token = {
@@ -785,7 +878,14 @@ class MySqlChangeStreamCdc:
                 cur.execute(sql, params)
                 rows = cur.fetchall() or []
                 headers = [d[0] for d in (cur.description or [])]
-            return [dict(zip(headers, row)) for row in rows]
+            instants = self._instant_columns(table)
+            return [
+                {
+                    h: mysql_timestamp_instant_wire(v) if h in instants else v
+                    for h, v in zip(headers, row)
+                }
+                for row in rows
+            ]
         finally:
             if close:
                 try:
@@ -1238,6 +1338,7 @@ class MySqlChangeStreamCdc:
         # whole cache would force every sibling table back through an ordinal
         # lookup against tables[0]'s columns.
         self._column_names_cache[self.table] = list(live["columns"].keys())
+        self._instant_columns_cache.pop(self.table, None)
         self.last_ddl_at = str(entry.get("recorded_at") or "") or self.last_ddl_at
         try:
             from services.cdc_mapping_review import flag_mapping_review
@@ -1304,6 +1405,31 @@ class MySqlChangeStreamCdc:
         self._column_names_cache[tbl] = cols
         return cols
 
+    def _instant_columns(self, table: str | None = None) -> frozenset[str]:
+        """``TIMESTAMP`` columns of one captured table (UTC instants on the wire).
+
+        A binlog row carries no column types, and a ``DATETIME`` and a
+        ``TIMESTAMP`` both decode to a naive ``datetime``. Without the catalog
+        type a ``TIMESTAMP`` reached the writer as zoneless wall-clock and a
+        ``TIMESTAMPTZ`` destination refused it (D177).
+        """
+        tbl = table or self.table
+        cached = self._instant_columns_cache.get(tbl)
+        if cached is not None:
+            return cached
+        found: frozenset[str] = frozenset()
+        try:
+            conn = self._conn()
+            try:
+                with conn.cursor() as cur:
+                    found = _instant_set_from_types(_mysql_column_types(cur, tbl))
+            finally:
+                conn.close()
+        except Exception:
+            _logger.debug("MySQL TIMESTAMP column lookup failed for %s", tbl, exc_info=True)
+        self._instant_columns_cache[tbl] = found
+        return found
+
     def _remap_positional(
         self, row: dict[str, Any], *, table: str | None = None
     ) -> dict[str, Any]:
@@ -1330,7 +1456,8 @@ class MySqlChangeStreamCdc:
         self, row: dict[str, Any], *, table: str | None = None
     ) -> dict[str, str]:
         row = self._remap_positional(row, table=table)
-        return {k: _serialize(v) for k, v in row.items()}
+        instants = self._instant_columns(table)
+        return {k: _serialize(v, instant=k in instants) for k, v in row.items()}
 
     def _pk_columns_for(self, table: str | None = None) -> list[str]:
         from services.cdc_snapshot_window import _pk_columns

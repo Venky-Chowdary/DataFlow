@@ -101,13 +101,18 @@ def bigquery_dataset_of(cfg: dict[str, Any]) -> str:
 
 
 def bigquery_ident(name: str) -> str:
-    """Quote one BigQuery identifier. Hyphens in project ids must survive."""
+    """Quote one BigQuery identifier. Hyphens in project ids must survive.
+
+    GoogleSQL quoted identifiers honour backslash escapes, so doubling a
+    backtick does not escape it. No legal BigQuery project, dataset, table,
+    or column name contains a backtick or backslash, so both are refused.
+    """
     from connectors.sql_identifiers import quote_sql_identifier, require_safe_identifier
 
-    return quote_sql_identifier(
-        require_safe_identifier(name, allow_raw=True, max_len=1024),
-        "`",
-    )
+    raw = require_safe_identifier(name, allow_raw=True, max_len=1024)
+    if "`" in raw or "\\" in raw:
+        raise ValueError("BigQuery identifier contains a backtick or backslash")
+    return quote_sql_identifier(raw, "`")
 
 
 def bigquery_table_ref(project: str, dataset: str, table: str) -> str:

@@ -341,16 +341,9 @@ class SqlServerChangeTrackingCdc:
             ) from exc
 
     def _row_to_record(self, cols: list[str], row: tuple) -> dict[str, str]:
-        from services.value_serializer import SQL_NULL_SENTINEL, cell_to_string
+        from services.value_serializer import wire_cell
 
-        return {
-            cols[i]: (
-                SQL_NULL_SENTINEL
-                if row[i] is None
-                else cell_to_string(row[i], preserve_sql_null=True)
-            )
-            for i in range(len(cols))
-        }
+        return {cols[i]: wire_cell(row[i]) for i in range(len(cols))}
 
     def snapshot(self) -> Iterator[ChangeBatch]:
         """Full table dump + CT version handoff (Airbyte initial sync)."""

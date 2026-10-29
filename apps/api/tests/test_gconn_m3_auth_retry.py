@@ -107,10 +107,15 @@ def test_hubspot_read_classifies_auth_and_rate_limit_errors(
 def test_singer_nonzero_exit_is_typed_and_redacts_tap_config(
     tmp_path: Path,
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     secret = "m3-singer-planted-secret"
-    script = tmp_path / "failed_tap.py"
+    taps = tmp_path / "taps"
+    taps.mkdir()
+    monkeypatch.setenv("DATAWRAP_SINGER_TAPS_DIR", str(taps))
+    script = taps / "tap-failed"
     script.write_text(
+        "#!" + sys.executable + "\n"
         "import json, sys\n"
         "args = sys.argv\n"
         "if '--config' in args:\n"
@@ -119,9 +124,10 @@ def test_singer_nonzero_exit_is_typed_and_redacts_tap_config(
         "sys.exit(1)\n",
         encoding="utf-8",
     )
+    script.chmod(0o755)
     connector = SingerTapBridge(
         {
-            "tap_command": [sys.executable, str(script)],
+            "tap_command": ["tap-failed"],
             "tap_config": {"api_key": secret},
         }
     )

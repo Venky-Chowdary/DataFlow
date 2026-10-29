@@ -302,6 +302,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Node deps install right after checkout: the web test/build steps run under
+      # `failure()` too, so when a database-image pull below fails they still run and
+      # need node_modules (otherwise `tsc` reports TS2307 Cannot find module 'react').
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install Node dependencies
+        run: npm ci
+
       - name: Start MySQL (local_infile), Mongo replica set, fake-gcs, Azurite
         # fake-gcs / Azurite back the desktop lab's postgresql->gcs / ->adls
         # execute cells (same flags as docker-compose.yml; emulator, not tenant).
@@ -311,7 +323,6 @@ jobs:
       - name: Start Postgres with logical CDC
         run: |
           bash .github/scripts/start_ci_databases.sh postgres-cdc
-          exit 1
 
       - name: Start BigQuery emulator
         # goccy/bigquery-emulator gives us an always-on BigQuery API surface in CI
@@ -324,12 +335,6 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Set up Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: npm
-
       - name: Install Python dependencies
         run: |
           cd apps/api
@@ -337,9 +342,6 @@ jobs:
           python -m pip install -r requirements.txt
           cd ../../packages/preflight
           python -m pip install -e .
-
-      - name: Install Node dependencies
-        run: npm ci
 
       - name: Grant MySQL CDC privileges
         run: |
@@ -375,13 +377,22 @@ jobs:
 
       - name: Run tests
         id: api_tests
-        run: npm run test
+        # The log is tee'd so the failing test ids can be listed again at the end
+        # of the job (the step output is tens of thousands of lines long).
+        run: |
+          set -o pipefail
+          npm run test 2>&1 | tee "$RUNNER_TEMP/api_tests.log"
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
           DATAFLOW_PII_HASH_KEY: test-pii-key
           DATAFLOW_ALLOW_STUB_WRITES: "1"
           DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
+          # Wall-clock throughput guard in tests/test_scale_transfer.py: the shared
+          # runner needs ~140s for 100k rows, the same code takes ~130s on a
+          # workstation (production's code: identical), so the 120s default is a
+          # local-machine figure. Owner-visible; not a product budget.
+          DATAFLOW_SCALE_MAX_SEC: "300"
           PGHOST: 127.0.0.1
           PGPORT: "5432"
           PGUSER: dataflow
@@ -508,6 +519,13 @@ jobs:
         working-directory: apps/web
         run: node scripts/check_a11y_hex.mjs
 
+      - name: Failing API test ids
+        if: ${{ !cancelled() && (success() || failure()) }}
+        run: |
+          echo "### Failing API tests" >> "$GITHUB_STEP_SUMMARY"
+          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP/api_tests.log" | tail -2 || true
+
       # Surface which gate failed when earlier steps failed but proofs still ran.
       - name: Fail job if api tests or proof gates failed
         if: ${{ always() && !cancelled() }}
@@ -566,7 +584,6 @@ jobs:
       - name: Start Postgres with logical CDC
         run: |
           bash .github/scripts/start_ci_databases.sh postgres-cdc
-          exit 1
 
       - name: Start SQL Server
         run: |

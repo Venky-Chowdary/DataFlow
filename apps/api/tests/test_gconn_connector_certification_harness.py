@@ -16,8 +16,9 @@ from tests.connector_certification.harness import certify
 def test_every_registered_sdk_connector_has_synthetic_certification(
     connector_id: str,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    cases = build_certification_cases(tmp_path)
+    cases = build_certification_cases(tmp_path, monkeypatch)
     assert connector_id in cases, f"registered connector {connector_id!r} has no certification case"
     report = certify(cases[connector_id])
     descriptor = get_descriptor(connector_id)

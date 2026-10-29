@@ -116,6 +116,26 @@ def terminal_status_for(rejected_rows: int = 0, coerced_null_rows: int = 0) -> s
     return COMPLETED
 
 
+#: What a terminal job record carries that a job leaving that state must not
+#: keep (D166): the cancelled / failed phase, the failure text, the finish stamp.
+TERMINAL_EXIT_RESETS = {
+    "phase": "queued",
+    "error": None,
+    "error_details": None,
+    "completed_at": None,
+    "cancel_outcome": None,
+}
+
+
+def terminal_exit_resets(
+    previous_status: str | None, next_status: str | None, allow_terminal_exit: bool
+) -> dict:
+    """Fields to clear when a write moves a job out of a terminal status."""
+    if allow_terminal_exit and is_terminal(previous_status) and not is_terminal(next_status):
+        return dict(TERMINAL_EXIT_RESETS)
+    return {}
+
+
 def is_completed(status: str | None) -> bool:
     return (status or "") in COMPLETED_STATUSES
 

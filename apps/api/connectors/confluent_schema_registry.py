@@ -60,6 +60,8 @@ def fetch_schema(registry_url: str, schema_id: int, *, timeout: float = 15.0) ->
     except ImportError as exc:
         raise SchemaRegistryError("requests is required for Schema Registry access") from exc
 
+    _guard_registry(base)
+
     url = f"{base}/schemas/ids/{int(schema_id)}"
     try:
         resp = requests.get(
@@ -96,6 +98,8 @@ def fetch_latest_subject_schema(
         import requests
     except ImportError as exc:
         raise SchemaRegistryError("requests is required for Schema Registry access") from exc
+
+    _guard_registry(base)
 
     url = f"{base}/subjects/{quote(subject, safe='')}/versions/latest"
     try:
@@ -134,6 +138,8 @@ def register_json_schema(
         import requests
     except ImportError as exc:
         raise SchemaRegistryError("requests is required for Schema Registry access") from exc
+
+    _guard_registry(base)
 
     url = f"{base}/subjects/{subject}/versions"
     try:
@@ -307,3 +313,12 @@ def decode_kafka_value(
         return json_loads_exact(text)
     except json.JSONDecodeError:
         return text
+
+
+def _guard_registry(base: str) -> None:
+    from services.egress_guard import EgressRefused, assert_connector_dial_allowed
+
+    try:
+        assert_connector_dial_allowed(base, point="http_client")
+    except EgressRefused as exc:
+        raise SchemaRegistryError(str(exc)) from exc

@@ -130,7 +130,6 @@ def test_d114_unverified_restore_is_not_claimed(trig_table, monkeypatch):
         # Force the no-privilege path: pretend SET LOCAL always fails.
         class _Cur:
             pass
-        real_restore = restore_pg_route_backups
         # Simplest honest check: directly verify the EXCEPT verify logic by
         # mutating the backup so live != backup after INSERT -> not restored.
         with conn.cursor() as cur:

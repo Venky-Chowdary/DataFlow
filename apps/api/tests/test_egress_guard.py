@@ -5,7 +5,19 @@ from __future__ import annotations
 from services.egress_guard import egress_url_allowed, host_is_blocked
 
 
-def test_public_https_is_allowed():
+def test_public_https_is_allowed(monkeypatch):
+    # The guard resolves the host and refuses private/link-local answers. The
+    # property under test is "a public answer is allowed", so answer from a
+    # stub resolver instead of depending on public DNS being reachable.
+    import socket
+
+    public = {"hooks.slack.com": "34.200.0.10", "example.com": "93.184.216.34"}
+
+    def resolver(host, port, *args, **kwargs):
+        ip = public[str(host).strip("[]").lower()]
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", (ip, port or 0))]
+
+    monkeypatch.setattr(socket, "getaddrinfo", resolver)
     assert egress_url_allowed("https://hooks.slack.com/services/T000/B000/xxx")
     assert egress_url_allowed("https://example.com/hook")
 

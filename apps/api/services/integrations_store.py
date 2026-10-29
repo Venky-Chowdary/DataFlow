@@ -708,6 +708,7 @@ def _public_api_key(item: dict[str, Any], *, secret: str | None = None) -> dict[
         "expired": _key_expired(item),
         "scopes": item.get("scopes"),
         "kind": item.get("kind") or "api_key",
+        "workspace_id": item.get("workspace_id") or "",
         "rotated_from": item.get("rotated_from"),
         "rotated_to": item.get("rotated_to"),
     }
@@ -734,6 +735,7 @@ def create_api_key(
     *,
     scopes: list[str] | None = None,
     kind: str = "api_key",
+    workspace_id: str = "",
 ) -> dict[str, Any]:
     stored_role = parse_requested_api_key_role(role)
     lifetime = parse_api_key_lifetime(expires_in)
@@ -775,6 +777,7 @@ def create_api_key(
         "expires_at": _expires_at(lifetime),
         "scopes": stored_scopes,
         "kind": kind,
+        "workspace_id": workspace_id,
     }
     _upsert_api_key_record(record)
     return _public_api_key(record, secret=raw)

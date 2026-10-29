@@ -70,6 +70,7 @@ def apply_create_new_risk_stamps(
         is_precision_collapse_coercion,
         normalize_logical_type as _nlt,
     )
+    from services.data_profiler import source_types_are_authoritative
     from services.type_system import (
         assess_create_new_type_risk,
         ddl_type,
@@ -77,6 +78,13 @@ def apply_create_new_risk_stamps(
     )
 
     samples_by_src = source_samples or {}
+    # A relational/warehouse source declared its own carriers; a file had them
+    # inferred from text, and only that inference can be wrong. MongoDB tags
+    # every value with its BSON type, so a double there is an IEEE double too.
+    declared_source = bool(source_db_type) and (
+        source_types_are_authoritative("database", source_db_type)
+        or source_db_type.strip().lower() == "mongodb"
+    )
     out: list[dict] = []
     for m in mappings:
         row = dict(m)
@@ -147,10 +155,16 @@ def apply_create_new_risk_stamps(
             # as a collapse. The calibration below reads ``fidelity``, so a
             # stale verdict caps a lossless create-new under the G4 floor and
             # demands a Risk Contract. Re-derive on the type that will run.
+            # The same measured population the first verdict used: a PostgreSQL
+            # TIMESTAMPTZ declares microseconds, and a BSON date keeps only
+            # milliseconds. Judged without the samples the re-derived verdict
+            # read a column of whole-millisecond cells as a truncation and
+            # parked the mapping at 0.70 under the G4 floor (D148/D156).
             verdict = mapping_fidelity(
                 row,
                 destination_db_type=db,
                 dest_table_exists=dest_table_exists,
+                population=col_samples,
             )
             row["fidelity"] = verdict["verdict"]
             row["fidelity_reason"] = verdict["reason"]
@@ -159,9 +173,17 @@ def apply_create_new_risk_stamps(
             row["invents_capacity"] = verdict.get("invents_capacity")
             row["requires_risk_contract"] = verdict.get("requires_risk_contract")
         risks = assess_create_new_type_risk(
-            src, tgt, destination_db_type=db, samples=col_samples
+            src,
+            tgt,
+            destination_db_type=db,
+            samples=col_samples,
+            source_types_declared=declared_source,
         )
-        ieee = ieee_float_create_new_risk(observe_numeric_samples(col_samples))
+        ieee = (
+            None
+            if declared_source
+            else ieee_float_create_new_risk(observe_numeric_samples(col_samples))
+        )
         if ieee and not any(r.get("kind") == "ieee_float_artifact" for r in risks):
             risks = list(risks) + [ieee]
         locking_risks = [r for r in risks if create_new_risk_locks_review(r)] if risks else []

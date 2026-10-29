@@ -22,6 +22,9 @@ def _pending_job_doc(monkeypatch, source_format: str, source_kind: str) -> dict:
         def _claim_idempotency(self, request, job_doc):
             return None
 
+        def _claim_destination(self, request, job_id):
+            return None
+
     class FakeMongo:
         def create_transfer_job(self, job_doc):
             captured.update(job_doc)

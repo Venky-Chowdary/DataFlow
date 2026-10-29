@@ -401,6 +401,61 @@ def _is_dialect_sanctioned_carrier(
     return _logical_type(expected) == _logical_type(target_type)
 
 
+#: Engines whose existing-table column types are catalog DDL, not a profile.
+_DECLARED_COLUMN_ENGINES = frozenset({
+    "postgresql", "mysql", "mariadb", "sqlserver", "oracle", "sqlite",
+    "snowflake", "bigquery", "redshift", "duckdb",
+})
+
+
+def _is_lossless_text_or_numeric_widening(
+    source_type: str, target_type: str, dest_db: str
+) -> bool:
+    """True for a file/typed value landing on a text or wider numeric column.
+
+    A CSV digit column profiled INTEGER onto an existing TEXT column (zip,
+    code, sku), or BOOLEAN onto a numeric one, is the type pair the fidelity
+    SSOT already grades ``preserve``. Scoring it "weak or conflicted" (0.55)
+    held every exact-name column of such a table for review, so a fresh load
+    into an existing table was refused while a rerun of the stored mapping
+    passed (D159). The lossy checks still decide: nothing lossy is promoted.
+    """
+    if not source_type or not target_type:
+        return False
+    from services.type_system import _normalize_dest_db, is_lossy_coercion
+
+    if _logical_type(target_type) not in {"string", "text", "decimal", "float"}:
+        return False
+    if _normalize_dest_db(dest_db or "") not in _DECLARED_COLUMN_ENGINES:
+        # A document / keyspace sink reports a placeholder ``string`` per
+        # column; that is no declared carrier to be confident about.
+        return False
+    try:
+        return not is_lossy_coercion(
+            source_type, target_type, dest_db=dest_db, dest_table_exists=True
+        )
+    except Exception:
+        return False
+
+
+def _json_text_into_json_column(src_logical: str, tgt_logical: str, samples: list[str]) -> bool:
+    """Text whose every sampled value parses as JSON, onto a JSON/JSONB column.
+
+    That is the document load itself (``payload`` text onto an existing
+    JSONB), not a cross-family guess; text that does not parse stays weak.
+    """
+    if src_logical not in {"string", "text"} or tgt_logical != "json" or not samples:
+        return False
+    import json
+
+    try:
+        for raw in samples:
+            json.loads(raw)
+    except (TypeError, ValueError):
+        return False
+    return True
+
+
 def classify_mapping_confidence(
     mapping: dict,
     *,
@@ -443,9 +498,32 @@ def classify_mapping_confidence(
     if not samples and mapping.get("samples"):
         samples = [str(x) for x in mapping["samples"] if str(x).strip()]
     sparse = len(samples) < 3
-    name_exact = src_l == tgt_l or src_l.replace("_", "") == tgt_l.replace("_", "")
+    # A table DataFlow created holds the *sanitised* names (``First Name`` ->
+    # ``First_Name``, ``Café`` -> ``Caf_``). Judging those against the original
+    # spelling by underscores alone demoted every such rerun below the
+    # confidence floor (D55); the sanitiser's own mapping is the identity.
+    from connectors.sql_identifiers import sanitize_identifier
+
+    name_exact = (
+        src_l == tgt_l
+        or src_l.replace("_", "") == tgt_l.replace("_", "")
+        or sanitize_identifier(src).lower() == tgt_l
+    )
     type_same = src_logical == tgt_logical
-    safe_promo = (src_logical, tgt_logical) in _SAFE_PROMOTIONS or sanctioned_carrier
+    safe_promo = (
+        (src_logical, tgt_logical) in _SAFE_PROMOTIONS
+        or sanctioned_carrier
+        or _json_text_into_json_column(src_logical, tgt_logical, samples)
+        or (
+            not is_identity
+            and not type_same
+            and _is_lossless_text_or_numeric_widening(
+                str(mapping.get("source_type") or mapping.get("inferred_type") or ""),
+                str(mapping.get("target_type") or mapping.get("dest_type") or ""),
+                destination_db_type,
+            )
+        )
+    )
     structural = src_logical in _STRUCTURAL_LOGICALS and tgt_logical in _STRUCTURAL_LOGICALS
     pattern = float(profile.get("semantic_pattern_score") or 0.0)
     null_rate = float(profile.get("null_rate") or 0.0)

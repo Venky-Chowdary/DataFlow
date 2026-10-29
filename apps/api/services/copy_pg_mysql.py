@@ -437,8 +437,7 @@ def _fifo_copy_into_mysql(
     from connectors.mysql_load_data import (
         apply_mysql_bulk_load_session,
         blocking_load_data_warnings,
-        build_load_data_sql,
-        quote_load_data_path,
+        execute_load_data_local,
         restore_mysql_bulk_load_session,
     )
 
@@ -461,18 +460,18 @@ def _fifo_copy_into_mysql(
             src_cur.copy_expert(copy_sql, _CancelAwareWriter(writer))
 
     def _consume(path: str) -> None:
-        load_sql = build_load_data_sql(
-            table_q=table_q,
-            columns=columns,
-            infile_sql=quote_load_data_path(path),
-        )
         apply_mysql_bulk_load_session(dst_cur)
         try:
             # D102: refuse to start the one-statement LOAD after a cancel.
             from services.cancel_check import cancel_checkpoint
 
             cancel_checkpoint()
-            dst_cur.execute(load_sql)
+            execute_load_data_local(
+                dst_cur,
+                path=path,
+                table_q=table_q,
+                columns=columns,
+            )
             dst_cur.execute("SHOW WARNINGS")
         finally:
             restore_mysql_bulk_load_session(dst_cur)

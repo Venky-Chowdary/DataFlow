@@ -171,14 +171,17 @@ def test_connect_rechecks_a_literal_private_address():
 def test_pg_copy_null_token_is_not_an_empty_field():
     from services.copy_pg_s3 import _pg_csv_export_expr
 
-    # The COPY clause is built next to this expression. Lock the sentinel.
+    # The COPY clause is built next to this expression. D115/C04: the operator
+    # CSV carries NULL as an unquoted empty field and a real '' as a quoted
+    # "" (PostgreSQL's CSV writer does this natively with NULL ''), so the
+    # internal __DF_SQL_NULL__ wire sentinel must never reach the file.
     import inspect
 
     from services import copy_pg_s3
 
     source = inspect.getsource(copy_pg_s3.copy_postgres_to_s3)
-    assert "NULL '__DF_SQL_NULL__'" in source
-    assert "NULL ''" not in source
+    assert "DELIMITER {delim}, NULL '')" in source
+    assert "__DF_SQL_NULL__" not in source
     assert "name" in _pg_csv_export_expr("name", "text", "name")
 
 

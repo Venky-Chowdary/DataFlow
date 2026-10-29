@@ -25,7 +25,21 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
+from services.brand_env import getenv_brand_bool
 from src.services import auth_service as _auth_service
+from services.request_principal import (  # noqa: F401 — re-exported RBAC surface
+    _REQUEST_ROLE,
+    ADMIN_ONLY_CONNECTOR_TYPES,
+    admin_only_message,
+    admin_only_types,
+    assert_bound_principal_may_use_connector,
+    assert_bound_principal_may_use_endpoints,
+    singer_admin_required,
+    singer_taps_dir,
+    connector_type_aliases,
+    connector_type_requires_admin,
+    endpoint_connector_types,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -301,6 +315,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # administration — which engine answers is read behind the same gate that
     # changes it (tests/test_byo_provider_keys.py).
     ("GET", "/api/v1/workspace/settings", Permission.WORKSPACE_READ),
+    # The key store is deployment-wide (every tenant's keys and service
+    # accounts), so listing, minting and revoking keys is IAM administration.
+    ("*", "/api/v1/workspace/api-keys", Permission.IAM_MANAGE),
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/resource-acls", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/audit/retention/purge", Permission.WORKSPACE_MANAGE),
@@ -334,6 +351,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/schedules/", Permission.SCHEDULE_READ),
     ("*", "/api/v1/schedules/", Permission.SCHEDULE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
+    # The RAG corpus is shared by every workspace's Pilot and RAG answers, so
+    # writing to it is workspace administration, like /copilot/train below.
+    ("POST", "/api/v1/ai/rag/ingest", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/ai/", Permission.AI_USE),
     # Pilot. Talking to the assistant is ai.use for every role; what the turn is
     # allowed to *do* is decided per tool (src/ai/copilot/tool_permissions.py),
@@ -372,6 +392,10 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("POST", "/api/v1/transforms/", Permission.CONNECTOR_WRITE),
     ("PATCH", "/api/v1/transforms/", Permission.CONNECTOR_WRITE),
     ("DELETE", "/api/v1/transforms/", Permission.CONNECTOR_WRITE),
+    ("GET", "/api/v1/transform-library/", Permission.JOB_READ),
+    ("POST", "/api/v1/transform-library/", Permission.CONNECTOR_WRITE),
+    ("PATCH", "/api/v1/transform-library/", Permission.CONNECTOR_WRITE),
+    ("DELETE", "/api/v1/transform-library/", Permission.CONNECTOR_WRITE),
     ("GET", "/api/v1/usage/", Permission.JOB_READ),
     ("GET", "/auth/", Permission.JOB_READ),
     ("GET", "/docs/", Permission.JOB_READ),
@@ -443,8 +467,31 @@ def role_permissions(role: str) -> set[str]:
     return _ROLE_PERMISSIONS.get(normalize_role(role), _ROLE_PERMISSIONS["viewer"])
 
 
+# Deployment-wide administration: credentials (API keys, service accounts, SCIM
+# tokens) and SCIM provisioning act on every tenant, so only a principal whose
+# own role is ``admin`` holds them. A workspace membership that resolves to the
+# gate role ``admin`` administers that workspace, not the deployment.
+PLATFORM_ADMIN_PERMISSIONS = frozenset({Permission.IAM_MANAGE, Permission.SCIM_PROVISION})
+
+
+def workspace_admin_iam_enabled() -> bool:
+    """``DATAFLOW_WORKSPACE_ADMIN_IAM`` (default on = pre-hardening behaviour).
+
+    On, a workspace admin keeps ``iam.manage`` / ``scim.provision`` as it did
+    before the platform-admin split; off, only a principal whose own role is
+    ``admin`` holds them.
+    """
+    return getenv_brand_bool("WORKSPACE_ADMIN_IAM", True)
+
+
+def holds_platform_admin_role(user: dict[str, Any] | None) -> bool:
+    return normalize_role((user or {}).get("role")) == "admin"
+
+
 def principal_permissions(user: dict[str, Any] | None, role: str) -> set[str]:
     permissions = role_permissions(role)
+    if not holds_platform_admin_role(user) and not workspace_admin_iam_enabled():
+        permissions = permissions - PLATFORM_ADMIN_PERMISSIONS
     scopes = user.get("scopes") if user else None
     if isinstance(scopes, list):
         return permissions & {scope for scope in scopes if isinstance(scope, str)}
@@ -486,6 +533,52 @@ def has_permission(user: dict[str, Any] | None, permission: str) -> bool:
         return False
     role = normalize_role(user.get("role"))
     return permission in principal_permissions(user, role)
+
+
+def _may_run_host_executables(user: dict[str, Any] | None) -> bool:
+    """Platform administrator, or authentication switched off (single local operator).
+
+    A workspace ``admin`` is not enough: a Singer tap runs on the API host that
+    every workspace shares.
+    """
+    from services.tenant_scope import actor_is_unrestricted
+
+    return actor_is_unrestricted(user)
+
+
+def admin_connector_denial(user: dict[str, Any] | None, *connector_types: Any) -> str | None:
+    """Return a denial message when ``user`` may not use any of ``connector_types``."""
+    gated = admin_only_types(connector_types)
+    if not gated or _may_run_host_executables(user):
+        return None
+    return admin_only_message(gated)
+
+
+def require_admin_connector_access(request: Request | None, *connector_types: Any) -> None:
+    """Refuse admin-only connector types the principal may not use, or that are disabled.
+
+    ``SingerUnavailable`` (403 ``singer_admin_required``) for a caller who is not
+    the platform admin, then (409 ``singer_taps_dir_unset``) when the operator has
+    not set DATAWRAP_SINGER_TAPS_DIR. Without a ``request`` the principal bound by
+    :class:`RBACMiddleware` is used (no bound principal: scheduler/worker or auth
+    off, not blocked).
+    """
+    types = [alias for t in connector_types for alias in connector_type_aliases(t)]
+    gated = admin_only_types(types)
+    if not gated:
+        return
+    if request is not None:
+        denied = bool(admin_connector_denial(getattr(getattr(request, "state", None), "user", None), *types))
+    else:
+        denied = _REQUEST_ROLE.get() not in (None, "admin")
+    if denied:
+        raise singer_admin_required(gated)
+    singer_taps_dir()
+
+
+def require_admin_for_endpoints(request: Request | None, workspace_id: str | None, *endpoints: Any) -> None:
+    """``require_admin_connector_access`` for the connector types these endpoints run."""
+    require_admin_connector_access(request, *endpoint_connector_types(workspace_id, *endpoints))
 
 
 def _is_public_mcp_path(path: str) -> bool:
@@ -617,10 +710,49 @@ def _required_permission(method: str, path: str) -> str | _NoRule | None:
     return NO_RULE
 
 
+def _audit_workspace_admin_iam(request: Request, permission: str, effective: str) -> None:
+    """Record an IAM/SCIM request admitted only because DATAFLOW_WORKSPACE_ADMIN_IAM is on."""
+    try:
+        from services.audit_coverage import record_security_event
+
+        record_security_event(
+            "authz.workspace_admin_iam.would_deny",
+            outcome="skipped",
+            request=request,
+            resource=request.url.path,
+            reason_code="workspace_admin_iam",
+            level="warn",
+            details={
+                "required_permission": permission,
+                "effective_role": effective,
+                "path": request.url.path,
+                "method": request.method.upper(),
+                "flag": "DATAFLOW_WORKSPACE_ADMIN_IAM",
+            },
+        )
+    except Exception as exc:
+        # Auditing must not change the authorization decision.
+        logger.error("workspace-admin IAM audit failed (%s)", type(exc).__name__, exc_info=exc)
+
+
 class RBACMiddleware(BaseHTTPMiddleware):
     """Enforce role-based permissions for authenticated API requests."""
 
     async def dispatch(self, request: Request, call_next):
+        # Bind the principal for sinks that run outside the router layer (a
+        # Singer tap probe, preflight, introspection). Unbound = auth off, a
+        # scheduler or a worker thread.
+        token = None
+        if _auth_service.auth_required():
+            user = getattr(request.state, "user", None)
+            token = _REQUEST_ROLE.set("admin" if _may_run_host_executables(user) else "member")
+        try:
+            return await self._dispatch(request, call_next)
+        finally:
+            if token is not None:
+                _REQUEST_ROLE.reset(token)
+
+    async def _dispatch(self, request: Request, call_next):
         # RBAC only matters when authentication is enforced. Read it off the
         # auth module per request rather than copying the symbol at import
         # time, so RBAC can never enforce against a stale view of the setting.
@@ -715,6 +847,8 @@ class RBACMiddleware(BaseHTTPMiddleware):
         effective = resolve_effective_role(user, workspace_id)
         request.state.effective_role = effective
         if permission in principal_permissions(user, effective):
+            if permission in PLATFORM_ADMIN_PERMISSIONS and not holds_platform_admin_role(user):
+                _audit_workspace_admin_iam(request, permission, effective)
             return await call_next(request)
 
         try:

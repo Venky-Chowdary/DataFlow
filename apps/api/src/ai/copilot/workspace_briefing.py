@@ -154,7 +154,7 @@ def _schedule_line(sched: dict[str, Any]) -> str:
 def _load_connectors(workspace_id: str) -> list[dict[str, Any]]:
     try:
         from services import connector_store
-        from services.tenant_scope import current_workspace_filter
+        from services.workspace_filter import current_workspace_filter
 
         rows = connector_store.list_connectors(workspace_id=workspace_id)
         visible = current_workspace_filter()
@@ -219,7 +219,7 @@ def _load_schedules(workspace_id: str) -> list[dict[str, Any]]:
     try:
         from services.schedule_store import list_schedules
 
-        from services.tenant_scope import current_workspace_filter
+        from services.workspace_filter import current_workspace_filter
 
         rows = list_schedules(current_workspace_filter())
         out = []
@@ -250,9 +250,9 @@ def _contract_census(workspace_id: str, contracts: list[dict[str, Any]]) -> tupl
     if len(contracts) < _CONTRACT_PAGE or workspace_id:
         return len(contracts), len(unsigned)
     try:
-        from services.contract_store import get_contract_store
+        from services.contract_store import visible_contracts
 
-        by_status = get_contract_store().count_contracts_by_status()
+        by_status = visible_contracts(limit=1)[1]
     except Exception:
         return len(contracts), len(unsigned)
     total = sum(int(n) for n in by_status.values())
@@ -268,10 +268,11 @@ def _contract_census(workspace_id: str, contracts: list[dict[str, Any]]) -> tupl
 
 def _load_contracts(workspace_id: str) -> list[dict[str, Any]]:
     try:
-        from services.contract_store import get_contract_store
+        from services.contract_store import contract_visible, get_contract_store
 
         store = get_contract_store()
         rows = store.list_contracts(limit=50) if hasattr(store, "list_contracts") else []
+        rows = [c for c in rows or [] if contract_visible(c)]
         out = []
         for c in rows or []:
             d = c.to_dict() if hasattr(c, "to_dict") else {}

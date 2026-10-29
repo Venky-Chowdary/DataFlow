@@ -17,6 +17,7 @@ from services.rbac import (
     PrivilegeEscalation,
     assert_grant_within,
     principal_permissions,
+    role_permissions,
 )
 from services.workspace_access import actor_email
 from src.services import auth_service as _auth_service
@@ -91,10 +92,11 @@ def enforce_grant_bounds(
     if not _auth_service.auth_required():
         return
 
-    granted = principal_permissions(
-        {"scopes": target_scopes} if target_scopes is not None else {},
-        target_role,
-    )
+    # What the minted credential will carry: the target role's full table
+    # (a key's own role is its platform role), narrowed by its scopes.
+    granted = set(role_permissions(target_role))
+    if target_scopes is not None:
+        granted &= {scope for scope in target_scopes if isinstance(scope, str)}
     try:
         assert_grant_within(_caller_permissions(request), granted)
     except PrivilegeEscalation as exc:

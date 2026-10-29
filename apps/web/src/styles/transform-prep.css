@@ -123,6 +123,17 @@
   display: none !important;
 }
 
+/* Library picker card. A section of its own, NOT a .df2-xform-panel: the
+   studio-next rule `.df2-xform.df2-studio-next .df2-xform-panel:not([hidden])`
+   is a descendant selector and gave the nested picker flex: 1 1 0, so it took
+   half the step's height and squeezed the canvas, dock and action bar. */
+.df2-xform-library {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
 .df2-xform-preview-tools {
   display: flex;
   align-items: center;

@@ -26,8 +26,10 @@ from services.connector_telemetry import connector_operation, driver_family
 
 def _list_sqlalchemy_tables(
     endpoint: EndpointConfig, fmt: str
-) -> tuple[bool, list[str], str]:
-    """``(ok, table names, error)`` for engines that list through introspect_schema.
+) -> tuple[bool, list[str], str, dict[str, str]]:
+    """``(ok, names, error, kinds)`` for engines that list through introspect_schema.
+
+    ``kinds`` maps name -> ``table`` / ``view`` where the engine reports it (M18).
 
     A failed catalog read is not an empty inventory. Callers must not report
     "connected, no tables" when the connection itself failed.
@@ -59,9 +61,9 @@ def _list_sqlalchemy_tables(
         )
         from .connector_registry import humanize_connection_error
 
-        return False, [], humanize_connection_error(fmt, exc)
+        return False, [], humanize_connection_error(fmt, exc), {}
     if not isinstance(info, dict) or not info.get("ok"):
-        return False, [], str((info or {}).get("error") or "object list failed")
+        return False, [], str((info or {}).get("error") or "object list failed"), {}
     names: list[str] = []
     seen: set[str] = set()
     for raw in info.get("tables") or []:
@@ -70,7 +72,7 @@ def _list_sqlalchemy_tables(
             continue
         seen.add(name)
         names.append(name)
-    return True, names, ""
+    return True, names, "", dict(info.get("table_types") or {})
 
 
 def _dest_table_schema_only(endpoint: EndpointConfig) -> bool:
@@ -148,7 +150,8 @@ def _operator_visible_objects(names, type_label: str, type_map: dict | None = No
         name = str(raw)
         if not name or name.startswith("("):
             continue
-        if name.startswith(_INTERNAL_OBJECT_PREFIXES):
+        # Case-insensitive: Snowflake stores these spools UPPER-cased.
+        if name.lower().startswith(_INTERNAL_OBJECT_PREFIXES):
             continue
         out.append({"name": name, "type": (type_map or {}).get(name) or type_label})
     return out
@@ -291,6 +294,32 @@ def _s3_family_format(fmt: str) -> str:
     return key
 
 
+def _introspect_endpoint_guarded(
+    endpoint: EndpointConfig, sample_content: bytes | None, filename: str
+) -> dict:
+    from services.egress_guard import EgressRefused, connector_dial_scope
+
+    if endpoint.kind == "file" and sample_content:
+        return _introspect_endpoint_impl(endpoint, sample_content, filename)
+    scope_cfg = {
+        "host": str(endpoint.host or ""),
+        "connection_string": str(endpoint.connection_string or ""),
+        "endpoint_url": str((endpoint.extra or {}).get("endpoint_url") or ""),
+        "type": str(endpoint.format or endpoint.kind or ""),
+        "workspace_id": str((endpoint.extra or {}).get("workspace_id") or ""),
+    }
+    try:
+        with connector_dial_scope(scope_cfg, point="introspect"):
+            return _introspect_endpoint_impl(endpoint, sample_content, filename)
+    except EgressRefused as exc:
+        return {
+            "connected": False,
+            "error": str(exc),
+            "objects": [],
+            "columns": [],
+        }
+
+
 def introspect_endpoint(
     endpoint: EndpointConfig,
     sample_content: bytes | None = None,
@@ -298,6 +327,10 @@ def introspect_endpoint(
 ) -> dict:
     raw_role = str((endpoint.extra or {}).get("introspect_purpose") or "")
     role = raw_role if raw_role in {"source", "destination"} else ""
+    # Validate describes the table as it is now (D165); see reflection_cache.
+    from services.reflection_cache import invalidate_named_tables
+
+    invalidate_named_tables(endpoint.table, endpoint.collection)
     with connector_operation(
         "introspect",
         driver_family=driver_family(endpoint.format or endpoint.kind),
@@ -305,7 +338,7 @@ def introspect_endpoint(
         surface="introspect",
         connector_id=endpoint.connector_id,
     ) as op:
-        out = _introspect_endpoint_impl(endpoint, sample_content, filename)
+        out = _introspect_endpoint_guarded(endpoint, sample_content, filename)
         if out.get("connected"):
             op.succeeded(
                 object_count=len(out.get("objects") or []),
@@ -820,7 +853,9 @@ def _introspect_endpoint_impl(
                     t for t in (probe.tables or [])
                     if t and not str(t).startswith("(")
                 ]
-                out["objects"] = [{"name": t, "type": "table"} for t in tables]
+                out["objects"] = _operator_visible_objects(
+                    tables, "table", getattr(probe, "table_types", None)
+                )
                 out["message"] = probe.message or f"SQLite connected — {len(tables)} tables"
                 out["connected"] = bool(probe.ok)
                 if not probe.ok and probe.error:
@@ -832,9 +867,9 @@ def _introspect_endpoint_impl(
         # without a table name, which left SQL Server (and the other engines on
         # this branch) connected with an empty object list while a named table
         # still sampled and transferred.
-        listed_ok, tables, list_error = _list_sqlalchemy_tables(endpoint, fmt)
+        listed_ok, tables, list_error, kinds = _list_sqlalchemy_tables(endpoint, fmt)
         if listed_ok:
-            out["objects"] = [{"name": name, "type": "table"} for name in tables]
+            out["objects"] = _operator_visible_objects(tables, "table", kinds)
             out["connected"] = True
             out["message"] = f"{fmt.title()} connected — {len(tables)} table(s)"
         else:
@@ -959,17 +994,22 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 prefer_bson_source_carrier,
             )
 
-            bson_types = mongodb_bson_column_types(records)
-            homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(records)
             # Match Execute path (mongodb_reader): expand nested docs + string
             # matrix via cell_to_string so Map/Validate columns ≡ write headers.
+            # Expansion keeps the BSON leaves, so the carriers are read from the
+            # expanded documents: a nested date (``customer.since``) is a BSON
+            # date like a top-level one, and read from the unexpanded sample it
+            # was typed from its stringified, zoneless text (TIMESTAMP against
+            # the top-level TIMESTAMPTZ).
             from services.json_intelligence import expand_mongo_documents
             from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
+            records = expand_mongo_documents(records, cfg=cfg)
+            bson_types = mongodb_bson_column_types(records)
+            homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(records)
             for doc in records:
                 if isinstance(doc, dict) and "_id" in doc:
                     doc["_id"] = str(doc["_id"])
-            records = expand_mongo_documents(records, cfg=cfg)
 
             # Union keys across the sample (sparse nested fields mid-batch).
             columns: list[str] = []

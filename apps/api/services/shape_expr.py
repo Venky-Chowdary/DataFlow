@@ -31,7 +31,6 @@ from typing import Any, Callable, Mapping, Sequence
 
 from services.value_serializer import (
     NULL_WIRE_SENTINELS,
-    cell_to_string,
     is_null_evidence,
     wire_cell_text,
 )

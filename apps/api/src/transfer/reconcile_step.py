@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import copy
 import logging
 import re
 import os
+import contextvars
 import hashlib
 import json
+import shutil
 import sqlite3
 import tempfile
 import time
@@ -402,6 +405,30 @@ _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS = frozenset(
 )
 
 
+# --- run-scoped proof scratch (leak fix) ------------------------------------
+# The proof stores are sqlite files that grow to hundreds of MB on large runs.
+# They used to be mkstemp()ed straight into the shared temp dir and removed only
+# by __del__, so an exception, a cancel or a killed run left them behind until
+# the disk filled. Each proof now runs inside a private directory that is
+# removed - stores closed first - however the run ends.
+_PROOF_SCRATCH: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "df_proof_scratch", default=None
+)
+_PROOF_STORES: contextvars.ContextVar[list | None] = contextvars.ContextVar(
+    "df_proof_stores", default=None
+)
+
+
+def _scratch_file(prefix: str, suffix: str) -> tuple[int, str]:
+    return tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=_PROOF_SCRATCH.get())
+
+
+def _track_store(store: Any) -> None:
+    tracked = _PROOF_STORES.get()
+    if tracked is not None:
+        tracked.append(store)
+
+
 class _PinStore:
     """Disk-backed per-key state for the transform proof (G-1g).
 
@@ -414,8 +441,9 @@ class _PinStore:
     """
 
     def __init__(self) -> None:
-        fd, self.path = tempfile.mkstemp(prefix="df_pinmap_", suffix=".db")
+        fd, self.path = _scratch_file("df_pinmap_", ".db")
         os.close(fd)
+        _track_store(self)
         self.db = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=OFF")
         self.db.execute("PRAGMA synchronous=OFF")
@@ -643,8 +671,9 @@ class _DiskKeySet:
     """
 
     def __init__(self) -> None:
-        fd, self.path = tempfile.mkstemp(prefix="df_scope_", suffix=".db")
+        fd, self.path = _scratch_file("df_scope_", ".db")
         os.close(fd)
+        _track_store(self)
         self.db = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=OFF")
         self.db.execute("PRAGMA synchronous=OFF")
@@ -854,7 +883,7 @@ def _recipe_step_sql(
     return None
 
 
-def _transform_applied_proof(
+def _transform_applied_proof_impl(
     *,
     shape_recipe: dict[str, Any] | None,
     dest_summary: dict[str, Any],
@@ -934,10 +963,6 @@ def _transform_applied_proof(
         r"TEXT|TINYTEXT|MEDIUMTEXT|LONGTEXT|NTEXT|CLOB|NCLOB|CHARACTER|"
         r"STRING|ENUM|SET\b",
         re.I,
-    )
-
-    _NUMERIC_DDL = re.compile(
-        r"NUMERIC|DECIMAL|INT|FLOAT|DOUBLE|REAL|MONEY", re.I
     )
 
     def _key_norm(v: Any) -> str:
@@ -2196,6 +2221,25 @@ def _transform_applied_proof(
         "key_note": key_note,
         "actual_label": actual_label,
     }
+
+
+def _transform_applied_proof(**kwargs: Any) -> Any:
+    """Run the transform proof with its scratch stores bound to this call."""
+    scratch = tempfile.mkdtemp(prefix="df_proof_")
+    stores: list = []
+    scratch_token = _PROOF_SCRATCH.set(scratch)
+    stores_token = _PROOF_STORES.set(stores)
+    try:
+        return _transform_applied_proof_impl(**kwargs)
+    finally:
+        _PROOF_STORES.reset(stores_token)
+        _PROOF_SCRATCH.reset(scratch_token)
+        for store in stores:
+            try:
+                store.close()
+            except Exception:  # noqa: BLE001 - cleanup must not mask the result
+                pass
+        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _compute_source_checksum_from_spool(
@@ -4187,6 +4231,11 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
         # DuckDB/SQLite resolve to the generic routing key — the census needs
         # the real engine from the endpoint's own format.
         eng = str(fmt or "").strip().lower() or eng
+    if eng == "sqlserver":
+        # resolve_driver_type names SQL Server "sqlserver"; the census helpers
+        # below key it "mssql". Without the alias Gate-8 said SQL Server "has
+        # no census driver" while listing mssql among them (D173).
+        eng = "mssql"
     if eng == "postgresql":
         from connectors.postgresql_conn import get_connection
 
@@ -4206,12 +4255,24 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
     if eng == "duckdb":
         import duckdb
 
+        from connectors.sqlite_common import duckdb_file_path
+
         return eng, duckdb.connect(
-            database=str(cfg.get("database") or cfg.get("path") or ":memory:")
+            database=duckdb_file_path(
+                str(cfg.get("database") or cfg.get("path") or ""),
+                str(cfg.get("connection_string") or ""),
+            )
+            or ":memory:"
         )
     if eng == "sqlite":
+        from connectors.sqlite_common import sqlite_file_path
+
         return eng, sqlite3.connect(
-            str(cfg.get("database") or cfg.get("path") or "")
+            sqlite_file_path(
+                str(cfg.get("database") or cfg.get("path") or ""),
+                str(cfg.get("connection_string") or ""),
+                "",
+            )
         )
     if eng == "mssql":
         from services.copy_sqlserver_sqlserver import _ss_connect
@@ -4393,7 +4454,8 @@ def _generic_key_census(
                                         "\x1f".join(
                                             normalize_cell(v, engine=dst_eng)
                                             for v in r[1:]
-                                        ).encode("utf-8", "replace")
+                                        ).encode("utf-8", "replace"),
+                                        usedforsecurity=False,
                                     ).hexdigest(),
                                 )
                                 for r in chunk
@@ -7444,8 +7506,9 @@ def _run_reconciliation_impl(
             source_checksum=source_checksum,
             target_checksum=target_checksum,
             message=(
-                "Gate-8 refused: streaming write completed but no reconcile_sample "
-                "was stashed for key-aligned proof. Re-run with sample stash enabled."
+                "Gate-8 refused: streaming write completed but the writer recorded "
+                "no source sample, so the write cannot be proven key by key. "
+                "Re-run the transfer; if it repeats, report this job."
             ),
             rejected_rows=rejected_rows,
             coerced_null_rows=coerced_null_rows,
@@ -7467,10 +7530,15 @@ def _run_reconciliation_impl(
     # reported as "checksum mismatch (strict)" on a correct load. A partial key
     # list is a diagnostic sample, not a scope: fall through to the append delta.
     keys_cover_batch = bool(written_ids) and len(written_ids) >= expected_batch
+    # Engine digests already compared both whole populations in their engines;
+    # swapping the target for a keyed Python fingerprint would compare two
+    # different algorithms and always disagree (an append that also added a
+    # column failed Gate-8 on matching tables).
     if (
         allow_extra
         and pk_column
         and keys_cover_batch
+        and engine_digests is None
         and target_rows > expected_batch
         and source_checksum
         and target_checksum
@@ -7900,6 +7968,14 @@ def run_reconciliation(
             # field carries the failure; the label must not contradict it).
             if recon["checksum_match"]:
                 recon["assurance_level"] = "full_checksum"
+                if recon.get("passed") and recon.get("post_write_pending"):
+                    # The count-only stamp this promotion supersedes also
+                    # said "post-write proof pending". Leaving it made a
+                    # verified, fully digested engine-copy run classify as
+                    # pre_write_only and report migration_proven=false.
+                    recon["phase"] = "post_write_verified"
+                    recon["coverage"] = "full_checksum"
+                    recon["post_write_pending"] = False
             recon["checksum_scope"] = "verify_time_population_digest"
             # X-41b: _finalize already stamped verification_verdict="partial"
             # before this promotion ran — a proven two-sided digest match
@@ -7948,6 +8024,15 @@ def run_reconciliation(
                         + _tail
                         + (f" {_count_fact}" if _count_fact else "")
                     )
+            # The rewrites above rebuild the message from the count-only note's
+            # head, dropping whatever a later gate appended after it. A G22
+            # block/warn is a finding in its own right (matching digests do
+            # not prove parents exist) and must stay in the operator's text.
+            _ri_gate = recon.get("g22_dest_referential_integrity")
+            if isinstance(_ri_gate, dict) and _ri_gate.get("status") in {"block", "warn"}:
+                _ri_msg = str(_ri_gate.get("message") or "").strip()
+                if _ri_msg and _ri_msg not in str(recon.get("message") or ""):
+                    recon["message"] = f"{str(recon.get('message') or '').rstrip()} {_ri_msg}".strip()
     # Unshaped digest failures only: for shaped runs the transform_applied
     # proof names its own culprit keys via culprit_keys_by_kind; hashing raw
     # src vs shaped dest here would flag every transformed row. And this is a
@@ -8007,9 +8092,12 @@ def run_reconciliation(
                         f"{recon['message']} "
                         f"({recon['culprit_keys_unavailable_reason']})"
                     )
+    verify_ms = (time.monotonic() - started) * 1000.0
+    # The wall time Gate-8 itself took — job_phase_timings reports it as verify.
+    recon["verify_seconds"] = round(verify_ms / 1000.0, 3)
     _emit_gate8_verdict(
         recon, endpoint=endpoint, validation_mode=validation_mode,
-        rows_written=rows_written, duration_ms=(time.monotonic() - started) * 1000.0,
+        rows_written=rows_written, duration_ms=verify_ms,
     )
     return recon
 
@@ -8068,6 +8156,46 @@ def _emit_gate8_verdict(
     )
 
 
+def _bind_endpoints_to_last_stream(
+    endpoint: EndpointConfig,
+    source_endpoint: EndpointConfig | None,
+    dest_summary: dict[str, Any] | None,
+) -> tuple[EndpointConfig, EndpointConfig | None]:
+    """Point Gate-8 at the table the multi-stream summary describes.
+
+    ``run_non_cdc_multi_stream_sequential`` hands back the *last* stream's
+    summary (digests, counts, ``table``) but restores the request's primary
+    endpoints, so Gate-8 would digest the last table's written population
+    against the first table's source and destination rows and call a correct
+    job a checksum mismatch. Rebind copies of both endpoints to that last
+    stream so every figure Gate-8 compares describes one table.
+    """
+    summary = dest_summary or {}
+    streams = summary.get("streams")
+    if not summary.get("multi_stream") or not isinstance(streams, list) or len(streams) < 2:
+        return endpoint, source_endpoint
+    last = streams[-1]
+    name = str(last.get("name") or "").strip() if isinstance(last, dict) else ""
+    if not name:
+        return endpoint, source_endpoint
+
+    def _bound(ep: EndpointConfig | None) -> EndpointConfig | None:
+        if ep is None or getattr(ep, "kind", "") != "database":
+            return ep
+        bound = copy.copy(ep)
+        if getattr(ep, "format", "") == "mongodb" or (
+            getattr(ep, "collection", None) and not getattr(ep, "table", None)
+        ):
+            bound.collection = name
+        elif getattr(ep, "table", None):
+            bound.table = name
+        else:
+            return ep
+        return bound
+
+    return _bound(endpoint) or endpoint, _bound(source_endpoint)
+
+
 def _run_reconciliation_with_rules(
     *,
     endpoint: EndpointConfig,
@@ -8082,6 +8210,9 @@ def _run_reconciliation_with_rules(
     source_endpoint: EndpointConfig | None,
     source_spool: Any,
 ) -> dict[str, Any]:
+    endpoint, source_endpoint = _bind_endpoints_to_last_stream(
+        endpoint, source_endpoint, dest_summary
+    )
     recon = _run_reconciliation_impl(
         endpoint=endpoint,
         records=records,

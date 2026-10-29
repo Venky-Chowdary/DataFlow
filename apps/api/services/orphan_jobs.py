@@ -178,6 +178,12 @@ def _request_for(job: dict[str, Any]) -> tuple[Any | None, str]:
     except Exception as exc:  # noqa: BLE001
         return None, f"the stored transfer request could not be read ({exc})"
     try:
+        from src.transfer.adapters import refresh_saved_connectors
+
+        refresh_saved_connectors(request)
+    except ValueError as exc:
+        return None, f"a saved connector it uses is gone ({exc})"
+    try:
         from services.transfer_file_staging import (
             file_source_bytes_available,
             hydrate_file_source,

@@ -160,6 +160,9 @@ def _write_batch(
         source_handoff["records"] = records
     if allow_equal_lsn:
         source_handoff["allow_equal_lsn"] = True
+    if (getattr(dest, "extra", None) or {}).get("upsert_ddl_approved"):
+        # Operator-approved unique index on an existing table (D101).
+        source_handoff["upsert_ddl_approved"] = True
     from services.duplicate_policy import (
         DuplicatePolicyError,
         reset_match_action,
@@ -714,6 +717,11 @@ def _write_batch(
                 else None
             ),
         }
+        # The SQL Server / Oracle writers forward to the generic SQL CREATE,
+        # which withholds the source key on append: an overwrite must carry it
+        # as the PostgreSQL / MySQL / SQLite writers do (D144).
+        if dest_type in ("sqlserver", "mssql", "oracle"):
+            common.update(key_carry)
         from connectors.engine_record_spill import spool_write_kinds
 
         if dest_type in spool_write_kinds():

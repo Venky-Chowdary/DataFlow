@@ -23,8 +23,9 @@ from typing import Any, Final
 
 from connectors.base import ReadBatch
 from connectors.oracle_tstz import (
+    ORACLE_LTZ_READ_FORMAT,
     ORACLE_TSTZ_READ_FORMAT,
-    is_oracle_tz_type_name,
+    oracle_tz_kind,
     oracle_tz_positions,
     oracle_tz_select_list,
     parse_oracle_tz_row,
@@ -78,7 +79,9 @@ from services.decision_kernel import (
     materialize_dest_ddl,
 )
 from services.dialect_profiles import denormalize_result_key
+from services.cancel_check import cancel_checkpoint
 from services.engine_pool import release_engine
+from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
 from services.value_serializer import cell_to_string
 
@@ -741,6 +744,34 @@ def with_connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
+    """Build a SQLAlchemy URL; embedded-file engines are path-confined."""
+    return _confine_embedded_file_url(_build_url_unconfined(cfg))
+
+
+def _confine_embedded_file_url(url: str | sa.URL) -> str | sa.URL:
+    """Apply ``connectors.sqlite_common`` path confinement to SQLite/DuckDB URLs."""
+    from connectors.sqlite_common import confine_duckdb_path, confine_sqlite_path
+
+    if not SQLALCHEMY_AVAILABLE:
+        return url
+    text = url.render_as_string(hide_password=False) if isinstance(url, sa.URL) else str(url)
+    lowered = text.lower()
+    if lowered.startswith("sqlite"):
+        confine = confine_sqlite_path
+    elif lowered.startswith("duckdb"):
+        confine = confine_duckdb_path
+    else:
+        return url
+    try:
+        database = sa.engine.url.make_url(text).database or ""
+    except Exception as exc:
+        raise ValueError(f"Invalid embedded database URL: {exc}") from exc
+    if database and database != ":memory:":
+        confine(database)
+    return url
+
+
+def _build_url_unconfined(cfg: dict[str, Any]) -> str | sa.URL:
     """Build a SQLAlchemy URL from host/port or use the explicit connection string."""
     connection_string = cfg.get("connection_string") or ""
     # EndpointConfig serialises the driver as ``format``. Procedure and query
@@ -1030,13 +1061,22 @@ _CONNECT_TIMEOUT_KWARGS: tuple[tuple[str, Any], ...] = (
 )
 
 
+#: Login/TCP handshake bound when the connector sets none.
+DEFAULT_CONNECT_TIMEOUT_SECONDS = 15
+
+
 def _connect_args_for(url: Any, cfg: Mapping[str, Any]) -> dict[str, Any]:
     """Translate ``cfg['connect_timeout']`` seconds into driver connect args."""
     raw = cfg.get("connect_timeout")
     try:
-        seconds = int(float(str(raw))) if raw not in (None, "") else 0
+        # Unset means the platform default, not "wait for the OS" (D169): a
+        # host that takes the connection and never answers held every caller.
+        # An explicit 0 still means the driver's own behaviour.
+        seconds = (
+            int(float(str(raw))) if raw not in (None, "") else DEFAULT_CONNECT_TIMEOUT_SECONDS
+        )
     except (TypeError, ValueError):
-        seconds = 0
+        seconds = DEFAULT_CONNECT_TIMEOUT_SECONDS
     if seconds <= 0:
         return {}
     driver = str(getattr(url, "drivername", "") or "").lower()
@@ -3187,30 +3227,39 @@ def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
         return list(cols)
     out: list[Any] = []
     for col in cols:
-        if _is_oracle_tz_sa(getattr(col, "type", None)):
+        kind = _oracle_tz_kind_sa(getattr(col, "type", None))
+        if kind == "tz":
             out.append(
                 sa.func.to_char(col, ORACLE_TSTZ_READ_FORMAT).label(col.name)
+            )
+        elif kind == "ltz":
+            # LTZ holds an instant, not an offset: TZH/TZM is ORA-01821 on it.
+            out.append(
+                (
+                    sa.func.to_char(sa.func.sys_extract_utc(col), ORACLE_LTZ_READ_FORMAT)
+                    + sa.literal("+00:00")
+                ).label(col.name)
             )
         else:
             out.append(col)
     return out
 
 
-def _is_oracle_tz_sa(col_type: Any) -> bool:
-    """True for a reflected Oracle TIMESTAMP WITH [LOCAL] TIME ZONE column.
+def _oracle_tz_kind_sa(col_type: Any) -> str | None:
+    """``"tz"`` / ``"ltz"`` for a reflected Oracle zone-bearing TIMESTAMP, else ``None``.
 
     The SQLAlchemy flags are one spelling; a type carried by its DDL name (a
     native passthrough such as ``TIMESTAMP(6) WITH TIME ZONE``) is the other,
     and missing it read the column naive (D155).
     """
     if col_type is None:
-        return False
-    if isinstance(col_type, sa.DateTime) and (
-        getattr(col_type, "timezone", False)
-        or getattr(col_type, "local_timezone", False)
-    ):
-        return True
-    return is_oracle_tz_type_name(getattr(col_type, "col_spec", ""))
+        return None
+    if isinstance(col_type, sa.DateTime):
+        if getattr(col_type, "local_timezone", False):
+            return "ltz"
+        if getattr(col_type, "timezone", False):
+            return "tz"
+    return oracle_tz_kind(getattr(col_type, "col_spec", ""))
 
 
 def _raw_select_list(conn: Any, dialect: str, qualified: str, probe: Any = None) -> str:
@@ -4088,11 +4137,14 @@ def _upsert_batch(
     from connectors.writer_common import partition_dense_upsert_rows
 
     # Quarantine null/empty keys — never abort the whole MERGE chunk.
+    from services.reconciliation import destination_empty_string_is_null
+
     batch = partition_dense_upsert_rows(
         batch,
         conflict_cols,
         rejected_details=rejected_details,
         policy=policy,
+        empty_is_null=destination_empty_string_is_null(dialect_name),
     )
     if not batch:
         return 0
@@ -5696,7 +5748,11 @@ def write_mapped_rows(
                         db_type=cfg.get("type", ""),
                         conflict_columns=conflict_columns,
                         fidelity_plan=fidelity_plan,
-                        declare_key=write_mode != "insert",
+                        # An overwrite rebuilds the table from one snapshot, so
+                        # the planner's carried key must reach the CREATE
+                        # (SQL Server overwrite dropped it, D144).
+                        declare_key=write_mode != "insert"
+                        or bool(_kwargs.get("carry_source_keys")),
                     )
                     _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
                 except Exception as exc:
@@ -5979,6 +6035,9 @@ def write_mapped_rows(
                     conn.commit()
                 dense_dicts = list(getattr(finished, "dense_dicts", None) or [])
                 for offset in range(0, len(dense_dicts), CHUNK_SIZE) if dense_dicts else []:
+                    # D168: a cancel stops before the NEXT sub-chunk. Outside
+                    # the try below - cancel is control flow, not a chunk failure.
+                    cancel_checkpoint(written)
                     batch = dense_dicts[offset : offset + CHUNK_SIZE]
                     start = row_offset + offset
                     try:
@@ -6279,6 +6338,11 @@ def write_mapped_rows(
             rows_skipped=rows_skipped,
             warnings=transform_errors,
         )
+    except TransferCancelled:
+        # D168: cancel is control flow, not a write failure. The chunks already
+        # committed stay (cancel_outcome reports them); the open one was never
+        # begun, and the finally below releases the connection.
+        raise
     except Exception as exc:
         cleanup = locals().get("_cleanup_spool")
         if callable(cleanup):

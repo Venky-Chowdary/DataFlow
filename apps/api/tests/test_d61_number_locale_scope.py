@@ -69,3 +69,13 @@ def test_genuine_ambiguity_still_flagged():
     findings = ambiguous_number_columns([{"amt": "10.129"}])
     assert [f["column"] for f in findings] == ["amt"]
     assert "10.129" in findings[0]["samples"]
+
+
+def test_day_first_dotted_timestamp_not_flagged():
+    """01.02.2024 10:30 is not an ISO form, so it used to fall through to the
+    grouped-number pre-filter and raise the US/EU locale warning on a
+    timestamp column (D61)."""
+    from services.transform_engine import ambiguous_number_columns
+
+    rows = [{"ts": "01.02.2024 10:30"}, {"ts": "15.01.2024 23:59:59"}]
+    assert ambiguous_number_columns(rows) == []

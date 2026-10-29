@@ -34,6 +34,7 @@ from services.copy_fast_path import (
 from services.copy_fast_path import _table_ref as _pg_table_ref
 from services.copy_mysql_pg import _pg_connect, _pg_create_sql, fast_copy_text_value
 from services.copy_pg_mysql import mapping_is_plain_carry
+from services.type_stamp_grammar import require_safe_type_stamp
 from services.copy_sqlite_common import (
     sqlite_connect,
     sqlite_copy_bool_value,
@@ -116,6 +117,10 @@ class _SqliteCopyReader:
 
             cancel_checkpoint()
             batch = self._cursor.fetchmany(_FETCH_BATCH)
+            # D168: rows read per fetch batch feed the job's progress.
+            from services.cancel_check import report_rows
+
+            report_rows(len(batch))
             if not batch:
                 self._done = True
                 break
@@ -154,6 +159,9 @@ def copy_sqlite_to_postgres(
     del source_schema
     if not pairs or len(pairs) != len(pg_ddls):
         raise FastPathUnavailable("column list / DDL mismatch")
+    for (_src, tgt), ddl in zip(pairs, pg_ddls, strict=True):
+        if ddl:
+            require_safe_type_stamp(ddl, context=f"postgresql column {tgt!r}")
     if not sqlite_pg_copy_enabled():
         raise FastPathUnavailable("SQLite→PostgreSQL COPY disabled")
     ok, reason = mapping_is_plain_carry(

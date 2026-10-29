@@ -65,6 +65,14 @@ def _client(rbac_env, user: dict | None = None):
     def list_connectors():
         return {"connectors": []}
 
+    @app.post("/api/v1/ai/rag/ingest")
+    def rag_ingest():
+        return {"columns_ingested": 1}
+
+    @app.post("/api/v1/ai/rag/query")
+    def rag_query():
+        return {"answer": "ok"}
+
     return TestClient(app)
 
 
@@ -114,3 +122,25 @@ def test_editor_can_write_connector(rbac_env, monkeypatch):
         assert resp.status_code == 200
     finally:
         rbac_mod.normalize_role = original
+
+
+@pytest.mark.parametrize(
+    ("role", "ingest_status"),
+    [("viewer", 403), ("operator", 403), ("editor", 403), ("admin", 200)],
+)
+def test_rag_ingest_requires_workspace_manage_but_rag_query_stays_ai_use(
+    rbac_env, monkeypatch, role, ingest_status
+):
+    # The RAG corpus is shared by every workspace, so only an admin may write
+    # to it; every role can still ask it questions.
+    import services.rbac as rbac_mod
+
+    monkeypatch.setattr(rbac_mod, "normalize_role", lambda _role: role)
+    client = _client(rbac_env)
+    headers = {"Authorization": f"Bearer {_token('admin@example.com')}"}
+
+    ingest = client.post("/api/v1/ai/rag/ingest", headers=headers)
+    assert ingest.status_code == ingest_status
+    if ingest_status == 403:
+        assert ingest.json()["detail"] == "Permission denied: workspace.manage"
+    assert client.post("/api/v1/ai/rag/query", headers=headers).status_code == 200

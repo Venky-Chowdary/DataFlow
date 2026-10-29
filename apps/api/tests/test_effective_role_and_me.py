@@ -163,7 +163,7 @@ def test_settings_read_is_not_workspace_administration():
     assert Permission.WORKSPACE_READ in role_permissions("viewer")
     # Secret-bearing reads, and the engine choice, stay behind administration.
     assert _required_permission("GET", "/api/v1/workspace/sso") == Permission.WORKSPACE_MANAGE
-    assert _required_permission("GET", "/api/v1/workspace/api-keys") == Permission.WORKSPACE_MANAGE
+    assert _required_permission("GET", "/api/v1/workspace/api-keys") == Permission.IAM_MANAGE
     assert _required_permission("GET", "/api/v1/workspace/pilot-engine") == Permission.WORKSPACE_MANAGE
 
 

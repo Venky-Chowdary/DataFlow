@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import time
-from typing import Callable
+from typing import Callable, Iterable
 
 
 # Phase floors/caps — writing uses row ratio inside the write band only.
@@ -200,10 +200,25 @@ def mappings_require_dest_widen(mappings: list | None) -> bool:
     return False
 
 
-def mappings_require_new_columns(mappings: list | None) -> bool:
-    """True when any mapping intentionally proposes ADD COLUMN / create-new DDL."""
+def mappings_require_new_columns(
+    mappings: list | None, *, dest_columns: Iterable[str] | None = None
+) -> bool:
+    """True when any mapping intentionally proposes ADD COLUMN / create-new DDL.
+
+    ``dest_columns`` are the live columns of a destination that exists. A
+    ``create_new`` stamp is a statement about the run that wrote it: run 1
+    stamped every column because the table did not exist. Replayed by a
+    schedule against the table run 1 created, those stamps name columns that
+    are already there and must not arm ADD COLUMN for the run — otherwise a
+    later run silently adds columns under manual review. Only a mapping whose
+    target the live table lacks still proposes one. Without ``dest_columns``
+    (existence unknown) every stamp counts, as before.
+    """
+    live = None if dest_columns is None else {str(c).lower() for c in dest_columns}
     for m in mappings or []:
         if not isinstance(m, dict):
+            continue
+        if live is not None and str(m.get("target") or "").lower() in live:
             continue
         if m.get("create_new"):
             return True
@@ -221,12 +236,19 @@ def effective_backfill_new_fields(
     backfill_new_fields: bool = False,
     schema_policy: str | None = None,
     mappings: list | None = None,
+    dest_columns: Iterable[str] | None = None,
 ) -> bool:
     """Honor explicit backfill toggle, propagate schema policies, or create_new maps.
 
     create_compatible_new mappings (e.g. Mongo ObjectId → new VARCHAR beside DECIMAL id)
     must ADD COLUMN on an existing destination — otherwise Snowflake fails with
     invalid identifier on names like id_text.
+
+    ``dest_columns`` is the live column list of an existing destination; see
+    :func:`mappings_require_new_columns`. An acknowledged drift review does not
+    appear here: it approves the evolution it disclosed by stamping those
+    mappings (``plan_destination_evolution``), not by switching on the writer's
+    whole backfill lane.
     """
     policy = (schema_policy or "").strip().lower()
     # pause_on_change and type_locked forbid silent ADD COLUMN. Implying
@@ -239,7 +261,7 @@ def effective_backfill_new_fields(
     return (
         bool(backfill_new_fields)
         or schema_policy_implies_backfill(schema_policy)
-        or mappings_require_new_columns(mappings)
+        or mappings_require_new_columns(mappings, dest_columns=dest_columns)
         or mappings_require_dest_widen(mappings)
     )
 

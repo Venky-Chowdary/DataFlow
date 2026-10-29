@@ -18,6 +18,8 @@ from typing import Any
 
 import pytest
 
+from services.export_paths import exports_dir
+
 import src.transfer.engine as engine_module
 from services.shape_models import ShapeRecipe
 from src.transfer.engine import UniversalTransferEngine
@@ -177,7 +179,13 @@ def _run(monkeypatch, source: EndpointConfig, dest: EndpointConfig, artifact, *,
     )
     result = UniversalTransferEngine().execute_tracked(req, "x5sr-" + uuid.uuid4().hex[:10])
     monkeypatch.setattr(engine_module, "run_reconciliation", real)
-    seen["final"] = artifact().read_bytes()
+    final = artifact()
+    # A failed run into an empty destination is rolled back, which removes the
+    # artifact; say why instead of dying on a bare FileNotFoundError.
+    assert final.exists(), (
+        f"run left no artifact: success={result.success} error={getattr(result, 'error', None)!r}"
+    )
+    seen["final"] = final.read_bytes()
     return result, seen
 
 
@@ -186,18 +194,19 @@ def _dump(result) -> str:
     return json.dumps(data, default=str)
 
 
-_APP_ROOT = Path(__file__).resolve().parents[1]
+_EXPORTS = exports_dir()
 
 
 def _local(tmp_path, monkeypatch, fmt, request):
-    # file_export resolves a relative output_path under the app root.
+    # file_export output_path is confined to apps/api/exports (services/export_paths.py);
+    # a relative name resolves under that folder.
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "data"))
     run_dir = f"x5sr_test/{uuid.uuid4().hex[:8]}"
-    request.addfinalizer(lambda: shutil.rmtree(_APP_ROOT / run_dir, ignore_errors=True))
+    request.addfinalizer(lambda: shutil.rmtree(_EXPORTS / run_dir, ignore_errors=True))
     dest = EndpointConfig(
         kind="file_export", format=fmt, table="x_out", output_path=f"{run_dir}/x_out.{fmt}"
     )
-    return dest, lambda: _APP_ROOT / run_dir / f"x_out.{fmt}"
+    return dest, lambda: _EXPORTS / run_dir / f"x_out.{fmt}"
 
 
 def _assert_tamper_caught(result, seen, fmt):

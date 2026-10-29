@@ -125,8 +125,18 @@ def _docs(mongo: _Mongo) -> dict[str, dict[str, Any]]:
     return mongo.db["pipeline_schedules"].docs
 
 
-def _make(name: str, *, dest_table: str = "orders_wh", src: str = "src") -> store.PipelineSchedule:
+def _make(
+    name: str,
+    *,
+    dest_table: str = "orders_wh",
+    src: str = "src",
+    shared: bool = False,
+) -> store.PipelineSchedule:
+    # ``shared`` acknowledges a second writer on one destination (D104's
+    # create-time ownership gate). The peer-claim tests need exactly that
+    # topology to exercise the run-time same-destination guard.
     return store.create_schedule({
+        "shared_destination_acknowledged": shared,
         "name": name,
         "source_connector_id": src,
         "source_table": "orders",
@@ -292,7 +302,7 @@ def test_lost_cas_does_not_fall_back_to_a_blind_write(mongo, monkeypatch):
 def test_peer_holder_is_named(mongo, monkeypatch):
     _jobs(monkeypatch, {"job-peer": "running"})
     holder = _make("peer writer", dest_table="shared", src="src-a")
-    blocked = _make("blocked", dest_table="shared", src="src-b")
+    blocked = _make("blocked", dest_table="shared", src="src-b", shared=True)
     _age_claim(mongo, holder.id, minutes=1, job_id="job-peer")
     _docs(mongo)[holder.id]["running_started_at"] = datetime.now(timezone.utc).isoformat()
 
@@ -308,7 +318,7 @@ def test_peer_holder_is_named(mongo, monkeypatch):
 def test_peer_with_finished_job_does_not_block(mongo, monkeypatch):
     _jobs(monkeypatch, {"job-peer": "failed"})
     holder = _make("peer", dest_table="shared", src="src-a")
-    blocked = _make("blocked", dest_table="shared", src="src-b")
+    blocked = _make("blocked", dest_table="shared", src="src-b", shared=True)
     _age_claim(mongo, holder.id, minutes=1, job_id="job-peer")
     assert store.mark_schedule_running(blocked.id, "beat") is not None
 

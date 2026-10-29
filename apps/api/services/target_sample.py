@@ -239,8 +239,11 @@ def _read_destination_sample(
                 else "1"
             )
             ssl_flag = _ssl_flag(False)
+            # Upgrade-only retry: a non-TLS connector may retry with TLS, but a
+            # connector that requested TLS never falls back to plaintext.
+            ssl_attempts = (True,) if ssl_flag else (False, True)
             last_exc: Exception | None = None
-            for attempt_ssl in (ssl_flag, not ssl_flag):
+            for attempt_ssl in ssl_attempts:
                 try:
                     conn = get_connection(
                         host=dest.get("host", ""),
@@ -278,16 +281,18 @@ def _read_destination_sample(
                     conn.close()
                     return [dict(zip(names, row)) for row in rows]
                 except Exception as exc:
-                    last_exc = exc
+                    # Report the configured mode's failure, not the upgrade probe's.
+                    last_exc = last_exc or exc
                     continue
-            if last_exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {last_exc}"
-                ) from last_exc
+            tls_note = (
+                " (SSL is required by the connector; plaintext fallback is not attempted)"
+                if ssl_flag
+                else ""
+            )
             raise TargetSampleUnavailable(
                 f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                "postgresql connection failed for both SSL modes"
-            )
+                f"{last_exc or 'postgresql connection failed'}{tls_note}"
+            ) from last_exc
 
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection
@@ -821,9 +826,13 @@ def _read_destination_sample(
                 )
                 from google.cloud import bigquery as _bq
 
-                from services.copy_bigquery_common import bigquery_ident
+                from services.copy_bigquery_common import (
+                    bigquery_ident,
+                    bigquery_table_ref,
+                )
 
-                table_id = f"{project_id}.{dataset_id}.{table_name}"
+                table_ref = bigquery_table_ref(project_id, dataset_id, table_name)
+                table_id = ".".join(p for p in (project_id, dataset_id, table_name) if p)
                 col_sql = (
                     "*"
                     if cols == ["*"]
@@ -845,7 +854,7 @@ def _read_destination_sample(
                     widened_sorted = sorted(widened_keys)
                     placeholders = ",".join(["?"] * len(widened_sorted))
                     sql = (
-                        f"SELECT {col_sql} FROM `{table_id}` "  # nosec B608
+                        f"SELECT {col_sql} FROM {table_ref} "  # nosec B608
                         f"WHERE CAST({key_col} AS STRING) IN ({placeholders}){_nk(key_col)} "
                         f"ORDER BY {bq_order} LIMIT ?"
                     )
@@ -853,7 +862,7 @@ def _read_destination_sample(
                         _bq.ScalarQueryParameter(None, "STRING", v) for v in widened_sorted
                     ]
                 else:
-                    sql = f"SELECT {col_sql} FROM `{table_id}` ORDER BY {bq_order} LIMIT ?"  # nosec B608
+                    sql = f"SELECT {col_sql} FROM {table_ref} ORDER BY {bq_order} LIMIT ?"  # nosec B608
                 bq_params.append(_bq.ScalarQueryParameter(None, "INT64", int(limit)))
                 job_config = _bq.QueryJobConfig(query_parameters=bq_params)
                 try:

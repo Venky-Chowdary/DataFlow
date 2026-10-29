@@ -23,7 +23,12 @@ from ..services.data_contract import (
     DataContract,
     QualityRule,
 )
-from services.workspace_access import assert_resource_workspace, resolve_read_workspace, resolve_write_workspace
+from services.workspace_access import (
+    assert_resource_workspace,
+    resolve_read_workspace,
+    resolve_write_workspace,
+    tenant_scope,
+)
 
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
@@ -115,7 +120,7 @@ def _scoped_contract(
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
     meta = getattr(contract, "metadata", None) or {}
-    assert_resource_workspace(request, str(meta.get("workspace_id") or ""))
+    assert_resource_workspace(request, str(meta.get("workspace_id") or ""), write=write)
     return contract
 
 
@@ -124,21 +129,13 @@ def list_contracts(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    ws = resolve_read_workspace(request, workspace_id)
+    scope = tenant_scope(request, workspace_id)
     store = get_contract_store()
     contracts = []
     for c in store.list_contracts(limit=200):
         meta = getattr(c, "metadata", None) or {}
-        cws = str(meta.get("workspace_id") or "")
-        if ws and cws and cws != ws:
-            continue
-        if ws and not cws:
-            # Legacy unscoped contracts visible only when isolation is off.
-            from services.team_store import require_workspace_isolation
-
-            if require_workspace_isolation():
-                continue
-        contracts.append(_contract_to_response(c))
+        if scope.allows(meta.get("workspace_id")):
+            contracts.append(_contract_to_response(c))
     return _ContractListResponse(contracts=contracts)
 
 
@@ -399,7 +396,12 @@ def import_contract(
 
     # Accept bare contract dicts and kind-wrapped artifacts.
     if payload.get("kind") == "DataContract" or payload.get("kind") == "DatawrapManifest":
-        result = apply_manifest(payload, dry_run=False, workspace_id=ws)
+        result = apply_manifest(
+            payload,
+            dry_run=False,
+            workspace_id=ws,
+            workspace_filter=tenant_scope(request, workspace_id).filter,
+        )
         rows = [r for r in (result.get("results") or []) if r.get("kind") == "DataContract" and r.get("ok")]
         if not rows:
             err = next((r.get("error") for r in (result.get("results") or []) if r.get("error")), None)
@@ -419,7 +421,9 @@ def import_contract(
         raise HTTPException(status_code=422, detail=f"Invalid contract payload: {exc}") from exc
     existing = store.get_contract(contract.id) if contract.id else None
     try:
-        bind_contract_workspace(contract, ws, existing=existing)
+        bind_contract_workspace(
+            contract, ws, existing=existing, workspace_filter=tenant_scope(request, workspace_id).filter
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail="Not found") from exc
     contract.status = ContractStatus.DRAFT

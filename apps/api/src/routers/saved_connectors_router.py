@@ -16,6 +16,8 @@ from typing import Any
 from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from services.rbac import require_admin_connector_access
+
 _api_root = Path(__file__).resolve().parents[2]
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
@@ -99,7 +101,7 @@ def _actor_email(request: Request) -> str:
 
 def _writable_connector_or_404(request: Request, conn: Any) -> Any:
     """404 an invisible connector, 403 one the actor may only read."""
-    if not conn or not _can_access_connector(request, conn):
+    if not conn or not _can_access_connector(request, conn, write=True):
         raise HTTPException(status_code=404, detail="Connector not found")
     if not tenant_scope(request).can_write(conn.workspace_id):
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
@@ -159,13 +161,13 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
     return out
 
 
-def _can_access_connector(request: Request, conn: Any) -> bool:
-    """True if the actor may see this connector.
+def _can_access_connector(request: Request, conn: Any, *, write: bool = False) -> bool:
+    """True if the actor may see this connector (with ``write``: may change it).
 
     Workspace visibility is the request's tenant scope (D154): members of the
     connector's workspace, platform admins, and — only while isolation is not
     enforced — anyone for an unscoped legacy connector. A per-resource ACL can
-    restrict further.
+    restrict further; changing the connector needs an editor grant there.
     """
     actor = _actor_email(request)
     scope = tenant_scope(request)
@@ -180,7 +182,7 @@ def _can_access_connector(request: Request, conn: Any) -> bool:
             resource_type="connector",
             resource_id=str(getattr(conn, "id", "") or ""),
             principal=actor,
-            min_role="viewer",
+            min_role="editor" if write else "viewer",
             is_admin=is_admin,
         )
     except PermissionError:
@@ -225,6 +227,19 @@ def _persist_form_test_status(connector_id: str, last_test_ok: bool | None) -> N
         mark_tested(connector_id, False)
 
 
+def _refuse_unsafe_egress(data: dict[str, Any], existing: Any = None) -> None:
+    """Refuse to persist a connector whose dial targets break the egress policy.
+
+    Audit-first for private hosts and never applied to an unchanged target
+    (``connector_save_refusal``); metadata and link-local always refuse.
+    """
+    from services.egress_guard import connector_save_refusal
+
+    refusal = connector_save_refusal(data, existing)
+    if refusal:
+        raise HTTPException(status_code=400, detail=refusal)
+
+
 @router.post("")
 def save_connector(
     body: ConnectorSaveDTO,
@@ -232,6 +247,7 @@ def save_connector(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     workspace_id = resolve_write_workspace(request, workspace_id)
+    require_admin_connector_access(request, body.type)
     data = body.model_dump(by_alias=True)
     form_test = data.pop("last_test_ok", None)
     data["workspace_id"] = workspace_id
@@ -244,6 +260,7 @@ def save_connector(
             break
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
+    _refuse_unsafe_egress(data, existing)
     conn = create_connector(data)
     _persist_form_test_status(conn.id, form_test)
     refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
@@ -262,8 +279,10 @@ def update_saved_connector(
     form_test = data.pop("last_test_ok", None)
     existing = get_connector(connector_id, workspace_id=workspace_id)
     _writable_connector_or_404(request, existing)
+    require_admin_connector_access(request, body.type, existing.type)
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
+    _refuse_unsafe_egress(data, existing)
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
@@ -384,6 +403,7 @@ def test_saved_connector(
     conn = get_connector(connector_id, workspace_id=workspace_id)
     if not conn or not _can_access_connector(request, conn):
         raise HTTPException(status_code=404, detail="Connector not found")
+    require_admin_connector_access(request, conn.type)
 
     from services.connector_probe import probe_saved_connector
 

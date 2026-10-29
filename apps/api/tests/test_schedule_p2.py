@@ -244,7 +244,7 @@ def test_mark_run_advances_cursor(temp_store):
 
 def test_concurrency_guard_same_connector_pair(temp_store):
     a = _make(store, name="a")
-    b = _make(store, name="b")  # same dest table
+    b = _make(store, name="b", shared_destination_acknowledged=True)  # same dest table
     assert store.mark_schedule_running(a.id, "inst-1") is not None
     # Same destination object is blocked while a is running.
     assert store.mark_schedule_running(b.id, "inst-2") is None
@@ -261,7 +261,10 @@ def test_concurrency_guard_same_schedule(temp_store):
 def test_concurrency_guard_same_dest_table_different_source(temp_store):
     """Two sources writing one dest table must not overlap — pair lock is not enough."""
     a = _make(store, name="a", source_connector_id="src-a", dest_table="shared_dest")
-    b = _make(store, name="b", source_connector_id="src-b", dest_table="shared_dest")
+    b = _make(
+        store, name="b", source_connector_id="src-b", dest_table="shared_dest",
+        shared_destination_acknowledged=True,
+    )
     assert a.dest_connector_id == b.dest_connector_id
     assert a.source_connector_id != b.source_connector_id
     assert store.dest_object_busy("dst", "shared_dest") is False
@@ -1401,6 +1404,7 @@ def test_create_schedule_persists_cdc_snapshot_mode(temp_store):
         "interval": "daily",
         "sync_mode": "full_refresh_overwrite",
         "snapshot_mode": "when_needed",
+        "shared_destination_acknowledged": True,
     })
     assert overwrite.snapshot_mode == ""
 
@@ -1441,6 +1445,7 @@ def test_create_schedule_persists_cdc_advanced_extras(temp_store):
         "allow_append_only": True,
         "cdc_row_filter": "net",
         "multi_subnet_failover": True,
+        "shared_destination_acknowledged": True,
     })
     assert overwrite.allow_append_only is False
     assert overwrite.cdc_row_filter == ""

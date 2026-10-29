@@ -332,6 +332,59 @@ def test_missing_tenant_is_a_404_on_every_verb(admin):
     assert admin.delete("/api/v1/workspace/tenant/nope").status_code == 404
 
 
+def _unbind(tenant_id: str) -> None:
+    """Rewrite a stored tenant as a pre-scoping record (``workspace_id: ""``)."""
+    import json
+
+    import services.tenant_store as tenant_store
+
+    raw = json.loads(tenant_store.STORE_PATH.read_text(encoding="utf-8"))
+    for t in raw["tenants"]:
+        if t["id"] == tenant_id:
+            t["workspace_id"] = ""
+    tenant_store.STORE_PATH.write_text(json.dumps(raw), encoding="utf-8")
+
+
+def test_unbound_tenant_is_refused_to_a_workspace_admin_on_every_verb(admin):
+    """An empty ``workspace_id`` must fail closed, not skip the authority check."""
+    import services.tenant_store as tenant_store
+
+    ws_id = _workspace(admin, "Orphaned")
+    created = admin.post(
+        "/api/v1/workspace/tenant",
+        json={"workspace_id": ws_id, "name": "Legacy", "custom_domain": "legacy.example.com"},
+    )
+    assert created.status_code == 200, created.text
+    tenant_id = created.json()["id"]
+    _unbind(tenant_id)
+    lead = _signed_in(admin, email="orphan-lead@example.com", workspace_id=ws_id, workspace_role="admin")
+
+    patched = lead.patch(
+        f"/api/v1/workspace/tenant/{tenant_id}", json={"custom_domain": "evil.example.com"}
+    )
+    assert patched.status_code == 403, patched.text
+    removed = lead.delete(f"/api/v1/workspace/tenant/{tenant_id}")
+    assert removed.status_code == 403, removed.text
+
+    kept = tenant_store.get_tenant(tenant_id)
+    assert kept is not None and kept.custom_domain == "legacy.example.com"
+
+
+def test_unbound_tenant_is_amended_and_removed_by_a_platform_admin(admin):
+    import services.tenant_store as tenant_store
+
+    ws_id = _workspace(admin, "Orphaned-admin")
+    created = admin.post("/api/v1/workspace/tenant", json={"workspace_id": ws_id, "name": "Legacy"})
+    assert created.status_code == 200, created.text
+    tenant_id = created.json()["id"]
+    _unbind(tenant_id)
+
+    amended = admin.patch(f"/api/v1/workspace/tenant/{tenant_id}", json={"name": "Legacy Renamed"})
+    assert amended.status_code == 200, amended.text
+    assert admin.delete(f"/api/v1/workspace/tenant/{tenant_id}").status_code == 200
+    assert tenant_store.get_tenant(tenant_id) is None
+
+
 def test_store_missing_its_tenants_list_still_accepts_a_write(stores, monkeypatch):
     """A store file written in another shape must not fault the next create."""
     import services.tenant_store as tenant_store
@@ -400,3 +453,121 @@ def test_an_unscoped_record_is_not_a_trusted_browser_origin(stores, monkeypatch)
     origins = platform_config.cors_origins()
     assert "https://scoped.example.com" in origins
     assert "https://legacy.example.com" not in origins
+
+
+def _foreign_tenant(admin) -> tuple[str, str, TestClient]:
+    """A tenant in workspace "theirs" and the admin of a different workspace."""
+    mine = _workspace(admin, "Mine-read")
+    theirs = _workspace(admin, "Theirs-read")
+    created = admin.post(
+        "/api/v1/workspace/tenant",
+        json={
+            "workspace_id": theirs,
+            "name": "Victim tenant",
+            "custom_domain": "victim.example.com",
+            "ip_allowlist": ["203.0.113.0/24"],
+        },
+        headers={"X-Workspace-Id": theirs},
+    )
+    assert created.status_code == 200, created.text
+    lead = _signed_in(admin, email="mine-read@example.com", workspace_id=mine, workspace_role="admin")
+    return mine, theirs, lead
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "/api/v1/workspace/tenant",
+        "/api/v1/workspace/tenant/byok-keys",
+        "/api/v1/workspace/security/posture",
+        "/api/v1/workspace/security/report",
+    ],
+)
+def test_workspace_admin_cannot_read_another_workspaces_tenant_data(admin, path):
+    mine, theirs, lead = _foreign_tenant(admin)
+
+    by_header = lead.get(path, headers={"X-Workspace-Id": theirs})
+    assert by_header.status_code == 403, by_header.text
+    assert "victim.example.com" not in by_header.text
+    assert "203.0.113.0/24" not in by_header.text
+
+    # The custom domain names the tenant even when the header names the caller's own workspace.
+    by_host = lead.get(path, headers={"X-Workspace-Id": mine, "Host": "victim.example.com"})
+    assert by_host.status_code == 403, by_host.text
+    assert "203.0.113.0/24" not in by_host.text
+
+    assert admin.get(path, headers={"X-Workspace-Id": theirs}).status_code == 200
+
+
+def test_workspace_admin_still_reads_their_own_tenant_data(admin):
+    mine = _workspace(admin, "Own-read")
+    created = admin.post(
+        "/api/v1/workspace/tenant",
+        json={"workspace_id": mine, "name": "Own tenant"},
+        headers={"X-Workspace-Id": mine},
+    )
+    assert created.status_code == 200, created.text
+    lead = _signed_in(admin, email="own-read@example.com", workspace_id=mine, workspace_role="admin")
+    headers = {"X-Workspace-Id": mine}
+    for path in (
+        "/api/v1/workspace/tenant",
+        "/api/v1/workspace/tenant/byok-keys",
+        "/api/v1/workspace/security/posture",
+        "/api/v1/workspace/security/report",
+    ):
+        response = lead.get(path, headers=headers)
+        assert response.status_code == 200, (path, response.text)
+    assert lead.get("/api/v1/workspace/security/posture", headers=headers).json()["tenant_id"] == created.json()["id"]
+
+
+def test_workspace_admin_cannot_rotate_or_add_keys_through_another_domain(admin):
+    mine, _theirs, lead = _foreign_tenant(admin)
+    headers = {"X-Workspace-Id": mine, "Host": "victim.example.com"}
+    added = lead.post("/api/v1/workspace/tenant/byok-keys", json={"label": "x"}, headers=headers)
+    assert added.status_code == 403, added.text
+    rotated = lead.post("/api/v1/workspace/tenant/byok-keys/any/rotate", headers=headers)
+    assert rotated.status_code == 403, rotated.text
+
+
+def test_workspace_admin_cannot_read_another_workspace_record(admin):
+    mine = _workspace(admin, "Mine-record")
+    theirs = _workspace(admin, "Theirs-record")
+    lead = _signed_in(admin, email="mine-record@example.com", workspace_id=mine, workspace_role="admin")
+
+    own = lead.get(f"/api/v1/workspace/workspaces/{mine}")
+    assert own.status_code == 200, own.text
+    refused = lead.get(f"/api/v1/workspace/workspaces/{theirs}")
+    assert refused.status_code == 403, refused.text
+    assert "Theirs-record" not in refused.text
+    assert admin.get(f"/api/v1/workspace/workspaces/{theirs}").status_code == 200
+
+
+def test_notification_listing_is_scoped_to_the_callers_workspace(admin, stores, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_NOTIFICATION_STORE", str(stores / "notifications.json"))
+    from services.notification_store import create_channel
+
+    mine = _workspace(admin, "Mine-notify")
+    theirs = _workspace(admin, "Theirs-notify")
+    for ws_id, label in ((mine, "mine-channel"), (theirs, "theirs-channel"), ("", "global-channel")):
+        create_channel(workspace_id=ws_id, kind="slack", label=label, config={}, created_by="root@example.com")
+    lead = _signed_in(admin, email="mine-notify@example.com", workspace_id=mine, workspace_role="admin")
+
+    scoped = lead.get("/api/v1/workspace/notifications", headers={"X-Workspace-Id": mine})
+    assert scoped.status_code == 200, scoped.text
+    assert [c["label"] for c in scoped.json()["channels"]] == ["mine-channel"]
+
+    foreign = lead.get(
+        f"/api/v1/workspace/notifications?workspace_id={theirs}", headers={"X-Workspace-Id": mine}
+    )
+    assert foreign.status_code == 403, foreign.text
+    assert "theirs-channel" not in foreign.text
+
+    # No header: the caller's own workspace (D154), never another tenant's or the global list.
+    unscoped = lead.get("/api/v1/workspace/notifications")
+    assert unscoped.status_code == 200, unscoped.text
+    assert [c["label"] for c in unscoped.json()["channels"]] == ["mine-channel"]
+    assert "theirs-channel" not in unscoped.text and "global-channel" not in unscoped.text
+
+    platform = admin.get("/api/v1/workspace/notifications")
+    assert platform.status_code == 200, platform.text
+    assert [c["label"] for c in platform.json()["channels"]] == ["global-channel"]

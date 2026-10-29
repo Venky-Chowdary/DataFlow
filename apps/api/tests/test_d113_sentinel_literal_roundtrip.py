@@ -171,7 +171,7 @@ def test_d113_s3_csv_encoder_roundtrip():
     export = enc.finish()
     body = export.read_all().decode("utf-8")
     rows = list(csv.reader(body.splitlines()))
-    header, body_rows = rows[0], rows[1:]
+    body_rows = rows[1:]
     by_id = {r[0]: r for r in body_rows}
     assert by_id["2"][1] == "__DF_SQL_NULL__", f"literal: {by_id['2'][1]!r}"
     # NULL numeric + NULL text -> empty cells; never __DF_ESC__ text

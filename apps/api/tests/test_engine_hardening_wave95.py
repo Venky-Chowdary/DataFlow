@@ -32,6 +32,13 @@ from services.sync_cursor import (  # noqa: E402
 )
 
 
+def _stream_source() -> str:
+    """stream.py plus the ``stream_db_*`` phase modules split out of it."""
+    transfer = Path("src/transfer")
+    parts = [transfer / "stream.py", *sorted(transfer.glob("stream_db_*.py"))]
+    return "\n".join(part.read_text(encoding="utf-8") for part in parts)
+
+
 class TestSyncModeTaxonomyIsUnified:
     """Four layers spelled these differently; only one vocabulary may reach the engine."""
 
@@ -166,7 +173,7 @@ class TestKeysetBookmarkTieBreak:
             == "offset"
         )
 
-        source = Path("src/transfer/stream.py").read_text(encoding="utf-8")
+        source = _stream_source()
         assert "decide_keyset_pagination(" in source, (
             "stream must use the shared decision, not a second copy of it"
         )
@@ -323,7 +330,7 @@ class TestCheckpointFailureIsSurfaced:
         assert caplog.text.count("Checkpoint write failed") == 1
 
     def test_stream_fail_closes_on_checkpoint_persistence(self):
-        source = Path("src/transfer/stream.py").read_text(encoding="utf-8")
+        source = _stream_source()
         assert "require_save(checkpoint)" in source
         assert "Checkpoint persistence is failing" not in source
         assert "_checkpoint_degraded" not in source
@@ -336,10 +343,10 @@ class TestSchemalessAbsorptionIsThreadSafe:
     """Chunk writers rebind shared mapping state; interleaving lost a column."""
 
     def test_absorb_is_guarded_by_a_lock(self):
-        source = Path("src/transfer/stream.py").read_text(encoding="utf-8")
+        source = _stream_source()
         body = source.split("def _absorb_schemaless_discovered_attrs", 1)[1]
         body = body.split("\n    if not schema:", 1)[0]
-        assert "with _schema_absorb_lock:" in body
+        assert "with cfg._schema_absorb_lock:" in body
         assert "_schema_absorb_lock = threading.Lock()" in source
 
     def test_concurrent_union_under_a_lock_keeps_every_attribute(self):

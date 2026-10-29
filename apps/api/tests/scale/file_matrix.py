@@ -49,7 +49,7 @@ from tests.scale import readback as rb  # noqa: E402
 
 ENV_GATE = "DATAFLOW_SCALE_FILE_MATRIX"
 
-#: Exports must land inside the API workspace (``land_export_bytes`` refuses
+#: Exports must land inside ``apps/api/exports`` (``land_export_bytes`` refuses
 #: anything else), and ``apps/api/exports/`` is already git-ignored.
 EXPORT_DIR = _API_ROOT / "exports" / "scale"
 RESULTS_PATH = EXPORT_DIR / "file_matrix.jsonl"

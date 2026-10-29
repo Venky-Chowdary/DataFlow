@@ -8,7 +8,11 @@ from pathlib import Path
 
 import pytest
 
-from src.routers.query_router import _is_safe_sql, _validate_mongodb_aggregate
+from src.routers.query_router import (
+    _is_safe_sql,
+    _validate_mongodb_aggregate,
+    _validate_mongodb_filter,
+)
 
 _API_ROOT = Path(__file__).resolve().parents[1]
 if str(_API_ROOT) not in sys.path:
@@ -518,3 +522,179 @@ def test_aggregate_stage_guard_blocks_writes():
     with pytest.raises(Exception) as exc:
         _validate_mongodb_aggregate([{"$match": {}}, {"$out": "stolen"}])
     assert "$out" in str(exc.value)
+
+
+@pytest.mark.parametrize(
+    "pipeline",
+    [
+        [{"$match": {"$where": "sleep(1000)"}}],
+        [{"$match": {"$expr": {"$function": {"body": "function(){}", "args": [], "lang": "js"}}}}],
+        [
+            {
+                "$group": {
+                    "_id": None,
+                    "x": {
+                        "$accumulator": {
+                            "init": "function(){}",
+                            "accumulate": "function(){}",
+                            "merge": "function(){}",
+                            "lang": "js",
+                        }
+                    },
+                }
+            }
+        ],
+        [{"$mapReduce": {}}],
+        [{"$lookup": {"from": "o", "pipeline": [{"$match": {"$where": "true"}}], "as": "o"}}],
+        [{"$facet": {"a": [{"$match": {"$expr": {"$function": {}}}}]}}],
+        [{"$unionWith": {"coll": "o", "pipeline": [{"$merge": "stolen"}]}}],
+        [{"$facet": {"a": [{"$out": "stolen"}]}}],
+    ],
+)
+def test_aggregate_guard_blocks_server_side_js_and_nested_writes(pipeline):
+    with pytest.raises(Exception) as exc:
+        _validate_mongodb_aggregate(pipeline)
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+@pytest.mark.parametrize(
+    "query_filter",
+    [
+        {"$where": "sleep(1000)"},
+        {"$and": [{"a": 1}, {"$where": "while(true){}"}]},
+        {"$expr": {"$function": {"body": "function(){return true}", "args": [], "lang": "js"}}},
+        {"nested": {"$elemMatch": {"$where": "true"}}},
+    ],
+)
+def test_filter_guard_blocks_server_side_js(query_filter):
+    with pytest.raises(Exception) as exc:
+        _validate_mongodb_filter(query_filter)
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+def test_filter_guard_blocks_bson_code_values():
+    from bson.code import Code
+
+    with pytest.raises(Exception) as exc:
+        _validate_mongodb_filter({"a": Code("function(){}")})
+    assert getattr(exc.value, "status_code", None) == 400
+
+
+def test_mongo_guards_allow_ordinary_read_queries():
+    _validate_mongodb_filter(
+        {"status": {"$in": ["a", "b"]}, "$or": [{"x": {"$gt": 1}}, {"where": 2}]}
+    )
+    _validate_mongodb_aggregate(
+        [
+            {"$match": {"$expr": {"$gt": ["$qty", 1]}}},
+            {"$lookup": {"from": "o", "pipeline": [{"$match": {"k": 1}}], "as": "o"}},
+            {"$group": {"_id": "$k", "n": {"$sum": 1}}},
+        ]
+    )
+
+
+def test_execute_rejects_mongo_where_filter_before_reaching_server(monkeypatch):
+    import src.routers.query_router as qr
+
+    calls = []
+
+    class _Coll:
+        def find(self, *a, **k):
+            calls.append(("find", a))
+            raise AssertionError("find must not run")
+
+        def aggregate(self, *a, **k):
+            calls.append(("aggregate", a))
+            raise AssertionError("aggregate must not run")
+
+    class _Db:
+        def __getitem__(self, _name):
+            return _Coll()
+
+    class _Client:
+        def __getitem__(self, _name):
+            return _Db()
+
+    monkeypatch.setattr(qr, "_mongo_client", lambda *_a, **_k: _Client())
+    connector = connector_store.SavedConnector(
+        id="m1",
+        name="mongo",
+        type="mongodb",
+        role="source",
+        connection_string="mongodb://localhost:27017/test",
+    )
+    for raw in (
+        '{"$where": "sleep(1000)"}',
+        '[{"$match": {"$expr": {"$function": {"body": "function(){}", "args": [], "lang": "js"}}}}]',
+    ):
+        body = qr.QueryExecuteRequest(connector_id="m1", query=raw, collection="c")
+        with pytest.raises(Exception) as exc:
+            qr._run_mongodb_query(connector, body)
+        assert getattr(exc.value, "status_code", None) == 400
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "output_path",
+    [
+        "../x.py",
+        "../src/routers/pwned.py",
+        "src/routers/pwned.py",
+        "../services/pwned.csv",
+        "/tmp/pwned.csv",
+        "../exports_evil/pwned.csv",
+    ],
+)
+def test_query_export_refuses_paths_outside_exports(test_client, tmp_path, monkeypatch, output_path):
+    """A client-chosen output_path must never land outside apps/api/exports."""
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    conn = connector_store.create_connector({
+        "name": "Export confinement",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    before = {p for p in _API_ROOT.rglob("pwned*")}
+    response = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": "SELECT 'import os' AS line",
+        "format": "csv",
+        "output_path": output_path,
+    })
+    assert response.status_code == 400, response.text
+    assert "exports" in response.json()["detail"].lower() or "extension" in response.json()["detail"].lower()
+    assert {p for p in _API_ROOT.rglob("pwned*")} == before
+    assert not Path("/tmp/pwned.csv").exists()
+
+
+def test_query_export_named_file_lands_in_exports(test_client, tmp_path, monkeypatch):
+    import uuid
+
+    _isolated_store(monkeypatch, tmp_path)
+    db_path = _sqlite_db(tmp_path)
+    conn = connector_store.create_connector({
+        "name": "Export named",
+        "type": "sqlite",
+        "role": "both",
+        "connection_string": f"sqlite:///{db_path}",
+        "workspace_id": "",
+    })
+    name = f"q_{uuid.uuid4().hex[:10]}"
+    response = test_client.post("/api/v1/query/export", json={
+        "connector_id": conn.id,
+        "query": "SELECT * FROM users",
+        "format": "csv",
+        "output_path": name,
+    })
+    assert response.status_code == 200, response.text
+    data = response.json()
+    target = _API_ROOT / "exports" / f"{name}.csv"
+    try:
+        assert data["success"] is True, data
+        assert Path(data["path"]) == target.resolve()
+        assert target.read_text().startswith("id,name")
+    finally:
+        if target.exists():
+            target.unlink()

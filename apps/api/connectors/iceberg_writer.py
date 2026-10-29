@@ -98,11 +98,20 @@ def _iceberg_effective_write_mode(
 
 def _warehouse_root(host: str, database: str, connection_string: str) -> Path:
     raw = (connection_string or database or host or "").strip()
-    if raw.startswith("file://"):
-        raw = raw[len("file://") :]
     if not raw:
         raise ValueError("Iceberg warehouse path required (connection_string or database)")
-    return Path(raw).expanduser().resolve()
+    from connectors.iceberg_catalog import resolve_local_warehouse
+
+    return resolve_local_warehouse(raw, create=False)
+
+
+def _iceberg_table_dir(root: Path, table: str, schema: str) -> Path:
+    """``root/schema/table`` (or ``root/ns/table`` for ``ns.table``), jailed under ``root``."""
+    from connectors.iceberg_catalog import safe_warehouse_child
+
+    if "." in table and not schema:
+        schema, table = table.split(".", 1)
+    return safe_warehouse_child(root, schema, table, label="schema/table name")
 
 
 def _logical_to_iceberg_type(logical: str) -> str:
@@ -2441,7 +2450,13 @@ def _write_mapped_rows_filesystem(
             checksum="", chunks_completed=0, error=str(exc), driver="iceberg",
         )
 
-    table_dir = root / (schema.strip() if schema else "") / table if schema else root / table
+    try:
+        table_dir = _iceberg_table_dir(root, table, (schema or "").strip())
+    except ValueError as exc:
+        return WriteResult(
+            ok=False, rows_written=0, table_name=table, target_schema=schema or "",
+            checksum="", chunks_completed=0, error=str(exc), driver="iceberg",
+        )
     # The reported target schema is the Iceberg namespace, never the warehouse
     # directory: reconciliation re-resolves ``root / namespace / table`` from it,
     # and an absolute path there resolves to ``root / <table dir> / table``,
@@ -2451,7 +2466,6 @@ def _write_mapped_rows_filesystem(
     # Normalize: namespace.table → nested dirs
     if "." in table and not schema:
         parts = table.split(".", 1)
-        table_dir = root / parts[0] / parts[1]
         namespace = parts[0]
         table = parts[1]
     # Deny-create must not invent an empty Iceberg tree (Airbyte-style false provision).
@@ -3143,11 +3157,7 @@ def _resolve_iceberg_table_dir(cfg: dict[str, Any], table_name: str, schema: str
     root = _warehouse_root(host, database, connection_string)
     table = (table_name or "").strip()
     sch = (schema or cfg.get("schema") or "").strip()
-    table_dir = root / sch / table if sch else root / table
-    if "." in table and not sch:
-        parts = table.split(".", 1)
-        table_dir = root / parts[0] / parts[1]
-    return table_dir
+    return _iceberg_table_dir(root, table, sch)
 
 
 def _iceberg_pk_columns(primary_key_column: str | Sequence[str]) -> list[str]:

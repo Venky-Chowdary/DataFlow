@@ -2108,6 +2108,35 @@ def materialize_dest_ddl(
     carrier: str | None,
     source_type: str | None = None,
 ) -> str:
+    """Writer CREATE DDL for one column; refuses carriers that are not a bare type.
+
+    The returned text is interpolated unquoted into ``CREATE TABLE`` /
+    ``ALTER TABLE … ADD COLUMN``, so both the carrier (after identity
+    qualifiers are stripped) and the materialized result must pass
+    ``services.type_stamp_grammar`` — otherwise ``UnsafeTypeStamp`` is raised
+    before any DDL is built.
+    """
+    from services.type_stamp_grammar import require_safe_type_stamp
+
+    db = _normalize_dest_db(db_type) or str(db_type or "")
+    raw = strip_identity_qualifier(carrier).strip()
+    if raw:
+        require_safe_type_stamp(raw, context=f"{db} column type")
+    # ``str()``: the checked-modules mypy run skips imports, so the gate's
+    # ``-> str`` is Any here and would trip ``no-any-return``.
+    return str(
+        require_safe_type_stamp(
+            _materialize_dest_ddl_unchecked(db_type, carrier, source_type),
+            context=f"{db} column DDL",
+        )
+    )
+
+
+def _materialize_dest_ddl_unchecked(
+    db_type: str,
+    carrier: str | None,
+    source_type: str | None = None,
+) -> str:
     """Writer CREATE DDL: honor Map physical stamps; map logicals via ddl_type.
 
     SSOT so Execute CREATE cannot invent REAL→DOUBLE, TIMESTAMP→DATETIME (BQ),

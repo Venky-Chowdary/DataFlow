@@ -43,13 +43,19 @@ def _requests_session() -> Any:
     adapter = HTTPAdapter(max_retries=retry)
     session.mount("http://", adapter)
     session.mount("https://", adapter)
+    from services.egress_guard import redirect_guard_hook
+
+    session.hooks["response"].append(redirect_guard_hook())
     return session
 
 
 def _base_url(host: str, port: int, ssl: bool) -> str:
     from connectors.url_authority import http_service_base_url
+    from services.egress_guard import assert_connector_dial_allowed
 
-    return http_service_base_url(host, port, ssl, 6333)
+    url = http_service_base_url(host, port, ssl, 6333)
+    assert_connector_dial_allowed(url, point="http_client")
+    return url
 
 
 def _headers(api_key: str) -> dict[str, str]:

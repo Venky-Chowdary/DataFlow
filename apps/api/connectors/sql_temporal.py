@@ -387,6 +387,15 @@ def coerce_sql_temporal(
         bounds = dest_temporal_bounds(engine, base)
         if bounds is not None:
             lo, hi = bounds
+            if isinstance(value, str) and _BC_SUFFIX_RE.search(value):
+                # PostgreSQL writes BC dates as "0044-03-15 BC". Read as AD it
+                # looked like year 44 - a different date, and the range
+                # message below then blamed a year the source never held.
+                raise ValueError(
+                    f"{value.strip()!r} is a BC date - {engine or 'destination'} "
+                    f"{base} stores {lo.date()} .. {hi.date()} (AD) only and has "
+                    "no BC era. Quarantined; map to TEXT to keep the literal"
+                )
             parsed = parse_sql_datetime(value, wall_clock=True)
             if parsed is not None:
                 civil = parsed.replace(tzinfo=None)
@@ -717,6 +726,7 @@ def dest_temporal_bounds(
 
 
 _LEADING_YEAR_RE = re.compile(r"^\s*(\d{4,6})-")
+_BC_SUFFIX_RE = re.compile(r"\bBC\s*$", re.IGNORECASE)
 
 
 def _temporal_year_beyond(value: Any, *, lo: int, hi: int) -> int | None:

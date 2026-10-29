@@ -10,6 +10,7 @@ from services.log_redaction import redact_log_text
 from services.mapping_proof import mappings_from_request
 from services.safe_errors import safe_http_exception
 from services.shape_preflight import ShapePreflightRefused
+from services.upload_limits import PayloadTooLarge, read_upload
 from pathlib import Path
 from typing import Any, Optional
 
@@ -25,7 +26,8 @@ from fastapi import (
 )
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-from services.workspace_access import resolve_write_workspace, tenant_scope
+from services.rbac import require_admin_for_endpoints
+from services.workspace_access import assert_connector_accessible, resolve_write_workspace, tenant_scope
 from services.value_serializer import cell_to_string
 
 router = APIRouter(prefix="/transfer", tags=["Universal Transfer"])
@@ -205,6 +207,28 @@ def _validated_shape_recipe(raw: dict | str | None) -> dict:
     return recipe.to_wire()
 
 
+def _connector_id_of(endpoint: Any) -> str | None:
+    return endpoint if isinstance(endpoint, str) else getattr(endpoint, "connector_id", None)
+
+
+def _assert_endpoint_connectors(
+    request: Request,
+    *,
+    read: tuple[Any, ...] = (),
+    write: tuple[Any, ...] = (),
+) -> None:
+    """404 / 403 when a named saved connector is outside the caller's tenant scope.
+
+    A ``connector_id`` expands into stored host and credentials, so it is
+    authorized against the connector's own workspace before it is resolved;
+    a destination also needs write access there.
+    """
+    for endpoint in read:
+        assert_connector_accessible(request, _connector_id_of(endpoint))
+    for endpoint in write:
+        assert_connector_accessible(request, _connector_id_of(endpoint), write=True)
+
+
 class EndpointDTO(BaseModel):
     # Allow Studio flat keys (schema_types, table_exists, …) so EndpointConfig.from_dict
     # can fold them into extra — never silently strip live DDL / existence SSOT.
@@ -247,6 +271,14 @@ class ExecuteTransferRequest(BaseModel):
     mappings: list[dict] = Field(default_factory=list)
     column_types: dict[str, str] = Field(default_factory=dict)
     sync_mode: str = "full_refresh_overwrite"
+
+    @field_validator("mappings")
+    @classmethod
+    def _mapping_types_are_types(cls, value: list[dict]) -> list[dict]:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        validate_mapping_type_stamps(value, context="mapping")
+        return value
     schema_policy: str = "manual_review"
     validation_mode: str = "strict"
     skip_preflight: bool = False
@@ -293,6 +325,8 @@ class ExecuteTransferRequest(BaseModel):
     ddl_changes_acknowledged: bool = False
     # Empty a populated destination from a 0-row source on purpose (D56).
     empty_source_overwrite_acknowledged: bool = False
+    # Accept a load far below this route's history (strict volume guard, D82).
+    load_volume_acknowledged: bool = False
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
     # Phase C11 — pin Validate Decision Artifact (64-hex content_hash).
@@ -399,8 +433,9 @@ async def transfer_readiness():
 
 
 @router.post("/route")
-async def analyze_route(body: AnalyzeRequest):
+async def analyze_route(body: AnalyzeRequest, request: Request):
     """Score a source → destination route with conversion and driver hints."""
+    _assert_endpoint_connectors(request, read=(body.source, body.destination))
     from services.universal_router import analyze_route as score_route
 
     from ..transfer.adapters import resolve_endpoint
@@ -414,8 +449,9 @@ async def analyze_route(body: AnalyzeRequest):
 
 
 @router.post("/analyze")
-async def analyze_transfer(request: AnalyzeRequest):
+async def analyze_transfer(request: AnalyzeRequest, http_request: Request):
     """Understand source/destination and show auto-creation plan."""
+    _assert_endpoint_connectors(http_request, read=(request.source, request.destination))
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig
 
@@ -431,8 +467,9 @@ async def analyze_transfer(request: AnalyzeRequest):
 
 
 @router.post("/introspect")
-async def introspect_endpoint_route(request: AnalyzeRequest):
+async def introspect_endpoint_route(request: AnalyzeRequest, http_request: Request):
     """Probe source or destination — list tables/collections, infer schema."""
+    _assert_endpoint_connectors(http_request, read=(request.source, request.destination))
     from ..transfer.endpoint_intelligence import introspect_endpoint
     from ..transfer.models import EndpointConfig
 
@@ -595,6 +632,14 @@ class UpdatePlanRequest(BaseModel):
 
 class SyncMappingsRequest(BaseModel):
     mappings: list[dict] = Field(default_factory=list)
+
+    @field_validator("mappings")
+    @classmethod
+    def _mapping_types_are_types(cls, value: list[dict]) -> list[dict]:
+        from services.type_stamp_grammar import validate_mapping_type_stamps
+
+        validate_mapping_type_stamps(value, context="mapping")
+        return value
 
 
 @router.get("/plans")
@@ -831,13 +876,15 @@ async def analyze_file_transfer(
     from ..transfer.engine import get_transfer_engine
     from ..transfer.models import EndpointConfig
 
-    content = await file.read()
+    content = await read_upload(file)
     from ..services.file_parser import FileParser
     src_fmt = FileParser.detect_file_type(file.filename or "upload.csv", content)
     if src_fmt == "unknown":
         src_fmt = "csv"
     try:
         columns, schema, row_count = parse_file_route_sample(content, file.filename or "upload.csv")
+    except PayloadTooLarge:
+        raise
     except ValueError as exc:
         raise safe_http_exception(
             exc,
@@ -922,8 +969,10 @@ async def execute_transfer_json(
         ) from exc
 
     workspace_id = resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(request, read=(body.source,), write=(body.destination,))
     src = src_preview
     dst = dst_preview
+    require_admin_for_endpoints(request, workspace_id, src, dst)
     region = (
         (body.data_region or "").strip()
         or getattr(request.state, "data_region", "")
@@ -965,6 +1014,7 @@ async def execute_transfer_json(
         empty_source_overwrite_acknowledged=bool(
             body.empty_source_overwrite_acknowledged
         ),
+        load_volume_acknowledged=bool(body.load_volume_acknowledged),
         acknowledgment_actor=str(body.acknowledgment_actor or "").strip(),
         acknowledgment_reason=str(body.acknowledgment_reason or "").strip(),
         approved_decision_artifact_hash=str(
@@ -987,10 +1037,14 @@ async def execute_transfer_json(
     )
     from services.batch_progress import effective_backfill_new_fields
 
+    # Only the operator's toggle and the policy persist on the request. A
+    # create_new stamp in the mappings is not folded in here: it says "the table
+    # did not exist" for the run that wrote it, and a schedule replaying it
+    # against the table that run created would silently ADD COLUMN. Execute
+    # derives that part from the live destination.
     request_obj.backfill_new_fields = effective_backfill_new_fields(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
-        mappings=request_obj.mappings,
     )
     if body.plan_id and str(body.plan_id).strip():
         from services.transfer_plan_service import merge_plan_into_run
@@ -1013,13 +1067,6 @@ async def execute_transfer_json(
             ) from e
     else:
         plan_payload = None
-
-    # Recompute after plan mappings may have been merged (create_new → ADD COLUMN).
-    request_obj.backfill_new_fields = effective_backfill_new_fields(
-        backfill_new_fields=request_obj.backfill_new_fields,
-        schema_policy=request_obj.schema_policy,
-        mappings=request_obj.mappings,
-    )
 
     _residency_check(request, dst, region)
     from src.transfer.contract_engine import stamp_request_contract
@@ -1244,10 +1291,15 @@ async def run_universal_transfer(
         ) from exc
 
     workspace_id = resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(
+        request,
+        read=tuple(c for c in (source_connector_id,) if c),
+        write=tuple(c for c in (dest_connector_id,) if c),
+    )
 
     src_fmt = source_format
     if source_kind == "file" and file:
-        content = await file.read()
+        content = await read_upload(file)
         filename = file.filename or "upload.csv"
         if not src_fmt:
             from ..services.file_parser import FileParser
@@ -1325,6 +1377,7 @@ async def run_universal_transfer(
         auth_source=dest_auth_source,
         extra=dest_extra,
     )
+    require_admin_for_endpoints(request, workspace_id, source, destination)
 
     source_filter: dict = {}
     if source_filter_json.strip():
@@ -1499,7 +1552,6 @@ async def run_universal_transfer(
     request_obj.backfill_new_fields = effective_backfill_new_fields(
         backfill_new_fields=request_obj.backfill_new_fields,
         schema_policy=request_obj.schema_policy,
-        mappings=getattr(request_obj, "mappings", None),
     )
     if stream_contracts_json.strip():
         try:
@@ -2153,6 +2205,7 @@ async def rebaseline_append_continuity(
     from ..transfer.models import EndpointConfig
 
     resolve_write_workspace(request, workspace_id)
+    _assert_endpoint_connectors(request, write=(body.destination,))
     reason = (body.reason or "").strip()
     if not reason:
         raise HTTPException(

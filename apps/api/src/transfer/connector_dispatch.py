@@ -165,17 +165,58 @@ def write_via_registry(
     # Dialect wrappers expect type=; harmless for others via **_kwargs.
     kwargs.setdefault("type", driver)
     # Pass write_mode / conflict_columns when the writer accepts them.
-    try:
-        return fn(
-            **kwargs,
-            write_mode=write_mode,
-            conflict_columns=conflict_columns or [],
-        )
-    except TypeError:
-        return fn(**kwargs)
+    with _dial_scope(driver, kwargs):
+        try:
+            return fn(
+                **kwargs,
+                write_mode=write_mode,
+                conflict_columns=conflict_columns or [],
+            )
+        except TypeError:
+            return fn(**kwargs)
+
+
+def _dial_scope(driver: str, cfg: dict[str, Any]):
+    """Egress policy around a connector call: pre-dial check + DNS pinning."""
+    from services.egress_guard import connector_dial_scope
+
+    extra = [
+        str(cfg.get(key) or "")
+        for key in ("schema_registry_url", "registry_url", "api_url", "base_url")
+    ]
+    return connector_dial_scope(
+        cfg, *extra, db_type=str(cfg.get("type") or driver or ""), point="transfer"
+    )
 
 
 def read_via_registry(
+    driver: str,
+    *,
+    cfg: dict[str, Any],
+    table: str,
+    limit: int = 100_000,
+    offset: int = 0,
+    columns: list[str] | None = None,
+    cursor_column: str = "",
+    cursor_after: Any = None,
+    sdk_state: str | None = None,
+) -> Any:
+    """Invoke the registered batch reader (SQL-style signature or SaaS object)."""
+    with _dial_scope(driver, cfg):
+        return _read_via_registry_unscoped(
+            driver,
+            cfg=cfg,
+            table=table,
+            limit=limit,
+            offset=offset,
+            columns=columns,
+            cursor_column=cursor_column,
+            cursor_after=cursor_after,
+            sdk_state=sdk_state,
+        )
+
+
+def _read_via_registry_unscoped(
     driver: str,
     *,
     cfg: dict[str, Any],

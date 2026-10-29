@@ -2,8 +2,8 @@
 
 Dest COUNT is ``count_documents({})`` — never ``estimatedDocumentCount``.
 Empty dest is ``insert_many`` (unordered), **not** upsert / ``ReplaceOne``.
-Occupied dest whose COUNT already equals the source snapshot is
-skip-complete. Occupied dest with a different COUNT declines.
+An occupied dest declines whatever its COUNT: equal counts do not prove
+equal content, and an insert would duplicate.
 ``_id`` is not invented from row bytes.
 
 SQL NULL is BSON null (field present). Empty string stays empty string.
@@ -91,6 +91,11 @@ def bson_to_python(value: Any, ddl: str) -> Any:
 def insert_many_documents(coll: Any, docs: list[dict[str, Any]]) -> int:
     if not docs:
         return 0
+    # D102: every route into Mongo lands through here, so a cancel stops the
+    # copy at the next batch instead of after the last one.
+    from services.cancel_check import cancel_checkpoint
+
+    cancel_checkpoint()
     result = coll.insert_many(docs, ordered=False)
     inserted = len(result.inserted_ids)
     if inserted != len(docs):
@@ -110,7 +115,7 @@ def prepare_mongo_dest(
     replace_destination: bool,
     extra_snapshot: dict[str, Any] | None = None,
 ) -> tuple[Any, bool, str] | FastPathResult:
-    """Return ``(coll, created_here, mongo_write)`` or a skip-complete result."""
+    """Return ``(coll, created_here, mongo_write)``; an occupied dest declines."""
     try:
         import pymongo  # noqa: F401
     except Exception as exc:

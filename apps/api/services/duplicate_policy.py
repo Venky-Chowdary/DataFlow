@@ -203,8 +203,11 @@ def collapse_keep_last(
     """Keep the last row for each key. Earlier copies are not a second insert.
 
     ``block`` is the other in-file choice: the caller refuses the file instead
-    of calling this. Rows with a missing key are kept in order.
+    of calling this. Rows with a NULL / missing key are kept in order: ``''`` is
+    a key like any other, so two ``''`` rows collapse (D53).
     """
+    from services.value_serializer import is_reader_null_cell
+
     keys = [str(col) for col in key_columns if str(col).strip()]
     if not keys:
         return list(rows), 0
@@ -218,7 +221,7 @@ def collapse_keep_last(
         identity = key_fn(row) if key_fn is not None else tuple(row.get(col) for col in keys)
         if not isinstance(identity, tuple):
             identity = (identity,)
-        if any(value in (None, "") for value in identity):
+        if any(value is None or is_reader_null_cell(value) for value in identity):
             kept.append(row)
             continue
         previous = index.get(identity)

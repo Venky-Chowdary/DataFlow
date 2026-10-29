@@ -26,6 +26,9 @@ def _url(host: str, port: int, ssl: bool) -> str:
         parsed = urlparse(h)
         if not parsed.port:
             h = urlunparse(parsed._replace(netloc=f"{parsed.hostname}:{port}"))
+    from services.egress_guard import assert_connector_dial_allowed
+
+    assert_connector_dial_allowed(h, point="http_client")
     return h.rstrip("/")
 
 

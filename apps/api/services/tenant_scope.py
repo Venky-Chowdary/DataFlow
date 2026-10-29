@@ -23,13 +23,16 @@ filter and keeps system scope.
 from __future__ import annotations
 
 import contextlib
-import contextvars
 from dataclasses import dataclass
 from typing import Any, Iterator
 
 from fastapi import HTTPException
 
-from services.workspace_filter import WorkspaceFilter, norm_workspace_id as _norm
+from services.workspace_filter import (
+    WorkspaceFilter,
+    bound_workspace_filter,
+    norm_workspace_id as _norm,
+)
 from services.team_store import (
     list_memberships_for_user,
     list_workspaces_for_user,
@@ -125,12 +128,14 @@ class TenantScope:
     def target_workspace_id(self, *, write: bool = False) -> str:
         """The one workspace a create/export lands in; never a silent "all".
 
-        With no header and isolation enforced this is the actor's default
-        workspace instead of the old 400. When isolation is off, a header-less
-        write keeps the legacy unscoped stamp.
+        With no header this is the actor's default workspace instead of the old
+        400. A header-less write that has no workspace to land in keeps the
+        legacy unscoped stamp only while isolation is off, and only for
+        callers with no membership to prefer (a member's write must not become
+        an unscoped row every legacy caller can see).
         """
         ws = self.requested_workspace_id
-        if not ws and (self.enforced or not write):
+        if not ws and (self.enforced or not write or (self.memberships and not self.unrestricted)):
             ws = self.default_workspace_id
         if not ws:
             if not self.enforced and write:
@@ -184,7 +189,7 @@ def ordered_memberships(email: str) -> tuple[tuple[str, str], ...]:
 
 
 def actor_is_unrestricted(user: dict[str, Any] | None) -> bool:
-    """Platform admin, same notion as ``team_router._is_platform_admin``.
+    """Platform admin, the one definition of a platform admin (``team_router`` resolves a user by email and asks it).
 
     A workspace API key carrying ``admin`` is unrestricted only when the account
     that minted it is a platform admin — the key's role is a workspace role.
@@ -239,22 +244,38 @@ def resolve_tenant_scope(request: Any, requested_workspace_id: str | None = None
     return _base_scope(request).narrowed(requested)
 
 
-# Request-free code paths that still serve one caller (Pilot / MCP tool turns)
-# read the scope bound for that turn; nothing bound means system scope.
-_bound_scope: contextvars.ContextVar[TenantScope | None] = contextvars.ContextVar(
-    "tenant_scope", default=None
-)
-
-
 @contextlib.contextmanager
 def bind_tenant_scope(scope: TenantScope | None) -> Iterator[None]:
-    token = _bound_scope.set(scope)
-    try:
+    """Bind ``scope`` for store-level reads in this request/turn (see
+    ``services.workspace_filter.bound_workspace_filter``)."""
+    stamp = ""
+    if scope is not None:
+        try:
+            stamp = scope.target_workspace_id(write=True)
+        except HTTPException:
+            stamp = ""
+    with bound_workspace_filter(
+        scope.filter if scope is not None else None,
+        stamp,
+        scope.actor if scope is not None else "",
+    ):
         yield
-    finally:
-        _bound_scope.reset(token)
 
 
-def current_workspace_filter() -> WorkspaceFilter | None:
-    scope = _bound_scope.get()
-    return scope.filter if scope is not None else None
+def scope_for_binding(request: Any) -> TenantScope | None:
+    """The scope to bind for ``request``; None leaves system scope.
+
+    Auth off means the single local operator, who sees everything. A request
+    whose header names a workspace the actor cannot read binds a scope that
+    sees nothing, so a store read in that request cannot fall back to system
+    scope; the router still answers the 403.
+    """
+    from src.services.auth_service import auth_required
+
+    if not auth_required() or not getattr(request.state, "user_email", None):
+        return None
+    try:
+        return resolve_tenant_scope(request)
+    except HTTPException:
+        return TenantScope(actor="", unrestricted=False, enforced=True, memberships=())
+

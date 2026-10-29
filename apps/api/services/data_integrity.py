@@ -16,7 +16,11 @@ from services.column_case import column_type_or_none, lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS, normalize_dest_kind
 from services.mapping_constraints import write_mappings
 from services.validation_coverage import stamp_validation_coverage
-from services.value_serializer import project_row_cells, wire_cell_text
+from services.value_serializer import (
+    is_reader_null_cell,
+    project_row_cells,
+    wire_cell_text,
+)
 
 # Validation mode → minimum confidence / null tolerance
 _MODE_THRESHOLDS = {
@@ -580,7 +584,12 @@ def _check_required_nulls(
         values = [lookup_row_value(row, src, None) for row in rows]
         if not values:
             continue
-        empty = sum(1 for v in values if wire_cell_text(v) == "")
+        # A NULL cell serialises to the wire sentinel, not "" — count it (and
+        # the reader's NULL/Missing spellings) as empty, or a key column that
+        # is entirely NULL sails through as populated.
+        empty = sum(
+            1 for v in values if is_reader_null_cell(v) or wire_cell_text(v) == ""
+        )
         rate = empty / len(values)
         if rate > null_rate_max:
             issues.append(f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field)")
@@ -1959,6 +1968,60 @@ def _check_null_keys(
     }
 
 
+def _check_transformed_key_collisions(
+    probe: dict[str, Any],
+    *,
+    sync_mode: str,
+    dest_kind: str,
+    identity_declared: bool = False,
+) -> dict[str, Any]:
+    """D39: distinct source keys that a key-column transform writes as one key."""
+    from services.primary_key import sync_requires_unique_identity
+    from services.sync_cursor import is_overwrite_sync, normalize_sync_mode
+
+    count = int(probe.get("collision_count") or 0)
+    label = " + ".join(probe.get("key_columns") or []) or "the key"
+    transforms = ", ".join(
+        f"{col}: {xform}" for col, xform in (probe.get("transforms") or {}).items()
+    )
+    sample = "; ".join(
+        f"{' vs '.join(repr(k) for k in c.get('source_keys') or [])} "
+        f"-> {c.get('written_key')!r}"
+        for c in (probe.get("collisions") or [])[:3]
+    )
+    message = (
+        f"{label}: {count:,} source row(s) share a key only after the key's "
+        f"transform ({transforms}) - {sample}. The destination key would treat them as one "
+        "row and keep one of them. Drop the transform from the key, dedupe the "
+        "source, or choose a key the transform leaves distinct."
+    )
+    # An overwrite recreates the table with the declared key as its PK, so the
+    # same collision is a unique violation there.
+    keyed = (
+        dest_kind in SCHEMALESS_DESTS
+        or sync_requires_unique_identity(
+            normalize_sync_mode(sync_mode), dest_kind=dest_kind
+        )
+        or (identity_declared and is_overwrite_sync(sync_mode))
+    )
+    if not keyed:
+        return {
+            "check": "transformed_key_collisions",
+            "passed": True,
+            "blocks_transfer": False,
+            "issues": [],
+            "warnings": [message],
+        }
+    return {
+        "check": "transformed_key_collisions",
+        "passed": False,
+        "blocks_transfer": True,
+        "issues": [message],
+        "collision_count": count,
+        "primary_key_columns": list(probe.get("key_columns") or []),
+    }
+
+
 def run_integrity_audit(
     *,
     source_columns: list[str],
@@ -1983,6 +2046,7 @@ def run_integrity_audit(
     source_duplicate_probe_message: str = "",
     source_duplicate_probe_expected: bool = False,
     source_null_key_rows: int | None = None,
+    source_key_collisions: dict[str, Any] | None = None,
     dest_table_exists: bool | None = None,
     empty_cells_as_null: bool = False,
     dest_nullability: dict[str, bool] | None = None,
@@ -2164,6 +2228,15 @@ def run_integrity_audit(
                     int(source_null_key_rows),
                     sync_mode=sync_mode,
                     dest_kind=dest_kind,
+                )
+            )
+        if source_key_collisions and source_key_collisions.get("collision_count"):
+            checks.append(
+                _check_transformed_key_collisions(
+                    source_key_collisions,
+                    sync_mode=sync_mode,
+                    dest_kind=dest_kind,
+                    identity_declared=identity_declared,
                 )
             )
         checks.append(

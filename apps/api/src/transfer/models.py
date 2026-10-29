@@ -177,6 +177,9 @@ class TransferRequest:
     # Operator chose to overwrite a populated destination from a source that
     # holds 0 rows — refused without it (D56).
     empty_source_overwrite_acknowledged: bool = False
+    # Operator accepted a load far smaller than this route's history (the
+    # strict load-volume guard) - D82.
+    load_volume_acknowledged: bool = False
     # Sync now / full re-sync. Empty scope runs the full gate set.
     # ``drift_connectivity`` rechecks only drift and connectivity on a signed contract.
     preflight_scope: str = ""
@@ -361,6 +364,14 @@ def transfer_request_to_dict(request: TransferRequest) -> dict:
         "empty_source_overwrite_acknowledged": bool(
             request.empty_source_overwrite_acknowledged
         ),
+        # Run semantics the persisted job must carry: rerun / retry / resume
+        # rebuild the request from this dict, and from_dict already restores
+        # them — leaving them out silently ran the rerun with the defaults.
+        "source_timezone": request.source_timezone or "",
+        "duplicate_policy": request.duplicate_policy or "",
+        "allow_duplicates": bool(request.allow_duplicates),
+        "file_wait_seconds": int(request.file_wait_seconds or 0),
+        "load_volume_acknowledged": bool(request.load_volume_acknowledged),
         "preflight_scope": request.preflight_scope or "",
         "parent_job_id": request.parent_job_id or "",
         "historical_resync": bool(request.historical_resync),
@@ -454,6 +465,28 @@ def _project_operator_quarantine(job: dict) -> None:
         )
 
 
+def _confined_source_path(raw: object) -> str:
+    """Keep a serialized ``source_path`` only when it lies under the upload roots.
+
+    A path outside them is dropped, so the request falls back to its stored
+    file id / object URI or reports that the file must be re-uploaded.
+    """
+    path = str(raw or "").strip()
+    if not path:
+        return ""
+    from services.dataset_file import confine_source_path
+
+    try:
+        return str(confine_source_path(path))
+    except ValueError:
+        import logging
+
+        logging.getLogger(__name__).warning(
+            "transfer request source_path refused: outside upload roots"
+        )
+        return ""
+
+
 def transfer_request_from_dict(data: dict) -> TransferRequest:
     src = _decrypt_endpoint_secrets(data.get("source") or {})
     dst = _decrypt_endpoint_secrets(data.get("destination") or {})
@@ -466,7 +499,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         skip_preflight=bool(data.get("skip_preflight")),
         source_filename=data.get("source_filename") or "",
         source_content=b"",
-        source_path=str(data.get("source_path") or "").strip(),
+        source_path=_confined_source_path(data.get("source_path")),
         source_object_uri=str(data.get("source_object_uri") or "").strip(),
         sync_mode=data.get("sync_mode") or "full_refresh_append",
         schema_policy=data.get("schema_policy") or "manual_review",
@@ -515,6 +548,7 @@ def transfer_request_from_dict(data: dict) -> TransferRequest:
         empty_source_overwrite_acknowledged=bool(
             data.get("empty_source_overwrite_acknowledged")
         ),
+        load_volume_acknowledged=bool(data.get("load_volume_acknowledged")),
         preflight_scope=str(data.get("preflight_scope") or "").strip(),
         parent_job_id=str(data.get("parent_job_id") or "").strip(),
         rerun_of=str(data.get("rerun_of") or "").strip(),

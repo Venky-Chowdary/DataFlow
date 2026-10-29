@@ -57,6 +57,7 @@ def run_plan_mapping(
     source_samples: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     from services.mapping_pipeline import run_mapping_pipeline
+    from services.value_serializer import evidence_text
 
     _, confidence_threshold_for_mode, _, _, _ = _preflight()
 
@@ -70,7 +71,7 @@ def run_plan_mapping(
         {
             "name": c,
             "inferred_type": plan.source_schema.get(c, "VARCHAR"),
-            "samples": [str(x) for x in samples.get(c, [])[:8]],
+            "samples": [evidence_text(x) for x in samples.get(c, [])[:8]],
         }
         for c in plan.source_columns
     ]
