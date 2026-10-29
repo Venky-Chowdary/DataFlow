@@ -47,6 +47,63 @@ export async function reachTransform(page: Page): Promise<void> {
     await next.click();
   }
   await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
+  // Every spec that reaches Transform measures layout or drags on it. The sample-load
+  // toast (and any it raises later) must not move the stage under the pointer.
+  await settleToasts(page);
+}
+
+/**
+ * The recipe store is keyed by source and destination, and every spec loads the
+ * same sample. A draft one test saved comes back from the API in the next test
+ * (or the next --repeat-each pass, or the other worker) as extra steps, so the
+ * step list, and its screenshot, depends on which test ran before. Every test
+ * starts from an empty recipe.
+ */
+export async function isolateDrafts(page: Page): Promise<void> {
+  await page.route("**/api/v1/shape/drafts**", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ draft: null }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+}
+
+/**
+ * Toasts dock in-flow in the studio header chrome (D-BP-20), so one that is
+ * still on screen, or that expires mid-capture, changes the header band and with
+ * it the height of everything under it. A visual capture must never depend on
+ * how long the sample-load toast lives. Hide toasts for good (a style tag, so a
+ * late arrival is hidden too) and wait until every toast has left the DOM; the
+ * dock then holds its idle layout, which is what the baselines show.
+ */
+export async function settleToasts(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    if (document.getElementById("df-e2e-quiet-toasts")) return;
+    const style = document.createElement("style");
+    style.id = "df-e2e-quiet-toasts";
+    style.textContent = ".dt-toast, .dt-toast-more { display: none !important; }";
+    document.head.appendChild(style);
+  });
+  await expect(page.locator(".dt-toast, .dt-toast-more")).toHaveCount(0, { timeout: 30_000 });
+}
+
+/**
+ * A capture must not carry transient input state. Whether the last control the
+ * test touched still shows its focus ring (or a hover) differs from run to run
+ * (1857 px on the status field of the dark 1440 shot), so drop focus and park
+ * the pointer before every capture.
+ */
+export async function settleInput(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) active.blur();
+  });
+  await page.mouse.move(0, 0);
 }
 
 export async function shoot(
@@ -59,11 +116,12 @@ export async function shoot(
   await panel.evaluate((node) => {
     node.scrollTop = 0;
   });
-  // A toast that arrives while the shot settles used to be masked, and the
-  // mask paints a magenta rectangle the classic baseline does not have.
-  // Hiding the toast keeps the step list itself on that baseline. The
-  // transform id stays masked because the hash changes.
-  await page.addStyleTag({ content: ".dt-toast { display: none !important; }" });
+  await settleToasts(page);
+  await settleInput(page);
+  // The identity chip reads "Previewing…" while the recipe preview is in flight and
+  // "Transform ID <hash>" after. It is masked, but the mask takes the chip's width, so a
+  // capture taken mid-preview differs from one taken after (4082 px on the runner).
+  await expect(page.locator(".df2-xform-identity")).not.toHaveText(/Previewing/, { timeout: 30_000 });
   await page.evaluate(async () => {
     await document.fonts.ready;
   });

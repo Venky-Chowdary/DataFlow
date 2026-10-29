@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { expectDisjoint, expectWithinViewport } from "./layout";
-import { openStudio } from "./support";
+import { isolateDrafts, openStudio, settleInput, settleToasts } from "./support";
 
 /**
  * Flags-off pixels against baselines taken from 873bec36.
@@ -40,11 +40,9 @@ async function shootSurface(
   name: string,
   forceElement = false,
 ): Promise<void> {
-  await page.locator(".dt-toast").evaluateAll((nodes) => {
-    for (const node of nodes) (node as HTMLElement).style.setProperty("display", "none");
-  });
+  await settleToasts(page);
+  await settleInput(page);
   const mask = [
-    page.locator(".dt-toast"),
     page.locator(".df2-xform-identity"),
     page.locator(".df2-nav-badge"),
     page.locator(".df2-sidebar-user"),
@@ -60,6 +58,7 @@ async function shootSurface(
 
 test.describe("flags-off parity", () => {
   test.beforeEach(async ({ page }) => {
+    await isolateDrafts(page);
     await page.addInitScript(() => {
       localStorage.removeItem("df.studioSchemaBrowser");
       localStorage.removeItem("df.studioCanvas");
@@ -102,6 +101,10 @@ test.describe("flags-off parity", () => {
     });
     await openStudio(page);
     await still(page);
+    // The source step paints the API's capability probe (OCR line, source types).
+    // Until it answers the OCR line reads "Optional", so a capture taken early
+    // differs from one taken after. Wait for the probe before any capture.
+    await expect(page.locator("#df2-source-ocr-status")).not.toHaveText(/^Optional/, { timeout: 30_000 });
     await expect(page.getByTestId("studio-schema-browser")).toHaveCount(0);
     await expect(page.getByTestId("studio-schema-opt-in")).toHaveCount(0);
     await expect(page.getByTestId("studio-flags-error")).toHaveCount(0);

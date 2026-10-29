@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { expectDisjoint, expectHitInside, expectStackedAbove, expectStudioShellClear, expectWithinViewport } from "./layout";
-import { openStudio, reachTransform, shoot, tokenColor } from "./support";
+import { openStudio, reachTransform, settleToasts, shoot, tokenColor } from "./support";
 
 /** A toast shifts the narrow page. Remove it before the shot; the mask alone does not. */
 async function setPalette(page: Page, open: boolean): Promise<void> {
@@ -41,6 +41,47 @@ function contrast(foreground: string, background: string): number {
   const lighter = Math.max(parse(foreground), parse(background));
   const darker = Math.min(parse(foreground), parse(background));
   return (lighter + 0.05) / (darker + 0.05);
+}
+
+/**
+ * Drop a palette tile on the stage. A tile is draggable only once the catalog has
+ * made it executable and the canvas is editable, and a drop that lands before the
+ * previous one has rendered its node is lost on a slow runner. Wait for both, and
+ * for the node count the drop must produce.
+ */
+async function dropOp(page: Page, op: string, position: { x: number; y: number }, nodesAfter?: number): Promise<void> {
+  const tile = page.locator(`.df2-canvas-op[data-op='${op}'][draggable='true']`);
+  await expect(tile).toBeVisible();
+  const nodes = page.locator(".react-flow__node");
+  if (nodesAfter == null) {
+    await tile.dragTo(page.getByTestId("transform-canvas-stage"), { targetPosition: position });
+    return;
+  }
+  // A synthetic HTML5 drop is sometimes swallowed on a loaded runner (no node, no error).
+  // Re-drop only while the node count is still short, so a slow drop is never doubled.
+  await expect(async () => {
+    if ((await nodes.count()) < nodesAfter) {
+      await tile.dragTo(page.getByTestId("transform-canvas-stage"), { targetPosition: position });
+    }
+    await expect(nodes).toHaveCount(nodesAfter, { timeout: 4_000 });
+  }).toPass({ timeout: 40_000 });
+}
+
+/**
+ * The stage resizes as panels open, close and finish loading, and xyflow centres on the pane
+ * size it has at the moment of the command. Wait until the stage box holds still before a test
+ * asks for a centred node.
+ */
+async function stageSettled(page: Page): Promise<void> {
+  const stage = page.getByTestId("transform-canvas-stage");
+  let last = await stage.boundingBox();
+  for (let still = 0, tries = 0; still < 4 && tries < 80; tries += 1) {
+    await page.waitForTimeout(150);
+    const next = await stage.boundingBox();
+    still = next && last && Math.abs(next.width - last.width) < 0.5 && Math.abs(next.height - last.height) < 0.5
+      && Math.abs(next.y - last.y) < 0.5 ? still + 1 : 0;
+    last = next;
+  }
 }
 
 async function buildValidOrdersChain(page: Page): Promise<void> {
@@ -363,10 +404,7 @@ test.describe("studio next", () => {
     await openStudio(page);
     await reachTransform(page);
     await setPalette(page, true);
-    await page.locator(".df2-canvas-op[data-op='trim']").dragTo(page.getByTestId("transform-canvas-stage"), {
-      targetPosition: { x: 400, y: 160 },
-    });
-    await expect(page.locator(".react-flow__node")).toHaveCount(1);
+    await dropOp(page, "trim", { x: 400, y: 160 }, 1);
     await page.getByRole("button", { name: "Run preview" }).first().click();
     await expect(page.getByTestId("canvas-preview").locator("tbody tr").first()).toBeVisible({ timeout: 20_000 });
     const toMap = page.getByRole("button", { name: "Continue with this transform" });
@@ -390,9 +428,12 @@ conn.execute("create table customers (id integer primary key, email text)")
 conn.executemany("insert into customers values (?, ?)", [(i, f"c{i}@example.com") for i in range(1, 13)])
 conn.commit()
 `, dbPath]);
+    const connectorName = `Studio SQLite ${dir.split("/").pop()}`;
     const created = await page.request.post("/api/v1/connectors/saved", {
       data: {
-        name: "Studio SQLite",
+        // Saved connectors live on the API across tests and repeats, so the name
+        // must be unique to this run or the picker finds an earlier run's file.
+        name: connectorName,
         type: "sqlite",
         role: "both",
         // SQLite has no schema layer. The file path is the database, and
@@ -406,10 +447,10 @@ conn.commit()
     await openStudio(page);
     await page.getByRole("radio", { name: "Database" }).click();
     const source = page.getByLabel("Source connector");
-    const sourceValue = await source.evaluate((el) => {
-      const option = [...(el as HTMLSelectElement).options].find((item) => item.label.includes("Studio SQLite"));
+    const sourceValue = await source.evaluate((el, name) => {
+      const option = [...(el as HTMLSelectElement).options].find((item) => item.label.includes(name));
       return option?.value ?? "";
-    });
+    }, connectorName);
     expect(sourceValue).toBeTruthy();
     await source.selectOption(sourceValue);
     const browser = page.getByTestId("studio-schema-browser");
@@ -498,12 +539,14 @@ conn.commit()
     await expect(validation.getByRole("button", { name: "Step 2 Valid" })).toBeVisible();
     await expect(validation.getByRole("button", { name: "Step 3 Invalid" })).toBeVisible();
     await expect(validation).toContainText(/order_id/);
+    await stageSettled(page);
     await validation.getByRole("button", { name: "Step 3 Invalid" }).click();
     await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
     await expect(page.locator("#canvas-inspector")).toBeFocused();
     await expect.poll(() => nodeCenterGap(page, 2)).toBeLessThan(80);
     await page.getByRole("button", { name: "Fit", exact: true }).click();
     await page.locator(".df2-canvas-node[data-index='0'] .df2-canvas-node-title").click();
+    await stageSettled(page);
     await page.getByRole("button", { name: "Step 3 Invalid" }).click();
     await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
     await expect(page.locator("#canvas-inspector")).toBeFocused();
@@ -520,7 +563,7 @@ conn.commit()
     await reachTransform(page);
     // A toast docks in-flow in the header (D-BP-20) and, at 390, leaves the canvas
     // 12px short of its 232px stage plus drawers. Measure the idle layout.
-    await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
+    await settleToasts(page);
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
     const trim = page.locator(".df2-canvas-op[data-op='trim']");
     await expect(trim).toBeVisible();
@@ -936,12 +979,11 @@ conn.commit()
     // Toasts dock in-flow in the header chrome (D-BP-20), so one expiring mid-test
     // moves the whole stage up by its 48px height. The drop offset compares a stage
     // box read earlier with a node box read later; let the sample-load toasts clear.
-    await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
+    await settleToasts(page);
     await setPalette(page, true);
     const stage = page.getByTestId("transform-canvas-stage");
-    await page.locator(".df2-canvas-op[data-op='trim']").dragTo(stage, { targetPosition: { x: 180, y: 80 } });
-    await page.locator(".df2-canvas-op[data-op='collapse_whitespace']").dragTo(stage, { targetPosition: { x: 460, y: 80 } });
-    await expect(page.locator(".react-flow__node")).toHaveCount(2);
+    await dropOp(page, "trim", { x: 180, y: 80 }, 1);
+    await dropOp(page, "collapse_whitespace", { x: 460, y: 80 }, 2);
     const first = page.locator(".react-flow__node").nth(0);
     const second = page.locator(".react-flow__node").nth(1);
     const before = await first.boundingBox();
@@ -960,7 +1002,7 @@ conn.commit()
     expect(dropped!.y).toBeGreaterThan(moving!.y + 40);
     await page.getByRole("combobox", { name: "Zoom percent" }).selectOption("150");
     const zoomedStage = await stage.boundingBox();
-    await page.locator(".df2-canvas-op[data-op='absolute']").dragTo(stage, { targetPosition: { x: 220, y: 140 } });
+    await dropOp(page, "absolute", { x: 220, y: 140 });
     const added = page.locator(".react-flow__node", { hasText: "Absolute" });
     await expect(added).toBeVisible();
     const addedBox = await added.boundingBox();
@@ -972,10 +1014,20 @@ conn.commit()
   test("flatten hover does not move the palette row", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
+    // A toast docked in the header shifts the palette by its 48px while it lives.
+    await settleToasts(page);
     await setPalette(page, true);
     const flatten = page.locator(".df2-canvas-op[data-op='flatten_json']");
     await flatten.scrollIntoViewIfNeeded();
-    const before = await flatten.boundingBox();
+    // The palette fills in as the catalog and suggestions arrive; a tile row
+    // landing above shifts it by one row (49px). Measure once it holds still.
+    let before = await flatten.boundingBox();
+    for (let still = 0, tries = 0; still < 3 && tries < 60; tries += 1) {
+      await page.waitForTimeout(150);
+      const next = await flatten.boundingBox();
+      still = next && before && Math.abs(next.y - before.y) < 0.5 ? still + 1 : 0;
+      before = next;
+    }
     await flatten.hover();
     await page.waitForTimeout(250);
     const after = await flatten.boundingBox();
