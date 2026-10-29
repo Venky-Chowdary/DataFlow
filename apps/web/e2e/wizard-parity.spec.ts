@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { expectDisjoint, expectWithinViewport } from "./layout";
-import { openStudio, settleToasts } from "./support";
+import { isolateDrafts, openStudio, settleToasts } from "./support";
 
 /**
  * Flags-off pixels against baselines taken from 873bec36.
@@ -57,6 +57,7 @@ async function shootSurface(
 
 test.describe("flags-off parity", () => {
   test.beforeEach(async ({ page }) => {
+    await isolateDrafts(page);
     await page.addInitScript(() => {
       localStorage.removeItem("df.studioSchemaBrowser");
       localStorage.removeItem("df.studioCanvas");

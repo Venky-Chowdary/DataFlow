@@ -1,8 +1,9 @@
 import { expect, test } from "@playwright/test";
-import { openStudio, reachTransform, shoot, tokenColor } from "./support";
+import { isolateDrafts, openStudio, reachTransform, shoot, tokenColor } from "./support";
 
 test.describe("wizard baseline", () => {
   test.beforeEach(async ({ page }) => {
+    await isolateDrafts(page);
     await page.addInitScript(() => {
       localStorage.removeItem("df.studioSchemaBrowser");
       localStorage.removeItem("df.studioCanvas");

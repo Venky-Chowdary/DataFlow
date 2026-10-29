@@ -50,6 +50,27 @@ export async function reachTransform(page: Page): Promise<void> {
 }
 
 /**
+ * The recipe store is keyed by source and destination, and every spec loads the
+ * same sample. A draft one test saved comes back from the API in the next test
+ * (or the next --repeat-each pass, or the other worker) as extra steps, so the
+ * step list, and its screenshot, depends on which test ran before. Every test
+ * starts from an empty recipe.
+ */
+export async function isolateDrafts(page: Page): Promise<void> {
+  await page.route("**/api/v1/shape/drafts**", async (route) => {
+    if (route.request().method() === "GET") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ draft: null }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+}
+
+/**
  * Toasts dock in-flow in the studio header chrome (D-BP-20), so one that is
  * still on screen, or that expires mid-capture, changes the header band and with
  * it the height of everything under it. A visual capture must never depend on
