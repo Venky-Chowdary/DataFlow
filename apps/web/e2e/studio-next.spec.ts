@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
 import { expectDisjoint, expectHitInside, expectStackedAbove, expectStudioShellClear, expectWithinViewport } from "./layout";
-import { openStudio, reachTransform, shoot, tokenColor } from "./support";
+import { openStudio, reachTransform, settleToasts, shoot, tokenColor } from "./support";
 
 /** A toast shifts the narrow page. Remove it before the shot; the mask alone does not. */
 async function setPalette(page: Page, open: boolean): Promise<void> {
@@ -520,7 +520,7 @@ conn.commit()
     await reachTransform(page);
     // A toast docks in-flow in the header (D-BP-20) and, at 390, leaves the canvas
     // 12px short of its 232px stage plus drawers. Measure the idle layout.
-    await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
+    await settleToasts(page);
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
     const trim = page.locator(".df2-canvas-op[data-op='trim']");
     await expect(trim).toBeVisible();
@@ -936,7 +936,7 @@ conn.commit()
     // Toasts dock in-flow in the header chrome (D-BP-20), so one expiring mid-test
     // moves the whole stage up by its 48px height. The drop offset compares a stage
     // box read earlier with a node box read later; let the sample-load toasts clear.
-    await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
+    await settleToasts(page);
     await setPalette(page, true);
     const stage = page.getByTestId("transform-canvas-stage");
     await page.locator(".df2-canvas-op[data-op='trim']").dragTo(stage, { targetPosition: { x: 180, y: 80 } });
@@ -972,6 +972,8 @@ conn.commit()
   test("flatten hover does not move the palette row", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
+    // A toast docked in the header shifts the palette by its 48px while it lives.
+    await settleToasts(page);
     await setPalette(page, true);
     const flatten = page.locator(".df2-canvas-op[data-op='flatten_json']");
     await flatten.scrollIntoViewIfNeeded();
