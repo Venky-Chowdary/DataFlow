@@ -1293,7 +1293,7 @@ test.describe("transfer wizard stepper", () => {
       await preview.evaluate((node: HTMLButtonElement) => node.click());
     }
     await expect(marker).toBeVisible();
-    await expect(page.locator(".df2-wizard-step")).toHaveCount(canvas ? 3 : 6);
+    await expect(page.locator(".df2-wizard-step")).toHaveCount(6);
   }
 
   test("step icons sit beside their labels and separators stay clear", async ({ page }) => {
@@ -1307,6 +1307,9 @@ test.describe("transfer wizard stepper", () => {
           await next.click();
           await expect(page.locator(".df2-wizard-line.done")).toHaveCount(1);
         }
+        // Toasts dock in-flow inside the chrome (D-BP-20) and grow the band on
+        // purpose. This test pins the idle chrome, so let them expire first.
+        await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
         for (const width of widths) {
           await page.setViewportSize({ width, height: width === 1920 ? 1080 : 900 });
           const where = `${canvas ? "flags" : "classic"} ${theme} ${width}`;
@@ -1402,12 +1405,15 @@ test.describe("transfer wizard stepper", () => {
               : false;
             return { steps: steps.length, lines: lines.length, pairs, border, chrome, trackOverflow };
           });
-          expect(report.steps, where).toBe(canvas ? 3 : 6);
+          expect(report.steps, where).toBe(6);
           expect(report.lines, where).toBe(report.steps - 1);
-          // Classic chrome stays 54px through 1440 (58px at 1920, where the
-          // full names and the larger marker already sat before this fix).
-          // Flags-on chrome is the 44px studio shell and must not grow.
-          expect(report.chrome, where).toBe(canvas ? 44 : width >= 1920 ? 58 : 54);
+          // Idle classic chrome: the stepper row (54px below 1440, 58px from 1440,
+          // where the full names and the larger marker sit) plus the 8px the empty
+          // toast dock holds as a row of the chrome grid (D-BP-20; the screenshot
+          // baselines are taken with that row). At 1280 and below the route bar
+          // stacks under the stepper (D-BP-23): 86px plus the dock row. Flags-on
+          // chrome is the 44px studio shell and must not grow.
+          expect(report.chrome, where).toBe(canvas ? 44 : width <= 1280 ? 94 : width >= 1440 ? 66 : 62);
           for (const pair of report.pairs) {
             expect(pair.iconHitsLabel, `${where} ${pair.text}`).toBe(false);
             expect(pair.position, `${where} ${pair.text}`).toBe("static");
@@ -1428,9 +1434,8 @@ test.describe("transfer wizard stepper", () => {
           const spread = Math.max(...lineGaps) - Math.min(...lineGaps);
           expect(spread, where).toBeLessThanOrEqual(1);
           expect(report.trackOverflow, where).toBe(false);
-          const fullNames = canvas
-            ? ["Connect", "Review", "Run"]
-            : ["Source", "Destination", "Transform", "Map", "Validate", "Run"];
+          // Flags-on shows the same six-step flow (P1-3), not a Connect/Review/Run trio.
+          const fullNames = ["Source", "Destination", "Transform", "Map", "Validate", "Run"];
           expect(report.pairs.map((pair) => pair.text), where).toEqual(fullNames);
           const active = report.pairs.find((pair) => pair.active);
           const inactive = report.pairs.find((pair) => !pair.active);
