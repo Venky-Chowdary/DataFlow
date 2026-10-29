@@ -319,6 +319,6 @@ def _guard_registry(base: str) -> None:
     from services.egress_guard import EgressRefused, assert_connector_dial_allowed
 
     try:
-        assert_connector_dial_allowed(base)
+        assert_connector_dial_allowed(base, point="http_client")
     except EgressRefused as exc:
         raise SchemaRegistryError(str(exc)) from exc

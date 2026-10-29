@@ -184,7 +184,9 @@ def _dial_scope(driver: str, cfg: dict[str, Any]):
         str(cfg.get(key) or "")
         for key in ("schema_registry_url", "registry_url", "api_url", "base_url")
     ]
-    return connector_dial_scope(cfg, *extra, db_type=str(cfg.get("type") or driver or ""))
+    return connector_dial_scope(
+        cfg, *extra, db_type=str(cfg.get("type") or driver or ""), point="transfer"
+    )
 
 
 def read_via_registry(

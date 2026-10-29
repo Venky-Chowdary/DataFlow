@@ -145,6 +145,78 @@ docker run -p 8000:8000 --env-file .env \
 
 ---
 
+## Connector egress policy (private networks, loopback, metadata)
+
+Connector hosts are operator-supplied, so the API refuses dial targets it should
+not reach. There are two tiers.
+
+| Target class | Where it applies | Behaviour |
+|--------------|------------------|-----------|
+| Cloud metadata (`169.254.169.254`, `100.100.100.200`, `fd00:ec2::254`, `metadata.google.internal`), link-local (`169.254/16`, `fe80::/10`), multicast | Every site | Always refused. No flag or allowlist can permit it. |
+| Private (`10/8`, `172.16/12`, `192.168/16`, IPv6 ULA), loopback, CGNAT (`100.64/10`) | Sites production already enforced: connector Test, the SQL / MySQL / PostgreSQL / AWS drivers, PostgreSQL CDC, notification webhooks, the Copilot connector tools | Refused unless allowlisted (unchanged). |
+| Private, loopback, CGNAT | Newer sites: connector save/update, transfer reads and writes, schema introspection, destination precount and probes, shared HTTP / SMTP / Mongo / Redis clients, HTTP redirects and pagination | **Audit only by default**: the call proceeds and an `egress.would_block` audit event is written. |
+
+`egress.would_block` carries `point` (which site), `connector` (name, when known),
+`host`, `reason`, `host_class`, and the workspace. It is written once per
+connector, host and site per hour. Find them in the audit log (Settings, Audit,
+or `GET /api/v1/audit/events?level=warn`, action `egress.would_block`).
+
+### Flag
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DATAFLOW_EGRESS_ENFORCE_NEW` (or `DATAWRAP_EGRESS_ENFORCE_NEW`) | off | `1`/`true`/`yes`/`on`: the newer sites above refuse private, loopback and CGNAT hosts exactly like the production sites. |
+
+Saving or renaming an existing connector whose host, endpoint URL and connection
+string are unchanged is never refused because the host is private, even with the
+flag on. Only a new or changed target is checked.
+
+### Before turning the flag on
+
+Count what it would break. The script is read-only (it never writes to a store
+and never prints connection strings or secrets):
+
+```bash
+cd apps/api
+python scripts/audit_egress_impact.py                          # store as the app is configured
+python scripts/audit_egress_impact.py --file connectors.json   # a connector store file
+MONGO_PROD=mongodb://... python scripts/audit_egress_impact.py --mongo-url-env MONGO_PROD
+python scripts/audit_egress_impact.py --workspace ws-acme --json
+```
+
+It prints every saved connector whose `host`, `endpoint_url`, `connection_string`
+(or `base_url` / `url` / registry URL) the enforcing rule would refuse, with the
+workspace, the host class (`loopback`, `private`, `cgnat`, `link-local`,
+`metadata`) and the reason, then a count (`N of M saved connectors would be
+refused`). It honours workspace allowlists and `DATAFLOW_EGRESS_ALLOWLIST`, so
+add the ranges first and re-run until the count is what you expect. Rows with
+`link-local` / `metadata` are refused today regardless of the flag.
+
+### Allowing a private range for a workspace
+
+A workspace admin adds CIDR ranges (not host names) to the tenant record's
+`egress_allowlist`. Metadata, link-local, multicast and `0.0.0.0/0` cannot be
+listed.
+
+```bash
+# find the tenant id for the workspace
+curl -s -H "Authorization: Bearer $TOKEN" -H "X-Workspace-Id: ws-acme" \
+  "$API/api/v1/workspace/tenant"
+
+# allow the on-prem database VLAN and one VPC peer
+curl -s -X PATCH -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"egress_allowlist": ["10.20.0.0/16", "172.31.5.0/24"]}' \
+  "$API/api/v1/workspace/tenant/$TENANT_ID"
+```
+
+The PATCH replaces the list, so send every range the workspace needs. A connector
+whose host is `10.20.4.7` then passes at every site (and `audit_egress_impact.py`
+stops listing it). For a single-process lab or a proof run, set
+`DATAFLOW_EGRESS_ALLOWLIST=127.0.0.0/8,10.20.0.0/16` in the API environment
+instead; production deploys normally leave it unset and use the workspace list.
+
+---
+
 ## Health checks
 
 | Endpoint | Use |

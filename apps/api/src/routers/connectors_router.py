@@ -341,16 +341,14 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
 
 
 def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
-    """Refuse to persist a connector whose dial targets break the egress policy."""
-    from services.egress_guard import metadata_endpoint_refusal
+    """Refuse to persist a connector whose dial targets break the egress policy.
 
-    refusal = metadata_endpoint_refusal(
-        str(data.get("host") or ""),
-        str(data.get("endpoint_url") or ""),
-        str(data.get("connection_string") or ""),
-        workspace_id=str(data.get("workspace_id") or ""),
-        db_type=str(data.get("type") or ""),
-    )
+    Audit-first for private hosts and never applied to an unchanged target
+    (``connector_save_refusal``); metadata and link-local always refuse.
+    """
+    from services.egress_guard import connector_save_refusal
+
+    refusal = connector_save_refusal(data)
     if refusal:
         raise HTTPException(status_code=400, detail=refusal)
 
