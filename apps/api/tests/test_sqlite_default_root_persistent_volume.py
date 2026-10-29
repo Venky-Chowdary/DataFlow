@@ -3,9 +3,11 @@
 ``QA_E2E_sqlite_dst`` listed 0 tables after a production restart: with no
 ``DATAFLOW_SQLITE_ROOT`` the path was used as given, so a relative name landed
 in the container's working directory and ``/tmp/...`` in the container's
-temp — both gone on the next restart. In production the default root is now a
-directory on the persistent data volume, and the API says so at startup when
-that volume is not mounted.
+temp — both gone on the next restart. With
+``DATAFLOW_CONFINE_LOCAL_FILES=1`` the production default root is a directory on
+the persistent data volume; with the flag off (the default) the path is used as
+given and the would-be refusal is audited. The API says so at startup when the
+volume is not mounted.
 """
 
 from __future__ import annotations
@@ -24,6 +26,7 @@ def production(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.delenv("DATAWRAP_ENV", raising=False)
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "data"))
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "1")
     return tmp_path / "data" / "sqlite"
 
 
@@ -78,3 +81,40 @@ def test_startup_warns_when_the_data_dir_is_not_a_mounted_volume(tmp_path, monke
     monkeypatch.setenv("DATAFLOW_ENV", "development")
     monkeypatch.setattr(platform_config, "_on_root_filesystem", lambda _p: True)
     assert platform_config.persistent_storage_warnings() == []
+
+
+def test_flag_off_keeps_today_behaviour_and_audits_what_it_would_refuse(
+    production, monkeypatch, tmp_path
+):
+    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES")
+    from services import would_apply_audit
+    import services.audit_log as audit_log
+
+    would_apply_audit.reset_dedupe()
+    events: list[dict] = []
+    monkeypatch.setattr(audit_log, "append_audit_event", lambda **kw: events.append(kw))
+    assert sqlite_file_path("relative.db", "", "") == "relative.db"
+    off_volume = str(tmp_path / "elsewhere" / "x.db")
+    assert sqlite_file_path(off_volume, "", "") == off_volume
+    on_volume = str(production / "ok.db")
+    assert sqlite_file_path(on_volume, "", "") == on_volume
+    assert [e["action"] for e in events] == ["local_file.would_confine"] * 2
+    assert {e["details"]["kind"] for e in events} == {"sqlite"}
+    assert events[1]["details"]["path"] == str(Path(off_volume).resolve())
+    assert events[1]["details"]["would_be_root"] == str(production.resolve())
+    assert events[1]["details"]["flag"] == "DATAFLOW_CONFINE_LOCAL_FILES"
+
+
+def test_flag_off_still_refuses_service_data_internals_and_honours_explicit_roots(
+    production, monkeypatch, tmp_path
+):
+    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES")
+    data = production.parent
+    with pytest.raises(ValueError, match="service data directory"):
+        sqlite_file_path(str(data / "proof_ledger.db"), "", "")
+    with pytest.raises(ValueError, match="service data directory"):
+        sqlite_file_path(str(tmp_path / "x" / ".." / "data" / "jobs.db"), "", "")
+    root = tmp_path / "custom"
+    monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(root))
+    with pytest.raises(ValueError, match="DATAFLOW_SQLITE_ROOT"):
+        sqlite_file_path(str(tmp_path / "outside.db"), "", "")

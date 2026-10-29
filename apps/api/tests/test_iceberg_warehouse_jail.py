@@ -138,13 +138,20 @@ def test_writer_warehouse_outside_root_rejected(jail: Path, tmp_path: Path) -> N
     assert not outside.exists()
 
 
-def test_production_defaults_root_to_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def _production(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("DATAFLOW_ICEBERG_ROOT", raising=False)
     monkeypatch.delenv("DATAWRAP_ICEBERG_ROOT", raising=False)
     for name in ("DATAWRAP_ENV", "DATAWRAP_DATA_DIR", "RAILWAY_ENVIRONMENT", "RAILWAY_SERVICE_ID"):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "production")
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path / "data"))
+
+
+def test_production_defaults_root_to_data_dir_when_confinement_is_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _production(tmp_path, monkeypatch)
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "1")
     with pytest.raises(ValueError, match="ICEBERG_ROOT"):
         resolve_local_warehouse("/etc", create=False)
     assert resolve_local_warehouse("wh", create=False) == (tmp_path / "data" / "iceberg" / "wh").resolve()
@@ -155,3 +162,47 @@ def test_dev_without_root_keeps_absolute_warehouse(tmp_path: Path, monkeypatch: 
     monkeypatch.delenv("DATAWRAP_ICEBERG_ROOT", raising=False)
     monkeypatch.setenv("DATAFLOW_ENV", "test")
     assert resolve_local_warehouse(str(tmp_path / "wh")) == (tmp_path / "wh").resolve()
+
+
+def test_production_without_the_flag_keeps_today_behaviour_and_audits(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _production(tmp_path, monkeypatch)
+    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES", raising=False)
+    monkeypatch.delenv("DATAWRAP_CONFINE_LOCAL_FILES", raising=False)
+    from services import would_apply_audit
+    import services.audit_log as audit_log
+
+    would_apply_audit.reset_dedupe()
+    events: list[dict] = []
+    monkeypatch.setattr(audit_log, "append_audit_event", lambda **kw: events.append(kw))
+    outside = tmp_path / "elsewhere" / "wh"
+    assert resolve_local_warehouse(str(outside), create=False) == outside.resolve()
+    assert [e["action"] for e in events] == ["local_file.would_confine"]
+    assert events[0]["details"]["would_be_root"] == str((tmp_path / "data" / "iceberg").resolve())
+    # An explicit root is still honoured, flag or not.
+    root = tmp_path / "explicit"
+    monkeypatch.setenv("DATAFLOW_ICEBERG_ROOT", str(root))
+    with pytest.raises(ValueError, match="ICEBERG_ROOT"):
+        resolve_local_warehouse(str(outside), create=False)
+
+
+def test_absolute_catalog_path_is_a_root_question_not_a_dotdot_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Relative ``..`` catalog paths are always refused; an absolute one follows the root."""
+    from connectors.iceberg_catalog import _sql_props
+
+    monkeypatch.delenv("DATAFLOW_ICEBERG_ROOT", raising=False)
+    monkeypatch.delenv("DATAWRAP_ICEBERG_ROOT", raising=False)
+    monkeypatch.setenv("DATAFLOW_ENV", "test")
+    wh = tmp_path / "wh"
+    with pytest.raises(ValueError, match="catalog_path"):
+        _sql_props("", str(wh), {"catalog_path": "../escape.db"})
+    absolute = tmp_path / "catalogs" / "cat.db"
+    uri, _props = _sql_props("", str(wh), {"catalog_path": str(absolute)})
+    assert uri == f"sqlite:///{absolute.resolve()}"
+    root = tmp_path / "root"
+    monkeypatch.setenv("DATAFLOW_ICEBERG_ROOT", str(root))
+    with pytest.raises(ValueError, match="ICEBERG_ROOT"):
+        _sql_props("", str(root / "wh"), {"catalog_path": str(absolute)})

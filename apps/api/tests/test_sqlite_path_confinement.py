@@ -73,6 +73,7 @@ def test_dev_without_root_keeps_local_files(dev_env):
 
 def test_production_without_root_confines_to_the_volume(dev_env, monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "production")
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "1")
     db = dev_env / "any.db"
     with pytest.raises(ValueError, match="DATAFLOW_SQLITE_ROOT"):
         sqlite_file_path(str(db), "", "")
@@ -117,6 +118,7 @@ def test_data_dir_refused_even_inside_root(dev_env, monkeypatch):
 
 def test_duckdb_root_and_fallback(dev_env, monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "production")
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "1")
     root = dev_env / "duck"
     root.mkdir()
     monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(root))
@@ -130,6 +132,7 @@ def test_duckdb_root_and_fallback(dev_env, monkeypatch):
 
 def test_production_default_volume_dirs_are_allowed_but_not_the_rest_of_the_data_dir(dev_env, monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "production")
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "1")
     data = platform_config.data_dir()
     assert sqlite_file_path("tenant.db", "", "") == str((data / "sqlite" / "tenant.db").resolve())
     assert duckdb_file_path("tenant.duckdb", "") == str((data / "duckdb" / "tenant.duckdb").resolve())
@@ -148,3 +151,20 @@ def test_embedded_raw_connectors_are_confined(dev_env, monkeypatch):
         _sqlite_cfg_path({"database": str(state_db)})
     with pytest.raises(ValueError, match="service data directory"):
         _build_url({"type": "sqlite", "database": str(state_db)})
+
+
+def test_duckdb_ignores_the_sqlite_root_unless_confinement_is_on(dev_env, monkeypatch):
+    """Production never confined DuckDB; SQLITE_ROOT must not start doing so by itself."""
+    monkeypatch.delenv("DATAFLOW_CONFINE_LOCAL_FILES", raising=False)
+    root = dev_env / "sqlite_only"
+    root.mkdir()
+    monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(root))
+    outside = str(dev_env / "b.duckdb")
+    assert duckdb_file_path(outside, "") == outside
+    monkeypatch.setenv("DATAFLOW_DUCKDB_ROOT", str(root))
+    with pytest.raises(ValueError, match="DATAFLOW_DUCKDB_ROOT"):
+        duckdb_file_path(outside, "")
+    monkeypatch.delenv("DATAFLOW_DUCKDB_ROOT")
+    monkeypatch.setenv("DATAFLOW_CONFINE_LOCAL_FILES", "1")
+    with pytest.raises(ValueError, match="DATAFLOW_DUCKDB_ROOT"):
+        duckdb_file_path(outside, "")

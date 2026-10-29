@@ -8,6 +8,12 @@ from decimal import Decimal
 from pathlib import Path
 
 from services.brand_env import getenv_brand
+from services.local_file_policy import (
+    audit_would_confine,
+    confine_local_files,
+    implicit_root,
+    is_within,
+)
 
 
 def sqlite_decimal_bind_text(value: Decimal) -> str:
@@ -91,56 +97,36 @@ def sqlite_root() -> tuple[str, bool]:
     ``DATAFLOW_SQLITE_ROOT`` may list several directories separated by
     ``os.pathsep`` (a relative path is anchored at the first).
 
-    ``DATAFLOW_SQLITE_ROOT`` wins. Without it, production confines SQLite to a
-    directory on the persistent data volume: a relative name used to land in
-    the container's working directory and ``/tmp`` in its temp, so a
-    destination file (and the tables DataFlow created in it) vanished on the
-    next restart (item 54). Development keeps any path.
+    ``DATAFLOW_SQLITE_ROOT`` wins. With ``DATAFLOW_CONFINE_LOCAL_FILES`` on,
+    production otherwise confines SQLite to a directory on the persistent data
+    volume: a relative name used to land in the container's working directory
+    and ``/tmp`` in its temp, so a destination file (and the tables DataFlow
+    created in it) vanished on the next restart (item 54). With the flag off
+    (the default) and no explicit root, any path is kept; see
+    :mod:`services.local_file_policy`.
     """
     explicit = (getenv_brand("SQLITE_ROOT") or "").strip()
     if explicit:
         return explicit, True
-    from services.platform_config import data_dir, is_production
-
-    if not is_production():
-        return "", False
-    root = data_dir() / "sqlite"
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return str(root), False
+    root = implicit_root("sqlite")
+    return (str(root), False) if root else ("", False)
 
 
 def duckdb_root() -> tuple[str, bool]:
     """``(root, explicit)`` for local DuckDB files, like :func:`sqlite_root`.
 
-    ``DATAFLOW_DUCKDB_ROOT`` wins, then ``DATAFLOW_SQLITE_ROOT``. Without either,
-    production confines DuckDB to ``<data_dir>/duckdb`` on the persistent
-    volume; development keeps any path.
+    ``DATAFLOW_DUCKDB_ROOT`` wins. With ``DATAFLOW_CONFINE_LOCAL_FILES`` on,
+    ``DATAFLOW_SQLITE_ROOT`` then applies to DuckDB too and production
+    otherwise confines it to ``<data_dir>/duckdb``. With the flag off (the
+    default, as before) DuckDB is unconfined unless ``DATAFLOW_DUCKDB_ROOT`` is set.
     """
-    explicit = (getenv_brand("DUCKDB_ROOT") or getenv_brand("SQLITE_ROOT") or "").strip()
+    explicit = (getenv_brand("DUCKDB_ROOT") or "").strip()
+    if not explicit and confine_local_files():
+        explicit = (getenv_brand("SQLITE_ROOT") or "").strip()
     if explicit:
         return explicit, True
-    from services.platform_config import data_dir, is_production
-
-    if not is_production():
-        return "", False
-    root = data_dir() / "duckdb"
-    try:
-        root.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
-    return str(root), False
-
-
-def _is_within(child: Path, parent: Path) -> bool:
-    c = os.path.normcase(str(child))
-    p = os.path.normcase(str(parent))
-    try:
-        return os.path.commonpath([c, p]) == p
-    except ValueError:  # different drives on Windows
-        return False
+    root = implicit_root("duckdb")
+    return (str(root), False) if root else ("", False)
 
 
 def _confine_embedded_path(
@@ -152,8 +138,10 @@ def _confine_embedded_path(
     anchored at the root. The service's own state directory
     (``platform_config.data_dir()``) is refused, except its ``sqlite`` /
     ``duckdb`` volume sub-directory, so a connector can never open the job
-    store, ledgers or secrets.
-    Without a root (development) any other path is returned unchanged.
+    store, ledgers or secrets (always on). Without a root any other path is
+    returned unchanged; in production with ``DATAFLOW_CONFINE_LOCAL_FILES`` off,
+    one outside the volume sub-directory is first recorded as
+    ``local_file.would_confine``.
     """
     from services.platform_config import data_dir
 
@@ -170,7 +158,7 @@ def _confine_embedded_path(
         state_dir = data_dir().resolve(strict=False)
     except OSError as exc:
         raise ValueError(f"Invalid {label} path: {exc}") from exc
-    if roots and not any(_is_within(resolved, r) for r in roots):
+    if roots and not any(is_within(resolved, r) for r in roots):
         shown = os.pathsep.join(str(r) for r in roots)
         if explicit:
             raise ValueError(f"{label} path must be under {env_name} ({shown})")
@@ -180,13 +168,14 @@ def _confine_embedded_path(
             f"Use a path under it, or set {env_name} to another mounted volume."
         )
     volume_dir = state_dir / volume_subdir
-    if _is_within(resolved, state_dir) and not _is_within(resolved, volume_dir):
+    if is_within(resolved, state_dir) and not is_within(resolved, volume_dir):
         raise ValueError(
             f"{label} path is inside the Datawrap service data directory and cannot be "
             f"opened as a connector; place the file under {volume_dir} "
             f"or set {env_name}"
         )
     if not roots:
+        audit_would_confine(volume_subdir, resolved)
         return path
     return str(resolved)
 
