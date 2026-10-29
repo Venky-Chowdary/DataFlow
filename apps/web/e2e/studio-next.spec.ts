@@ -67,6 +67,23 @@ async function dropOp(page: Page, op: string, position: { x: number; y: number }
   }).toPass({ timeout: 40_000 });
 }
 
+/**
+ * The stage resizes as panels open, close and finish loading, and xyflow centres on the pane
+ * size it has at the moment of the command. Wait until the stage box holds still before a test
+ * asks for a centred node.
+ */
+async function stageSettled(page: Page): Promise<void> {
+  const stage = page.getByTestId("transform-canvas-stage");
+  let last = await stage.boundingBox();
+  for (let still = 0, tries = 0; still < 4 && tries < 80; tries += 1) {
+    await page.waitForTimeout(150);
+    const next = await stage.boundingBox();
+    still = next && last && Math.abs(next.width - last.width) < 0.5 && Math.abs(next.height - last.height) < 0.5
+      && Math.abs(next.y - last.y) < 0.5 ? still + 1 : 0;
+    last = next;
+  }
+}
+
 async function buildValidOrdersChain(page: Page): Promise<void> {
   await setPalette(page, true);
   await page.locator(".df2-canvas-op[data-op='trim']").click();
@@ -522,12 +539,14 @@ conn.commit()
     await expect(validation.getByRole("button", { name: "Step 2 Valid" })).toBeVisible();
     await expect(validation.getByRole("button", { name: "Step 3 Invalid" })).toBeVisible();
     await expect(validation).toContainText(/order_id/);
+    await stageSettled(page);
     await validation.getByRole("button", { name: "Step 3 Invalid" }).click();
     await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
     await expect(page.locator("#canvas-inspector")).toBeFocused();
     await expect.poll(() => nodeCenterGap(page, 2)).toBeLessThan(80);
     await page.getByRole("button", { name: "Fit", exact: true }).click();
     await page.locator(".df2-canvas-node[data-index='0'] .df2-canvas-node-title").click();
+    await stageSettled(page);
     await page.getByRole("button", { name: "Step 3 Invalid" }).click();
     await expect(page.locator(".df2-canvas-node.is-selected[data-index='2']")).toBeVisible();
     await expect(page.locator("#canvas-inspector")).toBeFocused();
