@@ -328,7 +328,7 @@ def _introspect_schema_unscoped(
     password: str = "",
     schema: str = "public",
     connection_string: str = "",
-    ssl: bool = True,
+    ssl: bool | None = None,
     warehouse: str = "",
     table: str | None = None,
     catalog_type: str = "",
@@ -364,6 +364,11 @@ def _introspect_schema_unscoped(
     # planned engine does not inherit a live schema probe.
     if db_type in {"timescaledb", "timescale"}:
         db_type = "postgresql"
+    if ssl is None:
+        # A caller that never said anything about TLS must not make it mandatory.
+        from services.connector_store import default_ssl
+
+        ssl = default_ssl(db_type)
     if db_type in {
         "generic_sql",
         "duckdb",

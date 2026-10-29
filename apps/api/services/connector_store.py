@@ -164,6 +164,15 @@ SSL_MODES = ("", "prefer", "require")
 _TLS_MODE_TYPES = frozenset({"postgresql", "redshift"})
 
 
+def default_ssl(conn_type: str) -> bool:
+    """The ``ssl`` value for a caller that never said anything about TLS.
+
+    Engines with an explicit TLS mode (PostgreSQL family) negotiate: only a user's
+    choice may make TLS mandatory. Every other engine keeps its historical True.
+    """
+    return (conn_type or "").strip().lower() not in _TLS_MODE_TYPES
+
+
 def stamp_ssl_mode(doc: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
     """Record the user's TLS choice from a create/update payload onto ``doc``.
 

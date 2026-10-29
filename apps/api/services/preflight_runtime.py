@@ -52,7 +52,7 @@ class RuntimePreflightContext(PreflightContext):
                 password=self.source_db.get("password", ""),
                 schema=self.source_db.get("schema", "public"),
                 connection_string=self.source_db.get("connection_string", ""),
-                ssl=self.source_db.get("ssl", True),
+                ssl=self.source_db.get("ssl"),
                 table=self.source_table,
                 limit=100,
             )

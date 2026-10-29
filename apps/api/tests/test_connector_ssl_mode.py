@@ -116,3 +116,27 @@ def test_privilege_probe_dials_with_the_connectors_tls_choice(monkeypatch):
                 table_exists=None, need_update=False,
             )
     assert seen == [False, True]
+
+
+def test_a_caller_that_says_nothing_about_tls_does_not_make_it_mandatory():
+    """introspect_schema(ssl omitted) for a PostgreSQL-family engine negotiates TLS;
+    other engines keep their historical default."""
+    from services.connector_store import default_ssl
+
+    assert default_ssl("postgresql") is False
+    assert default_ssl("Redshift") is False
+    assert default_ssl("mysql") is True
+
+
+def test_introspect_schema_without_ssl_reaches_a_non_tls_postgres(monkeypatch):
+    import services.schema_introspect as si
+
+    seen: dict[str, object] = {}
+
+    def fake_get_connection(**kwargs):
+        seen.update(kwargs)
+        raise RuntimeError("stop after capturing the TLS argument")
+
+    monkeypatch.setattr("connectors.postgresql_conn.get_connection", fake_get_connection)
+    si.introspect_schema("postgresql", host="127.0.0.1", database="d", username="u", password="p")
+    assert seen.get("ssl") is False
