@@ -79,6 +79,12 @@ MODES_REQUIRING_PRIMARY_KEY = frozenset(
 )
 
 
+def _kafka_source(source_name: str) -> bool:
+    from services.copy_kafka_common import kafka_family_name
+
+    return kafka_family_name(source_name) == "kafka"
+
+
 def _declared_primary_key_columns(contract: dict[str, Any]) -> list[str]:
     raw = contract.get("primary_key")
     if raw is None or (isinstance(raw, str) and not str(raw).strip()):
@@ -423,6 +429,10 @@ def build_sync_contract_gate(
         # append still requires a table cursor.
         and sync != "cdc"
         and str(c.get("cursor_semantics") or "").strip().lower() != "cdc_position"
+        # Kafka's incremental position is the consumer group's committed
+        # offset per partition, not a column: an upsert keyed on id needs no
+        # cursor column, and a row watermark would drop messages.
+        and not _kafka_source(source_name)
     ]
     missing_primary_key: list[str] = []
     catalog_identity: list[tuple[str, list[str]]] = []
