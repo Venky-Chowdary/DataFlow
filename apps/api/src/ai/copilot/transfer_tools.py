@@ -1023,7 +1023,14 @@ def plan_transfer(
             except ValueError as exc:
                 return _tool_result(tool, success=False, error=str(exc))
 
-        note_step("running the preflight checks", src_conn, role="source")
+        # The gates probe the destination (login, privileges, catalog) as well
+        # as the source: a timeout here must not accuse the source alone (D187).
+        note_step(
+            "running the preflight checks",
+            src_conn,
+            role="source",
+            also=(("destination", dst_conn),),
+        )
         preflight = _run_preflight(
             src_conn=src_conn,
             dst_conn=dst_conn,
