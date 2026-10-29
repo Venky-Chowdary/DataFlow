@@ -2037,12 +2037,21 @@ def _to_sa_value(
                         f"generic SQL {ddl_type} refused naive datetime — provide "
                         "offset/Z (refuse silent UTC invent)"
                     )
-                return bind_aware_datetime(
+                from connectors.sqlserver_datetime2 import refuse_datetimeoffset_rounding
+
+                aware = bind_aware_datetime(
                     coerced,
                     engine=str(db_type or dialect_name or ""),
                     dest_type=str(coerce_ddl or ddl_type or ""),
                     original=value,
                 )
+                refuse_datetimeoffset_rounding(
+                    aware,
+                    logical=raw_lower,
+                    sa_type=sa_type,
+                    db_type=str(db_type or dialect_name or ""),
+                )
+                return aware
             if isinstance(coerced, date) and not isinstance(coerced, datetime):
                 raise ValueError(
                     f"generic SQL {ddl_type} refused date-only value — provide "
@@ -3234,10 +3243,14 @@ def _tz_safe_projection(cfg: dict[str, Any], cols: list[Any]) -> list[Any]:
             )
         elif kind == "ltz":
             # LTZ holds an instant, not an offset: TZH/TZM is ORA-01821 on it.
+            # Oracle's ``||`` treats NULL as '': guard it or NULL reads '+00:00' (D186).
             out.append(
-                (
-                    sa.func.to_char(sa.func.sys_extract_utc(col), ORACLE_LTZ_READ_FORMAT)
-                    + sa.literal("+00:00")
+                sa.case(
+                    (col.is_(None), sa.null()),
+                    else_=sa.func.to_char(
+                        sa.func.sys_extract_utc(col), ORACLE_LTZ_READ_FORMAT
+                    )
+                    + sa.literal("+00:00"),
                 ).label(col.name)
             )
         else:

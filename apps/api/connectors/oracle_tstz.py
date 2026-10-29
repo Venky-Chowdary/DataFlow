@@ -49,9 +49,12 @@ def is_oracle_tz_type_name(type_name: Any) -> bool:
 def oracle_tz_to_char(quoted_column: str, kind: str = _TZ) -> str:
     """SQL rendering one zone-bearing column as ISO text that keeps its instant."""
     if kind == _LTZ:
+        # Oracle's ``||`` treats NULL as '', so an unguarded suffix turns a NULL
+        # cell into the text '+00:00' (D186): keep NULL as NULL explicitly.
         return (
+            f"CASE WHEN {quoted_column} IS NULL THEN NULL ELSE "
             f"TO_CHAR(SYS_EXTRACT_UTC({quoted_column}), '{ORACLE_LTZ_READ_FORMAT}')"
-            " || '+00:00'"
+            " || '+00:00' END"
         )
     return f"TO_CHAR({quoted_column}, '{ORACLE_TSTZ_READ_FORMAT}')"
 
