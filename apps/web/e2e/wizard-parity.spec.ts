@@ -1,6 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { expectDisjoint, expectWithinViewport } from "./layout";
-import { openStudio } from "./support";
+import { openStudio, settleToasts } from "./support";
 
 /**
  * Flags-off pixels against baselines taken from 873bec36.
@@ -40,11 +40,8 @@ async function shootSurface(
   name: string,
   forceElement = false,
 ): Promise<void> {
-  await page.locator(".dt-toast").evaluateAll((nodes) => {
-    for (const node of nodes) (node as HTMLElement).style.setProperty("display", "none");
-  });
+  await settleToasts(page);
   const mask = [
-    page.locator(".dt-toast"),
     page.locator(".df2-xform-identity"),
     page.locator(".df2-nav-badge"),
     page.locator(".df2-sidebar-user"),
