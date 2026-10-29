@@ -518,6 +518,9 @@ conn.commit()
     await page.setViewportSize({ width: 390, height: 844 });
     await openStudio(page);
     await reachTransform(page);
+    // A toast docks in-flow in the header (D-BP-20) and, at 390, leaves the canvas
+    // 12px short of its 232px stage plus drawers. Measure the idle layout.
+    await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
     await page.evaluate(() => document.documentElement.setAttribute("data-theme", "dark"));
     const trim = page.locator(".df2-canvas-op[data-op='trim']");
     await expect(trim).toBeVisible();
@@ -930,6 +933,10 @@ conn.commit()
   test("dragging one node leaves the other in place and the drop stays under the pointer", async ({ page }) => {
     await openStudio(page);
     await reachTransform(page);
+    // Toasts dock in-flow in the header chrome (D-BP-20), so one expiring mid-test
+    // moves the whole stage up by its 48px height. The drop offset compares a stage
+    // box read earlier with a node box read later; let the sample-load toasts clear.
+    await expect(page.locator(".dt-toast")).toHaveCount(0, { timeout: 30_000 });
     await setPalette(page, true);
     const stage = page.getByTestId("transform-canvas-stage");
     await page.locator(".df2-canvas-op[data-op='trim']").dragTo(stage, { targetPosition: { x: 180, y: 80 } });
