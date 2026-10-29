@@ -158,10 +158,15 @@ NULL_SENTINELS = frozenset({
 # allocations on a wide, large table.
 
 #: Identity / text transforms where an empty string is a real value, not a null.
+#: ``mask_pii`` / ``hash_pii`` are here because a cell with no characters holds
+#: no PII to protect: it stays empty (distinct from SQL NULL, which stays NULL)
+#: instead of failing as an uncastable value (D184). ``redact`` stamps its token
+#: before this check.
 _KEEP_EMPTY_TRANSFORMS = frozenset({
     "none", "identity", "passthrough", "string", "varchar", "text",
     "upper", "lower", "trim", "trim_id",
     "strip_controls", "normalize_unicode",
+    "mask_pii", "hash_pii",
 })
 
 #: NaN / ±Infinity are not SQL null for JSON/vector — the typed parsers reject
