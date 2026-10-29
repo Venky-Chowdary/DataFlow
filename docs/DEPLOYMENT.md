@@ -350,6 +350,19 @@ folder under `<data dir>/iceberg`, and update the connector.
 
 ---
 
+### PostgreSQL / Redshift TLS requirement (`ssl_mode`)
+
+A saved PostgreSQL or Redshift connector records what the user chose for TLS in `ssl_mode`:
+
+| `ssl_mode` | Meaning | Behaviour |
+|---|---|---|
+| `require` | The user turned SSL/TLS on (Studio checkbox, or `ssl: true` in the API). | Strict. `sslmode=require` on every read, sample, probe and write; a server without TLS is refused with "TLS is required ... refusing to fall back to plaintext". Never retried in plaintext. |
+| `prefer` / `""` (unset) | The user never asked for TLS. | Negotiates TLS (`sslmode=prefer`) and may use plaintext. |
+
+Saving a connector sets `require` when the payload has `ssl: true`, and clears it when `ssl` is false. A payload that does not mention `ssl` leaves the stored choice alone.
+
+**Existing connectors.** Documents saved before `ssl_mode` existed hold only the boolean `ssl`, and the old store defaulted it to true when a caller omitted it, so a stored `ssl=true` cannot be told apart from an injected default. These documents are read as unset: their behaviour is unchanged (negotiate, plaintext allowed). To make an existing connector strictly TLS, open it in Studio and save it with SSL/TLS ticked (or `PUT` it with `ssl: true`). Check production connectors that must be encrypted and re-save them once.
+
 ## Health checks
 
 | Endpoint | Use |
