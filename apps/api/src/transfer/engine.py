@@ -1636,9 +1636,11 @@ class UniversalTransferEngine:
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
 
-            dest_schema_types, dest_table_exists_flag = _engine_module._destination_schema_probe(
+            dest_schema_types, dest_table_exists_flag = _engine_module._connect_destination(
                 request.destination,
                 sync_mode=request.sync_mode,
+                mongo=mongo,
+                job_id=job_id,
             )
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
@@ -3141,9 +3143,11 @@ class UniversalTransferEngine:
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
-            dest_schema_types, dest_table_exists_flag = _engine_module._destination_schema_probe(
+            dest_schema_types, dest_table_exists_flag = _engine_module._connect_destination(
                 request.destination,
                 sync_mode=request.sync_mode,
+                mongo=mongo,
+                job_id=job_id,
             )
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
@@ -4250,9 +4254,11 @@ class UniversalTransferEngine:
             mongo.update_job_status(
                 job_id, "running", total_rows=total_rows, records_processed=0
             )
-            dest_schema_types, dest_table_exists_flag = _engine_module._destination_schema_probe(
+            dest_schema_types, dest_table_exists_flag = _engine_module._connect_destination(
                 request.destination,
                 sync_mode=request.sync_mode,
+                mongo=mongo,
+                job_id=job_id,
             )
             schema = _prefer_approved_column_types(request, schema)
             mappings = _enrich_mappings_with_types(
@@ -5248,6 +5254,7 @@ _EXTRACTED_ENGINE_EXPORTS = {
     "_execute_policy_gates_for_request": "engine_preflight",
     "_execute_preflight_parity_kwargs": "engine_preflight",
     "_destination_schema_probe": "engine_destination",
+    "_connect_destination": "engine_destination",
     "_drop_destination_table": "engine_destination",
     "_note_failed_batch_undo": "engine_destination",
     "_pin_overwrite_rows_before": "engine_destination",
