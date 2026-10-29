@@ -1287,6 +1287,12 @@ def _apply_statement_timeout(conn: Any, db_type: str) -> None:
         seconds = DEFAULT_QUERY_STATEMENT_TIMEOUT_SECONDS
     if seconds <= 0:
         return
+    from src.ai.copilot.tool_deadline import statement_timeout_seconds
+
+    budget = statement_timeout_seconds()
+    if budget is not None:
+        # Never past the calling tool's own deadline (D181).
+        seconds = min(seconds, budget)
     millis = int(seconds * 1000)
     db = (db_type or "").lower()
     if db in {"postgresql", "postgres", "cockroachdb", "greenplum", "yugabytedb"}:

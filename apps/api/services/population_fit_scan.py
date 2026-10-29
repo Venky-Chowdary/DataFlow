@@ -1198,7 +1198,11 @@ def scan_rows(
             for idx in counts
         )
     ):
-        envelope_deadline = time.monotonic() + ENVELOPE_CONTINUE_SECONDS
+        from src.ai.copilot.tool_deadline import step_seconds
+
+        # Inside a tool call the envelope may not run past the call's deadline
+        # (D187): it stops, PARTIAL, like the main walk.
+        envelope_deadline = time.monotonic() + step_seconds(ENVELOPE_CONTINUE_SECONDS)
         for row in row_iter:
             if time.monotonic() >= envelope_deadline:
                 envelope_truncated = True

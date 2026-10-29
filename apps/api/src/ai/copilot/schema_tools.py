@@ -396,6 +396,11 @@ def _safe_connector(
                 f'"columns on {example_table_name()} in {ex}".'
             ),
         )
+    # Until a later step says otherwise, the call is waiting on this system:
+    # a deadline names its host instead of "a system it reads from" (D169).
+    from .tool_deadline import note_step
+
+    note_step(f"{tool}: reading connector {conn.get('name') or ''}".strip(), conn, role="connector", if_unset=True)
     return conn, None
 
 

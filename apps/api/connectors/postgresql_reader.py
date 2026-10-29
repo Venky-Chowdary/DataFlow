@@ -311,8 +311,15 @@ def read_table_batch(
         )
     try:
         with shared.cursor() as cur:
+            from src.ai.copilot.tool_deadline import remaining_seconds
+
             if known_total_rows is not None:
                 total = known_total_rows
+            elif remaining_seconds() is not None:
+                # A planning tool walks the table only as far as its budget
+                # allows; the total is a progress figure, and an exact COUNT(*)
+                # on a big table cost a full scan before the walk began (D187).
+                total = None
             else:
                 # COUNT on the SAME connection so cardinality matches the
                 # MVCC snapshot used for page reads (never a second conn).
@@ -416,8 +423,15 @@ def read_table_scan_batch(
             )
         cur = shared.cursor()
         try:
+            from src.ai.copilot.tool_deadline import remaining_seconds
+
             if known_total_rows is not None:
                 total = known_total_rows
+            elif remaining_seconds() is not None:
+                # A planning tool walks the table only as far as its budget
+                # allows; the total is a progress figure, and an exact COUNT(*)
+                # on a big table cost a full scan before the walk began (D187).
+                total = None
             else:
                 cur.execute(
                     sql.SQL("SELECT COUNT(*) FROM {}.{}{}").format(

@@ -210,6 +210,17 @@ def get_connection(
     }
     if ssl or public_proxy:
         kwargs["ssl"] = {"ssl": {}}
+    from src.ai.copilot.tool_deadline import remaining_seconds
+
+    left = remaining_seconds()
+    if left is not None:
+        # Inside a tool call no socket wait outlives the call: the client stops
+        # waiting at the deadline even when the server never answers (D169,
+        # D181). Transfer jobs keep their long socket timeouts.
+        bound = max(2, int(left) + 1)
+        kwargs["connect_timeout"] = min(kwargs["connect_timeout"], bound)
+        kwargs["read_timeout"] = min(kwargs["read_timeout"], bound)
+        kwargs["write_timeout"] = min(kwargs["write_timeout"], bound)
     from services.egress_guard import assert_connector_dial_allowed
 
     assert_connector_dial_allowed(ep["host"], connection_string)

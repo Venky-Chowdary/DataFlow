@@ -510,9 +510,20 @@ def _render_table_ranking(o: dict[str, Any]) -> str:
     superlative = "smallest" if ascending else "largest"
     objects = int(o.get("total_objects") or counted)
     considered = int(o.get("considered") or counted)
+    estimated = {str(t) for t in (o.get("estimated_tables") or [])}
+
+    def _rows(row: dict[str, Any]) -> str:
+        n = f"{int(row.get('rows') or 0):,}"
+        return f"~{n} (estimate)" if row.get("table") in estimated else n
+
     # ``exact`` is absent only on outputs that predate the flag.
     partial = o.get("exact") is False
-    if partial:
+    if estimated:
+        lines = [
+            f"By row count on **{cname}**, the {superlative} table is "
+            f"`{top.get('table')}` with **{_rows(top)} rows**."
+        ]
+    elif partial:
         lines = [
             f"Of the {counted} table(s) I counted on **{cname}**, the {superlative} "
             f"is `{top.get('table')}` with **{int(top.get('rows') or 0):,} rows**."
@@ -525,13 +536,21 @@ def _render_table_ranking(o: dict[str, Any]) -> str:
     lines.append("| table | rows |")
     lines.append("| --- | ---: |")
     for row in ranked:
-        lines.append(f"| `{row.get('table')}` | {int(row.get('rows') or 0):,} |")
+        lines.append(f"| `{row.get('table')}` | {_rows(row)} |")
     total = int(o.get("total_rows") or 0)
-    tail = (
-        f"Counted **{counted}** of {objects} table(s) — **{total:,} rows** in total. "
-        "Each count is an exact server-side `COUNT(*)`, not a sample."
-    )
-    if partial:
+    if estimated:
+        tail = (
+            f"Ranked all {objects} table(s) by the catalog's row estimates; "
+            f"**{counted}** got an exact server-side `COUNT(*)` within the time "
+            f"budget and {len(estimated)} shown above are estimates (marked ~), "
+            "which can be stale."
+        )
+    else:
+        tail = (
+            f"Counted **{counted}** of {objects} table(s) — **{total:,} rows** in total. "
+            "Each count is an exact server-side `COUNT(*)`, not a sample."
+        )
+    if partial and not estimated:
         basis = (
             "shortlisted by catalog row estimates, which can be stale"
             if o.get("shortlisted_by") == "catalog_estimate"
