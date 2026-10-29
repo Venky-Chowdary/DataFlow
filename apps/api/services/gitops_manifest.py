@@ -347,12 +347,18 @@ def plan_manifest(
             if existing is None and name and name in schedule_names:
                 existing = get_schedule(schedule_names[name])
             action = "update" if existing else "create"
-            actions.append({
+            entry: dict[str, Any] = {
                 "kind": kind,
                 "action": action,
                 "id": (existing.id if existing else sid) or None,
                 "name": name or (existing.name if existing else None),
-            })
+            }
+            cadence_error = _cadence_error(spec)
+            if cadence_error:
+                # The apply would refuse this schedule; a plan that says "create"
+                # for it promises a change CD can never make.
+                entry.update(action="error", error=cadence_error)
+            actions.append(entry)
         elif kind in {"DataContract", "MappingBundle"}:
             cid = str(spec.get("id") or "").strip()
             existing = store.get_contract(cid) if cid else None
@@ -389,8 +395,24 @@ def plan_manifest(
         "creates": sum(1 for a in actions if a["action"] == "create"),
         "updates": sum(1 for a in actions if a["action"] == "update"),
         "skips": sum(1 for a in actions if a["action"] == "skip"),
+        "errors": sum(1 for a in actions if a["action"] == "error"),
         "actions": actions,
     }
+
+
+def _cadence_error(spec: dict[str, Any]) -> str | None:
+    """Why the store would refuse this spec's clock, or None when it is usable."""
+    from services.cron_schedule import CronError, resolve_timezone, validate_cron
+
+    cron = str(spec.get("cron") or "").strip()
+    if not cron:
+        return None
+    try:
+        validate_cron(cron)
+        resolve_timezone(str(spec.get("timezone") or "UTC"))
+    except CronError as exc:
+        return str(exc)
+    return None
 
 
 def _visible(
