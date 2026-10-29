@@ -713,6 +713,15 @@ _GENERIC_DRIVERNAME_TO_MODULE: dict[str, str] = {
 }
 
 
+#: Packages a driver also needs beyond its client module. Snowflake's keyed
+#: modes, mirror/SCD2, FK carry and the physical-state diff all go through
+#: SQLAlchemy, so a host with the connector but not the dialect cannot run the
+#: route and must say so up front instead of letting each check skip itself.
+_DRIVER_COMPANION_MODULES: dict[str, str] = {
+    "snowflake": "snowflake.sqlalchemy",
+}
+
+
 def _module_is_installed(name: str | None) -> bool:
     if name is None:
         return True
@@ -791,7 +800,10 @@ def driver_available(driver_type: str, catalog_id: str | None = None) -> bool:
     if driver_type == "oracle":
         return _import_test("oracledb") or _import_test("cx_Oracle")
     module = _DRIVER_MODULE.get(driver_type)
-    return _module_is_installed(module)
+    if not _module_is_installed(module):
+        return False
+    companion = _DRIVER_COMPANION_MODULES.get(driver_type)
+    return companion is None or _module_is_installed(companion)
 
 
 def _declared_capabilities(driver_type: str, _catalog_id: str | None = None) -> dict[str, Any]:
@@ -1115,7 +1127,10 @@ def _driver_install_hint(driver: str) -> str:
         "postgresql": "install psycopg2-binary",
         "mysql": "install pymysql",
         "mongodb": "install pymongo",
-        "snowflake": "install snowflake-connector-python (and fakesnow for local demos)",
+        "snowflake": (
+            "install snowflake-connector-python and snowflake-sqlalchemy "
+            "(and fakesnow for local demos)"
+        ),
         "s3": "install boto3; ensure Python pyexpat/libexpat load (Homebrew expat mismatch breaks S3 XML)",
         "bigquery": "install google-cloud-bigquery",
         "dynamodb": "install boto3",
