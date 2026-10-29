@@ -400,9 +400,12 @@ conn.execute("create table customers (id integer primary key, email text)")
 conn.executemany("insert into customers values (?, ?)", [(i, f"c{i}@example.com") for i in range(1, 13)])
 conn.commit()
 `, dbPath]);
+    const connectorName = `Studio SQLite ${dir.split("/").pop()}`;
     const created = await page.request.post("/api/v1/connectors/saved", {
       data: {
-        name: "Studio SQLite",
+        // Saved connectors live on the API across tests and repeats, so the name
+        // must be unique to this run or the picker finds an earlier run's file.
+        name: connectorName,
         type: "sqlite",
         role: "both",
         // SQLite has no schema layer. The file path is the database, and
@@ -416,10 +419,10 @@ conn.commit()
     await openStudio(page);
     await page.getByRole("radio", { name: "Database" }).click();
     const source = page.getByLabel("Source connector");
-    const sourceValue = await source.evaluate((el) => {
-      const option = [...(el as HTMLSelectElement).options].find((item) => item.label.includes("Studio SQLite"));
+    const sourceValue = await source.evaluate((el, name) => {
+      const option = [...(el as HTMLSelectElement).options].find((item) => item.label.includes(name));
       return option?.value ?? "";
-    });
+    }, connectorName);
     expect(sourceValue).toBeTruthy();
     await source.selectOption(sourceValue);
     const browser = page.getByTestId("studio-schema-browser");
@@ -986,7 +989,15 @@ conn.commit()
     await setPalette(page, true);
     const flatten = page.locator(".df2-canvas-op[data-op='flatten_json']");
     await flatten.scrollIntoViewIfNeeded();
-    const before = await flatten.boundingBox();
+    // The palette fills in as the catalog and suggestions arrive; a tile row
+    // landing above shifts it by one row (49px). Measure once it holds still.
+    let before = await flatten.boundingBox();
+    for (let still = 0, tries = 0; still < 3 && tries < 60; tries += 1) {
+      await page.waitForTimeout(150);
+      const next = await flatten.boundingBox();
+      still = next && before && Math.abs(next.y - before.y) < 0.5 ? still + 1 : 0;
+      before = next;
+    }
     await flatten.hover();
     await page.waitForTimeout(250);
     const after = await flatten.boundingBox();
