@@ -508,20 +508,39 @@ def _render_table_ranking(o: dict[str, Any]) -> str:
 
     top = ranked[0]
     superlative = "smallest" if ascending else "largest"
-    lines = [
-        f"The {superlative} table on **{cname}** is `{top.get('table')}` with "
-        f"**{int(top.get('rows') or 0):,} rows**."
-    ]
+    objects = int(o.get("total_objects") or counted)
+    considered = int(o.get("considered") or counted)
+    # ``exact`` is absent only on outputs that predate the flag.
+    partial = o.get("exact") is False
+    if partial:
+        lines = [
+            f"Of the {counted} table(s) I counted on **{cname}**, the {superlative} "
+            f"is `{top.get('table')}` with **{int(top.get('rows') or 0):,} rows**."
+        ]
+    else:
+        lines = [
+            f"The {superlative} table on **{cname}** is `{top.get('table')}` with "
+            f"**{int(top.get('rows') or 0):,} rows**."
+        ]
     lines.append("| table | rows |")
     lines.append("| --- | ---: |")
     for row in ranked:
         lines.append(f"| `{row.get('table')}` | {int(row.get('rows') or 0):,} |")
     total = int(o.get("total_rows") or 0)
-    objects = int(o.get("total_objects") or counted)
     tail = (
         f"Counted **{counted}** of {objects} table(s) — **{total:,} rows** in total. "
         "Each count is an exact server-side `COUNT(*)`, not a sample."
     )
+    if partial:
+        basis = (
+            "shortlisted by catalog row estimates, which can be stale"
+            if o.get("shortlisted_by") == "catalog_estimate"
+            else f"the first {considered} in name order"
+        )
+        tail += (
+            f" The other {objects - considered} table(s) were not counted ({basis}), "
+            f"so this is not a ranking of all {objects}."
+        )
     if len(ranked) < counted:
         tail = f"Showing {len(ranked)} of {counted} counted. " + tail
     lines.append(tail)
@@ -535,11 +554,6 @@ def _render_table_ranking(o: dict[str, Any]) -> str:
                 for s in skipped[:4]
             )
             + ("…" if len(skipped) > 4 else "")
-        )
-    if o.get("truncated"):
-        lines.append(
-            "• The schema has more objects than I ranked in one pass, so this is "
-            "the largest page, not proven to be the whole database."
         )
     return "\n".join(lines)
 
