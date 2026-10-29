@@ -354,8 +354,11 @@ def test_kafka_double_is_a_typed_double_at_the_risk_stamp():
     [
         (1.0, [], "TEXT", False),      # observed, every value NULL: lossless into text
         (1.0, [], "BIGINT", True),     # NULL says nothing about an integer target
-        (None, [], "TEXT", True),      # never observed: still the placeholder cap
-        (0.0, [], "TEXT", True),       # a stamped 0 with no samples is not observed NULL
+        # Never observed: no cap onto the same-named text column (D159); the
+        # placeholder cap still holds onto a typed target (BIGINT above).
+        (None, [], "TEXT", False),
+        (0.0, [], "TEXT", False),
+        (None, [], "INTEGER", True),
         (0.5, ["", " "], "TEXT", False),  # empty / whitespace text is evidence
     ],
 )
