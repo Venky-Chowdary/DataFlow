@@ -574,6 +574,46 @@ def _coerce_eos_row(
     return out
 
 
+def _apply_mapped_transforms(
+    values: dict[str, Any],
+    mappings: list[dict[str, Any]],
+    column_types: dict[str, str],
+) -> dict[str, Any]:
+    """Run each mapped cell through the transform the plan stamped on it.
+
+    The at-least-once writer applies the Map transform to every cell before it
+    binds it. This apply used to bind the raw source cell, so a declared
+    ``assume_timezone:`` zone never reached a ``TIMESTAMPTZ`` column and the
+    bind refused the zoneless wall-clock. The same per-cell pipeline runs here;
+    this transaction has no quarantine, so a cell it cannot convert fails the
+    batch, which rolls back with the watermark.
+    """
+    from connectors.writer_common import _convert_mapped_cell
+    from services.transform_resolver import resolve_transform
+    from services.value_serializer import is_missing_sentinel
+
+    out = dict(values)
+    for mapping in mappings:
+        target = str(mapping.get("target") or mapping.get("source") or "")
+        if target not in out or is_missing_sentinel(out[target]):
+            continue
+        transform = resolve_transform(
+            mapping, column_types=column_types, dest_types={}
+        )
+        converted, err = _convert_mapped_cell(
+            out[target],
+            transform,
+            mapping,
+            empty_cells_as_null=False,
+            dest_nullability={},
+            target=target,
+        )
+        if err:
+            raise ValueError(f"column {target!r}: {err}")
+        out[target] = converted
+    return out
+
+
 def _row_values(
     rec: dict[str, Any],
     target_cols: list[str],
@@ -924,7 +964,11 @@ def _sa_apply_member(
         )
     for rec in records:
         values = _coerce_eos_row(
-            _row_values(rec, target_cols, tgt_to_src, incoming_lsn),
+            _apply_mapped_transforms(
+                _row_values(rec, target_cols, tgt_to_src, incoming_lsn),
+                mappings,
+                column_types,
+            ),
             logical_by,
             dialect,
         )

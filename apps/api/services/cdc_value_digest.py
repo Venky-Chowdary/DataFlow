@@ -5,8 +5,11 @@ each source row through the destination bind and checks that fingerprint
 is present on the destination. Extra dest rows do not fail (a changelog
 is not the source table; leftover MERGE is a no-op).
 
-Identity mappings are scanned. A transform is not a cell proof, so that
-route stays on ``cdc_source_image_count``. A scan that starts and does not
+Identity mappings are scanned, and so are carries that only declare how a
+cell is read: a typed cast, the ``json`` carrier, and ``assume_timezone:ZONE``
+(the declared zone is attached to the source cell before it is fingerprinted,
+exactly as the writer attaches it). Any other transform is not a cell proof, so
+that route stays on ``cdc_source_image_count``. A scan that starts and does not
 finish raises ``CdcValueScanIncomplete`` — row count must not complete the
 job. A finished scan with a missing fingerprint fails the job.
 """
@@ -21,6 +24,8 @@ from typing import Any
 _IDENTITY_TRANSFORMS = frozenset(
     {"", "none", "identity", "passthrough"}
 )
+#: Carries the writer applies without changing the value the source holds.
+_CARRIER_TRANSFORMS = frozenset({"json"})
 _PAGE = 500
 _MAX_PAGES = 400
 
@@ -58,6 +63,7 @@ def _identity_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, st
     source fingerprint missing.
     """
     from services.decision_kernel.findings import TYPED_CAST_TRANSFORMS
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
 
     if not mappings:
         return None
@@ -72,10 +78,57 @@ def _identity_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, st
         transform = str(raw.get("transform") or "").strip().lower()
         if not source or not target:
             return None
-        if transform not in _IDENTITY_TRANSFORMS and transform not in TYPED_CAST_TRANSFORMS:
+        if (
+            transform not in _IDENTITY_TRANSFORMS
+            and transform not in TYPED_CAST_TRANSFORMS
+            and transform not in _CARRIER_TRANSFORMS
+            and not transform.startswith(ASSUME_TIMEZONE_PREFIX)
+        ):
             return None
         pairs.append((source, target))
     return pairs or None
+
+
+def _declared_zones(mappings: list[dict[str, Any]] | None) -> dict[str, str]:
+    """Destination column -> ``assume_timezone:ZONE`` the writer attaches to it."""
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+
+    zones: dict[str, str] = {}
+    for raw in mappings or []:
+        if not isinstance(raw, dict) or raw.get("intentional_omit"):
+            continue
+        transform = str(raw.get("transform") or "").strip()
+        if transform.lower().startswith(ASSUME_TIMEZONE_PREFIX):
+            target = str(raw.get("target") or raw.get("source") or "").strip()
+            zones[target.lower()] = transform
+    return zones
+
+
+def _attach_zones(
+    rows: list[dict[str, Any]], zones: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Give a zoneless source instant the zone the job declared for it.
+
+    The destination holds the instant the writer built from that declaration, so
+    the source cell is read the same way before it is fingerprinted. A value the
+    transform cannot read is left as it is and fails the comparison.
+    """
+    if not zones:
+        return rows
+    from services.transform_engine import apply_transform
+
+    out: list[dict[str, Any]] = []
+    for row in rows:
+        attached = dict(row)
+        for column, transform in zones.items():
+            for key in list(attached):
+                if str(key).lower() != column or attached[key] is None:
+                    continue
+                value, error = apply_transform(str(attached[key]), transform)
+                if error is None:
+                    attached[key] = value
+        out.append(attached)
+    return out
 
 
 def _fingerprint_row(
@@ -241,7 +294,7 @@ def prove_cdc_values(
             "CDC value scan did not finish. Row count is not a cell proof."
         )
     return compare_row_sets(
-        _rename(source_rows, pairs),
+        _attach_zones(_rename(source_rows, pairs), _declared_zones(mappings)),
         _rename(dest_rows, [(column, column) for column in columns]),
         columns,
         engine=dest_type,
@@ -285,7 +338,9 @@ def identity_rows_missing_on_dest(
         raise CdcValueScanIncomplete(
             "CDC value scan did not finish. Row count is not a cell proof."
         )
-    renamed_source = _rename(source_rows, pairs)
+    renamed_source = _attach_zones(
+        _rename(source_rows, pairs), _declared_zones(mappings)
+    )
     dest_named = _rename(dest_rows, [(column, column) for column in columns])
     present = {
         _fingerprint_row(row, columns, engine=dest_type, dest_types=dest_types)
