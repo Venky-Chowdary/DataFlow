@@ -3156,6 +3156,12 @@ def fingerprint_for_reconcile(
         wire = None
         value = None
     tname = (transform or "").strip().lower()
+    if _json_text_fingerprints_raw(wire, tname, ddl_type, engine):
+        # D192: the JSON carrier transform and bind are meant to be lossless,
+        # so the source side is fingerprinted as the document it IS, not as
+        # what the bind made of it. Replaying the bind on both sides hid a
+        # write that turned ``1.10`` into ``1.1`` behind a matching checksum.
+        return normalize_cell(wire, ddl_type=ddl_type, engine=engine)
     if tname and tname not in {"", "none", "identity", "passthrough"}:
         cell = cell_to_string(value, preserve_sql_null=True) if value is not None else None
         if absent_field:
@@ -3237,6 +3243,48 @@ def operator_cell_text(fingerprint: str) -> str:
     return fingerprint
 
 
+_JSON_SCALE_ENGINES = frozenset({"postgresql", "postgres"})
+#: A text column holds the JSON tokens DataFlow wrote, scale included.
+_JSON_TEXT_CARRIER_RE = re.compile(
+    r"^(?:N|LONG|MEDIUM|TINY)?(?:VAR)?(?:CHAR|TEXT|CLOB)|^(?:N)?CLOB|^STRING|^CHARACTER", re.I
+)
+_JSON_LOSSLESS_TRANSFORMS = frozenset({"", "none", "identity", "passthrough", "json", "jsonb"})
+
+
+def _json_keeps_scale_for(ddl_type: str, engine: str) -> bool:
+    """Does this destination store a JSON number with its scale (D192)?"""
+    ddl = str(ddl_type or "").strip()
+    if ddl and _JSON_TEXT_CARRIER_RE.match(ddl):
+        return True
+    if str(engine or "").strip().lower() not in _JSON_SCALE_ENGINES:
+        return False
+    if not ddl:
+        return True
+    from services.type_system import normalize_logical_type
+
+    return normalize_logical_type(ddl) == "json"
+
+
+def _json_text_fingerprints_raw(wire: Any, tname: str, ddl_type: str, engine: str) -> bool:
+    """A JSON object/array text bound for a scale-keeping column, unchanged by its transform."""
+    if not isinstance(wire, str) or tname not in _JSON_LOSSLESS_TRANSFORMS:
+        return False
+    head = wire.lstrip()[:1]
+    if head not in ("{", "["):
+        return False
+    if not ddl_type or not _json_keeps_scale_for(ddl_type, engine):
+        return False
+    try:
+        json.loads(wire, parse_float=Decimal, parse_constant=_reject_json_constant)
+    except (ValueError, TypeError):
+        return False
+    return True
+
+
+def _reject_json_constant(token: str) -> Any:
+    raise ValueError(token)
+
+
 def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     """Canonical cell text for Gate-8 checksums.
 
@@ -3270,6 +3318,9 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     _text_declared = bool(ddl_type) and bool(
         _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip())
     )
+    # PostgreSQL json/jsonb and a JSON-as-text column store a number with its
+    # scale; there ``1.10`` -> ``1.1`` is a changed value Gate-8 must see (D192).
+    _json_keeps_scale = _text_declared or _json_keeps_scale_for(ddl_type, engine)
     if _text_declared and isinstance(value, (int, float, Decimal)):
         # Declared TEXT carrier: compare the bound repr, not a canonicalized
         # number — '1000.00' the writer rendered equals read-back '1000.00',
@@ -3359,6 +3410,8 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         # Same canonical form as the string-JSON branch below — compact,
         # key-sorted, numbers normalized — so a decoded dict fingerprints
         # identically to its wire text.
+        # A decoded dict already lost the document's number spelling, so it
+        # compares by value (keep_scale applies to JSON *text* only).
         canon = canonical_json_text(json.dumps(value, default=json_default))
         if canon is not None:
             return canon
@@ -3418,7 +3471,7 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     if ddl_type and _TEXT_FAMILY_DDL_RE.match(str(ddl_type).strip()):
         if text.startswith(("{", "[")):
             try:
-                canon = canonical_json_text(text)
+                canon = canonical_json_text(text, keep_scale=True)
                 if canon is not None and canon.startswith(("{", "[")):
                     return canon
             except (json.JSONDecodeError, TypeError):
@@ -3470,7 +3523,7 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # JSON payloads (e.g. jsonb).
     if text.startswith(("{", "[")):
         try:
-            canon = canonical_json_text(text)
+            canon = canonical_json_text(text, keep_scale=_json_keeps_scale)
             if canon is not None and canon.startswith(("{", "[")):
                 return canon
         except (json.JSONDecodeError, TypeError):

@@ -2790,6 +2790,14 @@ def stream_file_to_database(
             prior_key_addressed = dest_summary.get(KEY_ADDRESSED_KEY)
             prior_skipped = int(dest_summary.get("rows_skipped") or 0)
             dest_summary = dict(batch_summary)
+            # A SQL/document writer stamps the rows it *wrote* (target-named,
+            # already transformed) as ``reconcile_sample``. Gate-8 reads that
+            # key as SOURCE rows and applies each mapping's transform again,
+            # so a non-idempotent transform (hash_pii, mask_pii) compared
+            # hash(hash(x)) with hash(x) and rolled a correct load back (D184).
+            # The file route's Gate-8 sample is the reader's parse output,
+            # stashed below — the same rule stream.py follows.
+            dest_summary.pop("reconcile_sample", None)
             dest_summary["duplicate_policy"] = decision.policy
             dest_summary["duplicate_policy_reason"] = decision.reason
             dest_summary["rows_skipped"] = prior_skipped + int(

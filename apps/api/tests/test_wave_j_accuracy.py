@@ -199,8 +199,8 @@ def test_object_version_token_in_cache_key():
         "connectors.object_store_common._object_version_token",
         return_value="etag123",
     ), patch(
-        "connectors.object_store_common.read_rows_from_spill",
-        return_value=(["a"], [["1"]], 1),
+        "connectors.object_store_common.read_rows_and_schema_from_spill",
+        return_value=(["a"], [["1"]], 1, {}),
     ):
         read_object_from_store("s3", {}, "b", "k.csv")
     assert calls and "etag123" in calls[0]

@@ -11,7 +11,7 @@ Fix: valid JSON text is written as its own tokens with only insignificant
 whitespace removed (``value_serializer.compact_json_text``).
 
 Native JSON types normalise on store, and that is the engine's documented
-behaviour, not DataFlow's (docs/JSON_FIDELITY.md): PG ``jsonb`` keeps every
+behaviour, not DataFlow's (docs/ZERO_LOSS_PROPERTIES.md (Property 8, "JSON number spelling")): PG ``jsonb`` keeps every
 digit and scale but rewrites ``1e2`` -> ``100`` and ``-0.0`` -> ``0.0``; MySQL
 ``JSON`` stores numbers as doubles (``1.10`` -> ``1.1``). Those are asserted
 value-equal; text carriers are asserted byte-equal.

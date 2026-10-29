@@ -10,6 +10,7 @@ from typing import Any, Callable
 from services.object_streaming import (
     download_for_object_store,
     download_object,
+    read_rows_and_schema_from_spill,
     read_rows_from_spill,
 )
 
@@ -442,7 +443,7 @@ def read_object_from_store(
     object is never served as current under a stale TTL entry.
     """
     path = materialize_store_spill(store, cfg, bucket, key)
-    headers, rows, total = read_rows_from_spill(
+    headers, rows, total, declared = read_rows_and_schema_from_spill(
         path,
         key,
         offset=offset,
@@ -454,8 +455,30 @@ def read_object_from_store(
         rows=rows,
         offset=offset,
         total_rows=total,
-        meta=sampled_native_types_meta(headers, rows),
+        meta=object_native_types_meta(headers, rows, declared),
     )
+
+
+def object_native_types_meta(
+    headers: list[str], rows: list[list[Any]], declared: dict[str, str] | None
+) -> dict[str, Any]:
+    """The file's own schema where it has one (Parquet), else a sampled profile.
+
+    A declared column type is a catalog fact; a type read off a page of rows
+    is a guess whose width the page cannot know (D62).
+    """
+    meta = sampled_native_types_meta(headers, rows)
+    if not declared:
+        return meta
+    from services.dest_schema_authority import CARRIER_DECLARED
+
+    types = dict(meta.get("native_types") or {})
+    authority = dict(meta.get("native_types_authority") or {})
+    for name in headers:
+        if declared.get(name):
+            types[name] = declared[name]
+            authority[name] = CARRIER_DECLARED
+    return {**meta, "native_types": types, "native_types_authority": authority}
 
 
 def inferred_native_types(headers: list[str], rows: list[list[Any]]) -> dict[str, str]:
