@@ -1,4 +1,4 @@
-"""SQL Server DATETIME2 bind keeps the declared fraction.
+"""SQL Server DATETIME2 / DATETIMEOFFSET bind keeps the declared fraction.
 
 pyodbc sends a Python ``datetime`` as ODBC ``SQL_TIMESTAMP``, which keeps
 three fractional digits. ``DATETIME2(6)`` then stores milliseconds and the
@@ -14,7 +14,7 @@ this is not a claim of 100-nanosecond fidelity.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime
+from datetime import date, datetime, timedelta
 from typing import Any
 
 _INSTALLED = False
@@ -117,6 +117,66 @@ def bind_sqlserver_datetime2(
     return sqlserver_datetime2_bind_text(value, precision=digits)
 
 
+def datetimeoffset_declared_digits(sa_type: Any, logical: str) -> int | None:
+    """Fractional digits of a DATETIMEOFFSET carrier, else None.
+
+    Omitted precision is SQL Server's default of 7.
+    """
+    physical = str(getattr(getattr(sa_type, "__class__", None), "__name__", "") or "").upper()
+    logical_u = (logical or "").upper()
+    if physical != "DATETIMEOFFSET" and "DATETIMEOFFSET" not in logical_u:
+        return None
+    prec = getattr(sa_type, "precision", None) if physical == "DATETIMEOFFSET" else None
+    if prec is None:
+        match = re.search(r"DATETIMEOFFSET\s*\(\s*(\d+)\s*\)", logical_u)
+        prec = int(match.group(1)) if match else 7
+    try:
+        return int(prec)
+    except (TypeError, ValueError):
+        return 7
+
+
+def sqlserver_datetimeoffset_bind_text(value: Any, *, precision: int | None) -> Any:
+    """``YYYY-MM-DD hh:mm:ss.fffffff +hh:mm`` for an aware ``datetime``, else unchanged.
+
+    SQL Server reads that text as ``datetimeoffset(p)`` with the fraction and
+    the offset it was sent with.
+    """
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        return value
+    digits = 7 if precision is None else int(precision)
+    micro = f"{value.microsecond:06d}"
+    fraction = micro[:digits] if digits <= 6 else micro + "0" * (digits - 6)
+    minutes = int((value.utcoffset() or timedelta(0)).total_seconds() // 60)
+    hours, mins = divmod(abs(minutes), 60)
+    return (
+        value.strftime("%Y-%m-%d %H:%M:%S")
+        + (f".{fraction}" if digits else "")
+        + f" {'-' if minutes < 0 else '+'}{hours:02d}:{mins:02d}"
+    )
+
+
+def refuse_datetimeoffset_rounding(
+    value: Any, *, logical: str, sa_type: Any, db_type: str
+) -> None:
+    """Quarantine a fraction a DATETIMEOFFSET(p<6) column would round.
+
+    Raised before the write: a rounded row that only the read-back notices has
+    already been committed.
+    """
+    if not isinstance(value, datetime) or not is_sqlserver_engine(db_type):
+        return
+    digits = datetimeoffset_declared_digits(sa_type, logical)
+    if digits is None or digits >= 6:
+        return
+    if value.microsecond % (10 ** (6 - digits)):
+        raise ValueError(
+            f"SQL Server DATETIMEOFFSET({digits}) cannot store microsecond "
+            f"{value.microsecond:06d} ({value.isoformat(sep='T')}) — column keeps "
+            f"{digits} fractional digits. Quarantine; refuse round-after-commit."
+        )
+
+
 def sqlserver_datetime2_dbapi_type(precision: int | None, dbapi: Any) -> Any:
     """ODBC type for ``setinputsizes``.
 
@@ -144,7 +204,7 @@ def install_sqlserver_datetime2_bind() -> None:
     global _INSTALLED
     if _INSTALLED:
         return
-    from sqlalchemy.dialects.mssql.base import DATETIME2
+    from sqlalchemy.dialects.mssql.base import DATETIME2, DATETIMEOFFSET
 
     def bind_processor(self, dialect):  # noqa: ANN001
         precision = getattr(self, "precision", None)
@@ -159,4 +219,21 @@ def install_sqlserver_datetime2_bind() -> None:
 
     DATETIME2.bind_processor = bind_processor  # type: ignore[method-assign]
     DATETIME2.get_dbapi_type = get_dbapi_type  # type: ignore[method-assign]
+
+    inherited = DATETIMEOFFSET.bind_processor
+
+    def offset_bind_processor(self, dialect):  # noqa: ANN001
+        # pymssql renders a datetime as ``'… hh:mm:ss.mmm'``: three digits and
+        # no offset (D183). pyodbc sends the offset struct whole, so it keeps
+        # the processor it already had.
+        if getattr(dialect, "driver", "") != "pymssql":
+            return inherited(self, dialect)
+        precision = getattr(self, "precision", None)
+
+        def process(value: Any) -> Any:
+            return sqlserver_datetimeoffset_bind_text(value, precision=precision)
+
+        return process
+
+    DATETIMEOFFSET.bind_processor = offset_bind_processor  # type: ignore[method-assign]
     _INSTALLED = True
