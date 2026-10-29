@@ -1736,12 +1736,41 @@ def is_dialect_native_document_wire(
     db = (dest_db or "").strip().lower()
     if not db:
         return False
+    own = own_json_carrier_spellings(db)
+    return upper in own or bare in own
+
+
+@lru_cache(maxsize=256)
+def own_json_carrier_spellings(dest_db: str) -> frozenset[str]:
+    """Every spelling of the column DataFlow creates for JSON on ``dest_db``.
+
+    That is the CREATE spelling (``ddl_type(db, "JSON")``) *and* what DataFlow's
+    own introspection reads that column back as. Run 2 grades against the
+    read-back, and the two differ where introspection folds the physical type
+    into the logical lattice: Oracle creates ``CLOB`` and reads back ``TEXT``,
+    ClickHouse creates ``String`` and reads back ``TEXT``. Matching the CREATE
+    spelling (or a token list) alone made DataFlow's own JSON column a
+    "collapse" on run 2 (D198; D158 was the SQL Server instance of the same gap).
+    """
+    db = (dest_db or "").strip().lower()
     try:
         native = ddl_type(db, "JSON")
     except Exception:
-        return False
-    native_u = strip_identity_qualifier(native).upper().strip()
-    return upper == native_u or bare == re.sub(r"\s*\(\s*\d+\s*\)", "", native_u).strip()
+        return frozenset()
+    spellings = {native}
+    try:
+        from services.schema_introspect import catalog_read_back
+    except ImportError:  # pragma: no cover - introspection drivers not installed
+        catalog_read_back = None
+    if catalog_read_back is not None:
+        spellings.add(catalog_read_back(db, native))
+    out: set[str] = set()
+    for spelling in spellings:
+        u = strip_identity_qualifier(spelling).upper().strip()
+        if u:
+            out.add(u)
+            out.add(re.sub(r"\s*\(\s*\d+\s*\)", "", u).strip())
+    return frozenset(out)
 
 
 # Document-store ``date`` is an instant carrier, not a calendar date. The rules
