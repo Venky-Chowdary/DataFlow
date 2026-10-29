@@ -377,7 +377,11 @@ jobs:
 
       - name: Run tests
         id: api_tests
-        run: npm run test
+        # The log is tee'd so the failing test ids can be listed again at the end
+        # of the job (the step output is tens of thousands of lines long).
+        run: |
+          set -o pipefail
+          npm run test 2>&1 | tee "$RUNNER_TEMP/api_tests.log"
         env:
           DATAFLOW_JOB_STORE: memory
           DATAFLOW_DISABLE_OBJECT_STORE: "1"
@@ -509,6 +513,13 @@ jobs:
         if: ${{ !cancelled() && (success() || failure()) }}
         working-directory: apps/web
         run: node scripts/check_a11y_hex.mjs
+
+      - name: Failing API test ids
+        if: ${{ !cancelled() && (success() || failure()) }}
+        run: |
+          echo "### Failing API tests" >> "$GITHUB_STEP_SUMMARY"
+          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | sed 's/ - .*//' | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP/api_tests.log" | tail -2 || true
 
       # Surface which gate failed when earlier steps failed but proofs still ran.
       - name: Fail job if api tests or proof gates failed
