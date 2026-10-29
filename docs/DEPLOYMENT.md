@@ -58,9 +58,10 @@ Optional:
 | `DATAFLOW_SEED_DEMO` | `0` | No demo connectors |
 | `DATAFLOW_RBAC_UNRULED_ROUTES` | `deny` | `deny` rejects authenticated requests without a reviewed public exception or explicit permission rule; `allow_and_log` temporarily restores method-based fallback permissions and warns/audits. Invalid values fail closed. |
 | `DATAWRAP_SINGER_TAPS_DIR` | unset | Directory of operator-installed `tap-*` executables. **Unset disables the `singer_tap` connector.** Only `tap-*` programs inside it run (no interpreters, no paths elsewhere); only the platform administrator may create, test or run a Singer connector. Every `tap-*` entry in the directory, symlinks included, is trusted. |
-| `DATAFLOW_SQLITE_ROOT` | `<data dir>/sqlite` in production; unset (any path) in development | Directory (or `os.pathsep`-separated list) local SQLite connector files must live under; a relative name is anchored at the first. The service data directory itself is always refused. A SQLite connector pointing elsewhere (e.g. `/tmp/x.db`) is refused in production. |
-| `DATAFLOW_DUCKDB_ROOT` | `DATAFLOW_SQLITE_ROOT`, else `<data dir>/duckdb` in production | Same confinement for local DuckDB files (MotherDuck `md:` and `:memory:` are unaffected). |
-| `DATAFLOW_ICEBERG_ROOT` | `<data dir>/iceberg` in production; unset in development | Directory local Iceberg warehouses and SQLite catalogs must live under. Object-store warehouses (`s3://`, `gs://` ...) are unaffected. |
+| `DATAFLOW_SQLITE_ROOT` | unset (any path); with `DATAFLOW_CONFINE_LOCAL_FILES=1`, `<data dir>/sqlite` in production | Directory (or `os.pathsep`-separated list) local SQLite connector files must live under; a relative name is anchored at the first. The service data directory itself is always refused. Honoured whenever set. |
+| `DATAFLOW_DUCKDB_ROOT` | unset (any path); with `DATAFLOW_CONFINE_LOCAL_FILES=1`, `DATAFLOW_SQLITE_ROOT`, else `<data dir>/duckdb` in production | Same confinement for local DuckDB files (MotherDuck `md:` and `:memory:` are unaffected). |
+| `DATAFLOW_ICEBERG_ROOT` | unset; with `DATAFLOW_CONFINE_LOCAL_FILES=1`, `<data dir>/iceberg` in production | Directory local Iceberg warehouses and SQLite catalogs must live under. Object-store warehouses (`s3://`, `gs://` ...) are unaffected. Honoured whenever set. |
+| `DATAFLOW_CONFINE_LOCAL_FILES` | off | `1`: production confines local SQLite, DuckDB and Iceberg files to the persistent-volume folders above when no explicit root is set. See "Local file confinement" below. |
 | `DATAFLOW_SOURCE_PATH_ROOTS` | unset | Extra `os.pathsep`-separated directories a file transfer may read `source_path` from, besides the upload/staging directories. |
 | `DATAFLOW_MAX_UPLOAD_BYTES` | `268435456` | Largest upload body read into memory by the upload routes; over it the API answers 413 (matches nginx `client_max_body_size 256m`). |
 | `DATAFLOW_MAX_DECOMPRESSED_BYTES` | `1073741824` | Largest size a gzip payload may inflate to where a reader needs the whole image (JSON, Excel, XML, Parquet/ORC footers); streaming CSV/TSV readers are not capped. |
@@ -287,6 +288,65 @@ for the latter. "MB" here is MiB (1024 x 1024 bytes).
 To accept uploads above 256 MiB, raise `DATAFLOW_MAX_UPLOAD_BYTES` **and** the
 `client_max_body_size` in `deploy/nginx.conf` (and `deploy/nginx.conf.template`),
 otherwise nginx refuses the body first with its own 413.
+
+---
+
+## Local file confinement (SQLite, DuckDB, Iceberg)
+
+Status: the production-mode root is **off by default and waits for owner
+approval (D180 is not approved)**. Nothing below turns it on.
+
+A workspace member controls a local connector's `database` / warehouse path, so
+the API restricts where those files may live. The rules split in two:
+
+| Rule | Applies | Flag |
+|------|---------|------|
+| SQLite/DuckDB path may not point into the service data directory (`DATAFLOW_DATA_DIR`: job store, ledgers, secrets), except its `sqlite/` and `duckdb/` sub-folders. `..` and symlinks are resolved before the check, on every route (test, run, precount, undo, reconcile, SQLAlchemy URLs). | Always | none |
+| Iceberg schema, table and relative catalog names may not contain `..`, a path separator or be absolute. | Always | none |
+| An explicit `DATAFLOW_SQLITE_ROOT`, `DATAFLOW_DUCKDB_ROOT` or `DATAFLOW_ICEBERG_ROOT` confines that kind of file to the listed folders. | Whenever set | none (opt-in by setting it) |
+| **Production default roots**: SQLite to `<data dir>/sqlite`, DuckDB to `<data dir>/duckdb`, Iceberg to `<data dir>/iceberg`; relative names anchored there; `DATAFLOW_SQLITE_ROOT` also applying to DuckDB; an absolute Iceberg catalog file held to the Iceberg root. | Production only | `DATAFLOW_CONFINE_LOCAL_FILES=1` (default off) |
+
+With the flag off, a production process behaves as before for paths outside
+those folders: they open as given (a relative name lands in the working
+directory, `/tmp/x.db` in the container temp). Each one is recorded once an hour
+as an audit event `local_file.would_confine` (`kind`, resolved `path`,
+`would_be_root`, `flag`) so you can see what the flag would refuse before
+turning it on. Development processes are never audited or confined by default.
+
+### Migrating existing connectors without losing files
+
+The failure the default root prevents is a database file on the container's
+ephemeral disk, lost at the next restart. The flag does not move files; it
+refuses paths outside the volume folders. To turn it on safely:
+
+1. Run the read-only audit on the connector store (and again on the server whose
+   working directory the API uses, because a relative path resolves against it):
+
+   ```bash
+   cd apps/api
+   python scripts/audit_sqlite_paths.py --cwd /app/apps/api            # as configured
+   python scripts/audit_sqlite_paths.py --file connectors.json --data-dir /data --json
+   python scripts/audit_sqlite_paths.py --copy-plan > migrate.sh        # prints cp commands
+   ```
+
+   Each saved `sqlite` / `duckdb` connector is listed with its resolved path,
+   whether the file exists, whether it is inside the proposed root (the explicit
+   root if set, else `<data dir>/sqlite|duckdb`), and a verdict: `inside`,
+   `outside root`, `service data directory (always refused)`, or `in-memory`.
+2. Copy, never move. For every connector `outside root`, run the generated
+   `mkdir -p` / `cp -p -n` line (the audit prints it; it never runs it). The
+   original stays where it is, so rolling back is just unsetting the flag.
+3. Edit each connector to the new path (UI, or `PUT /api/v1/connectors/saved/<id>`
+   with `database` set to the file name under the root, e.g. `orders.db`), then
+   Test it. Two files with the same name from different folders are flagged in
+   the plan; give one a distinct name.
+4. Re-run the audit until every SQLite/DuckDB connector says `inside`, check that
+   no `local_file.would_confine` events arrive for a day, then set
+   `DATAFLOW_CONFINE_LOCAL_FILES=1`.
+
+Iceberg warehouses are not covered by the connector audit script: list
+`local_file.would_confine` events with `kind: iceberg`, copy the warehouse
+folder under `<data dir>/iceberg`, and update the connector.
 
 ---
 
