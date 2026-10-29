@@ -32,16 +32,13 @@ import ipaddress
 import os
 import re
 import socket
-import logging
 import threading
-import time
 import urllib.parse
 from contextlib import contextmanager
 from typing import Any, Iterator, Sequence
 
 from services.brand_env import getenv_brand
-
-logger = logging.getLogger(__name__)
+from services.would_apply_audit import audit_would_apply
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
@@ -311,9 +308,6 @@ def _refusal_text(host: str, phrase: str) -> str:
 
 
 _ALWAYS_REFUSED_PHRASES = frozenset({"cloud metadata and link-local", "multicast"})
-_AUDIT_TTL_SEC = 3600.0
-_AUDIT_SEEN: dict[tuple[str, str, str, str], float] = {}
-_AUDIT_LOCK = threading.Lock()
 _AUDIT_CONNECTOR: contextvars.ContextVar[str] = contextvars.ContextVar(
     "egress_audit_connector", default=""
 )
@@ -411,44 +405,20 @@ def audit_would_block(
         # Only a ``.internal`` / ``.localhost`` name reaches here with that
         # phrase: real metadata and link-local targets are refused, not audited.
         phrase = "private network name"
-    key = (point, connector, shown, workspace)
-    now = time.monotonic()
-    with _AUDIT_LOCK:
-        last = _AUDIT_SEEN.get(key)
-        if last is not None and now - last < _AUDIT_TTL_SEC:
-            return
-        if len(_AUDIT_SEEN) >= 1024:
-            _AUDIT_SEEN.clear()
-        _AUDIT_SEEN[key] = now
-    logger.warning(
-        "egress.would_block point=%s connector=%s host=%s reason=%s (allowed: "
-        "DATAFLOW_EGRESS_ENFORCE_NEW is off)",
-        point,
-        connector or "-",
-        shown,
-        phrase,
+    audit_would_apply(
+        "egress.would_block",
+        resource=f"connector:{connector}" if connector else f"host:{shown}",
+        dedupe_key=(point, connector, shown, workspace),
+        workspace_id=workspace,
+        flag="DATAFLOW_EGRESS_ENFORCE_NEW",
+        details={
+            "point": point,
+            "connector": connector,
+            "host": shown,
+            "reason": phrase,
+            "host_class": host_class(shown),
+        },
     )
-    try:
-        from services.audit_log import append_audit_event
-
-        append_audit_event(
-            action="egress.would_block",
-            resource=f"connector:{connector}" if connector else f"host:{shown}",
-            actor="system",
-            level="warn",
-            workspace_id=workspace or None,
-            details={
-                "point": point,
-                "connector": connector,
-                "host": shown,
-                "reason": phrase,
-                "host_class": host_class(shown),
-                "enforced": False,
-                "flag": "DATAFLOW_EGRESS_ENFORCE_NEW",
-            },
-        )
-    except Exception as exc:
-        logger.debug("egress.would_block audit write failed: %s", type(exc).__name__)
 
 
 def _refuse_at_new_point(

@@ -18,7 +18,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import HTTPException
 
-from services import egress_guard
+from services import would_apply_audit
 from services.egress_guard import (
     EgressRefused,
     assert_connector_dial_allowed,
@@ -39,7 +39,7 @@ def audit_events(monkeypatch):
     monkeypatch.delenv("DATAFLOW_EGRESS_ENFORCE_NEW", raising=False)
     monkeypatch.delenv("DATAWRAP_EGRESS_ENFORCE_NEW", raising=False)
     monkeypatch.delenv("DATAFLOW_EGRESS_ALLOWLIST", raising=False)
-    egress_guard._AUDIT_SEEN.clear()
+    would_apply_audit.reset_dedupe()
     events: list[dict] = []
     import services.audit_log as audit_log
 
