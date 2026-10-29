@@ -2656,6 +2656,27 @@ def _stream_database_transfer_impl(
         # them (D42: "committed rows into a table that doesn't exist").
         from services.error_handling import TransferCancelled
 
+        if isinstance(_row_exc, TransferCancelled) and not getattr(_row_exc, "superseded", False):
+            # D199 — every pooled writer has stopped (the dispatcher drained
+            # them); count what the destination really holds.
+            from services.job_status import measure_cancel_landing
+
+            measure_cancel_landing(
+                _row_exc,
+                dest_type=run.cfg.dest_type,
+                dest_cfg=run.cfg.dest_cfg,
+                table=str(run.cfg.dest_table),
+                sync_mode=str(run.cfg.effective_sync or ""),
+                rows_before=run.tally.dest_summary.get(PRECOUNT_KEY),
+                table_existed_before=run.tally.dest_summary.get("dest_table_existed_before"),
+                keyed=bool(run.cfg.write_mode == "upsert" and run.cfg.pk_target_cols),
+                atomic_overwrite=bool(
+                    run.cfg.dest_type in ("postgresql", "redshift")
+                    and (getattr(run.cfg.destination, "extra", None) or {}).get(
+                        "pg_overwrite_in_transaction"
+                    )
+                ),
+            )
         if not isinstance(_row_exc, TransferCancelled):
             try:
                 from services.batch_undo import (

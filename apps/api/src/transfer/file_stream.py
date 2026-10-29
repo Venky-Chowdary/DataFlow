@@ -3046,6 +3046,24 @@ def stream_file_to_database(
         # stays in the destination and cancel_outcome reports it verbatim.
         from services.error_handling import TransferCancelled
 
+        if isinstance(_write_exc, TransferCancelled) and not getattr(
+            _write_exc, "superseded", False
+        ):
+            # D199 — writers have stopped; the destination's count is the
+            # number the cancel message states.
+            from services.job_status import measure_cancel_landing
+
+            measure_cancel_landing(
+                _write_exc,
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                table=str(dest_table),
+                sync_mode=str(effective_sync or ""),
+                rows_before=dest_summary.get(PRECOUNT_KEY),
+                table_existed_before=dest_summary.get("dest_table_existed_before"),
+                keyed=bool(write_mode == "upsert" and pk_target_cols),
+                atomic_overwrite=bool(pg_overwrite_one_txn),
+            )
         if not isinstance(_write_exc, TransferCancelled):
             try:
                 from services.batch_undo import (

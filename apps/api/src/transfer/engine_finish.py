@@ -86,7 +86,7 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
         return written
     if not (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
         return written
-    outcome = cancel_outcome_for(fields.get("records_processed"))
+    outcome = cancel_outcome_for(fields.get("records_processed"), tally_is_exact=True)
     logger.warning(
         "Job %s: cancel landed after %s row(s) committed; recording them on the cancelled job",
         job_id,
