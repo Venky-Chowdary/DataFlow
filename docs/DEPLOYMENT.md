@@ -151,6 +151,36 @@ docker run -p 8000:8000 --env-file .env \
 |----------|-----|
 | `GET /health` | Load balancer — checks MongoDB, storage, drivers |
 | `GET /health-api` (via nginx) | Web container probe |
+| `GET /health/ready` | Readiness: returns 503 `degraded` while the connector pool is saturated or its oldest call is too old |
+
+`/health` and `/health/ready` both carry a `connector_pool` object
+(`in_flight`, `queued`, `abandoned`, `max_workers`, `oldest_in_flight_seconds`,
+`per_workspace`, `abandoned_total`, `rejected_total`). `/health` stays a cheap
+liveness check and never fails on it.
+
+### Connector I/O limits (D181)
+
+Pilot/MCP tools that dial out to a customer system (`run_query`,
+`test_connector`, `aggregate_data`, `plan_transfer`, `start_transfer`,
+`sample_connector_object`, schema introspection, ...) run on their own bounded
+worker pool, not the shared asyncio pool. A call that outlives its deadline
+returns a clear error naming the host and step; the stuck worker is counted as
+`abandoned` until it really ends. A workspace that already has its share of
+calls in flight gets an immediate "connector calls in flight" error instead of
+queueing. All settings are optional (`DATAWRAP_*` is read before `DATAFLOW_*`).
+
+| Variable | Default | Meaning |
+|----------|---------|---------|
+| `DATAFLOW_CONNECTOR_POOL_WORKERS` | `16` | Workers in the connector pool |
+| `DATAFLOW_CONNECTOR_WORKSPACE_MAX` | `6` | Connector calls in flight per workspace (running, queued and abandoned) |
+| `DATAFLOW_CONNECTOR_READY_MAX_AGE_SECONDS` | `300` | `/health/ready` degrades when the oldest in-flight call has run longer |
+| `DATAFLOW_QUERY_TOOL_DEADLINE_SECONDS` | `120` | Deadline for `run_query`, `test_connector`, `aggregate_data` |
+| `DATAFLOW_TOOL_DEADLINE_SECONDS` | `45` | Deadline for plan/start/sample/introspect tools (existing, D169) |
+| `DATAFLOW_QUERY_STATEMENT_TIMEOUT_SECONDS` | `120` | Server-side statement cap for interactive SQL (PostgreSQL `statement_timeout`, MySQL `MAX_EXECUTION_TIME`, SQL Server `LOCK_TIMEOUT`); `0` disables |
+
+Connect timeouts are unchanged (15 s default, `connect_timeout` on the connector).
+If `/health/ready` reports a saturated pool, look at `per_workspace` for the
+tenant holding the workers and at the sources those calls point to.
 
 ---
 

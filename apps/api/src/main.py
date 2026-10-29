@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager, nullcontext
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
+from services import connector_executor
 from services.connector_store import ConnectorStoreError
 from services.cors_policy import TenantAwareCORSMiddleware
 from services.health_service import aggregate_health
@@ -740,6 +741,9 @@ async def health_check():
         "version": "1.0.0",
         "commit": _BUILD_COMMIT,
         "ready": bool(getattr(app.state, "ready", False)) and not errors,
+        # Cheap in-memory counters (D181): liveness stays liveness, but the
+        # numbers show a pool held by stuck connector calls.
+        "connector_pool": connector_executor.snapshot(),
         # Present only after proxy-write hardening is deployed. Use this to
         # confirm Railway is not still running a pre-fix API image.
         "features": {
@@ -764,6 +768,11 @@ async def health_ready():
     to a pod that cannot accept transfer jobs.
     """
     payload = aggregate_health()
+    pool = connector_executor.readiness()
+    payload["connector_pool"] = pool
+    if not pool["ok"] and payload.get("status") == "healthy":
+        payload["status"] = "degraded"
+        payload["detail"] = pool["reason"]
     warm = bool(getattr(app.state, "ready", False))
     payload["ready"] = warm and payload.get("status") == "healthy"
     if not payload["ready"] and payload.get("status") == "healthy":
