@@ -176,3 +176,22 @@ def test_land_export_bytes_generated_name_lands_in_exports():
         assert Path(out["path"]) == exports_dir() / f"export_{job}.json"
     finally:
         Path(out["path"]).unlink()
+
+
+def test_exports_root_is_configurable(monkeypatch, tmp_path):
+    custom = tmp_path / "ops-exports"
+    monkeypatch.setenv("DATAFLOW_EXPORTS_DIR", str(custom))
+    assert exports_dir() == custom.resolve()
+    assert resolve_export_path("orders.csv", default_ext="csv") == custom.resolve() / "orders.csv"
+    # Confinement follows the configured root, not the default folder.
+    with pytest.raises(ExportPathError):
+        resolve_export_path("../escape.csv", default_ext="csv")
+    with pytest.raises(ExportPathError):
+        resolve_export_path(str(tmp_path / "elsewhere" / "x.csv"), default_ext="csv")
+
+
+def test_exports_root_defaults_to_api_exports(monkeypatch):
+    monkeypatch.delenv("DATAFLOW_EXPORTS_DIR", raising=False)
+    monkeypatch.delenv("DATAWRAP_EXPORTS_DIR", raising=False)
+    assert exports_dir().name == "exports"
+    assert exports_dir().parent.name == "api"
