@@ -20,7 +20,7 @@ import contextvars
 import logging
 import os
 import threading
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import urlparse
@@ -79,6 +79,8 @@ class _Progress:
     step: str = ""
     role: str = ""
     target: str = ""
+    #: ``(role, host:port)`` of every other system the same step also reaches.
+    also: tuple[tuple[str, str], ...] = ()
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -107,8 +109,19 @@ def describe_target(conn: Any) -> str:
     return f"{host}:{port}" if port else host
 
 
-def note_step(step: str, conn: Any = None, *, role: str = "") -> None:
-    """Record the step about to block on a customer system (cheap, thread-safe)."""
+def note_step(
+    step: str,
+    conn: Any = None,
+    *,
+    role: str = "",
+    also: Sequence[tuple[str, Any]] = (),
+) -> None:
+    """Record the step about to block on a customer system (cheap, thread-safe).
+
+    A step that reaches several systems (the preflight reads the source and the
+    destination) passes the others as ``also=((role, conn), ...)`` so a timeout
+    names every system it may have been waiting on, not just the first.
+    """
     progress = _progress.get()
     if progress is None:
         return
@@ -116,12 +129,29 @@ def note_step(step: str, conn: Any = None, *, role: str = "") -> None:
         progress.step = step
         progress.role = role
         progress.target = describe_target(conn) if conn is not None else ""
+        progress.also = tuple(
+            (other_role, target)
+            for other_role, other in also
+            if (target := describe_target(other))
+        )
 
 
 def _timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
     with progress.lock:
         step, role, target = progress.step, progress.role, progress.target
+        also = progress.also
     waited = f"{seconds:g}s"
+    if target and also:
+        # The step reads more than one system and cannot tell which one held it:
+        # blaming the first would send the operator to a healthy database.
+        named = ", ".join(f"the {r} ({t})" for r, t in ((role or "source", target), *also))
+        where = f" (step: {step})" if step else ""
+        return (
+            f"{tool} did not finish within {waited}{where}. It reads {named}, and "
+            "one of them is slow or unreachable. Check the hosts and ports, the "
+            "firewall or VPN, and that each system is healthy and its warehouse or "
+            "server is running, then try again."
+        )
     if target:
         subject = f"{role} unreachable/slow: {target}" if role else f"unreachable/slow: {target}"
         where = f" (step: {step})" if step else ""

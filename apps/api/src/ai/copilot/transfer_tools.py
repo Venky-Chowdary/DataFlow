@@ -673,14 +673,17 @@ def _plan_source_types_authoritative(
 
 
 def _share_catalog_reads(fn):
-    """Run a read-only planning tool with one catalog read per object (D145)."""
+    """Run a read-only planning tool with one catalog read per object (D145)
+    and one Snowflake login per endpoint (D187)."""
     import functools
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        from connectors.snowflake_conn import snowflake_plan_scope
         from services.introspect_memo import introspect_memo_scope
 
-        with introspect_memo_scope():
+        # One Snowflake login per endpoint for the whole plan (D187).
+        with introspect_memo_scope(), snowflake_plan_scope():
             return fn(*args, **kwargs)
 
     return wrapper
@@ -1025,7 +1028,14 @@ def plan_transfer(
             except ValueError as exc:
                 return _tool_result(tool, success=False, error=str(exc))
 
-        note_step("running the preflight checks", src_conn, role="source")
+        # The gates probe the destination (login, privileges, catalog) as well
+        # as the source: a timeout here must not accuse the source alone (D187).
+        note_step(
+            "running the preflight checks",
+            src_conn,
+            role="source",
+            also=(("destination", dst_conn),),
+        )
         preflight = _run_preflight(
             src_conn=src_conn,
             dst_conn=dst_conn,
