@@ -118,6 +118,10 @@ export async function shoot(
   });
   await settleToasts(page);
   await settleInput(page);
+  // The identity chip reads "Previewing…" while the recipe preview is in flight and
+  // "Transform ID <hash>" after. It is masked, but the mask takes the chip's width, so a
+  // capture taken mid-preview differs from one taken after (4082 px on the runner).
+  await expect(page.locator(".df2-xform-identity")).not.toHaveText(/Previewing/, { timeout: 30_000 });
   await page.evaluate(async () => {
     await document.fonts.ready;
   });
