@@ -23,6 +23,7 @@ from functools import partial
 from pathlib import Path
 from typing import Any
 
+from .job_quarantine import rebase_batch_rejects
 from .models import EndpointConfig
 from .type_mapper import ddl_carrier_type, ddl_type
 
@@ -2765,14 +2766,18 @@ def stream_file_to_database(
                 fingerprint_sink.add_many(result["fingerprints"])
         if sample_book.active and result.get("policy_sample"):
             sample_book.add_batch(list(result.get("policy_sample") or []), limit=50)
+        # Batches a resumed run skipped were full-size, so they sit before this one.
+        batch_start = (chunk_idx * batch_size if resumed else 0) + source_rows_seen
         source_rows_seen += int(result.get("batch_rows") or 0)
         written += result["batch_written"]
         rejected_total += result["rejected"]
         coerced_null_total += result.get("coerced_null", 0)
         warning_samples.extend(result["warnings"])
-        new_details = [
-            d for d in (result.get("rejected_details") or []) if isinstance(d, dict)
-        ]
+        new_details = rebase_batch_rejects(
+            result.get("rejected_details"),
+            batch_start=batch_start,
+            row_basis="shaped_read" if shape_runner is not None else "",
+        )
         rejected_details.extend(new_details)
         last_checksum = result["last_checksum"] or last_checksum
         batch_summary = result.get("dest_summary")

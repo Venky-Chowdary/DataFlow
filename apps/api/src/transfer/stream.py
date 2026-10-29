@@ -69,7 +69,7 @@ from .adapters import (
     resolve_dest_table,
 )
 from .connector_capabilities import resolve_driver_type, source_read_driver
-from .job_quarantine import align_reported_rejects
+from .job_quarantine import align_reported_rejects, rebase_batch_rejects
 from .stream_row_accounting import (
     _raw_page_rows,
     stamp_incremental_no_op,
@@ -2430,23 +2430,13 @@ def _stream_database_transfer_impl(
                 prev.get("embedding_usage"), incoming.get("embedding_usage")
             )
             prev_details = list(prev.get("rejected_details") or [])
-            new_details: list[dict[str, Any]] = []
-            for raw in incoming.get("rejected_details") or []:
-                if not isinstance(raw, dict):
-                    continue
-                detail = dict(raw)
-                local_row = int(detail.get("row") or 0)
-                if local_row > 0:
-                    detail["batch_row"] = local_row
-                    detail["batch_offset"] = batch_start
-                    detail["row"] = batch_start + local_row  # 1-based absolute across the transfer
-                    if int(result.get("shape_page_removed") or 0):
-                        # The recipe removed rows earlier in this page, so this
-                        # number counts the rows that reached the writer, not the
-                        # source's own numbering. Say so rather than name a source
-                        # line the operator would not find.
-                        detail["row_basis"] = "shaped_read"
-                new_details.append(detail)
+            new_details = rebase_batch_rejects(
+                incoming.get("rejected_details"),
+                batch_start=batch_start,
+                row_basis=(
+                    "shaped_read" if int(result.get("shape_page_removed") or 0) else ""
+                ),
+            )
             # GA: keep full rejected_details across batches — never drop for a
             # UI sample cap (sample is stamped separately at finalize).
             merged_details = prev_details + new_details
