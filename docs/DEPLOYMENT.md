@@ -284,3 +284,55 @@ permissions` describes "unruled = everyone allowed"; that does not match the
 fallback table above.) Deployments that actually saw viewers or operators
 saving recipes were running with RBAC off (`DATAFLOW_REQUIRE_AUTH=0`), where
 this middleware is skipped and nothing changes.
+
+---
+
+## `scripts/backfill_legacy_workspaces.py` (legacy workspace backfill, D154)
+
+Run from `apps/api`. **Dry run is the default**; nothing is written unless
+`--apply` is passed (`--dry-run` and `--apply` are mutually exclusive).
+It is never run at startup. Run it before turning self-serve signup on
+(workspace isolation), so existing owners keep their history.
+
+```bash
+python scripts/backfill_legacy_workspaces.py                       # dry run, prints a JSON report
+python scripts/backfill_legacy_workspaces.py --apply
+python scripts/backfill_legacy_workspaces.py --apply --owner-email ops@example.com
+```
+
+**Exactly what `--apply` changes.** It sets the single field `workspace_id` (for
+contracts: `metadata.workspace_id`) on rows whose workspace is empty/missing,
+and nothing else. It never deletes, never touches a row that already has a
+workspace, and never touches audit events (their HMAC chain covers every field;
+unscoped audit rows stay platform-admin only). Per store:
+
+| Report key | Rows stamped | Owner decided by |
+|---|---|---|
+| `connectors` (file/connector store) | unscoped connectors | owner field on the row, else the one account whose legacy jobs/schedules use it, else platform owner |
+| `job_store_connectors` | unscoped connector docs in the job store | same |
+| `jobs` | unscoped jobs (`updated_at` not bumped) | `created_by` / `owner_email` / `owner` / `triggered_by` (also inside `transfer_request`) naming a real account, else platform owner |
+| `schedules` | unscoped schedules | owner field, else the one account whose jobs ran it, else platform owner |
+| `contracts`, `transform_recipes` | unscoped | the one workspace of the schedules using them, else platform owner's workspace |
+| `transform_projects` | unscoped | the workspace of the destination connector, else platform owner's |
+| `quarantine_dlq`, `usage_events` | unscoped events | the owner of the job the event belongs to (an event it cannot place is `skipped`) |
+| `preflight_runs`, `transfer_plans`, `shape_drafts` | unscoped | always the platform owner's workspace (no ownership evidence exists) |
+
+An owner's workspace is their personal workspace, else their earliest
+membership. An owner on record without any workspace falls back to the
+platform owner. The platform owner is `--owner-email`, else the bootstrap admin
+(`DATAWRAP_ADMIN_EMAIL`/`DATAFLOW_ADMIN_EMAIL`), else the earliest stored admin.
+The only thing ever *created* is one workspace for the platform owner, and only
+if some row needs it and they have none.
+
+**Idempotent:** only unscoped rows are selected, so a second `--apply` reports
+`assigned: 0` everywhere and creates nothing. A row whose write fails is counted
+under `skipped`, logged, and retried by the next run. The DLQ JSONL fallback and
+the JSONL stores are rewritten atomically; run `--apply` in a maintenance window
+because concurrent appends are not locked against that rewrite.
+
+**Dry run** prints the same counts as `--apply` would produce (`applied: false`)
+and writes nothing, including no workspace creation (a would-be workspace shows
+as `(new workspace for <email>)`). Verified on throwaway stores by
+`tests/test_backfill_legacy_workspaces_cli.py` (file-tree hash unchanged after a
+dry run and after a second apply). Take a backup of the Mongo database and the
+data directory before the first `--apply`.
