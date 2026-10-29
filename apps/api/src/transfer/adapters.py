@@ -560,6 +560,20 @@ def resolve_connector_config(
         for key, value in {**cfg, **conn_dict}.items():
             if key not in merged_cfg:
                 merged_cfg[key] = value
+        # A saved SFTP connector keeps its host-key pin under ``extra``
+        # (connector_store.connector_extra_from_payload). An endpoint that names
+        # only the connector id (the planner's fallback sampler, a Validate
+        # sample) must carry it the way an inline ``extra`` is carried
+        # (``cfg.update(endpoint.extra)`` above). Dropped, the pinned host read
+        # as untrusted, Map scored a file with no sample rows and G4 held an
+        # exact-name column of an existing table (D159). Inline values win.
+        saved_extra = conn_dict.get("extra")
+        if isinstance(saved_extra, dict):
+            from connectors.sftp_common import host_key_settings
+
+            for key, value in host_key_settings(saved_extra).items():
+                if value and not merged_cfg.get(key):
+                    merged_cfg[key] = value
         merged_cfg["destination_identity"] = identity.as_dict()
         sync_credentials_into_connection_string(merged_cfg)
         cfg = merged_cfg

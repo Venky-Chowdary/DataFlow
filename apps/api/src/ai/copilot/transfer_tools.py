@@ -955,6 +955,9 @@ def plan_transfer(
 
     from services.mapping_pipeline import run_mapping_pipeline
 
+    # Map is Datawrap's own work: it reads neither system. Left on the
+    # sampling step, a slow Map was reported as the source (D189).
+    note_step(f"mapping the source columns onto {dst_table}")
     mapping = run_mapping_pipeline(
         [r["name"] for r in src_rows],
         [r["name"] for r in dst_rows],
