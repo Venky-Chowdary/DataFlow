@@ -82,15 +82,19 @@ def _railway_volume_root() -> Path | None:
     return None
 
 
-def data_dir() -> Path:
+def data_dir_path() -> Path:
+    """Where the service keeps its state, without creating it (audit scripts)."""
     vol = _railway_volume_root()
     raw = getenv_brand("DATA_DIR", "").strip()
     if raw:
-        path = Path(raw)
-    elif vol:
-        path = vol / "data"
-    else:
-        path = _API_ROOT / "data"
+        return Path(raw)
+    if vol:
+        return vol / "data"
+    return _API_ROOT / "data"
+
+
+def data_dir() -> Path:
+    path = data_dir_path()
     path.mkdir(parents=True, exist_ok=True)
     return path
 
