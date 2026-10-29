@@ -9,7 +9,6 @@ from connectors.sql_dsn import private_cloud_host_hint, resolve_sql_endpoint
 from connectors.write_resilience import is_public_proxy_host
 
 logger = logging.getLogger(__name__)
-_ssl_fallback_hosts: set[str] = set()
 
 
 def _parse_postgres_url(url: str) -> dict[str, Any]:
@@ -38,7 +37,6 @@ def get_connection(
     password: str,
     connection_string: str,
     ssl: bool,
-    allow_ssl_downgrade: bool = True,
 ) -> Any:
     try:
         import psycopg2
@@ -88,45 +86,19 @@ def get_connection(
     try:
         conn = psycopg2.connect(**kwargs)
     except Exception as first_exc:
-        fallback_sslmode: str | None = None
-        if not ssl and public_proxy and sslmode != "require":
-            fallback_sslmode = "require"
-        elif (
-            ssl
-            and allow_ssl_downgrade
-            and sslmode == "require"
-            and _ssl_not_supported(str(first_exc))
-        ):
-            # ssl=True with a server that does not advertise TLS is often a stale
-            # connector setting. Fall back to negotiate/try TLS first, then plain.
-            fallback_sslmode = "prefer"
-
-        if fallback_sslmode:
-            try:
-                conn = psycopg2.connect(**{**kwargs, "sslmode": fallback_sslmode})
-                if ep["host"] not in _ssl_fallback_hosts:
-                    _ssl_fallback_hosts.add(ep["host"])
-                    logger.warning(
-                        "PostgreSQL sslmode='%s' failed for %s; connected with sslmode='%s'. "
-                        "Review the connector SSL setting if encryption is required.",
-                        sslmode,
-                        ep["host"],
-                        fallback_sslmode,
-                    )
-            except psycopg2.Error as second_exc:
-                # The retry's error is the truth — the first failure was for a
-                # *different* sslmode. Raising first_exc reports the stale
-                # "server does not support SSL" and hides the real reason the
-                # working-mode connection failed (CI-1 PG-SSL masking).
-                hint = private_cloud_host_hint(ep["host"], connection_string)
-                if hint:
-                    raise RuntimeError(f"{second_exc}{hint}") from second_exc
-                raise second_exc from first_exc
-        else:
-            hint = private_cloud_host_hint(ep["host"], connection_string)
-            if hint:
-                raise RuntimeError(f"{first_exc}{hint}") from first_exc
-            raise
+        if ssl and _ssl_not_supported(str(first_exc)):
+            # ssl=True is the connector's explicit TLS requirement (see
+            # SavedConnector.ssl_mode): it is never retried without TLS.
+            raise RuntimeError(
+                f"{first_exc} - TLS is required by this connection and the server "
+                "does not offer it; refusing to fall back to plaintext. Enable TLS on "
+                "the server, or clear SSL/TLS on the connector to allow an unencrypted "
+                "connection."
+            ) from first_exc
+        hint = private_cloud_host_hint(ep["host"], connection_string)
+        if hint:
+            raise RuntimeError(f"{first_exc}{hint}") from first_exc
+        raise
 
     from connectors.write_resilience import apply_postgres_session_guards
 

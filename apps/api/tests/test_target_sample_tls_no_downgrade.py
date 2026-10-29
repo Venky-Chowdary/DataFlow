@@ -37,7 +37,6 @@ def test_ssl_required_sample_fails_closed_without_plaintext_retry(db_type):
             _read(db_type, {**_DEST, "ssl": True})
     assert fake.call_count == 1
     assert fake.call_args.kwargs["ssl"] is True
-    assert fake.call_args.kwargs["allow_ssl_downgrade"] is False
 
 
 def test_ssl_required_sample_query_failure_does_not_retry_plaintext():
@@ -82,22 +81,10 @@ def _pg_kwargs(**overrides):
     }
 
 
-def test_get_connection_refuses_downgrade_when_disallowed():
+def test_get_connection_never_downgrades_required_tls():
     pytest.importorskip("psycopg2")
     connect = MagicMock(side_effect=_no_ssl_error())
     with patch("psycopg2.connect", connect):
-        with pytest.raises(Exception, match="does not support SSL"):
-            postgresql_conn.get_connection(**_pg_kwargs(allow_ssl_downgrade=False))
+        with pytest.raises(RuntimeError, match="does not support SSL.*refusing to fall back"):
+            postgresql_conn.get_connection(**_pg_kwargs())
     assert [c.kwargs["sslmode"] for c in connect.call_args_list] == ["require"]
-
-
-def test_get_connection_default_keeps_legacy_prefer_fallback():
-    pytest.importorskip("psycopg2")
-    conn = MagicMock()
-    connect = MagicMock(side_effect=[_no_ssl_error(), conn])
-    with (
-        patch("psycopg2.connect", connect),
-        patch("connectors.write_resilience.apply_postgres_session_guards"),
-    ):
-        assert postgresql_conn.get_connection(**_pg_kwargs()) is conn
-    assert [c.kwargs["sslmode"] for c in connect.call_args_list] == ["require", "prefer"]
