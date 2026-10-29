@@ -55,7 +55,12 @@ def _auto_map(
     if zone_error:
         raise ValueError(zone_error)
     if zone:
-        source_schemas, _ = declare_zone_on_schema(source_schemas, zone)
+        source_schemas, _ = declare_zone_on_schema(
+            source_schemas,
+            zone,
+            source_db=(request.source.format or "").lower(),
+            source_kind=(request.source.kind or "").lower(),
+        )
         schema.update({
             str(row.get("name") or ""): str(row.get("inferred_type") or "")
             for row in source_schemas

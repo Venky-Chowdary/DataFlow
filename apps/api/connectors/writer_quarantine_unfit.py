@@ -11,6 +11,82 @@ from typing import Any
 logger = logging.getLogger("connectors.writer_common")
 
 
+def temporal_cell_unfit_reason(raw: Any, typ: str, *, dest_db: str = "") -> str:
+    """Why the writer would hold this temporal cell out, or ``""``.
+
+    The writer's own rule, for one cell. Validate's wire probe calls it so a
+    plan cannot go green on a value Execute quarantines (an offset-bearing
+    SQLite text timestamp into a PostgreSQL ``TIMESTAMP``: M6).
+    """
+    from connectors.writer_common import (
+        _dest_is_instant_only,
+        _mysql_datetime_utc_normalizes,
+    )
+    from services.type_system import (
+        datetime_timezone_polarity,
+        normalize_logical_type,
+        parse_temporal_fractional_precision,
+    )
+
+    logical = normalize_logical_type(typ)
+    if logical not in {"date", "time", "datetime"}:
+        return ""
+    check_fsp = parse_temporal_fractional_precision(typ) is not None
+    check_tz = (
+        logical == "datetime"
+        and datetime_timezone_polarity(typ, dest_db=dest_db) == "ntz"
+        and not _mysql_datetime_utc_normalizes(typ, dest_db)
+        and not _dest_is_instant_only(typ, dest_db)
+    )
+    return _temporal_unfit_reason(
+        raw, typ, dest_db=dest_db, check_fsp=check_fsp, check_tz=check_tz
+    )
+
+
+def _temporal_unfit_reason(
+    raw: Any, typ: str, *, dest_db: str, check_fsp: bool, check_tz: bool
+) -> str:
+    from connectors.writer_common import (
+        _mysql_timestamp_range_violation,
+        _time_out_of_carrier_range,
+    )
+    from services.type_system import (
+        temporal_value_exceeds_precision,
+        temporal_value_has_timezone,
+    )
+
+    if isinstance(raw, str) and not raw.strip():
+        return (
+            f"empty string into temporal destination {typ} "
+            "— quarantined (refuse silent NULL invent)"
+        )
+    if check_fsp and temporal_value_exceeds_precision(raw, typ):
+        return (
+            f"fractional seconds exceed destination {typ} "
+            "— quarantined (refuse silent truncate)"
+        )
+    if _mysql_timestamp_range_violation(typ, raw, dest_db=dest_db):
+        return (
+            f"value outside the MySQL TIMESTAMP epoch range for {typ} "
+            "— quarantined; map to DATETIME(6) with a UTC-normalize "
+            "contract to carry instants beyond 2038"
+        )
+    if _time_out_of_carrier_range(typ, raw, dest_db=dest_db):
+        return (
+            f"TIME value outside the 0–24h wall-clock range on {dest_db} "
+            f"for {typ} — quarantined; map to an interval or text "
+            "carrier to carry out-of-range TIME"
+        )
+    if check_tz and temporal_value_has_timezone(raw):
+        return (
+            f"timezone-aware value into NTZ destination {typ} "
+            "— quarantined (refuse silent offset strip; map to an instant "
+            "carrier such as TIMESTAMPTZ, declare source_timezone, or use an "
+            "explicit UTC transform)"
+        )
+    return ""
+
+
 def quarantine_unfit_temporals(
     mapped_rows: list[tuple],
     target_cols: list[str],
@@ -36,8 +112,6 @@ def quarantine_unfit_temporals(
     from connectors.writer_common import (
         _dest_is_instant_only,
         _mysql_datetime_utc_normalizes,
-        _mysql_timestamp_range_violation,
-        _time_out_of_carrier_range,
         _unfit_cell_absent,
         append_write_quarantine_detail,
     )
@@ -46,8 +120,6 @@ def quarantine_unfit_temporals(
         datetime_timezone_polarity,
         normalize_logical_type,
         parse_temporal_fractional_precision,
-        temporal_value_exceeds_precision,
-        temporal_value_has_timezone,
     )
 
     temporal_cols: list[tuple[int, str, bool, bool]] = []
@@ -74,35 +146,10 @@ def quarantine_unfit_temporals(
         for col_idx, typ, check_fsp, check_tz in temporal_cols:
             if _unfit_cell_absent(cells, col_idx):
                 continue
-            reason = ""
             raw = cells[col_idx]
-            if isinstance(raw, str) and not raw.strip():
-                reason = (
-                    f"empty string into temporal destination {typ} "
-                    "— quarantined (refuse silent NULL invent)"
-                )
-            elif check_fsp and temporal_value_exceeds_precision(raw, typ):
-                reason = (
-                    f"fractional seconds exceed destination {typ} "
-                    "— quarantined (refuse silent truncate)"
-                )
-            elif _mysql_timestamp_range_violation(typ, raw, dest_db=dest_db):
-                reason = (
-                    f"value outside the MySQL TIMESTAMP epoch range for {typ} "
-                    "— quarantined; map to DATETIME(6) with a UTC-normalize "
-                    "contract to carry instants beyond 2038"
-                )
-            elif _time_out_of_carrier_range(typ, raw, dest_db=dest_db):
-                reason = (
-                    f"TIME value outside the 0–24h wall-clock range on {dest_db} "
-                    f"for {typ} — quarantined; map to an interval or text "
-                    "carrier to carry out-of-range TIME"
-                )
-            elif check_tz and temporal_value_has_timezone(raw):
-                reason = (
-                    f"timezone-aware value into NTZ destination {typ} "
-                    "— quarantined (refuse silent offset strip; use explicit UTC transform)"
-                )
+            reason = _temporal_unfit_reason(
+                raw, typ, dest_db=dest_db, check_fsp=check_fsp, check_tz=check_tz
+            )
             if not reason:
                 continue
             sample = cell_to_string(raw)[:120]

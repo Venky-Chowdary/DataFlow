@@ -842,6 +842,12 @@ def _temporal_bind_reason(value: Any, target_type: str, dest_db: str) -> str | N
     except ValueError as exc:
         return str(exc)
     if coerced is value and not isinstance(value, (date, datetime, time)):
+        from connectors.sql_temporal import _keeps_era_literal, beyond_python_calendar
+
+        if beyond_python_calendar(value) and _keeps_era_literal(dest_db):
+            # D65 — the bind keeps a BC / five-digit-year literal on the
+            # PostgreSQL family and SQLite's text carrier; it is not unparsed.
+            return None
         shown = value if isinstance(value, str) else str(value)
         return f"Invalid {base}: {shown!r}"
     return None

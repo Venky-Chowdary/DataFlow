@@ -944,13 +944,28 @@ def plan_transfer(
         source_timezone, zone_error = validate_source_timezone(source_timezone)
         if zone_error:
             return _tool_result(tool, success=False, error=zone_error)
-        src_rows, zone_columns = declare_zone_on_schema(src_rows, source_timezone)
+        src_rows, zone_columns = declare_zone_on_schema(
+            src_rows,
+            source_timezone,
+            source_db=str(src_info.get("db_type") or src_conn.get("type") or ""),
+            source_kind=str(src_conn.get("kind") or "database"),
+        )
         # The declaration is a fact about the source, so it travels with the
         # schema every gate reads — not just with the mapping.
         src_info["schema"] = {
             **(src_info.get("schema") or {}),
             **{r["name"]: r["inferred_type"] for r in src_rows if r["name"] in zone_columns},
         }
+    if column_transforms:
+        from services.timezone_policy import declare_transform_zones_on_schema
+
+        zoned = declare_transform_zones_on_schema(src_rows, column_transforms)
+        if zoned is not src_rows:
+            src_rows = zoned
+            src_info["schema"] = {
+                **(src_info.get("schema") or {}),
+                **{r["name"]: r["inferred_type"] for r in src_rows},
+            }
     dst_rows = _schema_rows(dst_info.get("columns") or [])
 
     from services.mapping_pipeline import run_mapping_pipeline
