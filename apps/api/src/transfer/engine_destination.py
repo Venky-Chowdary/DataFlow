@@ -11,6 +11,92 @@ from src.transfer.engine import (
     logger,
 )
 
+#: Longest the engine waits for the destination to answer its first contact.
+DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS = 60.0
+
+
+class DestinationConnectTimeout(TimeoutError):
+    """The destination did not answer its first contact inside the deadline (D19)."""
+
+
+def _destination_connect_deadline() -> float:
+    from src.ai.copilot.tool_deadline import _seconds_from_env
+
+    return _seconds_from_env(
+        "DATAFLOW_DESTINATION_CONNECT_DEADLINE_SECONDS",
+        DEFAULT_DESTINATION_CONNECT_DEADLINE_SECONDS,
+    )
+
+
+def _connect_destination(
+    destination: EndpointConfig,
+    *,
+    sync_mode: str,
+    mongo: Any,
+    job_id: str,
+) -> tuple[dict[str, str], bool | None]:
+    """First contact with the destination: bounded, and the job keeps pulsing.
+
+    A destination that accepts the connection and never answers held the run's
+    worker for the sum of every driver timeout it stacked, with the job document
+    frozen at 5% (D19). The orphan sweeper cannot settle that job (its worker is
+    alive and holds the lease) and the step watchdog reads a pulse as progress,
+    so the engine ends it itself: the probe runs on the connector executor with
+    a deadline, and the run fails naming the destination.
+    """
+    if destination.kind != "database":
+        return _engine._destination_schema_probe(destination, sync_mode=sync_mode)
+    from services.connector_executor import (
+        ConnectorCallTimeout,
+        ConnectorCapacityExceeded,
+        get_executor,
+    )
+    from services.workspace_filter import current_workspace_stamp
+    from src.ai.copilot.tool_deadline import describe_target
+
+    seconds = _destination_connect_deadline()
+    try:
+        cfg = _engine.resolve_connector_config(destination)
+    except Exception:  # noqa: BLE001 - only names the target in the message
+        cfg = {}
+    target = describe_target(
+        {
+            "host": cfg.get("host") or destination.host,
+            "port": cfg.get("port") or destination.port,
+            "connection_string": cfg.get("connection_string")
+            or destination.connection_string,
+        }
+    ) or str(destination.format or "destination")
+
+    def _timeout_message() -> str:
+        return (
+            f"Destination {target} did not answer within {seconds:g}s while the "
+            "run was connecting to it (step: reading the destination schema). "
+            "Nothing was written. Check the host and port, the firewall or VPN, "
+            "and that the database is healthy, then run it again."
+        )
+
+    try:
+        with _engine._job_phase_heartbeat(
+            mongo,
+            job_id,
+            phase="preflight",
+            message="Connecting to destination…",
+            interval_s=max(0.25, min(15.0, seconds / 4)),
+        ):
+            return get_executor().run(
+                "destination_connect",
+                lambda: _engine._destination_schema_probe(
+                    destination, sync_mode=sync_mode
+                ),
+                workspace=current_workspace_stamp(),
+                seconds=seconds,
+                describe_timeout=_timeout_message,
+            )
+    except (ConnectorCallTimeout, ConnectorCapacityExceeded) as exc:
+        raise DestinationConnectTimeout(str(exc)) from None
+
+
 def _destination_schema_probe(
     destination: EndpointConfig,
     sync_mode: str = "",

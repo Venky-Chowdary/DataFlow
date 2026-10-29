@@ -1944,7 +1944,7 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
     list and lets those gates report SKIP honestly.
     """
     from connectors.header_union import SCHEMALESS_SOURCE_TYPES
-    from services.preflight_sample import engine_sample_rows
+    from services.preflight_sample import PREVIEW_UNFAITHFUL_SOURCE_TYPES, engine_sample_rows
     from src.transfer.connector_capabilities import resolve_driver_type
 
     from .query_tools import sample_connector_object
@@ -1952,9 +1952,13 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
     # A document store's preview is its raw JSON; Execute reads it through the
     # reader, which stamps a BSON date as the UTC instant it is. Judging the
     # preview's zoneless text refused the instant carrier ("TIMESTAMPTZ refuses
-    # naive wall-clock") for a column Execute loads cleanly (D147). The gates
-    # judge the rows Execute will read.
-    if resolve_driver_type(str(conn.get("type") or "")) in SCHEMALESS_SOURCE_TYPES:
+    # naive wall-clock") for a column Execute loads cleanly (D147). A MySQL
+    # TIMESTAMP is the same case: the reader attaches UTC, the raw preview query
+    # returns its digits naive, and a CDC plan has no table walk to correct it
+    # (D171). The gates judge the rows Execute will read.
+    if resolve_driver_type(str(conn.get("type") or "")) in (
+        SCHEMALESS_SOURCE_TYPES | PREVIEW_UNFAITHFUL_SOURCE_TYPES
+    ):
         read = engine_sample_rows(
             source_kind="database",
             source_format=str(conn.get("type") or ""),

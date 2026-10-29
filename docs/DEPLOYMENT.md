@@ -394,6 +394,7 @@ queueing. All settings are optional (`DATAWRAP_*` is read before `DATAFLOW_*`).
 | `DATAFLOW_CONNECTOR_READY_MAX_AGE_SECONDS` | `300` | `/health/ready` degrades when the oldest in-flight call has run longer |
 | `DATAFLOW_QUERY_TOOL_DEADLINE_SECONDS` | `120` | Deadline for `run_query`, `test_connector`, `aggregate_data` |
 | `DATAFLOW_TOOL_DEADLINE_SECONDS` | `45` | Deadline for plan/start/sample/introspect tools (existing, D169) |
+| `DATAFLOW_DESTINATION_CONNECT_DEADLINE_SECONDS` | `60` | A run fails, naming the destination, when its first contact (reading the destination schema) has not answered in this long; the job pulses while it waits (D19) |
 | `DATAFLOW_QUERY_STATEMENT_TIMEOUT_SECONDS` | `120` | Server-side statement cap for interactive SQL (PostgreSQL `statement_timeout`, MySQL `MAX_EXECUTION_TIME`, SQL Server `LOCK_TIMEOUT`); `0` disables |
 
 Connect timeouts are unchanged (15 s default, `connect_timeout` on the connector).

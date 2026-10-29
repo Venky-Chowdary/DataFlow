@@ -25,6 +25,12 @@ logger = logging.getLogger(__name__)
 
 _SAMPLED_KINDS = frozenset({"database", "cloud"})
 
+#: Relational sources whose raw preview query cannot carry what the Execute
+#: reader carries. MySQL ``TIMESTAMP`` digits are a stored UTC instant: the
+#: reader attaches UTC, the preview returns them as a naive wall clock, and
+#: ``TIMESTAMPTZ`` refuses a naive value (D171).
+PREVIEW_UNFAITHFUL_SOURCE_TYPES = frozenset({"mysql"})
+
 
 @dataclass(frozen=True)
 class EngineSample:
