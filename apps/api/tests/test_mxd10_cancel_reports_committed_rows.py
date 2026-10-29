@@ -267,10 +267,15 @@ def test_cancel_after_a_committed_chunk_warns_nothing_was_rolled_back(_quiet_slo
     assert job["cancel_outcome"] == {
         "partial_write": True,
         "rows_committed": 90,
+        # D199: no destination re-count on this route, so the tally is
+        # stated as a lower bound, never as the destination's number.
+        "rows_committed_source": "committed_batches",
+        "rows_committed_is_lower_bound": True,
         "rolled_back": False,
         "message": job["message"],
     }
-    assert "90 row(s) were already committed" in job["message"]
+    assert "at least 90 row(s) were already committed" in job["message"]
+    assert "lower bound" in job["message"]
     assert "not rolled back" in job["message"]
 
 

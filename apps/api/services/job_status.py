@@ -82,31 +82,130 @@ def job_timestamp_iso(value: object) -> str:
     return ts.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def cancel_outcome_for(rows_committed: int | None) -> dict:
+def _count(value: object) -> int | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return max(0, int(value))  # type: ignore[call-overload]
+    except (TypeError, ValueError):
+        return None
+
+
+def measure_cancel_landing(
+    exc: BaseException,
+    *,
+    dest_type: str,
+    dest_cfg: dict,
+    table: str,
+    sync_mode: str,
+    rows_before: object,
+    table_existed_before: object,
+    keyed: bool,
+    atomic_overwrite: bool,
+) -> None:
+    """D199 — stamp what the destination holds once a cancelled run stopped.
+
+    The committed-batch tally under-counts a pooled load: a chunk writer that
+    was already inside its commit when the cancel landed adds rows the
+    progress reporter never applied (QA: "23,552 left behind", MySQL held
+    25,120). By the time the cancel reaches here every writer has stopped, so
+    a COUNT is the real number. It is attributed to *this run* only when the
+    arithmetic is exact: an append (rows before known) or an overwrite that
+    cleared or created the table. A keyed upsert's COUNT growth is new keys
+    only, and an atomic overwrite rolls back, so those keep the tally,
+    labelled as a lower bound, beside the destination's own count.
+    """
+    try:
+        from services.dest_precount import precount_table
+
+        now = precount_table(dest_type, dest_cfg, table)
+    except Exception:  # noqa: BLE001 - an unreadable destination keeps the tally
+        now = None
+    if now is None:
+        return
+    exc.destination_rows_now = int(now)  # type: ignore[attr-defined]
+    from services.sync_cursor import is_overwrite_sync
+
+    by_run: int | None = None
+    if is_overwrite_sync(sync_mode):
+        if not atomic_overwrite or table_existed_before is False:
+            by_run = int(now)
+    elif not keyed:
+        before = _count(rows_before)
+        if before is not None and now >= before:
+            by_run = int(now) - before
+    if by_run is not None:
+        exc.destination_rows_by_run = by_run  # type: ignore[attr-defined]
+
+
+def cancel_outcome_for(
+    rows_committed: int | None,
+    *,
+    destination_rows_by_run: int | None = None,
+    destination_rows_now: int | None = None,
+    tally_is_exact: bool = False,
+) -> dict:
     """What a cancel left behind: committed rows are never rolled back.
 
     Cancel is honoured at the next checkpoint, so a chunk (or the whole load)
     can already be committed when the job turns ``cancelled``. The job must
     say so instead of reading as a clean stop (QA MXD10).
+
+    D199: the number comes from the destination when it was re-counted after
+    the writers stopped; otherwise it is the committed-batch tally and says
+    it is a lower bound.
     """
-    try:
-        rows = max(0, int(rows_committed or 0))
-    except (TypeError, ValueError):
-        rows = 0
-    if rows:
+    tally = _count(rows_committed) or 0
+    by_run = _count(destination_rows_by_run)
+    now = _count(destination_rows_now)
+    if by_run is not None:
+        rows, source = by_run, "destination_count"
+    elif tally_is_exact:
+        # The run finished and Gate-8 counted it before the cancel landed.
+        rows, source = tally, "completed_run"
+    else:
+        rows, source = tally, "committed_batches"
+    if rows and source == "completed_run":
         message = (
             f"Cancelled after {rows:,} row(s) were already committed to the "
-            "destination — they were not rolled back. Re-run with "
+            "destination — the load had finished when the cancel landed; they "
+            "were not rolled back. Re-run with full_refresh_overwrite or clear "
+            "the destination table to undo them."
+        )
+    elif rows and source == "destination_count":
+        message = (
+            f"Cancelled after {rows:,} row(s) were already committed to the "
+            "destination (counted on the destination after the writers "
+            "stopped) — they were not rolled back. Re-run with "
             "full_refresh_overwrite or clear the destination table to undo them."
+        )
+    elif rows:
+        held = (
+            f"; the destination table now holds {now:,} row(s)" if now is not None else ""
+        )
+        message = (
+            f"Cancelled after at least {rows:,} row(s) were already committed to "
+            "the destination (a lower bound: counted from the committed batches "
+            f"the job saw, not re-counted on the destination{held}) — they were "
+            "not rolled back. Re-run with full_refresh_overwrite or clear the "
+            "destination table to undo them."
         )
     else:
         message = "Transfer cancelled by user"
-    return {
+    out = {
         "partial_write": bool(rows),
         "rows_committed": rows,
+        "rows_committed_source": source,
         "rolled_back": False,
         "message": message,
     }
+    if source == "committed_batches" and rows:
+        out["rows_committed_is_lower_bound"] = True
+    if now is not None:
+        out["destination_rows_now"] = now
+    if by_run is not None and tally != by_run:
+        out["committed_batches_tally"] = tally
+    return out
 
 
 def terminal_status_for(rejected_rows: int = 0, coerced_null_rows: int = 0) -> str:
