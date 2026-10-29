@@ -101,6 +101,10 @@ test.describe("flags-off parity", () => {
     });
     await openStudio(page);
     await still(page);
+    // The source step paints the API's capability probe (OCR line, source types).
+    // Until it answers the OCR line reads "Optional", so a capture taken early
+    // differs from one taken after. Wait for the probe before any capture.
+    await expect(page.locator("#df2-source-ocr-status")).not.toHaveText(/^Optional/, { timeout: 30_000 });
     await expect(page.getByTestId("studio-schema-browser")).toHaveCount(0);
     await expect(page.getByTestId("studio-schema-opt-in")).toHaveCount(0);
     await expect(page.getByTestId("studio-flags-error")).toHaveCount(0);
