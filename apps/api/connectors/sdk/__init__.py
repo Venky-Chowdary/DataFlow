@@ -28,6 +28,11 @@ from typing import Any, Iterator
 from services.connector_telemetry import connector_operation, driver_family
 
 from connectors.sdk.declarative.errors import ConnectorError
+from services.request_principal import (
+    SingerUnavailable,
+    assert_bound_principal_may_use_connector,
+    singer_taps_dir,
+)
 from services.secret_config import redact_config, redact_url
 
 # Runtime registry of SDK-loaded connectors (name -> cls)
@@ -261,25 +266,10 @@ class SingerTapBridge(BaseConnector):
     _SHELL_METACHARS = frozenset({";", "|", "&", ">", "<", "$", "`", "\\"})
     _TAP_EXECUTABLE_PREFIX = "tap-"
 
-    @staticmethod
-    def taps_dir() -> str | None:
-        """Operator-controlled directory holding the only runnable ``tap-*`` executables."""
-        from services.brand_env import getenv_brand
-
-        raw = (getenv_brand("SINGER_TAPS_DIR") or "").strip()
-        return os.path.realpath(raw) if raw else None
-
     @classmethod
     def _resolve_executable(cls, token: str) -> str:
         """Resolve ``token`` to an allowlisted ``tap-*`` executable inside the taps dir."""
-        root = cls.taps_dir()
-        if not root:
-            raise PermissionError(
-                "singer_tap is disabled: set DATAWRAP_SINGER_TAPS_DIR to the directory of "
-                "operator-installed tap-* executables"
-            )
-        if not os.path.isdir(root):
-            raise PermissionError("singer_tap is disabled: DATAWRAP_SINGER_TAPS_DIR is not a directory")
+        root = singer_taps_dir()
         token = str(token or "").strip()
         name = os.path.basename(token)
         if not name.lower().startswith(cls._TAP_EXECUTABLE_PREFIX):
@@ -303,8 +293,6 @@ class SingerTapBridge(BaseConnector):
         return candidate
 
     def _argv(self, *extra: str) -> list[str]:
-        from services.request_principal import assert_bound_principal_may_use_connector
-
         assert_bound_principal_may_use_connector(self.name)
         cmd = self.config.get("tap_command")
         if not cmd:
@@ -490,6 +478,8 @@ class SingerTapBridge(BaseConnector):
             return False, self._safe_tap_stderr(
                 proc.stderr or proc.stdout or "tap --check failed"
             )
+        except SingerUnavailable as exc:
+            return False, exc.message
         except FileNotFoundError as exc:
             return False, str(exc) or "Singer tap binary not found"
         except subprocess.TimeoutExpired:

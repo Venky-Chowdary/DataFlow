@@ -217,6 +217,43 @@ instead; production deploys normally leave it unset and use the workspace list.
 
 ---
 
+## Singer taps: what users see and how to enable them
+
+`singer_tap` runs a program on the API host, so it stays **disabled until
+`DATAWRAP_SINGER_TAPS_DIR` is set** and is usable only by the platform
+administrator. Neither rule changed; what changed is that a user who hits one
+now gets a specific in-app error instead of a failed run with a generic message.
+
+| Code | HTTP | Meaning | Who fixes it |
+|------|------|---------|--------------|
+| `singer_taps_dir_unset` | 409 | `DATAWRAP_SINGER_TAPS_DIR` (or `DATAFLOW_SINGER_TAPS_DIR`) is unset, or is not a directory. | The server administrator: set it to the directory of `tap-*` executables and restart the API. |
+| `singer_admin_required` | 403 | The caller is not the platform administrator. | Ask the platform administrator; a workspace admin is not enough. |
+
+Both come back as `{"error": {"code": ..., "message": ...}}` and are raised when a
+Singer connector is tested (`/connectors/test`, `/connectors/saved/{id}/test`),
+created or edited, run as a transfer (Studio, Copilot confirm), pressed Run now
+on a schedule, or put on a schedule (create, enable, or change its connectors).
+Pausing or renaming an existing schedule is not blocked, and an unattended
+scheduled run is not pre-empted: it starts, and the run fails with the same
+message in its history.
+
+Before enabling taps, list what exists (read-only; prints no `tap_config` or
+secrets):
+
+```bash
+cd apps/api
+python scripts/audit_singer_usage.py                          # store as the app is configured
+python scripts/audit_singer_usage.py --file connectors.json   # schedules come from DATAFLOW_DATA_DIR
+MONGO_PROD=mongodb://... python scripts/audit_singer_usage.py --mongo-url-env MONGO_PROD --json
+```
+
+It lists every saved `singer_tap` connector with its workspace, recorded tap
+executable and whether this server can run it today (`ok`,
+`singer_taps_dir_unset`, `tap not found in taps dir`), plus each schedule that
+reads from or writes to it (enabled or paused).
+
+---
+
 ## Health checks
 
 | Endpoint | Use |

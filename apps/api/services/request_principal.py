@@ -8,9 +8,13 @@ principal; they rely on creation-time gates.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Iterable
 from contextvars import ContextVar
 from typing import Any
+
+from services.api_errors import ApiError
+from services.brand_env import getenv_brand
 
 # Connector types that execute operator-installed programs on the API host.
 # Only the platform ``admin`` role may create, test, or run them.
@@ -36,6 +40,42 @@ def admin_only_message(gated: list[str]) -> str:
     )
 
 
+class SingerUnavailable(ApiError, PermissionError):
+    """A Singer tap cannot be used here; the app renders ``{"error": {code, message}}``.
+
+    Codes: ``singer_taps_dir_unset`` (409, the operator has not enabled taps) and
+    ``singer_admin_required`` (403, the caller is not the platform admin). It is
+    still a ``PermissionError`` so the bridge sinks, which tell an allowlist or
+    role refusal from an exec failure, keep doing so.
+    """
+
+
+def singer_admin_required(gated: list[str]) -> SingerUnavailable:
+    return SingerUnavailable(403, "singer_admin_required", admin_only_message(gated))
+
+
+def singer_taps_dir() -> str:
+    """The operator's taps directory, or ``SingerUnavailable`` naming the setting."""
+    raw = (getenv_brand("SINGER_TAPS_DIR") or "").strip()
+    if not raw:
+        raise SingerUnavailable(
+            409,
+            "singer_taps_dir_unset",
+            "singer_tap is disabled: the server administrator must set DATAWRAP_SINGER_TAPS_DIR "
+            "(DATAFLOW_SINGER_TAPS_DIR also works) to the directory of operator-installed "
+            "tap-* executables and restart the API",
+        )
+    root = os.path.realpath(raw)
+    if not os.path.isdir(root):
+        raise SingerUnavailable(
+            409,
+            "singer_taps_dir_unset",
+            f"singer_tap is disabled: DATAWRAP_SINGER_TAPS_DIR ({raw}) is not a directory; "
+            "the server administrator must point it at the tap-* executables",
+        )
+    return root
+
+
 def connector_type_aliases(connector_type: Any) -> list[str]:
     raw = str(connector_type or "").strip()
     if not raw:
@@ -53,7 +93,7 @@ def assert_bound_principal_may_use_connector(connector_type: Any) -> None:
         return
     role = _REQUEST_ROLE.get()
     if role is not None and role != "admin":
-        raise PermissionError(admin_only_message(admin_only_types([connector_type])))
+        raise singer_admin_required(admin_only_types([connector_type]))
 
 
 def endpoint_connector_types(workspace_id: str | None, *endpoints: Any) -> list[str]:
@@ -77,10 +117,22 @@ def endpoint_connector_types(workspace_id: str | None, *endpoints: Any) -> list[
     return [t for t in types if t]
 
 
-def assert_bound_principal_may_use_endpoints(workspace_id: str | None, *endpoints: Any) -> None:
-    """Endpoint guard: no-op without a bound principal (scheduler/worker) or for admins."""
-    if _REQUEST_ROLE.get() in (None, "admin"):
+def assert_bound_principal_may_use_endpoints(
+    workspace_id: str | None, *endpoints: Any, require_taps: bool = False
+) -> None:
+    """Endpoint guard: role check for a bound non-admin principal.
+
+    No-op for the role without a bound principal (scheduler/worker) or for admins.
+    ``require_taps`` also refuses a Singer endpoint while taps are disabled
+    (``singer_taps_dir_unset``): the schedule create/enable and run-now paths.
+    """
+    role = _REQUEST_ROLE.get()
+    if role in (None, "admin") and not require_taps:
         return
+    singer = False
     for connector_type in endpoint_connector_types(workspace_id, *endpoints):
         for alias in connector_type_aliases(connector_type):
             assert_bound_principal_may_use_connector(alias)
+            singer = singer or connector_type_requires_admin(alias)
+    if require_taps and singer:
+        singer_taps_dir()
