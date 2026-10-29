@@ -188,7 +188,9 @@ def test_json_null_export_matches_postgres_text_and_sql_null_stays_absent() -> N
     assert "payload" not in absent
     loaded = json.loads(json_dumps_exact_numbers([present, absent]))
     reread = list(_json_null_cells_as_engine_text(loaded))
-    assert reread[0]["payload"] == "null"
+    # The read-back hands a present JSONL null over as the JSON-null token
+    # (D144: plain columns now keep their key and write SQL NULL as null).
+    assert str(reread[0]["payload"]) == "null"
     assert "payload" not in reread[1]
     source_null = fingerprint_for_reconcile(
         "null", ddl_type="JSON", engine="postgresql"

@@ -179,19 +179,30 @@ def test_manual_run_increments_run_count_when_the_job_ends(tmp_path, monkeypatch
 
 
 def test_second_overwrite_drops_the_replacement_not_the_backup(monkeypatch):
+    """A rename-aside backup left by an older build still holds the pre-run
+    table: put it back (never DROP it), then take this run's row backup and
+    empty the live table in place (D195 — the live object is never renamed)."""
     import connectors.table_manager as tm
 
     sql: list[str] = []
+    state = {"present": [("orders",), ("orders__df_bak",)]}
 
     class _Cur:
         def execute(self, statement, _args=None):
             sql.append(statement)
+            if statement.startswith("RENAME TABLE `orders__df_bak` TO `orders`"):
+                state["present"] = [("orders",)]
+
+        def fetchone(self):
+            return ("",)  # legacy backup: no row-backup marker
 
         def fetchall(self):
             last = sql[-1]
-            if "COLUMN_NAME" in last:
+            if "COLUMN_NAME, COLUMN_TYPE" in last:
                 return [("id", "int")]
-            return [("orders",), ("orders__df_bak",)]
+            if "COLUMN_NAME FROM" in last:
+                return [("id",)]
+            return list(state["present"])
 
         def __enter__(self):
             return self
@@ -220,7 +231,10 @@ def test_second_overwrite_drops_the_replacement_not_the_backup(monkeypatch):
     assert "DROP TABLE `orders__df_bak`" not in joined
     assert "DROP TABLE `orders`" in joined
     assert "RENAME TABLE `orders__df_bak` TO `orders`" in joined
-    assert "RENAME TABLE `orders` TO `orders__df_bak`" in joined
+    assert "RENAME TABLE `orders` TO" not in joined
+    assert "CREATE TABLE `orders__df_bak` LIKE `orders`" in joined
+    assert "INSERT INTO `orders__df_bak` (`id`) SELECT `id` FROM `orders`" in joined
+    assert "TRUNCATE TABLE `orders`" in joined
 
 
 def test_progress_write_refused_after_cancel_stops_the_writer():

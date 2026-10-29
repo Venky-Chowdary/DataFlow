@@ -561,6 +561,30 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
     ),
     (
         (
+            # PostgreSQL says 'new row for relation "t" violates check
+            # constraint', which the table_not_found tokens below matched
+            # (D112: a CHECK refusal read "Table was not found").
+            "violates check constraint",
+            "check constraint '",
+            "(3819,",
+            "conflicted with the check constraint",
+            "ora-02290",
+        ),
+        {
+            "code": "destination_check_violation",
+            "category": "data_quality",
+            "confidence": "high",
+            "title": "A row broke a destination CHECK constraint",
+            "fix": (
+                "The destination refused a row its CHECK constraint forbids, so the "
+                "write rolled back. Run Validate: it names the offending rows and the "
+                "constraint. Fix those source rows or map them out, then run again."
+            ),
+            "primary_action": "open_map",
+        },
+    ),
+    (
+        (
             "relation does not exist",
             'relation "',
             "table doesn't exist",

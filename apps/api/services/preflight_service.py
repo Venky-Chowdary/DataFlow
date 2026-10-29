@@ -2446,6 +2446,8 @@ def run_file_preflight(
         validation_mode=validation_mode,
         fk_risk_acknowledged=fk_risk_acknowledged,
         destination_foreign_keys=destination_foreign_keys,
+        destination_config=destination_config,
+        destination_connector_id=destination_connector_id,
         source_config=source_config,
         source_connector_id=source_connector_id,
         source_table=source_table,

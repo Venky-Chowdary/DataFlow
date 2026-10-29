@@ -229,7 +229,8 @@ class ObjectStoreEncoder:
             list(mapped_rows),
             self.target_cols,
             self.dest_types,
-            omit_sql_null=True,
+            exact_decimal=True,
+            omit_document_sql_null=True,
         ):
             if self._records_written or self._header_written:
                 self._spool.write(b"\n")
@@ -252,7 +253,8 @@ class ObjectStoreEncoder:
             list(mapped_rows),
             self.target_cols,
             self.dest_types,
-            omit_sql_null=True,
+            exact_decimal=True,
+            omit_document_sql_null=True,
         )
         for record in records:
             if not self._header_written:

@@ -603,8 +603,9 @@ def _drop_destination_table(
             destination.extra = extra
             return True
         # MySQL TRUNCATE auto-commits. A later refusal used to leave the
-        # live table empty. Rename the prior table aside and let the
-        # failure path put it back; success drops the backup.
+        # live table empty. Copy the prior rows aside, empty the live table
+        # in place (its constraints stay, D195), and let the failure path
+        # copy them back; success drops the backup.
         if db_type in {"mysql", "mariadb"}:
             from connectors.table_manager import retire_mysql_overwrite
 
