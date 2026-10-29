@@ -43,6 +43,19 @@ function contrast(foreground: string, background: string): number {
   return (lighter + 0.05) / (darker + 0.05);
 }
 
+/**
+ * Drop a palette tile on the stage. A tile is draggable only once the catalog has
+ * made it executable and the canvas is editable, and a drop that lands before the
+ * previous one has rendered its node is lost on a slow runner. Wait for both, and
+ * for the node count the drop must produce.
+ */
+async function dropOp(page: Page, op: string, position: { x: number; y: number }, nodesAfter?: number): Promise<void> {
+  const tile = page.locator(`.df2-canvas-op[data-op='${op}'][draggable='true']`);
+  await expect(tile).toBeVisible();
+  await tile.dragTo(page.getByTestId("transform-canvas-stage"), { targetPosition: position });
+  if (nodesAfter != null) await expect(page.locator(".react-flow__node")).toHaveCount(nodesAfter);
+}
+
 async function buildValidOrdersChain(page: Page): Promise<void> {
   await setPalette(page, true);
   await page.locator(".df2-canvas-op[data-op='trim']").click();
@@ -363,10 +376,7 @@ test.describe("studio next", () => {
     await openStudio(page);
     await reachTransform(page);
     await setPalette(page, true);
-    await page.locator(".df2-canvas-op[data-op='trim']").dragTo(page.getByTestId("transform-canvas-stage"), {
-      targetPosition: { x: 400, y: 160 },
-    });
-    await expect(page.locator(".react-flow__node")).toHaveCount(1);
+    await dropOp(page, "trim", { x: 400, y: 160 }, 1);
     await page.getByRole("button", { name: "Run preview" }).first().click();
     await expect(page.getByTestId("canvas-preview").locator("tbody tr").first()).toBeVisible({ timeout: 20_000 });
     const toMap = page.getByRole("button", { name: "Continue with this transform" });
@@ -939,9 +949,8 @@ conn.commit()
     await settleToasts(page);
     await setPalette(page, true);
     const stage = page.getByTestId("transform-canvas-stage");
-    await page.locator(".df2-canvas-op[data-op='trim']").dragTo(stage, { targetPosition: { x: 180, y: 80 } });
-    await page.locator(".df2-canvas-op[data-op='collapse_whitespace']").dragTo(stage, { targetPosition: { x: 460, y: 80 } });
-    await expect(page.locator(".react-flow__node")).toHaveCount(2);
+    await dropOp(page, "trim", { x: 180, y: 80 }, 1);
+    await dropOp(page, "collapse_whitespace", { x: 460, y: 80 }, 2);
     const first = page.locator(".react-flow__node").nth(0);
     const second = page.locator(".react-flow__node").nth(1);
     const before = await first.boundingBox();
@@ -960,7 +969,7 @@ conn.commit()
     expect(dropped!.y).toBeGreaterThan(moving!.y + 40);
     await page.getByRole("combobox", { name: "Zoom percent" }).selectOption("150");
     const zoomedStage = await stage.boundingBox();
-    await page.locator(".df2-canvas-op[data-op='absolute']").dragTo(stage, { targetPosition: { x: 220, y: 140 } });
+    await dropOp(page, "absolute", { x: 220, y: 140 });
     const added = page.locator(".react-flow__node", { hasText: "Absolute" });
     await expect(added).toBeVisible();
     const addedBox = await added.boundingBox();
