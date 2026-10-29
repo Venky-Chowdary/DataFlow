@@ -69,6 +69,7 @@ from services.value_serializer import (
     load_http_json,
     operator_binary_cell_text,
     unescape_wire_text,
+    WireLiteral,
 )
 
 # Fingerprinting runs once per cell on both the write and the read-back pass, so
@@ -3256,11 +3257,20 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     # must match. Sparse CDC sample_compare skips DF_MISSING columns (omit-from-SET).
     if is_missing_sentinel(value):
         return _NULL_SENTINEL
-    if isinstance(value, str) and value.strip().lower() in {
-        "__df_sql_null__",
-        "__df_ddb_null__",
-        "__df_missing__",
-    }:
+    if (
+        isinstance(value, str)
+        and not isinstance(value, WireLiteral)
+        and value.strip().lower()
+        in {
+            "__df_sql_null__",
+            "__df_ddb_null__",
+            "__df_missing__",
+        }
+    ):
+        # A decoded ``WireLiteral`` is source *text* that spells a sentinel
+        # (the reader escaped it). Reading it as NULL let a destination that
+        # stored the literal ``__DF_SQL_NULL__`` where the source held NULL
+        # fingerprint as a match.
         return _NULL_SENTINEL
     # Oracle write-location: '' is stored/read as NULL — equate before other paths.
     if destination_empty_string_is_null(engine) and isinstance(value, str) and value == "":

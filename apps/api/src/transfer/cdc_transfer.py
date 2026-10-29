@@ -628,18 +628,13 @@ def _query_cdc_downgrade(exc: BaseException, dialect: str) -> dict[str, str | bo
         if isinstance(exc, LogCaptureUnavailable)
         else classify_log_capture_failure(dialect, str(exc))
     )
-    # PostgreSQL wal_level is not a degradable "server has no log" the way a
-    # MySQL binlog-off install is. Query CDC on a PK then fails and the
-    # root-cause engine titles it "Duplicate identity keys" (R3-H1).
-    detail = str(refusal.detail or "").lower()
-    if str(dialect or "").lower() in {"postgresql", "postgres", "neon"} and (
-        "wal_level" in detail or "logical decoding" in detail
-    ):
-        raise RuntimeError(
-            f"PostgreSQL wal_level is not logical ({refusal.detail}). "
-            "CDC cannot start until the server enables logical decoding "
-            "(wal_level=logical). A cursor poll would miss updates and deletes."
-        ) from exc
+    # PostgreSQL with wal_level below logical is a server that emits no change
+    # log, the same as a MySQL install with the binlog off: the run may poll a
+    # column the operator declared (D28). It used to be refused here outright,
+    # before the poll cursor was even read, so a declared ``updated_at`` with
+    # modification_timestamp semantics never ran. A poll on the primary key or
+    # an undeclared column is still refused by ``query_cdc_change_refusal``
+    # once the cursor is resolved, and that refusal names wal_level (R3-H1).
     if refusal.fail_closed:
         raise RuntimeError(refusal.message(dialect)) from exc
     logging.getLogger(__name__).warning(
@@ -799,6 +794,24 @@ def _source_headers(headers: list[str], mappings: list[dict[str, Any]]) -> tuple
     return headers, [m.get("target", m.get("source", "")).strip() for m in mappings if m.get("source")]
 
 
+def _reader_wire_cell(value: Any) -> Any:
+    """Mark a batch-reader cell as already encoded for the wire.
+
+    The batch readers this engine polls hand back wire text: SQL NULL is the
+    ``__DF_SQL_NULL__`` sentinel and a source string that spells a sentinel is
+    already escaped. Left as a bare ``str``, the apply path encoded it a second
+    time, so every NULL a query-CDC poll read landed in the destination as the
+    literal text ``__DF_SQL_NULL__`` — and Gate-8, which reads that sentinel as
+    NULL on both sides, could not see it. A typed value a reader returns as is
+    (``None``, ``Decimal``) stays raw and is encoded once.
+    """
+    from services.value_serializer import WireCell
+
+    if isinstance(value, str) and not isinstance(value, WireCell):
+        return WireCell(value)
+    return value
+
+
 class CdcEngine:
     """Query-based CDC engine."""
 
@@ -935,7 +948,12 @@ class CdcEngine:
                         self.schema, headers
                     )
             for row in rows:
-                buffer.append({h: row[i] if i < len(row) else "" for i, h in enumerate(headers)})
+                buffer.append(
+                    {
+                        h: _reader_wire_cell(row[i]) if i < len(row) else ""
+                        for i, h in enumerate(headers)
+                    }
+                )
                 if len(buffer) >= self.batch_size:
                     yield self._split_batch(buffer)
                     emitted = True
@@ -3370,6 +3388,9 @@ def _run_cdc_single_stream(
             downgrade_cause=str(capture_downgrade.get("cdc_capture_downgrade_cause") or ""),
         )
         if refusal_text:
+            detail = str(capture_downgrade.get("cdc_capture_downgrade_detail") or "").strip()
+            if detail and detail not in refusal_text:
+                refusal_text = f"{refusal_text} Source reported: {detail}."
             raise RuntimeError(refusal_text)
         if not capture_downgrade:
             capture_downgrade = {
@@ -3774,8 +3795,17 @@ def _run_cdc_single_stream(
         cursor_now = (
             state.running_cursor if state.running_cursor is not None else watermark
         )
+        # Query CDC is not a log resume. Its watermark is a cursor value, which
+        # ``is_durable_log_resume_token`` accepts as an opaque string, and the
+        # repair below then upserted every row edited *outside* the poll window
+        # with that cursor text stamped as ``_df_lsn``. Run 1 created the
+        # destination without a bookkeeping column (a poll has no LSN), so run 2
+        # failed "missing column _df_lsn" on MySQL and PostgreSQL. A row the
+        # poll did not select is out-of-window drift (D188), reported by Gate-8,
+        # not written by this run.
         if (
-            is_durable_log_resume_token(cursor_now)
+            not isinstance(cdc, CdcEngine)
+            and is_durable_log_resume_token(cursor_now)
             and getattr(source, "kind", "") == "database"
         ):
             try:
@@ -4137,6 +4167,21 @@ def _run_cdc_single_stream(
             summary["snapshot_plan"] = stamp
         summary["watermark"] = final_watermark
         summary["checksum"] = state.last_checksum
+        if isinstance(cdc, CdcEngine) and cursor_field:
+            # A query-CDC poll selected ``cursor > watermark`` up to the
+            # watermark it ends on. Gate-8 proves that window and reports a row
+            # edited outside it as drift, as every incremental run does (D188).
+            from services.incremental_drift import stamp_run_window
+
+            stamp_run_window(
+                summary,
+                cursor=cursor_field,
+                pk=cdc._keyset_tiebreak(),
+                seed=watermark,
+                seed_inclusive=False,
+                high=final_watermark,
+            )
+            summary["cdc_poll_key_columns"] = list(pk_source_cols)
         _stamp_cdc_source_image(
             summary,
             src_type=src_type,
