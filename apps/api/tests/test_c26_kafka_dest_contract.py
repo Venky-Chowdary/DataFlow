@@ -199,13 +199,13 @@ def test_kafka_dest_non_append_refused_at_preflight():
         "cdc",
     ):
         gates = _gates_for(mode)
-        gate = next(g for g in gates if g["id"] == "g_kafka_append_only")
+        gate = next(g for g in gates if g["id"] == "g_dest_append_only")
         assert gate["status"] == "block", (mode, gate)
         assert "append" in gate["message"].lower()
 
     for mode in ("full_refresh_append", "incremental_append"):
         gates = _gates_for(mode)
-        gate = next(g for g in gates if g["id"] == "g_kafka_append_only")
+        gate = next(g for g in gates if g["id"] == "g_dest_append_only")
         assert gate["status"] == "pass", (mode, gate)
 
 
@@ -218,7 +218,7 @@ def test_kafka_family_aliases_covered():
         "redpanda",
     ):
         gates = _gates_for("upsert", dest=dest)
-        gate = next(g for g in gates if g["id"] == "g_kafka_append_only")
+        gate = next(g for g in gates if g["id"] == "g_dest_append_only")
         assert gate["status"] == "block", dest
 
 
