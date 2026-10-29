@@ -599,6 +599,35 @@ Combined Property 8 collation + instant + JSON polarity:
   this fixture (array JSON element fidelity is a separate wave-86 proof)
 * Exactly-once / 100% of all routes — not claimed
 
+### JSON number spelling (D192, 2026-10-29)
+
+**Rule:** a JSON document that reaches DataFlow as text keeps every token the
+source wrote. `1.10` stays `1.10`, `2.50` stays `2.50`, `1e2` stays `1e2`;
+string escapes and key order are unchanged. The only rewrite is removing
+whitespace between tokens (`{"a": 1.10}` lands as `{"a":1.10}`).
+
+Where the destination stores JSON as text, that is exactly what is stored:
+SQL Server `NVARCHAR(MAX)` (DataFlow's JSON carrier on SQL Server 2022),
+PostgreSQL `json`, MySQL/MariaDB `LONGTEXT`/`TEXT`, MariaDB `JSON` (a `LONGTEXT`
+alias), any `VARCHAR`/`CLOB`.
+
+Where the destination has a native JSON type, the engine normalises on store
+and DataFlow cannot prevent it:
+
+| Destination type | What the engine does to numbers |
+|---|---|
+| PostgreSQL `jsonb` | keeps digits and scale (`1.10`, `123.4500`); rewrites `1e2` as `100`, `-0.0` as `0.0`; reorders keys |
+| MySQL `JSON` | stores IEEE doubles: `1.10` reads back `1.1`; more than ~17 significant digits are lost (Gate-8 then fails the run) |
+| MongoDB (BSON) | doubles unless the value needs Decimal128 |
+| Snowflake `VARIANT`, Redshift `SUPER`, BigQuery `JSON` | value-normalised numbers |
+
+**Gate-8:** on PostgreSQL `json`/`jsonb` and on text carriers the checksum
+compares numbers with their scale (`1.10` != `1.1`) and fingerprints the
+source document as read, not as the writer bound it, so a write that drops a
+trailing zero fails verification. On the double-storing engines above the
+compare is value-equal (`1.10` == `1.1`), because that is all they can hold.
+Tests: `tests/test_d192_json_number_text_fidelity_e2e.py`.
+
 ## Property 9 — PARTIAL (2026-08-14, dest COUNT(*) conservation)
 
 **Claim:** Every source row is on the destination, quarantined, or

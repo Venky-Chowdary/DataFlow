@@ -1492,7 +1492,7 @@ def _parse_json(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        from services.value_serializer import json_dumps_exact_numbers
+        from services.value_serializer import compact_json_text
 
         try:
             # JSONDecodeError subclasses ValueError — catch it first so bare
@@ -1515,11 +1515,16 @@ def _parse_json(value: Any) -> str | None:
         except TypeError:
             parsed = value
         else:
-            # D74 — a number the document stated stays a JSON number, every
-            # digit kept. The Decimal-as-string policy is for values with no
-            # JSON number of their own; applied here it rewrote
-            # ``12345678901234567890.1`` into the string ``"12345678901234567890.1"``.
-            return json_dumps_exact_numbers(parsed, separators=(",", ":"))
+            # D74 / D192 — the document's own text is the value. A number
+            # stays the exact token the source spelled: re-dumping the parse
+            # kept the digits of ``12345678901234567890.1`` but rewrote
+            # ``1.10`` as ``1.1`` and ``1e2`` as ``100.0``. Strings keep their
+            # escapes and keys their order; only insignificant whitespace
+            # goes. A native JSON column (jsonb, MySQL JSON, VARIANT, BSON)
+            # may still normalise on store: docs/ZERO_LOSS_PROPERTIES.md,
+            # Property 8 "JSON number spelling".
+            del parsed
+            return compact_json_text(value)
     elif isinstance(value, (dict, list, tuple, set, frozenset)):
         parsed = value
     else:

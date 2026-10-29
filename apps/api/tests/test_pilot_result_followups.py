@@ -32,8 +32,10 @@ def test_analyze_rows_numeric_and_null_signals(tmp_path: Path) -> None:
     assert by_col["amt"]["inferred_kind"] == "number"
     assert by_col["amt"]["numeric"]["min"] == 10.5
     assert by_col["amt"]["numeric"]["max"] == 40.0
-    assert by_col["email"]["nulls"] == 2
-    assert by_col["email"]["null_rate"] == 0.5
+    # '' is a value, not NULL (D62): one NULL, one empty string.
+    assert by_col["email"]["nulls"] == 1
+    assert by_col["email"]["empty_strings"] == 1
+    assert by_col["email"]["null_rate"] == 0.25
     assert "email" in profile["signals"]["null_heavy_columns"]
 
 

@@ -243,6 +243,24 @@ def absent_sql_bind(value: Any) -> tuple[bool, Any]:
     return False, value
 
 
+def operator_cell(value: Any) -> Any:
+    """One wire cell as an operator reads it in a sample or preview.
+
+    SQL NULL / an absent field is ``None`` (JSON null; the UI says NULL) —
+    never the internal ``__DF_SQL_NULL__`` token and never ``''``. Text is the
+    user's literal: ``''`` and whitespace stay exactly as stored and an
+    escaped sentinel-spelling literal is decoded. Typed cells pass through.
+    Every sampler that shows rows to a person renders through this (D62).
+    """
+    if value is None or is_missing_sentinel(value) or is_frame_missing(value):
+        return None
+    if isinstance(value, str):
+        if is_reader_null_cell(value):
+            return None
+        return str(unescape_wire_text(value))
+    return value
+
+
 def present_cell_text(value: Any) -> str | None:
     """One present cell on the reader wire.
 
@@ -605,6 +623,40 @@ def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
     return _demote_exactly_representable(parsed)
 
 
+_JSON_INSIGNIFICANT_WS = frozenset(" \t\n\r")
+
+
+def compact_json_text(text: str) -> str:
+    """Valid JSON text with only the insignificant whitespace removed.
+
+    A JSON document that arrives as *text* (a PG ``json`` / ``jsonb::text``
+    read, a CSV cell, a MySQL JSON read) carries its numbers as the source
+    spelled them. Parsing it and dumping it again rewrote them through
+    binary64: ``1.10`` became ``1.1``, ``1e2`` became ``100.0`` (D192). Every
+    token — numbers, string escapes, key order, duplicate keys — is kept
+    byte-for-byte here; only whitespace *between* tokens goes. The caller has
+    already validated ``text`` as JSON.
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+            out.append(ch)
+        elif ch not in _JSON_INSIGNIFICANT_WS:
+            out.append(ch)
+    return "".join(out)
+
+
 def load_http_json(resp: Any) -> Any:
     """HTTP JSON body. Numbers match ``json_loads_exact``.
 
@@ -715,7 +767,29 @@ def _canonical_number_text(value: Any) -> str | None:
     return None
 
 
-def canonical_json_text(document_text: str) -> str | None:
+def _scaled_number_text(value: Any) -> str | None:
+    """A JSON number as PostgreSQL ``numeric`` stores it: value *and* scale.
+
+    ``1.10`` and ``1.1`` are different stored values on an engine that keeps
+    numeric scale (PG ``json``/``jsonb``, a JSON-as-text column): the
+    fingerprint must tell them apart (D192). The exponent is folded into
+    fixed-point (``1e2`` -> ``100``, ``2.50e1`` -> ``25.0``) and zero loses
+    its sign (``-0.0`` -> ``0.0``), exactly as ``jsonb`` renders them.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        if value.is_zero():
+            value = value.copy_abs()
+        return format(value, "f")
+    return _canonical_number_text(value)
+
+
+def canonical_json_text(document_text: str, *, keep_scale: bool = False) -> str | None:
     """Canonical form of a JSON document for fingerprint/semantic compare.
 
     Parses exactly (``json_loads_exact`` — no binary64 rounding), then renders
@@ -723,14 +797,25 @@ def canonical_json_text(document_text: str) -> str | None:
     ``{"n": 3.0}`` and ``{"n": 3}`` — the same JSON value — compare equal while
     ``{"n": 3.0001}`` still differs. Returns ``None`` when the text is not a
     JSON document a strict parser accepts.
+
+    ``keep_scale`` is for destinations that store a JSON number with its
+    scale (PostgreSQL ``json``/``jsonb``, JSON written to a text column):
+    ``{"n": 1.10}`` and ``{"n": 1.1}`` then fingerprint differently, so a
+    write that dropped the trailing zero cannot pass Gate-8 (D192). Engines
+    that store numbers as doubles (MySQL JSON, BSON, VARIANT) keep the
+    value-only compare.
     """
     try:
-        parsed = json_loads_exact(document_text)
+        if keep_scale:
+            parsed = json.loads(document_text, parse_float=Decimal)
+        else:
+            parsed = json_loads_exact(document_text)
     except Exception:
         return None
+    number_text = _scaled_number_text if keep_scale else _canonical_number_text
 
     def render(v: Any) -> str:
-        num = _canonical_number_text(v)
+        num = number_text(v)
         if num is not None:
             return num
         if v is None or isinstance(v, JsonNullToken):

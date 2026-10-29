@@ -2665,6 +2665,18 @@ def run_file_preflight(
             else ("set_locale" if number_findings else "ok")
         ),
     }
+    # D94: PII the content scan found is said out loud even when it does not
+    # force a review hold (email / phone / IP are medium-risk).
+    from services.preflight_proof_bundle import pii_detection_warning
+
+    _pii_warning = pii_detection_warning(
+        (out.get("proof_bundle") or {}).get("compliance")
+        if isinstance(out.get("proof_bundle"), dict)
+        else None,
+        list(mappings or []),
+    )
+    if _pii_warning:
+        out.setdefault("warnings", []).append(_pii_warning)
     if number_locale_assumed:
         cols = ", ".join(f["column"] for f in number_locale_assumed[:6])
         out.setdefault("warnings", []).append(
