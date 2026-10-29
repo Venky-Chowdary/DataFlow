@@ -56,7 +56,10 @@ def _rows() -> list[dict[str, Any]]:
 
 @pytest.fixture(autouse=True)
 def _loopback(monkeypatch):
-    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8")
+    # "localhost" resolves to ::1 as well as 127.0.0.1 on runners with IPv6
+    # loopback, and the Mongo driver dials both. Listing only 127.0.0.0/8
+    # passed on hosts without ::1 and was refused on GitHub's runners.
+    monkeypatch.setenv("DATAFLOW_EGRESS_ALLOWLIST", "127.0.0.0/8,::1/128")
 
 
 @pytest.fixture
