@@ -179,7 +179,13 @@ def _run(monkeypatch, source: EndpointConfig, dest: EndpointConfig, artifact, *,
     )
     result = UniversalTransferEngine().execute_tracked(req, "x5sr-" + uuid.uuid4().hex[:10])
     monkeypatch.setattr(engine_module, "run_reconciliation", real)
-    seen["final"] = artifact().read_bytes()
+    final = artifact()
+    # A failed run into an empty destination is rolled back, which removes the
+    # artifact; say why instead of dying on a bare FileNotFoundError.
+    assert final.exists(), (
+        f"run left no artifact: success={result.success} error={getattr(result, 'error', None)!r}"
+    )
+    seen["final"] = final.read_bytes()
     return result, seen
 
 

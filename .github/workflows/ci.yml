@@ -388,6 +388,11 @@ jobs:
           DATAFLOW_PII_HASH_KEY: test-pii-key
           DATAFLOW_ALLOW_STUB_WRITES: "1"
           DATAFLOW_FAKESNOW_KEEP_PATCH: "1"
+          # Wall-clock throughput guard in tests/test_scale_transfer.py: the shared
+          # runner needs ~140s for 100k rows, the same code takes ~130s on a
+          # workstation (production's code: identical), so the 120s default is a
+          # local-machine figure. Owner-visible; not a product budget.
+          DATAFLOW_SCALE_MAX_SEC: "300"
           PGHOST: 127.0.0.1
           PGPORT: "5432"
           PGUSER: dataflow
