@@ -2121,6 +2121,22 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
         dest = _copy.copy(dest)
         dest.extra = {k: v for k, v in dest_extra.items() if k not in _overwrite_extras}
 
+    # The stored mappings carry the target types the parent job planned with.
+    # The remedy for a hold-out is often to fix the destination column, so the
+    # replay is judged against the destination as it is now (D185).
+    if dest.kind == "database" and dest.table:
+        from services.dest_physical_types import refresh_mapping_target_types
+
+        from ..transfer.adapters import resolve_connector_config
+
+        dest_cfg = resolve_connector_config(dest)
+        mappings = refresh_mapping_target_types(
+            mappings,
+            resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
+            dest_cfg,
+            table=dest.table,
+        )
+
     # Prefer stream-contract / identity PK — never hardcode only id/_id
     # (Mongo→SQL users use `_id`→`id`, but many routes use user_id / code).
     conflict_columns: list[str] = []

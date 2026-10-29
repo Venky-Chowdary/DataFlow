@@ -90,6 +90,48 @@ def physical_column_types(
     return out
 
 
+def refresh_mapping_target_types(
+    mappings: list[dict[str, Any]],
+    db_type: str,
+    cfg: dict[str, Any],
+    *,
+    table: str,
+) -> list[dict[str, Any]]:
+    """Restate stored mappings' ``target_type`` from the destination as it is now.
+
+    A quarantine replay reuses the mappings the parent job planned with. Fixing
+    the destination is how an operator clears a hold-out (widen INTEGER to
+    DOUBLE PRECISION), and the writer already binds against the live column;
+    Gate-8, re-mapping the replayed rows against the stale plan type, held every
+    fractional value out of the source digest and failed a correct write (D185).
+    Plan types are kept where the catalog cannot answer. The input is not mutated.
+    """
+    declared = {
+        str(m["target"]): str(m["target_type"])
+        for m in mappings
+        if m.get("target") and m.get("target_type")
+    }
+    if not declared or not table or not db_type:
+        return mappings
+    physical = physical_column_types(db_type, cfg, table=table, columns=list(declared))
+    if not physical:
+        return mappings
+    from services.reconciliation import overlay_physical_dest_types
+
+    lowered = {name.lower(): name for name in declared}
+    live = {
+        lowered[name.lower()]: ddl for name, ddl in physical.items() if name.lower() in lowered
+    }
+    refreshed = overlay_physical_dest_types(declared, live)
+    return [
+        {**m, "target_type": refreshed[str(m["target"])]}
+        if str(m.get("target") or "") in refreshed
+        and refreshed[str(m["target"])] != m.get("target_type")
+        else m
+        for m in mappings
+    ]
+
+
 def apply_physical_temporal_precision(
     dest_types: dict[str, str],
     db_type: str,
