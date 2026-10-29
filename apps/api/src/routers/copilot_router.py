@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
 
+from services.api_errors import ApiError
 from services.rbac import require_admin_connector_access, require_admin_for_endpoints
 from src.services import auth_service
 
@@ -638,7 +639,7 @@ async def copilot_confirm(
         except DuplicateTransferSubmission:
             ledger.release_claim(ack_id)
             raise
-        except HTTPException:
+        except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise
         except Exception as exc:
@@ -672,7 +673,7 @@ async def copilot_confirm(
             # and no job to open.
             ledger.release_claim(ack_id)
             raise
-        except HTTPException:
+        except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise
         except Exception as exc:
@@ -698,7 +699,7 @@ async def copilot_confirm(
     if kind == "create_connector":
         try:
             require_admin_connector_access(None, payload.get("type"))
-        except HTTPException:
+        except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise
         from services.connector_store import (
@@ -758,6 +759,9 @@ async def copilot_confirm(
             except ScheduleStartError as exc:
                 ledger.release_claim(ack_id)
                 raise HTTPException(status_code=exc.http_status, detail=str(exc)) from exc
+            except ApiError:
+                ledger.release_claim(ack_id)
+                raise
             if not job_id:
                 ledger.release_claim(ack_id)
                 raise HTTPException(
@@ -768,7 +772,7 @@ async def copilot_confirm(
                         "connectors still resolve."
                     ),
                 )
-        except HTTPException:
+        except (HTTPException, ApiError):
             raise
         except Exception as exc:
             ledger.release_claim(ack_id)
@@ -825,7 +829,7 @@ async def copilot_confirm(
     if kind in ACK_KIND_BY_TOOL.values():
         try:
             result = await _run_lifecycle_confirm(kind, payload, http_request, background_tasks)
-        except HTTPException:
+        except (HTTPException, ApiError):
             ledger.release_claim(ack_id)
             raise
         except Exception as exc:

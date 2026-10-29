@@ -176,7 +176,7 @@ def test_email(
         return False, "Recipient (to) or SMTP username is required."
 
     try:
-        assert_connector_dial_allowed(cfg.host)
+        assert_connector_dial_allowed(cfg.host, point="smtp_client")
         if cfg.scheme == "smtps" or cfg.port == 465:
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(cfg.host, cfg.port, context=context, timeout=20) as server:
@@ -356,7 +356,7 @@ def write_mapped_rows(
         part.add_header("Content-Disposition", f"attachment; filename={filename}")
         msg.attach(part)
 
-        assert_connector_dial_allowed(cfg.host)
+        assert_connector_dial_allowed(cfg.host, point="smtp_client")
         if cfg.scheme == "smtps" or cfg.port == 465:
             context = ssl.create_default_context()
             with smtplib.SMTP_SSL(cfg.host, cfg.port, context=context, timeout=30) as server:

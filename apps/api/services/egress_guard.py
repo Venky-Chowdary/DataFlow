@@ -12,6 +12,17 @@ admin allowlist may permit an on-prem or VPC range. It is empty unless an
 admin saves one. Metadata, link-local, multicast, and unspecified addresses
 cannot be allowlisted. ``DATAFLOW_EGRESS_ALLOWLIST`` is an additional process
 list for local proof runs; production deploy leaves it unset.
+
+Two tiers of enforcement. The call sites production already enforced at
+(connector Test, the SQL/MySQL/Postgres/AWS drivers, CDC, webhooks, the
+Copilot connector tools) refuse private and loopback targets as before. The
+newer sites (connector save/update, transfer reads and writes, introspection,
+precount and probes, shared HTTP/SMTP/Mongo clients, redirects and
+pagination) pass a ``point`` name and are AUDIT-ONLY by default: a private or
+loopback target logs an ``egress.would_block`` audit event and is allowed.
+``DATAFLOW_EGRESS_ENFORCE_NEW=1`` (or ``DATAWRAP_EGRESS_ENFORCE_NEW``) turns
+those sites into refusals. Cloud metadata, link-local and multicast targets
+are refused at every site regardless of the flag.
 """
 
 from __future__ import annotations
@@ -25,6 +36,9 @@ import threading
 import urllib.parse
 from contextlib import contextmanager
 from typing import Any, Iterator, Sequence
+
+from services.brand_env import getenv_brand
+from services.would_apply_audit import audit_would_apply
 
 _ALLOWED_SCHEMES = frozenset({"http", "https"})
 
@@ -293,6 +307,146 @@ def _refusal_text(host: str, phrase: str) -> str:
     )
 
 
+_ALWAYS_REFUSED_PHRASES = frozenset({"cloud metadata and link-local", "multicast"})
+_AUDIT_CONNECTOR: contextvars.ContextVar[str] = contextvars.ContextVar(
+    "egress_audit_connector", default=""
+)
+
+
+def enforce_new_points() -> bool:
+    """True when ``DATAFLOW_EGRESS_ENFORCE_NEW`` makes the newer sites refuse.
+
+    Default off: those sites audit a private or loopback target
+    (``egress.would_block``) and allow it. See :func:`audit_would_block`.
+    """
+    raw = str(getenv_brand("EGRESS_ENFORCE_NEW", "") or "").strip().lower()
+    return raw in {"1", "true", "yes", "on"}
+
+
+def _real_getaddrinfo() -> Any:
+    return _INSTALL.get("real") or socket.getaddrinfo
+
+
+def _host_addresses(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Address]:
+    """Every address ``host`` is or resolves to, through the unguarded resolver."""
+    raw = _normalize_host(host)
+    try:
+        return [_unwrap(ipaddress.ip_address(raw))]
+    except ValueError:
+        pass
+    try:
+        infos = _real_getaddrinfo()(raw, None)
+    except (OSError, UnicodeError):
+        return []
+    found = []
+    for info in infos:
+        try:
+            found.append(_unwrap(ipaddress.ip_address(_normalize_host(str(info[4][0])))))
+        except (ValueError, IndexError, TypeError):
+            continue
+    return found
+
+
+def _is_always_blocked_ip(ip: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    return ip in _METADATA_ADDRESSES or ip.is_link_local or ip.is_multicast
+
+
+def is_always_blocked_target(host: str) -> bool:
+    """Cloud metadata, link-local and multicast: refused at every site, flag or not."""
+    if _normalize_host(host) in _METADATA_NAMES:
+        return True
+    return any(_is_always_blocked_ip(ip) for ip in _host_addresses(host))
+
+
+def host_class(host: str) -> str:
+    """``metadata``, ``link-local``, ``loopback``, ``cgnat``, ``private``, ``public``
+    or ``unresolved`` for ``host`` (the most restrictive answer wins)."""
+    if _normalize_host(host) in _METADATA_NAMES:
+        return "metadata"
+    addresses = _host_addresses(host)
+    if not addresses:
+        return "unresolved"
+    rank = ("metadata", "link-local", "loopback", "cgnat", "private", "public")
+    classes = set()
+    for ip in addresses:
+        if ip in _METADATA_ADDRESSES:
+            classes.add("metadata")
+        elif ip.is_link_local:
+            classes.add("link-local")
+        elif ip.is_loopback:
+            classes.add("loopback")
+        elif ip in ipaddress.ip_network("100.64.0.0/10"):
+            classes.add("cgnat")
+        elif _blocked_phrase(ip):
+            classes.add("private")
+        else:
+            classes.add("public")
+    return min(classes, key=rank.index)
+
+
+def audit_would_block(
+    point: str,
+    host: str,
+    phrase: str,
+    *,
+    workspace_id: str = "",
+    connector: str = "",
+) -> None:
+    """Record that the enforcing rule would have refused ``host`` at ``point``.
+
+    One ``egress.would_block`` audit event per (point, connector, host,
+    workspace) per hour, so a long transfer does not flood the audit chain.
+    The audit write never raises into the dial.
+    """
+    connector = connector or _AUDIT_CONNECTOR.get()
+    workspace = workspace_id or current_egress_workspace()
+    shown = _normalize_host(host)
+    if phrase in _ALWAYS_REFUSED_PHRASES:
+        # Only a ``.internal`` / ``.localhost`` name reaches here with that
+        # phrase: real metadata and link-local targets are refused, not audited.
+        phrase = "private network name"
+    audit_would_apply(
+        "egress.would_block",
+        resource=f"connector:{connector}" if connector else f"host:{shown}",
+        dedupe_key=(point, connector, shown, workspace),
+        workspace_id=workspace,
+        flag="DATAFLOW_EGRESS_ENFORCE_NEW",
+        details={
+            "point": point,
+            "connector": connector,
+            "host": shown,
+            "reason": phrase,
+            "host_class": host_class(shown),
+        },
+    )
+
+
+def _refuse_at_new_point(
+    point: str,
+    host: str,
+    phrase: str,
+    *,
+    workspace_id: str = "",
+    connector: str = "",
+    from_address: bool = False,
+) -> bool:
+    """True when a newer enforcement site must refuse ``host``.
+
+    Metadata/link-local always refuse. Anything else refuses only under
+    ``DATAFLOW_EGRESS_ENFORCE_NEW``; otherwise it is audited and allowed. A DNS
+    miss is not a policy hit and is left to the driver's own error.
+    ``from_address`` says ``phrase`` came from the address the driver is about
+    to use (dial time), so the phrase itself decides; a host-based check would
+    resolve the name a second time and could be rebound between the answers.
+    """
+    always = phrase in _ALWAYS_REFUSED_PHRASES if from_address else is_always_blocked_target(host)
+    if enforce_new_points() or always:
+        return True
+    if not phrase.startswith("DNS"):
+        audit_would_block(point, host, phrase, workspace_id=workspace_id, connector=connector)
+    return False
+
+
 def host_is_blocked(host: str) -> bool:
     """True when ``host`` is denied with an empty allowlist. DNS failure denies."""
     return classify_host(host, allowlist=(), fail_closed_dns=True) is not None
@@ -303,6 +457,8 @@ def assert_connector_dial_allowed(
     allowlist: Sequence[str] | None = None,
     workspace_id: str = "",
     db_type: str = "",
+    point: str = "",
+    connector: str = "",
 ) -> None:
     """Raise ``EgressRefused`` before a driver dials a blocked address.
 
@@ -310,13 +466,26 @@ def assert_connector_dial_allowed(
     here so a C client (libpq, ODBC) cannot time out on them. Names are
     resolved; an unresolved name is left to :func:`pinned_egress`, which
     fail-closes at connect.
+
+    ``point`` names a newer enforcement site: it audits instead of refusing a
+    private or loopback target unless ``DATAFLOW_EGRESS_ENFORCE_NEW`` is set
+    (:func:`new_point_refusal`). Without ``point`` the site is one production
+    already enforced and always refuses.
     """
-    refusal = metadata_endpoint_refusal(
-        *values,
-        allowlist=allowlist,
-        workspace_id=workspace_id or current_egress_workspace(),
-        db_type=db_type,
-    )
+    workspace_id = workspace_id or current_egress_workspace()
+    if point:
+        refusal = new_point_refusal(
+            point,
+            *values,
+            allowlist=allowlist,
+            workspace_id=workspace_id,
+            db_type=db_type,
+            connector=connector,
+        )
+    else:
+        refusal = metadata_endpoint_refusal(
+            *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type
+        )
     if refusal:
         raise EgressRefused(refusal)
 
@@ -338,13 +507,13 @@ FILE_ENGINE_TYPES = frozenset({
 })
 
 
-def metadata_endpoint_refusal(
+def iter_refusals(
     *values: str,
     allowlist: Sequence[str] | None = None,
     workspace_id: str = "",
     db_type: str = "",
-) -> str:
-    """Why a connector host is refused before any socket, or ``""``.
+) -> Iterator[tuple[str, str]]:
+    """Yield ``(host, phrase)`` for every dial target in ``values`` the policy refuses.
 
     Literal private, loopback, link-local, CGNAT, and metadata addresses are
     refused. A name is resolved; any private answer refuses it. An unresolved
@@ -355,7 +524,7 @@ def metadata_endpoint_refusal(
     engines never open a socket.
     """
     if (db_type or "").strip().lower() in FILE_ENGINE_TYPES:
-        return ""
+        return
     for host in _hosts_from_values(*values):
         phrase = classify_host(
             host,
@@ -364,8 +533,82 @@ def metadata_endpoint_refusal(
             fail_closed_dns=False,
         )
         if phrase:
+            yield host, phrase
+
+
+def metadata_endpoint_refusal(
+    *values: str,
+    allowlist: Sequence[str] | None = None,
+    workspace_id: str = "",
+    db_type: str = "",
+) -> str:
+    """Why a connector host is refused before any socket, or ``""``.
+
+    This is the rule production sites enforce unconditionally; see
+    :func:`iter_refusals` for what it covers and :func:`new_point_refusal` for
+    the audit-first variant the newer sites use.
+    """
+    for host, phrase in iter_refusals(
+        *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type
+    ):
+        return _refusal_text(host, phrase)
+    return ""
+
+
+def new_point_refusal(
+    point: str,
+    *values: str,
+    allowlist: Sequence[str] | None = None,
+    workspace_id: str = "",
+    db_type: str = "",
+    connector: str = "",
+) -> str:
+    """Refusal text at a newer enforcement site, or ``""`` to allow.
+
+    Same rule as :func:`metadata_endpoint_refusal`, but a private, loopback or
+    CGNAT target is only audited (``egress.would_block``) unless
+    ``DATAFLOW_EGRESS_ENFORCE_NEW`` is set. Metadata and link-local always refuse.
+    """
+    for host, phrase in iter_refusals(
+        *values, allowlist=allowlist, workspace_id=workspace_id, db_type=db_type
+    ):
+        if _refuse_at_new_point(
+            point, host, phrase, workspace_id=workspace_id, connector=connector
+        ):
             return _refusal_text(host, phrase)
     return ""
+
+
+_SAVE_TARGET_KEYS = ("host", "endpoint_url", "connection_string")
+
+
+def connector_save_refusal(data: dict[str, Any], existing: Any = None) -> str:
+    """Refusal text for saving ``data`` as a connector, or ``""`` to allow.
+
+    A save that leaves the dial targets exactly as ``existing`` already holds
+    them (a rename, a credential change) is never refused for a private or
+    loopback host, flag or no flag: only metadata and link-local still are. A
+    new or changed target is audited, or refused under the enforce flag.
+    """
+    values = [str(data.get(key) or "") for key in _SAVE_TARGET_KEYS]
+    workspace_id = str(data.get("workspace_id") or "")
+    db_type = str(data.get("type") or "")
+    if existing is not None and values == [
+        str(getattr(existing, key, "") or "") for key in _SAVE_TARGET_KEYS
+    ]:
+        for host, phrase in iter_refusals(
+            *values, workspace_id=workspace_id, db_type=db_type
+        ):
+            if is_always_blocked_target(host):
+                return _refusal_text(host, phrase)
+        return ""
+    return new_point_refusal(
+        "connector_save",
+        *values,
+        workspace_id=workspace_id,
+        db_type=db_type,
+        connector=str(data.get("name") or ""),
+    )
 
 
 def egress_url_allowed(
@@ -471,7 +714,9 @@ def _hosts_from_values(*values: str) -> list[str]:
     return hosts
 
 
-_DIAL_POLICY: contextvars.ContextVar[tuple[Sequence[str] | None, str] | None] = (
+# (allowlist, workspace_id, point). ``point`` is "" at the sites production
+# already enforced and names a newer, audit-first site otherwise.
+_DIAL_POLICY: contextvars.ContextVar[tuple[Sequence[str] | None, str, str] | None] = (
     contextvars.ContextVar("egress_dial_policy", default=None)
 )
 _EGRESS_WORKSPACE: contextvars.ContextVar[str] = contextvars.ContextVar(
@@ -559,28 +804,50 @@ def _is_control_plane_target(shown: str, real: Any) -> bool:
     return shown in _control_plane_addresses(real)
 
 
-def _refusal_for_target(host: str, policy: tuple[Sequence[str] | None, str], real: Any) -> str | None:
-    allowlist, workspace_id = policy
+def _dial_refusal(
+    policy: tuple[Sequence[str] | None, str, str],
+    shown: str,
+    phrase: str,
+    *,
+    from_address: bool = True,
+) -> str | None:
+    """Refusal text for a dial-time hit, or ``None`` when a newer site only audits it.
+
+    ``from_address`` is False for the ``.internal`` / metadata *name* rule,
+    which fires before any address is known.
+    """
+    point = policy[2]
+    if point and not _refuse_at_new_point(
+        point, shown, phrase, workspace_id=policy[1], from_address=from_address
+    ):
+        return None
+    return _refusal_text(shown, phrase)
+
+
+def _refusal_for_target(
+    host: str, policy: tuple[Sequence[str] | None, str, str], real: Any
+) -> str | None:
+    allowlist, workspace_id, _point = policy
     shown = _normalize_host(host)
     if not shown or "://" in shown or shown.startswith(("/", "\\")):
         return None
     if _is_control_plane_target(shown, real):
         return None
     if _name_is_non_overridable(shown):
-        return _refusal_text(shown, "cloud metadata and link-local")
+        return _dial_refusal(policy, shown, "cloud metadata and link-local", from_address=False)
     try:
         literal = ipaddress.ip_address(shown)
     except ValueError:
         literal = None
     if literal is not None:
         phrase = _ip_refusal_phrase(literal, _configured_networks(allowlist, workspace_id))
-        return _refusal_text(shown, phrase) if phrase else None
+        return _dial_refusal(policy, shown, phrase) if phrase else None
     try:
         infos = real(shown, None)
     except OSError:
-        return _refusal_text(shown, "DNS did not resolve to a public address")
+        return _dial_refusal(policy, shown, "DNS did not resolve to a public address")
     phrase = _phrase_for_infos(infos, allowlist=allowlist, workspace_id=workspace_id)
-    return _refusal_text(shown, phrase) if phrase else None
+    return _dial_refusal(policy, shown, phrase) if phrase else None
 
 
 def _install_guards() -> None:
@@ -629,25 +896,33 @@ def _install_guards() -> None:
             if _is_control_plane_target(shown, real):
                 return real(host, port, *args, **kwargs)
             if _name_is_non_overridable(shown):
-                raise EgressRefused(_refusal_text(shown, "cloud metadata and link-local"))
+                refusal = _dial_refusal(
+                    policy, shown, "cloud metadata and link-local", from_address=False
+                )
+                if refusal:
+                    raise EgressRefused(refusal)
+                return real(host, port, *args, **kwargs)
             try:
                 literal = ipaddress.ip_address(shown)
             except ValueError:
                 literal = None
-            allowlist, workspace_id = policy
+            allowlist, workspace_id, _point = policy
             if literal is not None:
                 phrase = _ip_refusal_phrase(literal, _configured_networks(allowlist, workspace_id))
-                if phrase:
-                    raise EgressRefused(_refusal_text(shown, phrase))
+                refusal = _dial_refusal(policy, shown, phrase) if phrase else None
+                if refusal:
+                    raise EgressRefused(refusal)
             try:
                 infos = real(host, port, *args, **kwargs)
             except OSError as exc:
-                raise EgressRefused(
-                    _refusal_text(shown, "DNS did not resolve to a public address")
-                ) from exc
+                refusal = _dial_refusal(policy, shown, "DNS did not resolve to a public address")
+                if refusal:
+                    raise EgressRefused(refusal) from exc
+                raise
             phrase = _phrase_for_infos(infos, allowlist=allowlist, workspace_id=workspace_id)
-            if phrase:
-                raise EgressRefused(_refusal_text(shown or raw_host, phrase))
+            refusal = _dial_refusal(policy, shown or raw_host, phrase) if phrase else None
+            if refusal:
+                raise EgressRefused(refusal)
             return infos
 
         socket.getaddrinfo = guarded
@@ -671,6 +946,7 @@ def pinned_egress(
     *,
     allowlist: Sequence[str] | None = None,
     workspace_id: str = "",
+    point: str = "",
 ) -> Iterator[None]:
     """Re-check every DNS answer and connect target in this context.
 
@@ -679,8 +955,12 @@ def pinned_egress(
     to the connector. The policy is scoped to the current thread/task through a
     context variable, so concurrent transfers and the API's own control-plane
     dials on other threads are not affected and scopes never serialize.
+
+    ``point`` names a newer, audit-first site (see :func:`new_point_refusal`):
+    private and loopback answers are audited and allowed there unless
+    ``DATAFLOW_EGRESS_ENFORCE_NEW`` is set; metadata and link-local still refuse.
     """
-    policy = (allowlist, str(workspace_id or "") or current_egress_workspace())
+    policy = (allowlist, str(workspace_id or "") or current_egress_workspace(), point)
     token = _DIAL_POLICY.set(policy)
     _install_guards()
     try:
@@ -701,23 +981,47 @@ def _cfg_dial_values(cfg: Any, extra: Sequence[str]) -> list[str]:
     return values
 
 
-def assert_cfg_dial_allowed(cfg: Any, *extra: str, db_type: str = "") -> None:
-    """Refuse a connector config whose dial targets break the egress policy."""
+def _cfg_connector_name(cfg_map: dict[str, Any]) -> str:
+    for key in ("connector_name", "name", "connector_id", "id"):
+        raw = cfg_map.get(key)
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return ""
+
+
+def assert_cfg_dial_allowed(cfg: Any, *extra: str, db_type: str = "", point: str) -> None:
+    """Check a connector config's dial targets at the newer site ``point``.
+
+    Audit-first: see :func:`new_point_refusal`. Raises ``EgressRefused`` for
+    metadata/link-local, and for private targets under the enforce flag.
+    """
     cfg_map = cfg if isinstance(cfg, dict) else {}
     assert_connector_dial_allowed(
         *_cfg_dial_values(cfg_map, extra),
         workspace_id=str(cfg_map.get("workspace_id") or ""),
         db_type=str(db_type or cfg_map.get("type") or cfg_map.get("db_type") or ""),
+        point=point,
+        connector=_cfg_connector_name(cfg_map),
     )
 
 
 @contextmanager
-def connector_dial_scope(cfg: Any, *extra: str, db_type: str = "") -> Iterator[None]:
-    """Pre-dial check plus dial-time DNS pinning around one connector call."""
+def connector_dial_scope(
+    cfg: Any, *extra: str, db_type: str = "", point: str
+) -> Iterator[None]:
+    """Pre-dial check plus dial-time DNS pinning around one connector call.
+
+    ``point`` names the newer site; both checks are audit-first for private
+    and loopback targets (see :func:`new_point_refusal`).
+    """
     cfg_map = cfg if isinstance(cfg, dict) else {}
-    assert_cfg_dial_allowed(cfg_map, *extra, db_type=db_type)
-    with pinned_egress(workspace_id=str(cfg_map.get("workspace_id") or "")):
-        yield
+    assert_cfg_dial_allowed(cfg_map, *extra, db_type=db_type, point=point)
+    token = _AUDIT_CONNECTOR.set(_cfg_connector_name(cfg_map))
+    try:
+        with pinned_egress(workspace_id=str(cfg_map.get("workspace_id") or ""), point=point):
+            yield
+    finally:
+        _AUDIT_CONNECTOR.reset(token)
 
 
 def follow_url_allowed(url: str, origin: str) -> bool:
@@ -725,8 +1029,10 @@ def follow_url_allowed(url: str, origin: str) -> bool:
 
     Same scheme+host+port as the configured origin keeps the policy that
     already admitted that origin. Any other target must be a public http(s)
-    host; private, loopback and metadata targets are refused regardless of a
-    workspace allowlist.
+    host regardless of a workspace allowlist. Metadata and link-local targets
+    are always refused; a private or loopback target is audited
+    (``egress.would_block``) and followed unless ``DATAFLOW_EGRESS_ENFORCE_NEW``
+    is set.
     """
     target = urllib.parse.urlparse((url or "").strip())
     if target.scheme not in _ALLOWED_SCHEMES or not target.hostname:
@@ -743,7 +1049,10 @@ def follow_url_allowed(url: str, origin: str) -> bool:
             return False
         if same:
             return True
-    return redirect_target_allowed(url)
+    phrase = classify_host(target.hostname, allowlist=())
+    if phrase is None:
+        return True
+    return not _refuse_at_new_point("redirect", target.hostname, phrase)
 
 
 def redirect_guard_hook(origin: str = ""):

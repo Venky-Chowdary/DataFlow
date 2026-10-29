@@ -309,7 +309,7 @@ def _introspect_endpoint_guarded(
         "workspace_id": str((endpoint.extra or {}).get("workspace_id") or ""),
     }
     try:
-        with connector_dial_scope(scope_cfg):
+        with connector_dial_scope(scope_cfg, point="introspect"):
             return _introspect_endpoint_impl(endpoint, sample_content, filename)
     except EgressRefused as exc:
         return {

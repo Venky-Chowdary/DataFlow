@@ -281,7 +281,7 @@ def request(
 
     from services.egress_guard import assert_connector_dial_allowed, redirect_guard_hook
 
-    assert_connector_dial_allowed(url)
+    assert_connector_dial_allowed(url, point="http_client")
     hooks = {"response": [redirect_guard_hook(url)]}
 
     def _call() -> requests.Response:

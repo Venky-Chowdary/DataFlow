@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.cdc_capture_release import release_schedule_cdc_capture
 from services.schedule_approvals import STATUS_OPEN
@@ -587,6 +588,8 @@ async def create_pipeline_schedule(
         assert_resource_workspace(request, str(payload.get("workspace_id") or ""), write=True)
     try:
         sched = create_schedule(payload)
+    except ApiError:
+        raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
@@ -630,6 +633,8 @@ async def patch_pipeline_schedule(
         return ScheduleResponse.from_schedule(existing)
     try:
         updated = update_schedule(schedule_id, data)
+    except ApiError:
+        raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
@@ -1141,6 +1146,8 @@ async def run_pipeline_now(
             manual=True,
             triggered_by=actor or "run-now",
         )
+    except ApiError:
+        raise
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ScheduleStartError as exc:

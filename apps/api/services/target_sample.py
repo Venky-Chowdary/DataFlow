@@ -239,8 +239,11 @@ def _read_destination_sample(
                 else "1"
             )
             ssl_flag = _ssl_flag(False)
+            # Upgrade-only retry: a non-TLS connector may retry with TLS, but a
+            # connector that requested TLS never falls back to plaintext.
+            ssl_attempts = (True,) if ssl_flag else (False, True)
             last_exc: Exception | None = None
-            for attempt_ssl in (ssl_flag, not ssl_flag):
+            for attempt_ssl in ssl_attempts:
                 try:
                     conn = get_connection(
                         host=dest.get("host", ""),
@@ -278,16 +281,18 @@ def _read_destination_sample(
                     conn.close()
                     return [dict(zip(names, row)) for row in rows]
                 except Exception as exc:
-                    last_exc = exc
+                    # Report the configured mode's failure, not the upgrade probe's.
+                    last_exc = last_exc or exc
                     continue
-            if last_exc:
-                raise TargetSampleUnavailable(
-                    f"Could not read destination sample from {db_type!r}.{table_name!r}: {last_exc}"
-                ) from last_exc
+            tls_note = (
+                " (SSL is required by the connector; plaintext fallback is not attempted)"
+                if ssl_flag
+                else ""
+            )
             raise TargetSampleUnavailable(
                 f"Could not read destination sample from {db_type!r}.{table_name!r}: "
-                "postgresql connection failed for both SSL modes"
-            )
+                f"{last_exc or 'postgresql connection failed'}{tls_note}"
+            ) from last_exc
 
         if db_type == "mysql":
             from connectors.mysql_conn import get_connection

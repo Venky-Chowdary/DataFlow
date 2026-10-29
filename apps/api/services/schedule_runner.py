@@ -1660,6 +1660,9 @@ def _run_schedule(
         getattr(sched, "workspace_id", "") or None,
         {"connector_id": sched.source_connector_id},
         {"connector_id": sched.dest_connector_id},
+        # An unattended beat runs the tap and the job records why it failed; a
+        # person pressing Run now is told at once.
+        require_taps=manual,
     )
     # Cadence already releases create-new dest-exists parks before the beat.
     # Run now must do the same or the first unattended fire stays parked.

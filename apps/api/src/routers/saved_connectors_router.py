@@ -227,17 +227,15 @@ def _persist_form_test_status(connector_id: str, last_test_ok: bool | None) -> N
         mark_tested(connector_id, False)
 
 
-def _refuse_unsafe_egress(data: dict[str, Any]) -> None:
-    """Refuse to persist a connector whose dial targets break the egress policy."""
-    from services.egress_guard import metadata_endpoint_refusal
+def _refuse_unsafe_egress(data: dict[str, Any], existing: Any = None) -> None:
+    """Refuse to persist a connector whose dial targets break the egress policy.
 
-    refusal = metadata_endpoint_refusal(
-        str(data.get("host") or ""),
-        str(data.get("endpoint_url") or ""),
-        str(data.get("connection_string") or ""),
-        workspace_id=str(data.get("workspace_id") or ""),
-        db_type=str(data.get("type") or ""),
-    )
+    Audit-first for private hosts and never applied to an unchanged target
+    (``connector_save_refusal``); metadata and link-local always refuse.
+    """
+    from services.egress_guard import connector_save_refusal
+
+    refusal = connector_save_refusal(data, existing)
     if refusal:
         raise HTTPException(status_code=400, detail=refusal)
 
@@ -262,7 +260,7 @@ def save_connector(
             break
     if existing is not None:
         data = _preserve_masked_secrets(data, existing)
-    _refuse_unsafe_egress(data)
+    _refuse_unsafe_egress(data, existing)
     conn = create_connector(data)
     _persist_form_test_status(conn.id, form_test)
     refreshed = get_connector(conn.id, workspace_id=workspace_id) or conn
@@ -284,7 +282,7 @@ def update_saved_connector(
     require_admin_connector_access(request, body.type, existing.type)
     data = _preserve_masked_secrets(data, existing)
     data["workspace_id"] = existing.workspace_id or workspace_id
-    _refuse_unsafe_egress(data)
+    _refuse_unsafe_egress(data, existing)
     updated = update_connector(connector_id, data, workspace_id=workspace_id)
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")

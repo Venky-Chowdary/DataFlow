@@ -55,7 +55,7 @@ def _base_url(host: str, port: int, ssl: bool, connection_string: str = "") -> s
         url = connection_string.rstrip("/")
     else:
         url = http_service_base_url(host, port, ssl, 8080)
-    assert_connector_dial_allowed(url)
+    assert_connector_dial_allowed(url, point="http_client")
     return url
 
 

@@ -2,6 +2,9 @@
 
 The probe path was the only place the policy ran. These tests pin the same
 refusal on every other dial a user-controlled connector config can steer.
+
+These run with ``DATAFLOW_EGRESS_ENFORCE_NEW=1``: the newer sites are
+audit-only by default (``test_egress_audit_only_new_points.py``).
 """
 
 from __future__ import annotations
@@ -23,6 +26,11 @@ from services.egress_guard import (
 METADATA = "169.254.169.254"
 PRIVATE = "10.0.0.5"
 PUBLIC = "93.184.216.34"
+
+
+@pytest.fixture(autouse=True)
+def _enforce_new_points(monkeypatch):
+    monkeypatch.setenv("DATAFLOW_EGRESS_ENFORCE_NEW", "1")
 
 
 def _public_dns(host, port, *args, **kwargs):

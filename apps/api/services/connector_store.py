@@ -147,6 +147,44 @@ def listen_port_for_connector(conn_type: str, raw: Any) -> int:
     return stored_listen_port(conn_type, raw)
 
 
+# --- TLS requirement -------------------------------------------------------
+# ``ssl_mode`` records what the USER chose, so "TLS required" is a fact and not
+# the stored default:
+#   "require" - the user turned SSL/TLS on. The connection is strictly
+#               encrypted and is never retried in plaintext.
+#   "prefer"  - negotiate TLS, plaintext allowed (explicit, API/import only).
+#   ""        - unset: the user never asked for TLS. Negotiates like "prefer".
+# Documents written before this field existed carry only the boolean ``ssl``,
+# which this store used to default to True when a caller omitted it - so a
+# legacy ``ssl=True`` cannot be told apart from an injected default. Such
+# documents are read as unset ("") until the connector is saved again.
+# For the PostgreSQL family ``SavedConnector.ssl`` is the derived strict flag
+# (``ssl_mode == "require"``), so every downstream ``ssl=True`` means required.
+SSL_MODES = ("", "prefer", "require")
+_TLS_MODE_TYPES = frozenset({"postgresql", "redshift"})
+
+
+def stamp_ssl_mode(doc: dict[str, Any], patch: Mapping[str, Any]) -> dict[str, Any]:
+    """Record the user's TLS choice from a create/update payload onto ``doc``.
+
+    A payload that says nothing about TLS leaves ``doc`` untouched.
+    """
+    if patch.get("ssl_mode") in SSL_MODES:
+        doc["ssl_mode"] = patch["ssl_mode"]
+    elif "ssl" in patch:
+        doc["ssl_mode"] = "require" if patch["ssl"] else ""
+    return doc
+
+
+def resolve_tls(conn_type: str, data: Mapping[str, Any]) -> tuple[bool, str]:
+    """Return ``(ssl, ssl_mode)`` for a stored or incoming connector document."""
+    mode = data.get("ssl_mode")
+    mode = mode if mode in SSL_MODES else ""
+    if conn_type in _TLS_MODE_TYPES:
+        return mode == "require", mode
+    return bool(data.get("ssl", True)), mode
+
+
 @dataclass
 class SavedConnector:
     id: str
@@ -161,6 +199,8 @@ class SavedConnector:
     schema: str = ""  # filled via dialect_profiles — never assume Postgres public
     connection_string: str = ""
     ssl: bool = True
+    #: What the user chose for TLS (see SSL_MODES above); "" = never asked.
+    ssl_mode: str = ""
     warehouse: str = ""
     auth_mode: str = ""
     auth_role: str = ""
@@ -221,6 +261,7 @@ class SavedConnector:
             }
         )
         password = str(lifted.get("password") or "")
+        ssl, ssl_mode = resolve_tls(conn_type, data)
         return cls(
             id=data["id"],
             name=data["name"],
@@ -233,7 +274,8 @@ class SavedConnector:
             password=password,
             schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
             connection_string=conn_str,
-            ssl=bool(data.get("ssl", True)),
+            ssl=ssl,
+            ssl_mode=ssl_mode,
             warehouse=data.get("warehouse", ""),
             auth_mode=data.get("auth_mode", ""),
             auth_role=data.get("auth_role", ""),
@@ -677,6 +719,7 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
 
     data = apply_sftp_uri_endpoint(data)
     conn_type = data["type"]
+    ssl, ssl_mode = resolve_tls(conn_type, stamp_ssl_mode(dict(data), data))
     conn = SavedConnector(
         id=str(uuid.uuid4()),
         name=data["name"],
@@ -689,7 +732,8 @@ def create_connector(data: dict[str, Any]) -> SavedConnector:
         password=data.get("password", ""),
         schema=_resolve_connector_schema(conn_type, data.get("schema"), data.get("username")),
         connection_string=data.get("connection_string", ""),
-        ssl=bool(data.get("ssl", True)),
+        ssl=ssl,
+        ssl_mode=ssl_mode,
         warehouse=data.get("warehouse", ""),
         auth_mode=data.get("auth_mode", ""),
         auth_role=data.get("auth_role", ""),
@@ -770,7 +814,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return None
     def _merge(existing: SavedConnector) -> SavedConnector:
-        merged = {**existing.to_dict(), **data, "id": connector_id}
+        merged = stamp_ssl_mode({**existing.to_dict(), **data, "id": connector_id}, data)
         # Never let a masked UI payload overwrite a saved secret / connection string.
         for secret_field in ("password", "api_key", "service_account", "private_key"):
             merged[secret_field] = _coerce_secret_update(merged.get(secret_field), existing.to_dict().get(secret_field))
@@ -795,7 +839,7 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
             # only a masked/empty placeholder, and a legacy plaintext secret is
             # re-encrypted by _encrypt_connector_doc — every successful update
             # heals the record instead of refusing it.
-            merged = {**raw, **data, "_id": raw.get("_id")}
+            merged = stamp_ssl_mode({**raw, **data, "_id": raw.get("_id")}, data)
             merged.pop("id", None)
             for secret_field in _DOC_SECRET_KEYS:
                 merged[secret_field] = _coerce_secret_update(

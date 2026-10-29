@@ -1,9 +1,9 @@
-"""CI-1 regression — a failed sslmode retry must surface the retry's error.
+"""CI-1 regression, kept under strict TLS - a required-TLS connection has no retry.
 
-Pre-fix: ``ssl=True`` -> ``sslmode=require`` failed with "server does not
-support SSL", the ``prefer`` retry failed for the *real* reason (auth,
-refused, timeout), and ``get_connection`` raised the first error — the stale
-SSL message masked the true failure in CI's PG-SSL legs.
+History: ``ssl=True`` -> ``sslmode=require`` failed with "server does not
+support SSL", a ``prefer`` retry then failed for the *real* reason, and the
+stale SSL message masked it. A required-TLS connection is now never retried in
+another mode, so the one error raised is the real one.
 """
 
 from __future__ import annotations
@@ -14,13 +14,11 @@ import pytest
 import connectors.postgresql_conn as pgc
 
 
-def test_failed_ssl_retry_raises_the_retry_error_not_the_stale_first(monkeypatch):
+def test_required_tls_failure_is_reported_once_and_not_retried(monkeypatch):
     calls: list[str] = []
 
     def fake_connect(**kwargs):
         calls.append(kwargs["sslmode"])
-        if kwargs["sslmode"] == "require":
-            raise psycopg2.Error("server does not support SSL, but SSL was required")
         raise psycopg2.Error("password authentication failed for user \"df\"")
 
     monkeypatch.setattr(psycopg2, "connect", fake_connect)
@@ -34,4 +32,4 @@ def test_failed_ssl_retry_raises_the_retry_error_not_the_stale_first(monkeypatch
             connection_string="",
             ssl=True,
         )
-    assert calls == ["require", "prefer"]
+    assert calls == ["require"]

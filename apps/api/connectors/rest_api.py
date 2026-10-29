@@ -96,7 +96,7 @@ def _request_with_retry(
     """
     from services.egress_guard import assert_connector_dial_allowed, redirect_guard_hook
 
-    assert_connector_dial_allowed(url)
+    assert_connector_dial_allowed(url, point="http_client")
     hooks = dict(kwargs.pop("hooks", None) or {})
     hooks["response"] = [*list(hooks.get("response") or []), redirect_guard_hook(url)]
     kwargs["hooks"] = hooks

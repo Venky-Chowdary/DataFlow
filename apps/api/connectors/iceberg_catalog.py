@@ -18,6 +18,7 @@ from urllib.parse import parse_qs, urlparse
 from urllib.request import url2pathname
 
 from services.brand_env import getenv_brand
+from services.local_file_policy import audit_would_confine, implicit_root, is_within
 
 _WINDOWS = os.name == "nt"
 logger = logging.getLogger(__name__)
@@ -102,28 +103,16 @@ def local_path_from_location(path_str: str) -> Path:
 def iceberg_local_root() -> Path | None:
     """Directory every local Iceberg warehouse / SQLite catalog must live under.
 
-    ``DATAFLOW_ICEBERG_ROOT`` wins. In production the jail defaults to
-    ``<data_dir>/iceberg`` (the persistent volume), so a tenant cannot point a
-    warehouse at an arbitrary worker path. Development without the variable is
-    unjailed.
+    ``DATAFLOW_ICEBERG_ROOT`` wins. With ``DATAFLOW_CONFINE_LOCAL_FILES`` on, the
+    production jail defaults to ``<data_dir>/iceberg`` (the persistent volume),
+    so a tenant cannot point a warehouse at an arbitrary worker path. Without
+    the variable and the flag (the default) nothing is jailed, as before.
     """
     raw = (getenv_brand("ICEBERG_ROOT") or "").strip()
     if raw:
         return Path(raw).expanduser().resolve()
-    from services.platform_config import data_dir, is_production
-
-    if is_production():
-        return (data_dir() / "iceberg").resolve()
-    return None
-
-
-def _is_within(child: Path, parent: Path) -> bool:
-    c = os.path.normcase(str(child))
-    p = os.path.normcase(str(parent))
-    try:
-        return os.path.commonpath([c, p]) == p
-    except ValueError:  # different drives on Windows
-        return False
+    root = implicit_root("iceberg")
+    return root.resolve() if root else None
 
 
 def _jail_local_path(path_str: str, label: str) -> Path:
@@ -141,11 +130,13 @@ def _jail_local_path(path_str: str, label: str) -> Path:
     else:
         candidate = Path(raw or ".").expanduser()
     if root is None:
-        return candidate.resolve()
+        resolved = candidate.resolve()
+        audit_would_confine("iceberg", resolved)
+        return resolved
     if not candidate.is_absolute():
         candidate = root / candidate
     resolved = candidate.resolve()
-    if not _is_within(resolved, root):
+    if not is_within(resolved, root):
         raise ValueError(
             f"Iceberg {label} must be under the Iceberg warehouse root {root} (DATAFLOW_ICEBERG_ROOT)"
         )
@@ -178,7 +169,7 @@ def safe_warehouse_child(base: Path, *parts: str, label: str) -> Path:
         ):
             raise ValueError(f"Iceberg {label} must be a relative name inside the warehouse: {part!r}")
         target = target / name
-    if not _is_within(target.resolve(), base.resolve()):
+    if not is_within(target.resolve(), base.resolve()):
         raise ValueError(f"Iceberg {label} escapes the warehouse directory: {target}")
     return target
 
@@ -194,10 +185,13 @@ def _validate_local_identifier(namespace: tuple[str, ...], table: str) -> None:
 
 def _jail_sqlite_uri(uri: str) -> str:
     """Keep ``sqlite:///`` catalog files under the Iceberg root when one is set."""
-    if iceberg_local_root() is None or not uri.startswith("sqlite:///"):
+    if not uri.startswith("sqlite:///"):
         return uri
     rest, sep, query = uri[len("sqlite:///") :].partition("?")
     if not rest or rest == ":memory:":
+        return uri
+    if iceberg_local_root() is None:
+        audit_would_confine("iceberg", Path(rest).expanduser().resolve())
         return uri
     resolved = _jail_local_path(rest, "catalog_path")
     return f"sqlite:///{resolved}{sep}{query}"
@@ -305,7 +299,12 @@ def _sql_props(connection_string: str, warehouse: str, extra: dict[str, Any]) ->
         wh = _warehouse_root(warehouse or cs or ".")
         props["warehouse"] = wh.as_uri()
     catalog_db = str(extra.get("catalog_path") or ".dataflow_iceberg_catalog.db")
-    db_path = safe_warehouse_child(wh, catalog_db, label="catalog_path")
+    if Path(catalog_db).is_absolute():
+        # An absolute catalog file is a root-confinement question (flag-gated);
+        # a relative one may never climb out of the warehouse.
+        db_path = _jail_local_path(catalog_db, "catalog_path")
+    else:
+        db_path = safe_warehouse_child(wh, catalog_db, label="catalog_path")
     return f"sqlite:///{db_path.resolve()}", props
 
 

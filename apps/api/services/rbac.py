@@ -20,7 +20,6 @@ import threading
 from typing import Any
 from weakref import WeakKeyDictionary
 
-from starlette.exceptions import HTTPException
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -35,6 +34,8 @@ from services.request_principal import (  # noqa: F401 — re-exported RBAC surf
     admin_only_types,
     assert_bound_principal_may_use_connector,
     assert_bound_principal_may_use_endpoints,
+    singer_admin_required,
+    singer_taps_dir,
     connector_type_aliases,
     connector_type_requires_admin,
     endpoint_connector_types,
@@ -554,24 +555,29 @@ def admin_connector_denial(user: dict[str, Any] | None, *connector_types: Any) -
 
 
 def require_admin_connector_access(request: Request | None, *connector_types: Any) -> None:
-    """Raise 403 unless the request principal may use every given connector type.
+    """Refuse admin-only connector types the principal may not use, or that are disabled.
 
-    Without a ``request`` the principal bound by :class:`RBACMiddleware` is used
-    (no bound principal: scheduler/worker or auth off, not blocked).
+    ``SingerUnavailable`` (403 ``singer_admin_required``) for a caller who is not
+    the platform admin, then (409 ``singer_taps_dir_unset``) when the operator has
+    not set DATAWRAP_SINGER_TAPS_DIR. Without a ``request`` the principal bound by
+    :class:`RBACMiddleware` is used (no bound principal: scheduler/worker or auth
+    off, not blocked).
     """
     types = [alias for t in connector_types for alias in connector_type_aliases(t)]
+    gated = admin_only_types(types)
+    if not gated:
+        return
     if request is not None:
-        denial = admin_connector_denial(getattr(getattr(request, "state", None), "user", None), *types)
+        denied = bool(admin_connector_denial(getattr(getattr(request, "state", None), "user", None), *types))
     else:
-        role = _REQUEST_ROLE.get()
-        gated = admin_only_types(types)
-        denial = admin_only_message(gated) if gated and role not in (None, "admin") else None
-    if denial:
-        raise HTTPException(status_code=403, detail=denial)
+        denied = _REQUEST_ROLE.get() not in (None, "admin")
+    if denied:
+        raise singer_admin_required(gated)
+    singer_taps_dir()
 
 
 def require_admin_for_endpoints(request: Request | None, workspace_id: str | None, *endpoints: Any) -> None:
-    """Raise 403 when a non-admin principal would run an admin-only connector endpoint."""
+    """``require_admin_connector_access`` for the connector types these endpoints run."""
     require_admin_connector_access(request, *endpoint_connector_types(workspace_id, *endpoints))
 
 

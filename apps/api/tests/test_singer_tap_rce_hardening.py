@@ -158,15 +158,15 @@ def auth_on(monkeypatch):
     return rbac
 
 
-def test_require_admin_connector_access(auth_on):
-    from starlette.exceptions import HTTPException
+def test_require_admin_connector_access(auth_on, taps_dir):
+    from services.api_errors import ApiError
 
     class _Req:
         def __init__(self, role):
             self.state = type("S", (), {"user": {"role": role} if role else None})()
 
     for role in (None, "viewer", "editor", "operator"):
-        with pytest.raises(HTTPException) as exc:
+        with pytest.raises(ApiError) as exc:
             auth_on.require_admin_connector_access(_Req(role), "singer_tap")
         assert exc.value.status_code == 403
         auth_on.require_admin_connector_access(_Req(role), "postgresql")
@@ -204,6 +204,7 @@ def _client(role: str):
     from fastapi.testclient import TestClient
     from starlette.middleware.base import BaseHTTPMiddleware
 
+    from services.api_errors import ApiError, api_error_handler
     from services.rbac import RBACMiddleware
     from src.routers.connectors_router import router as connectors_router
 
@@ -214,6 +215,7 @@ def _client(role: str):
             return await call_next(request)
 
     app = FastAPI()
+    app.add_exception_handler(ApiError, api_error_handler)
     app.include_router(connectors_router, prefix="/api/v1")
     app.add_middleware(RBACMiddleware)
     app.add_middleware(_User)
@@ -251,12 +253,12 @@ def test_connector_create_denies_non_admin_singer(auth_on):
 
 def test_workspace_member_account_is_not_a_platform_admin(auth_on):
     """A tap runs on the host every workspace shares; a workspace admin is not enough."""
-    from starlette.exceptions import HTTPException
+    from services.api_errors import ApiError
 
     class _Req:
         state = type("S", (), {"user": {"email": "m@example.com", "role": "member"}})()
 
-    with pytest.raises(HTTPException) as exc:
+    with pytest.raises(ApiError) as exc:
         auth_on.require_admin_connector_access(_Req(), "singer_tap")
     assert exc.value.status_code == 403
 

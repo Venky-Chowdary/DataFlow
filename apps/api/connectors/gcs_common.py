@@ -63,7 +63,7 @@ def gcs_client(cfg: dict[str, Any]):
         from services.egress_guard import assert_connector_dial_allowed
 
         assert_connector_dial_allowed(
-            str(endpoint), workspace_id=str(cfg.get("workspace_id") or "")
+            str(endpoint), workspace_id=str(cfg.get("workspace_id") or ""), point="http_client"
         )
     creds = _credentials(creds_ref, project)
     client_options = ClientOptions(api_endpoint=endpoint) if endpoint else None

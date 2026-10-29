@@ -314,7 +314,7 @@ def _introspect_schema(db_type: str, **kwargs: Any) -> dict[str, Any]:
             or ""
         ),
     }
-    with connector_dial_scope(scope_cfg, db_type=db_type):
+    with connector_dial_scope(scope_cfg, db_type=db_type, point="introspect"):
         return _introspect_schema_unscoped(db_type, **kwargs)
 
 
