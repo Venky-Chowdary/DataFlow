@@ -1328,6 +1328,19 @@ def get_connector_capability(key: str) -> dict[str, Any]:
     return cap
 
 
+def is_append_only_destination(key: str) -> bool:
+    """True when the destination can only add rows: no upsert, merge or overwrite.
+
+    Read from the same record the writers' honesty downgrades land on, so a
+    destination whose writer is absent (every write flag demoted to False) is
+    not mistaken for an append-only one.
+    """
+    cap = get_connector_capability(key)
+    return bool(cap.get("supports_append")) and not any(
+        cap.get(flag) for flag in ("supports_upsert", "supports_merge", "supports_overwrite")
+    )
+
+
 def list_connectors_by_tier() -> dict[str, list[str]]:
     out: dict[str, list[str]] = {tier: [] for tier in TIER_ORDER}
     for key, cap in CAPABILITY_REGISTRY.items():

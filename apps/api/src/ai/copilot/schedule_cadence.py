@@ -452,37 +452,6 @@ def _dow_field(dows: list[int]) -> str:
     return ",".join(str(d) for d in ordered)
 
 
-_DAYS_IN_MONTH = {1: 31, 2: 29, 3: 31, 4: 30, 5: 31, 6: 30, 7: 31,
-                  8: 31, 9: 30, 10: 31, 11: 30, 12: 31}
-
-
-def _never_fires_reason(expr: str) -> str | None:
-    """A cron that can never fire (``0 0 30 2 *`` — February 30th) is refused.
-
-    Only the day-of-month × month cross-product can deadlock: dom values below
-    the month's smallest maximum always find a day in at least one month.
-    """
-    fields = expr.split()
-    if len(fields) != 5:
-        return None
-    try:
-        from services.cron_schedule import _parse_field
-
-        dom = _parse_field(fields[2], 2)
-        months = _parse_field(fields[3], 3)
-    except Exception:
-        return None
-    if not dom or not months:
-        return None
-    if min(dom) > max(_DAYS_IN_MONTH[m] for m in months):
-        named = min(dom)
-        return (
-            f"day {named} never occurs in the named month(s) — "
-            "the schedule would never fire"
-        )
-    return None
-
-
 def _zone_txt(tz: str, assumed: bool) -> str:
     """The zone the cadence text may claim. An assumed zone is not the
     operator's — the preview names the kept zone separately instead of the
@@ -509,15 +478,14 @@ def _bare_cron(raw: str, tz: str, assumed: bool) -> CadenceSpec | None:
             break
     if not _BARE_CRON_RE.match(text):
         return None
-    from services.cron_schedule import CronError, validate_cron
+    from services.cron_schedule import CronError, CronNeverFiresError, validate_cron
 
     try:
         validate_cron(text)
+    except CronNeverFiresError as exc:
+        return _ask(f"{exc}.")
     except CronError:
         return None
-    never = _never_fires_reason(text)
-    if never:
-        return _ask(f"cron “{text}” can never fire: {never}.")
     return CadenceSpec(
         interval="cron",
         cron=text,
@@ -549,7 +517,7 @@ def parse_cadence(text: str) -> CadenceSpec:
     tz = tz or "UTC"
 
     if "cron" in lower:
-        from services.cron_schedule import CronError, validate_cron
+        from services.cron_schedule import CronError, CronNeverFiresError, validate_cron
 
         cron_literal = _CRON_RE.search(raw)
         expr = " ".join(cron_literal.group(1).split()) if cron_literal else ""
@@ -562,11 +530,10 @@ def parse_cadence(text: str) -> CadenceSpec:
             # The runner's own parser decides: chat must not accept an expression
             # the scheduler would then reject or evaluate differently.
             validate_cron(expr)
+        except CronNeverFiresError as exc:
+            return _ask(f"{exc}.")
         except CronError as exc:
             return _ask(f"I cannot schedule cron “{expr}”: {exc}")
-        never = _never_fires_reason(expr)
-        if never:
-            return _ask(f"cron “{expr}” can never fire: {never}.")
         return CadenceSpec(
             interval="cron",
             cron=expr,

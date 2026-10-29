@@ -1827,15 +1827,18 @@ def rank_connector_tables(
     # counts re-sort. Engines without cheap stats keep the bounded loop.
     estimates = _estimate_table_row_counts(conn, names)
     if estimates:
-        pool = list(names[:_MAX_RANKED_TABLES])
+        # The estimate query covers every table in one round trip, so it ranks
+        # the whole inventory; only the exact COUNTs are bounded, to the
+        # shortlist. Cutting to the first names before ranking dropped a big
+        # table that sorted late (D24).
         est_ranked = sorted(
-            (n for n in pool if n in estimates),
+            (n for n in names if n in estimates),
             key=lambda n: estimates[n],
             reverse=not ascending,
         )
         # Objects with no estimate (views, never-analyzed tables) cannot be
         # ranked by catalog — they join the count set within the same bound.
-        unestimated = [n for n in pool if n not in estimates]
+        unestimated = [n for n in names if n not in estimates]
         considered = (
             est_ranked[: shown + _RANK_MARGIN]
             + unestimated[: shown + _RANK_MARGIN]
@@ -1866,16 +1869,12 @@ def rank_connector_tables(
 
     ranked.sort(key=lambda r: r["rows"], reverse=not ascending)
     # ``exact`` means the ranking was computed over the full requested
-    # population — every count is a real COUNT(*), but a catalog-estimate
-    # shortlist can still omit a table from the ranking entirely (stale
-    # planner stats ranked qa_r8_big below the cutoff while it held 100k
-    # rows, D24). When any object went uncounted the answer is estimate-
-    # guided, not exact — say so.
-    full_population = (
-        len(considered) >= len(names[:_MAX_RANKED_TABLES])
-        and not bool(info.get("truncated"))
-        and len(names) <= _MAX_RANKED_TABLES
-    )
+    # population. Every count is a real COUNT(*), but a table that was not
+    # counted may be bigger than any that was: a catalog-estimate shortlist can
+    # omit one (stale planner stats ranked qa_r8_big below the cutoff while it
+    # held 100k rows, D24), and an engine without estimates counts only the
+    # first names. Either way the answer is partial and must say so.
+    full_population = len(considered) == len(names) and not bool(info.get("truncated"))
     return _tool_result(
         tool,
         success=True,
