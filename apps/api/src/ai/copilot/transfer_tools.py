@@ -228,6 +228,8 @@ def resolve_callable_plan_source(
 
 def _column_samples(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, list[str]]:
     """Per-column sample values, nulls excluded, in the pipeline's shape."""
+    from services.value_serializer import evidence_text
+
     out: dict[str, list[str]] = {}
     for name in columns:
         vals: list[str] = []
@@ -235,7 +237,7 @@ def _column_samples(rows: list[dict[str, Any]], columns: list[str]) -> dict[str,
             v = row.get(name)
             if v is None or v == "":
                 continue
-            vals.append(str(v))
+            vals.append(evidence_text(v))
             if len(vals) >= 20:
                 break
         out[name] = vals
