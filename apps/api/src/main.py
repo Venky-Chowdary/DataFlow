@@ -852,10 +852,15 @@ async def connector_store_error_handler(request: Request, exc: ConnectorStoreErr
 async def payload_too_large_handler(request: Request, exc: PayloadTooLarge):
     """An upload or its gzip expansion crossed the configured byte ceiling."""
     logger.warning("Payload refused on %s: %s", request.url.path, exc)
-    return JSONResponse(
-        status_code=413,
-        content={"error": "payload_too_large", "detail": str(exc), "limit_bytes": exc.limit},
-    )
+    content: dict[str, object] = {
+        "error": "payload_too_large",
+        "detail": str(exc),
+        "limit_bytes": exc.limit,
+        "setting": f"DATAFLOW_{exc.setting}",
+    }
+    if exc.actual is not None:
+        content["actual_bytes"] = exc.actual
+    return JSONResponse(status_code=413, content=content)
 
 
 @app.exception_handler(Exception)

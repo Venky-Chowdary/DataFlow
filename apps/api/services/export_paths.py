@@ -1,9 +1,10 @@
 """Single owner of where a file export may land on the API host.
 
 Every export a client can name (``/query/export``, file-export destinations in
-Transfer Studio) is confined to ``apps/api/exports``. A client-supplied
-``output_path`` is a name under that folder, never a path into the
-application tree: it is resolved (``..`` and symlinks followed), compared
+Transfer Studio) is confined to one folder: ``apps/api/exports``, or the folder an
+administrator names in ``DATAFLOW_EXPORTS_DIR`` (``DATAWRAP_EXPORTS_DIR``). A
+client-supplied ``output_path`` is a name under that folder, never a path into
+the application tree: it is resolved (``..`` and symlinks followed), compared
 structurally with ``os.path.commonpath`` — not a string prefix, which lets
 ``exports_evil/`` pass — and must carry an export-format extension, so it can
 never overwrite a module, config file or store.
@@ -13,6 +14,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path, PurePosixPath, PureWindowsPath
+
+from services.brand_env import getenv_brand
 
 EXPORTS_DIRNAME = "exports"
 
@@ -47,7 +50,9 @@ def api_root() -> Path:
 
 
 def exports_dir() -> Path:
-    path = api_root() / EXPORTS_DIRNAME
+    """The folder exports are confined to: ``DATAFLOW_EXPORTS_DIR``, else ``apps/api/exports``."""
+    configured = (getenv_brand("EXPORTS_DIR") or "").strip()
+    path = Path(configured).expanduser() if configured else api_root() / EXPORTS_DIRNAME
     path.mkdir(parents=True, exist_ok=True)
     return path.resolve()
 

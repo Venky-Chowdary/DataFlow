@@ -254,6 +254,42 @@ reads from or writes to it (enabled or paused).
 
 ---
 
+## Upload, decompression and export limits
+
+| Variable | Default | What it bounds |
+|----------|---------|----------------|
+| `DATAFLOW_MAX_UPLOAD_BYTES` (or `DATAWRAP_MAX_UPLOAD_BYTES`) | `268435456` (256 MiB) | The body an upload route (connector upload, Transfer Studio file run, analyze-file) reads into memory. |
+| `DATAFLOW_MAX_DECOMPRESSED_BYTES` (or `DATAWRAP_MAX_DECOMPRESSED_BYTES`) | `1073741824` (1 GiB) | What a gzip file may expand to when a reader needs the whole image (parse, JSON, Excel, XML, Parquet/ORC). Streaming readers are not capped. |
+| `DATAFLOW_EXPORTS_DIR` (or `DATAWRAP_EXPORTS_DIR`) | `apps/api/exports` | The one folder client-named exports (`/query/export`, file destinations) may write into. Created if missing; `..`, symlinks and absolute paths outside it are still refused, and only export extensions are allowed. |
+
+All three are read on every request, so a change needs a restart only if your
+process manager caches the environment. A non-numeric or non-positive byte value
+falls back to the default.
+
+When a limit is hit the API answers HTTP 413 and the message tells the user what
+happened and who can change it:
+
+```json
+{
+  "error": "payload_too_large",
+  "detail": "Uploaded file is 312.4 MB; the limit is 256 MB. A server administrator can raise it with DATAFLOW_MAX_UPLOAD_BYTES (or DATAWRAP_MAX_UPLOAD_BYTES), currently 268435456 bytes.",
+  "limit_bytes": 268435456,
+  "actual_bytes": 327572275,
+  "setting": "DATAFLOW_MAX_UPLOAD_BYTES"
+}
+```
+
+`actual_bytes` appears only when the size is known (a declared upload size); a
+body that was cut off at the limit, or a gzip stream that expanded past it, says
+"larger than the ... limit" and `setting` is `DATAFLOW_MAX_DECOMPRESSED_BYTES`
+for the latter. "MB" here is MiB (1024 x 1024 bytes).
+
+To accept uploads above 256 MiB, raise `DATAFLOW_MAX_UPLOAD_BYTES` **and** the
+`client_max_body_size` in `deploy/nginx.conf` (and `deploy/nginx.conf.template`),
+otherwise nginx refuses the body first with its own 413.
+
+---
+
 ## Health checks
 
 | Endpoint | Use |

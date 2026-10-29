@@ -233,3 +233,60 @@ def test_transfer_run_refuses_oversize_body(small_caps, client):
         files={"file": ("big.csv", b"a\n" + b"1\n" * CAP, "text/csv")},
     )
     _assert_413(response)
+
+
+def test_message_names_limit_size_and_setting():
+    err = PayloadTooLarge("Uploaded file", 256 * 1024 * 1024, actual=int(312.4 * 1024 * 1024))
+    text = str(err)
+    assert "312.4 MB" in text and "256 MB" in text
+    assert "DATAFLOW_MAX_UPLOAD_BYTES" in text and "DATAWRAP_MAX_UPLOAD_BYTES" in text
+    assert "268435456 bytes" in text
+
+
+def test_message_without_known_size_says_larger_than_limit():
+    text = str(PayloadTooLarge("Decompressed file", 1024**3, setting=upload_limits.DECOMPRESSED_SETTING))
+    assert "larger than the 1024 MB limit" in text
+    assert "DATAFLOW_MAX_DECOMPRESSED_BYTES" in text
+
+
+def test_gzip_bomb_names_the_decompression_setting():
+    with pytest.raises(PayloadTooLarge) as info:
+        gunzip_capped(_bomb(), CAP)
+    assert info.value.setting == upload_limits.DECOMPRESSED_SETTING
+    assert "DATAFLOW_MAX_DECOMPRESSED_BYTES" in str(info.value)
+    with pytest.raises(PayloadTooLarge) as info:
+        spool_capped(io.BytesIO(b"q" * (CAP + 1)), CAP)
+    assert info.value.setting == upload_limits.DECOMPRESSED_SETTING
+
+
+def test_declared_upload_size_is_reported():
+    with pytest.raises(PayloadTooLarge) as info:
+        asyncio.run(read_upload(_Upload(b"x", size=3 * CAP), CAP))
+    assert info.value.actual == 3 * CAP
+    assert info.value.setting == upload_limits.UPLOAD_SETTING
+
+
+def test_413_body_tells_the_user_limit_size_and_setting(small_caps, client):
+    body = b"a\n" + b"1\n" * CAP
+    response = client.post(
+        "/api/v1/connectors/upload", files={"file": ("big.csv", body, "text/csv")}
+    )
+    assert response.status_code == 413, response.text
+    payload = response.json()
+    assert payload["limit_bytes"] == CAP
+    assert payload["setting"] == "DATAFLOW_MAX_UPLOAD_BYTES"
+    assert payload["actual_bytes"] >= len(body)
+    assert f"{CAP} bytes" in payload["detail"]
+    assert "DATAFLOW_MAX_UPLOAD_BYTES" in payload["detail"]
+
+
+def test_413_for_gzip_bomb_points_at_the_decompression_setting(small_caps, client):
+    response = client.post(
+        "/api/v1/connectors/upload",
+        files={"file": ("rows.csv.gz", _bomb(), "application/gzip")},
+    )
+    assert response.status_code == 413, response.text
+    payload = response.json()
+    assert payload["setting"] == "DATAFLOW_MAX_DECOMPRESSED_BYTES"
+    assert "actual_bytes" not in payload
+    assert "DATAFLOW_MAX_DECOMPRESSED_BYTES" in payload["detail"]

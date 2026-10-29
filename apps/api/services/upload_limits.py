@@ -9,7 +9,9 @@ tune them without a code change:
   payload may expand to when a reader needs the whole image (parse, JSON,
   Excel, XML, Parquet/ORC footers). Streaming readers are not capped.
 
-Overflow raises ``PayloadTooLarge``; ``src.main`` maps it to HTTP 413. It is
+Overflow raises ``PayloadTooLarge``; ``src.main`` maps it to HTTP 413 and the
+message names the limit, the size when it is known, and the setting an
+administrator changes. It is
 deliberately not a ``ValueError`` so parse/decline handlers that turn
 ``ValueError`` into a 400 or a slower fallback path let it through.
 """
@@ -29,18 +31,44 @@ _CHUNK_BYTES = 1024 * 1024
 _SPOOL_MEMORY_BYTES = 32 * 1024 * 1024
 
 
-class PayloadTooLarge(Exception):
-    """A payload crossed its configured byte ceiling."""
+UPLOAD_SETTING = "MAX_UPLOAD_BYTES"
+DECOMPRESSED_SETTING = "MAX_DECOMPRESSED_BYTES"
 
-    def __init__(self, what: str, limit: int) -> None:
+
+class PayloadTooLarge(Exception):
+    """A payload crossed its configured byte ceiling.
+
+    ``setting`` is the environment variable suffix an administrator changes
+    (``DATAFLOW_`` or ``DATAWRAP_`` prefix); ``actual`` is the size in bytes
+    when it is known, ``None`` when the read stopped at the limit.
+    """
+
+    def __init__(
+        self,
+        what: str,
+        limit: int,
+        *,
+        setting: str = UPLOAD_SETTING,
+        actual: int | None = None,
+    ) -> None:
         self.what = what
         self.limit = int(limit)
-        super().__init__(f"{what} exceeds the {_describe(self.limit)} limit.")
+        self.setting = setting
+        self.actual = int(actual) if actual is not None else None
+        size = (
+            f"is {_describe(self.actual)}; the limit is {_describe(self.limit)}"
+            if self.actual is not None
+            else f"is larger than the {_describe(self.limit)} limit"
+        )
+        super().__init__(
+            f"{what} {size}. A server administrator can raise it with "
+            f"DATAFLOW_{setting} (or DATAWRAP_{setting}), currently {self.limit} bytes."
+        )
 
 
-def _describe(limit: int) -> str:
-    mib = limit / (1024 * 1024)
-    return f"{mib:g} MB" if mib >= 1 else f"{limit} byte"
+def _describe(size: int) -> str:
+    mib = size / (1024 * 1024)
+    return f"{round(mib, 1):g} MB" if mib >= 1 else f"{size} bytes"
 
 
 def _env_bytes(name: str, default: int) -> int:
@@ -67,7 +95,7 @@ async def read_upload(file: Any, limit: int | None = None) -> bytes:
     cap = max_upload_bytes() if limit is None else int(limit)
     declared = getattr(file, "size", None)
     if isinstance(declared, int) and declared > cap:
-        raise PayloadTooLarge("Uploaded file", cap)
+        raise PayloadTooLarge("Uploaded file", cap, actual=declared)
     buf = bytearray()
     while True:
         chunk = await file.read(min(_CHUNK_BYTES, cap + 1 - len(buf)))
@@ -91,7 +119,7 @@ def read_capped(
             break
         buf += chunk
         if len(buf) > cap:
-            raise PayloadTooLarge(what, cap)
+            raise PayloadTooLarge(what, cap, setting=DECOMPRESSED_SETTING)
     return bytes(buf)
 
 
@@ -128,7 +156,7 @@ def spool_capped(handle: Any, limit: int | None = None) -> Any:
                 break
             written += len(chunk)
             if written > cap:
-                raise PayloadTooLarge("Decompressed file", cap)
+                raise PayloadTooLarge("Decompressed file", cap, setting=DECOMPRESSED_SETTING)
             spool.write(chunk)
     except BaseException:
         spool.close()
