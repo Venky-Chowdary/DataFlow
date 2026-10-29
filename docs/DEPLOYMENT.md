@@ -206,3 +206,33 @@ npm run dev
 ```
 
 Dev auth: `test@gmail.com` / `password123` (when `DATAFLOW_REQUIRE_AUTH=0`).
+
+---
+
+## Authorization behaviour flags (off by default = pre-hardening behaviour)
+
+These flags gate access-control changes that were not part of the original
+defect brief. Each defaults to the behaviour production had before the change,
+and logs an audit entry when the new rule *would* have applied. Read with the
+`DATAWRAP_` prefix first, then `DATAFLOW_`.
+
+### `DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE` (default `0`)
+
+Per-tenant `ip_allowlist` (tenant custom domains, `TenantMiddleware`).
+
+- Before: the bare `"/"` entry in the public-path list matched every path as a
+  prefix, so the allowlist was **never enforced** on any route.
+- Now: public paths are matched on segment boundaries (`/` only exactly), so
+  the allowlist can actually block. That is only active with
+  `DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1`.
+- With the flag off (default) a request from an IP outside the tenant's
+  allowlist is **allowed** and an audit event
+  `tenant.ip_allowlist.would_block` (outcome `skipped`, level `warn`) is
+  written with `tenant_id`, `workspace_id`, `path` and `client_ip`.
+
+Owner how-to: leave off, then search the audit log for
+`tenant.ip_allowlist.would_block` for a few days. Every entry is a client that
+would be locked out; add their IPs to the tenant allowlist (or fix the proxy
+/ `X-Forwarded-For` trust settings so the real client IP is seen), then set
+the flag to `1`. Unauthenticated routes (login, signup, webhooks, health, SSO,
+contact-sales) stay outside the allowlist regardless of the flag.

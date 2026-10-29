@@ -42,3 +42,16 @@ def getenv_brand_str(name: str, default: str = "") -> str:
     """String helper — never returns None."""
     val = getenv_brand(name, default)
     return default if val is None else val
+
+
+def getenv_brand_bool(name: str, default: bool = False) -> bool:
+    """Boolean flag: ``1/true/yes/on`` enable, ``0/false/no/off`` disable.
+
+    Unset or unrecognised values return ``default``.
+    """
+    raw = (getenv_brand(name) or "").strip().lower()
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default

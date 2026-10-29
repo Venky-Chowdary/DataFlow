@@ -12,6 +12,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from services.audit_coverage import record_security_event
+from services.brand_env import getenv_brand_bool
 from services.platform_config import docs_enabled
 from services.tenant_store import (
     is_request_ip_allowed,
@@ -93,6 +95,17 @@ def _is_public_path(path: str) -> bool:
     return _is_public_mcp_path(path)
 
 
+def _allowlist_enforced() -> bool:
+    """``DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE`` (default off).
+
+    Before the segment-boundary fix a bare ``"/"`` prefix made every path
+    public, so the per-tenant allowlist was never enforced in production.
+    Turning it on is an operator decision; until then a request that the
+    allowlist would block is audited and allowed.
+    """
+    return getenv_brand_bool("TENANT_IP_ALLOWLIST_ENFORCE", False)
+
+
 def _client_ip(request: Request) -> str:
     """Phase D1 — trust-boundary aware (never left-most XFF by default)."""
     from services.client_ip import client_ip_from_request
@@ -115,6 +128,23 @@ class TenantMiddleware(BaseHTTPMiddleware):
             if tenant.ip_allowlist and not _is_public_path(request.url.path):
                 client_ip = _client_ip(request)
                 if not is_request_ip_allowed(client_ip, tenant):
+                    if not _allowlist_enforced():
+                        record_security_event(
+                            "tenant.ip_allowlist.would_block",
+                            outcome="skipped",
+                            request=request,
+                            resource=request.url.path,
+                            reason_code="ip_not_in_tenant_allowlist",
+                            level="warn",
+                            details={
+                                "tenant_id": tenant.id,
+                                "workspace_id": tenant.workspace_id,
+                                "path": request.url.path,
+                                "client_ip": client_ip,
+                                "enforce_flag": "DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE",
+                            },
+                        )
+                        return await call_next(request)
                     return JSONResponse(
                         status_code=403,
                         content={

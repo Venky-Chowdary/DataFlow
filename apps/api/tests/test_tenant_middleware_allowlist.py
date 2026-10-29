@@ -105,7 +105,8 @@ def _get(client, path: str, ip: str, host: str = "acme.example.com"):
     return client.get(path, headers={"host": host, "x-test-client-ip": ip})
 
 
-def test_allowlist_blocks_disallowed_ip_on_api_path(client):
+def test_allowlist_blocks_disallowed_ip_on_api_path(client, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE", "1")
     resp = _get(client, "/api/v1/connectors", BLOCKED_IP)
     assert resp.status_code == 403
     assert resp.json()["detail"] == "Access denied by tenant IP allowlist"
@@ -159,3 +160,36 @@ def test_every_unauthenticated_route_stays_reachable_on_allowlisted_tenant():
 )
 def test_webhooks_signup_and_verify_skip_allowlist(client, path):
     assert tm._is_public_path(path) is True
+
+
+def test_enforcement_is_off_by_default_and_audits_would_block(client, monkeypatch):
+    """Default = production behaviour before the fix: nothing is blocked, but
+    the request that the allowlist would have blocked leaves an audit entry."""
+    monkeypatch.delenv("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE", raising=False)
+    monkeypatch.delenv("DATAWRAP_TENANT_IP_ALLOWLIST_ENFORCE", raising=False)
+    events = []
+    monkeypatch.setattr(
+        tm, "record_security_event", lambda event, **kw: events.append((event, kw))
+    )
+
+    assert _get(client, "/api/v1/connectors", BLOCKED_IP).status_code == 200
+    assert _get(client, "/api/v1/connectors", ALLOWED_IP).status_code == 200
+    assert _get(client, "/health", BLOCKED_IP).status_code == 200
+
+    assert [e for e, _ in events] == ["tenant.ip_allowlist.would_block"]
+    kw = events[0][1]
+    assert kw["details"]["tenant_id"] == "t-acme"
+    assert kw["details"]["path"] == "/api/v1/connectors"
+    assert kw["details"]["client_ip"] == BLOCKED_IP
+
+
+def test_would_block_event_is_registered():
+    from services.audit_coverage import SECURITY_EVENTS
+
+    assert "tenant.ip_allowlist.would_block" in SECURITY_EVENTS
+
+
+def test_enforce_flag_off_values_do_not_block(client, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE", "0")
+    monkeypatch.setattr(tm, "record_security_event", lambda *a, **k: None)
+    assert _get(client, "/api/v1/connectors", BLOCKED_IP).status_code == 200
