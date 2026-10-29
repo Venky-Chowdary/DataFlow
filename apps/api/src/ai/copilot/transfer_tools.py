@@ -671,14 +671,17 @@ def _plan_source_types_authoritative(
 
 
 def _share_catalog_reads(fn):
-    """Run a read-only planning tool with one catalog read per object (D145)."""
+    """Run a read-only planning tool with one catalog read per object (D145)
+    and one Snowflake login per endpoint (D187)."""
     import functools
 
     @functools.wraps(fn)
     def wrapper(*args, **kwargs):
+        from connectors.snowflake_conn import snowflake_plan_scope
         from services.introspect_memo import introspect_memo_scope
 
-        with introspect_memo_scope():
+        # One Snowflake login per endpoint for the whole plan (D187).
+        with introspect_memo_scope(), snowflake_plan_scope():
             return fn(*args, **kwargs)
 
     return wrapper

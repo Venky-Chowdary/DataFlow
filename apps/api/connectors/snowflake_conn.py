@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import logging
 import os
 import re
 import sys
 import threading
 import unittest.mock
+from collections.abc import Callable, Iterator
 from typing import Any
 from urllib.parse import parse_qs, unquote
 
@@ -873,7 +876,7 @@ def snowflake_converter_class() -> type:
     return _converter_class
 
 
-def get_connection(
+def _open_connection(
     *,
     account: str,
     username: str,
@@ -1001,3 +1004,100 @@ def get_connection(
             return conn
 
     return snowflake_connector.connect(**kwargs)
+
+
+class _PlanSession:
+    """One real Snowflake login shared by every consumer of a plan scope."""
+
+    def __init__(self, open_fn: Callable[[], Any]) -> None:
+        self._open = open_fn
+        self._lock = threading.Lock()
+        self._conn = open_fn()
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        """A fresh cursor per consumer; reconnects once if the session was lost."""
+        with self._lock:
+            if self._conn.is_closed():
+                self._conn = self._open()
+            return self._conn.cursor(*args, **kwargs)
+
+    def shut(self) -> None:
+        with self._lock:
+            try:
+                self._conn.close()
+            except Exception as exc:  # noqa: BLE001 - closing must never raise
+                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+class _PlanConnection:
+    """What a consumer holds: cursors come from the shared login, ``close`` is a no-op."""
+
+    def __init__(self, session: _PlanSession) -> None:
+        self._session = session
+
+    def cursor(self, *args: Any, **kwargs: Any) -> Any:
+        return self._session.cursor(*args, **kwargs)
+
+    def close(self) -> None:
+        """The scope owns the login; a consumer finishing must not end it."""
+
+    def is_closed(self) -> bool:
+        return False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._session._conn, name)
+
+
+_plan_sessions: contextvars.ContextVar[dict[tuple, _PlanSession] | None] = (
+    contextvars.ContextVar("snowflake_plan_sessions", default=None)
+)
+
+
+@contextlib.contextmanager
+def snowflake_plan_scope() -> Iterator[None]:
+    """Log in to each distinct Snowflake endpoint once for one read-only plan.
+
+    ``plan_transfer`` reads the destination from several steps (catalog reads,
+    connection probe, privilege probe); each opened its own session, and a
+    Snowflake login costs seconds (more when the warehouse is suspended), so a
+    plan outlasted the tool deadline (D187). Inside the scope ``get_connection``
+    hands out a connection over one shared login per (account, user, database,
+    schema, warehouse, role, credentials); every consumer still gets its own
+    cursor. Outside a scope nothing is shared: Execute and writers always
+    open and close their own sessions.
+    """
+    if _plan_sessions.get() is not None:
+        yield
+        return
+    sessions: dict[tuple, _PlanSession] = {}
+    token = _plan_sessions.set(sessions)
+    try:
+        yield
+    finally:
+        _plan_sessions.reset(token)
+        for session in sessions.values():
+            session.shut()
+
+
+def get_connection(**kwargs: Any) -> Any:
+    """A Snowflake connection; shared per login inside :func:`snowflake_plan_scope`."""
+    sessions = _plan_sessions.get()
+    if sessions is None:
+        return _open_connection(**kwargs)
+    # The passphrase only matters to a key-pair login; callers pass the password
+    # there too, which must not split one login in two.
+    key_pair = bool(kwargs.get("private_key"))
+    key = (
+        str(kwargs.get("account") or "").lower(),
+        *(
+            str(kwargs.get(k) or "")
+            for k in ("username", "password", "database", "warehouse", "connection_string",
+                      "role", "private_key", "auth_mode")
+        ),
+        str(kwargs.get("private_key_passphrase") or "") if key_pair else "",
+        str(kwargs.get("schema") or "").upper(),
+    )
+    session = sessions.get(key)
+    if session is None:
+        session = sessions[key] = _PlanSession(lambda: _open_connection(**kwargs))
+    return _PlanConnection(session)
