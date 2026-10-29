@@ -254,21 +254,26 @@ def run_transfer_policy_gates(
             }
         )
 
-    # Kafka-family destinations are append-only topics. Any sync mode that
-    # promises destination-side semantics — overwrite replace, deduped/upsert
-    # merge, mirror delete, scd2 versioning, reverse_etl — would silently run
-    # as a plain produce, publishing duplicates that cannot be rolled back.
-    # Refuse at Validate instead of failing mid-run (C26/D90).
+    # An append-only destination (registry: append yes; upsert, merge and
+    # overwrite no) cannot honour a sync mode that promises destination-side
+    # semantics - overwrite replace, deduped/upsert merge, mirror delete, scd2
+    # versioning, reverse_etl. Kafka topics are the case in point: those modes
+    # would silently run as a plain produce, publishing duplicates that cannot be
+    # rolled back. Refuse at Validate instead of failing mid-run (C26/D90).
+    from services.connector_capability_registry import is_append_only_destination
     from services.copy_kafka_common import kafka_family_name
-    if kafka_family_name(dest) == "kafka":
-        kafka_append_modes = {"full_refresh_append", "incremental_append"}
-        if sync in kafka_append_modes:
+    from services.sync_cursor import is_append_sync
+
+    # ``kafka_family_name`` folds the Kafka-protocol spellings the registry has
+    # no record for (redpanda, msk, confluent_kafka ...) onto its ``kafka`` entry.
+    if dest and is_append_only_destination(kafka_family_name(dest)):
+        if is_append_sync(sync):
             gates.append(
                 {
-                    "id": "g_kafka_append_only",
+                    "id": "g_dest_append_only",
                     "status": GateStatus.PASS.value,
                     "message": (
-                        "Kafka destination: append produce — published messages "
+                        f"Destination '{dest}': append only - written rows "
                         "are final and cannot be rolled back"
                     ),
                     "duration_ms": 0,
@@ -278,19 +283,19 @@ def run_transfer_policy_gates(
         else:
             gates.append(
                 {
-                    "id": "g_kafka_append_only",
+                    "id": "g_dest_append_only",
                     "status": GateStatus.BLOCK.value,
                     "message": (
-                        f"Kafka destination supports append only — sync_mode "
-                        f"'{sync}' cannot replace, dedupe or merge a topic. "
-                        "Choose Append or Incremental append; published "
-                        "messages are final and cannot be rolled back."
+                        f"Destination '{dest}' supports append only - sync_mode "
+                        f"'{sync}' cannot replace, dedupe or merge into it. "
+                        "Choose Append or Incremental append; rows written "
+                        "cannot be rolled back."
                     ),
                     "duration_ms": 0,
                     "details": {
                         "dest_type": dest,
                         "sync_mode": sync,
-                        "allowed_modes": sorted(kafka_append_modes),
+                        "allowed_modes": ["full_refresh_append", "incremental_append"],
                     },
                 }
             )

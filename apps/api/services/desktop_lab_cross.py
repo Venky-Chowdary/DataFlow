@@ -565,7 +565,7 @@ def _dest_sync_mode(dst: EndpointConfig) -> str:
 
     Every lab destination is a fresh uniquely-named object, so ``append`` is
     equivalent to an overwrite there; sending ``full_refresh_overwrite`` to
-    Kafka is correctly blocked by the g_kafka_append_only gate.
+    Kafka is correctly blocked by the g_dest_append_only gate.
     """
     return "append" if dst.format == "kafka" else "full_refresh_overwrite"
 
