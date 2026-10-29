@@ -380,6 +380,27 @@ def source_types_are_authoritative(source_kind: str, source_format: str = "") ->
         return False
 
 
+def source_numbers_are_typed(source_db_type: str) -> bool:
+    """True when the source hands over numbers already typed, not as text.
+
+    The question the IEEE/Excel-float chip asks ("was this FLOAT invented
+    from text like ``111.89999999999999``?") has the answer No for a source
+    that declares DDL, and also for one whose wire format tags every value
+    with its type: a BSON double, or a Kafka message's JSON/Avro number. Those
+    are IEEE doubles already. The long fraction is the value itself. The rule
+    used to live inline at the risk stamp as "relational, or MongoDB", so
+    every Kafka DOUBLE was blocked at G4 (D161).
+    """
+    fmt = (source_db_type or "").strip().lower()
+    if not fmt:
+        return False
+    if source_types_are_authoritative("database", fmt):
+        return True
+    from services.copy_kafka_common import kafka_family_name
+
+    return fmt == "mongodb" or kafka_family_name(fmt) == "kafka"
+
+
 # Carriers a schemaless/text source declares for *every* column (CSV header,
 # Parquet string, thin SaaS describe). Profiling off one of these is evidence;
 # profiling *onto* one is a loss of evidence.

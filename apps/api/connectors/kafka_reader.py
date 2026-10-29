@@ -356,6 +356,32 @@ def read_topic_batch(
         consumer.close()
 
 
+_KAFKA_NUMERIC_LOGICALS = frozenset({"INTEGER", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE"})
+
+
+def merge_kafka_logicals(prev: str | None, logical: str) -> str:
+    """One column's type across messages: widen within numbers, else TEXT.
+
+    The decoder types a JSON float DOUBLE and a large int BIGINT, but the
+    merge only knew INTEGER/FLOAT/DECIMAL, so ``"price": 3`` in one message
+    and ``2.5`` in the next typed the column TEXT (D161 on the Kafka path).
+    A JSON number is IEEE on the wire: an integer meeting a double is the
+    double, and DECIMAL (a decimal string) stays DECIMAL.
+    """
+    if not prev or prev == logical:
+        return logical
+    pair = {prev, logical}
+    if not pair <= _KAFKA_NUMERIC_LOGICALS:
+        return "TEXT"
+    if "DECIMAL" in pair:
+        return "DECIMAL"
+    if "DOUBLE" in pair:
+        return "DOUBLE"
+    if "FLOAT" in pair:
+        return "FLOAT"
+    return "BIGINT"
+
+
 def _records_to_batch(
     records: list[dict[str, Any]],
     columns: list[str] | None,
@@ -383,15 +409,8 @@ def _records_to_batch(
         for rec in records:
             for key, value in rec.items():
                 logical = _kafka_value_to_logical(value)
-                if not logical:
-                    continue
-                prev = native_types.get(key)
-                if prev is None:
-                    native_types[key] = logical
-                elif prev != logical and {prev, logical} <= {"INTEGER", "FLOAT", "DECIMAL"}:
-                    native_types[key] = "DECIMAL" if "DECIMAL" in {prev, logical} else "FLOAT"
-                elif prev != logical:
-                    native_types[key] = "TEXT"
+                if logical:
+                    native_types[key] = merge_kafka_logicals(native_types.get(key), logical)
         native_types.update(
             (col, logical)
             for col, logical in KAFKA_ENVELOPE_TYPES.items()

@@ -51,6 +51,8 @@ _MESSAGES = [
     (b"42", None),  # tombstone: no row
     (None, {"id": 4, "price": None, "name": None, "note": None}),
     (b"0099", {"id": 5, "price": 1e-07, "name": "z", "note": "y"}),
+    # A JSON number written without a fraction: still the DOUBLE column.
+    (b"8", {"id": 6, "price": 3, "name": " lead", "note": "\u00a0"}),
 ]
 _EXPECTED = {
     1: (0.30000000000000004, "a", None, "001"),
@@ -58,6 +60,7 @@ _EXPECTED = {
     3: (12.5, "é中\U0001f600", "x", "7"),
     4: (None, None, None, None),
     5: (1e-07, "z", "y", "0099"),
+    6: (3.0, " lead", "\u00a0", "8"),
 }
 
 
@@ -178,9 +181,9 @@ def test_full_refresh_overwrite_twice_lands_every_value(topic, table):
     for n in (1, 2):
         result = _run(topic, table, "full_refresh_overwrite")
         assert result.success, (n, result.error)
-        assert result.records_transferred == 5, n
+        assert result.records_transferred == 6, n
         rows = _rows(table)
-        assert [int(r[0]) for r in rows] == [1, 2, 3, 4, 5], n
+        assert [int(r[0]) for r in rows] == [1, 2, 3, 4, 5, 6], n
         _assert_values(rows)
     types = _column_types(table)
     assert types["price"] == "double precision"
@@ -193,10 +196,10 @@ def test_full_refresh_append_twice_rereads_the_topic(topic, table):
     for n in (1, 2):
         result = _run(topic, table, "full_refresh_append")
         assert result.success, (n, result.error)
-        assert result.records_transferred == 5, n
+        assert result.records_transferred == 6, n
         assert result.destination_summary["kafka_offsets"]["start_position"] == "earliest"
     rows = _rows(table)
-    assert len(rows) == 10
+    assert len(rows) == 12
     _assert_values(rows)
 
 
@@ -208,7 +211,7 @@ def test_incremental_after_full_refresh_reads_only_new_messages(topic, table):
     # The new messages carry a NULL in every field the incremental read could
     # type ``note`` from, and a digit-only key.
     _produce(topic, [
-        (b"12", {"id": 6, "price": 2.5, "name": "n", "note": None}),
+        (b"12", {"id": 7, "price": 2.5, "name": "n", "note": None}),
         (b"13", None),  # tombstone
     ])
     second = _run(topic, table, "incremental_append")
@@ -216,7 +219,7 @@ def test_incremental_after_full_refresh_reads_only_new_messages(topic, table):
     assert second.records_transferred == 1
     assert second.destination_summary["kafka_offsets"]["start_position"] == "committed"
     rows = _rows(table)
-    assert [int(r[0]) for r in rows] == [1, 2, 3, 4, 5, 6]
+    assert [int(r[0]) for r in rows] == [1, 2, 3, 4, 5, 6, 7]
     assert tuple(rows[-1][1:]) == (2.5, "n", None, "12")
     _assert_values(rows[:-1])
 
@@ -225,11 +228,11 @@ def test_incremental_with_no_new_messages_is_not_a_failure(topic, table):
     _produce(topic, _MESSAGES)
     first = _run(topic, table, "incremental_append")
     assert first.success, first.error
-    assert first.records_transferred == 5
+    assert first.records_transferred == 6
     again = _run(topic, table, "incremental_append")
     assert again.success, again.error
     assert again.records_transferred == 0
-    assert len(_rows(table)) == 5
+    assert len(_rows(table)) == 6
 
 
 # --- MCP route: start_transfer -> /copilot/confirm -> job ---------------------
@@ -315,5 +318,70 @@ def test_mcp_start_transfer_full_refresh_twice(topic, table, transfer_client):
             n, job.get("status"), job.get("error") or job.get("message"),
         )
         rows = _rows(table)
-        assert [int(r[0]) for r in rows] == [1, 2, 3, 4, 5], n
+        assert [int(r[0]) for r in rows] == [1, 2, 3, 4, 5, 6], n
         _assert_values(rows)
+        assert _column_types(table)["price"] == "double precision"
+
+
+# --- the same rules without a broker ------------------------------------------
+
+
+def test_kafka_double_is_a_typed_double_at_the_risk_stamp():
+    from services.create_new_risk_stamp import apply_create_new_risk_stamps
+
+    row = {
+        "source": "price", "target": "price", "source_type": "DOUBLE",
+        "target_type": "DOUBLE PRECISION", "assignment_strategy": "identity_passthrough",
+        "create_new": True, "confidence": 0.95,
+    }
+    residue = {"price": ["0.30000000000000004", "1.23456789012345", None, ""]}
+    for engine in ("kafka", "mongodb", "postgresql"):
+        out = apply_create_new_risk_stamps(
+            [dict(row)], "postgresql", source_samples=residue,
+            dest_table_exists=False, source_db_type=engine,
+        )[0]
+        assert "ieee_float_artifact" not in [r.get("kind") for r in out.get("create_new_risks") or []]
+        assert float(out["confidence"]) >= 0.85, engine
+    csv = apply_create_new_risk_stamps(
+        [dict(row)], "postgresql", source_samples=residue,
+        dest_table_exists=False, source_db_type="csv",
+    )[0]
+    assert "ieee_float_artifact" in [r.get("kind") for r in csv.get("create_new_risks") or []]
+
+
+@pytest.mark.parametrize(
+    "null_rate, samples, target, capped",
+    [
+        (1.0, [], "TEXT", False),      # observed, every value NULL: lossless into text
+        (1.0, [], "BIGINT", True),     # NULL says nothing about an integer target
+        (None, [], "TEXT", True),      # never observed: still the placeholder cap
+        (0.0, [], "TEXT", True),       # a stamped 0 with no samples is not observed NULL
+        (0.5, ["", " "], "TEXT", False),  # empty / whitespace text is evidence
+    ],
+)
+def test_all_null_observed_column_is_not_weak_evidence(null_rate, samples, target, capped):
+    from services.mapping_pipeline import _demote_untyped_varchar_confidence
+
+    out = _demote_untyped_varchar_confidence(
+        [{"source": "note", "target": "note", "source_type": "VARCHAR",
+          "target_type": target, "confidence": 0.97}],
+        source_schemas=[{"name": "note", "inferred_type": "VARCHAR",
+                         "samples": samples, "null_rate": null_rate}],
+    )[0]
+    assert (out["confidence"] < 0.85) is capped
+
+
+def test_kafka_numbers_widen_within_numbers():
+    from connectors.kafka_reader import _records_to_batch, merge_kafka_logicals
+
+    batch = _records_to_batch(
+        [{"p": 3, "q": 3, "s": "x"}, {"p": 2.5, "q": 3_000_000_000, "s": 1}, {"p": None, "q": None}],
+        None, None,
+    )
+    native = batch.meta["native_types"]
+    assert native["p"] == "DOUBLE"
+    assert native["q"] == "BIGINT"
+    assert native["s"] == "TEXT"
+    assert merge_kafka_logicals("INTEGER", "FLOAT") == "FLOAT"
+    assert merge_kafka_logicals("DOUBLE", "DECIMAL") == "DECIMAL"
+    assert merge_kafka_logicals(None, "VARCHAR") == "VARCHAR"
