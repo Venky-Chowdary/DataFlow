@@ -1056,6 +1056,11 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
                 bson_types,
                 homogeneous_date_fields=homogeneous_date_fields,
             )
+            # BSON string fields are declared text: the stringified sample may
+            # not re-type them as numbers / booleans / digit dates (D190/D194).
+            from services.schema_inference import honor_declared_strings
+
+            schema = honor_declared_strings(schema, bson_types, samples_by_field, "mongodb")
             for col in columns:
                 if col not in schema:
                     schema[col] = "VARCHAR"

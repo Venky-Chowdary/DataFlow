@@ -1245,6 +1245,91 @@ def infer_column(
     }
 
 
+# A self-describing source (BSON, JSON on a Kafka topic, DynamoDB attribute
+# values) spells numbers and booleans natively. A value it sent as a *string*
+# was declared a string, so typing it INTEGER / BOOLEAN from what the text looks
+# like re-types the declaration: Mongo 't'/'f' read as BOOLEAN (D194), a Kafka
+# JSON "20240101" read as TIMESTAMP and then blocked as a lossy BIGINT (D190).
+# CSV and other untyped text declare nothing and keep :func:`infer_column`.
+_SELF_DESCRIBING_SCALARS = frozenset({
+    "INTEGER", "BIGINT", "SMALLINT", "INT", "DECIMAL", "NUMERIC",
+    "FLOAT", "DOUBLE", "REAL", "BOOLEAN",
+})
+_TEMPORAL_LOGICALS = frozenset({"DATE", "TIMESTAMP", "TIMESTAMPTZ", "TIME"})
+_DIGITS_RE = re.compile(r"^[+\-]?\d+$")
+
+
+def declared_string_logical_type(
+    samples: list[str],
+    *,
+    field_name: str | None = None,
+) -> str:
+    """Logical type of a field whose source declared each sampled value a string.
+
+    The declaration wins over the look of the value:
+
+    * never a number or boolean — the source would have sent one;
+    * never a temporal type from bare digits — ``20240101`` / ``1700000000``
+      are text the source chose not to send as a number or a date.
+
+    Formatted literals the value-side has always recognised (an ISO instant,
+    a UUID, JSON text) are kept. Returns ``VARCHAR`` for text.
+    """
+    logical = str(
+        infer_column(list(samples or []), field_name=field_name).get("logical_type")
+        or "VARCHAR"
+    )
+    base = logical.split("(", 1)[0].strip().upper()
+    if base in _SELF_DESCRIBING_SCALARS:
+        return "VARCHAR"
+    if base in _TEMPORAL_LOGICALS and any(
+        _DIGITS_RE.match(str(s).strip()) for s in evidence_samples(samples)
+    ):
+        return "VARCHAR"
+    return logical
+
+
+# Engines whose every sampled value carries its own type, so a textual carrier
+# is the source's declaration rather than a header placeholder. Files / CSV
+# are absent on purpose: a header declares nothing.
+_SELF_DESCRIBING_ENGINES = frozenset({"mongodb", "kafka", "dynamodb"})
+_UNTYPED_TEXT_TOKENS = frozenset({"TEXT", "VARCHAR", "STRING", "S"})
+
+
+def is_self_describing_source(source_db: str) -> bool:
+    """True when the engine's text carrier is a per-value string declaration."""
+    return str(source_db or "").strip().lower() in _SELF_DESCRIBING_ENGINES
+
+
+def honor_declared_strings(
+    schema: dict[str, str],
+    declared: dict[str, str] | None,
+    samples_by_field: dict[str, list[Any]] | None,
+    source_db: str,
+) -> dict[str, str]:
+    """Undo sample re-typing of fields a self-describing source declared text.
+
+    ``merge_profiler_schema`` lets a profile replace a declared TEXT because a
+    CSV header declares nothing. A Mongo / Kafka / DynamoDB text carrier is a
+    per-value declaration, so the profile may only refine it as far as
+    :func:`declared_string_logical_type` allows (D190 / D194).
+    """
+    if not is_self_describing_source(source_db) or not declared:
+        return dict(schema)
+    out = dict(schema)
+    for col, decl in declared.items():
+        if col not in out or str(decl or "").strip().upper() not in _UNTYPED_TEXT_TOKENS:
+            continue
+        current = str(out.get(col) or "").split("(", 1)[0].strip().upper()
+        if current in _UNTYPED_TEXT_TOKENS:
+            continue
+        samples = [str(v) for v in ((samples_by_field or {}).get(col) or []) if v is not None]
+        out[col] = declared_string_logical_type(samples, field_name=col)
+        if out[col] == "VARCHAR" and str(decl).strip().upper() == "TEXT":
+            out[col] = "TEXT"
+    return out
+
+
 def infer_columns_from_rows(headers: list[str], rows: list[list[Any]], *, max_samples: int = 50) -> list[dict]:
     columns = []
     sample_rows = rows[:max_samples]

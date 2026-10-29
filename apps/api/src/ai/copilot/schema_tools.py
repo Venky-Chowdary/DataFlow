@@ -500,6 +500,7 @@ def introspect_connector_table(
         catalog_type=str(cfg.get("type") or ""),
         auth_source=str(cfg.get("auth_source") or ""),
         reader_cfg=cfg if execute_shape else None,
+        introspect_purpose=purpose,
     )
     ok = bool(info.get("ok"))
     columns = _normalize_columns(info) if ok else []

@@ -154,6 +154,16 @@ def _as_int(value: Any, fallback: int) -> int:
         return fallback
 
 
+def _destination_probe(kwargs: dict[str, Any]) -> bool:
+    """A destination read reports the physical column, never its rows' look.
+
+    The writer binds into the catalog type. A ``text`` column of run 1's table
+    holding ``'t'`` / ``'20240101'`` refined to BOOLEAN / DATE made run 2 plan a
+    lossy TEXT → BOOLEAN cast into a column that is TEXT (D190 / D194).
+    """
+    return str(kwargs.get("introspect_purpose") or "").strip().lower() == "destination"
+
+
 def _refine_columns_by_samples(
     conn: Any,
     columns: list[dict],
@@ -339,6 +349,7 @@ def _introspect_schema_unscoped(
     private_key: str = "",
     strict_namespace: bool = False,
     reader_cfg: dict[str, Any] | None = None,
+    introspect_purpose: str = "",
     **options: Any,
 ) -> dict[str, Any]:
     """Load tables/columns for ``table`` in the requested database/schema.
@@ -412,6 +423,7 @@ def _introspect_schema_unscoped(
             strict_namespace=strict_namespace,
             # Redshift constraints are informational — mark advisory like BQ.
             advisory_keys=(db_type == "redshift"),
+            introspect_purpose=introspect_purpose,
             **options,
         )
     if db_type == "snowflake":
@@ -441,6 +453,7 @@ def _introspect_schema_unscoped(
             table=table,
             schema=schema,
             strict_namespace=strict_namespace,
+            introspect_purpose=introspect_purpose,
             **options,
         )
     if db_type in ("oracle", "oracle_db", "amazon_rds_oracle"):
@@ -890,7 +903,7 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                             resolved_schema = found_schema
                             target = found_table
                             break
-                if columns:
+                if columns and not _destination_probe(kwargs):
                     columns = _refine_columns_by_samples(
                         conn, columns, target, resolved_schema
                     )
@@ -1456,7 +1469,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         dest_db="mysql",
                     )
                     columns.append(col_my)
-                if columns:
+                if columns and not _destination_probe(kwargs):
                     columns = _refine_columns_by_samples(
                         conn, columns, target, db_name, quote_char="`"
                     )
@@ -2853,9 +2866,13 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     if isinstance(value, dict):
         return "OBJECT"
     if isinstance(value, str):
-        from services.schema_inference import infer_column
+        from services.schema_inference import declared_string_logical_type
 
-        inferred = str(infer_column([value], field_name=key)["logical_type"])
+        # A BSON string is a declared string: BSON has its own int, double and
+        # bool types, so text that merely looks like one ('t', '0012',
+        # '20240101') stays text (D190 / D194). Formatted literals (ISO
+        # instant, UUID, JSON text) keep their recognised carrier.
+        inferred = declared_string_logical_type([value], field_name=key)
         if inferred == "JSON":
             return "OBJECT"
         if inferred == "VARCHAR":
@@ -3176,6 +3193,8 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                 col["inferred_type"] = "TEXT"
             # Re-infer from samples only when majority vote stayed textual / weak —
             # never overwrite a high-confidence sticky numeric/date/structural type.
+            # The cells were BSON strings, so the declared-string rule applies:
+            # never a number / boolean / digit-temporal (D190 / D194).
             samples = [s for s in (col.get("samples") or []) if str(s).strip()]
             if (
                 len(samples) >= 2
@@ -3183,15 +3202,10 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                 and col["inferred_type"] in _TEXTUAL_TYPES
             ):
                 try:
-                    from services.schema_inference import infer_column
+                    from services.schema_inference import declared_string_logical_type
 
-                    intel = infer_column(samples, field_name=col["name"])
-                    logical = str(intel.get("logical_type") or col["inferred_type"])
-                    if logical == "VARCHAR":
-                        logical = "TEXT"
-                    # Never narrow a sticky OBJECT/ARRAY with scalar-only re-infer.
-                    if col["inferred_type"] not in _STRUCTURAL_TYPES:
-                        col["inferred_type"] = logical
+                    logical = declared_string_logical_type(samples, field_name=col["name"])
+                    col["inferred_type"] = "TEXT" if logical == "VARCHAR" else logical
                 except Exception:
                     logger.debug("Mongo sample re-infer failed for %s", col.get("name"), exc_info=True)
         return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
@@ -3227,7 +3241,10 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         try:
             from connectors.dynamodb_reader import read_table_batch
 
-            from services.schema_inference import infer_schema_map
+            from services.schema_inference import (
+                declared_string_logical_type,
+                infer_schema_map,
+            )
 
             sample, _ = read_table_batch(cfg=cfg, table=table, limit=50)
             if sample.headers:
@@ -3251,7 +3268,16 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
                 inferred_map, _intel = infer_schema_map(samples_by_col)
                 for name in names:
                     if name in inferred_map and (types.get(name) in {"TEXT", "VARCHAR", "S"} or name not in types):
-                        types[name] = inferred_map[name]
+                        # A typed-text name was declared S (AttributeDefinitions
+                        # or the sampled AttributeValue). DynamoDB has N and
+                        # BOOL, so '0012' / 't' stay text (D190 / D194).
+                        types[name] = (
+                            declared_string_logical_type(
+                                samples_by_col.get(name) or [], field_name=name
+                            )
+                            if name in types
+                            else inferred_map[name]
+                        )
         except Exception:
             logger.warning("DynamoDB sample inference failed for %s", table, exc_info=True)
 
@@ -4320,13 +4346,14 @@ def _kafka_value_to_logical(value: Any) -> str:
         return "ARRAY"
     if isinstance(value, str):
         try:
-            from services.schema_inference import infer_column
+            from services.schema_inference import declared_string_logical_type
 
-            inferred = str(infer_column([value], field_name="")["logical_type"] or "")
-            # A JSON string is not a LOB. Collapsing VARCHAR → TEXT made
-            # Validate fingerprint TEXT (pass-through) while Execute
-            # rematerialized LOGICAL_TEXT → MySQL LONGTEXT / Oracle CLOB.
-            return inferred or "VARCHAR"
+            # JSON spells numbers and booleans itself, so a JSON *string* that
+            # looks like one ("20240101", "0012", "t") is declared text, not
+            # an INTEGER / TIMESTAMP / BOOLEAN (D190). A JSON string is not a
+            # LOB either: collapsing VARCHAR → TEXT made Validate fingerprint
+            # TEXT while Execute rematerialized MySQL LONGTEXT / Oracle CLOB.
+            return declared_string_logical_type([value], field_name="") or "VARCHAR"
         except Exception:
             return "VARCHAR"
     return "TEXT"
