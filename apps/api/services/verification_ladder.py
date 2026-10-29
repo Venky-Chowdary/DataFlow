@@ -116,7 +116,9 @@ def layer_l1_row_balance(
     reader 4) while Gate-8 cells match — the operator sees Failed with
     "Row fidelity verified". Without a dest-engine key census, keyed L1
     is unmeasured: it must not veto matching L3 cells, and it must not
-    claim population proof.
+    claim population proof. Keys the writer held out (quarantined) are not
+    classified as new or existing, so with hold-outs the keyed identity is the
+    bound ``expected - dropped <= dest Δ <= expected``.
     """
     dropped = max(max(int(rejected_rows or 0), 0) - max(int(coerced_null_rows or 0), 0), 0)
     skipped = max(int(rows_skipped or 0), 0)
@@ -151,9 +153,16 @@ def layer_l1_row_balance(
         delta = target - int(target_rows_before)
         details["dest_delta"] = delta
         details["expected_rows"] = int(keyed_expected_delta)
+        # The census is taken before the write, so a key the writer then held
+        # out is still counted in it: as an insert if the destination lacked
+        # the key, as nothing if it held it. Which one is unknown (the ledger
+        # says the same), so held-out keys widen the identity to a bound
+        # instead of failing a write that landed every other key (D27).
+        floor = int(keyed_expected_delta) - dropped
+        details["expected_rows_floor"] = floor
         return LayerReport(
             layer="L1",
-            passed=delta == int(keyed_expected_delta),
+            passed=floor <= delta <= int(keyed_expected_delta),
             population_proof=False,
             details=details,
         )
