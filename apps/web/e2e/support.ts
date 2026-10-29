@@ -92,6 +92,20 @@ export async function settleToasts(page: Page): Promise<void> {
   await expect(page.locator(".dt-toast, .dt-toast-more")).toHaveCount(0, { timeout: 30_000 });
 }
 
+/**
+ * A capture must not carry transient input state. Whether the last control the
+ * test touched still shows its focus ring (or a hover) differs from run to run
+ * (1857 px on the status field of the dark 1440 shot), so drop focus and park
+ * the pointer before every capture.
+ */
+export async function settleInput(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active !== document.body) active.blur();
+  });
+  await page.mouse.move(0, 0);
+}
+
 export async function shoot(
   page: Page,
   name: string,
@@ -103,6 +117,7 @@ export async function shoot(
     node.scrollTop = 0;
   });
   await settleToasts(page);
+  await settleInput(page);
   await page.evaluate(async () => {
     await document.fonts.ready;
   });
