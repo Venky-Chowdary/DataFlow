@@ -99,6 +99,9 @@ export async function expectStackedAbove(page: Page, under: string, over: string
  * scrolling; a fixed bar is not clipped by the step behind it.
  */
 export async function expectStudioShellClear(page: Page, where: string): Promise<void> {
+  // A pointer left over a palette tile keeps its tooltip open, and the tooltip overlaps the
+  // tile it describes. Park the pointer so the check sees the idle shell.
+  await page.mouse.move(0, 0);
   await page.locator(".dt-toast").evaluateAll((nodes) => {
     for (const node of nodes) (node as HTMLElement).style.setProperty("display", "none");
   }).catch(() => {});

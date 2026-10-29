@@ -52,8 +52,19 @@ function contrast(foreground: string, background: string): number {
 async function dropOp(page: Page, op: string, position: { x: number; y: number }, nodesAfter?: number): Promise<void> {
   const tile = page.locator(`.df2-canvas-op[data-op='${op}'][draggable='true']`);
   await expect(tile).toBeVisible();
-  await tile.dragTo(page.getByTestId("transform-canvas-stage"), { targetPosition: position });
-  if (nodesAfter != null) await expect(page.locator(".react-flow__node")).toHaveCount(nodesAfter);
+  const nodes = page.locator(".react-flow__node");
+  if (nodesAfter == null) {
+    await tile.dragTo(page.getByTestId("transform-canvas-stage"), { targetPosition: position });
+    return;
+  }
+  // A synthetic HTML5 drop is sometimes swallowed on a loaded runner (no node, no error).
+  // Re-drop only while the node count is still short, so a slow drop is never doubled.
+  await expect(async () => {
+    if ((await nodes.count()) < nodesAfter) {
+      await tile.dragTo(page.getByTestId("transform-canvas-stage"), { targetPosition: position });
+    }
+    await expect(nodes).toHaveCount(nodesAfter, { timeout: 4_000 });
+  }).toPass({ timeout: 40_000 });
 }
 
 async function buildValidOrdersChain(page: Page): Promise<void> {
