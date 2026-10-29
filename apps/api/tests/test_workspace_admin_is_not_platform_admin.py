@@ -25,6 +25,13 @@ from services.rbac import PLATFORM_ADMIN_PERMISSIONS, Permission, principal_perm
 from src.main import app
 
 
+@pytest.fixture(autouse=True)
+def _strict_rule(monkeypatch):
+    # These tests pin the strict rule; the flag's default is covered in
+    # tests/test_workspace_admin_iam_flag.py.
+    monkeypatch.setenv("DATAFLOW_WORKSPACE_ADMIN_IAM", "0")
+
+
 @pytest.fixture
 def root(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))

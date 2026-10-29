@@ -26,6 +26,7 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse
 from starlette.routing import Mount
 
+from services.brand_env import getenv_brand_bool
 from src.services import auth_service as _auth_service
 from services.request_principal import (  # noqa: F401 — re-exported RBAC surface
     _REQUEST_ROLE,
@@ -472,9 +473,23 @@ def role_permissions(role: str) -> set[str]:
 PLATFORM_ADMIN_PERMISSIONS = frozenset({Permission.IAM_MANAGE, Permission.SCIM_PROVISION})
 
 
+def workspace_admin_iam_enabled() -> bool:
+    """``DATAFLOW_WORKSPACE_ADMIN_IAM`` (default on = pre-hardening behaviour).
+
+    On, a workspace admin keeps ``iam.manage`` / ``scim.provision`` as it did
+    before the platform-admin split; off, only a principal whose own role is
+    ``admin`` holds them.
+    """
+    return getenv_brand_bool("WORKSPACE_ADMIN_IAM", True)
+
+
+def holds_platform_admin_role(user: dict[str, Any] | None) -> bool:
+    return normalize_role((user or {}).get("role")) == "admin"
+
+
 def principal_permissions(user: dict[str, Any] | None, role: str) -> set[str]:
     permissions = role_permissions(role)
-    if normalize_role((user or {}).get("role")) != "admin":
+    if not holds_platform_admin_role(user) and not workspace_admin_iam_enabled():
         permissions = permissions - PLATFORM_ADMIN_PERMISSIONS
     scopes = user.get("scopes") if user else None
     if isinstance(scopes, list):
@@ -689,6 +704,31 @@ def _required_permission(method: str, path: str) -> str | _NoRule | None:
     return NO_RULE
 
 
+def _audit_workspace_admin_iam(request: Request, permission: str, effective: str) -> None:
+    """Record an IAM/SCIM request admitted only because DATAFLOW_WORKSPACE_ADMIN_IAM is on."""
+    try:
+        from services.audit_coverage import record_security_event
+
+        record_security_event(
+            "authz.workspace_admin_iam.would_deny",
+            outcome="skipped",
+            request=request,
+            resource=request.url.path,
+            reason_code="workspace_admin_iam",
+            level="warn",
+            details={
+                "required_permission": permission,
+                "effective_role": effective,
+                "path": request.url.path,
+                "method": request.method.upper(),
+                "flag": "DATAFLOW_WORKSPACE_ADMIN_IAM",
+            },
+        )
+    except Exception as exc:
+        # Auditing must not change the authorization decision.
+        logger.error("workspace-admin IAM audit failed (%s)", type(exc).__name__, exc_info=exc)
+
+
 class RBACMiddleware(BaseHTTPMiddleware):
     """Enforce role-based permissions for authenticated API requests."""
 
@@ -801,6 +841,8 @@ class RBACMiddleware(BaseHTTPMiddleware):
         effective = resolve_effective_role(user, workspace_id)
         request.state.effective_role = effective
         if permission in principal_permissions(user, effective):
+            if permission in PLATFORM_ADMIN_PERMISSIONS and not holds_platform_admin_role(user):
+                _audit_workspace_admin_iam(request, permission, effective)
             return await call_next(request)
 
         try:

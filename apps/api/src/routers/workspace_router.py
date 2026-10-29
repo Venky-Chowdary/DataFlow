@@ -372,11 +372,24 @@ async def patch_pilot_engine(body: PilotEngineBody, request: Request):
     return {"preference": saved, **decision}
 
 
+def _own_workspace_key(request: Request, key: dict[str, Any]) -> bool:
+    """A workspace key is visible to its own workspace; a platform admin sees all.
+
+    Keys minted before keys carried a workspace (``workspace_id`` ""), and
+    keys minted through ``/iam``, belong to no workspace and are platform-admin
+    only. This holds whether or not DATAFLOW_WORKSPACE_ADMIN_IAM is on.
+    """
+    scope = tenant_scope(request)
+    if scope.unrestricted:
+        return True
+    return bool(key.get("workspace_id")) and key["workspace_id"] == scope.workspace_id
+
+
 @router.get("/api-keys")
-async def get_api_keys():
+async def get_api_keys(request: Request):
     from services.integrations_store import list_api_keys
 
-    return {"keys": list_api_keys()}
+    return {"keys": [k for k in list_api_keys() if _own_workspace_key(request, k)]}
 
 
 @router.post("/api-keys")
@@ -395,7 +408,11 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
     )
     try:
         created = create_api_key(
-            body.name, actor, role=body.role, expires_in=body.expires_in
+            body.name,
+            actor,
+            role=body.role,
+            expires_in=body.expires_in,
+            workspace_id=tenant_scope(request).workspace_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -406,6 +423,7 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
         level="success",
         details={
             "id": created["id"],
+            "workspace_id": created["workspace_id"],
             "name": created["name"],
             "prefix": created["prefix"],
             "role": created["role"],
@@ -419,9 +437,11 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
 @router.delete("/api-keys/{key_id}")
 async def delete_api_key(key_id: str, request: Request):
     from services.audit_log import append_audit_event
-    from services.integrations_store import revoke_api_key
+    from services.integrations_store import list_api_keys, revoke_api_key
 
-    if not revoke_api_key(key_id):
+    if not any(
+        k["id"] == key_id and _own_workspace_key(request, k) for k in list_api_keys()
+    ) or not revoke_api_key(key_id):
         raise HTTPException(status_code=404, detail="API key not found")
     append_audit_event(
         action="workspace.api_key.revoke",
