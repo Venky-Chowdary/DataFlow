@@ -55,14 +55,29 @@ def _exact_es_serializers() -> dict[str, Any]:
     }
 
 
+def elasticsearch_url(cfg: dict[str, Any]) -> str:
+    """The one cluster URL Test, read and write all dial (D142).
+
+    A host that already carries a scheme or a port is the address: the port
+    field only supplies one the host does not name, so ``http://es:9201`` with
+    the form's 9200 is not ``http://http://es:9201:9200``.
+    """
+    if cfg.get("connection_string"):
+        return str(cfg["connection_string"])
+    from connectors.aws_common import normalize_service_endpoint
+
+    port = int(cfg.get("port") or 9200)
+    return normalize_service_endpoint(
+        str(cfg.get("host") or "").strip() or "localhost",
+        port=port,
+        ssl=bool(cfg.get("ssl")) or port == 443,
+    )
+
+
 def _client(cfg: dict[str, Any]):
     from elasticsearch import Elasticsearch
 
-    if cfg.get("connection_string"):
-        url = cfg["connection_string"]
-    else:
-        scheme = "https" if cfg.get("ssl") or int(cfg.get("port") or 9200) == 443 else "http"
-        url = f"{scheme}://{cfg.get('host') or 'localhost'}:{cfg.get('port') or 9200}"
+    url = elasticsearch_url(cfg)
     from services.egress_guard import assert_connector_dial_allowed
 
     assert_connector_dial_allowed(

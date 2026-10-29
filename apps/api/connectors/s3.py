@@ -46,6 +46,8 @@ def test_s3(
     connection_string: str,
     ssl: bool,
     warehouse: str = "",
+    endpoint_url: str = "",
+    path_style: bool = False,
 ) -> ConnectResult:
     del warehouse
 
@@ -70,6 +72,10 @@ def test_s3(
         "password": password,
         "connection_string": connection_string,
         "ssl": ssl,
+        # The read and write dial this URL when the connector carries one; a
+        # probe that ignored it tested a different address (D142).
+        "endpoint_url": endpoint_url,
+        "path_style": path_style,
     }
 
     try:
