@@ -253,7 +253,6 @@ def _read_destination_sample(
                         password=dest.get("password", ""),
                         connection_string=dest.get("connection_string", ""),
                         ssl=attempt_ssl,
-                        allow_ssl_downgrade=False,
                     )
                     with conn.cursor() as cur:
                         read_sql = text_carry_select_sql(cur, schema, table_name, cols) or col_sql
