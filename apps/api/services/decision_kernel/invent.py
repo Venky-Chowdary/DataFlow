@@ -393,12 +393,19 @@ def stamp_additive_mapping_types(
             live_hit = None
         if live_hit:
             # Bind-existing authority — live carrier always wins over Map invent.
-            widened = _backfill_widened_type(
-                live_hit,
-                row,
-                src_types,
-                dest_db=db,
-                backfill_new_fields=backfill_new_fields,
+            # An approved widen already names the post-ALTER carrier
+            # (schema_drift.plan_destination_evolution); re-deriving it from
+            # the source spelling turned NVARCHAR(500) into VARCHAR(500).
+            widened = (
+                stamped
+                if row.get("dest_widen") and stamped
+                else _backfill_widened_type(
+                    live_hit,
+                    row,
+                    src_types,
+                    dest_db=db,
+                    backfill_new_fields=backfill_new_fields,
+                )
             )
             sampled = (
                 ""

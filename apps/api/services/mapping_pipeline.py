@@ -691,7 +691,9 @@ def validate_mappings(mappings: list[dict], *, confidence_threshold: float = 0.8
     }
 
 
-def assert_mappings_executable(mappings: list[dict] | None) -> None:
+def assert_mappings_executable(
+    mappings: list[dict] | None, *, review: bool = True
+) -> None:
     """Hard-block Execute when any mapping still requires operator review.
 
     ``user_override`` / ``approved`` clear the block after an explicit Studio
@@ -713,6 +715,9 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
     hydrated = hydrate_mappings_risk_contracts(list(mappings or []))
     if isinstance(mappings, list):
         mappings[:] = hydrated
+    if not review:
+        # Signed above; the caller reviews the plan this run will write.
+        return
     work = hydrated
 
     pending: list[str] = []

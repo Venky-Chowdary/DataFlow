@@ -39,18 +39,44 @@ def declared_decimal_for_dest(
     :mod:`services.decimal_capacity_probe`). That measurement describes the rows
     present, so it must not become the DDL of an engine that has the same
     unbounded type: create-new on PostgreSQL would invent NUMERIC(29,9) and the
-    next larger value would fail (D68). Other destinations keep the measurement.
-    """
-    from connectors.sql_temporal import _is_postgres_family
+    next larger value would fail (D68).
 
+    Every destination with column DDL creates from the declaration: a bare
+    ``numeric`` becomes the engine's unbounded/widest exact decimal
+    (``invent_dest_type("DECIMAL")``), not the DECIMAL(9,6) run 1's rows
+    measured, which run 2's larger values then overflowed on MySQL and SQL
+    Server (D68).
+    """
     measured = (getattr(source, "extra", None) or {}).get(UNCONSTRAINED_DECIMALS_KEY)
-    if not measured or not _is_postgres_family(str(dest_format or "")):
+    return declare_measured_decimals(schema, measured, dest_format)
+
+
+def declare_measured_decimals(
+    schema: dict[str, Any], measured: Any, dest_format: str
+) -> dict[str, Any]:
+    """``schema`` with each measured bare numeric restored to bare ``DECIMAL``.
+
+    One rule for every create-new typing path (Execute's auto-map, the
+    overwrite typed mapping, the MCP plan's Map).
+    """
+    from services.db_type_utils import dest_declares_column_ddl
+
+    if not measured or not dest_declares_column_ddl(str(dest_format or "")):
         return schema
     folded = {str(c).casefold() for c in measured}
     return {
         col: ("DECIMAL" if str(col).casefold() in folded else typ)
         for col, typ in schema.items()
     }
+
+
+def measured_decimal_columns(columns: Any) -> list[str]:
+    """Names of introspected columns whose DECIMAL(p,s) is a row measurement."""
+    return [
+        str(c.get("name"))
+        for c in (columns or [])
+        if isinstance(c, dict) and c.get("decimal_capacity_measured") and c.get("name")
+    ]
 
 
 def endpoint_source_column_types(endpoint: Any) -> dict[str, str]:

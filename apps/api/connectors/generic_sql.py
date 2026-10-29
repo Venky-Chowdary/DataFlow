@@ -5161,6 +5161,22 @@ def write_mapped_rows(
             source_ddl = (
                 materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
             )
+            # An approved widen names its carrier (schema_drift
+            # .widened_dest_carrier): NVARCHAR stays NVARCHAR at the source's
+            # length. Re-deriving it from the source spelling ALTERed a SQL
+            # Server NVARCHAR(50) down to code-page VARCHAR(500).
+            widen_to = str(mapping.get("target_type") or "").strip()
+            if mapping.get("dest_widen") and widen_to:
+                source_ddl = (
+                    materialize_dest_ddl(dest_db, widen_to, source_type=source_type)
+                    if dest_db
+                    else widen_to
+                )
+                # ALTER COLUMN without COLLATE resets SQL Server's column to
+                # the database default (a binary column turned case-insensitive).
+                collate = re.search(r"\sCOLLATE\s+\S+", widen_to, re.I)
+                if collate and "collate" not in source_ddl.lower():
+                    source_ddl = f"{source_ddl}{collate.group(0)}"
             candidate_by_col[col] = source_ddl
 
         desired_list, alter_refusals = desired_types_honoring_map_stamps(

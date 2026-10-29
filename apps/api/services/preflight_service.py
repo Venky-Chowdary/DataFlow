@@ -805,30 +805,6 @@ def run_file_preflight(
                 adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
             )
         )
-        # Map stamped the fidelity verdict against the table as it stood
-        # (BIGINT → INT4 narrowing); a widened pair is lossless against the
-        # carrier it will have, and G4 reads the stale stamp as a risk-contract
-        # demand otherwise.
-        from services.mapping_proof import stamp_mapping_fidelity
-
-        widened_sources = {
-            str(a["source"]).lower()
-            for a in destination_evolution
-            if a.get("propagate_reason") == "widen_type"
-        }
-        if widened_sources:
-            mappings = [
-                stamp_mapping_fidelity(
-                    [m],
-                    source_types=column_types or {},
-                    target_types=destination_column_types,
-                    destination_db_type=str(destination_db_type or ""),
-                    dest_table_exists=True,
-                )[0]
-                if str(m.get("source") or "").lower() in widened_sources
-                else m
-                for m in mappings
-            ]
 
     # Source nullability defaults to True (unknown), which is the safe reading
     # for files. For an introspected database source it is knowable, and

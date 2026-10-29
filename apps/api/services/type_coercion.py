@@ -457,7 +457,22 @@ def assess_create_new_type_risk(
         _sp, src_scale = parse_numeric_precision_scale(src)
         _tp, dest_scale = parse_numeric_precision_scale(tgt)
         declared_scale = 0 if src_scale is None else int(src_scale)
-        if (
+        if _sp is None and src_scale is None and normalize_logical_type(src) == LOGICAL_DECIMAL:
+            # A bare NUMERIC declares no bound, so no carrier is "invented"
+            # from it: the engine's unbounded exact decimal is the declared
+            # carrier, sized by declaration rather than by today's rows (D68).
+            # A value past it is refused at write, never rounded silently.
+            risks.append({
+                "kind": "unbounded_decimal_carrier",
+                "severity": "warn",
+                "message": (
+                    f"Source declares an unbounded {src}; created as {tgt}, the "
+                    f"exact decimal carrier for {db or 'this destination'}. A "
+                    "value beyond its precision or scale is refused at write, "
+                    "never rounded."
+                ),
+            })
+        elif (
             dest_scale is not None
             and int(dest_scale) > declared_scale
             and not any(r.get("kind") == "invented_decimal_scale" for r in risks)
