@@ -1,7 +1,7 @@
-name: tmp-update-diag-6
+name: tmp-diag-6
 on:
   push:
-    branches: [tmp/update-diag-6]
+    branches: [tmp/diag-6]
 permissions:
   contents: write
 jobs:
