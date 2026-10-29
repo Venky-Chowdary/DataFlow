@@ -26,7 +26,9 @@ def guarded_mongo_client(conn_str: str, *, workspace_id: str = "", **options: An
 
     from services.egress_guard import assert_connector_dial_allowed
 
-    assert_connector_dial_allowed(str(conn_str or ""), workspace_id=workspace_id)
+    assert_connector_dial_allowed(
+        str(conn_str or ""), workspace_id=workspace_id, point="mongo_client"
+    )
     return MongoClient(conn_str, **options)
 
 

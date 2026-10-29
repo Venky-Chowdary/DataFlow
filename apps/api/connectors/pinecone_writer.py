@@ -55,7 +55,7 @@ def _index_url(host: str, connection_string: str = "") -> str:
         url = raw.rstrip("/")
     else:
         url = f"https://{raw.rstrip('/')}"
-    assert_connector_dial_allowed(url)
+    assert_connector_dial_allowed(url, point="http_client")
     return url
 
 

@@ -54,7 +54,7 @@ def _base_url(host: str, port: int, ssl: bool) -> str:
     from services.egress_guard import assert_connector_dial_allowed
 
     url = http_service_base_url(host, port, ssl, 6333)
-    assert_connector_dial_allowed(url)
+    assert_connector_dial_allowed(url, point="http_client")
     return url
 
 
