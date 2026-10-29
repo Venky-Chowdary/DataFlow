@@ -206,3 +206,40 @@ would be locked out; add their IPs to the tenant allowlist (or fix the proxy
 / `X-Forwarded-For` trust settings so the real client IP is seen), then set
 the flag to `1`. Unauthenticated routes (login, signup, webhooks, health, SSO,
 contact-sales) stay outside the allowlist regardless of the flag.
+
+### `DATAFLOW_WORKSPACE_ADMIN_IAM` (default `1`)
+
+Whether a *workspace* admin (workspace membership role `admin`, own platform
+role not `admin`) holds `iam.manage` and `scim.provision`.
+
+| Flag | `/api/v1/iam/*` | `/api/v1/scim/v2/*` | `/api/v1/workspace/api-keys` |
+|---|---|---|---|
+| `1` (default, pre-hardening behaviour) | workspace admins allowed | workspace admins allowed | workspace admins allowed, own workspace only (see below) |
+| `0` (strict) | platform admin only | platform admin only | platform admin only |
+
+"Platform admin" = the principal's own role is `admin` (including an API key
+minted by one). With the flag on, every IAM/SCIM request admitted only because
+of the flag writes an audit event `authz.workspace_admin_iam.would_deny`
+(outcome `skipped`, level `warn`; `required_permission`, `effective_role`,
+`path`, `method`).
+
+**Always on, regardless of the flag:** `/workspace/api-keys` only lists and
+revokes keys stamped with the caller's own workspace (`workspace_id`, taken
+from the key creator's request scope). Keys minted before this field existed,
+and keys minted via `/iam/*`, carry no workspace and are visible/revocable
+only by a platform admin; a foreign or unscoped key id answers 404 to a
+workspace admin. Before this change the key store had no workspace at all and
+`/workspace/api-keys` returned every tenant's keys to any caller that passed
+the route gate; the permission gate in strict mode was the only protection.
+
+**Residual risk while the flag is `1`:** the `/iam/*` routes (service
+accounts list/rotate/revoke, SCIM token mint, group mappings) are
+deployment-wide and are *not* workspace-scoped, so a workspace admin can see
+and revoke other tenants' service accounts and mint a role-`admin` key
+(which is a platform admin). The same is true of SCIM provisioning. Set
+`DATAFLOW_WORKSPACE_ADMIN_IAM=0` on any deployment hosting mutually
+untrusting tenants.
+
+Owner how-to: leave at `1`, review `authz.workspace_admin_iam.would_deny`
+events for who relies on it, move those people to a platform admin role or an
+admin-minted key, then set `0`.
