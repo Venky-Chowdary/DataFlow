@@ -1203,14 +1203,41 @@ def _transform_applied_proof_impl(
             _destk_buf.clear()
         pin_store.flush()
 
+    # D188 — an incremental run's expected output is the recipe applied to the
+    # rows its cursor window selected, not to the whole source table: a row
+    # edited without moving its cursor was not read, so recomputing it here
+    # reads as "the destination does not hold the recipe's output".
+    from services.incremental_drift import IN_WINDOW, RunWindow
+
+    _proof_window = (
+        RunWindow.from_summary(dest_summary) if scope_pk and not scd2_opts else None
+    )
+
     def _expected_iter():
         nonlocal raw_count
+        _extra = (
+            [
+                c
+                for c in dict.fromkeys((_proof_window.cursor, _proof_window.pk))
+                if c and c not in read_cols
+            ]
+            if _proof_window is not None
+            else []
+        )
         for batch in _proof_source_batches(
             source_endpoint=source_endpoint,
             src_type=src_type,
             src_cfg=src_cfg,
-            read_cols=read_cols,
+            read_cols=read_cols + _extra,
         ):
+            if _proof_window is not None:
+                batch = [
+                    {k: v for k, v in r.items() if k not in _extra}
+                    for r in batch
+                    if _proof_window.position(r) == IN_WINDOW
+                ]
+                if not batch:
+                    continue
             raw_count += len(batch)
             outs = runner.records(batch)
             for row in batch:
@@ -2885,55 +2912,46 @@ def _covered_keyed_noop_verify(
         }
     if src_rows is None or dest_rows is None:
         return None
-    src_by_pk: dict[str, dict[str, Any]] = {}
-    for r in src_rows:
-        if isinstance(r, dict) and r.get(src_pk) is not None:
-            src_by_pk[str(r.get(src_pk))] = r
-    drifts: list[str] = []
-    ghosts = 0
-    for r in dest_rows:
-        if not isinstance(r, dict) or r.get(pk_column) is None:
-            continue
-        key = str(r.get(pk_column))
-        srow = src_by_pk.get(key)
-        if srow is None:
-            ghosts += 1
-            if len(drifts) < 5:
-                drifts.append(f"key {key} has no covered source row")
-            continue
-        for m in map_list:
-            scol, tcol = str(m.get("source") or ""), str(m.get("target") or "")
-            if not scol or not tcol:
-                continue
-            # Compare canonical fingerprints, not raw driver reprs — a tz-aware
-            # timestamptz ('...+00:00') and the naive wall-clock a tz-less
-            # carrier stores are the same instant, and '1 day 02:00:00' ==
-            # '26:00:00' interval text. Raw != flagged faithful rows as drift.
-            s_fp = fingerprint_for_reconcile(srow.get(scol), engine=db_type)
-            t_fp = fingerprint_for_reconcile(r.get(tcol), engine=db_type)
-            if s_fp != t_fp:
-                if len(drifts) < 5:
-                    drifts.append(
-                        f"key {key} column {scol}->{tcol}: "
-                        f"source={srow.get(scol)!r} dest={r.get(tcol)!r}"
-                    )
-                break
-    if drifts:
-        detail = "; ".join(drifts[:3])
-        return {
-            "passed": False,
-            "checksum_match": False,
-            "assurance_level": "none",
-            "source_rows": len(src_rows),
-            "target_rows": len(dest_rows),
-            "message": (
-                "Quiet keyed poll found covered-content drift the COUNT "
-                f"proof could not see ({detail}"
-                + (f"; +{ghosts} ghost row(s)" if ghosts else "")
-                + "). Failing closed — the destination rows are left for "
-                "the operator."
-            ),
-        }
+    # D188 — a quiet poll's window is empty: every row it can see sits outside
+    # what the cursor selected. A disagreement there (a source edit that did
+    # not move the cursor, a hard delete, a hand-changed destination row) is
+    # out-of-window drift: measured cell-by-cell on canonical fingerprints and
+    # reported on the run, not this run's failure (fail closed again under
+    # DATAFLOW_INCREMENTAL_DRIFT_FAILS=1).
+    from services.incremental_drift import attach_drift, measure_drift
+
+    pairs = [
+        (str(m.get("source") or ""), str(m.get("target") or ""))
+        for m in map_list
+        if m.get("source") and m.get("target")
+    ]
+    if not any(t == pk_column for _s, t in pairs):
+        pairs.append((src_pk, pk_column))
+    as_target = [
+        {t: r.get(s) for s, t in pairs} for r in src_rows if isinstance(r, dict)
+    ]
+    drift = measure_drift(
+        source_rows=as_target,
+        target_rows=[r for r in dest_rows if isinstance(r, dict)],
+        columns=[t for _s, t in pairs],
+        key_cols=[pk_column],
+        dest_db_type=db_type,
+    )
+    if drift:
+        return attach_drift(
+            {
+                "passed": True,
+                "source_rows": 0,
+                "target_rows": len(dest_rows),
+                "assurance_level": NO_OP_DEST_UNCHANGED,
+                "message": (
+                    "No new source rows since the last watermark — nothing "
+                    f"written, destination unchanged at {len(dest_rows):,} row(s)."
+                ),
+            },
+            drift,
+            resource=str(endpoint.table or ""),
+        )
     return None
 
 
@@ -3159,45 +3177,26 @@ def _maybe_attach_verification_ladder(
     # share that window — without it the unbounded source re-read feeds L1–L5
     # whole-table rows while ``source_checksum`` describes only the window,
     # and ``key_rows`` below degenerates to every key in the table.
-    _win_cursor = str(dest_summary.get("incremental_window_cursor") or "").strip()
+    from services.incremental_drift import (
+        AFTER_WINDOW,
+        IN_WINDOW,
+        RunWindow,
+    )
+
+    window = RunWindow.from_summary(dest_summary)
     window_scoped_target = False
-    if _win_cursor and source_rows:
-        from services.sync_cursor import (
-            compare_cursor_values,
-            row_after_watermark,
-            row_in_run_window,
-        )
-
-        _win_seed = dest_summary.get("incremental_window_seed")
-        _win_max = dest_summary.get("incremental_window_max")
-        _win_pk = str(dest_summary.get("incremental_window_pk") or "").strip()
-        # D124: a run seeded from the stored watermark re-read its whole tie
-        # group; a resume seeks strictly past its committed page edge.
-        _win_inclusive = bool(dest_summary.get("incremental_window_seed_inclusive"))
-
-        def _in_run_window(_wr: Any, _cur: str, _pk: str) -> bool:
-            if not isinstance(_wr, dict):
-                return False
-            if _win_seed not in (None, "") and (
-                row_in_run_window(_wr, _cur, str(_win_seed))
-                if _win_inclusive
-                else row_after_watermark(_wr, _cur, str(_win_seed), primary_key=_pk)
-            ) is not True:
-                return False
-            if _win_max not in (None, ""):
-                _wrc = _wr.get(_cur)
-                _candidate = str(_wrc) if _wrc is not None else ""
-                if _pk and _pk != _cur:
-                    from services.keyset_pagination import encode_keyset_bookmark
-
-                    _candidate = encode_keyset_bookmark(
-                        [_candidate, str(_wr.get(_pk) or "")]
-                    )
-                if compare_cursor_values(_candidate, str(_win_max)) > 0:
-                    return False
-            return True
-
-        source_rows = [r for r in source_rows if _in_run_window(r, _win_cursor, _win_pk)]
+    # D188 — the source rows the cursor did NOT select, kept to report drift.
+    before_window_rows: list[dict] = []
+    after_window_rows: list[dict] = []
+    full_target_rows = target_rows
+    if window is not None and source_rows:
+        _positions = [(r, window.position(r)) for r in source_rows]
+        source_rows = [r for r, p in _positions if p == IN_WINDOW]
+        if source_reread:
+            after_window_rows = [r for r, p in _positions if p == AFTER_WINDOW]
+            before_window_rows = [
+                r for r, p in _positions if p not in (IN_WINDOW, AFTER_WINDOW)
+            ]
         if not keyed and allow_extra and dest_before and target_rows:
             # D123 — an append into an occupied table: the rows this run wrote
             # are the destination rows inside the same cursor window (an append
@@ -3208,22 +3207,28 @@ def _maybe_attach_verification_ladder(
                 for m in mappings
                 if m.get("source") and m.get("target")
             }
-            _t_cur = _to_target.get(_win_cursor, _win_cursor)
-            _t_pk = _to_target.get(_win_pk, _win_pk)
-            if _t_cur in target_cols:
+            _t_window = window.renamed(_to_target)
+            if _t_window.cursor in target_cols:
                 target_rows = [
-                    r for r in target_rows if _in_run_window(r, _t_cur, _t_pk)
+                    r for r in target_rows if _t_window.position(r) == IN_WINDOW
                 ]
                 window_scoped_target = True
-    if source_reread and rewrites and source_rows:
-        source_rows = _source_rows_as_written(
-            source_rows,
-            mappings=mappings,
-            target_cols=target_cols,
-            dest_types=dest_types,
-            dest_type=dest_type,
-            validation_mode=validation_mode,
-        )
+    if source_reread and rewrites:
+        def _as_written(rows: list[dict]) -> list[dict]:
+            if not rows:
+                return rows
+            return _source_rows_as_written(
+                rows,
+                mappings=mappings,
+                target_cols=target_cols,
+                dest_types=dest_types,
+                dest_type=dest_type,
+                validation_mode=validation_mode,
+            )
+
+        source_rows = _as_written(source_rows)
+        before_window_rows = _as_written(before_window_rows)
+        after_window_rows = _as_written(after_window_rows)
     # X-OW1: a keyed run into an occupied destination is only comparable on
     # the written batch's keys — the destination legitimately holds rows this
     # run never wrote. Restrict the re-read population to the batch keys so
@@ -3346,7 +3351,28 @@ def _maybe_attach_verification_ladder(
             "source_reread_is_pre_transform" if source_reread and rewrites else ""
         ),
     )
-    return attach_ladder_to_reconcile_report(report, ladder)
+    out = attach_ladder_to_reconcile_report(report, ladder)
+    if window is not None and source_reread and keyed and (pk_cols or pk_column):
+        # D188 — rows the cursor did not select are not this run's verdict,
+        # but a disagreement there is reported, never silently dropped.
+        from services.incremental_drift import attach_drift, measure_drift
+        from services.verification_ladder import _index_by_pk
+
+        _key_cols = pk_cols or [pk_column]
+        _owned = set(_index_by_pk(source_rows, _key_cols)) | set(
+            _index_by_pk(after_window_rows, _key_cols)
+        )
+        drift = measure_drift(
+            source_rows=before_window_rows,
+            target_rows=full_target_rows,
+            columns=target_cols,
+            key_cols=_key_cols,
+            dest_db_type=dest_type,
+            dest_types=dest_types,
+            skip_keys=_owned | (_rej_keys or set()),
+        )
+        out = attach_drift(out, drift, resource=str(endpoint.table or ""))
+    return out
 
 
 def _identity_watermark_evidence(
@@ -8092,6 +8118,13 @@ def run_reconciliation(
                         f"{recon['message']} "
                         f"({recon['culprit_keys_unavailable_reason']})"
                     )
+    # D188 — message rewrites above rebuild the text from its head; the
+    # out-of-window drift sentence is a finding and must stay in it.
+    from services.incremental_drift import DRIFT_KEY, drift_sentence
+
+    _drift_text = drift_sentence(recon.get(DRIFT_KEY) or {})
+    if _drift_text and _drift_text not in str(recon.get("message") or ""):
+        recon["message"] = f"{str(recon.get('message') or '').rstrip()} {_drift_text}".strip()
     verify_ms = (time.monotonic() - started) * 1000.0
     # The wall time Gate-8 itself took — job_phase_timings reports it as verify.
     recon["verify_seconds"] = round(verify_ms / 1000.0, 3)

@@ -493,6 +493,29 @@ Owner how-to: leave at `1`, review `authz.workspace_admin_iam.would_deny`
 events for who relies on it, move those people to a platform admin role or an
 admin-minted key, then set `0`.
 
+### `DATAFLOW_INCREMENTAL_DRIFT_FAILS` (default `0`)
+
+D188. An incremental run (upsert / deduped / append by cursor, composite
+watermarks included, and the quiet poll that reads nothing new) is verified on
+the rows its cursor window selected. A source row *outside* the window that
+disagrees with the destination (edited without moving the cursor, back-filled
+with an old cursor value, hard-deleted, or a destination row changed by hand)
+is reported on the run as `reconciliation.out_of_window_drift` (count, kinds,
+sample keys) and in the run message ("Out-of-window drift: ..."), and the run
+is **not** failed for it. A loss inside the window still fails the run.
+
+- `0` (default): drift is reported, the run passes, and an audit event
+  `gate8.would_fail_out_of_window_drift` (level `warn`; `rows`,
+  `sample_keys`) records that the strict setting would have failed it.
+- `1`: out-of-window drift fails the run (fail closed; rows are never rolled
+  back or overwritten).
+
+Before D188 a write-pass route (SQL Server -> MySQL, PG -> MySQL COPY, SQL
+Server -> PG) failed every later run on such drift and a quiet keyed poll
+failed closed on it, while other routes passed without mentioning it.
+
+Owner how-to: leave at `0`; set `1` to treat any divergence as fatal.
+
 ---
 
 ## Transform-library RBAC (what changed, per role)

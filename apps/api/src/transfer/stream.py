@@ -866,6 +866,19 @@ def _stream_database_transfer_impl(
                     },
                 )
                 run.tally.dest_summary["watermark"] = wm
+                # D188 — COPY seeds ``cursor >= watermark`` (D60/D98) and its
+                # high-water mark is the staging MAX: the same window contract
+                # as the row path, so Gate-8 judges only the rows it copied.
+                from services.incremental_drift import stamp_run_window
+
+                stamp_run_window(
+                    run.tally.dest_summary,
+                    cursor=run.cfg.cursor_source_col,
+                    pk=run.cfg.cursor_pk_source or "",
+                    seed=pre_copy_watermark,
+                    seed_inclusive=True,
+                    high=wm,
+                )
                 # D110 — if verification removes this run's batch, the route
                 # watermark must roll back to this pre-run value.
                 run.tally.dest_summary.setdefault(
@@ -2903,6 +2916,24 @@ def _stream_database_transfer_impl(
         # No cursor bound or no key scope → keep the write-pass digest and
         # its honest write-confirmed label.
         _reread = False
+    # M3 / D188 — publish the exact cursor window this run selected so every
+    # Gate-8 population (the ladder's own source re-read, the destination key
+    # filter, the transform proof) is scoped to it. Before D188 only the
+    # warehouse re-read branch stamped it: a write-pass route (SQL Server ->
+    # MySQL) left the ladder comparing whole tables, so a source row edited
+    # without moving its cursor — legitimately not picked up — failed every
+    # later run as an L4/L5 mismatch.
+    if run.cfg.incremental and run.cfg.cursor_source_col and not run.cfg.sdk_source:
+        from services.incremental_drift import stamp_run_window
+
+        stamp_run_window(
+            run.tally.dest_summary,
+            cursor=run.cfg.cursor_source_col,
+            pk=run.cfg.cursor_pk_source or "",
+            seed=window_seed_bookmark,
+            seed_inclusive=window_seed_inclusive,
+            high=running_cursor,
+        )
     if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()
         final_checksum = write_pass_fp.digest()
@@ -2958,19 +2989,7 @@ def _stream_database_transfer_impl(
             _seed_cursor_part = _split_bm(
                 str(checksum_cursor_after), has_tiebreak=_seed_tiebreak
             )[0]
-        # M3 — publish the exact window the digest covers so Gate-8 scopes
-        # every other population the same way (the ladder's own source
-        # re-read and the destination key filter are unbounded without it —
-        # a whole-table digest compared to a window digest reads as a
-        # checksum mismatch on a correct run).
-        if run.cfg.incremental and checksum_cursor_col:
-            run.tally.dest_summary["incremental_window_cursor"] = checksum_cursor_col
-            run.tally.dest_summary["incremental_window_pk"] = run.cfg.cursor_pk_source or ""
-            if checksum_cursor_after not in (None, ""):
-                run.tally.dest_summary["incremental_window_seed"] = str(checksum_cursor_after)
-                run.tally.dest_summary["incremental_window_seed_inclusive"] = window_seed_inclusive
-            if checksum_cursor_max not in (None, ""):
-                run.tally.dest_summary["incremental_window_max"] = str(checksum_cursor_max)
+        # The run's window is published once, above, for every digest mode.
         use_checksum_keyset = False
         if run.cfg.incremental and checksum_cursor_col:
             use_checksum_keyset = True

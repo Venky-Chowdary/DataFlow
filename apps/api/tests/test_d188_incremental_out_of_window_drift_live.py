@@ -168,6 +168,34 @@ class _Postgres:
         return f'DROP TABLE IF EXISTS "{t}"'
 
 
+class _Sqlite:
+    """In-process leg (AGENTS.md): runs without any live engine."""
+
+    fmt = "sqlite"
+    extra: dict = {}
+    ph = "?"
+    create = (
+        "CREATE TABLE {t} (id INTEGER PRIMARY KEY, name TEXT NULL, "
+        "note TEXT NULL, updated_at TEXT NOT NULL)"
+    )
+
+    def __init__(self, path: Path):
+        self.cfg = {"database": str(path)}
+
+    def conn(self):
+        import sqlite3
+
+        c = sqlite3.connect(self.cfg["database"])
+        c.isolation_level = None
+        return c
+
+    def q(self, t: str) -> str:
+        return f'"{t}"'
+
+    def drop(self, t: str) -> str:
+        return f'DROP TABLE IF EXISTS "{t}"'
+
+
 def _exec(eng, sql: str, rows=None):
     c = eng.conn()
     try:
@@ -195,12 +223,16 @@ def _ts(i: int) -> str:
     return f"2026-01-01 00:{i // 60:02d}:{i % 60:02d}"
 
 
+_TIES = {"on": False}
+
+
 def _seed(eng, table: str, lo: int, hi: int) -> None:
     rows = []
     for i in range(lo, hi + 1):
         # NULL, empty, whitespace and unicode ride the window on purpose.
         note = {0: None, 1: "", 2: "  ", 3: "naïve 中文 ✓"}.get(i % 7, f"note {i}")
-        rows.append((i, f"name {i}", note, _ts(i)))
+        # Ties on the cursor force a composite (cursor, id) watermark.
+        rows.append((i, f"name {i}", note, _ts(i // 3 if _TIES["on"] else i)))
     ph = eng.ph
     _exec(
         eng,
@@ -210,22 +242,44 @@ def _seed(eng, table: str, lo: int, hi: int) -> None:
     )
 
 
+def _dt(src, dst, table: str) -> str:
+    """Same-engine pairs share one database: the destination gets its own name."""
+    return table if src.fmt != dst.fmt else table + "_d"
+
+
+_MODE = {"sync": "incremental_upsert", "recipe": None}
+
+
 def _request(src, dst, table: str):
     from src.transfer.models import EndpointConfig, TransferRequest
 
+    sync = _MODE["sync"]
+    recipe = _MODE["recipe"]
+    shaped: dict = {}
+    if recipe is not None:
+        from services.shape_models import ShapeRecipe
+
+        shaped = {
+            "shape_recipe": recipe,
+            "approved_shape_recipe_hash": ShapeRecipe.parse(
+                recipe, source_columns=["id", "name", "note", "updated_at"]
+            ).recipe_hash,
+        }
     return TransferRequest(
+        **shaped,
         source=EndpointConfig(
             kind="database", format=src.fmt, table=table, extra=dict(src.extra), **src.cfg
         ),
         destination=EndpointConfig(
-            kind="database", format=dst.fmt, table=table, extra=dict(dst.extra), **dst.cfg
+            kind="database", format=dst.fmt, table=_dt(src, dst, table),
+            extra=dict(dst.extra), **dst.cfg
         ),
-        sync_mode="incremental_upsert",
+        sync_mode=sync,
         stream_contracts=[
             {
                 "name": table,
                 "cursor_field": "updated_at",
-                "sync_mode": "incremental_upsert",
+                "sync_mode": sync,
                 "primary_key": ["id"],
                 "selected": True,
             }
@@ -248,14 +302,18 @@ def _drift(result) -> dict:
     return recon.get("out_of_window_drift") or {}
 
 
-def _scenario(isolated, src, dst):
+def _scenario(isolated, src, dst, *, keyed: bool = True):
+    shaped = _MODE["recipe"] is not None
+    # A shaped run's ladder declines (its proof is the pinned recipe), so drift
+    # is not measured there; the run must still verify only its window.
+    keyed = keyed and not shaped
     table = "d188_" + uuid.uuid4().hex[:10]
     _exec(src, src.create.format(t=src.q(table)))
     try:
         _seed(src, table, 1, 30)
         first = _run(isolated, src, dst, table)
         assert first.success, first.error
-        assert len(_fetch(dst, f"SELECT id FROM {dst.q(table)}")) == 30  # nosec B608
+        assert len(_fetch(dst, f"SELECT id FROM {dst.q(_dt(src, dst, table))}")) == 30  # nosec B608
         assert not _drift(first)
 
         # A manual fix on the source that does NOT bump the cursor column.
@@ -269,27 +327,36 @@ def _scenario(isolated, src, dst):
         second = _run(isolated, src, dst, table)
         assert second.success, (second.error, second.reconciliation)
         dst_rows = dict(
-            _fetch(dst, f"SELECT id, name FROM {dst.q(table)}")  # nosec B608
+            _fetch(dst, f"SELECT id, name FROM {dst.q(_dt(src, dst, table))}")  # nosec B608
         )
         assert len(dst_rows) == 33
         assert dst_rows[5] == "name 5", "row 5 is outside run 2's window"
         assert dst_rows[31] == "name 31"
         drift = _drift(second)
-        assert drift.get("rows") == 1 and drift.get("changed") == 1, second.reconciliation
-        assert drift.get("sample_keys") == ["5"], drift
-        msg = str(second.reconciliation.get("message") or "")
-        assert "Out-of-window drift: 1 row(s)" in msg and "key 5" in msg, msg
+        if keyed:
+            assert drift.get("rows") == 1 and drift.get("changed") == 1, second.reconciliation
+            assert drift.get("sample_keys") == ["5"], drift
+            msg = str(second.reconciliation.get("message") or "")
+            assert "Out-of-window drift: 1 row(s)" in msg and "key 5" in msg, msg
+
+        # A quiet poll (nothing past the watermark) is a later run too.
+        quiet = _run(isolated, src, dst, table)
+        assert quiet.success, (quiet.error, quiet.reconciliation)
+        assert len(_fetch(dst, f"SELECT id FROM {dst.q(_dt(src, dst, table))}")) == 33  # nosec B608
+        if keyed:
+            assert _drift(quiet).get("sample_keys") == ["5"], quiet.reconciliation
 
         _seed(src, table, 34, 36)
         third = _run(isolated, src, dst, table)
         assert third.success, (third.error, third.reconciliation)
-        got = _fetch(dst, f"SELECT id, note FROM {dst.q(table)} ORDER BY id")  # nosec B608
+        got = _fetch(dst, f"SELECT id, note FROM {dst.q(_dt(src, dst, table))} ORDER BY id")  # nosec B608
         assert len(got) == 36
         # NULL / empty / whitespace / unicode in the window land exactly.
         notes = dict(got)
         assert notes[35] is None and notes[36] == "" and notes[30] == "  ", notes
-        assert notes[31] == "naïve 中文 ✓", notes
-        assert _drift(third).get("sample_keys") == ["5"], third.reconciliation
+        assert notes[31] == ("NAÏVE 中文 ✓" if shaped else "naïve 中文 ✓"), notes
+        if keyed:
+            assert _drift(third).get("sample_keys") == ["5"], third.reconciliation
         return table
     except BaseException:
         _cleanup(src, dst, table)
@@ -298,7 +365,20 @@ def _scenario(isolated, src, dst):
 
 def _cleanup(src, dst, table: str) -> None:
     _exec(src, src.drop(table))
-    _exec(dst, dst.drop(table))
+    _exec(dst, dst.drop(_dt(src, dst, table)))
+
+
+@pytest.fixture()
+def mode(request):
+    sync, ties, recipe = request.param
+    _MODE.update(sync=sync, recipe=recipe)
+    _TIES["on"] = ties
+    yield request.param
+    _MODE.update(sync="incremental_upsert", recipe=None)
+    _TIES["on"] = False
+
+
+_UPPER = {"steps": [{"op": "case", "column": "note", "options": {"mode": "upper"}}]}
 
 
 _PAIRS = {
@@ -308,7 +388,27 @@ _PAIRS = {
     "sqlserver->postgres": (_SqlServer, _Postgres, (_MS, _PG)),
     "postgres->sqlserver": (_Postgres, _SqlServer, (_PG, _MS)),
     "mysql->sqlserver": (_MySql, _SqlServer, (_MY, _MS)),
+    "postgres->postgres": (_Postgres, _Postgres, (_PG, _PG)),
+    "mysql->mysql": (_MySql, _MySql, (_MY, _MY)),
+    "sqlserver->sqlserver": (_SqlServer, _SqlServer, (_MS, _MS)),
 }
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        ("incremental_upsert", False, None),
+        ("incremental_upsert", True, None),
+        ("incremental_append", False, None),
+        ("incremental_upsert", False, _UPPER),
+    ],
+    indirect=True,
+    ids=["upsert", "upsert-composite", "append", "upsert-shaped"],
+)
+def test_sqlite_to_sqlite_in_process(isolated, mode, tmp_path):
+    src, dst = _Sqlite(tmp_path / "src.db"), _Sqlite(tmp_path / "dst.db")
+    table = _scenario(isolated, src, dst, keyed=mode[0] != "incremental_append")
+    _cleanup(src, dst, table)
 
 
 def _pair(name: str):
@@ -338,7 +438,7 @@ def test_real_loss_inside_the_window_still_fails(isolated, monkeypatch, pair):
 
         def _lose_then_verify(*args, **kwargs):
             # The run read and wrote id 38; it is gone when Gate-8 looks.
-            _exec(dst, f"DELETE FROM {dst.q(table)} WHERE id = 38")  # nosec B608
+            _exec(dst, f"DELETE FROM {dst.q(_dt(src, dst, table))} WHERE id = 38")  # nosec B608
             return real(*args, **kwargs)
 
         monkeypatch.setattr(engine_mod, "run_reconciliation", _lose_then_verify)
@@ -365,3 +465,22 @@ def test_strict_flag_restores_fail_closed_on_drift(isolated, monkeypatch, pair):
         assert "Out-of-window drift" in str(strict.error), strict.error
     finally:
         _cleanup(src, dst, table)
+
+
+@pytest.mark.parametrize(
+    "mode",
+    [
+        ("incremental_upsert", True, None),  # composite (cursor, id) watermark
+        ("incremental_deduped", False, None),
+        ("incremental_append", False, None),
+        ("incremental_append", True, None),
+        ("incremental_upsert", False, _UPPER),  # shaped run: transform proof
+    ],
+    indirect=True,
+    ids=["upsert-composite", "deduped", "append", "append-composite", "upsert-shaped"],
+)
+@pytest.mark.parametrize("pair", ["sqlserver->mysql", "postgres->mysql"])
+def test_every_incremental_mode_verifies_only_its_window(isolated, mode, pair):
+    src, dst = _pair(pair)
+    table = _scenario(isolated, src, dst, keyed=mode[0] != "incremental_append")
+    _cleanup(src, dst, table)
