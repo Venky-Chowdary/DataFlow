@@ -21,29 +21,18 @@ test.describe("wizard baseline", () => {
     await expect(add).toBeVisible();
     await add.click();
     const operation = page.locator("#xform-op");
-    let catalogReady = false;
-    try {
-      await expect(operation).toBeEnabled({ timeout: 15_000 });
-      catalogReady = true;
-    } catch {
-      catalogReady = false;
-    }
-    if (!catalogReady) {
-      test.info().annotations.push({
-        type: "skip-step",
-        description: "Shape catalog did not load, so a trim step was not added.",
-      });
-    } else {
-      await page.locator("#xform-op").click();
-      await page.getByLabel("Search Operation").fill("trim");
-      const trim = page.getByRole("option", { name: /trim/i }).first();
-      await expect(trim).toBeVisible();
-      await trim.click();
-      await page.locator("#xform-column").click();
-      await page.getByRole("option", { name: "customer_email" }).click();
-      await page.locator(".df2-xform-builder-actions").getByRole("button", { name: "Add step", exact: true }).click();
-      await expect(page.locator("#xform-step-1")).toContainText(/trim/i);
-    }
+    // The baseline holds the added trim step, so the shape catalog must load.
+    // A silent skip made the capture depend on how fast the API answered.
+    await expect(operation).toBeEnabled({ timeout: 60_000 });
+    await page.locator("#xform-op").click();
+    await page.getByLabel("Search Operation").fill("trim");
+    const trim = page.getByRole("option", { name: /trim/i }).first();
+    await expect(trim).toBeVisible();
+    await trim.click();
+    await page.locator("#xform-column").click();
+    await page.getByRole("option", { name: "customer_email" }).click();
+    await page.locator(".df2-xform-builder-actions").getByRole("button", { name: "Add step", exact: true }).click();
+    await expect(page.locator("#xform-step-1")).toContainText(/trim/i);
 
     const primary = page.locator(".df2-xform-actions .df2-btn-primary");
     const color = await primary.evaluate((node) => getComputedStyle(node).backgroundColor);
@@ -53,7 +42,7 @@ test.describe("wizard baseline", () => {
     // literal that goes stale on a brand repaint (UI-11).
     expect(color).toBe(await tokenColor(page, "--df-action-bg"));
 
-    // Toasts are hidden in shoot(), so these shots are the step list itself.
+    // Toasts are cleared and hidden in shoot(), so these shots are the step list itself.
     // The compose-step sentence is part of the pre-upgrade builder.
     await shoot(page, "wizard-transform-light-1440.png");
     await page.setViewportSize({ width: 390, height: 844 });
