@@ -518,7 +518,7 @@ jobs:
         if: ${{ !cancelled() && (success() || failure()) }}
         run: |
           echo "### Failing API tests" >> "$GITHUB_STEP_SUMMARY"
-          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | sed 's/ - .*//' | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -hE '^(FAILED|ERROR) ' "$RUNNER_TEMP/api_tests.log" | cut -c1-400 | sort -u | tee -a "$GITHUB_STEP_SUMMARY" || echo "none" | tee -a "$GITHUB_STEP_SUMMARY"
           grep -hE '[0-9]+ (passed|failed)' "$RUNNER_TEMP/api_tests.log" | tail -2 || true
 
       # Surface which gate failed when earlier steps failed but proofs still ran.

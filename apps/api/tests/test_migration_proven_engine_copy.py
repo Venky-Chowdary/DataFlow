@@ -32,6 +32,9 @@ def fake(monkeypatch):
 
     store = _FakeMongo()
     monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: store)
+    # The verify-time population digest is what makes the run "verified"; it is
+    # opt-in in the product (DATAFLOW_ENGINE_DIGEST), so the test says so.
+    monkeypatch.setenv("DATAFLOW_ENGINE_DIGEST", "1")
     return store
 
 

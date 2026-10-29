@@ -36,6 +36,8 @@ pytestmark = pytest.mark.skipif(not pg_up(), reason="PostgreSQL not available")
 def test_timestamp_round_trips_through_a_text_sqlite_carrier(tmp_path: Path, monkeypatch):
     store = MemoryMongoDBService()
     monkeypatch.setattr(engine_mod, "get_mongodb_service", lambda: store)
+    # "verified" needs the verify-time population digest, which is opt-in.
+    monkeypatch.setenv("DATAFLOW_ENGINE_DIGEST", "1")
     pg = _Postgres()
     suffix = uuid.uuid4().hex[:6]
     first, last = f"m6a_{suffix}", f"m6b_{suffix}"
