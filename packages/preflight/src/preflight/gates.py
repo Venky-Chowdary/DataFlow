@@ -278,6 +278,27 @@ def evidence_scope(
     return scope
 
 
+def _first_sample_reason(issues_detail: list[dict]) -> str:
+    """The first sampled cell's own refusal, for the gate headline.
+
+    "1 type coercion issue(s)" alone hid the precise cause (a DST-gap wall
+    clock, a BC date) behind a generic count (D52).
+    """
+    for detail in issues_detail or []:
+        if not isinstance(detail, dict) or detail.get("severity") == "warn":
+            continue
+        for failure in detail.get("sample_failures") or []:
+            if isinstance(failure, dict):
+                reason = str(failure.get("reason") or "").strip()
+            else:
+                reason = str(failure or "").strip()
+            if reason:
+                col = str(detail.get("source") or "").strip()
+                head = f"{col}: " if col else ""
+                return f" — {head}{reason[:240]}"
+    return ""
+
+
 def _with_scope(details: dict[str, Any] | None, scope: dict[str, Any]) -> dict[str, Any]:
     out = dict(details or {})
     out["evidence_scope"] = scope
@@ -1677,7 +1698,10 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
         return _block(
             GateId.G3_SCHEMA_CONTRACT,
             f"{len(issues)} type coercion issue(s)"
-            + (f": {first_issue}" if first_issue else ""),
+            + (
+                _first_sample_reason(issues_detail)
+                or (f": {first_issue}" if first_issue else "")
+            ),
             start,
             _with_scope(
                 {

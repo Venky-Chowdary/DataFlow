@@ -89,6 +89,39 @@ def classify_declared_collapse(source_type: str, target_type: str) -> FailureCla
     return FailureClass.FIDELITY_COLLAPSE
 
 
+# The refusals the one temporal converter writes (connectors.sql_temporal
+# coerce_sql_temporal, transform_engine's date / zone transforms). Each names a
+# temporal value its carrier cannot hold. Unlisted, every one of them graded
+# UNKNOWN and Validate's headline said UNKNOWN beside a specific cause (D52).
+_TEMPORAL_REFUSAL_PHRASES = (
+    "is a bc date",
+    "is a year past 9999",
+    "refuses naive wall-clock",
+    "refuses epoch instants",
+    "zone rules cover",
+    "could not apply zone",
+    "unknown timezone",
+    "timestamp epoch range",
+    # The writer's own unfit-cell holdouts (writer_quarantine_unfit).
+    "into ntz destination",
+    "fractional seconds exceed destination",
+    "time value outside the 0",
+)
+_TEMPORAL_RANGE_RE = re.compile(
+    r"\bis outside \S+ (date|datetime|datetime2|smalldatetime|datetimeoffset|"
+    r"timestamp\w*)( with(out)? time zone)? range\b"
+)
+_TEMPORAL_CARRIER_RE = re.compile(
+    r"\bhas no (date|datetime\w*|timestamp\w*|time\w*) carrier\b"
+)
+
+
+def _is_temporal_carrier_refusal(msg: str, tgt_l: str) -> bool:
+    if any(k in msg for k in _TEMPORAL_REFUSAL_PHRASES):
+        return True
+    return bool(_TEMPORAL_RANGE_RE.search(msg) or _TEMPORAL_CARRIER_RE.search(msg))
+
+
 def classify_transform_failure(
     reason: str,
     *,
@@ -120,6 +153,15 @@ def classify_transform_failure(
         )
     ):
         return FailureClass.ENCODING_FAILURE
+    # The float bind's carrier window (connectors.sql_bind.coerce_float_wire):
+    # a subnormal below the floor underflows, a magnitude above it overflows.
+    float_window = re.search(r"float (\S+) is outside \S+ on \S+ \(carrier magnitude", msg)
+    if float_window:
+        try:
+            magnitude = abs(float(float_window.group(1)))
+        except ValueError:
+            magnitude = 0.0
+        return FailureClass.UNDERFLOW if magnitude < 1.0 else FailureClass.OVERFLOW
     if "too long" in msg or "length" in msg and "overflow" in msg:
         return FailureClass.LENGTH_OVERFLOW
     if "overflow" in msg:
@@ -172,7 +214,7 @@ def classify_transform_failure(
         )
     ):
         return FailureClass.LENGTH_OVERFLOW
-    if "empty value cannot coerce" in msg or (
+    if "empty string into temporal destination" in msg or "empty value cannot coerce" in msg or (
         "empty" in msg and ("cannot coerce" in msg or "cannot cast" in msg)
     ):
         return FailureClass.EMPTY_VALUE_NOT_NULLABLE
@@ -191,6 +233,8 @@ def classify_transform_failure(
             "does not exist in timezone",
         )
     ) and any(t in msg or t in tgt_l for t in ("date", "time", "timestamp")):
+        return FailureClass.INVALID_TIMESTAMP
+    if _is_temporal_carrier_refusal(msg, tgt_l):
         return FailureClass.INVALID_TIMESTAMP
     if "invalid integer" in msg or (
         "cannot be cast to integer" in msg or "cannot cast to integer" in msg

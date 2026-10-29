@@ -66,7 +66,14 @@ def temporal_carrier_display_label(ddl_type: str, engine: str = "") -> str:
     if token.lower() == "date" and temporal_carrier_holds_time(engine):
         digits = carrier_instant_digits(token, engine=engine)
         suffix = f", {digits} fractional digits" if digits else ""
-        return f"date (BSON instant{suffix})"
+        from services.type_system import _normalize_dest_db
+
+        kind = (
+            "BSON instant"
+            if _normalize_dest_db(engine or "") in {"mongodb", "documentdb", "cosmosdb"}
+            else "instant"
+        )
+        return f"date ({kind}{suffix})"
     return token
 
 
