@@ -1,0 +1,61 @@
+name: tmp-update-baselines-2
+on:
+  push:
+    branches: [tmp/update-baselines-2]
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: python -m pip install --upgrade pip && python -m pip install -r apps/api/requirements.txt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+      - run: npm ci
+      - working-directory: apps/web
+        run: npx playwright install --with-deps chromium
+      - name: Start API
+        working-directory: apps/api
+        env:
+          DATAFLOW_REQUIRE_AUTH: "0"
+          DATAFLOW_JOB_STORE: memory
+          DATAFLOW_DISABLE_OBJECT_STORE: "1"
+        run: |
+          python -m uvicorn src.main:app --host 127.0.0.1 --port 8001 > /tmp/api.log 2>&1 &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:8001/api/v1/health >/dev/null && exit 0; sleep 2; done
+          cat /tmp/api.log; exit 1
+      - name: Start Vite
+        run: |
+          npm run dev --workspace=@dataflow/web > /tmp/web.log 2>&1 &
+          for i in $(seq 1 40); do curl -sf http://127.0.0.1:5173 >/dev/null && exit 0; sleep 2; done
+          cat /tmp/web.log; exit 1
+      - name: Update snapshots (both projects)
+        working-directory: apps/web
+        env:
+          CI: "1"
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
+        run: |
+          npx playwright test --project=wizard --update-snapshots || true
+          npx playwright test --project=studio-next --update-snapshots || true
+      - name: Commit regenerated baselines
+        run: |
+          git config user.name "baseline-bot"
+          git config user.email "baseline-bot@users.noreply.github.com"
+          git add apps/web/e2e/*-snapshots
+          git status --short | head -50
+          git commit -m "test(e2e): regenerate wizard-parity and studio-next screenshot baselines on the CI runner" || echo "no baseline changes"
+          git push origin HEAD:tmp/update-baselines-2
+      - name: Stability (real CI projects, 3 repeats each, no retries)
+        working-directory: apps/web
+        env:
+          CI: "1"
+          PLAYWRIGHT_BASE_URL: http://127.0.0.1:5173
+        run: |
+          npx playwright test --project=wizard --repeat-each=3 --retries=0
+          npx playwright test --project=studio-next --repeat-each=3 --retries=0
