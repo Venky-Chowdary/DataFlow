@@ -53,6 +53,11 @@ def _list_sqlalchemy_tables(
             or "",
             connection_string=str(cfg.get("connection_string") or ""),
             ssl=bool(cfg.get("ssl")),
+            # ``db_type`` is the shared SQLAlchemy driver (duckdb, clickhouse
+            # and trino all resolve to generic_sql); the catalog type is what
+            # tells the engine builder a DuckDB ``host`` is a label, not a
+            # dial target (D4).
+            catalog_type=str(cfg.get("type") or fmt or ""),
             table="",
         )
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
