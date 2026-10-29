@@ -47,6 +47,9 @@ export async function reachTransform(page: Page): Promise<void> {
     await next.click();
   }
   await expect(page.getByRole("heading", { name: "Transform", exact: true })).toBeVisible();
+  // Every spec that reaches Transform measures layout or drags on it. The sample-load
+  // toast (and any it raises later) must not move the stage under the pointer.
+  await settleToasts(page);
 }
 
 /**
