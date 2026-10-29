@@ -280,6 +280,11 @@ def _message_with_probe_detail(message: str, detail: str) -> str:
     return text
 
 
+#: Sources whose CDC run falls back to polling the declared cursor when the
+#: server emits no change log (``src/transfer/cdc_transfer.py``).
+_QUERY_POLL_DIALECTS = frozenset({"mysql", "mariadb", "sqlserver", "oracle", "postgresql", "mongodb"})
+
+
 def build_log_capture_gate(
     probe: LogCaptureProbe,
     *,
@@ -325,19 +330,45 @@ def build_log_capture_gate(
             "duration_ms": 0,
             "details": probe.to_dict(),
         }
-    # A declared timestamp still drops deletes. That is incremental, not CDC.
-    # Passing the pre-run check told the operator the source could do CDC.
+    if probe.dialect not in _QUERY_POLL_DIALECTS:
+        # No query-poll fallback at run time for this source: say so up front.
+        return {
+            "id": "g9c_cdc_log_capture",
+            "status": block_status,
+            "message": _message_with_probe_detail(
+                (
+                    f"{probe.dialect or 'this source'} does not emit a change log, "
+                    "so CDC cannot start. Run this sync as incremental."
+                ),
+                probe.detail,
+            ),
+            "duration_ms": 0,
+            "details": {**probe.to_dict(), "cdc_delete_capture": False},
+        }
+    # The operator named the poll column and declared what it means (D28). The
+    # run polls exactly that column (``cdc_transfer`` resolves the same
+    # contract fields), so Validate must not refuse what Execute would run
+    # correctly. It is not log CDC, and the gate says so: inserts and updates
+    # land, a DELETE on the source is not captured.
     return {
         "id": "g9c_cdc_log_capture",
-        "status": block_status,
+        "status": pass_status,
+        "severity": "warn",
         "message": _message_with_probe_detail(
             (
-                f"{probe.dialect} does not emit a change log, so CDC cannot start. "
-                "A cursor poll would drop deletes. Enable the change log, or run "
-                "this sync as incremental."
+                f"{probe.dialect} does not emit a change log, so this CDC run "
+                f"polls `{cursor}` (declared {cursor_semantics or 'cursor'}): "
+                "inserts and updates are captured, DELETEs on the source are "
+                "not. Enable the change log to capture deletes."
             ),
             probe.detail,
         ),
         "duration_ms": 0,
-        "details": {**probe.to_dict(), "cdc_delete_capture": False},
+        "details": {
+            **probe.to_dict(),
+            "cdc_delete_capture": False,
+            "cdc_capture_used": "query_cursor",
+            "poll_cursor_field": cursor,
+            "poll_cursor_semantics": cursor_semantics,
+        },
     }

@@ -66,16 +66,22 @@ def test_unclassified_failure_fails_closed() -> None:
     assert refusal.fail_closed is True
 
 
-def test_postgres_wal_level_does_not_degrade_to_query_cdc() -> None:
-    """wal_level=replica is not a cursor poll. Query CDC then mislabels the PK."""
+def test_postgres_wal_level_degrades_like_any_server_without_a_log() -> None:
+    """wal_level=replica emits no change log; the run may poll a declared cursor (D28).
+
+    A poll on the primary key is still refused once the cursor is resolved
+    (``query_cdc_change_refusal``), and that refusal names wal_level.
+    """
     refusal = classify_log_capture_failure(
         "postgresql",
         "wal_level=replica — logical decoding is off on this server",
         server_log_enabled=False,
     )
     assert refusal.cause == CAUSE_SERVER_NOT_CONFIGURED
-    with pytest.raises(RuntimeError, match="wal_level"):
-        _query_cdc_downgrade(LogCaptureUnavailable(refusal, "postgresql"), "postgresql")
+    fields = _query_cdc_downgrade(LogCaptureUnavailable(refusal, "postgresql"), "postgresql")
+    assert fields["cdc_capture_used"] == "query_cursor"
+    assert fields["cdc_delete_capture"] is False
+    assert "wal_level" in str(fields["cdc_capture_downgrade_detail"])
 
 
 @pytest.mark.parametrize(
