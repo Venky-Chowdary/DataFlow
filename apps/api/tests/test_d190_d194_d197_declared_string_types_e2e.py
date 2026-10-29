@@ -140,10 +140,19 @@ def _run(client, **kwargs) -> tuple[dict, dict]:
     plan = (staged.output or {}).get("plan") or {}
     assert staged.success, {
         "error": staged.error,
-        "blockers": (plan.get("preflight") or {}).get("blockers"),
+        "blockers": ((staged.output or {}).get("preflight") or {}).get("blockers"),
+        "mappings": [
+            {k: m.get(k) for k in ("source", "source_type", "target_type", "fidelity")}
+            for m in (staged.output or {}).get("engine_mappings") or []
+        ],
     }
     preflight = plan.get("preflight") or {}
     assert preflight.get("passed") is True, preflight.get("blockers")
+    from src.ai.copilot.ack_ledger import get_ack_ledger
+
+    # The mappings the confirmed job runs (start_transfer keeps them in the ledger).
+    payload, _why = get_ack_ledger().get_pending_payload(staged.output["ack_id"])
+    plan = {**plan, "engine_mappings": list((payload or {}).get("mappings") or [])}
     confirmed = client.post(
         "/api/v1/copilot/confirm",
         json={"ack_id": staged.output["ack_id"], "reason": "d197"},

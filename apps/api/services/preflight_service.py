@@ -641,8 +641,9 @@ def run_file_preflight(
 
             profiled = profile_dataset(columns, sample_rows).get("schema") or {}
             if profiled:
+                declared_types = dict(column_types or {})
                 column_types = merge_profiler_schema(
-                    dict(column_types or {}),
+                    declared_types,
                     {c: profiled[c] for c in columns if c in profiled},
                     authoritative_existing=False,
                     # A keyspace / document store declares no numeric width, so
@@ -651,6 +652,36 @@ def run_file_preflight(
                     source_carriers_sampled=destination_carriers_are_inferred(
                         source_format or source_kind
                     ),
+                )
+                # Same declared-string rule Map applies (D190 / D194), for the
+                # columns that land in text or in a column this run creates. A
+                # typed existing column keeps the profile as cast evidence.
+                from services.schema_inference import honor_declared_strings
+                from services.type_system import normalize_logical_type as _nlt
+
+                dest_types = {
+                    str(k).lower(): str(v or "")
+                    for k, v in (destination_column_types or {}).items()
+                }
+                target_of = {
+                    str(m.get("source") or ""): str(m.get("target") or m.get("source") or "")
+                    for m in (mappings or [])
+                    if isinstance(m, dict)
+                }
+                column_types = honor_declared_strings(
+                    column_types,
+                    {
+                        c: t
+                        for c, t in declared_types.items()
+                        if not dest_types.get(target_of.get(c, c).lower())
+                        or _nlt(dest_types[target_of.get(c, c).lower()])
+                        in {"string", "text", "varchar", "unknown"}
+                    },
+                    {
+                        c: [r.get(c) for r in sample_rows if isinstance(r, dict)]
+                        for c in columns
+                    },
+                    source_format,
                 )
         except Exception as exc:
             logger.debug("preflight schema inference failed: %s", exc, exc_info=exc)

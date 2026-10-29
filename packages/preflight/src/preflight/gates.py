@@ -1789,12 +1789,17 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
             _with_scope({"structural_unacknowledged": names}, g4_scope),
         )
 
+    # A verified continue-policy contract names this exact source → target
+    # pair with an approver and a reason: an operator approval at least as
+    # strong as ``user_override``. The plan signs one on any flagged mapping;
+    # ignoring it here left a signed approval unable to clear (D197).
     low_confidence = [
         m
         for m in active
         if m.confidence < confidence_floor
         and not m.user_override
         and not _requires_risk_ack(m)
+        and not _risk_cleared(m)
     ]
     if low_confidence:
         names = [f"{m.source}→{m.target} ({m.confidence:.2f})" for m in low_confidence]
@@ -1814,6 +1819,7 @@ def gate_g4_mapping_confidence(ctx: PreflightContext) -> GateResult:
         and not m.user_override
         and not _requires_risk_ack(m)
         and not _is_structural_review_mapping(m)
+        and not _risk_cleared(m)
     ]
     if ambiguous:
         names = [

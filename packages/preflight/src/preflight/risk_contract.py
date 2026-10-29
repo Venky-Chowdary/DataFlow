@@ -121,7 +121,8 @@ def mapping_review_cleared(mapping: Any) -> bool:
     """
     if mapping_requires_risk_contract(mapping) or mapping_is_structural_review(mapping):
         return mapping_risk_cleared(mapping)
-    return mapping_operator_overridden(mapping)
+    # A verified contract on the pair is an explicit, attributed approval too.
+    return mapping_operator_overridden(mapping) or mapping_risk_cleared(mapping)
 
 
 def _canonical_payload(payload: dict[str, Any]) -> str:
