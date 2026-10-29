@@ -166,6 +166,14 @@ def _connector_declared_columns(source_db_type: str) -> frozenset[str]:
     return frozenset(KAFKA_ENVELOPE_TYPES)
 
 
+def _observed_all_null(schema_row: dict) -> bool:
+    """The column was sampled and every sampled value was NULL."""
+    try:
+        return float(schema_row.get("null_rate")) >= 1.0
+    except (TypeError, ValueError):
+        return False
+
+
 def _demote_untyped_varchar_confidence(
     mappings: list[dict],
     *,
@@ -184,6 +192,13 @@ def _demote_untyped_varchar_confidence(
     ``declared_columns`` are columns the connector types itself even though
     the source is schemaless (a Kafka message without a key is an all-NULL
     ``_kafka_key``, not an unknown one — D151).
+
+    A column that was sampled and held NULL in every sampled row is not an
+    unknown placeholder either: it was observed, and NULL onto a text target
+    loses nothing whatever the type turns out to be. An incremental Kafka run
+    maps on the few messages it reads; one whose field was ``null`` in all of
+    them was capped under the Map floor and the run loaded 0 rows (D151, the
+    cap the envelope exemption above had answered only for ``_kafka_key``).
     """
     by_name = {s["name"]: s for s in (source_schemas or [])}
     text_logicals = {"string", "text", "varchar", "unknown"}
@@ -199,6 +214,9 @@ def _demote_untyped_varchar_confidence(
             source_types_authoritative or str(m.get("source") or "") in declared_columns
         ) and logical != "unknown"
         if catalog_typed and target_logical in text_logicals:
+            refined.append(out)
+            continue
+        if target_logical in {"string", "text", "varchar"} and _observed_all_null(src):
             refined.append(out)
             continue
         if logical in text_logicals and not samples:

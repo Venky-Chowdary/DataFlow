@@ -552,6 +552,7 @@ from .job_quarantine import (  # noqa: E402,F401 — re-export
 )
 from .engine_kafka import (  # noqa: E402
     commit_kafka_offsets_on_accept,
+    kafka_nothing_past_committed,
     stamp_kafka_source,
 )
 from .engine_identity import (  # noqa: E402,F401 — re-export
@@ -3070,6 +3071,8 @@ class UniversalTransferEngine:
                 initial_batch = None
             if request.limit > 0 and total_rows is not None:
                 total_rows = min(total_rows, request.limit)
+            if kafka_nothing_past_committed(request, total_rows):
+                return incremental_no_op_result(request, job_id, None)
             if total_rows == 0 and not columns:
                 mongo.update_job_status(
                     job_id, "failed", error="Source table is empty", phase="failed"

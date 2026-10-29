@@ -51,6 +51,26 @@ def stamp_kafka_source(request: Any) -> None:
     source.extra = extra
 
 
+def kafka_nothing_past_committed(request: Any, total_rows: Any) -> bool:
+    """D151 — an incremental Kafka run with no message past the group's offset.
+
+    The peek reads from the committed position to the run's frozen log end.
+    Reaching that end with nothing read is a correct no-op run, as the batch
+    path's cursor bound already treats it. Handing the gates a run with no
+    columns failed it as a "fidelity collapse" on every incremental tick in
+    which the topic had not changed.
+    """
+    from connectors.kafka_reader import configured_kafka_start
+    from services.copy_kafka_common import kafka_family_name
+
+    source = request.source
+    if total_rows != 0 or kafka_family_name(str(source.format or "")) != "kafka":
+        return False
+    # stamp_kafka_source wrote where this run starts; only an incremental run
+    # starts at the committed position.
+    return configured_kafka_start({"extra": dict(source.extra or {})}) == "committed"
+
+
 def commit_kafka_offsets_on_accept(request: Any, dest_summary: dict) -> None:
     """D85 — commit Kafka consumer-group offsets once, only on acceptance.
 
