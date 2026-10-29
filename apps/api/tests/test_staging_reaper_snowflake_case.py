@@ -90,7 +90,9 @@ def test_reaper_sweeps_snowflake_orphans(
     orphan = f"{stored}{mid}{OLD}_AB12CD34"
     live = f"{stored}{mid}{FRESH}_EF56AB78"
     mine = f"{stored}{mid}{OLD}_0000KEEP"
-    real = "REAL_TABLE"
+    # Unique per case: with DATAFLOW_FAKESNOW_KEEP_PATCH=1 (CI) the fake catalog
+    # outlives the case, so a shared name would already exist on the next one.
+    real = f"REAL_TABLE_{prefix.strip('_').upper()}"
     _create(orphan, live, mine, real)
 
     engine = get_sqlalchemy_engine(_cfg())
