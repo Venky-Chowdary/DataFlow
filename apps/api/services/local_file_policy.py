@@ -33,10 +33,13 @@ def confine_local_files() -> bool:
 
 
 def volume_root(subdir: str) -> Path:
-    """``<data_dir>/<subdir>``: the persistent-volume folder the flag would confine to."""
-    from services.platform_config import data_dir
+    """``<data_dir>/<subdir>``: the persistent-volume folder the flag would confine to.
 
-    return data_dir() / subdir
+    Not created; ``implicit_root`` creates it when the flag is on.
+    """
+    from services.platform_config import data_dir_path
+
+    return data_dir_path() / subdir
 
 
 def implicit_root(subdir: str) -> Path | None:

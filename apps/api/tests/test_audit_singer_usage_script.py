@@ -35,6 +35,11 @@ def _schedule(sid, name, source, dest, enabled=True, workspace="ws-1"):
 def stores(tmp_path, monkeypatch):
     for var in ("DATAWRAP_CONNECTOR_STORE", "DATAWRAP_CONNECTOR_STORE_BACKEND", "DATAWRAP_SINGER_TAPS_DIR", "DATAFLOW_SINGER_TAPS_DIR"):
         monkeypatch.delenv(var, raising=False)
+    # The scripts export their store/data-dir choice into os.environ; let
+    # monkeypatch restore whatever the process had.
+    for var in ("DATAFLOW_CONNECTOR_STORE", "DATAFLOW_CONNECTOR_STORE_BACKEND", "DATAFLOW_DATA_DIR", "MONGODB_URI"):
+        monkeypatch.setenv(var, "")  # recorded, so teardown restores the original
+        monkeypatch.delenv(var)
     import services.connector_store as connector_store
     import services.schedule_store as schedule_store
 

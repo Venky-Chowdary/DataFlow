@@ -13,6 +13,7 @@ from services.local_file_policy import (
     confine_local_files,
     implicit_root,
     is_within,
+    volume_root,
 )
 
 
@@ -91,6 +92,27 @@ def require_sqlite_source_file(path: str) -> None:
     )
 
 
+def _explicit_root(kind: str, confine: bool) -> str:
+    """The operator-set root for ``kind`` (``sqlite`` | ``duckdb``), or ``""``.
+
+    ``DATAFLOW_DUCKDB_ROOT`` is DuckDB's own. ``DATAFLOW_SQLITE_ROOT`` also covers
+    DuckDB only when ``confine`` (``DATAFLOW_CONFINE_LOCAL_FILES``) says so.
+    """
+    if kind == "duckdb":
+        own = (getenv_brand("DUCKDB_ROOT") or "").strip()
+        if own or not confine:
+            return own
+    return (getenv_brand("SQLITE_ROOT") or "").strip()
+
+
+def _runtime_root(kind: str) -> tuple[str, bool]:
+    explicit = _explicit_root(kind, confine_local_files())
+    if explicit:
+        return explicit, True
+    root = implicit_root(kind)
+    return (str(root), False) if root else ("", False)
+
+
 def sqlite_root() -> tuple[str, bool]:
     """``(root, explicit)`` — where SQLite files must live, or ``("", False)``.
 
@@ -105,11 +127,7 @@ def sqlite_root() -> tuple[str, bool]:
     (the default) and no explicit root, any path is kept; see
     :mod:`services.local_file_policy`.
     """
-    explicit = (getenv_brand("SQLITE_ROOT") or "").strip()
-    if explicit:
-        return explicit, True
-    root = implicit_root("sqlite")
-    return (str(root), False) if root else ("", False)
+    return _runtime_root("sqlite")
 
 
 def duckdb_root() -> tuple[str, bool]:
@@ -120,13 +138,18 @@ def duckdb_root() -> tuple[str, bool]:
     otherwise confines it to ``<data_dir>/duckdb``. With the flag off (the
     default, as before) DuckDB is unconfined unless ``DATAFLOW_DUCKDB_ROOT`` is set.
     """
-    explicit = (getenv_brand("DUCKDB_ROOT") or "").strip()
-    if not explicit and confine_local_files():
-        explicit = (getenv_brand("SQLITE_ROOT") or "").strip()
+    return _runtime_root("duckdb")
+
+
+def proposed_root(kind: str) -> tuple[str, bool]:
+    """The root ``DATAFLOW_CONFINE_LOCAL_FILES=1`` would enforce in production.
+
+    Pure (creates nothing): the audit script's reference for "inside the root".
+    """
+    explicit = _explicit_root(kind, True)
     if explicit:
         return explicit, True
-    root = implicit_root("duckdb")
-    return (str(root), False) if root else ("", False)
+    return str(volume_root(kind)), False
 
 
 def _confine_embedded_path(
@@ -207,16 +230,12 @@ def confine_duckdb_path(path: str) -> str:
     )
 
 
-def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
-    """Resolve the filesystem path to a SQLite database.
+def sqlite_unconfined_path(database: str, connection_string: str) -> str:
+    """The SQLite file named by ``database`` / ``connection_string``, before any root.
 
     Prefers the raw ``database`` path, then ``connection_string``.  If the value
     looks like a SQLAlchemy ``sqlite://`` URL, strip the scheme so ``sqlite3``
-    receives a filesystem path.
-
-    Resolved paths must stay under :func:`sqlite_root` when there is one
-    (blocks ``..`` / absolute escapes outside the allowlist); a relative path
-    is anchored at that root.
+    receives a filesystem path. ``""`` and ``":memory:"`` pass through.
     """
     path = (database or connection_string or "").strip()
     if not path:
@@ -231,11 +250,21 @@ def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
             path = path[1:]  # sqlite:///relative -> relative
     if "\x00" in path:
         raise ValueError("Invalid SQLite path")
-    return confine_sqlite_path(path)
+    return path
 
 
-def duckdb_file_path(database: str, connection_string: str, host: str = "") -> str:
-    """Resolve a filesystem path (or ``:memory:``) from DuckDB endpoint fields.
+def sqlite_file_path(database: str, connection_string: str, host: str) -> str:
+    """Resolve the filesystem path to a SQLite database.
+
+    Resolved paths must stay under :func:`sqlite_root` when there is one
+    (blocks ``..`` / absolute escapes outside the allowlist); a relative path
+    is anchored at that root.
+    """
+    return confine_sqlite_path(sqlite_unconfined_path(database, connection_string))
+
+
+def duckdb_unconfined_path(database: str, connection_string: str, host: str = "") -> str:
+    """The DuckDB file (or ``:memory:`` / ``md:`` token) named by the endpoint fields.
 
     SQLAlchemy URLs: ``duckdb:///rel``, ``duckdb:////abs``, ``duckdb:///:memory:``.
     MotherDuck ``md:`` / ``motherduck:`` tokens are returned unchanged so callers
@@ -259,4 +288,9 @@ def duckdb_file_path(database: str, connection_string: str, host: str = "") -> s
         return ":memory:" if raw else ""
     if "\x00" in raw:
         raise ValueError("Invalid DuckDB path")
-    return confine_duckdb_path(raw)
+    return raw
+
+
+def duckdb_file_path(database: str, connection_string: str, host: str = "") -> str:
+    """Resolve a filesystem path (or ``:memory:``) from DuckDB endpoint fields."""
+    return confine_duckdb_path(duckdb_unconfined_path(database, connection_string, host))

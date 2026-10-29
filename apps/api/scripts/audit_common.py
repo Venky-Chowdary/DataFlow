@@ -3,7 +3,8 @@
 ``audit_egress_impact.py``, ``audit_singer_usage.py`` and
 ``audit_sqlite_paths.py`` only read: they call ``list_connectors()`` (and, for
 Singer, the schedule store's list calls) and print. Nothing here writes to a
-store, a file, or a database.
+store, a file, or a database. The one side effect: importing the app's stores
+creates the (empty) data directory if it does not exist yet.
 """
 from __future__ import annotations
 
@@ -34,7 +35,8 @@ def add_store_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--json", action="store_true", help="print JSON instead of a table")
 
 
-def _set_env(name: str, value: str) -> None:
+def set_env(name: str, value: str) -> None:
+    """Set ``DATAFLOW_<suffix>`` (dropping a ``DATAWRAP_<suffix>`` that would shadow it)."""
     suffix = name.split("_", 1)[1]
     os.environ.pop(f"DATAWRAP_{suffix}", None)
     os.environ[f"DATAFLOW_{suffix}"] = value
@@ -45,14 +47,14 @@ def configure_store(file: str | None = None, mongo_url_env: str | None = None) -
     if file and mongo_url_env:
         raise SystemExit("choose one of --file and --mongo-url-env")
     if file:
-        _set_env("DATAFLOW_CONNECTOR_STORE", file)
-        _set_env("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
+        set_env("DATAFLOW_CONNECTOR_STORE", file)
+        set_env("DATAFLOW_CONNECTOR_STORE_BACKEND", "file")
     elif mongo_url_env:
         url = os.environ.get(mongo_url_env, "").strip()
         if not url:
             raise SystemExit(f"environment variable {mongo_url_env} is not set")
         os.environ["MONGODB_URI"] = url
-        _set_env("DATAFLOW_CONNECTOR_STORE_BACKEND", "mongo")
+        set_env("DATAFLOW_CONNECTOR_STORE_BACKEND", "mongo")
 
 
 def load_saved_connectors(args: argparse.Namespace) -> list[Any]:
