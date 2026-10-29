@@ -160,6 +160,15 @@ def _timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
             "Check the host and port, the firewall or VPN, and that the database "
             "is healthy, then try again."
         )
+    if step and not role:
+        # ``note_step(step)`` with no system: Datawrap's own work (Map). Naming a
+        # database here would send the operator to a healthy host (D189).
+        return (
+            f"{tool} did not finish within {waited} (step: {step}). That step is "
+            "Datawrap's own work and waits on neither the source nor the "
+            "destination, so neither system is the cause; nothing was staged. "
+            "Try again, and report it if it repeats."
+        )
     where = f" at step: {step}" if step else ""
     return (
         f"{tool} did not finish within {waited}{where}. A system it reads from "
