@@ -174,6 +174,17 @@ def _observed_all_null(schema_row: dict) -> bool:
         return False
 
 
+def _same_named(mapping: dict) -> bool:
+    """Source and target are the same column name (as DataFlow's DDL spells it)."""
+    from connectors.sql_identifiers import sanitize_identifier
+
+    src = str(mapping.get("source") or "").strip()
+    tgt = str(mapping.get("target") or "").strip()
+    if not src or not tgt:
+        return False
+    return src.casefold() == tgt.casefold() or sanitize_identifier(src).casefold() == tgt.casefold()
+
+
 def _demote_untyped_varchar_confidence(
     mappings: list[dict],
     *,
@@ -216,7 +227,12 @@ def _demote_untyped_varchar_confidence(
         if catalog_typed and target_logical in text_logicals:
             refined.append(out)
             continue
-        if target_logical in {"string", "text", "varchar"} and _observed_all_null(src):
+        if target_logical in {"string", "text", "varchar"} and (
+            _observed_all_null(src) or _same_named(out)
+        ):
+            # NULL onto text loses nothing; nor does any value onto a text
+            # column of the same name: missing samples say nothing about the
+            # pair (D159, "ambiguous mapping name->name (gap 0.94)").
             refined.append(out)
             continue
         if logical in text_logicals and not samples:
