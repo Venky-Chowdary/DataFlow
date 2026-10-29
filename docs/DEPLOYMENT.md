@@ -243,3 +243,44 @@ untrusting tenants.
 Owner how-to: leave at `1`, review `authz.workspace_admin_iam.would_deny`
 events for who relies on it, move those people to a platform admin role or an
 admin-minted key, then set `0`.
+
+---
+
+## Transform-library RBAC (what changed, per role)
+
+The 13 `/api/v1/transform-library/*` routes now carry explicit permissions:
+the 6 `GET` routes need `job.read`; the 7 writes (`POST`, `PATCH`, `DELETE`,
+including `compile`, `preview`, `upgrade-preview` and template `clone`) need
+`connector.write`. This is not behind a flag: it is a rule-table entry that
+makes the routes behave like every other reviewed route. Computed from
+`services/rbac.py` (`_ROLE_PERMISSIONS`, `_PATH_RULES`, `_fallback_permission`)
+and pinned by `tests/test_transform_library_rbac_matrix.py`.
+
+Role tables: `viewer` and `operator` hold `job.read` but not
+`connector.write`; `editor` and `admin` hold both.
+
+| Role | GET (6 routes) before -> after | Writes (7 routes) before -> after |
+|---|---|---|
+| viewer | see below -> allowed | see below -> **denied** |
+| operator | see below -> allowed | see below -> **denied** |
+| editor | see below -> allowed | see below -> allowed |
+| admin | see below -> allowed | see below -> allowed |
+
+"Before" depends on `DATAFLOW_RBAC_UNRULED_ROUTES` (the routes matched no rule):
+
+- **`deny` (the default, also the default before this change):** every
+  authenticated request to all 13 routes was rejected with 403 `no_rule`, for
+  every role including admin. The change *grants* access: viewer/operator/
+  editor/admin read, editor/admin write. No role loses access that worked.
+- **`allow_and_log`:** the legacy fallback applied (`GET` -> `job.read`,
+  writes -> `connector.write`), which is the same permission the explicit rules
+  now name. Nothing changes for any role: viewer/operator could already not
+  write, and everyone could already read.
+
+Neither mode ever let a viewer or operator write recipes through these routes
+in the code as it stands, so no currently-working role loses access. (The
+commit message of `fix(rbac): the transform-library routes carry explicit
+permissions` describes "unruled = everyone allowed"; that does not match the
+fallback table above.) Deployments that actually saw viewers or operators
+saving recipes were running with RBAC off (`DATAFLOW_REQUIRE_AUTH=0`), where
+this middleware is skipped and nothing changes.
