@@ -232,10 +232,11 @@ def backfill_legacy_workspaces(*, apply: bool = False, owner_email: str = "") ->
         schedule_ws.setdefault(s.id, s.workspace_id)
     for c in connector_store.list_connectors():
         connector_ws.setdefault(c.id, c.workspace_id)
-    platform_ws = workspaces.for_owner("")
 
     def followed(evidence: Iterable[str]) -> str:
-        return _unique(ws for ws in evidence if ws) or platform_ws
+        # Resolved only when a row needs it: a run with nothing to place must
+        # not create the platform owner's workspace.
+        return _unique(ws for ws in evidence if ws) or workspaces.for_owner("")
 
     contract_used_by: dict[str, list[str]] = defaultdict(list)
     recipe_used_by: dict[str, list[str]] = defaultdict(list)
@@ -317,7 +318,9 @@ def backfill_legacy_workspaces(*, apply: bool = False, owner_email: str = "") ->
         ("transfer_plans", transfer_plan_store),
         ("shape_drafts", shape_draft_store),
     ):
-        report.counts[name] = store.assign_unscoped_workspaces(lambda _row: platform_ws, apply=apply)
+        report.counts[name] = store.assign_unscoped_workspaces(
+            lambda _row: workspaces.for_owner(""), apply=apply
+        )
     for collection, counts in report.counts.items():
         logger.info(
             "legacy workspace backfill %s: %s assigned, %s skipped (%s)",
