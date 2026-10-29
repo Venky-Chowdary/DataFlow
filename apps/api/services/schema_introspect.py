@@ -4680,6 +4680,42 @@ def _introspect_weaviate(**kwargs: Any) -> dict[str, Any]:
         "schema": str(match.get("class") or class_name),
     }
 
+
+def catalog_read_back(dest_db: str, physical: str) -> str:
+    """The ``inferred_type`` this module's introspection reports for ``physical``.
+
+    Introspection hands back a logical lattice type, not the DDL spelling: an
+    Oracle ``CLOB`` reads back as ``TEXT``. Anything that must recognise a type
+    DataFlow itself created (run 2 into its own table) compares against this,
+    not against the CREATE spelling (D198). Engines without a catalog mapper
+    here read back the physical spelling unchanged.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+
+    db = _normalize_dest_db(dest_db)
+    raw = str(physical or "").strip()
+    if not raw:
+        return ""
+    if "oracle" in db:
+        from services.schema_introspect_enterprise import _oracle_to_logical
+
+        return _oracle_to_logical(raw)
+    if db == "sqlserver":
+        from services.schema_introspect_enterprise import _sqlserver_to_logical
+
+        # INFORMATION_SCHEMA spells types lower-case; the reader folds (max) in.
+        return _sqlserver_to_logical(raw.lower())
+    mapper = {
+        "postgresql": _pg_to_logical,
+        "redshift": _pg_to_logical,
+        "mysql": _mysql_to_logical,
+        "bigquery": _bq_to_logical,
+        "clickhouse": _ch_to_logical,
+        "snowflake": _sf_to_logical,
+    }.get(db)
+    return mapper(raw) if mapper else raw
+
+
 _ENTERPRISE_INTROSPECT_EXPORTS = frozenset(
     {
         "_introspect_oracle",
