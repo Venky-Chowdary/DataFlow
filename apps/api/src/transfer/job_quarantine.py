@@ -15,6 +15,37 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def rebase_batch_rejects(
+    details: Any,
+    *,
+    batch_start: int,
+    row_basis: str = "",
+) -> list[dict[str, Any]]:
+    """Copies of a batch's findings numbered by absolute source row (D35).
+
+    Writers number a finding by its position inside the batch they were
+    handed. Across batches that makes two different bad rows share a row
+    number, and replay identity falls back to that number when a finding has no
+    proven source key. ``batch_row`` / ``batch_offset`` keep the writer's own
+    numbering. ``row_basis`` names a count that is not the source's own line
+    numbering (rows a recipe removed earlier never reached the writer).
+    """
+    out: list[dict[str, Any]] = []
+    for raw in details or []:
+        if not isinstance(raw, dict):
+            continue
+        detail = dict(raw)
+        local_row = int(detail.get("row") or 0)
+        if local_row > 0:
+            detail["batch_row"] = local_row
+            detail["batch_offset"] = int(batch_start)
+            detail["row"] = int(batch_start) + local_row  # 1-based absolute
+            if row_basis:
+                detail["row_basis"] = row_basis
+        out.append(detail)
+    return out
+
+
 def rows_with_findings(details: list[dict[str, Any]]) -> int:
     """Distinct source rows that carry a finding of their own."""
     return len(
