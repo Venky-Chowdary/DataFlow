@@ -849,6 +849,12 @@ def _stream_database_transfer_impl(
             run.tally.dest_summary.setdefault(PRECOUNT_KEY, int(pre_write_rows_before))
         if run.cfg.incremental:
             run.tally.dest_summary["sync_mode"] = run.cfg.effective_sync
+            from services.incremental_drift import stamp_watermark_origin
+
+            stamp_watermark_origin(
+                run.tally.dest_summary, cursor_key=pre_copy_cursor_key,
+                cursor_column=run.cfg.cursor_source_col, before=pre_copy_watermark,
+            )
             wm = str(run.tally.dest_summary.get("incremental_watermark") or "").strip()
             if int(rows_copied or 0) == 0:
                 stamp_incremental_no_op(run.tally.dest_summary)
@@ -2812,6 +2818,12 @@ def _stream_database_transfer_impl(
             run.tally.dest_summary["delivery_semantics"] = "at_least_once_idempotent_apply"
             run.tally.dest_summary["resume_write_mode"] = run.cfg.write_mode
         run.tally.dest_summary["watermark"] = run.cfg.watermark
+        from services.incremental_drift import stamp_watermark_origin
+
+        stamp_watermark_origin(
+            run.tally.dest_summary, cursor_key=cursor_key,
+            cursor_column=run.cfg.cursor_source_col, before=job_start_watermark,
+        )
         try:
             from services.source_snapshot import get_source_snapshot_meta
 
@@ -2960,6 +2972,12 @@ def _stream_database_transfer_impl(
             seed=window_seed_bookmark,
             seed_inclusive=window_seed_inclusive,
             high=running_cursor,
+        )
+        from services.incremental_drift import stamp_watermark_origin
+
+        stamp_watermark_origin(
+            run.tally.dest_summary, cursor_key=cursor_key,
+            cursor_column=run.cfg.cursor_source_col, before=job_start_watermark,
         )
     if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()

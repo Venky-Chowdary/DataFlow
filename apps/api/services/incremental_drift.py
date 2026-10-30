@@ -272,3 +272,146 @@ def attach_drift(
         flag=DRIFT_FLAG,
     )
     return out
+
+
+# --------------------------------------------------------------------------- #
+# Round 5 (D203 prov.) — one watermark contract, reported on the job
+# --------------------------------------------------------------------------- #
+
+#: Job field carrying this run's watermark movement.
+WATERMARK_REPORT_KEY = "incremental_watermark"
+
+
+def stamp_watermark_origin(
+    dest_summary: dict[str, Any],
+    *,
+    cursor_key: str,
+    cursor_column: str,
+    before: Any,
+) -> None:
+    """Record the route bookmark this run read and the watermark it started at.
+
+    ``before`` is the job's start watermark (a resumed pass keeps the first
+    pass's), not a lookback-shifted read seed.
+    """
+    if not cursor_key or not cursor_column or not isinstance(dest_summary, dict):
+        return
+    dest_summary["incremental_cursor_key"] = cursor_key
+    dest_summary["incremental_cursor_column"] = cursor_column
+    dest_summary["incremental_watermark_before"] = (
+        None if before in (None, "") else str(before)
+    )
+
+
+def watermark_report(
+    dest_summary: dict[str, Any] | None, *, rows_selected: Any
+) -> dict[str, Any] | None:
+    """``{before, after, rows_selected, advanced}`` for an incremental run.
+
+    ``after`` is read back from the durable route store — the value the next
+    run will read — so a rolled-back batch reports the watermark it restored.
+    """
+    summary = dest_summary or {}
+    key = str(summary.get("incremental_cursor_key") or "").strip()
+    if not key:
+        return None
+    from services.sync_cursor import get_watermark
+
+    before = summary.get("incremental_watermark_before")
+    try:
+        after = get_watermark(key)
+    except Exception:  # noqa: BLE001 - an unreadable store is reported, not hidden
+        after = None
+    try:
+        selected = int(rows_selected or 0)
+    except (TypeError, ValueError):
+        selected = 0
+    return {
+        "cursor_key": key,
+        "cursor_column": str(summary.get("incremental_cursor_column") or ""),
+        "before": before,
+        "after": after,
+        "rows_selected": selected,
+        "advanced": after not in (None, "") and after != before,
+    }
+
+
+def measure_window_duplicates(
+    *,
+    source_rows: list[dict[str, Any]],
+    target_rows: list[dict[str, Any]],
+    match_cols: list[str],
+    dest_db_type: str,
+    dest_types: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Rows inside an append window that the destination holds more often than the source.
+
+    Both populations are already scoped to the run's cursor window. The
+    identity is ``match_cols`` — (cursor, key) for a keyed append, every column
+    for an unkeyed one — so an older version of a key kept by an append table
+    is a different identity, not a duplicate. Only an excess copy of a row the
+    source window holds is counted: rows the source does not hold are drift
+    (reported by :func:`measure_drift`), never this check's verdict. Returns
+    ``{}`` when every source row is at the destination at most as often as the
+    source holds it.
+    """
+    from collections import Counter
+
+    from services.reconciliation import fingerprint_for_reconcile
+
+    cols = [c for c in match_cols if c]
+    if not cols or not source_rows or not target_rows:
+        return {}
+    types = dest_types or {}
+
+    def _ident(row: dict[str, Any]) -> tuple[str, ...]:
+        low = {str(k).lower(): v for k, v in row.items()}
+        return tuple(
+            fingerprint_for_reconcile(
+                low.get(c.lower()), ddl_type=str(types.get(c) or ""), engine=dest_db_type
+            )
+            for c in cols
+        )
+
+    src = Counter(_ident(r) for r in source_rows if isinstance(r, dict))
+    tgt = Counter(_ident(r) for r in target_rows if isinstance(r, dict))
+    excess = {k: tgt[k] - n for k, n in src.items() if tgt.get(k, 0) > n}
+    if not excess:
+        return {}
+    sample = [
+        {"identity": dict(zip(cols, (_show(v) for v in key))), "copies": tgt[key], "expected": src[key]}
+        for key in list(excess)[:_SAMPLE]
+    ]
+    return {
+        "rows": sum(excess.values()),
+        "identities": len(excess),
+        "match_columns": cols,
+        "sample": sample,
+    }
+
+
+def fail_on_window_duplicates(
+    report: dict[str, Any], duplicates: dict[str, Any]
+) -> dict[str, Any]:
+    """Gate-8 verdict: an append window delivered twice is a failed run.
+
+    Inside the window is this run's responsibility (D188): a re-read tie peer
+    that was appended again is a loss of exactly-once, not drift.
+    """
+    if not duplicates:
+        return report
+    out = dict(report)
+    n = int(duplicates.get("rows") or 0)
+    cols = ", ".join(duplicates.get("match_columns") or [])
+    sentence = (
+        f"Gate-8: {n:,} row(s) inside this run's cursor window are at the "
+        "destination more times than the source holds them — the window was "
+        f"appended twice (matched on {cols}). The run is not exactly-once; the "
+        "watermark is not advanced past it."
+    )
+    out["passed"] = False
+    out["window_duplicates"] = duplicates
+    base = str(out.get("message") or "").rstrip()
+    out["message"] = f"{sentence} {base}".strip() if base else sentence
+    out["error"] = sentence
+    return out

@@ -124,6 +124,12 @@ def inspect_destination_for_preflight(
         from services.destination_identity import stamp_destination_identity
 
         ok, msg, cfg = probe_saved_connector(connector_id)
+        if cfg:
+            # The run keys this route's watermark by connector id (Execute's
+            # resolve_connector_config stamps it). Without it Validate looked
+            # the watermark up under host:port, found none, and judged an
+            # incremental run 2 as the whole table (round 5, D203 prov.).
+            cfg = {**cfg, "connector_id": str(connector_id)}
         db_type = (cfg.get("type") or dest_type or "").lower()
         out["db_type"] = db_type
         # Credentials travel to the collision probe / engine inside a general

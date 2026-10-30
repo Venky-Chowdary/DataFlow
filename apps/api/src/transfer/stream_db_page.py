@@ -123,6 +123,9 @@ def _boundary_rows_already_landed(run, headers: list[str], rows: list[list[str]]
             stream_error_policy=cfg.stream_error_policy,
             digest_dest_types=cfg.digest_dest_types,
             dest_bind_dialect=cfg.dest_bind_dialect,
+            # The write path's remap basis — the same one Gate-8's re-read uses.
+            remap_dest_types=cfg.fingerprint_dest_types,
+            destination_pk_columns=list(cfg.pk_target_cols or []),
         )
         if drop:
             _stream.logger.info(

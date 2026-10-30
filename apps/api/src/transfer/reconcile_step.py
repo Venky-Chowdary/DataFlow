@@ -3352,6 +3352,24 @@ def _maybe_attach_verification_ladder(
         ),
     )
     out = attach_ladder_to_reconcile_report(report, ladder)
+    if window_scoped_target:
+        # Round 5 (D203 prov.) — the ladder allows the extra rows an append
+        # table holds, so a window appended twice passed. Exactly-once is
+        # this run's own verdict, inside the window (D188).
+        from services.incremental_drift import (
+            fail_on_window_duplicates,
+            measure_window_duplicates,
+        )
+
+        _ident_keys = list(pk_cols) or ([_t_window.pk] if _t_window.pk else [])
+        out = fail_on_window_duplicates(out, measure_window_duplicates(
+            source_rows=source_rows, target_rows=target_rows,
+            match_cols=(
+                list(dict.fromkeys([_t_window.cursor, *_ident_keys]))
+                if _ident_keys else list(target_cols)
+            ),
+            dest_db_type=dest_type, dest_types=dest_types,
+        ))
     if window is not None and source_reread and keyed and (pk_cols or pk_column):
         # D188 — rows the cursor did not select are not this run's verdict,
         # but a disagreement there is reported, never silently dropped.
