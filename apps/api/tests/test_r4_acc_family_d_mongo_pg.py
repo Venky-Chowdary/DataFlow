@@ -136,7 +136,8 @@ def test_one_real_boolean_among_strings_is_not_boolean(transfer_client, collecti
         got = dict(_pg_rows(table, ["_id", "mixed"], "_id"))
         for d in _DOCS:
             assert got[str(d["_id"])] == d.get("mixed")
-        # The single BSON boolean is kept (rendered as text), not dropped.
-        assert got[str(_MIXED_DOCS[0]["_id"])] not in (None, "")
+        # The single BSON boolean lands as PostgreSQL's boolean text, distinct
+        # from the string 't' another row holds (it used to land as 't').
+        assert got[str(_MIXED_DOCS[0]["_id"])] == "true"
     finally:
         _drop(table)
