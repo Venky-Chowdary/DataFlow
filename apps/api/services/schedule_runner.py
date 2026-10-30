@@ -873,13 +873,11 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
     return entry
 
 
-def _notify_schedule(
-    sched, job_id: str, status: str, job_doc: dict | None, *, reason: str = ""
-) -> None:
+def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> None:
     """Deliver success/failure notifications honoring per-schedule preferences.
 
-    ``reason`` is the run record's reason. A run that failed before a job
-    existed, or whose worker was lost, has no job error to quote.
+    A run that failed before a job existed passes ``{"error": <run reason>}``
+    as ``job_doc``: there is no job error to quote.
     """
     success = _is_success(status)
     if success and not sched.notify_on_success:
@@ -902,7 +900,7 @@ def _notify_schedule(
             destination=sched.dest_table or sched.dest_connector_id,
             records_transferred=int(doc.get("records_processed", 0) or 0),
             rejected_rows=int(doc.get("rejected_rows", 0) or 0),
-            error=doc.get("error") or reason or "",
+            error=doc.get("error") or "",
             retry_url=(
                 f"/api/v1/connectors/jobs/{job_id}/resume"
                 if job_id
@@ -1211,8 +1209,9 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
     status = (job_doc or {}).get("status") or "failed"
     from services.schedule_run_lifecycle import run_finished
 
-    if job_id and run_finished(sched, job_id):
-        # Already recorded (the done-callback and the beat can both arrive).
+    if job_id and run_finished(sched, job_id, success=_is_success(status)):
+        # Already recorded with the same outcome (the done-callback and the
+        # beat can both arrive).
         return
     lost = _settle_if_worker_lost(job_id, job_doc)
     if lost is not None:
@@ -1338,7 +1337,10 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
             )
     from services.schedule_run_lifecycle import default_reason
 
-    _notify_schedule(sched, job_id, status, job_doc, reason=default_reason(entry))
+    doc = dict(job_doc or {})
+    if not _is_success(status):
+        doc["error"] = str(doc.get("error") or default_reason(entry))
+    _notify_schedule(sched, job_id, status, doc)
 
 
 def _park_on_decision(
@@ -1386,7 +1388,7 @@ def _park_on_decision(
     _open_finding(schedule_id, exc, attempt=attempt, job_id=job_id)
     if updated is not None:
         # No job ran, so no job-level notification will ever say this failed.
-        _notify_schedule(updated, job_id, "failed", None, reason=message)
+        _notify_schedule(updated, job_id, "failed", {"error": message})
 
 
 def _collapse_repeated_finding(message: str) -> str:
@@ -1749,10 +1751,11 @@ def _run_schedule(
         return None
     if not sched.enabled and not manual:
         return None
-    attempt = sched.retry_attempt if sched.retry_at else 0
+    retrying = bool(getattr(sched, "retry_at", None))
+    attempt = int(getattr(sched, "retry_attempt", 0) or 0) if retrying else 0
     trigger = (
         life.TRIGGER_MANUAL if manual
-        else life.TRIGGER_RETRY if sched.retry_at
+        else life.TRIGGER_RETRY if retrying
         else life.TRIGGER_CADENCE
     )
     run_id = life.begin_run(schedule_id, trigger=trigger, attempt=attempt)
@@ -1839,7 +1842,7 @@ def _fail_unstarted_run(
         if before is not None and _park_reason(before, {}, entry):
             _open_finding(schedule_id, reason, attempt=attempt, job_id=job_id)
         if updated is not None:
-            _notify_schedule(updated, job_id, "failed", None, reason=reason)
+            _notify_schedule(updated, job_id, "failed", {"error": reason})
     except Exception:  # noqa: BLE001 — recording must not mask the original error
         logger.exception("Schedule %s failed run %s was not recorded", schedule_id, run_id)
 

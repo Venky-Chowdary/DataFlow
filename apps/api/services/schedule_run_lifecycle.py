@@ -192,9 +192,22 @@ def _finished_job(history: list[dict[str, Any]], entry: dict[str, Any]) -> bool:
     )
 
 
-def run_finished(sched: Any, job_id: str) -> bool:
-    """True when the run record for ``job_id`` is already terminal."""
-    return _finished_job(list(getattr(sched, "run_history", None) or []), {"job_id": job_id})
+def run_finished(sched: Any, job_id: str, *, success: bool | None = None) -> bool:
+    """True when the run record for ``job_id`` is already terminal.
+
+    With ``success``, only when that record ended the same way (a job that
+    is now reported failed after a recorded success is still finalized: the
+    record stays as it was, the park decision is taken again).
+    """
+    for row in getattr(sched, "run_history", None) or []:
+        if (
+            str(row.get("job_id") or "") == str(job_id)
+            and row.get("run_id")
+            and not is_open(row.get("status"))
+            and (success is None or _is_success(row.get("status")) == success)
+        ):
+            return True
+    return False
 
 
 def merge_run_entry(history: list[dict[str, Any]], entry: dict[str, Any]) -> list[dict[str, Any]]:
@@ -604,6 +617,6 @@ def _fail_unstarted(sched: Any, run_id: str, reason: str) -> None:
         from services.schedule_runner import _notify_schedule
 
         if fresh is not None:
-            _notify_schedule(fresh, "", FAILED, None, reason=reason)
+            _notify_schedule(fresh, "", FAILED, {"error": reason})
     except Exception:  # noqa: BLE001
         logger.exception("Worker-lost notification failed for %s", sched.id)
