@@ -201,3 +201,55 @@ def test_mirror_soft_deletes_through_studio_rest_route(client, dst_kind):
     finally:
         h.drop_table("postgresql", src_table)
         h.drop_table(dst_kind, dest_table)
+
+
+@pytest.mark.parametrize("dst_kind", ["postgresql", "mysql"])
+def test_mirror_soft_deletes_through_studio_plan_and_run(client, dst_kind, tmp_path, monkeypatch):
+    """Studio's Validate (persisted plan) and Execute (multipart /transfer/run)."""
+    import services.transfer_plan_store as plan_store
+    from tests.r7_studio_harness import Studio, blockers, preflight_mappings
+
+    monkeypatch.setattr(plan_store, "STORE_PATH", tmp_path / "transfer_plans.json")
+    token = uuid.uuid4().hex[:8]
+    src_table = f"r7m_s_{token}"
+    dest_table = f"r7m_d_{token}"
+    contracts = [{"name": src_table, "selected": True, "sync_mode": "mirror", "primary_key": "id"}]
+    try:
+        h.execute("postgresql", f'CREATE TABLE "{src_table}" (id INT PRIMARY KEY, note TEXT NULL)')
+        for rid, note in _ROWS:
+            h.execute("postgresql", f'INSERT INTO "{src_table}" VALUES ({rid}, {_lit("postgresql", note)})')  # nosec B608
+        src, dst = _connectors(token, dst_kind)
+        studio = Studio(
+            client,
+            source={"kind": "database", "format": "postgresql", "connector_id": src.id, "table": src_table},
+            destination={"kind": "database", "format": dst.type, "connector_id": dst.id, "table": dest_table},
+            policies={"sync_mode": "mirror", "schema_policy": "manual_review",
+                      "validation_mode": "strict", "stream_contracts": contracts},
+        )
+
+        def run() -> dict:
+            si, di = studio.introspect()
+            sc, ss = studio.columns(si)
+            dc, ds = studio.columns(di) if di.get("table_exists") else ([], {})
+            maps = preflight_mappings(
+                studio.map(sc, ss, dc, ds, table_exists=bool(di.get("table_exists"))),
+                approve=True, dest_columns=dc if dc else None,
+            )
+            pf = studio.validate(sc, ss, dc, ds, maps)
+            assert pf.get("passed"), blockers(pf)
+            job = studio.execute(maps, stream_contracts_json=contracts)
+            assert job.get("status") == "completed", job.get("error") or job.get("message")
+            return job
+
+        run()
+        h.execute("postgresql", f'DELETE FROM "{src_table}" WHERE id IN {_DELETED}')  # nosec B608
+        job = run()
+        got = _dest_rows(dst_kind, dest_table)
+        assert len(got) == len(_ROWS), got
+        assert {r[0] for r in got if r[2]} == set(_DELETED), got
+        assert [(r[0], r[1]) for r in got if not r[2]] == [r for r in _ROWS if r[0] not in _DELETED]
+        ra = job.get("row_accounting") or {}
+        assert ra.get("balanced") is True and ra.get("active_count") == len(_ROWS) - len(_DELETED), ra
+    finally:
+        h.drop_table("postgresql", src_table)
+        h.drop_table(dst_kind, dest_table)
