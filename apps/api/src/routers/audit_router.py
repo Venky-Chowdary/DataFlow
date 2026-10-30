@@ -158,9 +158,11 @@ async def list_events(
         after_seq=after_seq,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    from services.audit_actor_display import add_actor_display
+
     return JSONResponse(
         {
-            "events": events,
+            "events": add_actor_display(events),
             "count": len(events),
             "workspace_id": workspace_id or None,
             "tenant_id": tenant_id or None,

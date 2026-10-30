@@ -31,6 +31,22 @@ API_KEY_LIFETIMES: dict[str, int | None] = {
     "never": None,
 }
 DEFAULT_API_KEY_LIFETIME = "90d"
+#: Every prefix a workspace API key may carry. ``dfk_`` keys stay valid forever;
+#: new keys take ``dwk_`` when the brand flag is on (services.brand).
+API_KEY_PREFIXES = ("dfk_", "dwk_")
+
+
+def is_workspace_api_key(token: str) -> bool:
+    return bool(token) and token.startswith(API_KEY_PREFIXES)
+
+
+def _mint_raw_key(key_id: str) -> str:
+    from services import brand
+
+    prefix = brand.name_for_new("api_key_prefix")
+    if prefix != brand.artifact("api_key_prefix").legacy:
+        brand.audit_new_name("api_key_prefix", prefix, f"api_key:{key_id}")
+    return f"{prefix}{secrets.token_urlsafe(32)}"
 
 _SSO_TYPES = ("saml", "oidc", "azure_ad")
 _CLOUD_PROVIDERS = ("openai", "anthropic")
@@ -790,10 +806,11 @@ def create_api_key(
             raise ValueError(
                 f"scope is outside the {stored_role} role: {sorted(disallowed_scopes)[0]}"
             )
-    raw = f"dfk_{secrets.token_urlsafe(32)}"
+    key_id = str(uuid.uuid4())
+    raw = _mint_raw_key(key_id)
     prefix = raw[:12]
     record = {
-        "id": str(uuid.uuid4()),
+        "id": key_id,
         "name": name.strip()[:64] or "API key",
         "prefix": prefix,
         "role": stored_role,
@@ -850,8 +867,8 @@ def rotate_api_key(
             raise ValueError("API key scopes are invalid")
         stored_scopes = sorted(set(scopes)) if scopes is not None else None
 
-        raw = f"dfk_{secrets.token_urlsafe(32)}"
         new_id = str(uuid.uuid4())
+        raw = _mint_raw_key(new_id)
         new_record = {
             "id": new_id,
             "name": source.get("name", "API key"),
@@ -912,7 +929,7 @@ def revoke_api_key(key_id: str) -> bool:
 
 
 def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
-    if not raw or not raw.startswith("dfk_"):
+    if not is_workspace_api_key(raw):
         return None
     digest = _hash_api_key(raw)
     for item in load_api_key_records():
