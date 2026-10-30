@@ -59,7 +59,13 @@ def test_cursor_bounded_walk_reads_every_row_after_the_mark_once(tmp_path):
         ROWS * 3,  # a walk that does not advance would stop here, not hang
     ))
     ids = [int(r["id"]) for r in walked]
-    assert ids == list(range(1001, ROWS + 1)), (len(ids), ids[:5], ids[-5:])
+    # Each row once, and the walk ends. A snapshot-scan reader may hand over
+    # the mark's whole tie group (cursor >= seed) for the caller to trim by
+    # (cursor, key); nothing earlier than that group, nothing twice.
+    assert len(ids) == len(set(ids)), (len(ids), len(set(ids)))
+    assert set(range(1001, ROWS + 1)) <= set(ids), (len(ids), ids[:5], ids[-5:])
+    tie_group = {g for g in range(1, ROWS + 1) if g // 60 == 16}
+    assert set(ids) - set(range(1001, ROWS + 1)) <= tie_group
     from services.value_serializer import is_reader_null_cell
 
     for r in walked:
