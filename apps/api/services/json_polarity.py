@@ -162,3 +162,42 @@ def json_document_wire(value: Any) -> str:
             return json.dumps(value, ensure_ascii=False)
         return text
     return json_document_text(value)
+
+
+def _keep_engine_text(text: Any) -> Any:
+    return text
+
+
+def keep_pg_json_engine_text(sa_connection: Any) -> Any:
+    """Make psycopg2 hand json/jsonb cells over as the engine's own text.
+
+    psycopg2 decodes json/jsonb with ``json.loads`` before any DataFlow code
+    sees the cell: the document ``"hello"`` arrives as the Python str
+    ``hello``, ``""`` as ``''`` and JSON ``null`` as ``None`` - the same value
+    as SQL NULL. A sampler built on that judged a JSON string scalar as bare
+    text (D207: ``""`` read as an empty cell, ``"   "`` as whitespace text,
+    ``"hello"`` as non-JSON). This is rule 1 above for query-shaped reads:
+    the Execute reader and the destination sampler already project ``::text``.
+
+    Returns a callable that restores psycopg2's decoder on the connection (it
+    goes back to the pool); a no-op for every other driver.
+    """
+    try:
+        dbapi = sa_connection.connection.dbapi_connection
+        import psycopg2.extensions
+        import psycopg2.extras
+    except Exception:  # noqa: BLE001 - not a psycopg2 connection
+        return lambda: None
+    if not isinstance(dbapi, psycopg2.extensions.connection):
+        return lambda: None
+    psycopg2.extras.register_default_json(dbapi, loads=_keep_engine_text)
+    psycopg2.extras.register_default_jsonb(dbapi, loads=_keep_engine_text)
+
+    def _restore() -> None:
+        try:
+            psycopg2.extras.register_default_json(dbapi, loads=json.loads)
+            psycopg2.extras.register_default_jsonb(dbapi, loads=json.loads)
+        except Exception:  # noqa: BLE001 - a closed connection keeps no caster
+            pass
+
+    return _restore
