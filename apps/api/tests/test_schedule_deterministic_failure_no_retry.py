@@ -141,3 +141,23 @@ def test_zero_retry_decision_artifact_names_validate_not_budget():
 def test_missing_job_document_does_not_block_the_retry():
     decision = _retry_decision("failed", 0, 3, sync_mode="overwrite", job_doc=None)
     assert decision["retry"] is True
+
+
+def test_a_rejected_login_is_deterministic_however_the_server_words_it():
+    """One unknown login, worded per server and per auth method. PostgreSQL says
+    'role ... does not exist' under trust auth and 'password authentication
+    failed' under password auth: the retry must not depend on pg_hba.conf."""
+    for error in (
+        'connection to server at "127.0.0.1", port 5432 failed: FATAL:  '
+        'role "r5_no_such_role" does not exist',
+        'connection to server at "127.0.0.1", port 5432 failed: FATAL:  '
+        'password authentication failed for user "r5_no_such_role"',
+        "(1045, \"Access denied for user 'x'@'localhost' (using password: YES)\")",
+        "Login failed for user 'x'. (18456)",
+        "ORA-01017: invalid username/password; logon denied",
+    ):
+        verdict = classify_failure(error=error, phase="running", rows_written=0)
+        assert verdict.kind == DETERMINISTIC, error
+        assert "Credentials" in verdict.corrective_action, error
+    # A missing table is not a login: still retried once.
+    assert classify_failure(error='relation "t" does not exist').kind == UNKNOWN

@@ -166,9 +166,20 @@ def _statuses(run: dict) -> list[str]:
 
 
 def test_source_auth_failure_is_a_failed_run_recorded_before_work_and_surfaced(env, monkeypatch):
-    """Run 1 lands; then the source login is refused. With one retry allowed the
-    first failed attempt used to leave the schedule showing the previous
-    ``completed`` (stale) until the retry finished."""
+    """Run 1 lands; then the source login is refused. The failed run is recorded
+    and surfaced at once, and - a rejected login being deterministic - no
+    retry is owed: the run names the credential fix instead.
+
+    The run then fails transiently (source port closed) with one retry
+    allowed: the first failed attempt used to leave the schedule showing the
+    previous ``completed`` (stale) until the retry finished.
+
+    PostgreSQL words the same unknown login 'password authentication failed'
+    (password auth, CI) or 'role ... does not exist' (trust auth): both are a
+    rejected login, so the outcome no longer depends on pg_hba.conf.
+    """
+    import socket
+
     from services.connector_store import update_connector
     from services.schedule_store import get_schedule
     from src.transfer.engine import UniversalTransferEngine
@@ -202,12 +213,55 @@ def test_source_auth_failure_is_a_failed_run_recorded_before_work_and_surfaced(e
         _make_due(sched.id)
         assert _beat_and_wait(sched.id) == 1
         one, row, runs = _rest(client, sched.id)
-        # A retry is owed, but the schedule must not keep showing run 1's success.
         for view in (one, row):
             assert view["last_status"] == "failed", view
             assert "r5_no_such_role" in view["last_status_reason"], view
+            assert view["current_run"] is None, view
+        assert runs[0]["status"] == "failed" and "r5_no_such_role" in runs[0]["reason"], runs[0]
+        assert _statuses(runs[0]) == ["pending", "running", "failed"], runs[0]
+        # A rejected login fails identically next time: no retry, the fix named.
+        assert not runs[0].get("retry_scheduled"), runs[0]
+        assert "Credentials" in str(runs[0].get("retry_refused") or ""), runs[0]
+        assert (runs[0].get("failure_class") or {}).get("kind") == "deterministic", runs[0]
+        assert not get_schedule(sched.id).retry_at
+        mcp = _mcp(sched.id)
+        assert mcp["last_status"] == "failed", mcp
+        assert "r5_no_such_role" in mcp["last_status_reason"], mcp
+        assert mcp["recent_runs"][0]["status"] == "failed", mcp
+        failed = [n for n in notes if n.get("status") == "failed" and "r5_no_such_role" in str(n.get("error"))]
+        assert failed, notes
+
+        # Parked on that finding: the next due beat does not replay the login,
+        # it is recorded as skipped with the reason.
+        _make_due(sched.id)
+        assert _beat_and_wait(sched.id) == 0
+        latest = _rest(client, sched.id)[2][0]
+        assert latest["status"] == "skipped", latest
+        assert latest["reason_code"] == "approval_pending", latest
+        assert "r5_no_such_role" in latest["reason"], latest
+    finally:
+        _cleanup(table)
+
+    # A transient failure (source port closed) with one retry allowed.
+    table, src, _dst, sched = _pipeline(max_retries=1, retry_backoff_seconds=0)
+    try:
+        _make_due(sched.id)
+        assert _beat_and_wait(sched.id) == 1
+        assert _rest(client, sched.id)[0]["last_status"] == "completed"
+        probe = socket.socket()
+        probe.bind(("127.0.0.1", 0))
+        closed_port = probe.getsockname()[1]
+        probe.close()
+        update_connector(src.id, {"port": closed_port})
+        _make_due(sched.id)
+        assert _beat_and_wait(sched.id) == 1
+        one, row, runs = _rest(client, sched.id)
+        # A retry is owed, but the schedule must not keep showing a stale status.
+        for view in (one, row):
+            assert view["last_status"] == "failed", view
+            assert view["last_status_reason"], view
         assert runs[0]["status"] == "failed" and runs[0]["retry_scheduled"], runs[0]
-        assert "r5_no_such_role" in runs[0]["reason"], runs[0]
+        assert runs[0]["reason"], runs[0]
         assert _statuses(runs[0]) == ["pending", "running", "failed"], runs[0]
 
         _make_due(sched.id, retry=True)
@@ -215,13 +269,8 @@ def test_source_auth_failure_is_a_failed_run_recorded_before_work_and_surfaced(e
         one, row, runs = _rest(client, sched.id)
         assert one["last_status"] == "failed" and one["current_run"] is None, one
         assert runs[0]["trigger"] == "retry" and runs[0]["attempt"] == 1, runs[0]
-        assert "r5_no_such_role" in runs[0]["reason"], runs[0]
-        mcp = _mcp(sched.id)
-        assert mcp["last_status"] == "failed", mcp
-        assert "r5_no_such_role" in mcp["last_status_reason"], mcp
-        assert mcp["recent_runs"][0]["status"] == "failed", mcp
-        failed = [n for n in notes if n.get("status") == "failed" and "r5_no_such_role" in str(n.get("error"))]
-        assert failed, notes
+        assert runs[0]["status"] == "failed" and runs[0]["reason"], runs[0]
+        assert _mcp(sched.id)["recent_runs"][0]["status"] == "failed"
     finally:
         _cleanup(table)
 
