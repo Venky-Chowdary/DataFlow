@@ -54,12 +54,14 @@ def _column_match(name: str) -> tuple[Artifact, str] | None:
 
 
 def _comment_match(comment: Any) -> tuple[Artifact, str] | None:
-    art = ARTIFACTS["managed_table_comment"]
     text = "" if comment is None else str(comment)
-    if text == art.legacy:
-        return art, "legacy"
-    if text == art.new:
-        return art, "new"
+    for art in ARTIFACTS.values():
+        if art.shape != "comment":
+            continue
+        if text == art.legacy:
+            return art, "legacy"
+        if text == art.new:
+            return art, "new"
     return None
 
 

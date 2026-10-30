@@ -647,15 +647,20 @@ Switched by the flag in this build:
 Recognised and listed, but still created under the old name even with the flag
 on (their run-to-run identity is not yet resolved per destination; switching
 them is a separate change): the CDC `_df_lsn` column and other `_df_*`
-bookkeeping columns, `_dataflow_write_ledger`, `_df_quarantine`,
+bookkeeping columns, `_dataflow_write_ledger`, `<table>_df_quarantine`,
+`dataflow_file_manifest`, `_df_vector_collections`, the MySQL row-backup
+comment `dataflow:overwrite-row-backup`,
 `dataflow_signal` (source database), `<table>__df_bak*` backups, staging
 prefixes (`_df_stg_`, `_dataflow_stg_`, `_df_mirrorkeys_`, `_df_merge_stage_`,
 `_df_upsert_stage_`, `_df_copy_ups_`, `_DF_UPSERT_`, `df_mrg_`), `df_enum_*`
 types, `df_*` replication slots / publications, Kafka group ids
 `dataflow-kafka-*`, object-store staging keys, the Redshift stage prefix,
 Iceberg `dataflow.*` snapshot properties, default vector collections, the
-SQLite-native watermark table, and the default BigQuery dataset `dataflow` /
-Snowflake schema `DATAFLOW` used when a connector names none.
+SQLite-native watermark table, temporary `.dataflow-*` files on SFTP/local
+destinations, SaaS idempotency keys `dataflow-*`, and the defaults used when a
+connector names none: BigQuery dataset `dataflow`, Snowflake schema
+`DATAFLOW`, Kafka topic `dataflow.events`, object-store key
+`exports/dataflow_export.json`, Redis prefix `dataflow`.
 
 ### Before turning the flag on
 
