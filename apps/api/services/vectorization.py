@@ -528,6 +528,42 @@ def vector_identity_columns(
     return out or None
 
 
+def _document_contract_text(
+    record: Mapping[str, Any],
+    content_column: str | None,
+    embedding_column: str | None,
+    exclude: set[str],
+    fields: list[str] | None = None,
+) -> str:
+    """One declared rule for every row's embedded text (D209).
+
+    ``fields`` are the mapped fields: the row JSON is those, not every header
+    the reader carried along.
+    """
+    from services.document_chunking import PRECHUNKED_FLAG
+    from services.value_serializer import is_reader_null_cell
+
+    if content_column:
+        value = record.get(content_column)
+        return "" if value is None or is_reader_null_cell(value) else str(value)
+    if embedding_column:
+        return ""
+    keep = set(fields or record.keys())
+    safe = {
+        k: (None if is_reader_null_cell(v) else v)
+        for k, v in record.items()
+        if k in keep and k not in exclude and k != PRECHUNKED_FLAG and k != embedding_column
+    }
+    return json.dumps(
+        {k: sanitize_json_value(v) for k, v in safe.items()},
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+        default=sanitize_json_value,
+        allow_nan=False,
+    )
+
+
 def vectorize_records(
     records: list[dict[str, Any]],
     *,
@@ -550,8 +586,15 @@ def vectorize_records(
     existing_vector_docs: Mapping[str, Mapping[str, Any]] | None = None,
     doc_fingerprint_digest: str | None = None,
     skip_unchanged: bool = True,
+    document_contract: bool = False,
+    document_fields: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Expand records into vector rows: id, content, embedding, metadata, source_id, chunk_index.
+
+    ``document_contract`` (pgvector document layout, D209): the embedded text
+    follows one rule for every row — the template, else ``content_column``
+    (NULL / '' → empty content, no embedding), else the whole row as JSON —
+    and metadata carries every mapped field with SQL NULL as ``None``.
 
     If ``embedding_column`` is supplied and contains a numeric vector or string
     representation, it is used directly. Otherwise the ``content_column`` is
@@ -621,7 +664,11 @@ def vectorize_records(
 
         content = ""
         template_error = ""
-        if text_template is not None:
+        if document_contract and text_template is None:
+            content = _document_contract_text(
+                record, content_column, embedding_column, exclude, document_fields
+            )
+        elif text_template is not None:
             try:
                 content = render_record_template(text_template, rec)
             except (TemplateFieldMissingError, TemplateFieldRenderError) as exc:
@@ -693,8 +740,8 @@ def vectorize_records(
             source_id = str(
                 rec.get("id", rec.get("_id", rec.get("source_id", "")))
             )
-        metadata = rec.copy()
-        if content_column and content_column in metadata:
+        metadata = (dict(record) if document_contract else rec.copy())
+        if content_column and content_column in metadata and not document_contract:
             del metadata[content_column]
         if embedding_column and embedding_column in metadata:
             del metadata[embedding_column]
@@ -872,6 +919,9 @@ def vectorize_records(
                 "metadata": metadata,
                 "source_id": source_id,
                 "chunk_index": 0,
+                # The declared rule gave this row no text: a document with
+                # no vector (NULL), never a fabricated one (D209).
+                **({"_df_empty_text": True} if document_contract else {}),
             })
         for row in rows[row_start:]:
             if not row.get("_df_embed_error"):

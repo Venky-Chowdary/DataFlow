@@ -6942,8 +6942,35 @@ def _run_reconciliation_impl(
         # conservation. Do not run Gate-8 as reader == vector COUNT(*) —
         # 2 documents / 5 chunks would fail (or invent a surplus if stuffed
         # as dest population). Identity COUNT(DISTINCT source_id) is stamped
-        # in _finalize. Embeddings are opaque: cell fidelity stays unproven.
+        # in _finalize. Embeddings are opaque; the metadata is not (D209):
+        # every carried source value is re-read and compared.
         measured = isinstance(target_rows, int) and target_rows >= 0
+        from services.pgvector_document_verify import gate8_document_report
+
+        doc_report = gate8_document_report(
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            mappings=mapping_dicts,
+            source_rows=source_rows,
+            source_endpoint=source_endpoint,
+            read_sample=_read_target_sample_retrying,
+            run_records=records,
+            source_schema=source_schema,
+            base={
+                "source_rows": source_rows,
+                "source_checksum": source_checksum,
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+            },
+            target_rows=target_rows if measured else None,
+            # A row digest over id/content/embedding/metadata is not
+            # comparable with the source's; the value proof replaces it.
+            target_checksum="",
+        )
+        if doc_report is not None:
+            return _finalize(doc_report)
         return _finalize({
             "passed": measured,
             "unproven": True,

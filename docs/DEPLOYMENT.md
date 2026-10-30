@@ -380,6 +380,36 @@ With the flag off, each create that would have used the NO PAD collation is
 recorded once an hour as an audit event `create_ddl.would_use_no_pad_collation`
 (`dialect`, `today`, `with_flag`).
 
+## pgvector destination layout (D209)
+
+A pgvector destination is PostgreSQL with the `vector` extension. It holds one
+of two shapes, and the plan (`destination_contract`), the preflight warning
+`pgvector_destination_layout` and the job all use the same one:
+
+| Layout | Physical table | Gate-8 |
+|--------|----------------|--------|
+| `table` | The typed table the Map shows: one column per mapped field with its type, SQL NULL as NULL. Written and verified as PostgreSQL. | Full PostgreSQL read-back |
+| `document` | `id TEXT` (the source key), `content TEXT` (embedded text), `embedding vector(n)`, `metadata JSONB` (every mapped value, SQL NULL as JSON null), `source_id`, `chunk_index`, `created_at`. The embedded text follows one rule for every row: `text_template`, else `content_column` (NULL / '' gives empty content and a NULL vector), else the whole row as JSON. | Every source value re-read and found in `metadata` |
+
+How the layout is chosen, first match wins:
+
+1. `vector_layout` (`table` / `document`) on the run (`plan_transfer` /
+   `start_transfer` argument) or in the saved connector's `extra`.
+2. An existing table keeps its shape: a table with `id, content, embedding,
+   metadata, source_id, chunk_index` stays a document table; any other existing
+   table is typed. Tables DataFlow created before this change keep working on
+   run 2.
+3. A new table: `document` (production behaviour), or `table` when
+   `DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT=1` (default off).
+
+With the flag off, each new table that would have been typed is recorded once
+an hour as the audit event `pgvector.would_create_typed_table` (`table`,
+`today`, `with_flag`).
+
+Document tables created before this change: run 2 re-embeds documents whose
+text changes under the single rule (the old per-row pick of the longest text
+column is gone) and adds NULL fields to `metadata` as JSON null.
+
 ## Health checks
 
 | Endpoint | Use |
