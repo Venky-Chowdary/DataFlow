@@ -185,7 +185,31 @@ def _column_order_keys(values: list[str]) -> list[Any]:
     keys = [_numeric_order_key(v) for v in values]
     if keys and all(k is not None for k in keys):
         return keys
+    # A zone-bearing cursor (SQL Server DATETIMEOFFSET / Oracle TIMESTAMP WITH
+    # TIME ZONE keep each row's own offset) is ordered by the server by
+    # instant. Picking the page maximum as text made ``10:00+05:30`` (04:30Z)
+    # beat ``06:00+00:00``: the next page seeked from an earlier instant and
+    # re-read rows already written.
+    from connectors.cursor_bind import cursor_instant_key
+
+    instants = [cursor_instant_key(v) for v in values]
+    if instants and all(k is not None for k in instants):
+        return instants
     return list(values)
+
+
+def canonical_cursor_bookmark(bookmark: Any) -> Any:
+    """``bookmark`` with every offset-bearing timestamp part written as UTC.
+
+    The stored watermark and every page edge name an instant once, whatever
+    offset the row that set it carried. Other parts (keys, naive timestamps,
+    numbers) and non-text values are returned unchanged.
+    """
+    if not isinstance(bookmark, str) or not bookmark:
+        return bookmark
+    from connectors.cursor_bind import canonical_cursor_text
+
+    return KEYSET_SEP.join(canonical_cursor_text(p) for p in bookmark.split(KEYSET_SEP))
 
 
 def compare_keyset_bookmark(left: str, right: str) -> int | None:

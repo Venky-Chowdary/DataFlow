@@ -869,6 +869,7 @@ def _stream_database_transfer_impl(
                         "cursor_column": run.cfg.cursor_source_col,
                         # The column a composite watermark is decodable on (QA ACC-02).
                         "tiebreak_column": run.cfg.cursor_pk_source,
+                        "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
                     },
                 )
                 run.tally.dest_summary["watermark"] = wm
@@ -2572,6 +2573,7 @@ def _stream_database_transfer_impl(
                         "cursor_column": run.cfg.cursor_source_col,
                         # The column a composite watermark is decodable on (QA ACC-02).
                         "tiebreak_column": run.cfg.cursor_pk_source,
+                        "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
                     },
                 )
                 # D110 — batch undo restores the watermark to this pre-run
@@ -2904,6 +2906,7 @@ def _stream_database_transfer_impl(
                 "cursor_column": run.cfg.cursor_source_col,
                 # The column a composite watermark is decodable on (QA ACC-02).
                 "tiebreak_column": run.cfg.cursor_pk_source,
+                "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
             },
         )
         # D110 — batch undo restores the watermark to this pre-run value

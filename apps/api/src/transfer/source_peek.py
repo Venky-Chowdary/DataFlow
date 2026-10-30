@@ -218,7 +218,17 @@ def iter_stream_source_column_rows(
     was O(n²) and could time out, leaving Execute-time population fit
     unproven while Validate's 100-row sample still looked clean.
     """
-    from connectors.sql_snapshot_scan import SNAPSHOT_SCAN_SOURCES, close_table_scan
+    from connectors.sql_snapshot_scan import (
+        FILTERED_SCAN_SOURCES,
+        SNAPSHOT_SCAN_SOURCES,
+        close_table_scan,
+    )
+    from services.keyset_pagination import (
+        compare_keyset_bookmark,
+        max_keyset_bookmark,
+        present_cursor_bookmark,
+        split_cursor_bookmark,
+    )
 
     from .adapters import resolve_connector_config
     from .connector_capabilities import resolve_driver_type
@@ -241,6 +251,22 @@ def iter_stream_source_column_rows(
     scan_state: dict[str, Any] | None = (
         {} if src_type in SNAPSHOT_SCAN_SOURCES else None
     )
+    pk = (cursor_primary_key or "").strip()
+    # An incremental walk is bounded by the run watermark. A cursor seek
+    # ignores ``offset``: handing it the same watermark on every page re-read
+    # page one forever (Validate never finished on a window of >= one page).
+    # A snapshot-scan source opens one held scan filtered to
+    # ``cursor >= watermark`` and pages it with fetchmany — no client-side page
+    # edge at all; the caller trims the tie group by instant. Any other cursor
+    # reader seeks from each page's (cursor, key) maximum.
+    scan_filter: tuple[str, str | None] | None = None
+    keyset_after: str | None = cursor_after
+    if cursor_column and scan_state is not None and src_type in FILTERED_SCAN_SOURCES:
+        bookmark = present_cursor_bookmark(cursor_after)
+        seed = split_cursor_bookmark(bookmark, has_tiebreak=True)[0] if bookmark else ""
+        scan_filter = (cursor_column, seed or None)
+    elif cursor_column:
+        scan_state = None
     total: int | None = None
     offset = 0
     emitted = 0
@@ -251,11 +277,13 @@ def iter_stream_source_column_rows(
                 extra["scan_state"] = scan_state
             if total is not None:
                 extra["known_total_rows"] = total
-            if cursor_column:
+            if scan_filter is not None:
+                extra["scan_filter"] = scan_filter
+            elif cursor_column:
                 extra["cursor_column"] = cursor_column
-                extra["cursor_after"] = cursor_after
-                if cursor_primary_key:
-                    extra["cursor_primary_key"] = cursor_primary_key
+                extra["cursor_after"] = keyset_after
+                if pk:
+                    extra["cursor_primary_key"] = pk
             batch, _ = _unwrap_read(
                 _read_batch(
                     src_type,
@@ -276,6 +304,24 @@ def iter_stream_source_column_rows(
                 if isinstance(reported, int) and reported >= 0:
                     total = reported
             headers = list(batch.headers or wanted)
+            seek_next: str | None = None
+            if cursor_column and scan_filter is None and len(rows) >= page:
+                if not pk or pk == cursor_column:
+                    raise ValueError(
+                        f"cannot walk the incremental window of {src_type} on cursor "
+                        f"{cursor_column!r} past one page without a tie-break key"
+                    )
+                seek_next = max_keyset_bookmark(rows, headers, [cursor_column, pk])
+                moved = (
+                    compare_keyset_bookmark(seek_next, str(keyset_after))
+                    if seek_next is not None and keyset_after not in (None, "")
+                    else 1
+                )
+                if seek_next is None or (moved is not None and moved <= 0):
+                    raise ValueError(
+                        f"incremental walk of {src_type} on cursor {cursor_column!r} "
+                        "did not advance past its page edge"
+                    )
             for row in rows:
                 yield dict(zip(headers, row))
                 emitted += 1
@@ -284,6 +330,9 @@ def iter_stream_source_column_rows(
             if len(rows) < page:
                 return
             offset += len(rows)
+            if seek_next is not None:
+                keyset_after = seek_next
+                continue
             if total is not None and offset >= total:
                 return
     finally:
