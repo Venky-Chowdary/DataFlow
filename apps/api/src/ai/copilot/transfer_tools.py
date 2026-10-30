@@ -832,6 +832,15 @@ def plan_transfer(
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
 
+    from src.transfer.connector_capabilities import source_only_destination_refusal
+
+    # D139: a source-only connector is not a destination; say so before any gate.
+    not_a_destination = source_only_destination_refusal(
+        str(dst_conn.get("type") or dst_conn.get("format") or "")
+    )
+    if not_a_destination:
+        return _tool_result(tool, success=False, error=not_a_destination)
+
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
 
     ident_err = unsafe_destination_identifier_reason(
@@ -1773,6 +1782,12 @@ def _run_preflight(
             destination_unique_keys=list(dest_probe.get("unique_keys") or []),
             destination_foreign_keys=list(dest_probe.get("foreign_keys") or []),
             destination_check_constraints=list(dest_probe.get("check_constraints") or []),
+            # D139: an existing DynamoDB table's HASH/RANGE contract. Without
+            # it g6 refused every run into a table DataFlow had created.
+            destination_dynamo_key_schema=list(dest_probe.get("dynamo_key_schema") or []),
+            destination_dynamo_index_attributes=dict(
+                dest_probe.get("dynamo_index_attributes") or {}
+            ),
             destination_config=dest_probe.get("_probe_cfg") or None,
             source_kind=source_kind or "database",
             source_format=src_db_type,

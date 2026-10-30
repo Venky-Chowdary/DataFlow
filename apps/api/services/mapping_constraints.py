@@ -203,7 +203,7 @@ def retain_dest_exists_write_mappings(
     create-new dest column from source position is the dest-exists jumble
     (write by dest name — never source position).
     """
-    from connectors.sql_identifiers import sanitize_identifier
+    from connectors.sql_identifiers import sanitize_identifier, sanitized_spellings
 
     dest = {_norm(c) for c in (dest_columns or []) if str(c).strip()}
     if not dest:
@@ -227,7 +227,11 @@ def retain_dest_exists_write_mappings(
         tgt = str(m.get("target") or "").strip()
         if not tgt:
             continue
-        actual = dest_by_sanitised.get(sanitize_identifier(tgt).lower())
+        # Run 1 may predate transliteration (``Caf_``) or follow it (``cafe``).
+        actual = next(
+            (dest_by_sanitised[k] for k in sorted(sanitized_spellings(tgt)) if k in dest_by_sanitised),
+            None,
+        )
         if actual and actual != tgt:
             kept.append({**m, "target": actual})
         elif _norm(tgt) in dest:

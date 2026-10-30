@@ -68,10 +68,62 @@ def sanitize_identifier(name: str, preserve_case: bool = False, *, max_len: int 
     row correctly.
     """
     cleaned = (name or "").strip() if preserve_case else (name or "").strip().lower()
+    # D55: a letter with an accent is that letter, not an illegal character.
+    # ``Café`` became ``Caf_`` (and ``Straße`` ``Stra_e``); transliterating
+    # keeps the name readable. Characters with no Latin spelling still become
+    # ``_`` as before.
+    s = _IDENT_RE.sub("_", transliterate_identifier(cleaned))
+    if not s or s[0].isdigit():
+        s = f"col_{s or 'field'}"
+    return s[:max_len]
+
+
+#: Latin letters NFKD does not decompose into an ASCII base.
+_LATIN_EXTRA = {
+    "ß": "ss", "ẞ": "SS", "æ": "ae", "Æ": "AE", "œ": "oe", "Œ": "OE",
+    "ø": "o", "Ø": "O", "ł": "l", "Ł": "L", "đ": "d", "Đ": "D",
+    "ð": "d", "Ð": "D", "þ": "th", "Þ": "TH", "ı": "i", "ħ": "h", "Ħ": "H",
+}
+
+
+def transliterate_identifier(name: str) -> str:
+    """Accented Latin letters to their ASCII spelling; everything else untouched."""
+    import unicodedata
+
+    out: list[str] = []
+    for ch in name or "":
+        if ch.isascii():
+            out.append(ch)
+            continue
+        if ch in _LATIN_EXTRA:
+            out.append(_LATIN_EXTRA[ch])
+            continue
+        base = "".join(
+            c for c in unicodedata.normalize("NFKD", ch) if not unicodedata.combining(c)
+        )
+        out.append(base if base and base.isascii() and base.isalnum() else ch)
+    return "".join(out)
+
+
+def legacy_sanitized_identifier(name: str, preserve_case: bool = False, *, max_len: int = 63) -> str:
+    """The spelling writers used before transliteration (``Café`` -> ``Caf_``).
+
+    Tables DataFlow created then still hold it, so a rerun must recognise it
+    as the same column (D55).
+    """
+    cleaned = (name or "").strip() if preserve_case else (name or "").strip().lower()
     s = _IDENT_RE.sub("_", cleaned)
     if not s or s[0].isdigit():
         s = f"col_{s or 'field'}"
     return s[:max_len]
+
+
+def sanitized_spellings(name: str) -> set[str]:
+    """Lower-cased destination spellings a source name may already have."""
+    return {
+        sanitize_identifier(name).lower(),
+        legacy_sanitized_identifier(name).lower(),
+    }
 
 
 #: Engines whose column names compare case-insensitively, so ``ID`` and ``id``

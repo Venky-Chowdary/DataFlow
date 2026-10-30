@@ -61,6 +61,7 @@ from services.transform_engine import (
 from services.type_system import instant_date_carrier, normalize_logical_type
 from services.value_serializer import (
     cell_to_string,
+    is_explicit_null,
     is_missing_sentinel,
     is_reader_null_cell,
     json_default,
@@ -3154,6 +3155,10 @@ def fingerprint_for_reconcile(
         }:
             wire = None
             value = None
+    if is_explicit_null(value):
+        # DynamoDB ``{"NULL": true}`` read back: SQL NULL, not the text of a sentinel.
+        wire = None
+        value = None
     if isinstance(wire, str):
         # Wire decode before any stage re-encodes: ``__DF_ESC__x`` is the
         # literal ``x`` (one layer — the recursive escape stays provable), so
@@ -3310,7 +3315,7 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
     VARCHAR2 semantics / HVR write-location compare rules). Postgres/MySQL keep
     NULL and ``""`` distinct.
     """
-    if value is None:
+    if value is None or is_explicit_null(value):
         # Distinct from empty string — SQL/Dynamo NULL must not checksum as "".
         return _NULL_SENTINEL
     # Dense write materializes absent schemaless fields as SQL NULL; fingerprint
