@@ -375,6 +375,9 @@ def _introspect_schema_unscoped(
     # planned engine does not inherit a live schema probe.
     if db_type in {"timescaledb", "timescale"}:
         db_type = "postgresql"
+    # MariaDB is the MySQL catalog (same INFORMATION_SCHEMA, same driver).
+    if db_type in {"mariadb", "maria"}:
+        db_type = "mysql"
     if ssl is None:
         # A caller that never said anything about TLS must not make it mandatory.
         from services.connector_store import default_ssl
