@@ -227,6 +227,12 @@ def iter_stream_source_column_rows(
     wanted = [c for c in (columns or []) if c]
     if not wanted:
         return
+    if cursor_column:
+        # A cursor-bounded read is a keyset seek: the next page starts after
+        # this page's last (cursor, key), so both must be read.
+        for key_col in (cursor_column, cursor_primary_key):
+            if key_col and key_col not in wanted:
+                wanted.append(key_col)
     src_type = resolve_driver_type(source.format or "")
     if src_type not in _OFFSET_PAGEABLE:
         return
@@ -286,6 +292,24 @@ def iter_stream_source_column_rows(
             offset += len(rows)
             if total is not None and offset >= total:
                 return
+            if cursor_column:
+                # The keyset reader ignores ``offset``: re-sending the same
+                # ``cursor_after`` re-read the first page for ever (a resumed
+                # incremental run's preflight walk never ended). Seek past this
+                # page's high mark - the write loop's own advance - and stop
+                # if the mark cannot move.
+                from services.sync_cursor import compare_cursor_values, max_cursor_value
+
+                mark = max_cursor_value(
+                    [list(r) for r in rows], headers, cursor_column,
+                    cursor_primary_key or None,
+                )
+                if mark is None or (
+                    cursor_after not in (None, "")
+                    and compare_cursor_values(mark, str(cursor_after)) <= 0
+                ):
+                    return
+                cursor_after = mark
     finally:
         if scan_state is not None:
             close_table_scan(scan_state)
