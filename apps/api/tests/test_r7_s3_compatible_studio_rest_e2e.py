@@ -275,3 +275,47 @@ def test_studio_cloud_storage_source_on_s3_compatible_endpoint(client, s3_store,
     finally:
         h.drop_table("postgresql", table)
 
+
+
+@pytest.mark.parametrize("shape", _SHAPES)
+@pytest.mark.parametrize("form", list(_PATHS))
+def test_studio_plan_validate_and_run_on_s3_compatible_endpoint(client, s3_store, form, shape, tmp_path, monkeypatch):
+    """Studio's own Validate (persisted plan) and Execute (multipart /transfer/run)."""
+    import services.transfer_plan_store as plan_store
+    from services.connector_store import create_connector
+    from tests.r7_studio_harness import Studio, blockers, preflight_mappings
+
+    monkeypatch.setattr(plan_store, "STORE_PATH", tmp_path / "transfer_plans.json")
+    path_t, expected = _PATHS[form]
+    path = path_t.format(bucket=s3_store["bucket"])
+    conn = _connector(client, s3_store, shape)
+    dst = create_connector({
+        "name": "r7s3-dst-" + uuid.uuid4().hex[:6], "role": "destination",
+        "workspace_id": "", "ssl": False, **h.dest_config("postgresql"),
+    })
+    table = "r7s3p_" + uuid.uuid4().hex[:8]
+    studio = Studio(
+        client, source=_source(conn, path), destination=_dest(dst.id, table),
+        policies={"sync_mode": "full_refresh_overwrite", "schema_policy": "manual_review",
+                  "validation_mode": "strict"},
+    )
+    try:
+        for _run in (1, 2):
+            si, di = studio.introspect()
+            assert si.get("connected") is True, si.get("message")
+            sc, ss = studio.columns(si)
+            assert sc == _HEADER, (si.get("message"), si.get("sample_error"))
+            dc, ds = studio.columns(di) if di.get("table_exists") else ([], {})
+            maps = preflight_mappings(
+                studio.map(sc, ss, dc, ds, table_exists=bool(di.get("table_exists"))),
+                approve=True, dest_columns=dc if dc else None,
+            )
+            pf = studio.validate(sc, ss, dc, ds, maps)
+            assert "Access denied" not in str(pf), blockers(pf)
+            assert pf.get("passed"), blockers(pf)
+            job = studio.execute(maps)
+            assert job.get("status") == "completed", job.get("error") or job.get("message")
+            got = h.query("postgresql", f'SELECT id, label, amount FROM "{table}"')  # nosec B608
+            assert _norm(got) == _norm(expected), {"run": _run, "rows": got}
+    finally:
+        h.drop_table("postgresql", table)
