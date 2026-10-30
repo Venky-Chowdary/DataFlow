@@ -363,6 +363,23 @@ Saving a connector sets `require` when the payload has `ssl: true`, and clears i
 
 **Existing connectors.** Documents saved before `ssl_mode` existed hold only the boolean `ssl`, and the old store defaulted it to true when a caller omitted it, so a stored `ssl=true` cannot be told apart from an injected default. These documents are read as unset: their behaviour is unchanged (negotiate, plaintext allowed). To make an existing connector strictly TLS, open it in Studio and save it with SSL/TLS ticked (or `PUT` it with `ssl: true`). Check production connectors that must be encrypted and re-save them once.
 
+## Text key collation on tables DataFlow creates (MySQL / MariaDB, D205)
+
+MySQL, MariaDB and SQL Server compare `VARCHAR` keys under PAD SPACE
+(`''` = `' '`, `'a'` = `'a '`), and a `_ci` / `CI_AS` collation also equates
+`'a'` and `'A'`. Two such source keys are one key to the destination's unique
+index.
+
+| Rule | Applies | Flag |
+|------|---------|------|
+| Validate walks the source key population under the destination key column's comparison rules and refuses a keyed load (upsert / merge / overwrite with a declared key) whose distinct source keys the destination would merge. The message names the colliding keys and the remedy: a binary NO PAD collation (MySQL `utf8mb4_0900_bin`, MariaDB `utf8mb4_nopad_bin`), a `_BIN2` collation on SQL Server for case, or a key transform. SQL Server has no NO PAD collation, so keys that differ only by trailing spaces are always refused there. | Always | none |
+| Gate-8's keyed read-back selects the written keys exactly (binary / `BIN2`), so run 2 updating `'A'` beside `'a'` is not mistaken for a mismatch. | Always | none |
+| A case-sensitive source text column on a table DataFlow **creates** on MySQL / MariaDB gets the NO PAD binary collation `utf8mb4_0900_bin` (MariaDB 11.4+ accepts it; older MariaDB: `utf8mb4_nopad_bin`) instead of `utf8mb4_bin` (PAD SPACE), so `'a'` and `'a '` load as two keys. Tables created earlier keep `utf8mb4_bin`; run 2 into them is unchanged. | New tables only | `DATAFLOW_KEY_COLLATION_NO_PAD=1` (default off) |
+
+With the flag off, each create that would have used the NO PAD collation is
+recorded once an hour as an audit event `create_ddl.would_use_no_pad_collation`
+(`dialect`, `today`, `with_flag`).
+
 ## Health checks
 
 | Endpoint | Use |

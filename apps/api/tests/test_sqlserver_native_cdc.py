@@ -12,6 +12,7 @@ from connectors.sqlserver_cdc_native import (
 )
 from connectors.sqlserver_change_stream import encode_sqlserver_resume_token
 from connectors.writer_common import extract_cdc_lsn
+from services.value_serializer import SQL_NULL_SENTINEL
 
 
 def test_mssql_cdc_token_roundtrip_with_offset_and_capture() -> None:
@@ -221,7 +222,8 @@ def test_native_cdc_binary_wire_roundtrips_bytes_and_empty_values() -> None:
     by_id = {record["id"]: record["payload"] for record in inserts}
     assert coerce_binary_wire(by_id["1"]) == payload
     assert coerce_binary_wire(by_id["2"]) == b""
-    assert by_id["3"] == ""
+    # SQL NULL stays NULL on the wire, distinct from b"" (D203).
+    assert by_id["3"] == SQL_NULL_SENTINEL
 
 
 def test_native_cdc_non_binary_values_preserve_legacy_wire_format() -> None:
@@ -249,7 +251,7 @@ def test_native_cdc_non_binary_values_preserve_legacy_wire_format() -> None:
     assert not updates
     assert not deletes
     expected = {
-        name: "" if value is None else str(value)
+        name: SQL_NULL_SENTINEL if value is None else str(value)
         for name, value in values.items()
     }
     assert {name: inserts[0][name] for name in values} == expected
@@ -291,7 +293,7 @@ def test_native_snapshot_binary_wire_roundtrips_bytes_and_empty_values() -> None
     record = batches[0].inserts[0]
     assert coerce_binary_wire(record["payload"]) == b"\x00\xffsnapshot"
     assert coerce_binary_wire(record["empty_payload"]) == b""
-    assert record["null_payload"] == ""
+    assert record["null_payload"] == SQL_NULL_SENTINEL
 
 
 def test_native_incremental_snapshot_preserves_legacy_values_and_binary_wire() -> None:
@@ -346,7 +348,7 @@ def test_native_incremental_snapshot_preserves_legacy_values_and_binary_wire() -
     assert record["enabled"] == "True"
     assert record["amount"] == "123.4500"
     assert coerce_binary_wire(record["payload"]) == payload
-    assert record["null_payload"] == ""
+    assert record["null_payload"] == SQL_NULL_SENTINEL
     assert new_last == "1"
     assert done is True
 
@@ -370,8 +372,8 @@ def test_native_cdc_update_old_before_image_nulls_are_not_written() -> None:
     assert len(updates) == 1
     assert coerce_binary_wire(updates[0]["payload"]) == payload
     assert updates[0]["large_value"] == "new"
-    assert updates[0]["_df_before"]["payload"] == ""
-    assert updates[0]["_df_before"]["large_value"] == ""
+    assert updates[0]["_df_before"]["payload"] == SQL_NULL_SENTINEL
+    assert updates[0]["_df_before"]["large_value"] == SQL_NULL_SENTINEL
 
 
 def test_native_cdc_legacy_value_redelivery_is_already_committed(tmp_path) -> None:

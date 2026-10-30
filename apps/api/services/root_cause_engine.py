@@ -2047,12 +2047,27 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 [b.get("id") for b in dup_blockers],
                 cols,
             )
+            # D205: name the colliding keys and the destination rule, not a
+            # generic "failed on the sample" (the probe walked the population).
+            _eq_msg = next(
+                (
+                    str(x.get("message") or "").split("Data integrity failed: ", 1)[-1]
+                    for x in [*dup_gates, *dup_blockers]
+                    if "equal under the destination's comparison" in str(x.get("message") or "")
+                ),
+                "",
+            )
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("duplicate_identity", cols, absorbed),
                     kind="duplicate_identity",
-                    title="Duplicate identity keys",
-                    summary=(
+                    title=(
+                        "Duplicate identity keys: distinct source keys collide "
+                        "on the destination key"
+                        if _eq_msg
+                        else "Duplicate identity keys"
+                    ),
+                    summary=_eq_msg or (
                         "Identity / uniqueness checks failed on the Validate sample "
                         f"— impacts {len(absorbed)} gate check(s)"
                     ),

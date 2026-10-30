@@ -1794,7 +1794,20 @@ def keyed_readback_where(
     dial = (dialect or "").strip().lower()
     pk_q = quote_sql_identifier(pk, _KEYED_QUOTE_CHAR.get(dial, '"'))
     cast = _KEYED_TEXT_CAST.get(dial, "VARCHAR(4000)")
-    return f"WHERE CAST({pk_q} AS {cast}) IN ({','.join(placeholders[: len(ids)])})"
+    expr = _KEYED_EXACT_COMPARE.get(dial, "{0}").format(f"CAST({pk_q} AS {cast})")
+    return f"WHERE {expr} IN ({','.join(placeholders[: len(ids)])})"
+
+
+# The read-back must select the written keys exactly. A bare CAST takes the
+# session's default collation (MySQL 8 utf8mb4_0900_ai_ci, SQL Server CI_AS),
+# so batch key 'A' also fetched the untouched row 'a' and a correct upsert into
+# a binary-collated key failed Gate-8 (D205 family: distinct keys merged).
+_KEYED_EXACT_COMPARE: Final[dict[str, str]] = {
+    "mysql": "CAST({0} AS BINARY)",
+    "mariadb": "CAST({0} AS BINARY)",
+    "sqlserver": "{0} COLLATE Latin1_General_100_BIN2",
+    "mssql": "{0} COLLATE Latin1_General_100_BIN2",
+}
 
 
 def keyed_readback_sa_clause(

@@ -256,6 +256,11 @@ def stage_dataset_transfer(
         target_schemas=dst_rows,
         source_samples={r["name"]: r["samples"] for r in src_rows},
         validation_mode=validation_mode,
+        # The file format is the source engine. Unbound, a CSV's text read as
+        # code-page VARCHAR and SQL Server's NVARCHAR carrier was graded a
+        # fidelity collapse on every text column (D204).
+        file_format=file_type,
+        source_db_type=file_type,
         destination_db_type=str(dst_info.get("db_type") or dst_conn.get("type") or ""),
         schema_policy=schema_policy,
         sync_mode=mode,

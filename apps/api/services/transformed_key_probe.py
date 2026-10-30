@@ -49,9 +49,17 @@ def probe_transformed_key_collisions(
     key_sources: list[str],
     transforms: Mapping[str, str],
     limit: int = 5,
+    equalizers: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Count written keys that two different source keys collapse into."""
+    """Count written keys that two different source keys collapse into.
+
+    ``equalizers`` (D205) maps a key column to ``(normalize, ddl, rules)`` from
+    :func:`services.dest_key_equality.key_equalizers`: the destination's own
+    comparison (PAD SPACE, case / accent folding) applied to the written key.
+    """
     from services.transform_engine import apply_transform
+
+    equalizers = dict(equalizers or {})
 
     seen: dict[tuple[str, ...], tuple[str, ...]] = {}
     collisions: list[dict[str, Any]] = []
@@ -80,6 +88,8 @@ def probe_transformed_key_collisions(
                 written.append(str(value))
             else:
                 written.append(text)
+            if col in equalizers:
+                written[-1] = equalizers[col][0](written[-1])
             raw.append(text)
         if not usable:
             continue
@@ -96,6 +106,7 @@ def probe_transformed_key_collisions(
                 collisions.append({
                     "written_key": ", ".join(key),
                     "source_keys": [", ".join(first), ", ".join(raw)],
+                    "source_key_parts": [list(first), list(raw)],
                 })
     return {
         "ran": True,
@@ -105,4 +116,7 @@ def probe_transformed_key_collisions(
         "collisions": collisions,
         "key_columns": list(key_sources),
         "transforms": dict(transforms),
+        "destination_equality": {
+            col: {"ddl": eq[1], "rules": list(eq[2])} for col, eq in equalizers.items()
+        },
     }
