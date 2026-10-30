@@ -49,6 +49,7 @@ from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
 from connectors.writer_common import writer_meta_with_source_rows
+from services.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -1062,7 +1063,9 @@ def write_mapped_rows(
                     # below: without it the D101 gate treats a table this run
                     # created as operator-owned and refuses the unique index a
                     # later keyed upsert/quarantine replay needs.
-                    cursor.execute(f"{create_sql} COMMENT='dataflow:managed'")
+                    from services.brand import new_marker_comment
+
+                    cursor.execute(f"{create_sql} COMMENT='{new_marker_comment(table_name)}'")
                 _kwargs["_schema_fidelity_report"] = settle_create_new_on_destination(
                     fidelity_plan,
                     dest_dialect="mysql",
@@ -1106,9 +1109,11 @@ def write_mapped_rows(
                     # 'dataflow:managed' marks a table this run created so the
                     # D101 gate below can tell it from an operator's table on
                     # later upserts/replays.
+                    from services.brand import new_marker_comment
+
                     cursor.execute(
                         f"CREATE TABLE IF NOT EXISTS {table_q} ({col_defs}) "
-                        "COMMENT='dataflow:managed'"
+                        f"COMMENT='{new_marker_comment(table_name)}'"
                     )
                 _kwargs.setdefault(
                     "_schema_fidelity_report",
@@ -1156,8 +1161,8 @@ def write_mapped_rows(
                     for name, cols in index_cols.items()
                 )
                 if not covered:
-                    # A table a prior DataFlow run created carries the
-                    # 'dataflow:managed' comment — index DDL on it is ours to
+                    # A table a prior run created carries 'dataflow:managed' (or,
+                    # flag on, 'datawrap:managed') — index DDL on it is ours to
                     # make; only unmarked (operator-owned) tables gate.
                     managed = False
                     try:
@@ -1167,7 +1172,9 @@ def write_mapped_rows(
                             (table_name,),
                         )
                         _mrow = cursor.fetchone()
-                        managed = bool(_mrow and _mrow[0] == "dataflow:managed")
+                        from services.brand import is_own
+
+                        managed = bool(_mrow and is_own("managed_table_comment", _mrow[0]))
                     except Exception:
                         managed = False
                     if not managed and not bool(_kwargs.get("upsert_ddl_approved")):
@@ -1176,7 +1183,7 @@ def write_mapped_rows(
                             f"unique index {index_name} on "
                             f"({', '.join(conflict_cols)}) — destination DDL "
                             "must be disclosed and approved at Validate "
-                            "(ddl_changes_acknowledged); DataFlow does not "
+                            f"(ddl_changes_acknowledged); {PRODUCT_NAME} does not "
                             "silently alter a table it did not create. To "
                             "proceed: re-run Validate and acknowledge the "
                             "planned DDL change, or create the index "

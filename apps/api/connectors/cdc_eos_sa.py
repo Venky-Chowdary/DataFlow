@@ -7,6 +7,7 @@ SQLite-via-SQLAlchemy, Oracle, Snowflake, generic_sql (URL dialect).
 
 from __future__ import annotations
 
+import contextvars
 import logging
 from datetime import datetime, timezone
 from typing import Any
@@ -125,6 +126,13 @@ def _q(name: str, dialect: str = "") -> str:
     return quote_sql_identifier(name, _quote_char(dialect))
 
 
+#: The watermark table resolved for the destination the current entry point
+#: is working on (``_enter_wm_scope``); unset = the historical name.
+_WM_TABLE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "cdc_eos_sa_wm_table", default=None
+)
+
+
 def _wm_ref(dialect: str) -> str:
     """Watermark table name for this dialect.
 
@@ -132,8 +140,42 @@ def _wm_ref(dialect: str) -> str:
     Oracle destinations the watermark DDL failed and with it every EOS apply on
     the very first batch. Oracle gets the Oracle-legal spelling; every other
     dialect keeps the historical name so existing tables keep working.
+
+    Inside an entry point the name is the one ``_enter_wm_scope`` resolved for
+    this destination (services.brand: an existing table wins, old name first).
     """
+    scoped = _WM_TABLE.get()
+    if scoped:
+        return scoped
     return WATERMARK_TABLE_ORACLE if dialect in _ORACLE_LIKE else WATERMARK_TABLE
+
+
+def _enter_wm_scope(engine: Any, dialect: str) -> contextvars.Token:
+    """Resolve this destination's watermark table and make ``_wm_ref`` use it.
+
+    The table holds every stream's resume point, so a run must never start a
+    second one: the table already on the destination is used, whichever name
+    it has; only a destination with neither gets the flag's name
+    (``DATAWRAP_BRAND_OBJECT_NAMES``). Reset with ``_WM_TABLE.reset(token)``.
+    """
+    from sqlalchemy import inspect as sa_inspect
+
+    from services.brand import resolve_existing
+
+    kind = (
+        "cdc_eos_watermark_table_oracle" if dialect in _ORACLE_LIKE
+        else "cdc_eos_watermark_table"
+    )
+
+    def _exists(name: str) -> bool:
+        with engine.connect() as conn:
+            return bool(sa_inspect(conn).has_table(name))
+
+    try:
+        where = engine.url.render_as_string(hide_password=True)
+    except Exception:
+        where = str(id(engine))
+    return _WM_TABLE.set(resolve_existing(kind, f"{dialect}:{where}", _exists))
 
 
 def _wm_ddl(dialect: str) -> str:
@@ -1060,6 +1102,7 @@ def apply_eos_sqlalchemy(
     cfg = dict(dest_cfg)
     cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
     engine = _engine(cfg)
+    wm_token = _enter_wm_scope(engine, dialect)
     try:
         _, _, target_cols, logical_by = _eos_write_shape(dialect, mappings, column_types)
         _prepare_eos_schema(
@@ -1093,6 +1136,7 @@ def apply_eos_sqlalchemy(
     except EosCrash:
         raise
     finally:
+        _WM_TABLE.reset(wm_token)
         release_engine(engine)
 
 
@@ -1119,6 +1163,7 @@ def apply_eos_sa_bundle(
     cfg = dict(dest_cfg)
     cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
     engine = _engine(cfg)
+    wm_token = _enter_wm_scope(engine, dialect)
     members: list[EosApplyResult] = []
     member_keys: list[str] = []
     try:
@@ -1193,6 +1238,7 @@ def apply_eos_sa_bundle(
     except EosCrash:
         raise
     finally:
+        _WM_TABLE.reset(wm_token)
         release_engine(engine)
     if incoming_lsn:
         for key, member in zip(member_keys, members):
@@ -1240,6 +1286,7 @@ def open_eos_sa_session(
     cfg = dict(dest_cfg)
     cfg.setdefault("type", dialect if dialect != "generic_sql" else (dest_cfg.get("type") or dest_type))
     engine = _engine(cfg)
+    wm_token = _enter_wm_scope(engine, dialect)
     try:
         with engine.begin() as conn:
             conn.execute(text(_wm_ddl(dialect)))
@@ -1275,6 +1322,7 @@ def open_eos_sa_session(
                 )
             return opened
     finally:
+        _WM_TABLE.reset(wm_token)
         release_engine(engine)
 
 
@@ -1289,6 +1337,7 @@ def sa_dest_watermark_view(
     cfg = dict(dest_cfg)
     cfg.setdefault("type", dialect)
     engine = _engine(cfg)
+    wm_token = _enter_wm_scope(engine, dialect)
     try:
         with engine.connect() as conn:
             try:
@@ -1311,6 +1360,7 @@ def sa_dest_watermark_view(
                 return DestWmView()
             return _row_to_wm(row)
     finally:
+        _WM_TABLE.reset(wm_token)
         release_engine(engine)
 
 
@@ -1322,6 +1372,7 @@ def sa_dest_resume_blob(dest_cfg: dict[str, Any], stream_key: str, dest_type: st
     cfg = dict(dest_cfg)
     cfg.setdefault("type", dialect)
     engine = _engine(cfg)
+    wm_token = _enter_wm_scope(engine, dialect)
     try:
         with engine.connect() as conn:
             try:
@@ -1338,6 +1389,7 @@ def sa_dest_resume_blob(dest_cfg: dict[str, Any], stream_key: str, dest_type: st
                 raise
             return str(row[0] or "") if row else ""
     finally:
+        _WM_TABLE.reset(wm_token)
         release_engine(engine)
 
 
@@ -1349,6 +1401,7 @@ def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: 
     cfg = dict(dest_cfg)
     cfg.setdefault("type", dialect)
     engine = _engine(cfg)
+    wm_token = _enter_wm_scope(engine, dialect)
     try:
         with engine.connect() as conn:
             try:
@@ -1365,6 +1418,7 @@ def sa_dest_watermark_lsn(dest_cfg: dict[str, Any], stream_key: str, dest_type: 
                 raise
             return str(row[0]) if row and row[0] else None
     finally:
+        _WM_TABLE.reset(wm_token)
         release_engine(engine)
 
 
@@ -1391,6 +1445,7 @@ def sa_blank_eos_resume(
     cfg = dict(dest_cfg)
     cfg.setdefault("type", dialect)
     engine = _engine(cfg)
+    wm_token = _enter_wm_scope(engine, dialect)
     try:
         with engine.begin() as conn:
             conn.execute(text(_wm_ddl(dialect)))
@@ -1412,6 +1467,7 @@ def sa_blank_eos_resume(
             )
             return cleared
     finally:
+        _WM_TABLE.reset(wm_token)
         release_engine(engine)
 
 
