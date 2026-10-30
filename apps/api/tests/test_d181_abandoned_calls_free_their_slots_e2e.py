@@ -198,3 +198,34 @@ def test_an_abandoned_call_releases_its_workspace_slot_at_the_deadline(world):
     while time.monotonic() < end and snapshot()["abandoned_total"]:
         time.sleep(0.25)
     assert snapshot()["abandoned_total"] == 0, snapshot()
+
+
+def test_pooled_sqlalchemy_sessions_carry_the_budget_only_inside_a_tool():
+    """Pooled engines (the duplicate probe, the query route) get the call's
+    budget as statement_timeout at checkout and lose it at checkin, so a
+    transfer job that reuses the session later is not bounded by a tool."""
+    sa = pytest.importorskip("sqlalchemy")
+    from conftest import pg_test_cfg
+    from services import statement_budget
+    from src.ai.copilot.tool_deadline import deadline_context_for_tests
+
+    statement_budget.install()
+    cfg = pg_test_cfg()
+    engine = sa.create_engine(
+        f"postgresql+psycopg2://{cfg['username']}:{cfg['password']}@{cfg['host']}:{cfg['port']}/{cfg['database']}",
+        pool_pre_ping=True,
+        pool_size=1,
+    )
+    try:
+        with engine.connect() as c:
+            assert c.exec_driver_sql("SHOW statement_timeout").scalar() == "0"
+        with deadline_context_for_tests(7):
+            with engine.connect() as c:
+                bound = c.exec_driver_sql("SHOW statement_timeout").scalar()
+                # The consumer's own first statement still opens the transaction.
+                c.exec_driver_sql("SET TRANSACTION READ ONLY")
+        assert bound.endswith("ms") and 5000 <= int(bound[:-2]) <= 7000, bound
+        with engine.connect() as c:
+            assert c.exec_driver_sql("SHOW statement_timeout").scalar() == "0"
+    finally:
+        engine.dispose()

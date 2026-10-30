@@ -422,7 +422,8 @@ def parallel_steps(
         return [_run_step(step) for step in steps]
     from services.connector_executor import get_executor
 
-    budget = remaining_seconds() if seconds is None else min(seconds, remaining_seconds() or seconds)
+    left = remaining_seconds()
+    budget = left if seconds is None else (seconds if left is None else min(seconds, left))
     deadline = time.monotonic() + max(0.0, budget or 0.0)
     if bound_each:
         steps = [

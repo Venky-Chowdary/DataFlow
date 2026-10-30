@@ -45,6 +45,12 @@ def _execute(dbapi_connection: Any, statement: str, *, outside_transaction: bool
     """Run one session statement; PostgreSQL runs it outside any transaction so
     the consumer's first statement (``SET TRANSACTION READ ONLY``) still opens it."""
     toggled = False
+    if outside_transaction:
+        # A pre-ping (SELECT 1) may have opened a transaction; nothing of the
+        # consumer's is in it yet at checkout/checkin.
+        status = getattr(dbapi_connection, "get_transaction_status", None)
+        if callable(status) and status() in (2, 3):  # INTRANS / INERROR
+            dbapi_connection.rollback()
     if outside_transaction and not getattr(dbapi_connection, "autocommit", True):
         dbapi_connection.autocommit = True
         toggled = True
