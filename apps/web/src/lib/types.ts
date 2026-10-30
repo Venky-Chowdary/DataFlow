@@ -1623,7 +1623,15 @@ export interface PipelineSchedule {
   last_run_at: string | null;
   next_run_at: string | null;
   last_job_id: string | null;
+  /** Derived by the API from the latest run record (not a stored copy). */
   last_status: string | null;
+  /** The latest run's reason (e.g. "Worker lost: …", the job error). */
+  last_status_reason?: string;
+  last_status_code?: string;
+  /** The open run record (pending/running), if any. */
+  current_run?: Partial<ScheduleRunBrief> & { run_id: string; status: string } | null;
+  /** The newest skipped beat after the latest run, with its reason. */
+  last_skip?: Partial<ScheduleRunBrief> | null;
   run_count: number;
   running: boolean;
   created_at: string;
@@ -1688,11 +1696,44 @@ export interface ScheduleRun {
   } | null;
   /** Independent dest COUNT(*) ledger copied from the completed job. */
   row_accounting?: import("./conservationLedger").ConservationLedger | null;
+  /** Run record id (one record per attempt, persisted before any work). */
+  run_id?: string;
+  /** cadence | retry | manual */
+  trigger?: string;
+  /** Why the run ended as it did — every terminal record has one. */
+  reason?: string;
+  reason_code?: string;
+  /** Persisted lifecycle: pending → running → terminal. */
+  transitions?: { status: string; at: string; reason?: string }[];
+  /** A skipped beat that repeated, coalesced on one record. */
+  occurrences?: number;
+  last_seen_at?: string;
+}
+
+/** A run record as summarised on a schedule (current run, last skip). */
+export interface ScheduleRunBrief {
+  run_id: string;
+  status: string;
+  trigger?: string;
+  attempt?: number;
+  job_id?: string;
+  started_at?: string;
+  finished_at?: string;
+  reason?: string;
+  reason_code?: string;
+  occurrences?: number;
+  last_seen_at?: string;
 }
 
 export interface ScheduleHistory {
   schedule_id: string;
   runs: ScheduleRun[];
+  status?: {
+    last_status: string | null;
+    last_status_reason: string;
+    current_run: ScheduleRunBrief | null;
+    last_skip: ScheduleRunBrief | null;
+  };
 }
 
 export interface ScheduleIntervalOption {

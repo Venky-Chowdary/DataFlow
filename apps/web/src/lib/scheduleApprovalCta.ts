@@ -78,7 +78,7 @@ export function persistedMappingRows(raw: unknown): Array<Record<string, unknown
 export function scheduleNeedsStudio(sched: PipelineSchedule): boolean {
   if (isEmptyMappingFinding(sched.approval_code, sched.approval_finding)) return true;
   const count = sched.mapping_count ?? (Array.isArray(sched.mappings) ? sched.mappings.length : undefined);
-  if (count === 0 && (sched.last_status === "needs_approval" || !sched.enabled)) {
+  if (count === 0 && (sched.needs_approval || sched.last_status === "needs_approval" || !sched.enabled)) {
     return true;
   }
   return false;

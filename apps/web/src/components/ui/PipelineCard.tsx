@@ -4,8 +4,8 @@ import { DtIcon } from "../DtIcon";
 import { Connector, PipelineSchedule } from "../../lib/types";
 import { breakerBadgeClass, breakerWarnLabel, campaignBadgeClass, campaignWarnLabel } from "../../lib/contractBreakerUi";
 import { formatSyncModeLabel } from "../../lib/transferConstants";
-import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import { scheduleCadenceLabel } from "../../lib/scheduleCadence";
+import { scheduleStatusBadge, skippedBeatNote } from "../../lib/scheduleRunStatus";
 import { Button } from "./Button";
 import { CopyIdChip } from "./CopyIdChip";
 
@@ -65,6 +65,9 @@ export function PipelineCard({
   children,
 }: PipelineCardProps) {
   const isRunning = running || sched.running;
+  // Derived from the latest run record (with its reason), not a stored copy.
+  const statusBadge = scheduleStatusBadge(sched);
+  const skipNote = skippedBeatNote(sched);
   const syncLabel = formatSyncModeLabel(sched.sync_mode);
   const routeLabel = `${source?.name ?? "Source"} → ${dest?.name ?? "Destination"}`;
   const tableLabel = `${sched.source_table} → ${sched.dest_table}`;
@@ -145,12 +148,9 @@ export function PipelineCard({
             </span>
           ) : isRunning ? (
             <span className="df2-badge df2-badge-run">Running</span>
-          ) : sched.last_status ? (
-            <span
-              className={jobStatusBadgeClass(sched.last_status)}
-              title={sched.approval_finding || undefined}
-            >
-              {jobStatusLabel(sched.last_status)}
+          ) : statusBadge ? (
+            <span className={statusBadge.className} title={skipNote ? `${statusBadge.title}\n${skipNote}` : statusBadge.title}>
+              {statusBadge.label}
             </span>
           ) : (
             <span className="df2-badge df2-badge-muted">No runs</span>
@@ -249,12 +249,9 @@ export function PipelineCard({
               {campaignText}
             </span>
           )}
-          {sched.last_status && (
-            <span
-              className={jobStatusBadgeClass(sched.last_status)}
-              title={sched.approval_finding || `Last run: ${jobStatusLabel(sched.last_status)}`}
-            >
-              {jobStatusLabel(sched.last_status)}
+          {statusBadge && (
+            <span className={statusBadge.className} title={skipNote ? `${statusBadge.title}\n${skipNote}` : statusBadge.title}>
+              {statusBadge.label}
             </span>
           )}
           <span className={`df2-badge ${sched.enabled ? "df2-badge-live" : "df2-badge-muted"}`}>

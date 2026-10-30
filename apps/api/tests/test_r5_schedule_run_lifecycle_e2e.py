@@ -37,6 +37,7 @@ from tests import r4_route_harness as h
 pytestmark = pytest.mark.timeout(300)
 
 _OPEN = {"pending", "running"}
+_INFLIGHT: list[dict] = []
 
 
 @pytest.fixture
@@ -46,6 +47,28 @@ def env(tmp_path, monkeypatch):
 
     sent: list[dict] = []
     monkeypatch.setattr(ns, "notify_workspace", lambda ws, payload: sent.append(dict(payload)) or [])
+    import threading
+
+    from services import schedule_runner
+
+    # Count finalize calls in flight so a beat is only "done" once its
+    # done-callback (record, close findings, notify) has fully returned.
+    inflight = {"n": 0}
+    lock = threading.Lock()
+    real_finalize = schedule_runner._finalize_run
+
+    def _counted(*a, **k):
+        with lock:
+            inflight["n"] += 1
+        try:
+            return real_finalize(*a, **k)
+        finally:
+            with lock:
+                inflight["n"] -= 1
+
+    monkeypatch.setattr(schedule_runner, "_finalize_run", _counted)
+    _INFLIGHT.clear()
+    _INFLIGHT.append(inflight)
     from fastapi.testclient import TestClient
     from src.main import app
 
@@ -112,7 +135,9 @@ def _beat_and_wait(schedule_id: str) -> int:
     if job_id:
         h.wait_job(job_id, 180)
         deadline = time.monotonic() + 60
-        while time.monotonic() < deadline and get_schedule(schedule_id).running:
+        while time.monotonic() < deadline and (
+            get_schedule(schedule_id).running or (_INFLIGHT and _INFLIGHT[0]["n"])
+        ):
             time.sleep(0.2)
     return started
 
@@ -398,8 +423,10 @@ def test_overlapping_beat_is_recorded_as_skipped_with_the_holder(env, monkeypatc
         one, _row, runs = _rest(client, sched.id)
         assert one["last_status"] == "completed", one
         assert one["current_run"] is None, one
-        assert runs[0]["status"] == "completed" and runs[0]["job_id"] == held["job_id"], runs[0]
-        assert any(r["status"] == "skipped" for r in runs[1:]), runs
+        run_a = next(r for r in runs if r["job_id"] == held["job_id"])
+        assert run_a["status"] == "completed", run_a
+        assert _statuses(run_a) == ["pending", "running", "completed"], run_a
+        assert one["last_skip"] is None, one  # the overlap was about run A, now done
         assert h.query("mysql", f"SELECT COUNT(*) FROM `{table}`")[0][0] == 5  # nosec B608
     finally:
         _cleanup(table)
@@ -433,9 +460,10 @@ def test_pending_approval_beat_is_recorded_and_status_comes_from_the_run(env):
         # A second beat while still parked does not add another row.
         schedule_runner._run_due_schedules()
         _one, _row, again = _rest(client, sched.id)
+        assert _row["needs_approval"] is True, (_row, again)
         assert len([r for r in again if r["status"] == "skipped"]) == 1, again
         mcp = _mcp(sched.id)
-        assert mcp["last_status"] == "completed" and mcp["needs_approval"] is True, mcp
+        assert mcp["last_status"] == "completed" and mcp.get("needs_approval") is True, (mcp, _row)
         assert mcp["last_skip"]["reason_code"] == "approval_pending", mcp
     finally:
         _cleanup(table)

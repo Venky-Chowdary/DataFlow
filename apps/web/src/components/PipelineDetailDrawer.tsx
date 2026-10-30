@@ -376,9 +376,15 @@ export function PipelineDetailDrawer({
             <span className="df2-badge df2-badge-warn">Needs attention</span>
           )}
           {sched.last_status && (
-            <span className={jobStatusBadgeClass(sched.last_status)}>
+            <span
+              className={jobStatusBadgeClass(sched.last_status)}
+              title={sched.last_status_reason || jobStatusLabel(sched.last_status)}
+            >
               {jobStatusLabel(sched.last_status)}
             </span>
+          )}
+          {sched.last_status_reason && sched.last_status !== "completed" && (
+            <span className="df2-sched-status-reason" role="status">{sched.last_status_reason}</span>
           )}
         </>
       }
