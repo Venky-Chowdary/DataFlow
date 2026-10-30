@@ -112,6 +112,35 @@ def wire_cell(value: Any) -> WireCell:
     return WireCell(cell_to_string(value, preserve_sql_null=True))
 
 
+def reader_wire_cell(value: Any) -> Any:
+    """Mark a cell taken from a connector reader's ``ReadBatch`` as wire.
+
+    ``ReadBatch.rows`` are wire by contract (``cell_to_string(...,
+    preserve_sql_null=True)``): NULL is the ``__DF_SQL_NULL__`` sentinel and a
+    colliding text is already escaped. A consumer that otherwise sees raw
+    driver values (Gate-8's destination sample) must not encode it again.
+    """
+    if isinstance(value, str) and not isinstance(value, (WireCell, WireLiteral)):
+        return WireCell(value)
+    return value
+
+
+def document_bind_value(value: Any) -> Any:
+    """A present wire cell as the value a document store keeps.
+
+    The wire escapes text that spells a sentinel (``__DF_ESC____DF_SQL_NULL__``
+    is the user's text ``__DF_SQL_NULL__``). SQL binds decode that layer
+    (``sql_bind``); the Elasticsearch / MongoDB / DynamoDB writers did not, so
+    the escape itself was stored and read back as different text. Callers
+    handle absence first (``absent_sql_bind``); this decodes one layer. A
+    decoded sentinel spelling stays a :class:`WireLiteral` (a ``str``), so
+    later absence checks in the writer keep it as text, not NULL.
+    """
+    if isinstance(value, str):
+        return unescape_wire_text(value)
+    return value
+
+
 def driver_bind_value(value: Any) -> Any:
     """The value a database driver binds: a :class:`WireLiteral` leaves as ``str``.
 
@@ -149,6 +178,11 @@ def payload_cell_wire(value: Any) -> Any:
     Only text is escaped: ``None`` already is NULL on the wire, and typed
     values (JSON numbers, Parquet decimals) never collide.
     """
+    # A reader's batch cell already crossed the encode (D174): its
+    # ``__DF_SQL_NULL__`` is NULL, and escaping it again turned a real NULL
+    # into the literal text ``__DF_SQL_NULL__``.
+    if isinstance(value, WireCell):
+        return value
     # Every wire spelling contains ``__`` — the cheap test keeps the
     # strip/lower in ``escape_wire_text`` off the per-cell hot path.
     if isinstance(value, str) and "__" in value:
