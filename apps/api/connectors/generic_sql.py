@@ -906,73 +906,14 @@ def _engine(cfg: dict[str, Any]) -> Any:
     """
     from services.engine_pool import get_pooled_engine
 
-    scoped = _endpoint_scoped_engine(cfg)
+    from connectors.snowflake_scoped_engine import endpoint_scoped_engine
+
+    scoped = endpoint_scoped_engine(cfg)
     if scoped is not None:
         return scoped
     # Flatten nested extra TLS/SID/driver keywords *before* the pool key, or
     # a verify-or-fail engine is reused after the operator declared trust.
     return get_pooled_engine(with_connection_options(cfg), _build_engine)
-
-
-def _endpoint_scoped_engine(cfg: dict[str, Any]) -> Any:
-    """Inside an endpoint scope, a Snowflake engine that rides the scope's login.
-
-    The process-wide pooled engine owns a login of its own and pings it on
-    every checkout: inside one plan the reflection and the GROUP BY of the
-    destination uniqueness probe paid a second Snowflake login (2-4s) and a
-    ``SELECT 1`` round trip per checkout (D187). The scope's engine draws its
-    DBAPI connection from the shared login (no pool, nothing to ping) and is
-    disposed with the scope.
-    """
-    if str(cfg.get("type") or "").lower().strip() != "snowflake":
-        return None
-    from services.endpoint_session import borrow, in_scope
-
-    if not in_scope("snowflake"):
-        return None
-    built = _warehouse_creator(cfg, "snowflake")
-    if built is None:
-        return None
-    url, _owned_creator = built
-    kwargs = _snowflake_login_kwargs(cfg)
-
-    def _shared_login() -> Any:
-        from connectors.snowflake_conn import get_connection
-
-        return get_connection(**kwargs)
-
-    from sqlalchemy.pool import NullPool
-
-    key = tuple(sorted((k, str(v)) for k, v in kwargs.items()))
-    try:
-        engine, _release = borrow(
-            "snowflake-sqlalchemy",
-            key,
-            lambda: create_engine(url, creator=_shared_login, poolclass=NullPool),
-            close=lambda e: e.dispose(),
-            shared=True,
-        )
-    except (NoSuchModuleError, ImportError) as exc:
-        raise _dialect_unavailable(url, cfg.get("type")) from exc
-    return engine
-
-
-def _snowflake_login_kwargs(cfg: dict[str, Any]) -> dict[str, Any]:
-    from connectors.snowflake_conn import normalize_account
-    from services.copy_snowflake_common import snowflake_database_of, snowflake_schema_of
-
-    return {
-        "account": normalize_account(str(cfg.get("host") or "")),
-        "username": str(cfg.get("username") or cfg.get("user") or ""),
-        "password": str(cfg.get("password") or ""),
-        "database": snowflake_database_of(cfg),
-        "schema": snowflake_schema_of(cfg),
-        "warehouse": str(cfg.get("warehouse") or ""),
-        "connection_string": str(cfg.get("connection_string") or ""),
-        "role": str(cfg.get("role") or ""),
-        "private_key": str(cfg.get("private_key") or ""),
-        "private_key_passphrase": str(cfg.get("private_key_passphrase") or ""),
-    }
 
 
 def _warehouse_creator(cfg: dict[str, Any], db_type: str) -> tuple[sa.URL, Callable[[], Any]] | None:
@@ -994,7 +935,9 @@ def _warehouse_creator(cfg: dict[str, Any], db_type: str) -> tuple[sa.URL, Calla
             # used after the scope closed it (and reopened unowned logins).
             from connectors.snowflake_conn import _open_connection
 
-            return _open_connection(**_snowflake_login_kwargs(cfg))
+            from connectors.snowflake_scoped_engine import snowflake_login_kwargs
+
+            return _open_connection(**snowflake_login_kwargs(cfg))
 
         url = sa.URL.create(
             "snowflake",

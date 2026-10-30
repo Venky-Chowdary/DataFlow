@@ -174,10 +174,10 @@ def _connect(kind: str):
     if kind == "sqlserver":
         import pyodbc
 
+        c = _cfg(kind)  # skips when SQL Server is not configured
         return pyodbc.connect(
             "DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;DATABASE=dataflow;"
-            f"UID={os.environ.get('DATAFLOW_TEST_MSSQL_USER', 'sa')};"
-            f"PWD={os.environ['DATAFLOW_TEST_MSSQL_PASSWORD']};TrustServerCertificate=yes",
+            f"UID={c['username']};PWD={c['password']};TrustServerCertificate=yes",
             timeout=10, autocommit=True,
         )
     if kind == "snowflake":

@@ -165,6 +165,8 @@ def _dest_config(kind: str) -> dict[str, Any]:
 def _mssql():
     import pyodbc
 
+    if not os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD"):
+        pytest.skip("SQL Server not configured (DATAFLOW_TEST_MSSQL_PASSWORD)")
     return pyodbc.connect(
         "DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;DATABASE=dataflow;"
         f"UID={os.environ.get('DATAFLOW_TEST_MSSQL_USER', 'sa')};"
