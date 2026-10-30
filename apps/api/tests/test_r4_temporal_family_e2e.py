@@ -585,3 +585,68 @@ def test_d59_a_refused_double_is_named_at_validate(transfer_client):
     finally:
         pg_exec(f'DROP TABLE IF EXISTS public."{src}"')
         _drop("sqlserver", out)
+
+
+# ============================================ NULL vs the sentinel's spelling
+#
+# Gate-8 read the destination sample as raw values and encoded it for the wire.
+# The ES / Kafka / SaaS / DynamoDB-scan samples come from connector readers
+# whose cells already are wire, so a real JSON ``null`` (the sentinel) was
+# escaped into the *text* ``__DF_SQL_NULL__`` and failed verification. The
+# literal text the source really holds must still arrive as text.
+
+_NULL_ROWS = [(1, None, "a"), (2, "y", None), (3, "", " "), (4, "z", "")]
+_LITERAL_ROWS = [(1, "__DF_SQL_NULL__", None), (2, "__DF_ESC__x", "__df_missing__")]
+
+
+@pytest.mark.parametrize("rows", ["null", "literal"])
+@pytest.mark.parametrize("dest", ["elasticsearch", "mongodb", "redis"])
+def test_null_and_the_sentinel_literal_round_trip_document_destinations(
+    transfer_client, fake_es, dest, rows
+):
+    _SENTINEL_ROWS = _NULL_ROWS if rows == "null" else _LITERAL_ROWS
+    import json
+
+    from tests._r4_temporal_harness import up
+
+    if dest == "redis" and not up("127.0.0.1", 6379):
+        pytest.skip("Redis not reachable")
+    src, out = tag("nulls"), tag("nulld")
+    pg_exec(f'CREATE TABLE public."{src}" (id int primary key, a text, b text)')
+    for row in _SENTINEL_ROWS:
+        pg_exec(f'INSERT INTO public."{src}" VALUES (%s, %s, %s)', row)
+    if dest == "redis":
+        dest_id = connector("redis", "destination", type="redis", host="127.0.0.1",
+                            port=6379, database="0")
+    else:
+        dest_id = _dest(transfer_client, dest, out)
+    try:
+        job = run(transfer_client, source_connector_id=connector("postgresql", "source"),
+                  source_table=src, dest_connector_id=dest_id, dest_table=out,
+                  sync_mode="full_refresh_overwrite")
+        assert (job.get("reconciliation") or {}).get("verification_verdict") == "verified", job
+        if dest == "elasticsearch":
+            docs = list(fake_es[out]["docs"].values())
+        elif dest == "mongodb":
+            client, db = mongo_db()
+            try:
+                docs = list(db[out].find({}, {"_id": 0}))
+            finally:
+                db[out].drop()
+                client.close()
+        else:
+            import redis
+
+            r = redis.Redis(host="127.0.0.1", port=6379, db=0)
+            try:
+                keys = r.keys(f"{out}:*")
+                docs = [json.loads(r.get(k)) for k in keys]
+                docs = [d for d in docs if isinstance(d, dict) and "id" in d]
+                if keys:
+                    r.delete(*keys)
+            finally:
+                r.close()
+        got = sorted((int(d["id"]), d.get("a"), d.get("b")) for d in docs)
+        assert got == _SENTINEL_ROWS
+    finally:
+        pg_exec(f'DROP TABLE IF EXISTS public."{src}"')

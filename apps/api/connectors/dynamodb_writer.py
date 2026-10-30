@@ -293,6 +293,9 @@ def _to_dynamo_value(value: Any, source_type: str) -> Any:
     handled, bound = absent_sql_bind(value)
     if handled:
         return bound
+    from services.value_serializer import document_bind_value
+
+    value = document_bind_value(value)
     # Reader envelopes: {"_df_ddb_set": "SS"|"NS"|"BS", "v": [...]} (also accept "items").
     if isinstance(value, dict) and value.get("_df_ddb_set") in {"SS", "NS", "BS"}:
         kind = value["_df_ddb_set"]
