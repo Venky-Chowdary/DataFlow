@@ -2147,6 +2147,7 @@ def _clear_stale_running_schedules() -> None:
     """
     _sweep_orphan_runs()
     from services.schedule_store import (
+        _CLAIM_LOCK,
         PipelineSchedule,
         _is_running_stale,
         _load_all,
@@ -2155,43 +2156,46 @@ def _clear_stale_running_schedules() -> None:
         compute_next_run,
     )
 
-    schedules = _load_all()
-    changed = False
-    for i, s in enumerate(schedules):
-        if s.running and str(s.running_job_id or "").strip():
-            from services.schedule_store import _job_dispatch_state, get_schedule
+    # The whole snapshot is rewritten below: hold the store lock so an edit or
+    # a run landing meanwhile is not overwritten by this stale copy.
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        changed = False
+        for i, s in enumerate(schedules):
+            if s.running and str(s.running_job_id or "").strip():
+                from services.schedule_store import _job_dispatch_state, get_schedule
 
-            if _job_dispatch_state(s.running_job_id) == "terminal":
-                started = _parse_ts(s.running_started_at) or datetime.now(timezone.utc)
-                _finalize_run(
-                    s.id,
-                    s.running_job_id,
-                    s.retry_attempt if s.retry_at else 0,
-                    started,
-                )
-                fresh = get_schedule(s.id)
-                if fresh is not None:
-                    schedules[i] = fresh
-                continue
-        if s.running and _is_running_stale(s):
-            current = datetime.now(timezone.utc)
-            nxt = _parse_ts(s.next_run_at)
-            advanced = s.next_run_at
-            if nxt is None or nxt <= current:
-                advanced = compute_next_run(
-                    s.interval, current, cron=s.cron, tz=s.timezone
-                )
-            schedules[i] = PipelineSchedule.from_dict({
-                **s.to_dict(),
-                "running": False,
-                "running_instance": "",
-                "running_started_at": None,
-                "running_job_id": "",
-                "next_run_at": advanced,
-            })
-            changed = True
-    if changed:
-        _save_all(schedules)
+                if _job_dispatch_state(s.running_job_id) == "terminal":
+                    started = _parse_ts(s.running_started_at) or datetime.now(timezone.utc)
+                    _finalize_run(
+                        s.id,
+                        s.running_job_id,
+                        s.retry_attempt if s.retry_at else 0,
+                        started,
+                    )
+                    fresh = get_schedule(s.id)
+                    if fresh is not None:
+                        schedules[i] = fresh
+                    continue
+            if s.running and _is_running_stale(s):
+                current = datetime.now(timezone.utc)
+                nxt = _parse_ts(s.next_run_at)
+                advanced = s.next_run_at
+                if nxt is None or nxt <= current:
+                    advanced = compute_next_run(
+                        s.interval, current, cron=s.cron, tz=s.timezone
+                    )
+                schedules[i] = PipelineSchedule.from_dict({
+                    **s.to_dict(),
+                    "running": False,
+                    "running_instance": "",
+                    "running_started_at": None,
+                    "running_job_id": "",
+                    "next_run_at": advanced,
+                })
+                changed = True
+        if changed:
+            _save_all(schedules)
 
 
 async def run_schedule_loop() -> None:

@@ -73,7 +73,12 @@ def env(tmp_path, monkeypatch):
     from src.main import app
 
     # No lifespan: the background scheduler loop must not race these beats.
-    return {"client": TestClient(app), "notes": sent}
+    yield {"client": TestClient(app), "notes": sent}
+    # A finalize callback still running on a job thread would write into the
+    # next test's store (STORE_PATH is a module global): let it land first.
+    deadline = time.monotonic() + 60
+    while inflight["n"] and time.monotonic() < deadline:
+        time.sleep(0.1)
 
 
 def _pipeline(kind: str = "mysql", **extra):
