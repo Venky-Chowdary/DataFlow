@@ -3601,6 +3601,8 @@ export type AuditChainFinding = {
   index: number;
   event_id: string;
   detail: string;
+  cause?: string;
+  workspace_id?: string | null;
 };
 
 export type AuditChainVerification = {
@@ -3611,6 +3613,7 @@ export type AuditChainVerification = {
   retention_checkpoints: Array<{ removed_count: number; at: string }>;
   honesty: string;
   withheld_findings?: number;
+  reanchored?: Array<{ event_id: string; kind: string; cause?: string; reanchored_at?: string; reanchored_by?: string }>;
   workspace_id?: string | null;
   scope?: "workspace" | "platform";
 };

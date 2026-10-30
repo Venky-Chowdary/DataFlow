@@ -1,49 +1,48 @@
 /**
  * Verdict copy for Settings → Audit Logs → Verify chain.
  *
- * The HMAC walk is platform-wide. Findings listed to the operator are this
- * workspace's records; other-workspace findings are a count, not event ids.
+ * A workspace report covers that workspace's own chain (its records and the
+ * links between them); another tenant's findings are never part of it (R7).
+ * The platform walk is a platform admin's report and names workspaces.
  */
 
 export type ChainVerdictReport = {
   verified: boolean;
   checked: number;
-  findings: Array<{ kind?: string; index?: number; event_id?: string; detail?: string }>;
+  findings: Array<{ kind?: string; index?: number; event_id?: string; detail?: string; workspace_id?: string | null }>;
+  /** Sent by older APIs; never shown — it is not this workspace's verdict. */
   withheld_findings?: number;
+  reanchored?: Array<{ event_id?: string; kind?: string }>;
+  scope?: "workspace" | "platform";
 };
 
+function reanchoredNote(report: ChainVerdictReport): string {
+  const n = report.reanchored?.length ?? 0;
+  return n ? ` (${n} re-anchored)` : "";
+}
+
 export function chainVerdictTitle(report: ChainVerdictReport): string {
+  const workspace = report.scope === "workspace";
   if (report.verified) {
-    return `Chain intact — ${report.checked} records re-walked`;
+    const lead = workspace ? "This workspace's chain is intact" : "Chain intact";
+    return `${lead} — ${report.checked} records re-walked${reanchoredNote(report)}`;
   }
-  const local = report.findings?.length ?? 0;
-  const withheld = report.withheld_findings ?? 0;
-  if (local && withheld) {
-    return `Chain verification failed — ${local} record(s) in this workspace, ${withheld} withheld`;
+  const findings = report.findings ?? [];
+  if (!findings.length) return "Chain verification failed";
+  if (workspace) {
+    return `Chain verification failed — ${findings.length} record(s) in this workspace`;
   }
-  if (local) {
-    return `Chain verification failed — ${local} record(s) in this workspace`;
-  }
-  if (withheld) {
-    return `Chain verification failed — ${withheld} finding(s) in other workspaces (not shown)`;
-  }
-  return "Chain verification failed";
+  const spaces = new Set(findings.map((f) => f.workspace_id || "(platform)"));
+  return `Chain verification failed — ${findings.length} record(s) across ${spaces.size} workspace(s)`;
 }
 
 export function chainVerdictToast(report: ChainVerdictReport): string {
   if (report.verified) {
     return `${report.checked} records re-walked — none altered or missing.`;
   }
-  const local = report.findings?.length ?? 0;
-  const withheld = report.withheld_findings ?? 0;
-  if (local && withheld) {
-    return `${local} record(s) in this workspace do not hold up; ${withheld} withheld.`;
-  }
-  if (local) {
-    return `${local} record(s) in this workspace do not hold up.`;
-  }
-  if (withheld) {
-    return `${withheld} finding(s) belong to other workspaces and are not shown.`;
-  }
-  return "The chain does not hold up.";
+  const n = report.findings?.length ?? 0;
+  if (!n) return "The chain does not hold up.";
+  return report.scope === "workspace"
+    ? `${n} record(s) in this workspace do not hold up.`
+    : `${n} record(s) do not hold up.`;
 }

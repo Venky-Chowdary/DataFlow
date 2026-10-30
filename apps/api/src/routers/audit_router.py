@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
 
 from services.audit_coverage import record_security_event
 from services.workspace_access import tenant_scope as _tenant_scope
@@ -350,12 +351,13 @@ async def verify_audit_chain(
     request: Request,
     limit: int = Query(5000, ge=1, le=20000, description="Records to walk, oldest first"),
 ):
-    """Re-walk the evidence chain. The walk is platform-wide (HMAC links every
-    record). Findings named in the response are this workspace's when
-    ``X-Workspace-Id`` is set — another tenant's event ids are withheld.
+    """Re-walk the evidence chain.
 
-    With no header the findings are the caller's own workspace's; only a
-    platform admin gets the platform-wide list of broken event ids (D154).
+    With ``X-Workspace-Id`` (or for any non-admin) this is the workspace's own
+    chain: its records and the per-workspace links between them, so another
+    tenant's records can neither fail nor appear in the verdict (R7). With no
+    header a platform admin gets the platform-wide walk, each finding naming
+    its workspace.
     """
     from services.evidence_chain import verify_chain
 
@@ -369,6 +371,47 @@ async def verify_audit_chain(
             "ok": bool(result.get("verified")),
             "verified_count": result.get("checked", 0),
         },
+    )
+    return result
+
+
+class ReanchorBody(BaseModel):
+    reason: str = Field(min_length=10, max_length=500)
+    accept_causes: list[str] = Field(default_factory=lambda: ["legacy_datetime_roundtrip"])
+    dry_run: bool = True
+
+
+@router.post("/chain/reanchor")
+async def reanchor_audit_chain(body: ReanchorBody, request: Request):
+    """Platform admin: migrate records the old hash input broke (R7).
+
+    Dry run by default. Applying it files ``audit.chain.reanchored`` into the
+    chain and seals each accepted record as it stands; see
+    ``services.audit_chain_reanchor``. A workspace admin cannot do this: the
+    chain is shared, so the decision is the platform's.
+    """
+    from services.audit_chain_reanchor import ReanchorError, reanchor_chain
+    from services.audit_log import actor_from_request
+
+    scope = tenant_scope(request)
+    if not scope.unrestricted or scope.workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Re-anchoring the audit chain is a platform administrator action.",
+        )
+    try:
+        result = reanchor_chain(
+            actor=actor_from_request(request),
+            reason=body.reason,
+            accept_causes=body.accept_causes,
+            dry_run=body.dry_run,
+        )
+    except ReanchorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_security_event(
+        "audit.chain.reanchor", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"dry_run": body.dry_run, "accepted": len(result["accepted"])},
     )
     return result
 

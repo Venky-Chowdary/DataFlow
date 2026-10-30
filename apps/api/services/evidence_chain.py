@@ -216,10 +216,16 @@ def read_chain(*, limit: int = MAX_VERIFY_EVENTS) -> list[dict[str, Any]]:
 def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> dict[str, Any]:
     """Re-walk the stored chain and name every record that does not hold up.
 
-    The walk is always platform-wide — the HMAC line links every record, so a
-    workspace-filtered read would invent broken links. When ``workspace_id`` is
-    set, findings that name another workspace's records are withheld after the
-    walk. ``verified`` stays the global verdict.
+    With no ``workspace_id`` this is the platform walk: every record, linked by
+    the global ``prev_hash`` line. It is the platform admin's report, and each
+    finding names the workspace of the record it is about.
+
+    With ``workspace_id`` this is that workspace's own chain (R7): its records'
+    HMACs, and the ``ws_prev_hash`` line that links each record to the previous
+    record of the same workspace. Other tenants' records are neither walked
+    nor counted, so their findings cannot fail this verdict or leak into it.
+    Records written before per-workspace links existed are hash-checked only;
+    their links are part of the platform walk.
 
     Findings, in the order they are checked per record:
 
@@ -228,7 +234,9 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     ``event_hash_mismatch``
         Recomputing the HMAC over the record's own content disagrees with the
         stored hash: the record was altered after it was written, or written
-        under a different platform secret.
+        under a different platform secret, or (``cause`` =
+        ``legacy_datetime_roundtrip``) it predates canonical hashing and holds a
+        value the store rewrote.
     ``broken_link``
         ``prev_hash`` does not name the previous record: a record between them
         was deleted, or the two were reordered.
@@ -238,10 +246,15 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     ``unexplained_prefix``
         The oldest record points at a predecessor that is not in the store and
         no signed retention checkpoint accounts for it.
+
+    A finding a platform admin migrated with :func:`reanchor_chain` (and that
+    still matches the content sealed then) moves to ``reanchored``.
     """
+    from services.audit_chain_reanchor import split_reanchored
+
     events = read_chain(limit=limit)
-    findings: list[ChainFinding] = []
     truncations = list_truncations()
+    ws = (workspace_id or "").strip()
     if not events:
         return present_verify_report(
             {
@@ -249,6 +262,7 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
                 "checked": 0,
                 "chain_head": None,
                 "findings": [],
+                "reanchored": [],
                 "retention_checkpoints": truncations,
                 "walked_limit": limit,
                 "honesty": (
@@ -257,15 +271,80 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
                 ),
             },
             [],
-            workspace_id,
+            ws,
         )
 
     from services.audit_log import _hmac_event_hash, _platform_hmac_secret
 
     secret = _platform_hmac_secret()
+    if ws:
+        positions = [i for i, ev in enumerate(events) if _event_workspace(ev) == ws]
+        findings = _walk(
+            events, positions, secret, _hmac_event_hash, truncations,
+            link_field="ws_prev_hash",
+            prefix_explained=_retention_explains_first(events, truncations),
+        )
+        head = events[positions[-1]] if positions else None
+    else:
+        positions = list(range(len(events)))
+        findings = _walk(
+            events, positions, secret, _hmac_event_hash, truncations,
+            link_field="prev_hash", prefix_explained=None,
+        )
+        head = events[-1]
+    found = [f.as_dict() for f in findings]
+    for f in found:
+        ev = events[f["index"]]
+        f["cause"] = _cause(f["kind"], ev)
+        if not ws:
+            f["workspace_id"] = _event_workspace(ev) or None
+    found, reanchored = split_reanchored(found, events)
+    return present_verify_report(
+        {
+            "verified": not found,
+            "checked": len(positions),
+            "chain_head": str((head or {}).get("event_hash") or "") or None,
+            "findings": found,
+            "reanchored": reanchored,
+            "retention_checkpoints": truncations,
+            "walked_limit": limit,
+            "honesty": (
+                "Verification covers the records still in the store: it proves they "
+                "were not edited or removed since a holder of the platform secret "
+                "wrote them. It does not prove the recorded facts are true, nor that "
+                "records were never discarded together with their checkpoint. Only an "
+                "external WORM / timestamp anchor narrows that."
+            ),
+        },
+        events,
+        ws,
+    )
+
+
+def _event_workspace(event: dict[str, Any]) -> str:
+    return str(event.get("workspace_id") or "").strip()
+
+
+def _walk(
+    events: list[dict[str, Any]],
+    positions: list[int],
+    secret: bytes,
+    hmac_of: Any,
+    truncations: list[dict[str, Any]],
+    *,
+    link_field: str,
+    prefix_explained: bool | None,
+) -> list[ChainFinding]:
+    """Check each record at ``positions`` and the ``link_field`` line between them.
+
+    For the workspace line only records that carry ``link_field`` are
+    link-checked (older records predate it).
+    """
+    findings: list[ChainFinding] = []
     seen_prev: dict[str, int] = {}
     prev_hash: str | None = None
-    for index, event in enumerate(events):
+    for n, index in enumerate(positions):
+        event = events[index]
         event_id = str(event.get("id") or event.get("event_id") or "")
         stored_hash = str(event.get("event_hash") or "")
         if not stored_hash:
@@ -277,25 +356,29 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
                     detail="Record carries no event_hash, so it cannot be verified.",
                 )
             )
-        else:
-            expected = _hmac_event_hash(event, secret)
-            if expected != stored_hash:
-                findings.append(
-                    ChainFinding(
-                        "event_hash_mismatch",
-                        index=index,
-                        event_id=event_id,
-                        detail=(
-                            "Recomputed HMAC does not match the stored event_hash: "
-                            "this record was altered after it was written, or it "
-                            "was written under a different platform secret."
-                        ),
-                    )
+        elif hmac_of(event, secret) != stored_hash:
+            findings.append(
+                ChainFinding(
+                    "event_hash_mismatch",
+                    index=index,
+                    event_id=event_id,
+                    detail=(
+                        "Recomputed HMAC does not match the stored event_hash: "
+                        "this record was altered after it was written, or it "
+                        "was written under a different platform secret."
+                    ),
                 )
+            )
 
-        claimed_prev = event.get("prev_hash") or None
-        if index == 0:
-            if claimed_prev and not _prefix_explained(str(claimed_prev), truncations):
+        linked = link_field in event
+        claimed_prev = event.get(link_field) or None
+        if linked and n == 0:
+            explained = (
+                prefix_explained
+                if prefix_explained is not None
+                else _prefix_explained(str(claimed_prev or ""), truncations)
+            )
+            if claimed_prev and not explained:
                 findings.append(
                     ChainFinding(
                         "unexplained_prefix",
@@ -308,7 +391,7 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
                         ),
                     )
                 )
-        elif str(claimed_prev or "") != str(prev_hash or ""):
+        elif linked and str(claimed_prev or "") != str(prev_hash or ""):
             findings.append(
                 ChainFinding(
                     "broken_link",
@@ -322,7 +405,7 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
                 )
             )
 
-        if claimed_prev:
+        if linked and claimed_prev:
             first = seen_prev.get(str(claimed_prev))
             if first is not None:
                 findings.append(
@@ -340,26 +423,42 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
             else:
                 seen_prev[str(claimed_prev)] = index
         prev_hash = stored_hash or prev_hash
+    return findings
 
-    return present_verify_report(
-        {
-            "verified": not findings,
-            "checked": len(events),
-            "chain_head": str(events[-1].get("event_hash") or "") or None,
-            "findings": [f.as_dict() for f in findings],
-            "retention_checkpoints": truncations,
-            "walked_limit": limit,
-            "honesty": (
-                "Verification covers the records still in the store: it proves they "
-                "were not edited or removed since a holder of the platform secret "
-                "wrote them. It does not prove the recorded facts are true, nor that "
-                "records were never discarded together with their checkpoint. Only an "
-                "external WORM / timestamp anchor narrows that."
-            ),
-        },
-        events,
-        workspace_id,
-    )
+
+def _retention_explains_first(
+    events: list[dict[str, Any]], truncations: list[dict[str, Any]]
+) -> bool:
+    """A workspace line may start mid-history only if retention trimmed the store."""
+    first_prev = str(events[0].get("prev_hash") or "") if events else ""
+    return bool(first_prev) and _prefix_explained(first_prev, truncations)
+
+
+def _holds_datetime(value: Any) -> bool:
+    if isinstance(value, datetime):
+        return True
+    if isinstance(value, dict):
+        return any(_holds_datetime(v) for v in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_holds_datetime(v) for v in value)
+    return False
+
+
+def _cause(kind: str, event: dict[str, Any]) -> str:
+    """What the store alone can say about why a record does not hold up.
+
+    ``legacy_datetime_roundtrip``: written before canonical hashing, and it
+    holds a value BSON rewrites (a datetime) — the old HMAC covered bytes the
+    store no longer has. ``legacy_unserialized_writer``: a link defect on a
+    record written before cross-process write positions (the old race could
+    produce it; so could a deletion). Anything else is ``unexplained``.
+    """
+    legacy = "chain_v" not in event
+    if kind == "event_hash_mismatch" and legacy and _holds_datetime(event):
+        return "legacy_datetime_roundtrip"
+    if kind in {"broken_link", "fork"} and legacy:
+        return "legacy_unserialized_writer"
+    return "unexplained"
 
 
 def present_verify_report(
@@ -367,58 +466,23 @@ def present_verify_report(
     events: list[dict[str, Any]],
     workspace_id: str = "",
 ) -> dict[str, Any]:
-    """Keep the HMAC walk global; name only the caller's workspace findings.
-
-    Settings → Audit Logs is workspace-scoped. A UUID in a finding is enough
-    to disclose another tenant's event. Redact after the walk — never skip
-    records during it.
-    """
+    """Label the report's scope. A workspace report holds only its own records."""
     ws = (workspace_id or "").strip()
     out = dict(report)
+    out.setdefault("reanchored", [])
     out["workspace_id"] = ws or None
     out["scope"] = "workspace" if ws else "platform"
-    out.setdefault("withheld_findings", 0)
-    if not ws:
-        return out
-
-    isolation = False
-    try:
-        from services.team_store import require_workspace_isolation
-
-        isolation = require_workspace_isolation()
-    except Exception:
-        isolation = False
-
-    visible: list[dict[str, Any]] = []
-    withheld = 0
-    for finding in list(out.get("findings") or []):
-        if not isinstance(finding, dict):
-            continue
-        ews = _finding_event_workspace(events, finding)
-        if ews == ws or (not ews and not isolation):
-            visible.append(finding)
-        else:
-            withheld += 1
-    out["findings"] = visible
-    out["withheld_findings"] = withheld
-    extra = (
-        f" The HMAC chain is platform-wide: {out.get('checked') or 0} records "
-        f"were walked. This report names only records in this workspace."
-    )
-    if withheld:
-        extra += f" {withheld} finding(s) in other workspaces are withheld."
-    out["honesty"] = str(out.get("honesty") or "") + extra
+    # Kept for API clients that read it. A workspace walk never sees another
+    # tenant's records, so there is nothing to withhold.
+    out["withheld_findings"] = 0
+    if ws:
+        out["honesty"] = str(out.get("honesty") or "") + (
+            f" This verdict covers this workspace's own chain: {out.get('checked') or 0} "
+            "record(s), their HMACs, and the link from each to the previous record "
+            "of this workspace. The platform-wide chain is verified by a platform "
+            "administrator."
+        )
     return out
-
-
-def _finding_event_workspace(events: list[dict[str, Any]], finding: dict[str, Any]) -> str:
-    try:
-        idx = int(finding.get("index") or 0)
-    except (TypeError, ValueError):
-        return ""
-    if 0 <= idx < len(events):
-        return str(events[idx].get("workspace_id") or "").strip()
-    return ""
 
 
 def _prefix_explained(claimed_prev: str, truncations: list[dict[str, Any]]) -> bool:

@@ -204,6 +204,7 @@
   "POST /api/v1/ai/rag/query": "ai.use",
   "POST /api/v1/ai/suggest/transforms": "ai.use",
   "POST /api/v1/ai/vector-routing": "ai.use",
+  "POST /api/v1/audit/chain/reanchor": "workspace.manage",
   "POST /api/v1/audit/retention/purge": "workspace.manage",
   "POST /api/v1/audit/tip/anchor": "workspace.manage",
   "POST /api/v1/audit/verify-pack": "connector.write",

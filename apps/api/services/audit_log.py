@@ -17,6 +17,16 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from services.audit_chain_link import (
+    append_with_retry,
+    canonical_record,
+    ensure_chain_indexes,
+    file_workspace_tip,
+    is_duplicate_position,
+    link_fields,
+    mongo_workspace_tip,
+    workspace_key,
+)
 from services.log_redaction import (
     is_redactable_value,
     is_sensitive_key,
@@ -165,7 +175,9 @@ def chain_seq_of(event: dict[str, Any] | None) -> int:
 #: opposite order from the one they were written in (a broken link) — on a chain
 #: nobody had tampered with. ``chain_seq`` is strictly increasing per append and
 #: breaks every tie.
-CHAIN_ORDER: tuple[tuple[str, int], ...] = (("time", 1), ("chain_seq", 1))
+#: Position first (R7): writer processes with skewed clocks still agree on it.
+#: ``time`` orders only records written before positions existed (seq 0).
+CHAIN_ORDER: tuple[tuple[str, int], ...] = (("chain_seq", 1), ("time", 1))
 
 
 def _chain_tip() -> dict[str, Any] | None:
@@ -181,6 +193,27 @@ def _chain_tip() -> dict[str, Any] | None:
                 "Mongo chain tip read failed; falling back to file: %s", exc
             )
     return _latest_record_from_file()
+
+
+def _file_tips(workspace_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    if not STORE_PATH.exists():
+        return None, None
+    lines = STORE_PATH.read_text(encoding="utf-8").strip().splitlines()
+    return _latest_record_from_file(), file_workspace_tip(lines, workspace_id)
+
+
+def _chain_tips(workspace_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Newest record overall and newest of ``workspace_id`` (global + workspace links)."""
+    tip = _chain_tip()
+    coll = _mongo_collection()
+    if coll is not None:
+        try:
+            return tip, mongo_workspace_tip(coll, workspace_id)
+        except Exception as exc:  # noqa: BLE001 - any driver error falls back to file
+            logging.getLogger(__name__).warning(
+                "Mongo workspace tip read failed; falling back to file: %s", exc
+            )
+    return tip, _file_tips(workspace_id)[1]
 
 
 def append_audit_event(
@@ -247,14 +280,11 @@ def append_audit_event(
                 actor = f"{actor_type}:{actor_id}"
 
     with _APPEND_LOCK:
-        stage = "chain_read"
-        event: dict[str, Any] | None = None
+        state: dict[str, Any] = {"stage": "chain_read", "event": None}
         try:
             secret = _platform_hmac_secret()
-            tip = _chain_tip()
-            prev = str(tip.get("event_hash")) if tip and tip.get("event_hash") else None
 
-            stage = "redact"
+            state["stage"] = "redact"
             redacted = _redact(details or {})
             ws = (workspace_id or "").strip()
             tid = (tenant_id or "").strip()
@@ -262,41 +292,52 @@ def append_audit_event(
                 ws = ws or str(redacted.get("workspace_id") or "").strip()
                 tid = tid or str(redacted.get("tenant_id") or "").strip()
             redacted_resource = redact_secret_shapes(resource)
+            coll = _mongo_collection()
+            if coll is not None:
+                ensure_chain_indexes(coll)
 
-            stage = "hash"
-            event = {
-                "_id": str(uuid.uuid4()),
-                "id": str(uuid.uuid4()),
-                "time": _now(),
-                "actor": actor,
-                **principal_fields,
-                "action": action,
-                "resource": redacted_resource,
-                "level": canonical_level(level),
-                "correlation_id": correlation_id,
-                "workspace_id": ws,
-                "tenant_id": tid,
-                "details": redacted,
-                **{
-                    key: value
-                    for key, value in (
-                        ("outcome", outcome),
-                        ("reason_code", reason_code),
-                        ("session_id", session_id),
-                        ("trace_id", trace_id),
-                        ("route_template", route_template),
-                    )
-                    if value is not None
-                },
-                "prev_hash": prev,
-                "chain_seq": chain_seq_of(tip) + 1,
-                "hash_alg": "HMAC-SHA256",
-            }
-            event["event_hash"] = _hmac_event_hash(event, secret)
+            def build() -> dict[str, Any]:
+                state["stage"] = "chain_read"
+                tip, ws_tip = _chain_tips(ws)
+                state["stage"] = "hash"
+                event = {
+                    "_id": str(uuid.uuid4()),
+                    "id": str(uuid.uuid4()),
+                    "time": _now(),
+                    "actor": actor,
+                    **principal_fields,
+                    "action": action,
+                    "resource": redacted_resource,
+                    "level": canonical_level(level),
+                    "correlation_id": correlation_id,
+                    "workspace_id": ws,
+                    "tenant_id": tid,
+                    "details": redacted,
+                    **{
+                        key: value
+                        for key, value in (
+                            ("outcome", outcome),
+                            ("reason_code", reason_code),
+                            ("session_id", session_id),
+                            ("trace_id", trace_id),
+                            ("route_template", route_template),
+                        )
+                        if value is not None
+                    },
+                    **link_fields(tip=tip, workspace_tip=ws_tip),
+                    "hash_alg": "HMAC-SHA256",
+                }
+                state["event"] = event
+                # Hash exactly what the store will hand back (R7).
+                event = canonical_record(event)
+                state["event"] = event
+                event["event_hash"] = _hmac_event_hash(event, secret)
+                state["stage"] = "persist"
+                return event
 
-            stage = "persist"
-            persisted = _persist_event(event)
+            persisted = append_with_retry(build, _persist_event)
         except Exception as exc:
+            event = state["event"]
             try:
                 store = "mongo" if _mongo_collection() is not None else "file"
             except Exception:
@@ -306,7 +347,7 @@ def append_audit_event(
                 correlation_id=(
                     event.get("correlation_id") if event else correlation_id
                 ),
-                stage=stage,
+                stage=state["stage"],
                 store=store,
                 fallback="none",
                 error=exc,
@@ -338,6 +379,9 @@ def _persist_event(event: dict[str, Any]) -> dict[str, Any]:
             _maybe_opportunistic_audit_purge()
             return event
         except Exception as exc:
+            if is_duplicate_position(exc):
+                # Another writer process took this position: re-link, not file.
+                raise
             logging.getLogger(__name__).warning(
                 "Mongo audit insert failed; falling back to file with file-local prev: %s",
                 exc,
@@ -351,11 +395,8 @@ def _persist_event(event: dict[str, Any]) -> dict[str, Any]:
                 fallback="file",
                 error=exc,
             )
-            file_tip = _latest_record_from_file()
-            event["prev_hash"] = (
-                str(file_tip.get("event_hash")) if file_tip else None
-            )
-            event["chain_seq"] = chain_seq_of(file_tip) + 1
+            file_tip, file_ws_tip = _file_tips(workspace_key(event))
+            event.update(link_fields(tip=file_tip, workspace_tip=file_ws_tip))
             event["event_hash"] = _hmac_event_hash(
                 event,
                 _platform_hmac_secret(),
