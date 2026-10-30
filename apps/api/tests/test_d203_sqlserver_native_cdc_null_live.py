@@ -213,7 +213,7 @@ def _drop(table: str, fmt: str) -> None:
                 "EXEC sys.sp_cdc_disable_table @source_schema = N'dbo', "
                 f"@source_name = N'{table}', @capture_instance = N'all'",
             )
-        except Exception:
+        except Exception:  # noqa: BLE001, S110 - table may not be CDC-enabled
             pass
         _exec(conn, f"DROP TABLE IF EXISTS dbo.[{table}]")
     finally:

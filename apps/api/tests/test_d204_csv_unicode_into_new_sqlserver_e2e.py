@@ -99,7 +99,7 @@ def _text_columns_are_national(table: str) -> None:
 def _drop(table: str) -> None:
     try:
         mssql_exec(f"DROP TABLE IF EXISTS dbo.[{table}]")
-    except Exception:  # noqa: BLE001 - best-effort cleanup
+    except Exception:  # noqa: BLE001, S110 - best-effort cleanup
         pass
 
 
