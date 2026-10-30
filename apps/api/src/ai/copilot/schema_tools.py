@@ -467,7 +467,7 @@ def introspect_connector_table(
     Query/aggregation callers keep the raw document keys their pipelines use.
     """
     from services.dialect_profiles import normalize_schema
-    from services.schema_introspect import introspect_schema
+    from services.schema_introspect import introspect_schema, is_object_store_type
 
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
@@ -499,7 +499,8 @@ def introspect_connector_table(
         table=table,
         catalog_type=str(cfg.get("type") or ""),
         auth_source=str(cfg.get("auth_source") or ""),
-        reader_cfg=cfg if execute_shape else None,
+        # Object stores dial the connector's endpoint/port from it (D142).
+        reader_cfg=cfg if execute_shape or is_object_store_type(db_type) else None,
         introspect_purpose=purpose,
     )
     ok = bool(info.get("ok"))
@@ -720,7 +721,7 @@ def introspect_connector_schema(
     if err:
         return err
     try:
-        from services.schema_introspect import introspect_schema
+        from services.schema_introspect import introspect_schema, is_object_store_type
 
         from src.transfer.adapters import resolve_connector_config
         from src.transfer.connector_capabilities import resolve_driver_type
@@ -744,6 +745,7 @@ def introspect_connector_schema(
             table=table,
             catalog_type=str(cfg.get("type") or ""),
             auth_source=str(cfg.get("auth_source") or ""),
+            reader_cfg=cfg if is_object_store_type(db_type) else None,
         )
         if not info.get("ok"):
             return _tool_result(
