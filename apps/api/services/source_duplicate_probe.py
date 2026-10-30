@@ -1029,11 +1029,43 @@ def probe_source_duplicate_keys_result(
                 db_type=db_type,
                 primary_key_columns=pk_columns,
             )
+        proven = _enforced_key_proves_unique(cfg, db_type, table, pk_columns)
+        if proven:
+            return SourceDuplicateProbeResult(
+                status="ran",
+                message=proven,
+                db_type=db_type,
+                primary_key_columns=pk_columns,
+                null_key_rows=0,
+            )
         null_counts: dict[str, int] = {}
         try:
-            findings = _sql_duplicates(
-                cfg, table, pk_columns, limit=limit, null_counts=null_counts
+            from src.ai.copilot.tool_deadline import bounded_step
+
+            scan = bounded_step(
+                f"checking key uniqueness on source table {table}",
+                lambda: _sql_duplicates(
+                    cfg, table, pk_columns, limit=limit, null_counts=null_counts
+                ),
+                seconds=DUPLICATE_SCAN_STEP_SECONDS,
+                conn=cfg,
+                role="source",
             )
+            if scan.timed_out:
+                return SourceDuplicateProbeResult(
+                    status="error",
+                    message=(
+                        f"the uniqueness scan of {table}.({pk_label}) did not finish "
+                        f"within the plan's step budget ({DUPLICATE_SCAN_STEP_SECONDS:g}s "
+                        "at most); uniqueness is unproven. An enforced PRIMARY KEY on "
+                        "these columns proves it without a scan"
+                    ),
+                    db_type=db_type,
+                    primary_key_columns=pk_columns,
+                )
+            if scan.error is not None:
+                raise scan.error
+            findings = scan.value
         except Exception as sql_exc:
             if db_type not in _SQL_INSPECT_FALLBACK_TYPES:
                 raise
@@ -1082,6 +1114,56 @@ def probe_source_duplicate_keys_result(
             db_type=db_type,
             primary_key_columns=pk_columns,
         )
+
+
+#: Longest a planning tool spends on the GROUP BY uniqueness scan (D187).
+DUPLICATE_SCAN_STEP_SECONDS = 10.0
+
+#: Engines that enforce PRIMARY KEY constraints: a declared key there IS the
+#: population's uniqueness and non-NULL-ness. Snowflake, Redshift, BigQuery,
+#: Databricks and friends accept a PRIMARY KEY they never enforce: scanned.
+_ENFORCED_KEY_TYPES = frozenset({
+    "postgresql", "postgres", "timescaledb", "supabase", "pgvector", "cockroachdb",
+    "mysql", "mariadb", "sqlserver", "mssql", "azure_sql_database", "oracle", "sqlite",
+})
+
+
+def _enforced_key_proves_unique(
+    cfg: dict[str, Any], db_type: str, table: str, pk_columns: list[str]
+) -> str:
+    """A message when the source's enforced primary key is exactly these columns.
+
+    The probe ran two full-table aggregates (GROUP BY key HAVING count > 1, and
+    COUNT of NULL keys) on every plan. On a large PostgreSQL table they ran past
+    the 45s tool deadline (D187), while the catalog already said the database
+    itself refuses a duplicate or NULL key. Reading the constraint is the proof;
+    a key the engine does not enforce, or any other column set, is still scanned.
+    """
+    if db_type not in _ENFORCED_KEY_TYPES or not pk_columns:
+        return ""
+    try:
+        import sqlalchemy as sa
+
+        from connectors.generic_sql import _engine
+        from connectors.sql_identifiers import split_qualified_table
+
+        engine = _engine(cfg)
+        schema, name = split_qualified_table(table, (cfg.get("schema") or "").strip() or None)
+        inspector = sa.inspect(engine)
+        if not inspector.has_table(name, schema=schema):
+            return ""
+        declared = inspector.get_pk_constraint(name, schema=schema) or {}
+        key = [str(c) for c in (declared.get("constrained_columns") or [])]
+    except Exception as exc:  # noqa: BLE001 - fall back to the scan
+        logger.debug("enforced-key lookup failed for %s: %s", table, exc)
+        return ""
+    if not key or {c.lower() for c in key} != {str(c).lower() for c in pk_columns}:
+        return ""
+    label = ", ".join(key)
+    return (
+        f"{db_type} enforces PRIMARY KEY ({label}) on {table}: every key is unique "
+        "and non-NULL (proven by the constraint; no table scan)"
+    )
 
 
 def probe_source_duplicate_keys(

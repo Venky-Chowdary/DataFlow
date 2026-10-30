@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -1693,8 +1694,17 @@ _MAX_RANKED_TABLES = 40
 #: real counts re-sort them.
 _RANK_MARGIN = 5
 
+#: Time a ranking may spend refining the estimate shortlist with exact
+#: COUNT(*) (D201: QA's bar is a PostgreSQL ranking under 10s).
+_RANK_COUNT_BUDGET_SECONDS = 6.0
 
-def _estimate_table_row_counts(conn: dict[str, Any], names: list[str]) -> dict[str, int]:
+#: Exact counts sent at once to one source.
+_RANK_COUNT_PARALLEL = 4
+
+
+def _estimate_table_row_counts(
+    conn: dict[str, Any], names: list[str], *, whole_schema: bool = False
+) -> dict[str, int]:
     """Bulk catalog row estimates — one query, never per-table COUNT(*).
 
     ``pg_class.reltuples`` / ``information_schema.tables.table_rows`` are
@@ -1720,10 +1730,31 @@ def _estimate_table_row_counts(conn: dict[str, Any], names: list[str]) -> dict[s
     family = ""
     if ctype in {"postgresql", "postgres", "pg", "redshift", "greenplum", "cockroachdb", "timescaledb", "yugabytedb"}:
         family = "postgresql"
+        # A partitioned table (relkind 'p') and a TimescaleDB hypertable keep
+        # no rows of their own: their volume is the sum of their partitions /
+        # chunks (pg_inherits, any depth). A table never ANALYZEd has
+        # reltuples -1; the stats collector's n_live_tup still counts it
+        # (D201: a hypertable ranked as empty and every parent fell to exact
+        # COUNT(*) over all its chunks).
         sql = (
-            "SELECT c.relname, n.nspname, c.reltuples::bigint "
-            "FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace "
-            "WHERE c.relkind IN ('r','p') AND n.nspname NOT IN ('pg_catalog','information_schema')"
+            "WITH RECURSIVE est AS ("
+            " SELECT c.oid, CASE WHEN c.relkind = 'p' THEN NULL"
+            "  WHEN c.reltuples >= 0 THEN c.reltuples::bigint"
+            "  ELSE COALESCE(NULLIF(s.n_live_tup, 0), -1) END AS n"
+            " FROM pg_class c LEFT JOIN pg_stat_all_tables s ON s.relid = c.oid"
+            " WHERE c.relkind IN ('r','p')),"
+            " tree AS ("
+            " SELECT c.oid AS root, c.oid AS member FROM pg_class c WHERE c.relkind IN ('r','p')"
+            " UNION ALL SELECT t.root, i.inhrelid FROM tree t JOIN pg_inherits i ON i.inhparent = t.member)"
+            " SELECT c.relname, n.nspname,"
+            "  CASE WHEN bool_and(e.n IS NULL OR e.n >= 0) AND bool_or(e.n >= 0)"
+            "  THEN sum(GREATEST(e.n, 0))::bigint ELSE -1 END"
+            " FROM tree t JOIN pg_class c ON c.oid = t.root"
+            " JOIN pg_namespace n ON n.oid = c.relnamespace"
+            " JOIN est e ON e.oid = t.member"
+            " WHERE n.nspname NOT IN ('pg_catalog','information_schema')"
+            " AND n.nspname NOT LIKE '\\_timescaledb%' ESCAPE '\\'"
+            " GROUP BY c.relname, n.nspname"
         )
     elif ctype in {"mysql", "mariadb", "singlestore", "tidb"}:
         family = "mysql"
@@ -1772,7 +1803,62 @@ def _estimate_table_row_counts(conn: dict[str, Any], names: list[str]) -> dict[s
                 hit = hits[0]
         if hit is not None:
             out[name] = hit
+    if whole_schema:
+        # The object listing is capped; the catalog is not. Every table in the
+        # connector's schema is ranked, listed or not (D24).
+        home = str(cfg.get("schema") or "").strip()
+        if home:
+            for (sch, tbl), value in stored.items():
+                if sch.lower() == home.lower() and tbl not in out:
+                    out[tbl] = value
     return out
+
+
+def _direct_row_count(conn: dict[str, Any], name: str) -> int | None:
+    """One ``SELECT COUNT(*)`` on the endpoint's session (PostgreSQL / MySQL).
+
+    The aggregation path grounds every count (introspection, a sample, the
+    schema allow-list): eight catalog queries and a connect per table before
+    the COUNT itself. A ranking names tables the catalog just listed, so it
+    counts them directly; other engines keep the aggregation path (``None``).
+    A count that fails or is cancelled by its time budget raises.
+    """
+    ctype = str(conn.get("type") or conn.get("format") or "").lower()
+    if ctype in {"postgresql", "postgres", "pg", "timescaledb", "greenplum", "cockroachdb", "yugabytedb"}:
+        family = "postgresql"
+    elif ctype in {"mysql", "mariadb", "tidb"}:
+        family = "mysql"
+    else:
+        return None
+    try:
+        from connectors.sql_identifiers import split_qualified_table
+        from services.column_profile import _connect
+        from src.transfer.adapters import resolve_connector_config
+
+        from .schema_tools import _endpoint_from_connector
+
+        cfg = resolve_connector_config(_endpoint_from_connector(conn))
+        schema, table = split_qualified_table(name, str(cfg.get("schema") or "") or None)
+        db = _connect(family, cfg)
+    except Exception as exc:  # noqa: BLE001 - no session: the aggregation path decides
+        _LOG.info("direct count of %s unavailable: %s", name, exc)
+        return None
+    if family == "postgresql":
+        q = lambda part: '"' + str(part).replace('"', '""') + '"'  # noqa: E731
+    else:
+        q = lambda part: "`" + str(part).replace("`", "``") + "`"  # noqa: E731
+    target = f"{q(schema)}.{q(table)}" if schema else q(table)
+    try:
+        cur = db.cursor()
+        cur.execute(f"SELECT COUNT(*) FROM {target}")  # nosec B608 - quoted identifiers
+        row = cur.fetchone()
+        try:
+            db.rollback()
+        except Exception:  # noqa: BLE001 - read-only
+            pass
+    finally:
+        db.close()
+    return int(row[0]) if row else None
 
 
 def rank_connector_tables(
@@ -1825,8 +1911,11 @@ def rank_connector_tables(
     # warehouses with million-row tables. A bulk catalog estimate shortlists
     # limit+margin candidates; those alone get the exact COUNT and the real
     # counts re-sort. Engines without cheap stats keep the bounded loop.
-    estimates = _estimate_table_row_counts(conn, names)
+    estimates = _estimate_table_row_counts(
+        conn, names, **({"whole_schema": True} if info.get("truncated") else {})
+    )
     if estimates:
+        names = names + [n for n in estimates if n not in set(names)]
         # The estimate query covers every table in one round trip, so it ranks
         # the whole inventory; only the exact COUNTs are bounded, to the
         # shortlist. Cutting to the first names before ranking dropped a big
@@ -1846,35 +1935,96 @@ def rank_connector_tables(
     else:
         considered = names[:_MAX_RANKED_TABLES]
 
-    ranked: list[dict[str, Any]] = []
-    skipped: list[dict[str, str]] = []
-    for name in considered:
-        counted = aggregate_connector_data(
-            connector_id=cid,
-            connector_name=cname,
-            table=name,
-            metric="count",
-        )
-        value = (counted.output or {}).get("value") if counted.success else None
-        if not counted.success or value is None:
-            skipped.append({
-                "table": name,
-                "error": str(counted.error or "count returned no value"),
-            })
-            continue
-        try:
-            ranked.append({"table": name, "rows": int(value)})
-        except (TypeError, ValueError):
-            skipped.append({"table": name, "error": f"non-numeric count {value!r}"})
+    # The answer is a ranking: the catalog estimate already ranks every table.
+    # Exact COUNT(*) refines the shortlist only as far as a step budget allows,
+    # a few at a time; a count that does not fit keeps its estimate, labelled
+    # (D201/D24: fifteen serial COUNTs on big PostgreSQL / TimescaleDB tables
+    # ran past the 45s deadline and the call returned nothing).
+    from .tool_deadline import Step, parallel_steps, step_seconds
 
+    counts: dict[str, int] = {}
+    skipped: list[dict[str, str]] = []
+    count_deadline = time.monotonic() + step_seconds(_RANK_COUNT_BUDGET_SECONDS)
+
+    def _count(name: str) -> Any:
+        try:
+            direct = _direct_row_count(conn, name)
+        except Exception as exc:  # noqa: BLE001 - reported as not counted
+            return _tool_result(tool, success=False, error=str(exc)[:200])
+        if direct is not None:
+            return _tool_result(tool, success=True, output={"value": direct})
+        return aggregate_connector_data(
+            connector_id=cid, connector_name=cname, table=name, metric="count"
+        )
+
+    # Tables the catalog cannot estimate are counted next, as far as the
+    # budget goes: they cannot be ranked any other way.
+    import collections
+    import threading
+
+    extra_unestimated = [n for n in names if n not in estimates and n not in set(considered)]
+    queue = collections.deque(list(considered) + extra_unestimated)
+    attempted: list[str] = []
+    failures: dict[str, str] = {}
+    qlock = threading.Lock()
+
+    def _worker() -> None:
+        # A few counters pull from one queue, so a slow table does not hold
+        # the small ones behind it.
+        while time.monotonic() < count_deadline - 0.05:
+            with qlock:
+                if not queue:
+                    return
+                name = queue.popleft()
+                attempted.append(name)
+            counted = _count(name)
+            value = (counted.output or {}).get("value") if counted.success else None
+            try:
+                if value is None:
+                    raise ValueError(str(counted.error or "count returned no value"))
+                counts[name] = int(value)
+            except (TypeError, ValueError) as exc:
+                failures[name] = str(exc)
+
+    parallel_steps(
+        [
+            Step(f"counting rows on {cname} (worker {i + 1})", _worker, conn, "source")
+            for i in range(_RANK_COUNT_PARALLEL)
+        ],
+        seconds=max(0.0, count_deadline - time.monotonic()),
+        bound_each=True,
+    )
+    with qlock:
+        considered = list(dict.fromkeys(list(considered) + attempted))
+        not_reached = list(queue)
+    for name in considered + not_reached:
+        if name in counts or name in estimates:
+            continue
+        skipped.append({
+            "table": name,
+            "error": failures.get(name)
+            or "not counted within the ranking's time budget and the catalog has no estimate",
+        })
+
+    ranked: list[dict[str, Any]] = []
+    for name in considered:
+        if name in counts:
+            ranked.append({"table": name, "rows": counts[name], "basis": "count"})
+        elif name in estimates:
+            ranked.append({"table": name, "rows": int(estimates[name]), "basis": "estimate"})
+    # Tables outside the shortlist are ranked by estimate already; they are
+    # not listed but they are part of the ranking (they sort below the cut).
     ranked.sort(key=lambda r: r["rows"], reverse=not ascending)
-    # ``exact`` means the ranking was computed over the full requested
-    # population. Every count is a real COUNT(*), but a table that was not
-    # counted may be bigger than any that was: a catalog-estimate shortlist can
-    # omit one (stale planner stats ranked qa_r8_big below the cutoff while it
-    # held 100k rows, D24), and an engine without estimates counts only the
-    # first names. Either way the answer is partial and must say so.
-    full_population = len(considered) == len(names) and not bool(info.get("truncated"))
+    estimated = [r["table"] for r in ranked[:shown] if r["basis"] == "estimate"]
+    # ``exact`` means every shown row is an exact COUNT(*) over the full
+    # requested population; a catalog-estimate shortlist can omit a table whose
+    # stats are stale (D24), and an estimate shown is never exact.
+    full_population = (
+        len(considered) == len(names)
+        and not bool(info.get("truncated"))
+        and not estimated
+        and not skipped
+    )
     return _tool_result(
         tool,
         success=True,
@@ -1884,11 +2034,18 @@ def rank_connector_tables(
             "type": info.get("type") or "",
             "order": "asc" if ascending else "desc",
             "ranked": ranked[:shown],
-            "counted": len(ranked),
+            # Tables given an exact COUNT(*); the rest of ``ranked`` is estimates.
+            "counted": len(counts),
             "total_objects": int(info.get("total") or len(names)),
             "considered": len(considered),
             "total_rows": sum(r["rows"] for r in ranked),
             "skipped": skipped,
+            # Rows shown from the catalog estimate because their exact count
+            # did not fit the time budget. Never presented as exact.
+            "estimated_tables": estimated,
+            "row_count_basis": (
+                "count" if not estimated else ("estimate" if not counts else "mixed")
+            ),
             "truncated": len(names) > len(considered) or bool(info.get("truncated")),
             # The shortlist came from catalog estimates; every reported row
             # count is still an exact COUNT(*).

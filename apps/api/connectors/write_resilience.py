@@ -362,11 +362,21 @@ def apply_postgres_session_guards(conn: Any) -> None:
     the operator.  DDL paths that need a shorter fail-fast window can ``SET LOCAL``
     a lower value and ``RESET`` afterwards.
     """
+    from src.ai.copilot.tool_deadline import statement_timeout_seconds
+
+    # Inside a tool call (plan, rank, sample, query...) a statement may not
+    # outlive the call: the server cancels it at the call's deadline instead of
+    # scanning on for a caller that gave up (D181). Transfer jobs keep 0.
+    budget = statement_timeout_seconds()
+    statement_ms = int(budget * 1000) if budget is not None else 0
     try:
         conn.autocommit = True
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = 0")
-            cur.execute("SET idle_in_transaction_session_timeout = 0")
+            cur.execute(f"SET statement_timeout = {statement_ms}")
+            # Likewise a transaction a tool left open (a scan it stopped at
+            # its budget) is ended by the server at the call's deadline, so it
+            # cannot hold locks on the customer's table afterwards.
+            cur.execute(f"SET idle_in_transaction_session_timeout = {statement_ms}")
             cur.execute("SET lock_timeout = 120000")
             cur.execute("SET application_name = 'dataflow'")
         conn.autocommit = False

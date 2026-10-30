@@ -93,8 +93,15 @@ def test_hung_calls_do_not_stop_a_healthy_call_in_a_tiny_default_pool(hang):
     assert healthy.success is True
 
 
-def test_same_workspace_is_told_why_while_workers_are_stuck_then_recovers(hang):
-    """Abandoned workers keep their slots until they end: a clear refusal, not a hang."""
+def test_abandoned_calls_give_their_workspace_slots_back(hang):
+    """QA D181: abandoned calls must not keep the workspace's slots.
+
+    Before: two abandoned calls held the workspace's two slots until their
+    workers ended, so every later call was refused "in flight (limit 2)" for as
+    long as the stuck source kept them. Now an abandoned call releases its
+    slot at its deadline (its worker is still counted by the pool) and the pool
+    gets a replacement worker, so the next call runs.
+    """
 
     async def scenario():
         loop = asyncio.get_running_loop()
@@ -108,8 +115,8 @@ def test_same_workspace_is_told_why_while_workers_are_stuck_then_recovers(hang):
         recovered = await asyncio.wait_for(asyncio.to_thread(_call, "good"), timeout=3)
         return refused, recovered
 
-    refused, recovered = asyncio.run(asyncio.wait_for(scenario(), 20))
-    assert refused.success is False and "in flight" in refused.error
+    after_abandon, recovered = asyncio.run(asyncio.wait_for(scenario(), 20))
+    assert after_abandon.success is True, after_abandon.error
     assert recovered.success is True
 
 
@@ -157,8 +164,12 @@ def test_readiness_degrades_while_saturated_and_recovers(hang):
     while time.monotonic() < deadline and not connector_executor.readiness()["ok"]:
         time.sleep(0.1)
     assert connector_executor.readiness()["ok"] is True
-    assert connector_executor.snapshot()["abandoned"] == 0
-    assert connector_executor.snapshot()["abandoned_total"] == 4
+    snap = connector_executor.snapshot()
+    assert snap["abandoned"] == 0
+    # QA reads abandoned_total as the leak gauge: back to baseline once the
+    # stuck workers end; the lifetime count stays available.
+    assert snap["abandoned_total"] == 0
+    assert snap["abandoned_lifetime"] == 4
 
 
 def test_readiness_degrades_when_the_oldest_call_is_too_old(hang, monkeypatch):

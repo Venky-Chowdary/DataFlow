@@ -10,6 +10,11 @@ from pathlib import Path
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
+
+#: Longest a planning tool spends proving an existing destination's upsert
+#: keys unique (D187). Unfinished warns; it is never reported clean.
+DEST_DUPLICATE_KEY_STEP_SECONDS = 8.0
+
 _ps = sys.modules[__name__]
 
 # Add preflight package to path
@@ -1514,11 +1519,39 @@ def run_file_preflight(
                 _dup = {"ran": False, "duplicate_keys": 0, "duplicate_rows": 0,
                         "samples": [], "message": "destination probe skipped"}
                 try:
-                    _dup = count_dest_duplicate_keys(
-                        dict(destination_config or {}),
-                        destination_table,
-                        _uk_cols,
+                    # Optional proof, bounded inside a tool call (D187): on a
+                    # Snowflake destination the reflection + GROUP BY ran 25s
+                    # and killed a second-run upsert plan. Unfinished is a
+                    # labelled ``ran=False`` (the gate warns), never a clean 0.
+                    from src.ai.copilot.tool_deadline import bounded_step
+
+                    _dup_run = bounded_step(
+                        f"counting duplicate upsert keys on destination {destination_table}",
+                        lambda: count_dest_duplicate_keys(
+                            dict(destination_config or {}),
+                            destination_table,
+                            _uk_cols,
+                        ),
+                        seconds=DEST_DUPLICATE_KEY_STEP_SECONDS,
+                        conn=destination_config,
+                        role="destination",
                     )
+                    if _dup_run.error is not None:
+                        raise _dup_run.error
+                    if _dup_run.timed_out:
+                        _dup = {
+                            "ran": False,
+                            "duplicate_keys": 0,
+                            "duplicate_rows": 0,
+                            "samples": [],
+                            "message": (
+                                "duplicate-key probe did not finish within the plan's "
+                                f"step budget ({DEST_DUPLICATE_KEY_STEP_SECONDS:g}s at most); "
+                                "Execute's keyed write still enforces the key"
+                            ),
+                        }
+                    else:
+                        _dup = _dup_run.value
                 except Exception as _dexc:  # noqa: BLE001
                     _dup = {
                         "ran": False,

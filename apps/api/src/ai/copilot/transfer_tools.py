@@ -45,7 +45,7 @@ from .schema_tools import (
     _safe_connector,
     introspect_connector_table as _introspect,
 )
-from .tool_deadline import note_step
+from .tool_deadline import Step, describe_target, bounded_step, note_step, parallel_steps, step_seconds
 
 _LOG = logging.getLogger(__name__)
 
@@ -946,12 +946,47 @@ def plan_transfer(
                 ),
             )
 
-    note_step(f"reading destination table {dst_table}", dst_conn, role="destination")
-    try:
-        dst_info = _introspect(dst_conn, dst_table, purpose="destination")
-    except Exception as exc:
-        _LOG.warning("plan_transfer dest introspect failed: %s", exc, exc_info=True)
-        dst_info = {"ok": False, "error": str(exc), "columns": [], "db_type": "", "cfg": {}}
+    def _read_destination() -> dict[str, Any]:
+        try:
+            return _introspect(dst_conn, dst_table, purpose="destination")
+        except Exception as exc:
+            _LOG.warning("plan_transfer dest introspect failed: %s", exc, exc_info=True)
+            return {"ok": False, "error": str(exc), "columns": [], "db_type": "", "cfg": {}}
+
+    def _read_source() -> tuple[dict[str, Any], list[dict[str, Any]]]:
+        info = _introspect(src_conn, src_table, purpose="source", execute_shape=True)
+        if not info["ok"] or not info["columns"]:
+            return info, []
+        note_step(f"sampling source table {src_table}", src_conn, role="source")
+        return info, _sample_rows(src_conn, src_table)
+
+    # The destination and the source are independent reads: they overlap, so
+    # the plan costs the slower of the two instead of their sum (D187).
+    if callable_plan:
+        note_step(f"reading destination table {dst_table}", dst_conn, role="destination")
+        dst_info = _read_destination()
+    else:
+        src_read, dst_read = parallel_steps(
+            [
+                Step(f"reading source table {src_table}", _read_source, src_conn, "source"),
+                Step(
+                    f"reading destination table {dst_table}",
+                    _read_destination,
+                    dst_conn,
+                    "destination",
+                ),
+            ]
+        )
+        if dst_read.timed_out:
+            return _tool_result(
+                tool,
+                success=False,
+                error=(
+                    f"destination unreachable/slow: {describe_target(dst_conn) or dst_conn.get('name')} "
+                    f"did not answer while reading {dst_table}; nothing was staged."
+                ),
+            )
+        dst_info = dst_read.value
 
     dest_exists = _dest_table_exists_tri_state(dst_info)
 
@@ -967,24 +1002,17 @@ def plan_transfer(
             )
         sample_rows = list(src_info.get("sample_rows") or [])
     else:
-        note_step(f"reading source table {src_table}", src_conn, role="source")
-        try:
-            src_info = _introspect(src_conn, src_table, purpose="source", execute_shape=True)
-        except Exception as exc:
-            _LOG.warning("plan_transfer source introspect failed: %s", exc, exc_info=True)
+        if src_read.error is not None:
+            exc = src_read.error
+            _LOG.warning("plan_transfer source introspect failed: %s", exc, exc_info=exc)
             return _tool_result(tool, success=False, error=f"Could not read the source: {exc}")
+        src_info, sample_rows = src_read.value
         if not src_info["ok"] or not src_info["columns"]:
             return _tool_result(
                 tool,
                 success=False,
-                error=(
-                    f"Could not read `{src_table}` on {src_conn.get('name')}"
-                    + (f": {src_info['error']}" if src_info["error"] else "")
-                    + '. Ask me to "list tables on that connector".'
-                ),
+                error=_source_read_error(src_conn, src_table, str(src_info["error"] or "")),
             )
-        note_step(f"sampling source table {src_table}", src_conn, role="source")
-        sample_rows = _sample_rows(src_conn, src_table)
 
     src_names = [str(c.get("name")) for c in src_info["columns"] if c.get("name")]
 
@@ -1293,6 +1321,42 @@ def plan_transfer(
             **_preview_bound_contract(contract_id, require_signed_contract),
             **({"contract_blocker": contract_refusal} if contract_refusal else {}),
         },
+    )
+
+
+_UNREACHABLE_MARKERS = (
+    "timeout expired",
+    "timed out",
+    "could not connect",
+    "connection refused",
+    "connection reset",
+    "did not answer",
+    "unreachable",
+    "name or service not known",
+    "no route to host",
+)
+
+
+def _source_read_error(src_conn: dict[str, Any], src_table: str, detail: str) -> str:
+    """Why the source could not be read, naming the source system (D169).
+
+    A source that never answered read "Could not read `orders` ... Ask me to
+    list tables": the advice for a missing table, for a host that is down.
+    """
+    target = describe_target(src_conn)
+    name = src_conn.get("name") or "the source"
+    where = f"{name} ({target})" if target else str(name)
+    if any(marker in detail.lower() for marker in _UNREACHABLE_MARKERS):
+        return (
+            f"source unreachable/slow: {where} did not answer while reading "
+            f"`{src_table}` ({detail.strip()}). Check the host and port, the "
+            "firewall or VPN, and that the database is up, then try again. "
+            "Nothing was staged."
+        )
+    return (
+        f"Could not read the source `{src_table}` on {where}"
+        + (f": {detail.strip()}" if detail.strip() else "")
+        + '. Ask me to "list tables on that connector".'
     )
 
 
@@ -1710,35 +1774,75 @@ def _run_preflight(
         run_transfer_policy_gates,
     )
 
-    try:
-        dest_probe = inspect_destination_for_preflight(
-            connector_id=str(dst_conn.get("id") or ""),
-            dest_type=dest_db_type,
-            dest_table=dst_table,
-            dest_collection=dst_table,
-            dest_schema=str(dst_conn.get("schema") or ""),
-        )
-    except Exception as exc:
-        _LOG.warning("destination probe failed: %s", exc, exc_info=True)
-        dest_probe = {"connected": False, "error": str(exc)}
+    def _probe_destination() -> dict[str, Any]:
+        try:
+            return inspect_destination_for_preflight(
+                connector_id=str(dst_conn.get("id") or ""),
+                dest_type=dest_db_type,
+                dest_table=dst_table,
+                dest_collection=dst_table,
+                dest_schema=str(dst_conn.get("schema") or ""),
+            )
+        except Exception as exc:
+            _LOG.warning("destination probe failed: %s", exc, exc_info=True)
+            return {"connected": False, "error": str(exc)}
 
     columns = [r["name"] for r in src_rows]
     column_types = {r["name"]: r["inferred_type"] for r in src_rows}
     # G7 capacity sizes batches from the real volume, so send the exact count
     # rather than the sample size, which would understate a large table.
     population_counted = False
+    count_needed = known_row_count is None and (source_read_mode or "").strip().lower() not in {
+        "procedure",
+        "query",
+    }
+    # The destination probe (login, privileges, catalog) and the source row
+    # count read different systems: they overlap (D187).
+    probe_run, count_run = parallel_steps(
+        [
+            Step(
+                f"probing destination {dst_table} (connection, privileges, catalog)",
+                _probe_destination,
+                dst_conn,
+                "destination",
+            ),
+            Step(
+                f"counting rows in source table {src_table}",
+                (lambda: _bounded_row_count(src_conn, src_table)) if count_needed else (lambda: (None, "")),
+                src_conn if count_needed else None,
+                "source" if count_needed else "",
+            ),
+        ]
+    )
+    dest_probe = (
+        probe_run.value
+        if isinstance(probe_run.value, dict)
+        else {
+            "connected": False,
+            "error": (
+                "the destination did not answer the preflight probe in time"
+                if probe_run.timed_out
+                else str(probe_run.error or "destination probe failed")
+            ),
+        }
+    )
+    row_count_basis = "exact"
     if known_row_count is not None:
         row_count = max(0, int(known_row_count))
         population_counted = True
-    elif (source_read_mode or "").strip().lower() in {"procedure", "query"}:
+    elif not count_needed:
         # COUNT(*) against a procedure stream name would hit a colliding table.
         row_count = len(sample_rows)
+        row_count_basis = "sample"
     else:
-        row_count = _exact_row_count(src_conn, src_table)
-        if row_count is None:
+        counted, row_count_basis = count_run.value if isinstance(count_run.value, tuple) else (None, "")
+        if counted is None:
             row_count = len(sample_rows)
+            row_count_basis = "sample"
         else:
-            population_counted = True
+            row_count = counted
+            # Only an exact COUNT is the population; an estimate sizes batches.
+            population_counted = row_count_basis == "exact"
 
     try:
         policy_gates = run_transfer_policy_gates(
@@ -1856,7 +1960,11 @@ def _run_preflight(
             # behind g3f read every row of the source on this thread — 148 s for
             # 200k Oracle rows (D145). Studio's budget applies here too: rows
             # past it stay unproven (PARTIAL) and write-time checks still bind.
-            fit_scan_seconds=STUDIO_FIT_SCAN_SECONDS,
+            # ...and never past the tool's own deadline less what the gates
+            # after it still need (D187): the scan stops PARTIAL instead.
+            fit_scan_seconds=step_seconds(
+                STUDIO_FIT_SCAN_SECONDS, reserve=_AFTER_FIT_SCAN_RESERVE_SECONDS
+            ),
             # Key-addressed destinations (Mongo, Redis, vector stores) refuse a
             # write they cannot address. Studio carries the key on a stream
             # contract; the Pilot has no Map screen to fill one in, so without
@@ -1958,6 +2066,11 @@ def _run_preflight(
                 else {}
             ),
         },
+        # How the source volume G7 sized from was measured: "exact" COUNT(*),
+        # "catalog_estimate" when the count did not fit its step budget, or
+        # "sample" (D187).
+        "source_row_count": row_count,
+        "source_row_count_basis": row_count_basis,
     }
 
 
@@ -2054,6 +2167,34 @@ def _endpoint_dict(endpoint: Any) -> dict[str, Any]:
     except Exception as exc:
         _LOG.info("endpoint serialisation unavailable: %s", exc)
         return {}
+
+
+#: Longest a plan spends on an exact COUNT(*) before it sizes from the
+#: catalog estimate instead (D187). The estimate is labelled, never exact.
+ROW_COUNT_STEP_SECONDS = 8.0
+
+#: What the gates after the population fit scan (uniqueness probe, save) keep.
+_AFTER_FIT_SCAN_RESERVE_SECONDS = 14.0
+
+
+def _bounded_row_count(conn: dict[str, Any], table: str) -> tuple[int | None, str]:
+    """``(rows, basis)``: an exact COUNT(*) within its step budget, else the
+    catalog estimate (``basis="catalog_estimate"``), else ``(None, "")``."""
+    run = bounded_step(
+        f"counting rows in source table {table}",
+        lambda: _exact_row_count(conn, table),
+        seconds=ROW_COUNT_STEP_SECONDS,
+        conn=conn,
+        role="source",
+    )
+    if not run.timed_out and run.error is None and run.value is not None:
+        return int(run.value), "exact"
+    from .aggregate_tools import _estimate_table_row_counts
+
+    estimate = _estimate_table_row_counts(conn, [table]).get(table)
+    if estimate is not None and estimate >= 0:
+        return int(estimate), "catalog_estimate"
+    return None, ""
 
 
 def _exact_row_count(conn: dict[str, Any], table: str) -> int | None:

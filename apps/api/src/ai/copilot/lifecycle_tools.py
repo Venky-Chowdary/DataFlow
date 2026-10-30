@@ -944,6 +944,10 @@ def _connector(
         return None, _tool_result(tool, success=False, output=None,
             error=f"No connector matched “{name or connector_id}”. Name a saved connector from Connectors.",
         )
+    # A deadline then names this connector's host, not "a system" (D169).
+    from .tool_deadline import note_step
+
+    note_step(f"{tool}: reaching connector {conn.get('name') or ''}".strip(), conn, role="connector", if_unset=True)
     return conn, None
 
 

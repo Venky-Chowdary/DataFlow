@@ -443,6 +443,7 @@ def _introspect_schema_unscoped(
             auth_role=auth_role,
             private_key=private_key,
             strict_namespace=strict_namespace,
+            introspect_purpose=introspect_purpose,
         )
     if db_type == "mysql":
         return _introspect_mysql(
@@ -1263,7 +1264,15 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                 col_rows = snowflake_physical_column_rows(
                     cur, schema, str(target_table)
                 )
-                if not col_rows and not bool(kwargs.get("strict_namespace")):
+                # A destination stays in the operator's namespace: a table of
+                # the same name in another schema is not where the run writes,
+                # and the cross-schema search runs on the warehouse (a 5-10s
+                # resume when suspended) for every NEW destination table (D187).
+                if (
+                    not col_rows
+                    and not bool(kwargs.get("strict_namespace"))
+                    and str(kwargs.get("introspect_purpose") or "") != "destination"
+                ):
                     cur.execute(
                         """
                         SELECT table_schema, table_name
