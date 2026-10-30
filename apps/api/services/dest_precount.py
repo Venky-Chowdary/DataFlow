@@ -4903,6 +4903,7 @@ def _checksum_records(
 ) -> tuple[int, str]:
     """Hash a dest-engine record iterator. Empty ``(0, "")``. Unmeasured ``(-1, "")``."""
     from services.reconciliation import canonical_checksum_from_iter
+    from services.value_serializer import payload_record_wire
 
     n = 0
 
@@ -4910,7 +4911,12 @@ def _checksum_records(
         nonlocal n
         for rec in records:
             n += 1
-            yield rec
+            # A parsed artifact cell is what the file spells: NULL is already
+            # ``None`` and a text cell reading ``__DF_SQL_NULL__`` is the user's
+            # literal. Put it on the wire the way the write pass and the
+            # destination sample (target_sample) do, or Gate-8 fingerprints the
+            # literal as NULL here and as text on the write pass (D113 / D115).
+            yield payload_record_wire(rec) if isinstance(rec, dict) else rec
 
     try:
         digest = canonical_checksum_from_iter(
