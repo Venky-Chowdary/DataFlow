@@ -406,8 +406,8 @@ def fail_on_window_duplicates(
     sentence = (
         f"Gate-8: {n:,} row(s) inside this run's cursor window are at the "
         "destination more times than the source holds them — the window was "
-        f"appended twice (matched on {cols}). The run is not exactly-once; the "
-        "watermark is not advanced past it."
+        f"appended twice (matched on {cols}). The run is not exactly-once; "
+        "the job's undo note says whether the batch was removed or kept."
     )
     out["passed"] = False
     out["window_duplicates"] = duplicates

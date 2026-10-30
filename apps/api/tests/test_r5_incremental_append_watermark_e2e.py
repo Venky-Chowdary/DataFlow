@@ -44,6 +44,8 @@ pytestmark = pytest.mark.timeout(600)
 @pytest.fixture
 def client(tmp_path, monkeypatch):
     h.isolate(tmp_path, monkeypatch)
+    # Snowflake legs run on fakesnow (no real Snowflake here).
+    monkeypatch.setenv("FAKESNOW_DB_PATH", str(tmp_path / "fakesnow"))
     from fastapi.testclient import TestClient
     from src.main import app
 
@@ -99,8 +101,30 @@ def _create_source(spec: str, table: str) -> None:
     )
 
 
+_SNOWFLAKE = dict(type="snowflake", host="localhost", port=443, database="dataflow",
+                  username="test", password="test", schema="public")
+
+
+def _dest_config(kind: str) -> dict[str, Any]:
+    if kind == "snowflake":
+        pytest.importorskip("fakesnow")
+        return dict(_SNOWFLAKE)
+    return h.dest_config(kind)
+
+
 def _dest_rows(kind: str, table: str) -> list[tuple]:
-    rows = h.query(kind, f"SELECT id, note FROM {h.quote(kind, table)}")  # nosec B608
+    if kind == "snowflake":
+        import connectors.snowflake_conn as sfc
+
+        conn = sfc.get_connection(
+            account="localhost", username="test", password="test", database="dataflow",
+            schema="public", warehouse="", connection_string="",
+        )
+        cur = conn.cursor()
+        cur.execute(f"SELECT id, note FROM {table}")  # nosec B608
+        rows = [tuple(r) for r in cur.fetchall()]
+    else:
+        rows = h.query(kind, f"SELECT id, note FROM {h.quote(kind, table)}")  # nosec B608
     return sorted(((int(r[0]), r[1]) for r in rows), key=lambda r: (r[0], str(r[1])))
 
 
@@ -118,7 +142,7 @@ def _connectors(token: str, src_spec: str, dst_kind: str):
     })
     dst = create_connector({
         "name": f"r5wm-dst-{token}", "role": "destination", "workspace_id": "", "ssl": False,
-        **h.dest_config(dst_kind),
+        **_dest_config(dst_kind),
     })
     return src, dst
 
@@ -177,6 +201,7 @@ _MCP_ROUTES = [
     ("pg_tstz", "mysql"),
     ("mysql", "postgresql"),
     ("sqlserver", "postgresql"),
+    ("pg_tstz", "snowflake"),  # staged writer, TIMESTAMP_NTZ carrier (fakesnow)
 ]
 
 
