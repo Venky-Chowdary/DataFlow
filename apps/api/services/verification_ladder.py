@@ -701,6 +701,46 @@ def _index_by_pk(
     return out
 
 
+def target_rows_on_batch_keys(
+    target_rows: list[dict[str, Any]],
+    batch_rows: list[dict[str, Any]],
+    key_cols: list[str],
+    *,
+    dest_db_type: str = "",
+    dest_types: dict[str, str] | None = None,
+) -> list[dict[str, Any]] | None:
+    """The destination rows that carry a key of the compared batch.
+
+    Gate-8 proved an append into an occupied table WHERE key IN (written keys)
+    (``checksum_scope = written_batch_keys``, granted only when one key names
+    one destination row). The ladder has to grade that same population: rows
+    earlier runs wrote are outside this job's proof, and a held-out key was
+    never written (D205). Keys compare as the digest compares cells (typed by
+    the destination column), so a source ``...Z`` and a destination
+    ``...+00:00`` timestamp are one key. ``None`` when the batch has no
+    addressable key.
+    """
+    from services.reconciliation import fingerprint_for_reconcile
+
+    cols = [c for c in key_cols if c]
+    types = dest_types or {}
+
+    def _key(row: dict[str, Any]) -> tuple[str, ...] | None:
+        parts = []
+        for col in cols:
+            if _pk_key(row.get(col)) is None:
+                return None
+            parts.append(fingerprint_for_reconcile(
+                row.get(col), ddl_type=str(types.get(col) or ""), engine=dest_db_type
+            ))
+        return tuple(parts)
+
+    keys = {k for r in batch_rows if isinstance(r, dict) and (k := _key(r)) is not None}
+    if not cols or not keys:
+        return None
+    return [r for r in target_rows if isinstance(r, dict) and _key(r) in keys]
+
+
 def _row_address(pk_label: str, key_cols: list[str], key: Any) -> str:
     """``id='7'`` for one key column; a composite key already names its columns."""
     if len(key_cols) > 1:

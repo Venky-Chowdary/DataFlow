@@ -3296,6 +3296,22 @@ def _maybe_attach_verification_ladder(
                 if not isinstance(r, dict)
                 or str(r.get(pk_column)) not in _rej_keys
             ]
+    # D205 — an append into an occupied table: grade the written batch, not
+    # the rows earlier runs wrote (see ladder_batch_scope).
+    ladder_scope = str(report.get("checksum_scope") or "")
+    if allow_extra and dest_before and not keyed and not (batch_scoped or window_scoped_target):
+        from .ladder_batch_scope import scope_append_target_to_batch
+
+        _scoped, ladder_scope = scope_append_target_to_batch(
+            checksum_scope=ladder_scope, quarantined=bool(_rej_keys),
+            target_rows=target_rows, source_rows=source_rows,
+            pk_cols=pk_cols or [pk_column], dest_type=dest_type, dest_cfg=dest_cfg,
+            schema=str(endpoint.schema or dest_cfg.get("schema") or ""),
+            table_name=str(endpoint.table or dest_cfg.get("table") or ""),
+            columns=target_cols, dest_types=dest_types,
+        )
+        if _scoped is not None:
+            target_rows = _scoped
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -3330,7 +3346,7 @@ def _maybe_attach_verification_ladder(
         dest_db_type=dest_type,
         dest_types=dest_types,
         allow_extra_rows=allow_extra,
-        checksum_scope=str(report.get("checksum_scope") or ""),
+        checksum_scope=ladder_scope,
         target_rows_before=dest_before,
         keyed_cardinality=keyed,
         keyed_expected_delta=census.expected_delta if keyed and census else None,
