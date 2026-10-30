@@ -1923,7 +1923,6 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
     from services.migration_rollback import (
         RollbackContractError,
         RollbackRefuseError,
-        discard_staging_table,
         execute_rollback,
     )
 
@@ -1975,19 +1974,29 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
         )
 
     dest_ep = None
-    req = job.get("request") if isinstance(job.get("request"), dict) else {}
-    raw_dest = req.get("destination") if isinstance(req.get("destination"), dict) else {}
-    if not raw_dest:
-        raw_dest = job.get("destination") if isinstance(job.get("destination"), dict) else {}
+    # The run is stored under ``transfer_request`` (job_submission). Reading
+    # only ``request`` rebuilt an endpoint with no engine or connector, so the
+    # drop failed closed on every job (QA: 409 "Failed to discard staging").
+    from services.staging_discard import job_destination_config
+
+    raw_dest = job_destination_config(job)
 
     def _drop(staging: str) -> bool:
         nonlocal dest_ep
+        from services.staging_discard import StagingDiscardError, drop_staging_table
+
         if dest_ep is None:
             dest_ep = EndpointConfig.from_dict(
                 str(raw_dest.get("kind") or "database"),
                 {**raw_dest, "table": staging},
             )
-        return bool(discard_staging_table(dest_ep, staging))
+        try:
+            drop_staging_table(dest_ep, staging)
+        except StagingDiscardError as exc:
+            raise RollbackRefuseError(
+                f"Failed to discard staging table `{staging}` — {exc}"
+            ) from exc
+        return True
 
     try:
         result = execute_rollback(

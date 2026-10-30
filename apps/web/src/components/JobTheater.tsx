@@ -16,7 +16,7 @@ import {
 } from "../lib/api";
 import { useActiveData } from "../lib/DataContext";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
-import { isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
+import { isJobParked, isJobSuccess, isJobTerminal, jobStatusBadgeClass, jobStatusLabel } from "../lib/uiUtils";
 import { LoadHistoryPanel } from "./transfer/LoadHistoryPanel";
 import { NotificationDeliveryStrip } from "./transfer/NotificationDeliveryStrip";
 import { QuarantinePanel } from "./transfer/QuarantinePanel";
@@ -28,7 +28,7 @@ import { destHeadline, destMetricCompact, destMetricToneClass, writerAckDisagree
 import { formatProofScope, readGate8Population, readJobLineage } from "../lib/gate8Population";
 import { inferTransferFailureHint, isDestinationCapacityFailure } from "../lib/transferFailure";
 import { ringDasharray } from "../lib/progressRing";
-import { earliestJobStartMs, jobAverageRowsPerSecond, publishedEngineElapsedSeconds, theaterElapsedMs, theaterProgressPct } from "../lib/jobTheaterProgress";
+import { earliestJobStartMs, jobAverageRowsPerSecond, parseServerTimestampMs, publishedEngineElapsedSeconds, theaterElapsedMs, theaterProgressPct } from "../lib/jobTheaterProgress";
 import { formatSeconds } from "../lib/phaseProfile";
 import { contractIdFromBreakerFailure } from "../lib/contractBreakerUi";
 import { CdcLeaseConflictPanel } from "./transfer/CdcLeaseConflictPanel";
@@ -42,6 +42,7 @@ import { IdentityAlignmentNote } from "./jobs/IdentityAlignmentNote";
 import { RunCarryNotes } from "./jobs/RunCarryNotes";
 import { SchemaFidelityNotes } from "./jobs/SchemaFidelityNotes";
 import { useToast } from "./Toast";
+import { StagingRollbackPanel, stagingDiscardRecorded } from "./transfer/StagingRollbackPanel";
 import { useConfirm } from "./ui/ConfirmDialog";
 import { MappingProofDrawer, type MappingProof } from "./MappingProofDrawer";
 import { hashForScreen } from "../lib/appNavigation";
@@ -149,9 +150,7 @@ function formatEta(seconds: number): string {
 }
 
 function toEpochMs(value?: string): number | null {
-  if (!value) return null;
-  const ms = Date.parse(value);
-  return Number.isFinite(ms) ? ms : null;
+  return parseServerTimestampMs(value);
 }
 
 /**
@@ -514,6 +513,8 @@ export function JobTheaterView({
   const [mappingProofOpen, setMappingProofOpen] = useState(false);
   const [resettingBreaker, setResettingBreaker] = useState(false);
   const [rollbackBusy, setRollbackBusy] = useState(false);
+  const [rollbackError, setRollbackError] = useState<string | null>(null);
+  const [rollbackDone, setRollbackDone] = useState(false);
   const rollbackGate = useWriteGate(PERMISSIONS.jobManage);
   const [resolvedProof, setResolvedProof] = useState<MappingProof | null>(() => asMappingProof(job.mapping_proof));
 
@@ -594,23 +595,28 @@ export function JobTheaterView({
 
   const frozenEndRef = useRef<number | null>(null);
   const [nowTick, setNowTick] = useState(() => Date.now());
+  // Parked on a decision: not finished, but nothing runs — the clock stops.
+  const isParked = isRunning && isJobParked(job.status);
+  const clockLive = isRunning && !isParked;
   useEffect(() => {
-    if (!isRunning) return;
+    if (!clockLive) return;
     const id = window.setInterval(() => setNowTick(Date.now()), 1000);
     return () => window.clearInterval(id);
-  }, [isRunning]);
-  if (isRunning) {
+  }, [clockLive]);
+  if (clockLive) {
     frozenEndRef.current = null;
   } else if (frozenEndRef.current == null) {
-    frozenEndRef.current = toEpochMs(job.completed_at) ?? nowTick;
+    frozenEndRef.current = toEpochMs(job.completed_at) ?? toEpochMs(job.updated_at) ?? nowTick;
   }
   const elapsed = theaterElapsedMs({
     startedAt: job.started_at,
     createdAt: job.created_at,
     completedAt: job.completed_at,
+    updatedAt: job.updated_at,
     fallbackStartMs: startedAtFallback,
     nowMs: nowTick,
     terminal: !isRunning,
+    parked: isParked,
     frozenEndMs: frozenEndRef.current,
   });
   const averageRps = jobAverageRowsPerSecond(processed, elapsed);
@@ -1762,75 +1768,75 @@ export function JobTheaterView({
       )}
 
       {canDiscardStaging && rollbackGate.allowed && (
-        <section className="df2-theater-rollback" aria-label="Staging rollback">
-          <div>
-            <strong>Discard staging table</strong>
-            <p>
-              Signed plan <code>DISCARD_STAGING</code> for{" "}
-              <code>{String(rollbackPlan?.staging_table)}</code>. Drops staging only —
-              never undoes promoted destination rows (population_undo_claimed=false).
-            </p>
-          </div>
-          <button
-            type="button"
-            className="df2-btn df2-btn-sm df2-btn-danger"
-            disabled={rollbackBusy}
-            onClick={() => {
-              void ask({
-                title: "Discard staging table",
-                message: "Drops staging only. Promoted destination rows stay. Both fields are stored on the audit record.",
-                confirmLabel: "Discard staging",
-                cancelLabel: "Keep staging",
-                tone: "danger",
-                fields: [
-                  {
-                    name: "reason",
-                    label: "Reason for discarding staging",
-                    defaultValue: "Operator discarded unused staging after migration review",
-                    required: true,
-                  },
-                  {
-                    name: "actor",
-                    label: "Approver identity",
-                    defaultValue: "job-theater-operator",
-                    required: true,
-                  },
-                ],
-              }).then((values) => {
-                const reason = values?.reason?.trim() || "";
-                const actor = values?.actor?.trim() || "";
-                if (!reason || !actor) return;
-                setRollbackBusy(true);
-                void executeJobRollback(jobId, {
-                  approved_by: actor,
-                  reason,
-                  plan: rollbackPlan as Record<string, unknown>,
-                })
-                .then((res) => {
-                  toast({
-                    title: "Staging discarded",
-                    message: String(
-                      (res as { staging_table?: string }).staging_table
-                      || rollbackPlan?.staging_table
-                      || "OK",
-                    ),
-                    tone: "success",
-                  });
-                })
-                .catch((err) => {
-                  toast({
-                    title: "Rollback refused",
-                    message: err instanceof Error ? err.message : String(err),
-                    tone: "error",
-                  });
-                })
-                .finally(() => setRollbackBusy(false));
-              });
-            }}
-          >
-            {rollbackBusy ? "Discarding…" : "Discard staging"}
-          </button>
-        </section>
+        <StagingRollbackPanel
+          stagingTable={String(rollbackPlan?.staging_table)}
+          busy={rollbackBusy}
+          error={rollbackError}
+          discarded={
+            rollbackDone
+            || stagingDiscardRecorded(
+              (job as { rollback_execution?: unknown }).rollback_execution,
+              String(rollbackPlan?.staging_table),
+            )
+          }
+          onDiscard={() => {
+            void ask({
+              title: "Discard staging table",
+              message: "Drops staging only. Promoted destination rows stay. Both fields are stored on the audit record.",
+              confirmLabel: "Discard staging",
+              cancelLabel: "Keep staging",
+              tone: "danger",
+              fields: [
+                {
+                  name: "reason",
+                  label: "Reason for discarding staging",
+                  defaultValue: "Operator discarded unused staging after migration review",
+                  required: true,
+                },
+                {
+                  name: "actor",
+                  label: "Approver identity",
+                  defaultValue: "job-theater-operator",
+                  required: true,
+                },
+              ],
+            }).then((values) => {
+              const reason = values?.reason?.trim() || "";
+              const actor = values?.actor?.trim() || "";
+              if (!reason || !actor) return;
+              setRollbackBusy(true);
+              setRollbackError(null);
+              void executeJobRollback(jobId, {
+                approved_by: actor,
+                reason,
+                plan: rollbackPlan as Record<string, unknown>,
+              })
+              .then((res) => {
+                setRollbackDone(true);
+                toast({
+                  title: "Staging discarded",
+                  message: String(
+                    (res as { staging_table?: string }).staging_table
+                    || rollbackPlan?.staging_table
+                    || "OK",
+                  ),
+                  tone: "success",
+                });
+              })
+              .catch((err) => {
+                const message = err instanceof Error ? err.message : String(err);
+                // Stays on the panel: a toast alone was gone before anyone read it.
+                setRollbackError(message || "The server refused the discard.");
+                toast({
+                  title: "Rollback refused",
+                  message,
+                  tone: "error",
+                });
+              })
+              .finally(() => setRollbackBusy(false));
+            });
+          }}
+        />
       )}
 
       {resolvedProof && !earlyFail && (
