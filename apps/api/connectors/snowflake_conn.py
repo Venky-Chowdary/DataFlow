@@ -1132,7 +1132,7 @@ def get_connection(**kwargs: Any) -> Any:
     """A Snowflake connection; one shared login per endpoint inside an endpoint scope."""
     from services.endpoint_session import borrow, in_scope
 
-    if not in_scope():
+    if not in_scope("snowflake"):
         return _open_connection(**kwargs)
     # The passphrase only matters to a key-pair login; callers pass the password
     # there too, which must not split one login in two.

@@ -32,7 +32,7 @@ import contextlib
 import contextvars
 import logging
 import threading
-from collections.abc import Callable, Hashable, Iterator
+from collections.abc import Callable, Hashable, Iterable, Iterator
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -49,7 +49,9 @@ class _Pool:
 
 
 class _Scope:
-    def __init__(self) -> None:
+    def __init__(self, engines: frozenset[str] | None = None) -> None:
+        #: Engines this scope shares; ``None`` means every engine.
+        self.engines = engines
         self.lock = threading.Lock()
         self.pools: dict[tuple[str, Hashable], _Pool] = {}
         self.closed = False
@@ -78,12 +80,16 @@ def _close_quietly(conn: Any, close: Callable[[Any], None]) -> None:
 
 
 @contextlib.contextmanager
-def endpoint_session_scope() -> Iterator[None]:
-    """Share one session per endpoint until the block ends (re-entrant)."""
+def endpoint_session_scope(engines: Iterable[str] | None = None) -> Iterator[None]:
+    """Share one session per endpoint until the block ends (re-entrant).
+
+    ``engines`` limits sharing to those engines (a transfer job shares its
+    SFTP login; its database sessions stay its own).
+    """
     if _scope.get() is not None:
         yield
         return
-    scope = _Scope()
+    scope = _Scope(frozenset(engines) if engines is not None else None)
     token = _scope.set(scope)
     try:
         yield
@@ -97,8 +103,11 @@ def endpoint_session_scope() -> Iterator[None]:
             _close_quietly(conn, close)
 
 
-def in_scope() -> bool:
-    return _scope.get() is not None
+def in_scope(engine: str = "") -> bool:
+    scope = _scope.get()
+    if scope is None:
+        return False
+    return not engine or scope.engines is None or engine in scope.engines
 
 
 def scope_stats() -> dict[str, dict[str, int]]:
@@ -126,7 +135,7 @@ def borrow(
     database, user, credential, role, warehouse...).
     """
     scope = _scope.get()
-    if scope is None:
+    if scope is None or (scope.engines is not None and engine not in scope.engines):
         return open_fn(), None
     pool_key = (engine, key)
     with scope.lock:

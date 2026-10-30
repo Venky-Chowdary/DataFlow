@@ -748,7 +748,13 @@ class UniversalTransferEngine:
         """Run a tracked transfer under the workspace's connector egress policy."""
         from services.egress_guard import egress_workspace
 
-        with egress_workspace(str(request.workspace_id or "")):
+        from services.endpoint_session import endpoint_session_scope
+
+        # One SFTP login per endpoint for the whole job (D189): listing, stat,
+        # spill, preview and probes share it. Database sessions stay the job's.
+        with egress_workspace(str(request.workspace_id or "")), endpoint_session_scope(
+            engines=("sftp",)
+        ):
             return self._execute_tracked_in_workspace(request, job_id, resume)
 
     def _execute_tracked_in_workspace(
