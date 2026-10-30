@@ -6735,6 +6735,12 @@ def trailing_spaces_insignificant_for_unique(
         "amazon_rds_oracle",
     }:
         return False
+    if kind in {"mysql", "mariadb"} and re.search(
+        r"_0900_|NOPAD", (parse_collation(ddl_type) or "").upper()
+    ):
+        # MySQL 8's UCA 9.0.0 collations (utf8mb4_0900_bin / _ai_ci) and
+        # MariaDB's *_nopad_* are NO PAD: 'a' and 'a ' are two keys (D205).
+        return False
     if kind in {
         "mysql",
         "mariadb",

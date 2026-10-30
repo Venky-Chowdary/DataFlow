@@ -1367,7 +1367,15 @@ def run_file_preflight(
                 )
 
                 _key_xforms = key_transforms(mappings, source_pk_cols)
-                if _key_xforms:
+                # D205: the destination's comparison (PAD SPACE, _ci) can merge
+                # distinct source keys too; the same walk names them.
+                from services.dest_key_equality import key_equalizers
+
+                _key_eq = key_equalizers(
+                    mappings, source_pk_cols, destination_column_types, dest_kind,
+                    source_db=source_format,
+                )
+                if _key_xforms or _key_eq:
                     _key_rows = _ps._iter_table_population_for_preflight(
                         source_columns=list(source_pk_cols),
                         source_kind=source_kind,
@@ -1385,6 +1393,7 @@ def run_file_preflight(
                         _key_rows if _key_rows is not None else (sample_rows or []),
                         key_sources=list(source_pk_cols),
                         transforms=_key_xforms,
+                        equalizers=_key_eq,
                     )
             else:
                 source_duplicate_probe_status = "skipped_no_pk"
