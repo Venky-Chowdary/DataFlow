@@ -1820,7 +1820,7 @@ def _run_preflight(
         else {
             "connected": False,
             "error": (
-                f"the destination did not answer the preflight probe in time"
+                "the destination did not answer the preflight probe in time"
                 if probe_run.timed_out
                 else str(probe_run.error or "destination probe failed")
             ),
