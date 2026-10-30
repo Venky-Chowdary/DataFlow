@@ -358,7 +358,9 @@ def _failed_batch_undo_note_impl(
     destination = getattr(request, "destination", None)
     extra = dict(getattr(destination, "extra", None) or {})
     backup_engine = str(extra.get("overwrite_backup_engine") or "")
-    if extra.get("overwrite_backup") and backup_engine in {"mysql", "mongodb"}:
+    from src.transfer.engine_finish import RESTORABLE_BACKUP_ENGINES
+
+    if extra.get("overwrite_backup") and backup_engine in RESTORABLE_BACKUP_ENGINES:
         backup_name = str(extra.get("overwrite_backup") or "")
         restored = _engine._settle_overwrite_backup(destination, restore=True)
         if restored:
@@ -620,6 +622,29 @@ def _drop_destination_table(
                 extra["overwrite_backup_engine"] = "mysql"
                 destination.extra = extra
             _remember_preserved_columns(destination, kept)
+            return True
+        from connectors.table_manager import (
+            ROW_COPY_BACKUP_ENGINE,
+            overwrite_keeps_row_copy,
+            retire_generic_sql_overwrite,
+        )
+
+        if overwrite_keeps_row_copy(db_type):
+            # The writer's batches commit one by one, so the empty cannot
+            # share their transaction. Keep the previous rows recoverable and
+            # let the failure path put them back (_settle_overwrite_backup).
+            try:
+                _state, backup = retire_generic_sql_overwrite(
+                    db_type, cfg, table_name, schema
+                )
+            except TableDropError as exc:
+                logger.error("full_refresh empty failed for %s: %s", table_name, exc)
+                raise FullRefreshDropFailed(table_name, str(exc.cause)) from exc
+            if backup:
+                extra = dict(destination.extra or {})
+                extra["overwrite_backup"] = backup
+                extra["overwrite_backup_engine"] = ROW_COPY_BACKUP_ENGINE
+                destination.extra = extra
             return True
         try:
             empty_existing_for_overwrite(db_type, cfg, table_name, schema)
