@@ -7,6 +7,7 @@ import { Button } from "../ui/Button";
 import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import type { ScheduleRun } from "../../lib/types";
 import { formatJobRowMetric } from "../../lib/conservationLedger";
+import { historyPollMs, isOpenRun, runLabel, runReason } from "../../lib/scheduleRunStatus";
 
 interface ScheduleRunHistoryProps {
   scheduleId: string;
@@ -54,21 +55,32 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const load = useCallback(async (quiet = false) => {
+    if (!quiet) {
+      setLoading(true);
+      setError(null);
+    }
     try {
       const res = await fetchScheduleHistory(scheduleId, 25);
       setRuns(res.runs ?? []);
+      setError(null);
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Could not load run history");
+      if (!quiet) setError(e instanceof Error ? e.message : "Could not load run history");
     }
-    setLoading(false);
+    if (!quiet) setLoading(false);
   }, [scheduleId]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Loaded once, the panel kept showing a run as it was when opened — a run
+  // that finished, failed or was declared "worker lost" never appeared.
+  useEffect(() => {
+    if (loading || error) return;
+    const timer = window.setTimeout(() => void load(true), historyPollMs(runs));
+    return () => window.clearTimeout(timer);
+  }, [load, loading, error, runs]);
 
   if (loading) {
     return (
@@ -107,15 +119,21 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
             records_transferred: run.records_transferred,
             row_accounting: run.row_accounting,
           });
-          const drift = isSourceDriftError(run.error || "");
+          const reason = runReason(run);
+          const showReason =
+            Boolean(run.error?.trim()) ||
+            (Boolean(reason) && !isOpenRun(run.status) && !/^completed/.test(run.status));
+          const drift = isSourceDriftError(reason);
           return (
             <article
               className={`df2-sched-run${run.retry_scheduled ? " is-retry" : ""}`}
               role="listitem"
-              key={`${run.job_id}-${run.attempt}-${i}`}
+              key={run.run_id || `${run.job_id}-${run.attempt}-${i}`}
             >
               <header className="df2-sched-run-head">
-                <span className={jobStatusBadgeClass(run.status)}>{jobStatusLabel(run.status)}</span>
+                <span className={jobStatusBadgeClass(run.status)} title={reason || jobStatusLabel(run.status)}>
+                  {runLabel(run)}
+                </span>
                 {run.attempt > 0 && (
                   <span className="df2-sched-attempt" title={`Retry attempt #${run.attempt}`}>
                     <DtIcon name="trend" size={11} /> retry #{run.attempt}
@@ -169,9 +187,9 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
                   </dd>
                 </div>
               </dl>
-              {run.error?.trim() && (
+              {showReason && (
                 <div className="df2-sched-run-error">
-                  <p title={run.error}>{run.error}</p>
+                  <p title={reason}>{reason}</p>
                   {run.failure_class?.corrective_action && (
                     <p className="df2-sched-run-fix">{run.failure_class.corrective_action}</p>
                   )}

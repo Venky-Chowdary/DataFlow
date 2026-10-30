@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { schedulesPollMs } from "../lib/scheduleRunStatus";
 import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
 import { HiddenFileInput } from "../components/ui/HiddenFileInput";
@@ -180,6 +181,33 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   useEffect(() => {
     load();
   }, [load]);
+
+  // Loaded once, the list showed whatever status each schedule had when the
+  // page opened: a run that failed, was skipped or lost its worker stayed
+  // invisible until a manual reload. Re-read quietly — fast while a run is
+  // open, slower at rest — and again when the tab regains focus.
+  useEffect(() => {
+    if (loading || loadError) return;
+    let cancelled = false;
+    const refresh = async () => {
+      try {
+        const rows = await fetchSchedules();
+        if (!cancelled) setSchedules(rows);
+      } catch {
+        /* a failed background read keeps the last good list */
+      }
+    };
+    const timer = window.setTimeout(() => void refresh(), schedulesPollMs(schedules));
+    const onVisible = () => {
+      if (document.visibilityState === "visible") void refresh();
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [loading, loadError, schedules]);
 
   useEffect(() => {
     fetchScheduleIntervals()

@@ -49,10 +49,13 @@ def _manual_start_failure_detail(sched: Any) -> str:
     """Prefer the parked finding or last run error over a connector guess."""
     if sched is None:
         return "Schedule not found."
-    hist = list(getattr(sched, "run_history", None) or [])
+    hist = [
+        r for r in (getattr(sched, "run_history", None) or [])
+        if isinstance(r, dict) and str(r.get("status") or "") not in ("pending", "running")
+    ]
     last_err = ""
-    if hist and isinstance(hist[-1], dict):
-        last_err = str(hist[-1].get("error") or "").strip()
+    if hist:
+        last_err = str(hist[-1].get("error") or hist[-1].get("reason") or "").strip()
     req = getattr(sched, "approval_request", None) or {}
     finding = ""
     if isinstance(req, dict) and str(req.get("status") or "") == "open":
@@ -859,13 +862,23 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "error": (doc.get("error") or "")[:500],
         "row_accounting": dict(ledger),
     }
+    if doc.get("_run_reason_code"):
+        entry["reason_code"] = doc["_run_reason_code"]
+    elif doc.get("error_code") and not _is_success(status):
+        entry["reason_code"] = str(doc["error_code"])
+    if _is_success(status) and doc.get("message"):
+        entry["reason"] = str(doc.get("message") or "")[:500]
     if isinstance(hist, dict) and hist:
         entry["load_history_report"] = hist
     return entry
 
 
 def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> None:
-    """Deliver success/failure notifications honoring per-schedule preferences."""
+    """Deliver success/failure notifications honoring per-schedule preferences.
+
+    A run that failed before a job existed passes ``{"error": <run reason>}``
+    as ``job_doc``: there is no job error to quote.
+    """
     success = _is_success(status)
     if success and not sched.notify_on_success:
         return
@@ -888,7 +901,11 @@ def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> N
             records_transferred=int(doc.get("records_processed", 0) or 0),
             rejected_rows=int(doc.get("rejected_rows", 0) or 0),
             error=doc.get("error") or "",
-            retry_url=f"/api/v1/connectors/jobs/{job_id}/resume",
+            retry_url=(
+                f"/api/v1/connectors/jobs/{job_id}/resume"
+                if job_id
+                else f"/api/v1/schedules/{sched.id}/history"
+            ),
             workspace_id=sched.workspace_id or "",
             base_url=public_url(),
             web_url=web_url(),
@@ -1102,7 +1119,14 @@ def _park_reason(sched: Any, decision: dict[str, Any], entry: dict[str, Any]) ->
         return "deterministic_refusal"
     if not decision.get("retry") and (decision.get("decision") or {}).get("allowed") is False:
         return "committed_rows_cannot_be_replayed"
-    history = list(getattr(sched, "run_history", None) or [])
+    # Finished runs only: a skipped beat or the record still open for this very
+    # run is not a failure in a row.
+    history = [
+        r for r in (getattr(sched, "run_history", None) or [])
+        if isinstance(r, dict)
+        and str(r.get("status") or "") not in ("skipped", "pending", "running")
+        and (not entry.get("run_id") or r.get("run_id") != entry.get("run_id"))
+    ]
     signature = _failure_signature(entry)
     if signature:
         previous = [r for r in history if not _is_success(r.get("status"))]
@@ -1140,6 +1164,36 @@ def _append_replay_blocked(sched: Any) -> str | None:
     )
 
 
+def _settle_if_worker_lost(
+    job_id: str, job_doc: dict | None
+) -> tuple[str, dict] | None:
+    """Finalize was asked about a job that never reached a terminal status.
+
+    Callers only get here when the job is not live (its lease and heartbeat
+    expired, or the document is gone). Recording the job's own ``running`` as
+    the run's result left ``last_status='running'`` for good. The job is failed
+    "worker lost" instead, conditional on the status that was read.
+
+    Returns ``None`` when the job is terminal (nothing to settle), ``("", {})``
+    when it became live again, else the settled ``(status, job_doc)``.
+    """
+    from services.job_status import UNFINISHED_JOB_STATUSES
+    from services.schedule_run_lifecycle import WORKER_LOST_CODE, is_open, settle_lost_job
+
+    status = str((job_doc or {}).get("status") or "")
+    if job_doc and status not in UNFINISHED_JOB_STATUSES:
+        return None
+    settled, reason = settle_lost_job(job_id, job_doc)
+    if is_open(settled) or settled in UNFINISHED_JOB_STATUSES:
+        return "", {}
+    doc = dict(_job_doc(job_id) or job_doc or {})
+    doc["status"] = settled
+    doc["error"] = str(doc.get("error") or reason)
+    doc.setdefault("error_code", WORKER_LOST_CODE)
+    doc["_run_reason_code"] = WORKER_LOST_CODE if doc.get("error_code") == WORKER_LOST_CODE else ""
+    return settled, doc
+
+
 def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datetime) -> None:
     """Handle a finished scheduled run: retry on failure, else record + notify."""
     from services.schedule_store import (
@@ -1153,6 +1207,17 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
         return
     job_doc = _job_doc(job_id)
     status = (job_doc or {}).get("status") or "failed"
+    from services.schedule_run_lifecycle import run_finished
+
+    if job_id and run_finished(sched, job_id, success=_is_success(status)):
+        # Already recorded with the same outcome (the done-callback and the
+        # beat can both arrive).
+        return
+    lost = _settle_if_worker_lost(job_id, job_doc)
+    if lost is not None:
+        status, job_doc = lost
+        if not status:
+            return  # resumed or live again: the run is still in flight
     if (
         job_id
         and sched.last_job_id == job_id
@@ -1270,7 +1335,12 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                     "unmapped_columns": unaccounted_sources_from_job(job_doc),
                 },
             )
-    _notify_schedule(sched, job_id, status, job_doc)
+    from services.schedule_run_lifecycle import default_reason
+
+    doc = dict(job_doc or {})
+    if not _is_success(status):
+        doc["error"] = str(doc.get("error") or default_reason(entry))
+    _notify_schedule(sched, job_id, status, doc)
 
 
 def _park_on_decision(
@@ -1279,6 +1349,7 @@ def _park_on_decision(
     *,
     attempt: int,
     job_id: str = "",
+    reason_code: str = "preflight_refused",
 ) -> None:
     """Turn a pre-run refusal into a decision a human can act on.
 
@@ -1289,15 +1360,19 @@ def _park_on_decision(
     Best effort: if the inbox write fails, the failed run is already recorded and
     the schedule behaves exactly as it did before this existed.
     """
+    from services.schedule_run_lifecycle import current_run_id
     from services.schedule_store import mark_schedule_run
 
     message = str(exc)
     now = datetime.now(timezone.utc).isoformat()
-    mark_schedule_run(
+    updated = mark_schedule_run(
         schedule_id,
         job_id,
         status="failed",
         run_entry={
+            "run_id": current_run_id(schedule_id),
+            "reason": message[:500],
+            "reason_code": reason_code,
             "job_id": job_id,
             "status": "failed",
             "attempt": attempt,
@@ -1311,6 +1386,9 @@ def _park_on_decision(
         },
     )
     _open_finding(schedule_id, exc, attempt=attempt, job_id=job_id)
+    if updated is not None:
+        # No job ran, so no job-level notification will ever say this failed.
+        _notify_schedule(updated, job_id, "failed", {"error": message})
 
 
 def _collapse_repeated_finding(message: str) -> str:
@@ -1493,6 +1571,7 @@ def _dispatch_transfer(
                 "connector, then resume."
             ),
             attempt=attempt,
+            reason_code="connector_missing",
         )
         return None
 
@@ -1576,6 +1655,9 @@ def _dispatch_transfer(
                 # No durable schedule (direct dispatch tests) or the claim was
                 # not stored. Keep the job the caller just created.
                 set_running_job(schedule_id, job_id)
+    from services.schedule_run_lifecycle import current_run_id, mark_running
+
+    mark_running(schedule_id, current_run_id(schedule_id), job_id)
     if request.acknowledgment_actor or authorized_drift:
         # Delegated authority was exercised, and only now that a run actually
         # exists to exercise it: counting earlier would spend a single-use
@@ -1653,6 +1735,126 @@ def _run_schedule(
     resync_mode: str = "",
     triggered_by: str = "",
 ) -> str | None:
+    """Start one scheduled attempt. Its run record exists before any work.
+
+    Every way out of here leaves that record in a persisted state: ``running``
+    with the job bound, ``skipped`` with why, or ``failed`` with why. An
+    exception used to be a log line and nothing else (QA round 5).
+    """
+    from services import schedule_run_lifecycle as life
+    from services.schedule_store import get_schedule
+
+    sched = get_schedule(schedule_id)
+    if not sched:
+        if manual:
+            raise ScheduleStartError("Schedule not found.", http_status=404, code="not_found")
+        return None
+    if not sched.enabled and not manual:
+        return None
+    retrying = bool(getattr(sched, "retry_at", None))
+    attempt = int(getattr(sched, "retry_attempt", 0) or 0) if retrying else 0
+    trigger = (
+        life.TRIGGER_MANUAL if manual
+        else life.TRIGGER_RETRY if retrying
+        else life.TRIGGER_CADENCE
+    )
+    run_id = life.begin_run(schedule_id, trigger=trigger, attempt=attempt)
+    with life.bound_run(schedule_id, run_id):
+        try:
+            job_id = _start_schedule_run(
+                schedule_id,
+                manual=manual,
+                resync_mode=resync_mode,
+                triggered_by=triggered_by,
+            )
+        except ScheduleStartError as exc:
+            life.finish_run(
+                schedule_id, run_id, life.SKIPPED,
+                reason=str(exc), reason_code=exc.code or "start_refused",
+            )
+            raise
+        except PermissionError as exc:
+            if manual:
+                life.finish_run(
+                    schedule_id, run_id, life.SKIPPED,
+                    reason=str(exc), reason_code="permission_refused",
+                )
+            else:
+                _fail_unstarted_run(schedule_id, run_id, exc, attempt=attempt, manual=False)
+            raise
+        except Exception as exc:
+            _fail_unstarted_run(schedule_id, run_id, exc, attempt=attempt, manual=manual)
+            raise
+    if job_id is None:
+        # A refusal that parked already failed this record; anything else
+        # (paused between the beat and the dispatch) is a skip with its reason.
+        life.finish_run(
+            schedule_id, run_id, life.SKIPPED,
+            reason="The schedule was not started: it was paused or removed before dispatch.",
+            reason_code="not_started",
+        )
+    return job_id
+
+
+def _fail_unstarted_run(
+    schedule_id: str,
+    run_id: str,
+    exc: BaseException,
+    *,
+    attempt: int,
+    manual: bool,
+) -> None:
+    """An exception before (or while) the job was submitted: a failed run.
+
+    A cadence attempt consumes its slot like any failed run — otherwise the
+    same crash re-fires on every beat — and is notified, since no job exists
+    to notify for it. A manual one only records the failure: the person who
+    pressed Run now is told by the HTTP answer, and the cadence is untouched.
+    """
+    from services import schedule_run_lifecycle as life
+    from services.schedule_store import get_schedule, mark_schedule_run
+
+    reason = f"The scheduler could not start this run: {type(exc).__name__}: {exc}"[:500]
+    try:
+        before = get_schedule(schedule_id)
+        record = next(
+            (r for r in (before.run_history if before else []) if r.get("run_id") == run_id),
+            {},
+        )
+        if not life.is_open(record.get("status")):
+            return
+        job_id = str(record.get("job_id") or "")
+        if job_id:
+            life.settle_lost_job(job_id, _job_doc(job_id))
+        now = datetime.now(timezone.utc).isoformat()
+        entry = {
+            "run_id": run_id, "status": "failed", "attempt": attempt, "job_id": job_id,
+            "finished_at": now, "error": reason, "reason": reason,
+            "reason_code": "start_error",
+        }
+        if manual:
+            life.finish_run(schedule_id, run_id, "failed", reason=reason,
+                            reason_code="start_error", error=reason, job_id=job_id)
+            return
+        updated = mark_schedule_run(schedule_id, job_id, status="failed", run_entry=entry)
+        emit_event(logger, "schedule.run.fire", outcome="failed", reason_code="start_error",
+                   schedule_id=schedule_id, attempt=attempt + 1, error=exc)
+        if before is not None and _park_reason(before, {}, entry):
+            _open_finding(schedule_id, reason, attempt=attempt, job_id=job_id)
+        if updated is not None:
+            _notify_schedule(updated, job_id, "failed", {"error": reason})
+    except Exception:  # noqa: BLE001 — recording must not mask the original error
+        logger.exception("Schedule %s failed run %s was not recorded", schedule_id, run_id)
+
+
+def _start_schedule_run(
+    schedule_id: str,
+    *,
+    manual: bool,
+    resync_mode: str,
+    triggered_by: str,
+) -> str | None:
+    from services import schedule_run_lifecycle as life
     from services.schedule_store import (
         clear_schedule_running,
         get_schedule,
@@ -1663,8 +1865,6 @@ def _run_schedule(
     if not sched:
         if manual:
             raise ScheduleStartError("Schedule not found.", http_status=404, code="not_found")
-        return None
-    if not sched.enabled and not manual:
         return None
     from services.request_principal import assert_bound_principal_may_use_endpoints
 
@@ -1689,6 +1889,10 @@ def _run_schedule(
     if blocked:
         logger.info("Schedule %s skipped — append replay would duplicate", schedule_id)
         emit_event(logger, "schedule.run.skip", outcome="skipped", reason_code="append_replay_duplicate", schedule_id=schedule_id)
+        life.finish_run(
+            schedule_id, life.current_run_id(schedule_id), life.SKIPPED,
+            reason=blocked, reason_code="committed_rows_cannot_be_replayed",
+        )
         if manual:
             raise ScheduleStartError(
                 blocked,
@@ -1744,6 +1948,10 @@ def _run_schedule(
                 }
             detail = describe_claim_holder(holder)
             _note_claim_blocked(schedule_id, holder, detail)
+            life.finish_run(
+                schedule_id, life.current_run_id(schedule_id), life.SKIPPED,
+                reason=detail, reason_code="already_running",
+            )
             if manual:
                 raise ScheduleStartError(
                     detail,
@@ -1886,6 +2094,7 @@ def _run_due_schedules() -> int:
         release_create_new_dest_exists_false_refuse()
         _release_superseded_queued_claims()
         _finalize_finished_schedule_claims()
+        _sweep_orphan_runs()
         try:
             from services.cdc_capture_release import retry_pending_capture_releases
 
@@ -1917,8 +2126,26 @@ def _run_due_schedules() -> int:
     return started
 
 
+def _sweep_orphan_runs() -> None:
+    """Fail open run records whose worker is gone ("worker lost")."""
+    try:
+        from services.schedule_run_lifecycle import sweep_orphan_runs
+
+        swept = sweep_orphan_runs()
+        for row in swept:
+            emit_event(logger, "schedule.run.orphan", outcome=row["action"],
+                       reason_code="worker_lost", schedule_id=row["schedule_id"])
+    except Exception:  # noqa: BLE001 — the sweep must never stop the beat
+        logger.exception("Schedule run sweep failed")
+
+
 def _clear_stale_running_schedules() -> None:
-    """On startup, clear running flags left by a previous crashed instance."""
+    """On startup, settle runs and claims left by a previous crashed instance.
+
+    Runs first: a claim whose job died is finalized as "worker lost" before
+    the claim is released, so the run is never dropped without a record.
+    """
+    _sweep_orphan_runs()
     from services.schedule_store import (
         PipelineSchedule,
         _is_running_stale,

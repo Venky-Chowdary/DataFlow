@@ -3667,12 +3667,14 @@ class DataPilotTools:
         return None, None
 
     def _schedule_summary(self, s) -> dict:
+        from services.schedule_run_lifecycle import derive_status, recent_runs
         from services.schedule_store import (
             has_open_approval,
             schedule_bind_summary,
             visible_next_run_at,
         )
 
+        derived = derive_status(s)
         row = {
             "id": s.id,
             "name": s.name,
@@ -3685,7 +3687,12 @@ class DataPilotTools:
             "sync_mode": getattr(s, "sync_mode", "") or "",
             "next_run_at": visible_next_run_at(s),
             "last_run_at": s.last_run_at,
-            "last_status": s.last_status,
+            # Derived from the latest run record, with its reason (QA round 5).
+            "last_status": derived["last_status"],
+            "last_status_reason": derived["last_status_reason"],
+            "current_run": derived["current_run"],
+            "last_skip": derived["last_skip"],
+            "recent_runs": recent_runs(s, 5),
             "run_count": s.run_count,
             "missed_window_count": int(getattr(s, "missed_window_count", 0) or 0),
             "last_missed_windows": int(getattr(s, "last_missed_windows", 0) or 0),
