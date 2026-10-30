@@ -3573,6 +3573,8 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   id: string;
   time: string;
   actor: string;
+  /** Name + masked id for an API key / service account (R7). */
+  actor_display?: string;
   action: string;
   resource: string;
   level: string;
@@ -4544,6 +4546,8 @@ export type BenchmarkReport = {
   destination_summary: Record<string, unknown>;
   error: string;
   timestamp: string;
+  peak_memory_basis?: string;
+  startup_seconds?: number;
   competitors: {
     product: string;
     typical_rps: number;
@@ -4551,7 +4555,20 @@ export type BenchmarkReport = {
     resume_from_checkpoint: boolean;
     observed_max_rows: number;
     notes: string;
+    comparison?: { verdict: "faster" | "slower" | "similar" | "unknown"; ratio: number | null; label: string };
   }[];
+};
+
+export type BenchmarkRun = {
+  id: string;
+  rows: number;
+  status: "queued" | "running" | "succeeded" | "failed";
+  phase: string;
+  progress_pct: number;
+  rows_done: number;
+  elapsed_seconds: number;
+  error: string;
+  report: BenchmarkReport | null;
 };
 
 export type SecurityPosture = {
@@ -4862,6 +4879,29 @@ export async function runBenchmark(rows = 100_000): Promise<BenchmarkReport> {
   });
   if (!res.ok) throw new Error(await parseApiError(res, "Benchmark failed"));
   return res.json();
+}
+
+/** Start the Scale benchmark as a background run (returns at once). */
+export async function startBenchmarkRun(rows = 100_000): Promise<BenchmarkRun> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rows }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Benchmark failed to start"));
+  return (await res.json()).run;
+}
+
+export async function fetchBenchmarkRun(id: string): Promise<BenchmarkRun> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not read the benchmark run"));
+  return (await res.json()).run;
+}
+
+export async function downloadBenchmarkRunReport(id: string): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs/${encodeURIComponent(id)}?format=md`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not download benchmark report"));
+  return res.blob();
 }
 
 export async function downloadBenchmarkReport(rows = 100_000): Promise<Blob> {

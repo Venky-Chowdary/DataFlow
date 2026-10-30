@@ -1032,36 +1032,9 @@ async def get_security_report(request: Request):
 
 
 def _baseline_competitors() -> list[dict[str, Any]]:
-    """Approximate mid-market ELT baselines for procurement context (synthetic).
+    from services.benchmark_runs import baseline_competitors
 
-    Figures are illustrative industry ranges — not named vendor SLAs or guarantees.
-    """
-    return [
-        {
-            "product": "Managed ELT (high)",
-            "typical_rps": 4000,
-            "memory_mb": 2048,
-            "resume_from_checkpoint": True,
-            "observed_max_rows": 1_000_000_000,
-            "notes": "Throughput depends on source API rate limits and destination load",
-        },
-        {
-            "product": "Open-source ELT workers",
-            "typical_rps": 2500,
-            "memory_mb": 1024,
-            "resume_from_checkpoint": True,
-            "observed_max_rows": 100_000_000,
-            "notes": "Connector pods; scale limited by worker memory",
-        },
-        {
-            "product": "Lightweight Singer-class",
-            "typical_rps": 1800,
-            "memory_mb": 1024,
-            "resume_from_checkpoint": False,
-            "observed_max_rows": 10_000_000,
-            "notes": "Row-by-row logging overhead on smaller pipelines",
-        },
-    ]
+    return baseline_competitors()
 
 
 def _markdown_benchmark_report(report: dict[str, Any]) -> str:
@@ -1077,15 +1050,18 @@ def _markdown_benchmark_report(report: dict[str, Any]) -> str:
         f"- Success: {report['success']}",
         f"- Elapsed: {report['elapsed_seconds']:.3f}s",
         f"- Throughput: {report['records_per_second']:,.1f} rows/sec (CSV→SQLite)",
-        f"- Peak memory: {report['peak_memory_mb']} MB",
+        f"- Peak memory: {report['peak_memory_mb']} MB ({report.get('peak_memory_basis') or 'process'})",
         f"- Row count verified: {report['destination_summary'].get('verified', False)}",
         "",
         "## Competitor baselines",
-        "| Product | Typical rows/sec | Resume | Notes |",
-        "|---------|------------------|--------|-------|",
+        "| Product | Typical rows/sec | Datawrap vs this | Resume | Notes |",
+        "|---------|------------------|------------------|--------|-------|",
     ]
+    from services.benchmark_runs import comparison
+
     for c in report["competitors"]:
-        lines.append(f"| {c['product']} | {c['typical_rps']:,} | {'Yes' if c['resume_from_checkpoint'] else 'No'} | {c['notes']} |")
+        label = (c.get("comparison") or comparison(report.get("records_per_second") or 0, c["typical_rps"]))["label"]
+        lines.append(f"| {c['product']} | {c['typical_rps']:,} | {label} | {'Yes' if c['resume_from_checkpoint'] else 'No'} | {c['notes']} |")
     lines.extend(["", "This report was produced by the Datawrap benchmark harness and can be reproduced locally without cloud credentials."])
     return "\n".join(lines)
 
@@ -1191,29 +1167,21 @@ async def get_desktop_lab_cross_proof():
 
 @router.post("/benchmark")
 async def run_workspace_benchmark(body: BenchmarkRequest):
-    """Run a reproducible local benchmark and return a standardized report.
+    """Run the local benchmark to completion and return the report.
 
-    The local benchmark transfers a synthetic CSV into an in-memory SQLite file
-    and reports throughput, memory, and correctness. It does not require cloud
-    credentials, so it can be run by prospects during a security review.
+    Kept for API clients. It runs in a child process like the background run
+    (so this API process's environment is untouched and memory is measured),
+    but a large run outlives proxy timeouts: the page uses ``/benchmark/runs``.
     """
-    import benchmarks.cloud_scale as bench
+    from services.benchmark_runs import run_blocking
 
-    # The benchmark is synchronous and can block the event loop for large row
-    # counts; run it in a thread and surface any failures gracefully.
-    try:
-        report = await asyncio.to_thread(bench.run_local_benchmark, body.rows)
-    except Exception as exc:
-        return JSONResponse(
-            {
-                "target": "sqlite",
-                "rows": body.rows,
-                "success": False,
-                "error": str(exc),
-            },
-            status_code=500,
-        )
-    report["competitors"] = _baseline_competitors()
+    run = await asyncio.to_thread(run_blocking, body.rows)
+    report = run.get("report") or {
+        "target": "sqlite", "rows": body.rows, "success": False,
+        "error": run.get("error") or "Benchmark failed",
+    }
+    if not run.get("report"):
+        return JSONResponse(report, status_code=500)
     if body.format == "md":
         return PlainTextResponse(
             _markdown_benchmark_report(report),
@@ -1221,3 +1189,30 @@ async def run_workspace_benchmark(body: BenchmarkRequest):
             headers={"Content-Disposition": f'attachment; filename="{PRODUCT_SLUG}-benchmark-report.md"'},
         )
     return JSONResponse(report)
+
+
+@router.post("/benchmark/runs")
+async def start_benchmark_run(body: BenchmarkRequest):
+    """Start the Proofs → Scale benchmark in the background; poll ``GET .../runs/{id}``."""
+    from services.benchmark_runs import start_run
+
+    run, started = start_run(body.rows)
+    return JSONResponse({"run": run, "started": started}, status_code=202 if started else 200)
+
+
+@router.get("/benchmark/runs/{run_id}")
+async def get_benchmark_run(run_id: str, format: str = "json"):
+    from services.benchmark_runs import get_run
+
+    run = get_run(run_id)
+    if run is None:
+        raise HTTPException(status_code=404, detail="Benchmark run not found")
+    if format == "md":
+        if not run.get("report"):
+            raise HTTPException(status_code=409, detail="The benchmark run has not finished")
+        return PlainTextResponse(
+            _markdown_benchmark_report(run["report"]),
+            media_type="text/markdown",
+            headers={"Content-Disposition": f'attachment; filename="{PRODUCT_SLUG}-benchmark-report.md"'},
+        )
+    return JSONResponse({"run": run})
