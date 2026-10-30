@@ -378,7 +378,10 @@ def apply_postgres_session_guards(conn: Any) -> None:
             # cannot hold locks on the customer's table afterwards.
             cur.execute(f"SET idle_in_transaction_session_timeout = {statement_ms}")
             cur.execute("SET lock_timeout = 120000")
-            cur.execute("SET application_name = 'dataflow'")
+            from services.brand import session_application_name
+
+            # A constant from services.brand ("dataflow" / "datawrap"), never input.
+            cur.execute(f"SET application_name = '{session_application_name()}'")
         conn.autocommit = False
     except Exception:
         try:

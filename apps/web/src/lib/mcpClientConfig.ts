@@ -23,7 +23,7 @@ export function cursorMcpSnippet(url: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        dataflow: {
+        datawrap: {
           url,
           headers: { Authorization: "Bearer <workspace-api-key>" },
         },
@@ -38,7 +38,7 @@ export function claudeMcpSnippet(url: string): string {
   return JSON.stringify(
     {
       mcpServers: {
-        dataflow: {
+        datawrap: {
           type: "http",
           url,
           headers: { Authorization: "Bearer <workspace-api-key>" },
@@ -54,7 +54,7 @@ export function vscodeMcpSnippet(url: string): string {
   return JSON.stringify(
     {
       servers: {
-        dataflow: {
+        datawrap: {
           type: "http",
           url,
           headers: { Authorization: "Bearer <workspace-api-key>" },

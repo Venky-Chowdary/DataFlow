@@ -16,14 +16,15 @@ from dataclasses import dataclass
 from typing import Any
 
 from services.value_serializer import json_default
+from services.brand import PRODUCT_NAME, PRODUCT_SLUG
 
 logger = logging.getLogger(__name__)
 
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
 PROTOCOL_VERSION = SUPPORTED_PROTOCOL_VERSIONS[0]
 SERVER_INFO = {
-    "name": "dataflow",
-    "title": "Datawrap MCP Server",
+    "name": PRODUCT_SLUG,
+    "title": f"{PRODUCT_NAME} MCP Server",
     "version": "2.0.0",
 }
 

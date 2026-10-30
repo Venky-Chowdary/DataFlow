@@ -15,6 +15,7 @@ import logging
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from services.brand import PRODUCT_NAME
 
 _logger = logging.getLogger(__name__)
 
@@ -1851,7 +1852,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             summary = (
                 f"Upsert into this existing table keys on "
                 f"({', '.join(cols)}) but the destination has no unique "
-                f"constraint on those columns — DataFlow would need to run: "
+                f"constraint on those columns — {PRODUCT_NAME} would need to run: "
                 f"{planned_ddl}"
             )
         roots.append(

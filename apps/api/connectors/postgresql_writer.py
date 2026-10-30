@@ -57,6 +57,7 @@ from connectors.writer_common import (
     WriteResult as _WriteResult,
 )
 from services.transform_resolver import LiveDestTypes
+from services.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -2084,12 +2085,13 @@ def write_mapped_rows(
                 # operator-table disclosed-DDL gate (D101). Operator tables
                 # never carry this comment, so the gate stays fail-closed.
                 try:
+                    from services.brand import new_marker_comment
+
                     cursor.execute(
-                        sql.SQL(
-                            "COMMENT ON TABLE {}.{} IS 'dataflow:managed'"
-                        ).format(
+                        sql.SQL("COMMENT ON TABLE {}.{} IS {}").format(
                             sql.Identifier(schema),
                             sql.Identifier(table_name),
+                            sql.Literal(new_marker_comment(f"{schema}.{table_name}")),
                         )
                     )
                 except Exception:
@@ -2243,16 +2245,18 @@ def write_mapped_rows(
                     pg_table_existed = cursor.fetchone() is not None
                 pg_table_managed = False
                 if pg_table_existed:
-                    # A table a prior DataFlow run created carries the
-                    # 'dataflow:managed' comment — index DDL on it is ours to
-                    # make; only unmarked (operator-owned) tables gate.
+                    # A table a prior run created carries the 'dataflow:managed'
+                    # (or, flag on, 'datawrap:managed') comment — index DDL on
+                    # it is ours to make; only unmarked (operator) tables gate.
                     try:
                         cursor.execute(
                             "SELECT obj_description(to_regclass(%s), 'pg_class')",
                             (f'"{schema}"."{table_name}"',),
                         )
                         _row = cursor.fetchone()
-                        pg_table_managed = bool(_row and _row[0] == "dataflow:managed")
+                        from services.brand import is_own
+
+                        pg_table_managed = bool(_row and is_own("managed_table_comment", _row[0]))
                     except Exception:
                         logger.debug("managed-table probe skipped", exc_info=True)
                 if pg_table_existed and not pg_table_managed:
@@ -2281,7 +2285,7 @@ def write_mapped_rows(
                             f"{index_name} on ({', '.join(conflict_cols)}) — "
                             "destination DDL must be disclosed and approved "
                             "at Validate (ddl_changes_acknowledged); "
-                            "DataFlow does not silently alter a table it "
+                            f"{PRODUCT_NAME} does not silently alter a table it "
                             "did not create. To proceed: re-run Validate and "
                             "acknowledge the planned DDL change, or create "
                             "the index yourself — "

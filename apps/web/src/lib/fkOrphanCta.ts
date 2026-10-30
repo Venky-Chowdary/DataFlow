@@ -2,9 +2,11 @@
  * FK orphan suggested-action SSOT.
  *
  * Engine emits these from ``preflight_rules`` (sample + population).
- * DataFlow cannot invent parent rows and never claims RI proven from sample
+ * The product cannot invent parent rows and never claims RI proven from sample
  * Validate. The population scan flag is the same opt-in as the honesty checkbox.
  */
+
+import { PRODUCT_NAME } from "./brand";
 
 export type FkOrphanCtaKind = "run_population_orphan_scan" | "fix_orphans";
 
@@ -78,8 +80,8 @@ export function planFkOrphanSuggestedAction(opts: {
       focusSource: column || undefined,
       toastTitle: "Parent rows are source work",
       toastMessage: column
-        ? `DataFlow cannot invent missing parents for ${column}. Load parent rows first or remap the FK on Map. Acknowledging FK risk never claims RI proven.`
-        : "DataFlow cannot invent missing parent rows. Load parents first or remap the FK on Map. Acknowledging FK risk never claims RI proven.",
+        ? `${PRODUCT_NAME} cannot invent missing parents for ${column}. Load parent rows first or remap the FK on Map. Acknowledging FK risk never claims RI proven.`
+        : `${PRODUCT_NAME} cannot invent missing parent rows. Load parents first or remap the FK on Map. Acknowledging FK risk never claims RI proven.`,
       toastTone: "warning",
     };
   }

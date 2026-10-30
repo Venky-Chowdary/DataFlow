@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from services.acknowledgment_contract import MIN_ACTOR_LEN
 from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
+from services.brand import PRODUCT_SLUG
 from services.cdc_capture_release import release_schedule_cdc_capture
 from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
@@ -439,7 +440,7 @@ def export_dataflow_manifest(
         return Response(
             content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
             media_type="application/x-yaml",
-            headers={"Content-Disposition": "attachment; filename=dataflow.yaml"},
+            headers={"Content-Disposition": f"attachment; filename={PRODUCT_SLUG}.yaml"},
         )
     return artifact
 

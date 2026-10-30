@@ -443,6 +443,18 @@ def sanitize_job_for_api(job: dict) -> dict:
     return out
 
 
+def _shown_wire_cell(value: object) -> object:
+    """A stored sample cell as a person should see it: wire NULL is null, an
+    escaped literal is the literal; any other value is left exactly as is."""
+    from services.value_serializer import SQL_NULL_SENTINEL, unescape_wire_text
+
+    if not isinstance(value, str):
+        return value
+    if value == SQL_NULL_SENTINEL:
+        return None
+    return unescape_wire_text(value)
+
+
 def _project_operator_quarantine(job: dict) -> None:
     """Copy the job already. Show SQL NULL as null, not the transfer token.
 
@@ -458,6 +470,11 @@ def _project_operator_quarantine(job: dict) -> None:
         for key in ("rejected_details", "rejected_details_sample"):
             if isinstance(summary.get(key), list):
                 summary[key] = project_operator_quarantine_details(summary[key])
+        if isinstance(summary.get("reconcile_sample"), list):
+            summary["reconcile_sample"] = [
+                {str(k): _shown_wire_cell(v) for k, v in row.items()} if isinstance(row, dict) else row
+                for row in summary["reconcile_sample"]
+            ]
     checkpoint = job.get("checkpoint")
     if isinstance(checkpoint, dict) and isinstance(checkpoint.get("rejected_details"), list):
         checkpoint["rejected_details"] = project_operator_quarantine_details(

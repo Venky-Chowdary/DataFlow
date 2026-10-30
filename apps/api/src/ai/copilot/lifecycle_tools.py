@@ -278,7 +278,7 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                 },
                 "warehouse": {
                     "type": "string",
-                    "description": "Engine warehouse (Snowflake warehouse, e.g. DATAFLOW_WH).",
+                    "description": "Engine warehouse (Snowflake warehouse, e.g. COMPUTE_WH).",
                 },
                 "auth_role": {
                     "type": "string",

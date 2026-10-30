@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, FrozenSet
 
 from connectors.sdk import list_descriptors
+from services.brand import PRODUCT_NAME
 
 # Driver-level capabilities (implemented in connectors/ + adapters.py)
 _DRIVER_CAPS: dict[str, dict[str, Any]] = {
@@ -1142,7 +1143,7 @@ def source_only_destination_refusal(dest_type: str) -> str | None:
         driver, driver.replace("_", " ").title()
     )
     return (
-        f"{label} is a source-only connector: DataFlow has no {label} writer, so "
+        f"{label} is a source-only connector: {PRODUCT_NAME} has no {label} writer, so "
         f"it cannot be a transfer destination. Use {label} as the source, or "
         "choose a destination such as PostgreSQL, MySQL, SQL Server, Snowflake "
         "or DynamoDB."

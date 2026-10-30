@@ -543,13 +543,14 @@ def _mssql_connect_query(cfg: dict[str, Any], drivername: str) -> dict[str, str]
         # for the whole session per connection, and it never verifies the chain.
         unsupported.append("Encrypt")
     if unsupported:
+        from services.brand import PRODUCT_NAME
         raise ValueError(
             "SQL Server options "
             + ", ".join(unsupported)
             + " need the Microsoft ODBC driver; this host only has pymssql "
             "(FreeTDS), which cannot honour them. Install \"ODBC Driver 18 for "
-            "SQL Server\" (or 17) on the DataFlow host, or remove the option "
-            "from the connector — DataFlow refuses to connect as if it were "
+            f"SQL Server\" (or 17) on the {PRODUCT_NAME} host, or remove the option "
+            f"from the connector — {PRODUCT_NAME} refuses to connect as if it were "
             "honoured."
         )
     # ``trust_server_certificate`` and ``multi_subnet_failover`` need no keyword:

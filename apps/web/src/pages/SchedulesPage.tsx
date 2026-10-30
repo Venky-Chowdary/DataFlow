@@ -488,9 +488,9 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
     setGitopsBusy(true);
     try {
       const blob = await exportDatawrapManifest();
-      downloadBlob(blob, "dataflow.yaml");
+      downloadBlob(blob, "datawrap.yaml");
       toast({
-        title: "Exported dataflow.yaml",
+        title: "Exported datawrap.yaml",
         message: "Schedules + contracts — review in git before apply.",
         tone: "success",
       });
@@ -629,7 +629,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                     onClick={() => void handleExportFleet()}
                     title={
                       fleetExportBlockedReason(schedules.length)
-                      || "Export schedules + contracts as dataflow.yaml"
+                      || "Export schedules + contracts as datawrap.yaml"
                     }
                   >
                     Export YAML
@@ -653,7 +653,7 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
                       scheduleManage.reason ||
                       (gitopsRequireSigned
                         ? "Plan then apply with signed-contract gate"
-                        : "Plan then apply a dataflow.yaml manifest")
+                        : "Plan then apply a datawrap.yaml manifest")
                     }
                   >
                     Import YAML

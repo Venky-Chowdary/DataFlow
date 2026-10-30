@@ -27,6 +27,7 @@ from reportlab.platypus import (
 )
 
 from services.migration_certificate import render_certificate_markdown
+from services.brand import PRODUCT_NAME
 
 __all__ = ["render_certificate_pdf"]
 
@@ -170,7 +171,7 @@ def render_certificate_pdf(cert: dict[str, Any]) -> bytes:
         topMargin=16 * mm,
         bottomMargin=18 * mm,
         title=f"Migration Certificate {job_id}".strip(),
-        author="DataFlow",
+        author=PRODUCT_NAME,
         subject=headline,
         # Byte-identical output for the same signed body: an auditor must be
         # able to re-render and diff, which a wall-clock timestamp would break.

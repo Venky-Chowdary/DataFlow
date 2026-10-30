@@ -29,6 +29,7 @@ from services.mapping_constraints import (
     is_intentional_omit,
     write_mappings,
 )
+from services.brand import PRODUCT_NAME
 
 GATE_ID = "g15_dest_exists_shape"
 
@@ -398,7 +399,7 @@ def _shape_copy(
     if counts["unaccounted"]:
         return (
             f"{counts['unaccounted']} extra source column(s) are unaccounted",
-            "Map them, declare Omit, or propose ADD COLUMN — DataFlow will not drop them silently.",
+            f"Map them, declare Omit, or propose ADD COLUMN — {PRODUCT_NAME} will not drop them silently.",
             "review_map",
         )
     if unfilled:

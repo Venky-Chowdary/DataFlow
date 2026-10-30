@@ -625,3 +625,75 @@ as `(new workspace for <email>)`). Verified on throwaway stores by
 `tests/test_backfill_legacy_workspaces_cli.py` (file-tree hash unchanged after a
 dry run and after a second apply). Take a backup of the Mongo database and the
 data directory before the first `--apply`.
+
+## Brand: names the product leaves in customer systems (`DATAWRAP_BRAND_OBJECT_NAMES`)
+
+The product is Datawrap. Text people read (API and MCP messages, the web app,
+download file names, e-mail sender defaults, the certificate PDF, the MCP
+server name `datawrap`) says Datawrap unconditionally; the product name comes
+from `services/brand.py` (`PRODUCT_NAME`, `PRODUCT_SLUG`) and, in the web app,
+`apps/web/src/lib/brand.ts`.
+
+Objects the product writes into a customer's systems are different: existing
+customers already hold them under the old `dataflow` / `_df_` names and the
+next run has to keep working against them. `services/brand.ARTIFACTS` lists
+every such name. The rules:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `DATAWRAP_BRAND_OBJECT_NAMES` (`DATAFLOW_BRAND_OBJECT_NAMES` also read) | `0` | `1`: a **new** artifact of a switchable kind gets the new name. |
+
+* An artifact that already exists is used under the name it has, old name
+  first. Nothing is ever renamed. Both names are recognised as the product's
+  own (for example a table commented `dataflow:managed` **or**
+  `datawrap:managed` may get the upsert index without the operator-table DDL
+  gate; any other comment still needs approval).
+* Turning the flag off again keeps using artifacts created under the new name
+  (the CDC watermark table is resolved per destination, so state never forks).
+* Every artifact created under a new name writes an audit event
+  `brand.object_name.created` (`details.kind`, `name`, `legacy_name`).
+
+Switched by the flag in this build:
+
+| Kind | Old name | New name |
+|---|---|---|
+| PostgreSQL `application_name` | `dataflow` | `datawrap` |
+| Table ownership comment (PostgreSQL, MySQL; row writers and the MySQL COPY routes) | `dataflow:managed` | `datawrap:managed` |
+| Exactly-once CDC watermark table (SQLAlchemy destinations: PostgreSQL, MySQL, SQL Server, Snowflake, …) | `_df_cdc_eos_watermarks` (Oracle `df_cdc_eos_watermarks`) | `_dw_cdc_eos_watermarks` (Oracle `dw_cdc_eos_watermarks`) |
+
+Recognised and listed, but still created under the old name even with the flag
+on (their run-to-run identity is not yet resolved per destination; switching
+them is a separate change): the CDC `_df_lsn` column and other `_df_*`
+bookkeeping columns, `_dataflow_write_ledger`, `<table>_df_quarantine`,
+`dataflow_file_manifest`, `_df_vector_collections`, the MySQL row-backup
+comment `dataflow:overwrite-row-backup`,
+`dataflow_signal` (source database), `<table>__df_bak*` backups, staging
+prefixes (`_df_stg_`, `_dataflow_stg_`, `_df_mirrorkeys_`, `_df_merge_stage_`,
+`_df_upsert_stage_`, `_df_copy_ups_`, `_DF_UPSERT_`, `df_mrg_`), `df_enum_*`
+types, `df_*` replication slots / publications, Kafka group ids
+`dataflow-kafka-*`, object-store staging keys, the Redshift stage prefix,
+Iceberg `dataflow.*` snapshot properties, default vector collections, the
+SQLite-native watermark table, temporary `.dataflow-*` files on SFTP/local
+destinations, SaaS idempotency keys `dataflow-*`, and the defaults used when a
+connector names none: BigQuery dataset `dataflow`, Snowflake schema
+`DATAFLOW`, Kafka topic `dataflow.events`, object-store key
+`exports/dataflow_export.json`, Redis prefix `dataflow`.
+
+### Before turning the flag on
+
+1. List what a destination already holds (read-only, renames nothing):
+
+   ```bash
+   cd apps/api
+   python scripts/brand_artifacts_dry_run.py --type postgresql \
+     --config '{"host":"…","port":5432,"database":"…","username":"…","password":"…","schema":"public"}'
+   ```
+
+   Each entry has `kind`, `object`, `named` (`legacy`/`new`), `new_name` and
+   `action: keep`.
+2. Set `DATAWRAP_BRAND_OBJECT_NAMES=1` on every API, worker and scheduler
+   process (a mixed fleet would name new artifacts inconsistently; existing
+   ones are unaffected either way).
+3. Do not rename old artifacts by hand while pipelines run against them. A
+   renamed watermark table makes the next CDC run start a new one and
+   re-snapshot; a renamed `_df_lsn` column breaks the monotonic-apply guard.

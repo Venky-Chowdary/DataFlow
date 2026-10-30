@@ -359,17 +359,17 @@ def email_provider_config() -> dict[str, Any]:
     cfg: dict[str, Any] = {"provider": provider}
     if provider == "sendgrid":
         cfg["api_key"] = os.getenv("SENDGRID_API_KEY", "")
-        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
+        cfg["from"] = getenv_brand("EMAIL_FROM", "datawrap@example.com")
     elif provider == "resend":
         cfg["api_key"] = getenv_brand("RESEND_API_KEY", os.getenv("RESEND_API_KEY", ""))
-        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
+        cfg["from"] = getenv_brand("EMAIL_FROM", "datawrap@example.com")
     elif provider == "mailgun":
         cfg["api_key"] = os.getenv("MAILGUN_API_KEY", "")
         cfg["domain"] = os.getenv("MAILGUN_DOMAIN", "")
         cfg["region"] = os.getenv("MAILGUN_REGION", "us")
-        cfg["from"] = getenv_brand("EMAIL_FROM", "dataflow@example.com")
+        cfg["from"] = getenv_brand("EMAIL_FROM", "datawrap@example.com")
     else:
-        cfg["from"] = getenv_brand("EMAIL_FROM", getenv_brand("SMTP_FROM", "dataflow@localhost"))
+        cfg["from"] = getenv_brand("EMAIL_FROM", getenv_brand("SMTP_FROM", "datawrap@localhost"))
     return cfg
 
 

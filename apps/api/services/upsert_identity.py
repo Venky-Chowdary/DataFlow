@@ -34,6 +34,7 @@ from connectors.merge_registry import (
     upsert_identity,
 )
 from connectors.sql_identifiers import sanitize_identifier
+from services.brand import PRODUCT_NAME
 
 #: ``query(sql, params) -> rows`` against the destination (DB-API ``%s`` style).
 Query = Callable[[str, Sequence[Any]], list[tuple]]
@@ -132,7 +133,7 @@ def mysql_full_width_key_plan(
                 f"{col} holds values up to {longest} characters, but MySQL can "
                 f"enforce uniqueness on the full value only up to {width} "
                 f"characters (VARCHAR({width}), {MYSQL_KEY_BYTES}-byte key "
-                "limit). DataFlow will not index a prefix — distinct keys "
+                f"limit). {PRODUCT_NAME} will not index a prefix — distinct keys "
                 "sharing it would overwrite each other. Use a shorter key column."
             )
         _name, _dtype, nullable, charset, collation, _octets = info[col]

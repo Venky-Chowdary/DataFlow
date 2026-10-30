@@ -32,6 +32,7 @@ from services.offset_label import plan_offset_label_carry
 from services.physical_placement_ddl import plan_physical_placement, verify_placement
 from services.unicode_form import plan_unicode_form_carry
 from services.value_serializer import present_cell_text
+from services.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -2621,8 +2622,8 @@ def mysql_key_compatible_types(
             f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
             f"{', '.join(unresolved)} would be created as a TEXT/BLOB "
             "column, which MySQL refuses in a key without a prefix length "
-            "(error 1170), and it is not text DataFlow can carry in a "
-            "full-width VARCHAR key. DataFlow will not invent a prefix (that "
+            f"(error 1170), and it is not text {PRODUCT_NAME} can carry in a "
+            f"full-width VARCHAR key. {PRODUCT_NAME} will not invent a prefix (that "
             "enforces a different uniqueness rule). Map the column to "
             "VARCHAR(n) sized to its longest value, or use a scalar key."
         )

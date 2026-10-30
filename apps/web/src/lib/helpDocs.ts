@@ -1070,7 +1070,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
           {
             title: "Copy the MCP server URL",
             pin: "System → MCP → Cursor",
-            body: "Expand the **Cursor** integration card. Copy the `mcpServers.dataflow.url` value shown for your tenant.",
+            body: "Expand the **Cursor** integration card. Copy the `mcpServers.datawrap.url` value shown for your tenant.",
           },
           {
             title: "Paste into Cursor Settings → MCP",
@@ -1078,7 +1078,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
             body: "Add the server entry from **System → MCP**. The URL is absolute (`https://<the host you are signed into>/api/v1/mcp`) and the workspace API key is the `Authorization: Bearer` header. Restart MCP if prompted. `create_connector`, `start_transfer`, and `create_schedule` return an `ack_id` and do not move data until `confirm_action`. Every confirmed transfer appears in **Job Theater** with an audit trail. The key's role is the same gate as the UI: an editor key can create connectors, transfers, and schedules.",
           },
         ],
-        code: '{\n  "mcpServers": {\n    "dataflow": {\n      "url": "https://<tenant-host>/api/v1/mcp",\n      "headers": { "Authorization": "Bearer <workspace-api-key>" }\n    }\n  }\n}',
+        code: '{\n  "mcpServers": {\n    "datawrap": {\n      "url": "https://<tenant-host>/api/v1/mcp",\n      "headers": { "Authorization": "Bearer <workspace-api-key>" }\n    }\n  }\n}',
       },
       {
         id: "security",
@@ -1297,7 +1297,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         id: "webhooks",
         title: "Webhooks",
         body: "Subscribe to job.completed, job.failed, and pipeline.quarantine_threshold events. Payloads include job ID, gate results, and reconciliation summary — no row payloads unless explicitly configured.",
-        code: 'POST /api/v1/webhooks\n{ "url": "https://your.app/hooks/dataflow", "events": ["job.completed"] }',
+        code: 'POST /api/v1/webhooks\n{ "url": "https://your.app/hooks/datawrap", "events": ["job.completed"] }',
       },
     ],
   },

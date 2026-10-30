@@ -227,7 +227,7 @@ def cmd_export(*, api: str, token: str, local: bool, output: Path) -> int:
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="dataflow",
-        description="DataFlow GitOps CLI (plan / apply / export / validate)",
+        description="Datawrap GitOps CLI (plan / apply / export / validate)",
     )
 
     sub = p.add_subparsers(dest="command", required=True)

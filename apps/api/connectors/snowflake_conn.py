@@ -13,6 +13,7 @@ from typing import Any
 from urllib.parse import parse_qs, unquote
 
 from services.brand_env import getenv_brand
+from services.brand import PRODUCT_NAME
 
 _SF_HOST_SUFFIXES = (
     ".privatelink.snowflakecomputing.com",
@@ -362,7 +363,7 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
         return SNOWFLAKE_ACCOUNT_NOT_FOUND_MSG
     if re.search(r"network policy|not allowed to access|390403|390422", text):
         return (
-            "Snowflake blocked this IP (network policy). Allow the DataFlow egress "
+            f"Snowflake blocked this IP (network policy). Allow the {PRODUCT_NAME} egress "
             "address or ask your Snowflake admin to update the policy."
         )
     if re.search(
@@ -389,7 +390,7 @@ def classify_snowflake_connect_error(raw: str, auth_mode: str = "") -> str | Non
             return (
                 "Snowflake refused the programmatic access token (PAT) — it is "
                 "expired, revoked, or was not issued for this user/account. "
-                "Re-save the connector with a valid PAT (DataFlow stores it in "
+                f"Re-save the connector with a valid PAT ({PRODUCT_NAME} stores it in "
                 "the Password/PAT field), or switch the record to Key-pair."
             )
         if auth_mode == "user_pass":
