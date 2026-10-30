@@ -800,6 +800,11 @@ async def retry_transfer_job(
             raise HTTPException(status_code=409, detail=detail)
         # Retries from start also re-run preflight — never inherit skip_preflight.
         xfer_req.skip_preflight = False
+        from services.full_pass_rerun import apply_full_pass, full_pass_decision
+
+        # D208: from zero means the whole source — an incremental upsert ignores its watermark.
+        read_scope = apply_full_pass(xfer_req, parent_job=job, action="retry")
+        retry_decision = full_pass_decision(retry_decision, read_scope)
         # D6: the audit trail must name who started this attempt and what they
         # acknowledged — a blank triggered_by / null governance hides it.
         actor = _actor_email(request)
@@ -846,6 +851,7 @@ async def retry_transfer_job(
             retry_decision=retry_decision,
             confirmation=confirmation,
             triggered_by=xfer_req.triggered_by,
+            **({"read_scope": read_scope} if read_scope else {}),
         )
 
         # From-zero: do not copy parent checkpoint / resume_from_job_id.
@@ -868,6 +874,7 @@ async def retry_transfer_job(
             "source": getattr(xfer_req.source, "table", "") or getattr(xfer_req.source, "collection", "") or "",
             "destination": getattr(xfer_req.destination, "table", "") or getattr(xfer_req.destination, "collection", "") or "",
             "rows_committed": rows_committed if rows_known else None,
+            "read_scope": read_scope,
             "message": (
                 "Retry from start — new job, source re-read from the beginning "
                 "(at-least-once)."
@@ -1010,6 +1017,11 @@ async def rerun_transfer_job(
             detail["rows_committed_known"] = rows_known
             raise HTTPException(status_code=409, detail=detail)
         xfer_req.skip_preflight = False
+        from services.full_pass_rerun import apply_full_pass, full_pass_decision
+
+        # D208: "a second full pass" must be one — the watermark is not read.
+        read_scope = apply_full_pass(xfer_req, parent_job=job, action="rerun")
+        decision = full_pass_decision(decision, read_scope)
         # D6: record who triggered the rerun and what they acknowledged.
         actor = _actor_email(request)
         xfer_req.triggered_by = actor or f"rerun of {job_id}"
@@ -1059,6 +1071,7 @@ async def rerun_transfer_job(
             retry_decision=decision,
             confirmation=confirmation,
             triggered_by=xfer_req.triggered_by,
+            **({"read_scope": read_scope} if read_scope else {}),
         )
         background_tasks.add_task(run_transfer_async, new_job_id, xfer_req, resume=False)
         emit_event(
@@ -1080,9 +1093,11 @@ async def rerun_transfer_job(
             "source": getattr(xfer_req.source, "table", "") or getattr(xfer_req.source, "collection", "") or "",
             "destination": getattr(xfer_req.destination, "table", "") or getattr(xfer_req.destination, "collection", "") or "",
             "rows_committed": rows_committed if rows_known else None,
+            "read_scope": read_scope,
             "message": (
                 "Re-run — new job linked with rerun_of. Preflight runs again "
                 "(at-least-once)."
+                + (f" {read_scope['reason']}" if read_scope else "")
             ),
         }
     except HTTPException:

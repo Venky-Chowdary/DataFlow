@@ -51,8 +51,10 @@ def full_resync_plan(request: dict[str, Any] | None) -> dict[str, Any]:
             "note": "Full re-sync uses the signed sync mode and re-reads from the start.",
         }
     if key:
+        # D208: a full-source upsert. incremental_deduped read the route's
+        # saved watermark, so "re-read from the start" read only new rows.
         return {
-            "sync_mode": "incremental_deduped",
+            "sync_mode": "upsert",
             "destructive": False,
             "clears_cursor": True,
             "note": (

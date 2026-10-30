@@ -42,8 +42,9 @@ def _pg_reachable() -> bool:
          "orders", "Local Postgres", "Warehouse", "", False),
         ("move the customers table from Local Postgres into Mongo Prod",
          "customers", "Local Postgres", "Mongo Prod", "", False),
+        # D208: a bare "upsert" is a full-source upsert, never incremental.
         ("copy orders from pg to wh as upsert",
-         "orders", "pg", "wh", "incremental_upsert", False),
+         "orders", "pg", "wh", "upsert", False),
         ("sync payments from mysql prod to snowflake with overwrite",
          "payments", "mysql prod", "snowflake", "full_refresh_overwrite", False),
         ("plan a transfer of orders from Local Postgres to Warehouse",
@@ -121,8 +122,9 @@ def test_transfer_request_outranks_generic_advice_tools():
         ("overwrite", "full_refresh_overwrite"),
         ("replace the table", "full_refresh_overwrite"),
         ("truncate and load", "full_refresh_overwrite"),
-        ("upsert", "incremental_upsert"),
-        ("merge on id", "incremental_upsert"),
+        ("upsert", "upsert"),  # D208: full-source upsert
+        ("merge on id", "upsert"),
+        ("incremental upsert", "incremental_upsert"),
         ("cdc", "cdc_incremental"),
         ("append", "full_refresh_append"),
         ("incremental_upsert", "incremental_upsert"),

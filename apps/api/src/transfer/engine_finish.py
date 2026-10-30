@@ -64,6 +64,23 @@ def _progress_write_or_cancel(mongo: Any, job_id: str, **update: Any) -> None:
         )
 
 
+def _stamp_read_scope(mongo: Any, job_id: str, fields: dict) -> None:
+    """D208: an upsert job says what it read — full source, no watermark."""
+    from services.full_pass_rerun import READ_SCOPE_KEY, run_read_scope
+
+    try:
+        staged = (mongo.get_job(job_id) or {}).get(READ_SCOPE_KEY)
+    except Exception:  # noqa: BLE001 - a store without get_job still reports
+        staged = None
+    scope = run_read_scope(
+        fields.get("destination_summary"),
+        rows_read=fields.get("records_processed"),
+        staged=staged if isinstance(staged, dict) else None,
+    )
+    if scope is not None:
+        fields[READ_SCOPE_KEY] = scope
+
+
 def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -> Any:
     """Write the success terminal status, or record the commit on a cancelled job.
 
@@ -83,6 +100,8 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
             # A quiet run advances nothing, but the job still names the
             # watermark the route stands at — the schedule follows it.
             fields.setdefault("cursor_value", report["after"])
+    else:
+        _stamp_read_scope(mongo, job_id, fields)
     written = mongo.update_job_status(job_id, status, **fields)
     if written is not False:
         return written
