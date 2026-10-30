@@ -163,10 +163,13 @@ def test_missed_cron_windows_are_counted():
 
 
 def test_on_time_beat_counts_no_missed_window():
-    due = datetime.now(timezone.utc) - timedelta(seconds=5)
+    # A fixed clock: against the wall clock this read 1 whenever the 5 seconds
+    # before "now" crossed a :00 / :30 slot of the */30 cron (CI, run 41058582812).
+    now = datetime(2026, 10, 30, 15, 10, 5, tzinfo=timezone.utc)
+    due = now - timedelta(seconds=5)
     assert (
         count_missed_windows(
-            cron="*/30 * * * *", interval="hourly", tz="UTC", next_run_at=due.isoformat()
+            cron="*/30 * * * *", interval="hourly", tz="UTC", next_run_at=due.isoformat(), now=now
         )
         == 0
     )
