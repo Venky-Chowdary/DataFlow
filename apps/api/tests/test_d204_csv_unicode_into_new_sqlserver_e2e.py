@@ -165,3 +165,33 @@ def test_sftp_csv_non_ascii_into_new_sqlserver_table_then_run2(transfer_client, 
     finally:
         runner.stop()
         _drop(table)
+
+
+@pytest.mark.parametrize("src_format", ["csv", "postgresql"])
+def test_studio_plan_mapping_binds_the_source_engine(tmp_path, monkeypatch, src_format):
+    """Sibling route: the Studio plan's Map (``run_plan_mapping``) had the same
+    unbound source engine, so a CSV / PostgreSQL VARCHAR into a new SQL Server
+    table needed a Risk Contract for the NVARCHAR carrier."""
+    from services.transfer_plan_service import run_plan_mapping
+    from services.transfer_plan_store import create_plan
+
+    monkeypatch.setattr("services.transfer_plan_store.STORE_PATH", tmp_path / "plans.json")
+    monkeypatch.setattr("services.audit_log.STORE_PATH", tmp_path / "audit.jsonl")
+    kind = "file" if src_format == "csv" else "database"
+    plan_id = create_plan({
+        "name": "d204-plan",
+        "source": {"kind": kind, "format": src_format, "connector_id": "src"},
+        "destination": {"kind": "database", "format": "sqlserver", "connector_id": "dst",
+                        "table": "d204_new", "extra": {"table_exists": False}},
+        "source_columns": ["id", "name"],
+        "source_schema": {"id": "INTEGER", "name": "VARCHAR(64)"},
+        "target_columns": [],
+        "target_schema": {},
+        "policies": {"sync_mode": "full_refresh_overwrite"},
+    }).id
+    result = run_plan_mapping(plan_id, use_llm=False,
+                              source_samples={"id": ["1", "2"], "name": ["café", "中文 😀"]})
+    name = next(m for m in result["mappings"] if m["source"] == "name")
+    assert str(name.get("target_type") or "").upper().startswith("NVARCHAR"), name
+    assert not name.get("requires_risk_contract"), (name.get("fidelity_reason"),
+                                                    name.get("create_new_risks"))
