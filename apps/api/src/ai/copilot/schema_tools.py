@@ -225,6 +225,17 @@ def _pick_connector(
     case-insensitive full name. Two connectors with that same name are an
     error, not a silent first hit.
     """
+    # Id, name and display name — case, spacing and punctuation folded — are
+    # one resolver shared with free-text mentions (connector_resolver).
+    from .connector_resolver import ambiguity_message, describe, reference_matches
+
+    named = reference_matches(needle, candidates)
+    if len(named) == 1:
+        return named[0]
+    if len(named) > 1:
+        raise AmbiguousConnectorError(
+            ambiguity_message(needle, named), candidates=[describe(d) for d in named[:6]]
+        )
     scored: list[tuple[float, dict[str, Any]]] = []
     for d in candidates:
         score = _match_score(
@@ -338,6 +349,21 @@ def _connector_dict(
             c = get_connector(cid)
             if c:
                 return c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
+            if not needle:
+                # An agent passing a name (or an id in other case) as the id.
+                from .connector_resolver import ambiguity_message, describe, reference_matches
+
+                pool_by_id = [
+                    x.to_dict() if hasattr(x, "to_dict") else dict(x.__dict__)
+                    for x in list_connectors()
+                ]
+                named = reference_matches(cid, pool_by_id)
+                if len(named) == 1:
+                    return named[0]
+                if len(named) > 1:
+                    raise AmbiguousConnectorError(
+                        ambiguity_message(cid, named), candidates=[describe(d) for d in named[:6]]
+                    )
         if needle:
             pool: list[dict[str, Any]] = []
             for c in list_connectors():

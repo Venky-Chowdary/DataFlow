@@ -64,6 +64,27 @@ def compose_greeting(ctx: dict[str, Any] | None = None) -> str:
     )
 
 
+def _contracts_line(total: int, unsigned: int, facts: dict[str, Any]) -> str:
+    """Per-status counts and the newest agreements' "Signed v3" labels.
+
+    Same words as the Contracts page (services.contract_read_model). "All signed
+    or active" summarised away the one Draft the page was showing.
+    """
+    by_status = {str(k): int(v) for k, v in (facts.get("contracts_by_status") or {}).items() if int(v or 0)}
+    order = ("signed", "draft", "broken", "deprecated")
+    parts = [f"{by_status[s]} {s}" for s in order if s in by_status]
+    parts += [f"{n} {s}" for s, n in sorted(by_status.items()) if s not in order]
+    if not parts:
+        parts = [f"{unsigned} not signed"] if unsigned else []
+    line = f"• Contracts — **{total}** on file" + (f": {', '.join(parts)}" if parts else "")
+    recent = [r for r in (facts.get("recent_contracts") or []) if r.get("name")]
+    if recent:
+        line += ". Latest: " + "; ".join(
+            f"**{r['name']}** {r.get('status_label') or ''}".rstrip() for r in recent[:3]
+        )
+    return line + "."
+
+
 def compose_briefing(facts: dict[str, Any]) -> str:
     """Turn briefing facts into a spoken sitrep. Every number is from ``facts``."""
     if facts.get("empty_workspace"):
@@ -125,11 +146,7 @@ def compose_briefing(facts: dict[str, Any]) -> str:
     lines.append(f"• Pipelines — {sched_bit}.")
 
     if n_ct:
-        lines.append(
-            f"• Contracts — **{n_ct}** on file"
-            + (f", **{unsigned}** not signed" if unsigned else ", all signed or active")
-            + "."
-        )
+        lines.append(_contracts_line(n_ct, unsigned, facts))
 
     attention = [str(a) for a in (facts.get("attention") or []) if a]
     if attention:

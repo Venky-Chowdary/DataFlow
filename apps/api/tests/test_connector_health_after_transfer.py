@@ -113,8 +113,7 @@ def test_pilot_list_and_briefing_bucket_on_the_same_rule(file_store, monkeypatch
 
     monkeypatch.setattr(briefing, "_load_jobs", lambda _w: ([], {"total": 0, "by_status": {}}))
     monkeypatch.setattr(briefing, "_load_schedules", lambda _w: [])
-    monkeypatch.setattr(briefing, "_load_contracts", lambda _w: [])
-    monkeypatch.setattr(briefing, "_contract_census", lambda _w, _c: (0, 0))
+    monkeypatch.setattr(briefing, "_contract_facts", lambda _ws: {})
     brief = briefing.collect_workspace_briefing(workspace_id="")
     assert brief["connectors_failed"] == 1
     assert brief["connectors_passed"] == 1

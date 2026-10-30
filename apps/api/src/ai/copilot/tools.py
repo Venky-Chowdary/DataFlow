@@ -1727,6 +1727,12 @@ def _preview_endpoint(draft: dict[str, Any]) -> tuple[str, int | None, bool]:
     return host or "(from URL)", draft.get("port"), False
 
 
+
+def _contract_status_label(contract: Any) -> str:
+    from services.contract_read_model import status_label
+
+    return status_label(contract)
+
 class DataPilotTools:
     """Execute Datawrap Pilot tools against live app state."""
 
@@ -4009,6 +4015,9 @@ class DataPilotTools:
                 "id": d.get("id") or d.get("contract_id"),
                 "name": d.get("name") or d.get("title") or d.get("id"),
                 "status": d.get("status"),
+                "version": d.get("version"),
+                # Same "Signed v3" the Contracts page shows (contract_read_model).
+                "status_label": _contract_status_label(d),
                 "updated_at": str(d.get("updated_at") or ""),
             })
         total = sum(int(n) for n in census.values()) if census else len(rows)
@@ -6764,6 +6773,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     ):
         planned.append(("brief_workspace", {}))
         return planned
+
+    # A plain row count is one intent → COUNT(*) on the resolved connector,
+    # ahead of the sample route that answered it with 25 rows (QA, r7).
+    from .row_count_intent import plan_row_count
+
+    row_count = plan_row_count(message)
+    if row_count:
+        return row_count
 
     nav_map = {
         "pilot": ["data pilot", "go to pilot", "open pilot"],

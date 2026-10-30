@@ -3132,7 +3132,7 @@ Respond as Datawrap Pilot — grounded in tool results."""
                 if rows:
                     lines = [f"**{len(rows)} data contract(s):**"]
                     for c in rows[:8]:
-                        lines.append(f"• **{c.get('name') or c.get('id')}** ({c.get('status') or '—'})")
+                        lines.append(f"• **{c.get('name') or c.get('id')}** ({c.get('status_label') or c.get('status') or '—'})")
                     parts.append("\n".join(lines))
                 else:
                     parts.append("No data contracts yet. Open **Contracts** to define one.")
