@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from services.acknowledgment_contract import (
     AcknowledgmentRefused,
@@ -168,6 +168,26 @@ class PreflightRequest(BaseModel):
     # this id is set, Validate scans the stored population (same bytes Execute
     # will stream). Browser-local CSV fallback has no file_id — stay sampled.
     source_file_id: str | None = None
+
+    @model_validator(mode="after")
+    def _object_url_source(self) -> "PreflightRequest":
+        """``s3://bucket/key`` is a bucket and a key, as on Execute (QA demo 1030)."""
+        from ..transfer.object_path import split_object_url
+
+        for attr in ("source_table", "source_collection"):
+            split = split_object_url(getattr(self, attr) or "")
+            if split is None:
+                continue
+            bucket, key = split
+            cfg = dict(self.source_config or {})
+            current = str(cfg.get("database") or "").strip()
+            if current and current != bucket:
+                continue
+            cfg.setdefault("database", bucket)
+            cfg["database"] = cfg["database"] or bucket
+            self.source_config = cfg
+            setattr(self, attr, key)
+        return self
 
 
 def _schema_default(db_type: str) -> str:

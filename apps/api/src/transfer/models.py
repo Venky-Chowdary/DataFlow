@@ -55,6 +55,12 @@ class EndpointConfig:
         }
         nested = d.get("extra") if isinstance(d.get("extra"), dict) else {}
         flat_extra = {k: v for k, v in d.items() if k not in known}
+        from .object_path import normalize_object_source
+
+        # ``s3://bucket/key`` is a bucket plus a key, not a key (QA demo 1030).
+        database, table = normalize_object_source(
+            d.get("database", ""), d.get("table", d.get("table_name", ""))
+        )
         return cls(
             kind=kind,
             format=d.get("format", d.get("type", d.get("db_type", ""))),
@@ -64,9 +70,9 @@ class EndpointConfig:
             # while Test still used the stored host.
             host=d.get("host") or "",
             port=int(d.get("port", 0) or 0),
-            database=d.get("database", ""),
+            database=database,
             schema=d.get("schema", ""),
-            table=d.get("table", d.get("table_name", "")),
+            table=table,
             collection=d.get("collection", d.get("collection_name", "")),
             username=d.get("username", ""),
             password=d.get("password", ""),
