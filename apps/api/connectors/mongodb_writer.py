@@ -1035,6 +1035,13 @@ def write_mapped_rows(
                 # Fail-closed — never UTF-8-invent bytes.
                 return _Bin(coerce_binary_wire(value))
             if upper in {"JSON", "OBJECT", "ARRAY", "VARIANT"}:
+                from services.json_number_capacity import json_number_refusal
+
+                # D206: BSON has no int past int64 and Decimal128 stops at 34
+                # digits (wider fell back to a string). Refuse, never round.
+                refusal = json_number_refusal(value, engine="mongodb", ddl_type=upper)
+                if refusal:
+                    raise ValueError(refusal)
                 return bind_mongo_json_document(value)
             if upper in {"UUID", "UNIQUEIDENTIFIER", "GUID"}:
                 from connectors.sql_bind import coerce_uuid_wire
