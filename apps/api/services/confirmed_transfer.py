@@ -59,6 +59,10 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         limit=max(0, int(payload.get("limit") or 0)),
         source_filter=dict(payload.get("source_filter") or {}),
         stream_contracts=list(payload.get("stream_contracts") or []),
+        # A multi-step column transform staged from chat is a recipe; Execute
+        # runs it only under the hash Validate approved.
+        shape_recipe=dict(payload.get("shape_recipe") or {}),
+        approved_shape_recipe_hash=str(payload.get("approved_shape_recipe_hash") or ""),
         source_filename=str(payload.get("source_filename") or ""),
         source_path=source_path,
         source_object_uri=str(payload.get("source_object_uri") or ""),

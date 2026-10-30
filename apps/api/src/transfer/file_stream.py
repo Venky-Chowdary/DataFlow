@@ -1470,12 +1470,9 @@ def stream_file_to_database(
         # ones the file holds. The caller's runner is stateful and carries this
         # job's population counts; the sample is shaped by a throwaway one so a
         # peeked row is never counted as a written row.
-        from services.shape_apply import ShapeRunner, shaped_schema
+        from services.shape_apply import shaped_schema
 
-        probe = ShapeRunner(
-            shape_runner.recipe,
-            workspace_id=getattr(shape_runner, "workspace_id", ""),
-        )
+        probe = shape_runner.fork()
         sample_rows = probe.records(sample_rows)
         columns = list(probe.output_columns or columns)
         schema = shaped_schema(probe, sample_rows, schema)

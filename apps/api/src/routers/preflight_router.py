@@ -303,12 +303,21 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
     )
     # The write never sees the raw source when a recipe is approved: shape the
     # image first so a gate cannot block on a value the transform removes.
+    from services.preflight_source_kind import shape_typed_values
+
+    # Same value model as Execute's runner: a database's '' is a value.
+    shape_typed = shape_typed_values(
+        body.source_kind,
+        body.source_type,
+        source_connector_id=body.source_connector_id,
+    )
     try:
         shaped_image = shaped_preflight_image(
             body.shape_recipe,
             columns=body.columns,
             column_types=source_column_types,
             sample_rows=body.sample_rows,
+            typed_values=shape_typed,
         )
     except ShapePreflightRefused as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -334,10 +343,12 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
     source_file_id = str(body.source_file_id or "").strip()
     stored_population = iter_stored_upload_rows(source_file_id) if source_file_id else None
     if stored_population is not None and shaped_image.applied:
+        # The recipe reads the upload's own columns, not its shaped image.
         stored_population = shaped_population_rows(
             body.shape_recipe,
             stored_population,
-            source_columns=preflight_columns,
+            source_columns=body.columns,
+            typed_values=shape_typed,
         )
 
     preflight_mappings = restamp_mapping_source_types(
@@ -503,6 +514,8 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
         result["transform_image"] = {
             "recipe_hash": shaped_image.recipe_hash,
             "columns": shaped_image.columns,
+            # The carriers the gates judged — the ones Execute's writer uses.
+            "column_types": shaped_image.column_types,
             "sample_rows_in": shaped_image.rows_in,
             "sample_rows_out": shaped_image.rows_out,
             "sample_rows_removed": shaped_image.rows_removed,

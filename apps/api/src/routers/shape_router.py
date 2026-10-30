@@ -24,7 +24,7 @@ from pydantic import BaseModel, Field
 
 from services.canvas_capability import canvas_capability
 from services.set_graph import catalog_set_fields
-from services.shape_engine import ShapeEffect, ShapeEngine, ShapeRowError
+from services.shape_engine import ShapeEffect, ShapeRowError
 from services.shape_expr import ExpressionError, compile_expression, describe_functions
 from services.shape_models import MAX_STEPS, ShapeError, ShapeRecipe, describe_catalog
 from services.shape_preflight import shaped_column_types
@@ -84,6 +84,10 @@ class _PreviewBody(_RecipeBody):
     # per-step preview then reports which keys would open/close versions
     # against the live destination, not just shaped sample rows.
     destination: dict[str, Any] | None = None
+    # The source's format (``postgresql``, ``csv`` …). It decides the value
+    # model exactly as Execute's runner does: a database's '' and whitespace
+    # are stored values, a file's empty cell is NULL. Empty = file rules.
+    source_type: str = ""
 
 
 class _ProfileBody(BaseModel):
@@ -175,12 +179,16 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         return blocked
     recipe, preview_note, program_hash = _recipe_for_preview(body, columns)
 
-    engine = ShapeEngine(recipe)
+    from services.shape_apply import ShapeRunner, is_typed_value_source
+
+    typed = is_typed_value_source(body.source_type)
+    runner = ShapeRunner(recipe, typed_values=typed)
+    engine = runner._engine
     shaped: list[dict[str, Any]] = []
     refusal: dict[str, Any] | None = None
     for row in rows:
         try:
-            shaped.extend(engine.apply_records(row))
+            shaped.extend(runner.records([row]))
         except ShapeRowError as exc:
             # A refusal is the recipe's answer for this row, and the preview's job
             # is to show it now rather than let Execute discover it at scale.
@@ -189,7 +197,7 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     # The sample's end is the stream's end: buffering steps (dedupe keep-last,
     # aggregate, sort, rank) emit now, same as the transfer's drain.
     if refusal is None:
-        shaped.extend(engine.drain())
+        shaped.extend(runner.drain())
 
     out_columns = list(engine.output_columns) or list(recipe.output_columns) or _columns_of(shaped or rows)
     profiles = (
@@ -202,6 +210,8 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         declared_types=body.column_types,
         touched=recipe.touched_columns,
         rows=shaped,
+        recipe=recipe,
+        typed_values=typed,
     )
     identity = _identity(recipe, output_columns=out_columns)
     if program_hash:

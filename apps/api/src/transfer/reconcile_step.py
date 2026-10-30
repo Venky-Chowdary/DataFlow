@@ -729,6 +729,10 @@ _RECIPE_ORACLE_DIALECTS = {
 _TSQL_DIALECTS = {"sqlserver", "mssql", "azure_sql"}
 
 
+#: Exactly the characters ``str.strip()`` removes — the engine's ``trim``.
+_PY_WHITESPACE = "".join(chr(c) for c in range(0x3001) if chr(c).isspace())
+
+
 def _recipe_step_sql(
     op: str,
     opts: dict[str, Any],
@@ -737,12 +741,20 @@ def _recipe_step_sql(
     *,
     src_type: str,
     dest_ddl: str = "",
+    nan_is_null: bool = False,
 ) -> str | None:
     """Faithful SQL equivalent of one recipe step, or None when the dialect
     has none. The G-1d independent oracle recomputes declared columns in the
     source database and compares multisets — an op without a faithful
-    mapping stays "recipe re-applied" (honest), never fake SQL."""
+    mapping stays "recipe re-applied" (honest), never fake SQL.
+
+    The oracle only runs on database sources, so every fragment states the
+    engine's *typed* value model (``ShapeRunner(typed_values=True)``): '' and
+    whitespace are stored values, only SQL NULL (or a reader's NULL wire
+    sentinel) is null. ``nan_is_null``: the column is a float carrier whose
+    NaN the engine reads as null."""
     tsql = src_type in _TSQL_DIALECTS
+    mysql = src_type in {"mysql", "mariadb"}
 
     def _lit(v: Any) -> str:
         key = f"ov{len(params)}"
@@ -759,6 +771,8 @@ def _recipe_step_sql(
     def _btrim(expr: str) -> str:
         if tsql:
             return f"LTRIM(RTRIM({expr}))"
+        if mysql:
+            return f"TRIM({expr})"
         return f"BTRIM({expr})"
 
     if op == "case":
@@ -769,9 +783,16 @@ def _recipe_step_sql(
             return f"LOWER({col_expr})"
         return None
     if op == "trim":
+        # The engine's trim is str.strip(): every Unicode whitespace character,
+        # not only the space SQL TRIM removes — a '\tbob' cell read as a broken
+        # step and failed the run.
         if tsql:
-            return f"LTRIM(RTRIM({col_expr}))"
-        return f"TRIM({col_expr})"
+            return f"TRIM({_lit(_PY_WHITESPACE)} FROM {col_expr})"
+        if mysql:
+            # Whitespace has no meaning inside an ICU class: no escaping.
+            ws = _PY_WHITESPACE
+            return f"REGEXP_REPLACE({col_expr}, {_lit(f'^[{ws}]+|[{ws}]+$')}, '')"
+        return f"BTRIM({col_expr}, {_lit(_PY_WHITESPACE)})"
     if op == "collapse_whitespace":
         # _fn_collapse_whitespace = re.sub(r"\s+", " ", t).strip()
         if tsql:
@@ -812,13 +833,15 @@ def _recipe_step_sql(
             f"{_lit(opts.get('replacement', ''))})"
         )
     if op == "default_if_null":
-        # is_blank: NULL, empty/whitespace text, wire sentinels, NaN.
+        # Typed is_blank: NULL or a NULL wire sentinel. '' and '   ' are values
+        # on a database source — defaulting them here failed every run whose
+        # trim step produced '' (trim -> default_if_null -> upper).
         txt = _text_cast(col_expr)
+        nan = f"OR {txt} = 'NaN' " if nan_is_null else ""
         return (
             f"CASE WHEN {col_expr} IS NULL "
-            f"OR {_btrim(txt)} = '' "
-            f"OR {txt} = 'NaN' "
-            f"OR {txt} IN ({_lit('__df_sql_null__')}, "
+            f"{nan}"
+            f"OR {_btrim(txt)} IN ({_lit('__df_sql_null__')}, "
             f"{_lit('__df_missing__')}, {_lit('__df_ddb_null__')}) "
             f"THEN {_lit(opts.get('value'))} "
             f"ELSE {txt} END"
@@ -1342,7 +1365,14 @@ def _transform_applied_proof_impl(
         _flush_ms()
 
     try:
-        parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
+        # The recipe reads the SOURCE columns; ``columns`` is the shaped image.
+        # Parsing against the image refused every rename/derive recipe ("column
+        # 'name' is not available") and the proof never ran. The runner that
+        # shaped the write stamped the columns it read (shape_proof).
+        _read_cols = list(
+            (dest_summary.get("shape_proof") or {}).get("input_columns") or columns
+        )
+        parsed = ShapeRecipe.parse(shape_recipe, source_columns=_read_cols)
         src_type = resolve_driver_type(source_endpoint.format or "")
         from services.shape_apply import is_typed_value_source as _itvs
 
@@ -1448,6 +1478,11 @@ def _transform_applied_proof_impl(
                 expr = _recipe_step_sql(
                     op, opts, expr, oracle_params,
                     src_type=src_type, dest_ddl=_step_ddl,
+                    # NaN is null to the engine only on a raw float cell.
+                    nan_is_null=(
+                        scol not in oracle_exprs
+                        and bool(re.match(r"(?i)\s*(float|double|real)", _src_ddl(scol)))
+                    ),
                 )
                 if expr is None:
                     oracle_ok = False
@@ -1513,7 +1548,9 @@ def _transform_applied_proof_impl(
     if oracle_bad:
         bad_steps = sorted(
             {
-                f"step {i + 1} ({s.get('op')} on "
+                # steps[i], not the loop variable left over from building
+                # declared_map — that named every culprit after the last step.
+                f"step {i + 1} ({steps[i].get('op')} on "
                 f"'{map_source_to_target(c, mappings)}')"
                 for i, cols in declared_map.items()
                 for c in cols

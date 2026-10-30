@@ -877,6 +877,8 @@ export async function previewShapeRecipe(payload: {
   focus_table?: string;
   source_tables?: string[];
   source_catalog?: Record<string, string[]>;
+  /** Source format (postgresql, csv…): a database's '' is a value, a file's is NULL — same rule as Execute. */
+  source_type?: string;
 }): Promise<ShapePreviewResponse> {
   const res = await apiFetch(`${API_BASE}/shape/preview`, {
     method: "POST",

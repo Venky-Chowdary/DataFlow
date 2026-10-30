@@ -382,13 +382,7 @@ def iter_bounded_table_population_rows(
             if filtered is not None:
                 rows = filtered
         if shape_runner is not None:
-            from services.shape_apply import ShapeRunner
-
-            probe = ShapeRunner(shape_runner.recipe)
-            for row in rows:
-                shaped = probe.records([dict(row)])
-                if shaped:
-                    yield shaped[0]
+            yield from shape_runner.fork().population(rows)
             return
         yield from rows
 
