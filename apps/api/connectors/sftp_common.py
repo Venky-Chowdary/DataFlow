@@ -141,9 +141,22 @@ def parse_sftp_config(
             # Treat a bare connection string as a remote path.
             cfg.path = raw
 
-    if host:
+    host_url = sftp_host_url(host)
+    if host_url is not None:
+        # D208: a URL-shaped host carries its own port, which outranks the
+        # port field (a record saved before the host was edited kept its old
+        # port). Edit boundaries refuse a disagreeing explicit port.
+        cfg.host = host_url.host.strip()
+        cfg.port = host_url.port or int(port or 0) or cfg.port
+        if host_url.user and not username:
+            cfg.username = host_url.user.strip()
+        if host_url.password and not password:
+            cfg.password = host_url.password
+        if host_url.path and host_url.path != "/" and not cfg.path:
+            cfg.path = host_url.path
+    elif host:
         cfg.host = host.strip()
-    if port:
+    if port and not (host_url is not None and host_url.port):
         cfg.port = int(port)
     if username:
         cfg.username = username.strip()
@@ -170,6 +183,95 @@ def parse_sftp_config(
     return cfg
 
 
+_SFTP_FORM_DEFAULT_PORTS = frozenset({0, 22, 5432})
+
+
+def sftp_host_url(host: Any) -> Any:
+    """The authority an SFTP ``host`` field carries when it is URL-shaped.
+
+    ``sftp://h:2200``, ``ssh://user@h:2200/dir`` and a bare ``h:2200`` name
+    their own port. Returns the parsed ``UrlAuthority`` or ``None`` for a
+    plain host name (or a URL of another scheme).
+    """
+    from connectors.url_authority import parse_url_authority
+
+    raw = str(host or "").strip()
+    if not raw:
+        return None
+    if "://" in raw:
+        parsed = parse_url_authority(raw)
+        if parsed.scheme.lower() in ("sftp", "ssh") and parsed.host:
+            return parsed
+        return None
+    if "/" in raw or "@" in raw:
+        return None
+    parsed = parse_url_authority(raw)
+    return parsed if parsed.host and parsed.port else None
+
+
+def sftp_port_conflict(host: Any, explicit_port: Any) -> str:
+    """Refusal when the host URL's port and an explicit port field disagree (D208)."""
+    url = sftp_host_url(host)
+    try:
+        port = int(explicit_port or 0)
+    except (TypeError, ValueError):
+        port = 0
+    if url is None or not url.port or not port or port == url.port:
+        return ""
+    return (
+        f"The SFTP host {str(host).strip()!r} names port {url.port}, but the port "
+        f"field says {port}. Give one port: drop the port field (the host's port "
+        f"is used), or make the two agree."
+    )
+
+
+def sftp_edit_port_error(
+    conn_type: Any, host: Any, port: Any, previous_port: Any = None
+) -> str:
+    """D208 refusal for a save/update payload, which always carries a port.
+
+    On an update the port is explicit only when it differs from the stored
+    one (the confirm path and the UI form both resend the stored port); on a
+    create only when it is not a form default (0, 22, or the DTO's 5432).
+    """
+    if str(conn_type or "").strip().lower() not in {"sftp", "ssh"}:
+        return ""
+    try:
+        n = int(port or 0)
+    except (TypeError, ValueError):
+        return ""
+    unchanged = (
+        n in _SFTP_FORM_DEFAULT_PORTS
+        if previous_port is None
+        else n in (0, int(previous_port or 0))
+    )
+    return "" if unchanged else sftp_port_conflict(host, n)
+
+
+def split_sftp_host_edit(
+    data: Mapping[str, Any], conn_type: Any, previous_port: Any = None
+) -> dict[str, Any]:
+    """Save/update payload with a URL-shaped SFTP host split into host + port.
+
+    Raises ``ValueError`` when the payload's explicit port disagrees with the
+    host's (see ``sftp_edit_port_error``). Other connector types pass through.
+    """
+    out = dict(data)
+    kind = str(conn_type or out.get("type") or "").strip().lower()
+    if kind not in {"sftp", "ssh"} or sftp_host_url(out.get("host")) is None:
+        return out
+    err = sftp_edit_port_error(kind, out.get("host"), out.get("port"), previous_port)
+    if err:
+        raise ValueError(err)
+    lifted = apply_sftp_uri_endpoint({**out, "type": kind})
+    for key in ("host", "port", "username", "database"):
+        if key in lifted:
+            out[key] = lifted[key]
+    if lifted.get("password") and not out.get("password"):
+        out["password"] = lifted["password"]
+    return out
+
+
 def apply_sftp_uri_endpoint(data: Mapping[str, Any]) -> dict[str, Any]:
     """Fill an empty host, port, user, and path from an ``sftp://`` URI.
 
@@ -182,6 +284,20 @@ def apply_sftp_uri_endpoint(data: Mapping[str, Any]) -> dict[str, Any]:
     kind = str(out.get("type") or "").strip().lower()
     if kind not in {"sftp", "ssh"}:
         return out
+    # D208: ``host = "sftp://h:2200"`` is one endpoint. Its port is the dial
+    # port, not whatever port the record held before the host was edited (the
+    # edit boundaries refuse a port field that disagrees). Store it split.
+    url = sftp_host_url(out.get("host"))
+    if url is not None:
+        out["host"] = url.host.strip()
+        if url.port:
+            out["port"] = url.port
+        if url.user and not str(out.get("username") or "").strip():
+            out["username"] = url.user.strip()
+        if url.password and not str(out.get("password") or ""):
+            out["password"] = url.password
+        if url.path and url.path != "/" and not str(out.get("database") or "").strip():
+            out["database"] = url.path
     raw = str(out.get("connection_string") or "").strip()
     if not raw:
         return out

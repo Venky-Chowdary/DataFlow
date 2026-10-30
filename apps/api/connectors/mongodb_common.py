@@ -160,6 +160,11 @@ def normalize_mongodb_connection_string(
 
     uri = connection_string.strip()
     host = host or "localhost"
+    if not uri and host.strip().lower().startswith(("mongodb://", "mongodb+srv://")):
+        # D208 sibling: a URI typed into the host field names its own port;
+        # ``mongodb://h:27018`` + port 27017 used to dial ``h:27018:27017``.
+        uri = host.strip()
+        connection_string = uri
     if not uri:
         if username and password:
             netloc = f"{quote_plus(username)}:{quote_plus(password)}@{host}:{port or 27017}"
@@ -177,7 +182,13 @@ def normalize_mongodb_connection_string(
 
     # If the user pasted a connection string pointing to localhost but also
     # filled host/port, prefer the explicit form fields.
-    if connection_string.strip() and _is_localhost(uri) and host and (username or password):
+    if (
+        connection_string.strip()
+        and _is_localhost(uri)
+        and host
+        and (username or password)
+        and uri != host.strip()
+    ):
         return normalize_mongodb_connection_string(
             "", database=database, host=host, port=port, username=username, password=password,
             ssl=ssl, auth_source=auth_source,
