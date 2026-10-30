@@ -1003,6 +1003,12 @@ def _stream_database_transfer_impl(
         refuse_unusable_cursor_state(
             scope, run.cfg.dest_type, run.cfg.dest_cfg, resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table)
         )
+        from .engine_kafka import kafka_offsets_bound_the_read
+
+        if kafka_offsets_bound_the_read(run.cfg.src_read_type, run.cfg.src_cfg):
+            # The group's committed offsets are the delta; a per-partition
+            # _kafka_offset watermark dropped other partitions' new messages.
+            run.cfg.watermark = None
     # A source whose read call cannot carry the cursor bound (Redis SCAN, Dynamo
     # Scan, an ES search) hands its whole population over, so the bound is
     # applied to each page instead. Without it "incremental" degraded into a

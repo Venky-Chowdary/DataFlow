@@ -71,6 +71,25 @@ def kafka_nothing_past_committed(request: Any, total_rows: Any) -> bool:
     return configured_kafka_start({"extra": dict(source.extra or {})}) == "committed"
 
 
+def kafka_offsets_bound_the_read(source_type: Any, source_cfg: Any) -> bool:
+    """True when a Kafka source's consumer-group offsets already bound this read.
+
+    An incremental Kafka run starts at the group's committed offset on every
+    partition, so the delta is exactly the messages past those offsets. A
+    row-level cursor watermark on top of that is wrong: ``_kafka_offset`` is
+    per partition, so on a multi-partition topic the max offset one partition
+    reached is past another partition's new messages, and the client-side bound
+    dropped them while the run still committed past them (lost for good).
+    """
+    from connectors.kafka_reader import configured_kafka_start
+    from services.copy_kafka_common import kafka_family_name
+
+    if kafka_family_name(str(source_type or "")) != "kafka":
+        return False
+    cfg = source_cfg if isinstance(source_cfg, dict) else {}
+    return configured_kafka_start(cfg) == "committed"
+
+
 def commit_kafka_offsets_on_accept(request: Any, dest_summary: dict) -> None:
     """D85 — commit Kafka consumer-group offsets once, only on acceptance.
 

@@ -106,7 +106,15 @@ def resolve_endpoint_url(cfg: dict[str, Any]) -> str:
     # A host with no dots is an AWS region only when no service port was
     # given (``us-east-1``). ``minio`` + ``9000`` is a Docker endpoint;
     # treating it as a region dropped the host and port.
-    if host and "." not in host and host not in ("localhost", "127.0.0.1", "host.docker.internal"):
+    # A host that already carries its port (``localhost:9100``, ``minio:9100``)
+    # is handled below; appending the Port field here dialled
+    # ``http://localhost:9100:9000`` (D142).
+    if (
+        host
+        and "." not in host
+        and ":" not in host
+        and host not in ("localhost", "127.0.0.1", "host.docker.internal")
+    ):
         port = _explicit_service_port(cfg)
         if port is None:
             return ""

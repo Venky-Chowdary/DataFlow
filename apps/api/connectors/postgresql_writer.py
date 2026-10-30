@@ -1197,7 +1197,11 @@ def _copy_text_value(value: Any) -> str:
     if is_reader_null_cell(value):
         return "\\N"
     if isinstance(value, bool):
-        return "t" if value else "f"
+        # PostgreSQL's canonical boolean text. A boolean column reads it the
+        # same as 't'; a text column (a source field that is not boolean in
+        # every row) keeps a real boolean distinct from the string 't' — the
+        # bind path already lands 'true' there (boolean::text).
+        return "true" if value else "false"
     if isinstance(value, (dict, list)):
         # json.dumps escapes backslashes for JSON; COPY would then eat that
         # escape and hand jsonb a different string — "C:\\temp" arrives as

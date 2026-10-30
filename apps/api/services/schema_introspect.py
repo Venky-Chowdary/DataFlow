@@ -608,14 +608,17 @@ def _introspect_schema_unscoped(
     if db_type in ("s3", "amazon_s3"):
         return _introspect_object_store("s3", host=host, database=database, table=table, schema=schema, **{
             "username": username, "password": password, "connection_string": connection_string,
+            "port": port, "ssl": ssl, "store_cfg": reader_cfg, "options": options,
         })
     if db_type in ("gcs", "google_cloud_storage"):
         return _introspect_object_store("gcs", host=host, database=database, table=table, schema=schema, **{
             "username": username, "password": password, "connection_string": connection_string,
+            "port": port, "ssl": ssl, "store_cfg": reader_cfg, "options": options,
         })
     if db_type in ("adls", "azure_blob", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage"):
         return _introspect_object_store("adls", host=host, database=database, table=table, schema=schema, **{
             "username": username, "password": password, "connection_string": connection_string,
+            "port": port, "ssl": ssl, "store_cfg": reader_cfg, "options": options,
         })
     if db_type == "redis":
         return _introspect_redis(host=host, port=port, password=password, table=table, connection_string=connection_string)
@@ -729,6 +732,72 @@ def _introspect_sftp(
     }
 
 
+#: Driver types whose introspection is an object read (bucket + key).
+OBJECT_STORE_INTROSPECT_TYPES = frozenset({
+    "s3", "amazon_s3", "gcs", "google_cloud_storage", "adls", "azure_blob",
+    "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
+})
+
+
+def is_object_store_type(db_type: str) -> bool:
+    return str(db_type or "").strip().lower() in OBJECT_STORE_INTROSPECT_TYPES
+
+
+#: Connector keys an object-store client is built from (connectors.aws_common).
+_OBJECT_STORE_DIAL_KEYS = (
+    "endpoint_url",
+    "path_style",
+    "region",
+    "use_default_aws_credentials",
+    "workspace_id",
+    "account_name",
+    "account_key",
+    "project_id",
+    "credentials_json",
+)
+
+
+def object_store_dial_cfg(
+    store_cfg: dict[str, Any] | None,
+    options: dict[str, Any] | None,
+    *,
+    host: str,
+    port: Any,
+    ssl: bool | None,
+    database: str,
+    username: str,
+    password: str,
+    connection_string: str,
+) -> dict[str, Any]:
+    """The config an object-store read dials, built like the Execute reader's.
+
+    ``store_cfg`` is the resolved connector config (callers pass it as
+    ``reader_cfg``); its port, TLS flag and endpoint keys are what Test and the
+    Execute reader dial. Endpoint keys passed through ``options`` are kept too.
+    """
+    full = dict(store_cfg) if isinstance(store_cfg, dict) else {}
+    extra = full.get("extra") if isinstance(full.get("extra"), dict) else {}
+    cfg: dict[str, Any] = {}
+    for source in (options or {}, extra, full):
+        for key in _OBJECT_STORE_DIAL_KEYS:
+            if source.get(key) not in (None, ""):
+                cfg[key] = source[key]
+    cfg.update({
+        "host": host,
+        "database": database,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+    })
+    # Only the connector's own port. Callers without the config pass a
+    # placeholder default (5432) that would invent ``http://us-east-1:5432``.
+    if full.get("port") not in (None, "", 0, "0"):
+        cfg["port"] = full["port"]
+    if full.get("ssl") is not None:
+        cfg["ssl"] = bool(full["ssl"])
+    return cfg
+
+
 def _introspect_object_store(
     store_type: str,
     *,
@@ -739,15 +808,27 @@ def _introspect_object_store(
     username: str = "",
     password: str = "",
     connection_string: str = "",
+    port: Any = None,
+    ssl: bool | None = None,
+    store_cfg: dict[str, Any] | None = None,
+    options: dict[str, Any] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
-    cfg = {
-        "host": host,
-        "database": database,
-        "username": username,
-        "password": password,
-        "connection_string": connection_string,
-    }
+    # D142 — the object read dials the same endpoint Test and the reader do.
+    # This cfg used to carry host/credentials only: the port, the Endpoint URL
+    # field and path-style addressing were dropped, so ``127.0.0.1`` + a custom
+    # port resolved to no endpoint and boto went to AWS.
+    cfg = object_store_dial_cfg(
+        store_cfg,
+        options,
+        host=host,
+        port=port,
+        ssl=ssl,
+        database=database,
+        username=username,
+        password=password,
+        connection_string=connection_string,
+    )
     bucket = database or ""
     key = table or ""
     prefix = schema or ""

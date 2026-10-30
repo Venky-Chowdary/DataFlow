@@ -196,7 +196,7 @@ def _introspect_table_schema_rich(
     from connectors.generic_sql import connection_options
     from services.copy_kafka_common import kafka_security_options
     from services.dialect_profiles import schema_from_cfg
-    from services.schema_introspect import introspect_schema
+    from services.schema_introspect import introspect_schema, is_object_store_type
 
     info = introspect_schema(
         db_type,
@@ -234,6 +234,8 @@ def _introspect_table_schema_rich(
         auth_role=str(cfg.get("auth_role") or ""),
         private_key=str(cfg.get("private_key") or ""),
         strict_namespace=strict_namespace,
+        # Object stores dial the connector's endpoint/port from it (D142).
+        reader_cfg=cfg if is_object_store_type(db_type) else None,
         # TLS / service-name / driver keywords the writer will use.
         **connection_options(cfg),
         # A Kafka connector's SASL listener (D83).
