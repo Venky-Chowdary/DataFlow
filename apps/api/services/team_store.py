@@ -267,6 +267,10 @@ class Membership:
     role: str = "viewer"
     added_at: str = field(default_factory=_now)
     added_by: str = ""
+    #: Display name typed on invite. Shown until the member's own account has
+    #: one — an email invite creates no account, so this is the only place the
+    #: name the admin typed can live (R7).
+    name: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -279,7 +283,13 @@ class Membership:
             role=normalize_role(data.get("role", "viewer")),
             added_at=data.get("added_at", _now()),
             added_by=data.get("added_by", ""),
+            name=clean_display_name(data.get("name")),
         )
+
+
+def clean_display_name(value: Any) -> str:
+    """Trimmed display name; ``None``/blank/whitespace is no name."""
+    return " ".join(str(value or "").split())[:128]
 
 
 def _member_key(workspace_id: str, email: str) -> str:
@@ -546,6 +556,7 @@ def add_workspace_member(
     added_by: str,
     actor_is_platform_admin: bool = False,
     refuse_existing: bool = False,
+    name: str = "",
 ) -> Membership:
     with workspace_membership_lock(workspace_id):
         return _add_workspace_member(
@@ -555,6 +566,7 @@ def add_workspace_member(
             added_by=added_by,
             actor_is_platform_admin=actor_is_platform_admin,
             refuse_existing=refuse_existing,
+            name=name,
         )
 
 
@@ -566,6 +578,7 @@ def _add_workspace_member(
     added_by: str,
     actor_is_platform_admin: bool = False,
     refuse_existing: bool = False,
+    name: str = "",
 ) -> Membership:
     """Add or re-role a member, or raise the reason it cannot be done.
 
@@ -602,6 +615,7 @@ def _add_workspace_member(
         role=role,
         added_at=existing.added_at if existing else _now(),
         added_by=existing.added_by if existing else normalize_email(added_by),
+        name=clean_display_name(name) or (existing.name if existing else ""),
     )
     _write_membership(membership)
     return membership
