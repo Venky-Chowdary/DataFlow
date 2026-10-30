@@ -2313,7 +2313,7 @@ export async function runScheduleNow(id: string): Promise<{ job_id: string }> {
 
 export async function exportDatawrapManifest(): Promise<Blob> {
   const res = await apiFetch(`${API_BASE}/schedules/export/dataflow?format=yaml`);
-  if (!res.ok) throw new Error(await parseApiError(res, "Could not export dataflow.yaml"));
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not export datawrap.yaml"));
   return res.blob();
 }
 

@@ -153,7 +153,7 @@ export function BenchmarksPage() {
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `dataflow-benchmark-report-${rows}.md`;
+      a.download = `datawrap-benchmark-report-${rows}.md`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {

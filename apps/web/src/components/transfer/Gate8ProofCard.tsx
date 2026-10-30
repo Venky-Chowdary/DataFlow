@@ -131,7 +131,7 @@ async function exportGate8Proof(
       return;
     }
   }
-  downloadJson(`dataflow-gate8-proof-${Date.now()}.json`, {
+  downloadJson(`datawrap-gate8-proof-${Date.now()}.json`, {
     honesty: "Unsigned local Gate-8 snapshot — open Jobs with a job id to export HMAC-signed pack.",
     gate8: report,
   });

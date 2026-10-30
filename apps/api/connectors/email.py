@@ -138,7 +138,7 @@ def _parse_email_config(
         cfg.from_addr = from_override.strip()
 
     if not cfg.from_addr:
-        cfg.from_addr = cfg.username or "dataflow@example.com"
+        cfg.from_addr = cfg.username or "datawrap@example.com"
 
     # ssl flag forces TLS/STARTTLS when True and disables it when False.
     ssl_flag = _kwargs.get("ssl")

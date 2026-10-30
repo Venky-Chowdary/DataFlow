@@ -65,10 +65,15 @@ def _string_literals(path: Path):
                 yield node.lineno, node.value
 
 
+#: The brand module defines the old names (to recognise old artifacts); its
+#: strings are the inventory, not text shown to anyone.
+BRAND_MODULES = {"services/brand.py", "services/brand_env.py", "services/brand_artifacts.py"}
+
+
 def _api_sources():
     for top in ("src", "services", "connectors"):
         for path in sorted((API / top).rglob("*.py")):
-            if "__pycache__" in path.parts:
+            if "__pycache__" in path.parts or str(path.relative_to(API)) in BRAND_MODULES:
                 continue
             yield path
 

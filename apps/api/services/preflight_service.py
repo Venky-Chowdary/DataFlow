@@ -75,6 +75,7 @@ from services.transform_engine import (
 )
 from services.validation_plan import build_validation_plan
 from services.value_serializer import wire_cell_text
+from services.brand import PRODUCT_NAME
 
 
 def _hydrate_risk_contract(
@@ -1653,7 +1654,7 @@ def run_file_preflight(
                         "message": (
                             f"Upsert into existing '{destination_table}' needs "
                             f"a unique constraint on ({', '.join(_uk_cols)}). "
-                            f"DataFlow would run: {_planned_ddl} — disclose "
+                            f"{PRODUCT_NAME} would run: {_planned_ddl} — disclose "
                             "and approve destination DDL before executing."
                         ),
                         "duration_ms": 0,

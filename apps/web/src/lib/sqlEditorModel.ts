@@ -7,6 +7,7 @@
  */
 
 import { checkReadOnly, extractBindParams, stripComments } from "./sqlIntel";
+import { PRODUCT_NAME } from "./brand";
 
 export type SqlEditorMode = "query" | "procedure" | "dest_dml";
 
@@ -144,7 +145,7 @@ function definitionPasted(stripped: string, dialect: string, mode: SqlEditorMode
     }
     return `This is a CREATE ${kind} definition, not an extract. Create the object in ${engine} with your own client first. ${via}paste \`${call} schema.name(:param)\` for a procedure that already exists, with binds set below.`;
   }
-  return `This is a CREATE ${kind} statement — DataFlow only reads here. Use Table, one read-only SELECT / WITH, or a stored procedure CALL.`;
+  return `This is a CREATE ${kind} statement — ${PRODUCT_NAME} only reads here. Use Table, one read-only SELECT / WITH, or a stored procedure CALL.`;
 }
 
 function firstVerb(text: string): string {

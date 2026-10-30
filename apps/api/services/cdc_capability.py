@@ -26,6 +26,7 @@ schema and continues from that DDL.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from services.brand import PRODUCT_NAME
 
 CAUSE_SERVER_NOT_CONFIGURED = "server_not_configured"
 CAUSE_SLOT_QUOTA = "replication_slot_quota"
@@ -284,4 +285,4 @@ def _remedy(dialect: str, cause: str, *, collection: str = "") -> str:
             "Install the log-reader driver on the worker to capture DELETEs; until "
             "then this stream carries inserts/updates by cursor only."
         )
-    return "Inspect the source log-capture error above; DataFlow will not silently drop deletes."
+    return f"Inspect the source log-capture error above; {PRODUCT_NAME} will not silently drop deletes."
