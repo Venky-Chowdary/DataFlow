@@ -610,12 +610,26 @@ def text_cell_copy_safe(
         return fits_decimal(value, params[0], params[1], dest_db=dest_db)
     if kind == "boolean":
         return value in _COPY_BOOLEAN_TEXT
-    if kind == "date":
-        return bool(_ISO_DATE_TEXT.match(value))
-    if kind == "datetime":
-        return bool(_ISO_DATETIME_TEXT.match(value))
-    if kind == "time":
-        return bool(_ISO_TIME_TEXT.match(value))
+    if kind in {"date", "datetime", "time"}:
+        shape = {"date": _ISO_DATE_TEXT, "datetime": _ISO_DATETIME_TEXT}.get(kind, _ISO_TIME_TEXT)
+        if not shape.match(value):
+            return False
+        # Shape is not the calendar: '2024-02-30' / '0000-00-00' are ISO-shaped
+        # and the engine's bulk parse fails the whole load on them. The cell is
+        # graded by the row path's own temporal rules (calendar, carrier range,
+        # FSP / zone polarity) so census and writer hold out the same cell.
+        from connectors.sql_temporal import (
+            logical_to_temporal_ddl,
+            temporal_text_unfit_reason,
+        )
+        from connectors.writer_quarantine_unfit import temporal_cell_unfit_reason
+
+        ddl = physical or logical_to_temporal_ddl(kind) or logical
+        if temporal_text_unfit_reason(value, ddl, engine=dest_db):
+            return False
+        if not physical:
+            return True
+        return not temporal_cell_unfit_reason(value, physical, dest_db=dest_db)
     return True
 
 

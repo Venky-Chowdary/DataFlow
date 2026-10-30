@@ -1751,9 +1751,13 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 if carrier_failures
                 else ""
             )
+            # Name where: a whole-file scan knows the row, and "one bad date in
+            # 5,000" is only actionable with it.
+            first_rows = ", ".join(str(r) for r in first.example_rows[:3])
+            where = f" at data row {first_rows}" if first_rows else ""
             message = (
                 f"{tf_rows} value(s) in {scope} fail the declared transform "
-                f"({tf_cols}) — {first.unfit_reason} — the load aborts on "
+                f"({tf_cols}){where} — {first.unfit_reason} — the load aborts on "
                 f"these values{cf_suffix}; Execute would commit nothing"
             )
             corrective = (
@@ -1773,9 +1777,18 @@ def build_population_fit_gate(report: FitScanReport) -> dict[str, Any]:
                 "Nothing is written to the destination until Execute."
             )
         else:
+            lead = aborting[0]
+            lead_rows = ", ".join(str(r) for r in lead.example_rows[:3])
+            lead_where = (
+                f" (first: '{lead.target.source}' at data row {lead_rows}"
+                + (f", {lead.example_values[0]!r}" if lead.example_values else "")
+                + ")"
+                if lead_rows
+                else ""
+            )
             message = (
                 f"{rows} value(s) in {scope} cannot fit the destination carrier "
-                f"({cols}); the resolved write policy for those column(s) aborts "
+                f"({cols}){lead_where}; the resolved write policy for those column(s) aborts "
                 "the load, so Execute would commit nothing"
             )
             corrective = (

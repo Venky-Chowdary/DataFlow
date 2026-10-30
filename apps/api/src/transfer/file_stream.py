@@ -51,6 +51,7 @@ try:
     from services.row_filter import apply_row_filter
     from services.transform_engine import (
         assumed_number_locale,
+        date_locale_scoped,
         infer_date_locale,
         infer_number_locale,
         set_active_date_locale,
@@ -65,6 +66,7 @@ except ImportError:  # pragma: no cover - tests with api root on path
     from src.services.row_filter import apply_row_filter
     from src.services.transform_engine import (
         assumed_number_locale,
+        date_locale_scoped,
         infer_date_locale,
         infer_number_locale,
         set_active_date_locale,
@@ -1408,6 +1410,7 @@ def _maybe_upgrade_copy_reread(dest_summary: dict[str, Any], **scan_kwargs: Any)
     )
 
 
+@date_locale_scoped
 def stream_file_to_database(
     content: bytes | str | os.PathLike,
     filename: str,
@@ -2643,9 +2646,9 @@ def stream_file_to_database(
 
     def _process_file_chunk(idx: int, batch: list[dict]) -> dict[str, Any]:
         # Worker threads do not inherit the caller's contextvars, so each chunk
-        # must re-apply the resolved locales before any coercion runs.
-        if date_locale:
-            set_active_date_locale(date_locale)
+        # must re-apply the resolved locales before any coercion runs. Auto
+        # ("") is applied too: a pooled thread may still hold a prior run's pin.
+        set_active_date_locale(date_locale)
         if number_locale:
             set_active_number_locale(number_locale)
         empty = {

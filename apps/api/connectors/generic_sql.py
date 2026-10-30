@@ -4579,6 +4579,7 @@ def _generic_sql_map_kwargs(
         "source_spool": source_spool,
         "extra": extra,
         "batch_size": materialize_batch,
+        "empty_cells_as_null": bool((extra or {}).get("empty_cells_as_null")),
     }
 
 
@@ -5599,11 +5600,8 @@ def write_mapped_rows(
         sql_source_from_writer,
     )
 
-    extra = (
-        _kwargs.get("dest_extra")
-        if isinstance(_kwargs.get("dest_extra"), dict)
-        else {}
-    )
+    extra = dict(_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {})
+    extra["empty_cells_as_null"] = bool(_kwargs.get("empty_cells_as_null"))  # route fact (blank cell)
     _sql_src = sql_source_from_writer(_kwargs, extra)
     spool, close_spool = ensure_sql_source_spool(
         headers=headers,
