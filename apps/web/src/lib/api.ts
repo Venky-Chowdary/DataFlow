@@ -4889,6 +4889,10 @@ export interface DataContractSummary {
   updated_at: string;
   metadata: Record<string, unknown>;
   preflight_gates?: Record<string, unknown>[];
+  /** Server read model: "Signed v3" — the list, drawer and Pilot all show it. */
+  status_label?: string;
+  signed_version?: number | null;
+  signed_at?: string;
 }
 
 export interface ContractBreaker {

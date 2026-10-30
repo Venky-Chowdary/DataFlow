@@ -574,7 +574,7 @@ def test_collect_workspace_briefing_never_invents_when_stores_fail(monkeypatch):
     monkeypatch.setattr(wb, "_load_connectors", lambda _ws: [])
     monkeypatch.setattr(wb, "_load_jobs", lambda _ws: [])
     monkeypatch.setattr(wb, "_load_schedules", lambda _ws: [])
-    monkeypatch.setattr(wb, "_load_contracts", lambda _ws: [])
+    monkeypatch.setattr(wb, "_contract_facts", lambda _ws: {})
     facts = collect_workspace_briefing()
     assert facts["connector_count"] == 0
     assert facts["job_count"] == 0
@@ -607,7 +607,7 @@ def test_collect_workspace_briefing_counts_only_loaded_rows(monkeypatch):
         "_load_schedules",
         lambda _ws: [{"name": "Nightly", "enabled": True, "needs_approval": True, "approval_finding": "x"}],
     )
-    monkeypatch.setattr(wb, "_load_contracts", lambda _ws: [])
+    monkeypatch.setattr(wb, "_contract_facts", lambda _ws: {})
     facts = collect_workspace_briefing()
     assert facts["connector_count"] == 2
     assert facts["connectors_failed"] == 1
@@ -639,7 +639,7 @@ def test_collect_workspace_briefing_uses_whole_history_job_counts(monkeypatch):
         ),
     )
     monkeypatch.setattr(wb, "_load_schedules", lambda _ws: [])
-    monkeypatch.setattr(wb, "_load_contracts", lambda _ws: [])
+    monkeypatch.setattr(wb, "_contract_facts", lambda _ws: {})
     facts = collect_workspace_briefing(workspace_id="ws-1")
     assert facts["job_count"] == 84
     assert facts["jobs_failed"] == 12
@@ -725,7 +725,7 @@ def test_briefing_through_agent_uses_tool_not_faq(monkeypatch):
         lambda _ws: [{"id": "job_deadbeef", "status": "failed", "source": "orders", "destination": "dest"}],
     )
     monkeypatch.setattr(wb, "_load_schedules", lambda _ws: [])
-    monkeypatch.setattr(wb, "_load_contracts", lambda _ws: [])
+    monkeypatch.setattr(wb, "_contract_facts", lambda _ws: {})
 
     agent = DataPilotAgent()
     resp = agent.chat("give me a workspace briefing", history=[], data_context=None)

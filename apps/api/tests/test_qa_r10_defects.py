@@ -350,7 +350,7 @@ def test_next_schedule_is_the_soonest_future_run(monkeypatch):
 
     monkeypatch.setattr(wb, "_load_connectors", lambda workspace_id: [])
     monkeypatch.setattr(wb, "_load_jobs", lambda workspace_id: ([], {"total": 0, "by_status": {}}))
-    monkeypatch.setattr(wb, "_contract_census", lambda *a, **k: (0, 0))
+    monkeypatch.setattr(wb, "_contract_facts", lambda *a, **k: {})
     monkeypatch.setattr(
         wb, "_load_schedules",
         lambda workspace_id: [
