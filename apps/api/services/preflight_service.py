@@ -1007,6 +1007,7 @@ def run_file_preflight(
         stream_contracts=stream_contracts,
         source_format=source_format,
         source_config=source_config,
+        source_connector_id=source_connector_id,
         source_table=source_table,
         destination_db_type=destination_db_type,
         destination_config=destination_config,

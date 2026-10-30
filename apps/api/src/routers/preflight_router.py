@@ -602,6 +602,7 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
                 stream_contracts=body.stream_contracts,
                 source_format=body.source_type or "",
                 source_config=body.source_config,
+                source_connector_id=body.source_connector_id or "",
                 source_table=(body.source_table or body.source_collection or ""),
                 destination_db_type=str(
                     body.dest_type

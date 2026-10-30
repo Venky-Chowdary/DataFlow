@@ -71,8 +71,18 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
     but by then the rows are committed. Leaving the cancelled job at its
     last heartbeat hid them (QA MXD10).
     """
+    from services.incremental_drift import WATERMARK_REPORT_KEY, watermark_report
     from services.job_status import cancel_outcome_for
 
+    report = watermark_report(
+        fields.get("destination_summary"), rows_selected=fields.get("records_processed")
+    )
+    if report is not None:
+        fields.setdefault(WATERMARK_REPORT_KEY, report)
+        if report.get("after") not in (None, ""):
+            # A quiet run advances nothing, but the job still names the
+            # watermark the route stands at — the schedule follows it.
+            fields.setdefault("cursor_value", report["after"])
     written = mongo.update_job_status(job_id, status, **fields)
     if written is not False:
         return written
