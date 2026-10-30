@@ -20,6 +20,9 @@ import pytest
 
 from tests import r4_route_harness as h
 
+# Live engines: a hung run fails instead of holding a session (pytest-timeout).
+pytestmark = pytest.mark.timeout(300)
+
 # Source column names QA named: spaces, dashes, accents (and a mix).
 _COLS = ["id", "First Name", "last-name", "Café", "Straße Nr", "émoji-ñ col", "updated-at"]
 _ROWS = [

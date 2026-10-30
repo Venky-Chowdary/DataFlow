@@ -14,6 +14,9 @@ import pytest
 
 from tests import r4_route_harness as h
 
+# Live engines: a hung run fails instead of holding a session (pytest-timeout).
+pytestmark = pytest.mark.timeout(300)
+
 
 def _pin(seed: bytes) -> str:
     return "SHA256:" + base64.b64encode(hashlib.sha256(seed).digest()).decode().rstrip("=")
@@ -29,9 +32,12 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
+@pytest.mark.parametrize("confirm_via", ["rest", "mcp"])
 @pytest.mark.parametrize("backend", ["file", "mongo"])
 @pytest.mark.parametrize("had_pin", [False, True])
-def test_host_port_and_host_key_in_one_update_all_land(client, monkeypatch, had_pin, backend):
+def test_host_port_and_host_key_in_one_update_all_land(
+    client, monkeypatch, had_pin, backend, confirm_via
+):
     import services.connector_store as store
     from services.connector_store import create_connector, get_connector
 
@@ -60,11 +66,18 @@ def test_host_port_and_host_key_in_one_update_all_land(client, monkeypatch, had_
     })
     assert ok, staged
     assert {"host", "port", "host_key"} <= set(staged["preview"]["changes"]), staged
-    resp = client.post(
-        "/api/v1/copilot/confirm", json={"ack_id": staged["ack_id"], "reason": "re-point sftp"}
-    )
-    assert resp.status_code == 200, resp.text
-    body = resp.json()
+    if confirm_via == "rest":
+        resp = client.post(
+            "/api/v1/copilot/confirm",
+            json={"ack_id": staged["ack_id"], "reason": "re-point sftp"},
+        )
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+    else:
+        ok, body = h.mcp_call(
+            client, "confirm_action", {"ack_id": staged["ack_id"], "reason": "re-point sftp"}
+        )
+        assert ok, body
     assert body.get("ok") is True, body
 
     after = get_connector(saved.id)

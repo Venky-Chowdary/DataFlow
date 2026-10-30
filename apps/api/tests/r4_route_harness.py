@@ -42,6 +42,8 @@ def pg_conn():
         conn = psycopg2.connect(
             host=PG["host"], port=PG["port"], user=PG["username"],
             password=PG["password"], dbname=PG["database"], connect_timeout=3,
+            # A live test never holds a lock longer than this.
+            options="-c statement_timeout=60000 -c idle_in_transaction_session_timeout=60000",
         )
     except psycopg2.OperationalError as exc:
         pytest.skip(f"PostgreSQL not reachable: {exc}")
@@ -57,7 +59,8 @@ def mysql_conn():
     return pymysql.connect(
         host="127.0.0.1", port=3306, user=os.environ.get("MYSQL_USER", "dataflow"),
         password=pw, database=os.environ.get("MYSQL_DATABASE", "dataflow"),
-        charset="utf8mb4", autocommit=True,
+        charset="utf8mb4", autocommit=True, connect_timeout=5,
+        read_timeout=60, write_timeout=60,
     )
 
 
@@ -66,12 +69,14 @@ def mssql_conn():
     pw = os.environ.get("DATAFLOW_TEST_MSSQL_PASSWORD", "")
     if not pw or not port_up(1433):
         pytest.skip("SQL Server not configured (DATAFLOW_TEST_MSSQL_PASSWORD, :1433)")
-    return pyodbc.connect(
+    conn = pyodbc.connect(
         "DRIVER={ODBC Driver 18 for SQL Server};SERVER=127.0.0.1,1433;DATABASE=dataflow;"
         f"UID={os.environ.get('DATAFLOW_TEST_MSSQL_USER', 'sa')};PWD={pw};"
         "TrustServerCertificate=yes",
         timeout=10, autocommit=True,
     )
+    conn.timeout = 60  # per-statement: a hung test never holds a session open
+    return conn
 
 
 def dest_config(kind: str) -> dict[str, Any]:

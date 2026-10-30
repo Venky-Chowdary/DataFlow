@@ -24,6 +24,9 @@ import pytest
 
 from tests import r4_route_harness as h
 
+# Live engines: a hung run fails instead of holding a session (pytest-timeout).
+pytestmark = pytest.mark.timeout(300)
+
 
 def _free_port() -> int:
     with socket.socket() as s:
