@@ -2421,11 +2421,17 @@ class DataPilotTools:
         if stored_details and not drop_phantom_identity_rows(stored_details) and not quarantine:
             stored_rejected = 0
         reported_rejected = stored_rejected or quarantine_row_count
+        from services.dest_quarantine import operator_quarantine_json_cell
+
         samples = [
             {
                 "row": d.get("row"),
                 "column": d.get("column"),
-                "value": str(d.get("value") or "")[:120],
+                # SQL NULL shows as null, a literal as itself; never the wire token.
+                "value": (
+                    None if (shown := operator_quarantine_json_cell(d.get("value"))) is None
+                    else str(shown)[:120]
+                ),
                 "reason": str(d.get("reason") or "")[:200],
                 # Which signed policy held the row out (cast_failure vs quarantined).
                 **{
