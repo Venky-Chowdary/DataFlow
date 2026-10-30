@@ -1357,6 +1357,13 @@ def plan_transfer(
                 else {}
             ),
             "column_types": {r["name"]: r["inferred_type"] for r in src_rows},
+            # How the source decided a field's type when it had to choose (a
+            # Kafka field mixing JSON numbers and numeric strings, D203).
+            **(
+                {"source_type_notes": str(_src_note)}
+                if (_src_note := ((src_info.get("raw") or {}).get("warning") or ""))
+                else {}
+            ),
             "sync_mode": mode,
             "sync_mode_requested": (sync_mode or "").strip(),
             **(
