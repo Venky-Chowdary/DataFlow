@@ -2252,6 +2252,8 @@ def _sample_rows(conn: dict[str, Any], table: str, limit: int = 50) -> list[dict
             table=table,
             limit=limit,
             analyze=False,
+            # Every sampled row, not the 25-row display preview (D189).
+            full_rows=True,
         )
         if res.success:
             rows = list((res.output or {}).get("rows") or [])

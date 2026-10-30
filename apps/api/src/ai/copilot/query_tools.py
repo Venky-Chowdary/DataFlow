@@ -465,8 +465,15 @@ def sample_connector_object(
     limit: int = _DEFAULT_SAMPLE,
     analyze: bool = True,
     session_id: str = "",
+    full_rows: bool = False,
 ):
-    """Sample rows from a saved-connector table/collection (read-only)."""
+    """Sample rows from a saved-connector table/collection (read-only).
+
+    ``rows`` is a display preview of at most 25 rows. ``full_rows=True``
+    returns every sampled row up to ``limit`` instead: the plan's gates judge
+    the rows they asked for, and a 25-row preview silently hid a bad value in
+    rows 26..limit from them (D189).
+    """
     tool = "sample_connector_object"
     table = (table or "").strip()
     if not table:
@@ -537,7 +544,7 @@ def sample_connector_object(
 
         if batch_source:
             rows, columns, schema = _sample_batch_source(conn, table, limit)
-            preview_rows = rows[: min(limit, 25)]
+            preview_rows = rows if full_rows else rows[: min(limit, 25)]
             meta = {
                 "connector_id": cid,
                 "connector_name": conn.get("name"),
@@ -584,7 +591,7 @@ def sample_connector_object(
                 limit=limit,
             )
         rows, columns, schema, truncated = _run_query(saved, body)
-        preview_rows = rows[: min(limit, 25)]
+        preview_rows = rows if full_rows else rows[: min(limit, 25)]
         meta = {
             "connector_id": cid,
             "connector_name": conn.get("name"),
