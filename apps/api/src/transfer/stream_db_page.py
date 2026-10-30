@@ -33,11 +33,21 @@ def _boundary_rows_already_landed(run, headers: list[str], rows: list[list[str]]
         from services.target_sample import read_target_sample
         from services.value_serializer import present_cell_text
 
+        from connectors.cursor_bind import cursor_instant_key
+
         cur_val, _ = split_cursor_bookmark(str(cfg.watermark), has_tiebreak=True)
+        # A zone-bearing tie group is one instant written with any offset:
+        # ``02:45-08:00`` and ``16:15+05:30`` are both at a ``10:45Z`` watermark.
+        wm_instant = cursor_instant_key(str(cur_val))
+
+        def _at_watermark(cell: Any) -> bool:
+            text = present_cell_text(cell)
+            if text == str(cur_val):
+                return True
+            return wm_instant is not None and cursor_instant_key(text) == wm_instant
+
         boundary_idx = [
-            i
-            for i, row in enumerate(rows)
-            if cidx < len(row) and present_cell_text(row[cidx]) == str(cur_val)
+            i for i, row in enumerate(rows) if cidx < len(row) and _at_watermark(row[cidx])
         ]
         if not boundary_idx:
             return set()

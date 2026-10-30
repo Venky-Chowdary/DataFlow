@@ -22,7 +22,7 @@ column named — never bound as a string for the engine to guess at.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time, timezone
+from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -238,3 +238,99 @@ def count_cursor_window(conn: Any, table_obj: Any, col: Any, text: Any) -> int |
     except Exception:  # noqa: BLE001 - an uncountable window is unknown, not zero
         return None
 
+
+
+# --------------------------------------------------------------------------- #
+# Zone-bearing cursor values compared as instants (client side).
+#
+# A zone-bearing column (SQL Server DATETIMEOFFSET, Oracle TIMESTAMP WITH TIME
+# ZONE, PG timestamptz) hands each cell over with its own offset. The server
+# orders and compares those by instant; text order does not:
+# ``2026-01-01T10:00:00+05:30`` (04:30Z) sorts after ``2026-01-01T06:00:00+00:00``.
+# Every client-side page maximum, bookmark comparison and stored watermark goes
+# through these two helpers so it agrees with the server.
+# --------------------------------------------------------------------------- #
+
+_AWARE_RE = re.compile(
+    r"^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?\s*"
+    r"(Z|z|[+-]\d{2}(?::?\d{2})?)$"
+)
+
+
+def _aware_parts(text: Any) -> tuple[datetime, str] | None:
+    """``(UTC instant to the second, fraction digits)`` of offset-bearing text.
+
+    The wall clock is read as UTC and the offset subtracted: the result is the
+    instant in UTC, whatever offset the text was written with.
+    """
+    if not isinstance(text, str):
+        return None
+    m = _AWARE_RE.match(text.strip())
+    if m is None:
+        return None
+    year, month, day, hh, mi, ss, frac, off = m.groups()
+    try:
+        if off in ("Z", "z"):
+            sign, oh, om = 1, 0, 0
+        else:
+            sign = -1 if off[0] == "-" else 1
+            digits = off[1:].replace(":", "")
+            oh, om = int(digits[:2]), int(digits[2:4] or 0)
+        local = datetime(
+            int(year), int(month), int(day), int(hh), int(mi), int(ss), tzinfo=timezone.utc
+        )
+        utc = local - sign * timedelta(hours=oh, minutes=om)
+    except (ValueError, OverflowError):
+        return None
+    return utc, (frac or "").rstrip("0")
+
+
+def cursor_instant_key(text: Any) -> tuple[datetime, Decimal] | None:
+    """A sort key ordering offset-bearing timestamp text by instant, else None.
+
+    Only text that names its own offset (``+05:30``, ``-08:00``, ``Z``) is an
+    instant; a naive timestamp is a wall clock and keeps its own ordering.
+    Fraction digits are kept exactly (DATETIMEOFFSET(7) carries 100 ns), so two
+    instants a tick apart never compare equal.
+    """
+    parts = _aware_parts(text)
+    if parts is None:
+        return None
+    utc, frac = parts
+    return utc, Decimal("0." + frac) if frac else Decimal(0)
+
+
+def canonical_cursor_text(text: Any) -> Any:
+    """Offset-bearing timestamp text rewritten as its UTC instant; other values unchanged.
+
+    ``2026-01-01T02:45:00-08:00`` -> ``2026-01-01T10:45:00+00:00``. One spelling
+    per instant, so a stored watermark never depends on which offset the row
+    that set it happened to be written with. Fraction digits are kept as read
+    (trailing zeros dropped).
+    """
+    parts = _aware_parts(text)
+    if parts is None:
+        return text
+    utc, frac = parts
+    stamp = utc.strftime("%Y-%m-%dT%H:%M:%S")
+    return f"{stamp}.{frac}+00:00" if frac else f"{stamp}+00:00"
+
+
+def declared_type_is_zone_bearing(declared: Any) -> bool:
+    """True for a declared column type whose values carry their own instant.
+
+    PG ``timestamp with time zone`` / ``timestamptz``, SQL Server
+    ``datetimeoffset``, Oracle ``TIMESTAMP WITH [LOCAL] TIME ZONE``, Snowflake
+    ``TIMESTAMP_TZ`` / ``TIMESTAMP_LTZ``. Text, naive timestamps and unknown
+    types are not.
+    """
+    text = " ".join(str(declared or "").lower().split())
+    if not text:
+        return False
+    if "without time zone" in text:
+        return False
+    return (
+        "with time zone" in text
+        or "with local time zone" in text
+        or text.startswith(("timestamptz", "datetimeoffset", "timestamp_tz", "timestamp_ltz"))
+    )
