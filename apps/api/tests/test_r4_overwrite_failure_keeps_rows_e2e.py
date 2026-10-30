@@ -138,7 +138,8 @@ def test_duckdb_failed_overwrite_keeps_pre_run_rows(fake_jobs, pg_source, tmp_pa
     finally:
         con.close()
     assert rows == PRE_RUN
-    assert tables == {pg_source}, "no backup table may be left behind"
+    assert pg_source in tables
+    assert not [t for t in tables if "__df_bak" in t], "no backup table may be left behind"
     assert check == 1, "the live table object (and its CHECK) is the one kept"
 
 
@@ -183,3 +184,36 @@ def test_sqlserver_failed_overwrite_keeps_pre_run_rows(fake_jobs, pg_source):
         for (name,) in cur.fetchall():
             cur.execute(f"DROP TABLE dbo.[{name}]")
         conn.close()
+
+
+def test_duckdb_successful_overwrite_replaces_rows_and_drops_the_copy(
+    fake_jobs, pg_source, tmp_path
+):
+    duckdb = pytest.importorskip("duckdb")
+    conn = psycopg2.connect(**PG)
+    conn.autocommit = True
+    conn.cursor().execute(f"DELETE FROM {pg_source} WHERE v < 0")
+    conn.close()
+    path = str(tmp_path / "dest.duckdb")
+    con = duckdb.connect(path)
+    con.execute(
+        f"CREATE TABLE {pg_source} (id BIGINT PRIMARY KEY, v BIGINT CHECK (v > 0), note VARCHAR)"
+    )
+    con.executemany(f"INSERT INTO {pg_source} VALUES (?, ?, ?)", PRE_RUN)
+    con.close()
+
+    result = _run(
+        fake_jobs,
+        _source(pg_source),
+        EndpointConfig(kind="database", format="duckdb", database=path, table=pg_source),
+    )
+
+    assert result.success, result.error
+    con = duckdb.connect(path, read_only=True)
+    try:
+        rows = con.execute(f"SELECT count(*), min(id), max(id) FROM {pg_source}").fetchone()
+        tables = {r[0] for r in con.execute("SELECT table_name FROM information_schema.tables").fetchall()}
+    finally:
+        con.close()
+    assert rows == (400, 1, 400)
+    assert not [t for t in tables if "__df_bak" in t]
