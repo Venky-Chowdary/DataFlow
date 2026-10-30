@@ -269,6 +269,12 @@ def _timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
             "Check the host and port, the firewall or VPN, and that the database "
             "is healthy, then try again."
         )
+    if step and role and not target:
+        return (
+            f"{role} unreachable/slow: it did not answer within {waited} "
+            f"(step: {step}). Check that the {role} is reachable and healthy "
+            "(and its warehouse or server is running), then try again."
+        )
     if step and not role:
         # ``note_step(step)`` with no system: Datawrap's own work (Map). Naming a
         # database here would send the operator to a healthy host (D189).
@@ -505,8 +511,12 @@ def bounded_step(
             _step_deadline.reset(token)
 
     future = get_executor().spawn(f"step:{label}", inner)
+    started_by = time.monotonic() + 0.25
+    while not (future.running() or future.done()) and time.monotonic() < started_by:
+        time.sleep(0.005)
     if future.cancel():
-        # No free worker: run it here, still under the step budget.
+        # No worker picked it up: run it here, still under the step budget
+        # (its statements carry it).
         return inner()
     try:
         return future.result(timeout=budget)

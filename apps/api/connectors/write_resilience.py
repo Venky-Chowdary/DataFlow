@@ -373,7 +373,10 @@ def apply_postgres_session_guards(conn: Any) -> None:
         conn.autocommit = True
         with conn.cursor() as cur:
             cur.execute(f"SET statement_timeout = {statement_ms}")
-            cur.execute("SET idle_in_transaction_session_timeout = 0")
+            # Likewise a transaction a tool left open (a scan it stopped at
+            # its budget) is ended by the server at the call's deadline, so it
+            # cannot hold locks on the customer's table afterwards.
+            cur.execute(f"SET idle_in_transaction_session_timeout = {statement_ms}")
             cur.execute("SET lock_timeout = 120000")
             cur.execute("SET application_name = 'dataflow'")
         conn.autocommit = False

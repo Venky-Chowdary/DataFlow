@@ -126,15 +126,28 @@ def route(request, tmp_path, monkeypatch):
     monkeypatch.delenv("DATAFLOW_TOOL_DEADLINE_SECONDS", raising=False)
     connector_executor.reset_for_tests()
     slow_postgres(monkeypatch, connect=0.3)
-    calls = slow_snowflake(monkeypatch, login=3.0, query=1.0, warehouse_resume=8.0)
+    # QA's real-account range: login 2-4s, metadata 0.5-2s, resume 5-10s.
+    calls = slow_snowflake(monkeypatch, login=3.0, query=1.5, warehouse_resume=8.0)
     try:
         yield {"src": src.id, "dst": dst.id, "table": table, "calls": calls, "engine": engine}
     finally:
         delete_connector(src.id)
         delete_connector(dst.id)
+        leaked = []
         with db.cursor() as cur:
+            if engine == "postgresql":
+                cur.execute(
+                    "SELECT pid, left(query, 160) FROM pg_stat_activity WHERE state = "
+                    "'idle in transaction' AND pid <> pg_backend_pid() AND query ILIKE %s",
+                    (f"%{table}%",),
+                )
+                leaked = cur.fetchall()
+                cur.execute("SET lock_timeout = '15s'")
             cur.execute(f"DROP TABLE IF EXISTS {table}")
         db.close()
+        # A session left open in a transaction on the source would block the
+        # operator's DDL (it blocked this DROP for 25 minutes once).
+        assert not leaked, leaked
 
 
 def _call(tool: str, route: dict, dest: str, mode: str):
