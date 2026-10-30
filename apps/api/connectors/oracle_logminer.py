@@ -25,7 +25,7 @@ from connectors.write_resilience import (
 )
 from services.cdc_cursor_gap import CdcScnGapError
 from services.cdc_engine import ChangeBatch
-from services.value_serializer import cell_to_string
+from services.value_serializer import cell_to_string, wire_cell
 
 logger = logging.getLogger(__name__)
 
@@ -1250,7 +1250,10 @@ def _split_sql_csv_aware(text: str) -> list[str]:
 
 def _unquote_sql_literal(value: str) -> str:
     v = (value or "").strip().rstrip(";").strip()
-    if not v or v.upper() == "NULL":
+    if v.upper() == "NULL":
+        # SQL NULL is the wire NULL sentinel, never '' (D203 family).
+        return wire_cell(None)
+    if not v:
         return ""
     if len(v) >= 2 and v[0] == "'" and v[-1] == "'":
         return v[1:-1].replace("''", "'")
@@ -1306,7 +1309,7 @@ def _parse_sql_redo(sql_redo: str, *, op: str) -> dict[str, str]:
     for m in _SET_RE.finditer(text):
         col = m.group(1).upper()
         val = m.group(2) if m.group(2) is not None else m.group(3)
-        out[col] = "" if val is None or str(val).upper() == "NULL" else str(val)
+        out[col] = wire_cell(None) if val is None or str(val).upper() == "NULL" else str(val)
     if out:
         return out
     # Non-empty redo that yielded no columns is unparsed — never a dest upsert.
@@ -2461,7 +2464,7 @@ class OracleLogMinerCdc:
                 values = list(row)
             records.append(
                 {
-                    str(clean_cols[i]).upper(): "" if values[i] is None else str(values[i])
+                    str(clean_cols[i]).upper(): wire_cell(values[i])
                     for i in range(len(clean_cols))
                 }
             )
