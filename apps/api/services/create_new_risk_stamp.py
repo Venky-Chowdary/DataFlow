@@ -24,6 +24,8 @@ _INFORMATIONAL_WARN_KINDS = frozenset({
     "uuid_carrier_equivalent",
     "objectid_carrier_equivalent",
     "fixed_width_not_enforced",
+    # A bare NUMERIC onto the engine's unbounded exact decimal (D68).
+    "unbounded_decimal_carrier",
 })
 
 

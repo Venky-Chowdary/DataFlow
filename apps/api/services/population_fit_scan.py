@@ -517,6 +517,7 @@ def _write_bind_target_type(
     *,
     sync_mode: str = "",
     dest_table_exists: bool | None = None,
+    dest_db: str = "",
 ) -> tuple[str, bool]:
     """Carrier the write will bind — live DDL wins on an existing object.
 
@@ -526,11 +527,19 @@ def _write_bind_target_type(
     mapping / create-new types win there. ``dest_table_exists is False`` is
     create-new even when a projected schema is sitting in ``dest_types``.
     """
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
     from services.sync_cursor import is_overwrite_sync
 
     declared = str(declared or "").strip()
     live = str(live or "").strip()
-    if live and not is_overwrite_sync(sync_mode) and dest_table_exists is not False:
+    # Relational overwrite empties the table and keeps its columns, so the live
+    # carrier is what the rows land in — the same rule Validate's DDL checks
+    # and the writer use. Reading every overwrite as a recreate told the
+    # operator an existing table "does not exist yet".
+    recreated = is_overwrite_sync(sync_mode) and (
+        not dest_db or dest_schema_is_recreated_on_overwrite(dest_db)
+    )
+    if live and not recreated and dest_table_exists is not False:
         return live, True
     return declared or live, False
 
@@ -599,6 +608,7 @@ def bounded_targets(
             live,
             sync_mode=sync_mode,
             dest_table_exists=dest_table_exists,
+            dest_db=dest_db,
         )
         carrier = _carrier_for(target_type, dest_db=dest_db)
         transform = _scannable_transform(m, source_types=src_types, dest_types=types)

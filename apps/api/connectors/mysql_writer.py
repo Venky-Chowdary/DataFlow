@@ -1313,6 +1313,12 @@ def write_mapped_rows(
                     continue
                 source_type_by_col[col] = str(source_type)
                 candidate_by_col[col] = mysql_type(source_type)
+                # An approved widen names its carrier, collation included
+                # (schema_drift.widened_dest_carrier); re-deriving it from the
+                # source spelling dropped the column's COLLATE on MODIFY.
+                widen_to = str(mapping.get("target_type") or "").strip()
+                if mapping.get("dest_widen") and widen_to:
+                    candidate_by_col[col] = widen_to
 
             desired_types, alter_refusals = desired_types_honoring_map_stamps(
                 target_cols=target_cols,

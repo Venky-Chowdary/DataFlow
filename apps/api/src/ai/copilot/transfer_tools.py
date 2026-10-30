@@ -672,6 +672,20 @@ def _plan_source_types_authoritative(
     return source_types_are_authoritative(kind, fmt)
 
 
+def _engine_format(info: dict[str, Any]) -> str:
+    """The engine name Execute will run this endpoint as.
+
+    Execute's Map and gates read ``request.<endpoint>.format``: the connector's
+    own type (``duckdb``). The introspection driver can be the shared SQL
+    driver (``generic_sql``), and planning under that name graded a different
+    engine: a PostgreSQL TIMESTAMP onto DuckDB's zone-naive TIMESTAMP read as a
+    generic-SQL instant collapse (D202). Same name, same decision.
+    """
+    endpoint = info.get("endpoint")
+    fmt = str(getattr(endpoint, "format", "") or "").strip().lower()
+    return fmt or str(info.get("db_type") or "")
+
+
 def _share_catalog_reads(fn):
     """Run a read-only planning tool with one catalog read per object (D145)
     and one Snowflake login per endpoint (D187)."""
@@ -972,20 +986,38 @@ def plan_transfer(
 
     # Map is Datawrap's own work: it reads neither system. Left on the
     # sampling step, a slow Map was reported as the source (D189).
+    # A table this run creates is typed from the source's declaration: a bare
+    # ``numeric`` measured to DECIMAL(9,6) from today's rows created a column
+    # the next run's larger values overflowed (D68). Same rule as Execute's
+    # auto-map (source_schema_authority.declare_measured_decimals).
+    map_src_rows = src_rows
+    if dest_exists is not True:
+        from services.source_schema_authority import (
+            declare_measured_decimals,
+            measured_decimal_columns,
+        )
+
+        declared = declare_measured_decimals(
+            {r["name"]: r["inferred_type"] for r in src_rows},
+            measured_decimal_columns((src_info.get("raw") or {}).get("columns")),
+            _engine_format(dst_info),
+        )
+        map_src_rows = [{**r, "inferred_type": declared[r["name"]]} for r in src_rows]
+
     note_step(f"mapping the source columns onto {dst_table}")
     mapping = run_mapping_pipeline(
         [r["name"] for r in src_rows],
         [r["name"] for r in dst_rows],
-        source_schemas=src_rows,
+        source_schemas=map_src_rows,
         target_schemas=dst_rows,
         source_samples=samples,
         validation_mode=validation_mode,
-        destination_db_type=str(dst_info.get("db_type") or ""),
+        destination_db_type=_engine_format(dst_info),
         # The engine route maps under the source engine's identity
         # (``_auto_map``). Without it a BSON date read as a zoneless TIMESTAMP
         # and a PostgreSQL / Mongo VARCHAR as a code-page one, so the plan
         # demanded a risk contract for columns Execute stamps preserve (D147).
-        source_db_type=str(src_info.get("db_type") or ""),
+        source_db_type=_engine_format(src_info),
         schema_policy=schema_policy,
         sync_mode=mode,
         destination_table_exists=dest_exists,
@@ -1065,12 +1097,12 @@ def plan_transfer(
             mode=mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
-            src_db_type=str(src_info.get("db_type") or ""),
+            src_db_type=_engine_format(src_info),
             source_config=_stamp_callable_source_config(
                 _endpoint_dict(src_info.get("endpoint")),
                 callable_plan,
             ),
-            dest_db_type=str(dst_info.get("db_type") or ""),
+            dest_db_type=_engine_format(dst_info),
             dest_exists=dest_exists,
             source_primary_key=(
                 _primary_key_csv(contracts[0].get("primary_key"))

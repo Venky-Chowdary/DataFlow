@@ -138,6 +138,17 @@ def dest_schema_is_recreated_on_overwrite(dest_db_type: str | None) -> bool:
         return True
     if kind in _OVERWRITE_KEEPS_EXISTING_TABLE:
         return False
+    # The overwrite itself (``engine_destination._drop_destination_table``)
+    # clears the driver the connector resolves to, so a connector named
+    # ``duckdb`` / ``neon`` / ``tidb`` is emptied in place by the generic SQL /
+    # PostgreSQL / MySQL driver. Answering "recreated" for the connector name
+    # had Execute type against an empty destination and skip the widen while
+    # the writer bound rows into the kept, narrower table (D200).
+    from src.transfer.connector_capabilities import resolve_driver_type
+
+    driver = overwrite_engine_kind(resolve_driver_type(kind))
+    if driver != kind and driver in _OVERWRITE_KEEPS_EXISTING_TABLE:
+        return False
     if kind in DESTS_WITHOUT_SCHEMA_RECREATE:
         return False
     if kind in SCHEMALESS_DESTS or kind in NO_RELATIONAL_DDL_DESTS:
