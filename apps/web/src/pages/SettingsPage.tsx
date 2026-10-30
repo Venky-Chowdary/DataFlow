@@ -1153,7 +1153,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-permission-notice" role="alert" data-testid="settings-storage-warning">
                     <DtIcon name="alert" size={16} />
                     <p>
-                      <strong>Saved keys will not survive a restart. </strong>
+                      <strong>Saved keys may need to be entered again. </strong>
                       {modelCapabilities.settings_storage.reason}
                     </p>
                   </div>

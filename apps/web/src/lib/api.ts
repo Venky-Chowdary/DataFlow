@@ -1195,7 +1195,7 @@ export interface ModelCapabilities {
     blocked_reason?: string;
     key_state?: "ready" | "none" | "disabled" | "undecryptable";
   }[];
-  settings_storage?: { path: string; persistent: boolean; reason: string };
+  settings_storage?: { path?: string; persistent: boolean; reason: string };
   guarantees: string[];
 }
 

@@ -79,4 +79,6 @@ def test_storage_status_flags_unmounted_railway_data_dir(tmp_path, monkeypatch):
     monkeypatch.setenv("RAILWAY_ENVIRONMENT", "production")
     status = integrations_store.storage_status()
     assert status["persistent"] is False
-    assert "volume" in status["reason"]
+    # R7: a user-level message; the path / volume detail goes to the log only.
+    assert "administrator" in status["reason"]
+    assert "volume" not in status["reason"] and "/" not in status["reason"]

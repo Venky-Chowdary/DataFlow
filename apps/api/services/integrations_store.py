@@ -96,14 +96,27 @@ def _empty_store() -> dict[str, Any]:
     }
 
 
-def _load_raw() -> dict[str, Any]:
+def _read_file() -> dict[str, Any] | None:
     if not STORE_PATH.exists():
-        return _empty_store()
+        return None
     try:
         raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("invalid store")
     except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _load_raw() -> dict[str, Any]:
+    from services.integrations_persistence import load_sections, save_sections
+
+    file_raw = _read_file()
+    durable = load_sections()
+    if durable is None and file_raw is not None:
+        # Heal: a settings file written before the database held them (or while
+        # it was down) is copied up once, so the next restart keeps it.
+        save_sections(file_raw)
+    raw = {**(file_raw or {}), **(durable or {})}
+    if not raw:
         return _empty_store()
 
     sso = _default_sso()
@@ -142,6 +155,10 @@ def _load_raw() -> dict[str, Any]:
 
 
 def _save(data: dict[str, Any]) -> None:
+    from services.integrations_persistence import save_sections
+
+    # Database first: it is what survives a restart; the file is a local cache.
+    save_sections(json.loads(json.dumps(data, default=json_default)))
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
 
@@ -320,28 +337,39 @@ def get_sso_config_raw(sso_type: str) -> dict[str, Any]:
 
 
 def storage_status() -> dict[str, Any]:
-    """Where Settings are written and whether that location survives a restart.
+    """Whether saved Settings survive a restart, in words a user can act on.
 
-    A container without a mounted volume writes to its own filesystem, so
-    every redeploy or restart reverts the store to whatever the image shipped
-    with. Reporting that is the difference between "the key vanished" and
-    "the key was never going to stay".
+    Durable when the control-plane database holds them. Otherwise a container
+    without a mounted volume loses them on every deploy; the operator-facing
+    detail (path, volume) goes to the log, never to the Settings screen.
     """
     import os
 
-    path = STORE_PATH
+    from services.integrations_persistence import durable
+
+    if durable():
+        return {"persistent": True, "reason": ""}
     persistent = True
-    reason = ""
+    path = STORE_PATH
     if is_railway():
         root = path.parent.parent if path.parent.name == "data" else path.parent
-        if not (os.path.ismount(root) or os.path.ismount(path.parent)):
-            persistent = False
-            reason = (
-                f"{path.parent} is not a mounted volume on this Railway service, so "
-                "saved settings are lost on every deploy or restart. Attach a volume at "
-                f"{root} (or set DATAFLOW_DATA_DIR to a mounted path)."
+        persistent = bool(os.path.ismount(root) or os.path.ismount(path.parent))
+        if not persistent:
+            logger.warning(
+                "Settings store %s is on an ephemeral disk and no settings database "
+                "is configured; saved keys are lost on restart (mount a volume at %s "
+                "or configure MongoDB).", path, root,
             )
-    return {"path": str(path), "persistent": persistent, "reason": reason}
+    return {
+        "persistent": persistent,
+        "reason": (
+            ""
+            if persistent
+            else "Saved model keys can't be stored durably on this deployment yet, so "
+            "they may need to be entered again after an update. Ask your administrator "
+            "to connect the settings database."
+        ),
+    }
 
 
 def provider_key_state(provider: str) -> str:
