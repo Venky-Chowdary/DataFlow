@@ -31,6 +31,7 @@ _PLAIN_ASCII_INT_RE = re.compile(r"^-?[0-9]{1,38}$")
 _ISO_DATE_RE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 
 _MONTH_NAME_RE = r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*"
+_ISO_YEAR_FIRST_RE = re.compile(r"^\d{4}-\d{1,2}-\d{1,2}(?:[ T].*)?$")
 _DATE_LIKE_RE = re.compile(
     r"\d{1,4}[-/.]\d{1,2}[-/.]\d{1,4}|"
     r"\d{8}|"
@@ -207,6 +208,12 @@ _DATE_LOCALES = frozenset({"DMY", "MDY"})
 # Auto (deployment default may apply). This marker is not a locale and
 # must not be copied onto a report.
 _DATE_LOCALE_REJECTED = "REJECTED"
+#: Not a day/month order: the read's dates are year-first ISO. Pinned by
+#: :func:`infer_date_locale` when the evidence is ISO, or when one column mixes
+#: ISO with slash dates. Under it a slash date (``31/12/2024``) is a second
+#: format whose order nothing declared, so it is refused as ambiguous instead
+#: of being read one way. DMY / MDY consumers see Auto.
+DATE_LOCALE_ISO = "ISO"
 
 
 def canonical_date_locale(locale: str) -> str:
@@ -244,12 +251,64 @@ def set_active_date_locale(locale: str) -> contextvars.Token[str]:
     if not raw:
         return _DATE_LOCALE_VAR.set("")
     chosen = canonical_date_locale(raw)
+    if not chosen and raw.upper() == DATE_LOCALE_ISO:
+        return _DATE_LOCALE_VAR.set(DATE_LOCALE_ISO)
     return _DATE_LOCALE_VAR.set(chosen or _DATE_LOCALE_REJECTED)
+
+
+_SLASH_DATE_RE = re.compile(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$")
+
+
+def _calendar_reason(text: str) -> str:
+    """The shared temporal model's reason a date-shaped text names no real day."""
+    from connectors.sql_temporal import invalid_calendar_reason
+
+    return invalid_calendar_reason(text)
+
+
+def mixed_date_format_reason(text: str, date_locale: str = "") -> str:
+    """Why a day/month-ordered date is refused in an ISO-dated read, else ``""``.
+
+    ``31/12/2024`` beside ``2024-01-15`` is two formats in one column. Reading
+    it day-first because 31 cannot be a month is a guess the file never made;
+    the operator declares DMY / MDY and the value loads.
+    """
+    if _active_date_locale(date_locale):
+        return ""
+    if (_DATE_LOCALE_VAR.get() or "").strip().upper() != DATE_LOCALE_ISO:
+        return ""
+    raw = (text or "").strip()
+    if not _SLASH_DATE_RE.match(raw):
+        return ""
+    return (
+        f"{raw!r} is day/month-ordered but this read's dates are ISO "
+        "(YYYY-MM-DD) — mixed date formats, so the day/month order is "
+        "ambiguous; set date locale DMY or MDY to load it"
+    )
 
 
 def reset_active_date_locale(token: contextvars.Token[str]) -> None:
     """Restore the previous date locale."""
     _DATE_LOCALE_VAR.reset(token)
+
+
+def date_locale_scoped(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run ``fn`` so the date reading it pins does not outlive the call.
+
+    A file read pins the order its own evidence settles (DMY / MDY / ISO). Left
+    on the thread, that pin decided how the *next* read on the thread parsed
+    ``31/12/2024`` - another file, another job.
+    """
+
+    @functools.wraps(fn)
+    def _scoped(*args: Any, **kwargs: Any) -> Any:
+        token = _DATE_LOCALE_VAR.set(_DATE_LOCALE_VAR.get())
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            _DATE_LOCALE_VAR.reset(token)
+
+    return _scoped
 
 
 # Number grouping: 'US' (1,234.56), 'EU' (1.234,56), 'WIRE' (machine-canonical
@@ -746,43 +805,62 @@ def infer_date_locale(
     A value like 31/12/2024 is unambiguously DMY; 12/31/2024 is MDY.
     Ambiguous values (both fields <= 12 and unequal) are ignored.
     If an explicit locale is already set, it is returned unchanged.
+
+    ``ISO`` (:data:`DATE_LOCALE_ISO`) when one column mixes year-first ISO
+    dates with slash dates, or when every date seen is ISO: a slash date in
+    such a read has no declared day/month order and is refused as ambiguous.
     """
     order = _active_date_locale(existing_locale)
     if order:
         return order
     dmy = 0
     mdy = 0
-    pattern = re.compile(r"^(\d{1,2})[-/.](\d{1,2})[-/.](\d{2,4})(?:[ T].*)?$")
+    pattern = _SLASH_DATE_RE
+    # Per column: does it hold year-first ISO dates, slash dates, or both?
+    iso_cols: set[Any] = set()
+    slash_cols: set[Any] = set()
     checked = 0
     for rec in records:
         if checked >= max_rows:
             break
         checked += 1
         if isinstance(rec, dict):
-            vals = rec.values() if columns is None else (rec.get(c) for c in columns)
+            items = rec.items() if columns is None else ((c, rec.get(c)) for c in columns)
         elif isinstance(rec, (list, tuple)) and columns is not None:
-            vals = (rec[columns.index(c)] for c in columns if c in columns)
+            items = ((c, rec[columns.index(c)]) for c in columns if c in columns)
         else:
-            vals = [rec]
-        for v in vals:
+            items = [(None, rec)]
+        for col, v in items:
             if not isinstance(v, str):
                 continue
             v = v.strip()
             if not _DATE_LIKE_RE.search(v):
                 continue
+            if _ISO_YEAR_FIRST_RE.match(v):
+                iso_cols.add(col)
+                continue
             m = pattern.match(v)
             if not m:
                 continue
+            slash_cols.add(col)
             first, second = int(m.group(1)), int(m.group(2))
             if first > 12 and second <= 12:
                 dmy += 1
             elif second > 12 and first <= 12:
                 mdy += 1
             # if both > 12 it's invalid; if equal it's locale-independent
+    if iso_cols & slash_cols:
+        # One column, two formats: ISO anchors it, and its slash dates are
+        # ambiguous rather than settled by whichever member has a day > 12.
+        return DATE_LOCALE_ISO
     if dmy and dmy >= mdy:
         return "DMY"
     if mdy and mdy > dmy:
         return "MDY"
+    if iso_cols and not slash_cols:
+        # Every date seen is ISO: a slash date further into the read is a
+        # second format, refused as ambiguous wherever it sits.
+        return DATE_LOCALE_ISO
     return ""
 
 
@@ -2641,6 +2719,11 @@ def apply_transform(
             # (coerce_sql_temporal) keeps it or refuses it by name.
             return _era_literal_through(text.strip(), transform)
 
+    if transform in {"date", "datetime"}:
+        mixed = mixed_date_format_reason(text)
+        if mixed:
+            return None, f"Invalid {transform}: {mixed}"
+
     if transform == "date":
         if _is_ambiguous_mdy_dmy(text):
             return None, (
@@ -2649,13 +2732,13 @@ def apply_transform(
             )
         parsed = _parse_date(text, with_time=True)
         if parsed is None:
-            return None, f"Invalid date: {text!r}"
+            return None, _calendar_reason(text) or f"Invalid date: {text!r}"
         return parsed, None
 
     if transform == "datetime":
         parsed = _parse_datetime(text)
         if parsed is None:
-            return None, f"Invalid datetime: {text!r}"
+            return None, _calendar_reason(text) or f"Invalid datetime: {text!r}"
         return parsed, None
 
     if transform.startswith(ASSUME_TIMEZONE_PREFIX):

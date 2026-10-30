@@ -69,12 +69,21 @@ def agreed_sample_date_locale(sample_rows: list[dict], columns: list[str]) -> st
     A settler in ``dob`` must not rewrite an unrelated column whose slash
     dates are still ambiguous. Empty means the operator locale, or Auto, stays.
     """
-    from services.transform_engine import ambiguous_date_columns, infer_date_locale
+    from services.transform_engine import (
+        DATE_LOCALE_ISO,
+        ambiguous_date_columns,
+        infer_date_locale,
+    )
 
+    # The run-wide reading Execute settles on (file_stream / engine): an ISO
+    # read, or a column mixing ISO with slash dates, pins ISO there too, so
+    # Validate refuses the same slash dates Execute refuses.
+    if infer_date_locale(sample_rows, columns) == DATE_LOCALE_ISO:
+        return DATE_LOCALE_ISO
     per_column = {
         col: infer_date_locale(sample_rows, [col]) for col in columns
     }
-    agreed = {loc for loc in per_column.values() if loc}
+    agreed = {loc for loc in per_column.values() if loc and loc != DATE_LOCALE_ISO}
     if len(agreed) != 1:
         return ""
     if ambiguous_date_columns(sample_rows, columns):
