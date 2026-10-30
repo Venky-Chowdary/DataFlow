@@ -312,6 +312,13 @@ def inspect_destination_for_preflight(
                     connection_string=str(fk_cfg.get("connection_string") or ""),
                     ssl=bool(fk_cfg.get("ssl")),
                     table=str(stream),
+                    # The login's own identity (warehouse, role, key): without it
+                    # this catalog read opened a second Snowflake login (D187).
+                    **{
+                        k: str(fk_cfg.get(k))
+                        for k in ("warehouse", "role", "auth_role", "private_key")
+                        if fk_cfg.get(k)
+                    },
                 )
                 out["foreign_keys"] = list(live.get("foreign_keys") or [])
                 out["foreign_keys_meta"] = dict(

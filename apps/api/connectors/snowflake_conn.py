@@ -888,6 +888,7 @@ def _open_connection(
     private_key: str = "",
     private_key_passphrase: str = "",
     auth_mode: str = "",
+    session_parameters: dict[str, Any] | None = None,
 ) -> Any:
     kwargs = snowflake_connect_kwargs(
         account=account,
@@ -905,6 +906,12 @@ def _open_connection(
 
     snowflake_connector = _snowflake_connector_module()
     kwargs["converter_class"] = snowflake_converter_class()
+    if session_parameters:
+        # Set at login: no ALTER SESSION round trip afterwards (D187).
+        kwargs["session_parameters"] = {
+            **dict(kwargs.get("session_parameters") or {}),
+            **session_parameters,
+        }
 
     # Use fakesnow for local/emulator testing; it patches snowflake.connector.connect
     # and persists databases to disk so read-after-write works across connections.
@@ -1029,28 +1036,105 @@ class _PlanCursor:
     DATABASE / SCHEMA``: ten of the sixteen statements one PG -> Snowflake plan
     sent were these, a Snowflake round trip each (D187). On the shared login a
     statement that would set the session to the value it already holds is
-    answered here; any other value is sent and remembered.
+    answered here; any other value is sent and remembered. A ``USE`` is
+    compared with the session context read once after login, and a read-only
+    catalog statement another step already sent (``DESC TABLE``, ``SHOW``,
+    ``SELECT CURRENT_ROLE()``) is answered from that step's result
+    (:mod:`connectors.snowflake_session_state`).
     """
 
     def __init__(self, session: "_PlanSession", cur: Any) -> None:
         self._session = session
         self._cur = cur
+        self._replay: Any = None
 
     def execute(self, command: Any, *args: Any, **kwargs: Any) -> Any:
+        from connectors.snowflake_session_state import (
+            CATALOG_CONTEXT,
+            Answer,
+            Replay,
+            cache_key,
+            context_answer,
+            context_select,
+            ends_cached_answers,
+            use_target,
+        )
+
+        self._replay = None
+        bare = not kwargs and all(not a for a in args)
         key = _session_statement_key(command)
         normalized = " ".join(str(command).split()).upper() if key else ""
-        if key and not args and not kwargs:
-            with self._session._lock:
-                if self._session._state.get(key) == normalized:
+        use = use_target(command) if bare else None
+        cached = cache_key(command) if bare else None
+        session = self._session
+        if bare:
+            with session._lock:
+                if use is not None and session._context.get(use[0]) == use[1]:
                     return self
-        result = self._cur.execute(command, *args, **kwargs)
-        if key:
-            with self._session._lock:
+                if key and session._state.get(key) == normalized:
+                    return self
+                answer = session._answers.get(cached) if cached else None
+                if answer is None:
+                    asked = context_select(command)
+                    answer = context_answer(asked, session._context) if asked else None
+            if answer is not None:
+                if answer.error is not None:
+                    raise answer.error
+                self._replay = Replay(answer)
+                return self
+        try:
+            result = self._cur.execute(command, *args, **kwargs)
+        except Exception as exc:
+            if cached and type(exc).__name__ == "ProgrammingError":
+                # "does not exist" / "not authorized" is the catalog's answer too.
+                with session._lock:
+                    session._answers[cached] = Answer(error=exc)
+            raise
+        with session._lock:
+            if key:
                 if key in {"DATABASE", "WAREHOUSE"}:
                     # A new database or warehouse changes what SCHEMA means.
-                    self._session._state.pop("SCHEMA", None)
-                self._session._state[key] = normalized
+                    session._state.pop("SCHEMA", None)
+                session._state[key] = normalized
+            if use is not None or key in {"DATABASE", "SCHEMA", "WAREHOUSE", "ROLE"}:
+                kind = use[0] if use is not None else key
+                if use is not None:
+                    session._context[kind] = use[1]
+                    if kind == "DATABASE":
+                        session._context.pop("SCHEMA", None)
+                else:
+                    session._context.pop(kind, None)
+                if kind in CATALOG_CONTEXT:
+                    # A warehouse is compute only; the catalog answers stand.
+                    session._answers.clear()
+            elif cached is None and ends_cached_answers(command):
+                session._answers.clear()
+        if cached is not None:
+            answer = Answer(description=self._cur.description, rows=list(self._cur.fetchall() or []))
+            with session._lock:
+                session._answers[cached] = answer
+            self._replay = Replay(answer)
+            return self
         return self if result is self._cur else result
+
+    def fetchone(self) -> Any:
+        return self._replay.fetchone() if self._replay is not None else self._cur.fetchone()
+
+    def fetchall(self) -> Any:
+        return self._replay.fetchall() if self._replay is not None else self._cur.fetchall()
+
+    def fetchmany(self, *args: Any, **kwargs: Any) -> Any:
+        if self._replay is not None:
+            return self._replay.fetchmany(*args, **kwargs)
+        return self._cur.fetchmany(*args, **kwargs)
+
+    @property
+    def description(self) -> Any:
+        return self._replay.description if self._replay is not None else self._cur.description
+
+    @property
+    def rowcount(self) -> Any:
+        return self._replay.rowcount if self._replay is not None else self._cur.rowcount
 
     def __enter__(self) -> "_PlanCursor":
         return self
@@ -1065,7 +1149,7 @@ class _PlanCursor:
             logger.debug("Snowflake cursor close failed: %s", exc)
 
     def __iter__(self) -> Any:
-        return iter(self._cur)
+        return iter(self._replay) if self._replay is not None else iter(self._cur)
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._cur, name)
@@ -1074,19 +1158,83 @@ class _PlanCursor:
 class _PlanSession:
     """One real Snowflake login shared by every consumer of an endpoint scope."""
 
-    def __init__(self, open_fn: Callable[[], Any]) -> None:
+    def __init__(
+        self,
+        open_fn: Callable[[], Any],
+        *,
+        session_parameters: dict[str, Any] | None = None,
+        local_emulator: bool = False,
+        login_warehouse: str = "",
+    ) -> None:
         self._open = open_fn
+        self._login_warehouse = login_warehouse
         self._lock = threading.Lock()
-        self._conn = open_fn()
+        self._session_parameters = dict(session_parameters or {})
+        self._local_emulator = local_emulator
         #: Session settings this login holds (see :class:`_PlanCursor`).
         self._state: dict[str, str] = {}
+        #: Stored names of the current WAREHOUSE / DATABASE / SCHEMA / ROLE.
+        self._context: dict[str, str] = {}
+        #: Read-only catalog answers kept for this login (normalized SQL -> Answer).
+        self._answers: dict[str, Any] = {}
+        self._conn = open_fn()
+        self._learn_login()
+
+    def _learn_login(self) -> None:
+        """What the login set, read in one statement instead of one per step."""
+        from connectors.snowflake_session_state import Answer, context_query
+
+        self._state = {
+            name.upper(): f"ALTER SESSION SET {name.upper()} = {value}".upper()
+            for name, value in self._session_parameters.items()
+        }
+        self._context.clear()
+        self._answers.clear()
+        sql, kinds = context_query(self._local_emulator)
+        try:
+            cur = self._conn.cursor()
+            try:
+                cur.execute(sql)
+                row = cur.fetchone() or ()
+                description = list(cur.description or [])
+            finally:
+                cur.close()
+        except Exception as exc:  # noqa: BLE001 - consumers then set it themselves
+            logger.debug("Snowflake session context not read: %s", exc)
+            return
+        if self._local_emulator and self._login_warehouse:
+            from connectors.snowflake_session_state import canonical_identifier
+
+            # The emulator has no warehouses and answers USE WAREHOUSE as a
+            # no-op: the login's own is the current one.
+            name = canonical_identifier(self._login_warehouse)
+            if name:
+                self._context["WAREHOUSE"] = name
+        for index, kind in enumerate(kinds):
+            value = row[index] if index < len(row) else None
+            if value:
+                self._context[kind] = str(value)
+                if kind not in {"WAREHOUSE", "VERSION"} and index < len(description):
+                    self._answers[f"SELECT CURRENT_{kind}()"] = Answer(
+                        description=[description[index]], rows=[(value,)]
+                    )
+        if self._context.get("VERSION") and len(description) > kinds.index("VERSION"):
+            self._answers["SELECT CURRENT_VERSION()"] = Answer(
+                description=[description[kinds.index("VERSION")]],
+                rows=[(self._context["VERSION"],)],
+            )
 
     def cursor(self, *args: Any, **kwargs: Any) -> Any:
         """A fresh cursor per consumer; reconnects once if the session was lost."""
         with self._lock:
             if self._conn.is_closed():
                 self._conn = self._open()
-                self._state.clear()
+                relearn = True
+            else:
+                relearn = False
+        if relearn:
+            self._learn_login()
+        with self._lock:
             cur = self._conn.cursor(*args, **kwargs)
         return _PlanCursor(self, cur)
 
@@ -1148,10 +1296,17 @@ def get_connection(**kwargs: Any) -> Any:
         str(kwargs.get("private_key_passphrase") or "") if key_pair else "",
         str(kwargs.get("schema") or "").upper(),
     )
+    from connectors.snowflake_session_state import PLAN_SESSION_PARAMETERS
+
     session, _release = borrow(
         "snowflake",
         key,
-        lambda: _PlanSession(lambda: _open_connection(**kwargs)),
+        lambda: _PlanSession(
+            lambda: _open_connection(**kwargs, session_parameters=PLAN_SESSION_PARAMETERS),
+            session_parameters=PLAN_SESSION_PARAMETERS,
+            local_emulator=_is_local_account(str(kwargs.get("account") or "")),
+            login_warehouse=str(kwargs.get("warehouse") or ""),
+        ),
         close=lambda s: s.shut(),
         shared=True,
     )
