@@ -151,7 +151,7 @@ def remediation(dest_kind: str) -> str:
     return (
         "Give the key column a binary NO PAD collation (MySQL utf8mb4_0900_bin, "
         "MariaDB utf8mb4_nopad_bin; any *_bin for case alone), or transform the "
-        f"keys so they differ under the destination's rules. Tables DataFlow "
+        f"keys so they differ under the destination's rules. Tables Datawrap "
         f"creates use that collation when {NO_PAD_FLAG}=1."
     )
 
@@ -176,6 +176,6 @@ def destination_equality_message(
         f"{label}: {count:,} source key(s) are distinct in the source but equal "
         f"under the destination's comparison{via} ({rules}) - colliding keys: "
         f"{groups}. The destination's unique key would merge them (an upsert "
-        "keeps one row, or the load fails on a duplicate key), so DataFlow "
+        "keeps one row, or the load fails on a duplicate key), so Datawrap "
         f"refuses rather than merge distinct keys. {remediation(dest_kind)}"
     )
