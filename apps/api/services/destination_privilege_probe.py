@@ -304,12 +304,15 @@ def probe_destination_privileges(
         # Name the real gap: an engine with no privilege probe is not a
         # supported destination at all (e.g. generic_sql is read-side only).
         # "Probe not implemented" read like a missing feature and sent
-        # operators looking for a fix that does not exist.
+        # operators looking for a fix that does not exist. A source-only
+        # driver (Neo4j) gets the reason itself: it has no writer (D139).
+        from src.transfer.connector_capabilities import source_only_destination_refusal
+
         return PrivilegeProbeResult(
             can_write=None,
             can_create_table=None,
             status="unavailable",
-            detail=(
+            detail=source_only_destination_refusal(engine) or (
                 f"'{engine}' is not a supported destination — no write "
                 "privilege probe exists for it. Choose a supported "
                 "destination engine."

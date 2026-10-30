@@ -108,6 +108,27 @@ def gate_codes_from_job(job: Mapping[str, Any] | None) -> list[str]:
     return codes
 
 
+def unaccounted_sources_from_job(job: Mapping[str, Any] | None) -> list[str]:
+    """Source columns G13 named as neither mapped nor omitted, from its details.
+
+    A run refused inside the job carries the gate, not the drift guard's
+    evidence; the finding needs the column names so a drift acknowledgement
+    can record exactly those as omitted.
+    """
+    doc = job if isinstance(job, Mapping) else {}
+    pf = doc.get("preflight") if isinstance(doc.get("preflight"), Mapping) else {}
+    out: list[str] = []
+    for node in list(pf.get("gates") or []) + list(pf.get("blockers") or []):
+        if not isinstance(node, Mapping) or str(node.get("id") or "") != "g13_source_coverage":
+            continue
+        details = node.get("details") if isinstance(node.get("details"), Mapping) else {}
+        for col in details.get("unaccounted_sources") or []:
+            name = str(col or "").strip()
+            if name and name not in out:
+                out.append(name)
+    return out
+
+
 def drift_codes(codes: list[str] | tuple[str, ...]) -> list[str]:
     return [code for code in codes if is_source_drift_code(code)]
 

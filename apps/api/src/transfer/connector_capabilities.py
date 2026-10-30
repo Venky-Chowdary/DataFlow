@@ -1119,6 +1119,36 @@ def dest_ready(caps: dict[str, bool]) -> bool:
     return bool(caps.get("write") and (caps.get("read") or caps.get("dest_only")) and transfer_ready(caps))
 
 
+def source_only_destination_refusal(dest_type: str) -> str | None:
+    """The one sentence for "this connector cannot be a destination" (D139).
+
+    A source-only driver (Neo4j, InfluxDB, Couchbase, SaaS readers) has no
+    writer. Planning a load into one used to run every gate anyway: G2 said
+    "'neo4j' is not a supported destination" and the type gates graded each
+    column against a destination with no types, so even an integer id read as
+    a fidelity collapse. Refuse before any gate, naming the reason. Unknown
+    types return ``None`` — this never refuses a destination it cannot place.
+    """
+    raw = (dest_type or "").strip().lower()
+    if not raw:
+        return None
+    driver = resolve_driver_type(raw)
+    if driver not in _DRIVER_CAPS:
+        return None
+    caps = get_capabilities(driver)
+    if dest_ready(caps) or not _source_only_ready(dict(_DRIVER_CAPS.get(driver) or {})):
+        return None
+    label = {"neo4j": "Neo4j", "influxdb": "InfluxDB", "couchbase": "Couchbase", "github": "GitHub"}.get(
+        driver, driver.replace("_", " ").title()
+    )
+    return (
+        f"{label} is a source-only connector: DataFlow has no {label} writer, so "
+        f"it cannot be a transfer destination. Use {label} as the source, or "
+        "choose a destination such as PostgreSQL, MySQL, SQL Server, Snowflake "
+        "or DynamoDB."
+    )
+
+
 def _driver_install_hint(driver: str) -> str:
     """Operator-facing package hint when a certified driver fails to load."""
     return {

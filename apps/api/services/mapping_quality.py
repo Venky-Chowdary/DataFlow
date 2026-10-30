@@ -502,12 +502,12 @@ def classify_mapping_confidence(
     # ``First_Name``, ``Café`` -> ``Caf_``). Judging those against the original
     # spelling by underscores alone demoted every such rerun below the
     # confidence floor (D55); the sanitiser's own mapping is the identity.
-    from connectors.sql_identifiers import sanitize_identifier
+    from connectors.sql_identifiers import sanitized_spellings
 
     name_exact = (
         src_l == tgt_l
         or src_l.replace("_", "") == tgt_l.replace("_", "")
-        or sanitize_identifier(src).lower() == tgt_l
+        or tgt_l in sanitized_spellings(src)
     )
     type_same = src_logical == tgt_logical
     safe_promo = (

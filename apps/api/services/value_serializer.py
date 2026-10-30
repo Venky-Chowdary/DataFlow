@@ -69,6 +69,25 @@ def is_missing_sentinel(value: Any) -> bool:
     return value is Missing or value == DF_MISSING_SENTINEL
 
 
+class _ExplicitNullType:
+    """A store's explicit NULL value (DynamoDB ``{"NULL": true}``), not an absent field."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ExplicitNull"
+
+
+#: The DynamoDB reader returns this for ``{"NULL": true}`` so a source read can
+#: tell it from a missing attribute. Every verifier reads it as SQL NULL (D139:
+#: Gate-8 read-back stringified the bare ``object()`` and failed a correct load).
+EXPLICIT_NULL = _ExplicitNullType()
+
+
+def is_explicit_null(value: Any) -> bool:
+    return value is EXPLICIT_NULL
+
+
 # Wire spellings that mean "no value here" — a DuckDB reader adds its own.
 NULL_WIRE_SENTINELS: frozenset[str] = frozenset(
     {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL, "__df_ddb_null__"}
