@@ -26,6 +26,8 @@ _INFORMATIONAL_WARN_KINDS = frozenset({
     "fixed_width_not_enforced",
     # A bare NUMERIC onto the engine's unbounded exact decimal (D68).
     "unbounded_decimal_carrier",
+    # Float-residue-shaped text held exactly by the DECIMAL it lands in (D161).
+    "ieee_float_residue_kept_exact",
 })
 
 
@@ -181,9 +183,11 @@ def apply_create_new_risk_stamps(
         ieee = (
             None
             if declared_source
-            else ieee_float_create_new_risk(observe_numeric_samples(col_samples))
+            else ieee_float_create_new_risk(
+                observe_numeric_samples(col_samples), target_type=tgt, dest_db=db
+            )
         )
-        if ieee and not any(r.get("kind") == "ieee_float_artifact" for r in risks):
+        if ieee and not any(r.get("kind") == ieee["kind"] for r in risks):
             risks = list(risks) + [ieee]
         locking_risks = [r for r in risks if create_new_risk_locks_review(r)] if risks else []
         if risks:

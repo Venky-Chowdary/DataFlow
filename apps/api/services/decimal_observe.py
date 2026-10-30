@@ -255,6 +255,7 @@ def observe_numeric_samples(
     # heuristic below consults this instead of the raw maximum, so one exact
     # small decimal cannot brand the whole column approximate.
     residue_scale = 0
+    exact_int = exact_scale = 0
     parsed = 0
     for raw in rows[:500]:
         d = _canonical_numeric(raw)
@@ -270,6 +271,11 @@ def observe_numeric_samples(
         if looks_like_binary_residue(d):
             ieee_signals.append("hard_scale_residue")
             residue_scale = max(residue_scale, scale)
+        # Exact digits under a context wide enough not to round (the scale
+        # above normalizes at 28 digits): what a DECIMAL must hold verbatim.
+        w_int, w_scale = write_int_digits_and_scale(d)
+        exact_int = max(exact_int, idig, w_int)
+        exact_scale = max(exact_scale, scale, w_scale)
 
     if not parsed:
         return {
@@ -358,7 +364,43 @@ def observe_numeric_samples(
         "suggested_fixed": (
             f"DECIMAL({precision},{scale})" if kind == "ieee_float" else carrier
         ),
+        "exact_int_digits": exact_int,
+        "exact_scale": exact_scale,
+        # The DECIMAL that holds every cell *as written*, residue included.
+        "exact_fixed": (
+            _exact_residue_decimal(exact_int, exact_scale, max_precision)
+            if kind == "ieee_float"
+            else None
+        ),
     }
+
+
+#: Largest scale every bounded exact decimal accepts (MySQL ``DECIMAL`` stops
+#: at 30; SQL Server, MariaDB, Snowflake and Oracle go further).
+_PORTABLE_MAX_DECIMAL_SCALE = 30
+
+
+def _exact_residue_decimal(max_int: int, max_scale: int, max_precision: int) -> str | None:
+    """``DECIMAL(p,s)`` holding residue-shaped text exactly, or ``None``.
+
+    ``0.30000000000000004`` read from a CSV is that decimal: the text is the
+    value. Sized from the full written scale (not the cleaned significant
+    scale, which would round the cell), and only while every bounded engine
+    can declare it; past that the column stays FLOAT and its chip holds it.
+    """
+    precision = max(1, int(max_int) + int(max_scale))
+    if max_scale > _PORTABLE_MAX_DECIMAL_SCALE:
+        return None
+    if precision > min(int(max_precision), _OPEN_DOMAIN_PRECISION):
+        return None
+    return f"DECIMAL({precision},{int(max_scale)})"
+
+
+def exact_residue_carrier(observation: dict[str, Any] | None) -> str | None:
+    """The exact DECIMAL for an IEEE-residue-shaped *text* column, if one fits."""
+    if not observation or observation.get("kind") != "ieee_float":
+        return None
+    return observation.get("exact_fixed") or None
 
 
 # Sources whose cells arrive as untyped text: a numeric column exists only
@@ -829,10 +871,55 @@ def decimal_scale_overflow_fix(
     )
 
 
-def ieee_float_create_new_risk(observation: dict[str, Any] | None) -> dict[str, str] | None:
-    """Risk stamp when invent chose FLOAT due to Excel/IEEE residue."""
+def _exact_decimal_holds(observation: dict[str, Any], target_type: str, dest_db: str) -> bool:
+    """True when ``target_type`` is an exact decimal holding every observed cell."""
+    from services.type_system import (
+        LOGICAL_DECIMAL,
+        normalize_logical_type,
+        parse_numeric_precision_scale,
+    )
+
+    tgt = (target_type or "").strip()
+    if not tgt or normalize_logical_type(tgt) != LOGICAL_DECIMAL:
+        return False
+    p, s = parse_numeric_precision_scale(tgt)
+    if p is None:
+        # A bare NUMERIC is exact and unbounded only on the PostgreSQL family.
+        return (dest_db or "").strip().lower() in _UNBOUNDED_EXACT_NUMERIC_DIALECTS
+    s = int(s or 0)
+    need_scale = int(observation.get("exact_scale", observation.get("max_scale")) or 0)
+    need_int = int(
+        observation.get("exact_int_digits", observation.get("max_int_digits")) or 0
+    )
+    return s >= need_scale and int(p) - s >= need_int
+
+
+def ieee_float_create_new_risk(
+    observation: dict[str, Any] | None,
+    *,
+    target_type: str = "",
+    dest_db: str = "",
+) -> dict[str, str] | None:
+    """Risk stamp when invent chose FLOAT due to Excel/IEEE residue.
+
+    When the column is created as an exact decimal that holds every cell as
+    written (a CSV's ``0.30000000000000004`` into ``DECIMAL(18,17)``), nothing
+    is approximated: the chip becomes an informational note that the values
+    look like binary-float noise, and does not hold the mapping (D161).
+    """
     if not observation or observation.get("kind") != "ieee_float":
         return None
+    if target_type and _exact_decimal_holds(observation, target_type, dest_db):
+        return {
+            "kind": "ieee_float_residue_kept_exact",
+            "severity": "warn",
+            "message": (
+                "Some values look like IEEE/Excel binary-float residue (for "
+                "example 0.30000000000000004). They load exactly as written into "
+                f"{target_type}; nothing is rounded. Add a rounding transform if "
+                "the source meant the shorter value."
+            ),
+        }
     suggested = observation.get("suggested_fixed") or "DECIMAL"
     return {
         "kind": "ieee_float_artifact",
