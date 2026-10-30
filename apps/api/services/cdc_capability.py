@@ -204,9 +204,11 @@ def query_cdc_change_refusal(
         f"{dialect or 'source'} log-based CDC is not available{cause}, and {why}. "
         "A cursor poll on it sees new rows only: updates and deletes made after "
         "the snapshot would be lost while the run reports completed. "
-        "Enable the source change log, or declare a cursor the source moves on "
-        "every update (cursor_semantics=modification_timestamp, e.g. updated_at), "
-        "or declare the table insert_only."
+        "Enable the source change log, or name a column the source moves on "
+        "every update as the poll cursor (cursor_column=updated_at with "
+        "cursor_semantics=modification_timestamp) and the CDC run polls it "
+        "(inserts and updates; deletes are not captured), or declare the table "
+        "insert_only."
     )
 
 

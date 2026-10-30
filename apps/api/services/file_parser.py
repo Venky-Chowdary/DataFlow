@@ -355,7 +355,9 @@ def _parse_parquet_preview(content: bytes, preview_rows: int = 100) -> tuple[lis
         row = []
         for col in slice_table.column_names:
             val = slice_table.column(col)[i].as_py()
-            row.append("" if val is None else cell_to_string(val))
+            # NULL stays None: a preview that showed it as '' hid the
+            # NULL / empty-string distinction the file states (D62).
+            row.append(None if val is None else cell_to_string(val))
         rows.append(row)
     return headers, rows, row_count, table.schema
 

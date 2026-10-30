@@ -1,9 +1,10 @@
 """A refused MySQL full_refresh_overwrite must put the prior rows back.
 
 TRUNCATE auto-commits, so emptying the live table and then refusing the load
-published an empty destination. The overwrite renames the table aside and the
-failure path renames it back, including when the refused load already created
-an empty replacement.
+published an empty destination. The overwrite copies the prior rows to
+``<table>__df_bak`` and empties the live table in place (D195: renaming it
+aside let the writer re-create it without its constraints); the failure path
+copies the rows back, the success path drops the backup.
 """
 
 from __future__ import annotations
@@ -101,11 +102,12 @@ def test_refused_overwrite_restores_prior_mysql_rows():
         dest = _endpoint(table)
         assert _drop_destination_table(dest) is True
         assert dest.extra.get("overwrite_backup") == f"{table}__df_bak"
-        assert _absent(conn, table)
-
-        # The refused load created an empty replacement before it aborted.
-        _exec(conn, f"CREATE TABLE `{table}` (id INT PRIMARY KEY, name VARCHAR(32))")
+        # The live table stays (with its constraints), emptied in place.
         assert _count(conn, table) == 0
+        assert _count(conn, f"{table}__df_bak") == 3
+
+        # The refused load wrote part of its batch before it aborted.
+        _exec(conn, f"INSERT INTO `{table}` (id, name) VALUES (7, 'partial')")
 
         assert _settle_overwrite_backup(dest, restore=True) is True
         assert _count(conn, table) == 3
@@ -127,7 +129,6 @@ def test_successful_overwrite_discards_the_mysql_backup():
         _exec(conn, f"INSERT INTO `{table}` (id, name) VALUES (1, 'old')")
         dest = _endpoint(table)
         assert _drop_destination_table(dest) is True
-        _exec(conn, f"CREATE TABLE `{table}` (id INT PRIMARY KEY, name VARCHAR(32))")
         _exec(conn, f"INSERT INTO `{table}` (id, name) VALUES (9, 'new')")
         assert _settle_overwrite_backup(dest, restore=False) is True
         assert _names(conn, table) == ["new"]

@@ -35,8 +35,8 @@ def test_copy_empty_string_stays_present():
 
 def test_copy_zero_and_false_stay_present():
     assert _copy_text_value(0) == "0"
-    assert _copy_text_value(False) == "f"
-    assert _copy_text_value(True) == "t"
+    assert _copy_text_value(False) == "false"
+    assert _copy_text_value(True) == "true"
 
 
 def test_copy_decimal_uses_dest_canonical_text():

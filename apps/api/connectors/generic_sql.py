@@ -906,6 +906,11 @@ def _engine(cfg: dict[str, Any]) -> Any:
     """
     from services.engine_pool import get_pooled_engine
 
+    from connectors.snowflake_scoped_engine import endpoint_scoped_engine
+
+    scoped = endpoint_scoped_engine(cfg)
+    if scoped is not None:
+        return scoped
     # Flatten nested extra TLS/SID/driver keywords *before* the pool key, or
     # a verify-or-fail engine is reused after the operator declared trust.
     return get_pooled_engine(with_connection_options(cfg), _build_engine)
@@ -922,26 +927,17 @@ def _warehouse_creator(cfg: dict[str, Any], db_type: str) -> tuple[sa.URL, Calla
     """
     if db_type == "snowflake":
         from connectors.snowflake_conn import normalize_account
-        from services.copy_snowflake_common import (
-            snowflake_database_of,
-            snowflake_schema_of,
-        )
+        from services.copy_snowflake_common import snowflake_database_of
 
         def _connect_snowflake() -> Any:
-            from connectors.snowflake_conn import get_connection
+            # The SQLAlchemy pool outlives any endpoint scope, so it owns a
+            # login of its own: a scope's shared login handed to the pool was
+            # used after the scope closed it (and reopened unowned logins).
+            from connectors.snowflake_conn import _open_connection
 
-            return get_connection(
-                account=normalize_account(str(cfg.get("host") or "")),
-                username=str(cfg.get("username") or cfg.get("user") or ""),
-                password=str(cfg.get("password") or ""),
-                database=snowflake_database_of(cfg),
-                schema=snowflake_schema_of(cfg),
-                warehouse=str(cfg.get("warehouse") or ""),
-                connection_string=str(cfg.get("connection_string") or ""),
-                role=str(cfg.get("role") or ""),
-                private_key=str(cfg.get("private_key") or ""),
-                private_key_passphrase=str(cfg.get("private_key_passphrase") or ""),
-            )
+            from connectors.snowflake_scoped_engine import snowflake_login_kwargs
+
+            return _open_connection(**snowflake_login_kwargs(cfg))
 
         url = sa.URL.create(
             "snowflake",
@@ -2434,6 +2430,18 @@ def _build_table_for_write(
                 if match:
                     plan_collations[key] = match.group(1).strip().strip('"')
 
+    # A LOB cannot be a key (SQL Server 1919, ORA-02329): an unbounded text
+    # key gets the widest full-value carrier the engine enforces (CR-D126).
+    from services.upsert_identity import unbounded_key_widths
+
+    unbounded_key_width = unbounded_key_widths(
+        dialect_name,
+        [c for c in columns if c in pk_set],
+        lambda c: _gsql._sa_type_for_logical(
+            column_types.get(c, "string"), dialect_name, db_type, nullable=False
+        ),
+    )
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
@@ -2464,6 +2472,8 @@ def _build_table_for_write(
         sa_type = _gsql._sa_type_for_logical(
             logical, dialect_name, db_type, nullable=nullable
         )
+        if is_pk and col in unbounded_key_width:
+            sa_type = unbounded_key_width[col]
         collation = plan_collations.get(col)
         if collation and isinstance(sa_type, sa.String):
             # String-family types render ``… COLLATE <name>`` from this attribute
@@ -5161,6 +5171,22 @@ def write_mapped_rows(
             source_ddl = (
                 materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
             )
+            # An approved widen names its carrier (schema_drift
+            # .widened_dest_carrier): NVARCHAR stays NVARCHAR at the source's
+            # length. Re-deriving it from the source spelling ALTERed a SQL
+            # Server NVARCHAR(50) down to code-page VARCHAR(500).
+            widen_to = str(mapping.get("target_type") or "").strip()
+            if mapping.get("dest_widen") and widen_to:
+                source_ddl = (
+                    materialize_dest_ddl(dest_db, widen_to, source_type=source_type)
+                    if dest_db
+                    else widen_to
+                )
+                # ALTER COLUMN without COLLATE resets SQL Server's column to
+                # the database default (a binary column turned case-insensitive).
+                collate = re.search(r"\sCOLLATE\s+\S+", widen_to, re.I)
+                if collate and "collate" not in source_ddl.lower():
+                    source_ddl = f"{source_ddl}{collate.group(0)}"
             candidate_by_col[col] = source_ddl
 
         desired_list, alter_refusals = desired_types_honoring_map_stamps(

@@ -1492,7 +1492,7 @@ def _parse_json(value: Any) -> str | None:
     if value is None:
         return None
     if isinstance(value, str):
-        from services.value_serializer import json_dumps_exact_numbers
+        from services.value_serializer import compact_json_text
 
         try:
             # JSONDecodeError subclasses ValueError — catch it first so bare
@@ -1515,11 +1515,16 @@ def _parse_json(value: Any) -> str | None:
         except TypeError:
             parsed = value
         else:
-            # D74 — a number the document stated stays a JSON number, every
-            # digit kept. The Decimal-as-string policy is for values with no
-            # JSON number of their own; applied here it rewrote
-            # ``12345678901234567890.1`` into the string ``"12345678901234567890.1"``.
-            return json_dumps_exact_numbers(parsed, separators=(",", ":"))
+            # D74 / D192 — the document's own text is the value. A number
+            # stays the exact token the source spelled: re-dumping the parse
+            # kept the digits of ``12345678901234567890.1`` but rewrote
+            # ``1.10`` as ``1.1`` and ``1e2`` as ``100.0``. Strings keep their
+            # escapes and keys their order; only insignificant whitespace
+            # goes. A native JSON column (jsonb, MySQL JSON, VARIANT, BSON)
+            # may still normalise on store: docs/ZERO_LOSS_PROPERTIES.md,
+            # Property 8 "JSON number spelling".
+            del parsed
+            return compact_json_text(value)
     elif isinstance(value, (dict, list, tuple, set, frozenset)):
         parsed = value
     else:
@@ -2375,6 +2380,28 @@ def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
     return _format_datetime(first), None
 
 
+def _era_literal_through(text: str, transform: str) -> tuple[Any, str | None]:
+    """A BC / five-digit-year literal under a date or zone transform (D65)."""
+    if not transform.startswith(ASSUME_TIMEZONE_PREFIX):
+        return text, None
+    from connectors.sql_temporal import input_has_timezone, is_bc_temporal_literal
+
+    if input_has_timezone(text):
+        return text, None
+    zone = transform[len(ASSUME_TIMEZONE_PREFIX):].strip()
+    if zone.upper() in {"UTC", "ETC/UTC", "Z", "GMT", "ETC/GMT"} and ":" in text:
+        # UTC has the same offset in every era, so the instant is exact.
+        if is_bc_temporal_literal(text):
+            body = re.sub(r"\s*\bBC\s*$", "", text, flags=re.IGNORECASE)
+            return f"{body}+00 BC", None
+        return f"{text}+00", None
+    return None, (
+        f"{text!r} is outside the years zone rules cover, so "
+        f"assume_timezone:{zone} cannot place it on the UTC timeline. "
+        "Map it to TEXT to keep the literal, or declare UTC"
+    )
+
+
 def _engine_cell_sentinel(raw: Any) -> str:
     """``missing``, ``null``, or ``""`` for a cell the reader marked specially."""
     if type(raw) is str:
@@ -2581,6 +2608,17 @@ def apply_transform(
         # through verbatim; the destination bind carries it to the PG family
         # and refuses it by name everywhere else (never a clamped 9999-12-31).
         return text.strip().lower(), None
+
+    if (
+        transform in {"date", "datetime"} or transform.startswith(ASSUME_TIMEZONE_PREFIX)
+    ):
+        from connectors.sql_temporal import beyond_python_calendar
+
+        if beyond_python_calendar(text):
+            # D65 — a BC date / five-digit year is the source's value, not an
+            # invalid date. Same rule as infinity: the destination bind
+            # (coerce_sql_temporal) keeps it or refuses it by name.
+            return _era_literal_through(text.strip(), transform)
 
     if transform == "date":
         if _is_ambiguous_mdy_dmy(text):

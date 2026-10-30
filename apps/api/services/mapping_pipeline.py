@@ -166,6 +166,25 @@ def _connector_declared_columns(source_db_type: str) -> frozenset[str]:
     return frozenset(KAFKA_ENVELOPE_TYPES)
 
 
+def _observed_all_null(schema_row: dict) -> bool:
+    """The column was sampled and every sampled value was NULL."""
+    try:
+        return float(schema_row.get("null_rate")) >= 1.0
+    except (TypeError, ValueError):
+        return False
+
+
+def _same_named(mapping: dict) -> bool:
+    """Source and target are the same column name (as DataFlow's DDL spells it)."""
+    from connectors.sql_identifiers import sanitize_identifier
+
+    src = str(mapping.get("source") or "").strip()
+    tgt = str(mapping.get("target") or "").strip()
+    if not src or not tgt:
+        return False
+    return src.casefold() == tgt.casefold() or sanitize_identifier(src).casefold() == tgt.casefold()
+
+
 def _demote_untyped_varchar_confidence(
     mappings: list[dict],
     *,
@@ -184,6 +203,13 @@ def _demote_untyped_varchar_confidence(
     ``declared_columns`` are columns the connector types itself even though
     the source is schemaless (a Kafka message without a key is an all-NULL
     ``_kafka_key``, not an unknown one — D151).
+
+    A column that was sampled and held NULL in every sampled row is not an
+    unknown placeholder either: it was observed, and NULL onto a text target
+    loses nothing whatever the type turns out to be. An incremental Kafka run
+    maps on the few messages it reads; one whose field was ``null`` in all of
+    them was capped under the Map floor and the run loaded 0 rows (D151, the
+    cap the envelope exemption above had answered only for ``_kafka_key``).
     """
     by_name = {s["name"]: s for s in (source_schemas or [])}
     text_logicals = {"string", "text", "varchar", "unknown"}
@@ -199,6 +225,14 @@ def _demote_untyped_varchar_confidence(
             source_types_authoritative or str(m.get("source") or "") in declared_columns
         ) and logical != "unknown"
         if catalog_typed and target_logical in text_logicals:
+            refined.append(out)
+            continue
+        if target_logical in {"string", "text", "varchar"} and (
+            _observed_all_null(src) or _same_named(out)
+        ):
+            # NULL onto text loses nothing; nor does any value onto a text
+            # column of the same name: missing samples say nothing about the
+            # pair (D159, "ambiguous mapping name->name (gap 0.94)").
             refined.append(out)
             continue
         if logical in text_logicals and not samples:
@@ -284,6 +318,16 @@ def _passthrough_identity_transform(
     same_family = src_logical == tgt_logical or (
         src_logical in _TEXT_CARRIER_LOGICALS and tgt_logical in _TEXT_CARRIER_LOGICALS
     )
+    if not same_family and src_logical == "objectid":
+        # An ObjectId's defined text carrier is its 24 hex characters
+        # (VARCHAR(24) / CHAR(24) / TEXT). Landing ``_id`` there is a byte copy,
+        # not a family change: keeping ``trim_id`` graded it ``mutate`` at 0.70
+        # and held every Mongo collection at G4 (D197).
+        from services.type_system import specialty_wire_preserves_value
+
+        same_family = tgt_logical in _TEXT_CARRIER_LOGICALS and bool(
+            specialty_wire_preserves_value("OBJECTID", tgt_type)
+        )
     return "none" if same_family else transform
 
 
@@ -663,7 +707,9 @@ def validate_mappings(mappings: list[dict], *, confidence_threshold: float = 0.8
     }
 
 
-def assert_mappings_executable(mappings: list[dict] | None) -> None:
+def assert_mappings_executable(
+    mappings: list[dict] | None, *, review: bool = True
+) -> None:
     """Hard-block Execute when any mapping still requires operator review.
 
     ``user_override`` / ``approved`` clear the block after an explicit Studio
@@ -685,6 +731,9 @@ def assert_mappings_executable(mappings: list[dict] | None) -> None:
     hydrated = hydrate_mappings_risk_contracts(list(mappings or []))
     if isinstance(mappings, list):
         mappings[:] = hydrated
+    if not review:
+        # Signed above; the caller reviews the plan this run will write.
+        return
     work = hydrated
 
     pending: list[str] = []
@@ -904,6 +953,7 @@ def run_mapping_pipeline(
         None if destination_table_exists is False else target_schemas
     )
 
+    present_empty_text: set[str] = set()
     if source_samples and source_columns:
         from services.data_profiler import merge_profiler_schema, profile_dataset
         from services.value_serializer import (
@@ -980,6 +1030,16 @@ def run_mapping_pipeline(
                 source_carriers_sampled=destination_carriers_are_inferred(
                     source_db_type
                 ),
+            )
+            # A BSON / Kafka JSON / DynamoDB S string is declared text — the
+            # profile of its rendered value must not re-type it (D190 / D194).
+            from services.schema_inference import honor_declared_strings
+
+            merged_schema = honor_declared_strings(
+                merged_schema,
+                {s["name"]: s.get("inferred_type", "VARCHAR") for s in (source_schemas or [])},
+                source_samples,
+                source_db_type,
             )
             # profile_dataset returns columns as name→profile dict — attach for
             # Map strip (null%/min/max/observed DECIMAL scale), not type invent only.
@@ -1163,6 +1223,13 @@ def run_mapping_pipeline(
 
     schema_by_name = {s["name"]: s for s in (source_schemas or [])}
     target_by_name = {s["name"]: s for s in (target_schemas or [])}
+    # A text carrier is the source's own declaration on a catalog engine and on
+    # a self-describing one (BSON / Kafka JSON / DynamoDB S strings); only a
+    # file header's VARCHAR is a placeholder samples may type (D190 / D194).
+    from services.schema_inference import is_self_describing_source
+
+    self_describing_source = is_self_describing_source(source_db_type or "")
+    text_declared_by_source = source_types_authoritative or self_describing_source
 
     enriched_mappings = []
     for m in pruned:
@@ -1396,7 +1463,11 @@ def run_mapping_pipeline(
         # this pipeline charging for its own guess. The operator can still pick a
         # typed column — then the contract covers a decision they made.
         typed_stamp_has_evidence = not declared_untyped_text or (
-            bool(col_samples) and not (source_types_authoritative and intentional_create)
+            bool(col_samples)
+            and not (text_declared_by_source and intentional_create)
+            # A BSON / Kafka JSON / DynamoDB S string is text on every run,
+            # including the overwrite that recreates run 1's table (D190/D194).
+            and not self_describing_source
         )
         # Slash dates that Auto cannot settle (01/02/2024) are not evidence
         # for DATE dest. The operator sets DMY/MDY; we do not invent one.
@@ -1435,7 +1506,7 @@ def run_mapping_pipeline(
         if (
             intentional_create
             and not pending_dest
-            and source_types_authoritative
+            and text_declared_by_source
             and declared_untyped_text
             and not operator_stamp
             and tgt_type
@@ -1575,7 +1646,10 @@ def run_mapping_pipeline(
         enriched_mappings,
         source_schemas=source_schemas,
         source_types_authoritative=source_types_authoritative,
-        declared_columns=_connector_declared_columns(source_db_type),
+        # A sampled '' / ' ' cell on a self-describing source is a string the
+        # source sent, not missing evidence: the column is declared text.
+        declared_columns=_connector_declared_columns(source_db_type)
+        | (frozenset(present_empty_text) if self_describing_source else frozenset()),
     )
     quality_issues = detect_cross_field_issues(enriched_mappings, source_schemas=source_schemas)
 

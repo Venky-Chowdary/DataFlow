@@ -17,6 +17,13 @@ from services.preflight_source_catalog import load_source_foreign_keys
 logger = logging.getLogger(__name__)
 
 
+def _dest_probe_config(destination_config: Any) -> dict[str, Any]:
+    """The destination config with its TLS / driver keywords on top level."""
+    from connectors.generic_sql import with_connection_options
+
+    return with_connection_options(dict(destination_config or {}))
+
+
 def apply_constraint_findings(
     out: dict[str, Any],
     ctx: Any,
@@ -40,6 +47,8 @@ def apply_constraint_findings(
     acknowledgment_actor: str,
     acknowledgment_reason: str,
     dest_kind: str,
+    destination_config: Any = None,
+    destination_connector_id: str = "",
 ) -> None:
     """FK / CHECK constraint findings, sample + population orphan probes (D112)."""
     from services.preflight_rules import enrich_blockers
@@ -66,6 +75,7 @@ def apply_constraint_findings(
 
         # Prefer source-introspected FKs for orphan probe (sample is source rows).
         probe_fks = list(destination_foreign_keys or [])
+        src_fks: list[dict[str, Any]] = []
         try:
             from services.procedure_source import is_callable_source
 
@@ -95,12 +105,24 @@ def apply_constraint_findings(
                 "source FK introspect skipped: %s", src_fk_exc, exc_info=src_fk_exc
             )
 
+        # A destination FK names a parent table that lives in the
+        # destination, so its parent keys are looked up there. Probing the
+        # source for it failed closed on every source that lacks the parent
+        # ("no such table"), even when every key is present (D112-FK).
+        probe_on_dest = probe_fks is not src_fks and bool(
+            destination_config or destination_connector_id
+        )
         orphan_report = probe_sample_fk_orphans(
             sample_rows=sample_rows,
             mappings=list(mappings or []),
             foreign_keys=probe_fks,
-            source_connector_id=source_connector_id or "",
-            source_config=source_config,
+            source_connector_id=(
+                (destination_connector_id or "") if probe_on_dest
+                else (source_connector_id or "")
+            ),
+            source_config=(
+                _dest_probe_config(destination_config) if probe_on_dest else source_config
+            ),
             validation_mode=validation_mode,
             fk_risk_acknowledged=bool(fk_risk_acknowledged),
         )
@@ -207,7 +229,11 @@ def apply_constraint_findings(
             )
             viol = int(check_report.get("violating_count") or 0)
             if viol:
-                sev = "error" if validation_mode in {"strict", "maximum"} else "warning"
+                # The destination refuses these rows in every validation mode:
+                # a warning under balanced let the run start and fail after
+                # Confirm on the raw CheckViolation (or, while overwrite still
+                # rebuilt the table, land the row with the CHECK gone — D195).
+                sev = "error"
                 offenders = "; ".join(
                     f"row {v.get('row_index')}: {v.get('constraint')} "
                     f"{v.get('values')}"
@@ -216,9 +242,8 @@ def apply_constraint_findings(
                 check_msg = (
                     f"{viol} source row(s) violate destination CHECK "
                     f"constraint(s) — {offenders}. "
-                    "Confirm writes them and the destination rejects "
-                    "them; map them out, fix the source, or let "
-                    "quarantine carry them."
+                    "The destination rejects them, so the run would fail "
+                    "after Confirm; fix the source rows or map them out."
                 )
                 findings.append(
                     {

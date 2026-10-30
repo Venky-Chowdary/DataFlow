@@ -57,9 +57,10 @@ def test_timestamp_narrowed_to_date_stays_conflicted(destination_db_type: str) -
     )
 
 
-@pytest.mark.parametrize(
-    ("source_type", "target_type"),
-    [("INTEGER", "DECIMAL(12,2)"), ("VARCHAR(64)", "TEXT")],
-)
-def test_other_widenings_stay_promotions(source_type: str, target_type: str) -> None:
-    assert _classify(source_type, target_type) == "safe_type_promotion"
+def test_other_widenings_stay_promotions() -> None:
+    assert _classify("INTEGER", "DECIMAL(12,2)") == "safe_type_promotion"
+
+
+def test_varchar_onto_unbounded_text_is_the_same_carrier() -> None:
+    """VARCHAR onto TEXT is the text carrier itself, the exact band (D159)."""
+    assert _classify("VARCHAR(64)", "TEXT") == "exact_name_type"

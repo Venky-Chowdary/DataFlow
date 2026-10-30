@@ -552,6 +552,7 @@ from .job_quarantine import (  # noqa: E402,F401 — re-export
 )
 from .engine_kafka import (  # noqa: E402
     commit_kafka_offsets_on_accept,
+    kafka_nothing_past_committed,
     stamp_kafka_source,
 )
 from .engine_identity import (  # noqa: E402,F401 — re-export
@@ -747,7 +748,13 @@ class UniversalTransferEngine:
         """Run a tracked transfer under the workspace's connector egress policy."""
         from services.egress_guard import egress_workspace
 
-        with egress_workspace(str(request.workspace_id or "")):
+        from services.endpoint_session import endpoint_session_scope
+
+        # One SFTP login per endpoint for the whole job (D189): listing, stat,
+        # spill, preview and probes share it. Database sessions stay the job's.
+        with egress_workspace(str(request.workspace_id or "")), endpoint_session_scope(
+            engines=("sftp",)
+        ):
             return self._execute_tracked_in_workspace(request, job_id, resume)
 
     def _execute_tracked_in_workspace(
@@ -1019,7 +1026,15 @@ class UniversalTransferEngine:
                 getattr(request, "sync_mode", "") or "",
                 getattr(request, "source", None),
             )
-            assert_mappings_executable(request.mappings)
+            from src.transfer.engine_schema_propagation import (
+                _mapping_review_waits_for_evolution,
+            )
+
+            # Approved evolution: reviewed on the evolved plan (D200).
+            assert_mappings_executable(
+                request.mappings,
+                review=not _mapping_review_waits_for_evolution(request),
+            )
         except (ValueError, DeliveryGuaranteeError, ExactlyOnceRouteError) as mapping_exc:
             mongo = get_mongodb_service()
             mongo.update_job_status(
@@ -3070,6 +3085,8 @@ class UniversalTransferEngine:
                 initial_batch = None
             if request.limit > 0 and total_rows is not None:
                 total_rows = min(total_rows, request.limit)
+            if kafka_nothing_past_committed(request, total_rows):
+                return incremental_no_op_result(request, job_id, None)
             if total_rows == 0 and not columns:
                 mongo.update_job_status(
                     job_id, "failed", error="Source table is empty", phase="failed"

@@ -154,6 +154,16 @@ def _as_int(value: Any, fallback: int) -> int:
         return fallback
 
 
+def _destination_probe(kwargs: dict[str, Any]) -> bool:
+    """A destination read reports the physical column, never its rows' look.
+
+    The writer binds into the catalog type. A ``text`` column of run 1's table
+    holding ``'t'`` / ``'20240101'`` refined to BOOLEAN / DATE made run 2 plan a
+    lossy TEXT → BOOLEAN cast into a column that is TEXT (D190 / D194).
+    """
+    return str(kwargs.get("introspect_purpose") or "").strip().lower() == "destination"
+
+
 def _refine_columns_by_samples(
     conn: Any,
     columns: list[dict],
@@ -339,6 +349,7 @@ def _introspect_schema_unscoped(
     private_key: str = "",
     strict_namespace: bool = False,
     reader_cfg: dict[str, Any] | None = None,
+    introspect_purpose: str = "",
     **options: Any,
 ) -> dict[str, Any]:
     """Load tables/columns for ``table`` in the requested database/schema.
@@ -364,6 +375,9 @@ def _introspect_schema_unscoped(
     # planned engine does not inherit a live schema probe.
     if db_type in {"timescaledb", "timescale"}:
         db_type = "postgresql"
+    # MariaDB is the MySQL catalog (same INFORMATION_SCHEMA, same driver).
+    if db_type in {"mariadb", "maria"}:
+        db_type = "mysql"
     if ssl is None:
         # A caller that never said anything about TLS must not make it mandatory.
         from services.connector_store import default_ssl
@@ -412,6 +426,7 @@ def _introspect_schema_unscoped(
             strict_namespace=strict_namespace,
             # Redshift constraints are informational — mark advisory like BQ.
             advisory_keys=(db_type == "redshift"),
+            introspect_purpose=introspect_purpose,
             **options,
         )
     if db_type == "snowflake":
@@ -428,6 +443,7 @@ def _introspect_schema_unscoped(
             auth_role=auth_role,
             private_key=private_key,
             strict_namespace=strict_namespace,
+            introspect_purpose=introspect_purpose,
         )
     if db_type == "mysql":
         return _introspect_mysql(
@@ -441,6 +457,7 @@ def _introspect_schema_unscoped(
             table=table,
             schema=schema,
             strict_namespace=strict_namespace,
+            introspect_purpose=introspect_purpose,
             **options,
         )
     if db_type in ("oracle", "oracle_db", "amazon_rds_oracle"):
@@ -592,14 +609,17 @@ def _introspect_schema_unscoped(
     if db_type in ("s3", "amazon_s3"):
         return _introspect_object_store("s3", host=host, database=database, table=table, schema=schema, **{
             "username": username, "password": password, "connection_string": connection_string,
+            "port": port, "ssl": ssl, "store_cfg": reader_cfg, "options": options,
         })
     if db_type in ("gcs", "google_cloud_storage"):
         return _introspect_object_store("gcs", host=host, database=database, table=table, schema=schema, **{
             "username": username, "password": password, "connection_string": connection_string,
+            "port": port, "ssl": ssl, "store_cfg": reader_cfg, "options": options,
         })
     if db_type in ("adls", "azure_blob", "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage"):
         return _introspect_object_store("adls", host=host, database=database, table=table, schema=schema, **{
             "username": username, "password": password, "connection_string": connection_string,
+            "port": port, "ssl": ssl, "store_cfg": reader_cfg, "options": options,
         })
     if db_type == "redis":
         return _introspect_redis(host=host, port=port, password=password, table=table, connection_string=connection_string)
@@ -713,6 +733,72 @@ def _introspect_sftp(
     }
 
 
+#: Driver types whose introspection is an object read (bucket + key).
+OBJECT_STORE_INTROSPECT_TYPES = frozenset({
+    "s3", "amazon_s3", "gcs", "google_cloud_storage", "adls", "azure_blob",
+    "azure_blob_storage", "azure_data_lake", "azure_data_lake_storage",
+})
+
+
+def is_object_store_type(db_type: str) -> bool:
+    return str(db_type or "").strip().lower() in OBJECT_STORE_INTROSPECT_TYPES
+
+
+#: Connector keys an object-store client is built from (connectors.aws_common).
+_OBJECT_STORE_DIAL_KEYS = (
+    "endpoint_url",
+    "path_style",
+    "region",
+    "use_default_aws_credentials",
+    "workspace_id",
+    "account_name",
+    "account_key",
+    "project_id",
+    "credentials_json",
+)
+
+
+def object_store_dial_cfg(
+    store_cfg: dict[str, Any] | None,
+    options: dict[str, Any] | None,
+    *,
+    host: str,
+    port: Any,
+    ssl: bool | None,
+    database: str,
+    username: str,
+    password: str,
+    connection_string: str,
+) -> dict[str, Any]:
+    """The config an object-store read dials, built like the Execute reader's.
+
+    ``store_cfg`` is the resolved connector config (callers pass it as
+    ``reader_cfg``); its port, TLS flag and endpoint keys are what Test and the
+    Execute reader dial. Endpoint keys passed through ``options`` are kept too.
+    """
+    full = dict(store_cfg) if isinstance(store_cfg, dict) else {}
+    extra = full.get("extra") if isinstance(full.get("extra"), dict) else {}
+    cfg: dict[str, Any] = {}
+    for source in (options or {}, extra, full):
+        for key in _OBJECT_STORE_DIAL_KEYS:
+            if source.get(key) not in (None, ""):
+                cfg[key] = source[key]
+    cfg.update({
+        "host": host,
+        "database": database,
+        "username": username,
+        "password": password,
+        "connection_string": connection_string,
+    })
+    # Only the connector's own port. Callers without the config pass a
+    # placeholder default (5432) that would invent ``http://us-east-1:5432``.
+    if full.get("port") not in (None, "", 0, "0"):
+        cfg["port"] = full["port"]
+    if full.get("ssl") is not None:
+        cfg["ssl"] = bool(full["ssl"])
+    return cfg
+
+
 def _introspect_object_store(
     store_type: str,
     *,
@@ -723,15 +809,27 @@ def _introspect_object_store(
     username: str = "",
     password: str = "",
     connection_string: str = "",
+    port: Any = None,
+    ssl: bool | None = None,
+    store_cfg: dict[str, Any] | None = None,
+    options: dict[str, Any] | None = None,
     **_: Any,
 ) -> dict[str, Any]:
-    cfg = {
-        "host": host,
-        "database": database,
-        "username": username,
-        "password": password,
-        "connection_string": connection_string,
-    }
+    # D142 — the object read dials the same endpoint Test and the reader do.
+    # This cfg used to carry host/credentials only: the port, the Endpoint URL
+    # field and path-style addressing were dropped, so ``127.0.0.1`` + a custom
+    # port resolved to no endpoint and boto went to AWS.
+    cfg = object_store_dial_cfg(
+        store_cfg,
+        options,
+        host=host,
+        port=port,
+        ssl=ssl,
+        database=database,
+        username=username,
+        password=password,
+        connection_string=connection_string,
+    )
     bucket = database or ""
     key = table or ""
     prefix = schema or ""
@@ -863,7 +961,9 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             check_meta: dict[str, Any] | None = None
             indexes_meta: dict[str, Any] | None = None
             if target:
-                columns = _pg_fetch_columns(cur, schema, target)
+                columns = _pg_fetch_columns(
+                    cur, schema, target, measure_decimals=not _destination_probe(kwargs)
+                )
                 # Table may live outside the requested schema (common when UI
                 # schema is blank / wrong but database+table are correct).
                 # Destination probes must NOT do this — wrong-schema columns
@@ -885,12 +985,17 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                         (target, schema),
                     )
                     for found_schema, found_table in cur.fetchall() or []:
-                        columns = _pg_fetch_columns(cur, found_schema, found_table)
+                        columns = _pg_fetch_columns(
+                            cur,
+                            found_schema,
+                            found_table,
+                            measure_decimals=not _destination_probe(kwargs),
+                        )
                         if columns:
                             resolved_schema = found_schema
                             target = found_table
                             break
-                if columns:
+                if columns and not _destination_probe(kwargs):
                     columns = _refine_columns_by_samples(
                         conn, columns, target, resolved_schema
                     )
@@ -1159,7 +1264,15 @@ def _introspect_snowflake(**kwargs) -> dict[str, Any]:
                 col_rows = snowflake_physical_column_rows(
                     cur, schema, str(target_table)
                 )
-                if not col_rows and not bool(kwargs.get("strict_namespace")):
+                # A destination stays in the operator's namespace: a table of
+                # the same name in another schema is not where the run writes,
+                # and the cross-schema search runs on the warehouse (a 5-10s
+                # resume when suspended) for every NEW destination table (D187).
+                if (
+                    not col_rows
+                    and not bool(kwargs.get("strict_namespace"))
+                    and str(kwargs.get("introspect_purpose") or "") != "destination"
+                ):
                     cur.execute(
                         """
                         SELECT table_schema, table_name
@@ -1456,7 +1569,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         dest_db="mysql",
                     )
                     columns.append(col_my)
-                if columns:
+                if columns and not _destination_probe(kwargs):
                     columns = _refine_columns_by_samples(
                         conn, columns, target, db_name, quote_char="`"
                     )
@@ -1914,7 +2027,9 @@ def _fetch_foreign_keys(
     return [fk.to_dict() for fk in measured.items], measured.to_dict()
 
 
-def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
+def _pg_fetch_columns(
+    cur: Any, schema: str, table: str, *, measure_decimals: bool = True
+) -> list[dict]:
     """Read column metadata via ``format_type`` so typmod (vector dim, decimal p,s) survives."""
     try:
         cur.execute(_PG_COLUMN_SQL, (schema, table))
@@ -2015,7 +2130,12 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
         )
         columns.append(col_pg)
     apply_identity_probe("postgresql", cur, schema, table, columns)
-    _measure_unconstrained_decimals(cur, schema, table, columns)
+    if measure_decimals:
+        # A destination's bare ``numeric`` is the carrier the writer binds
+        # into, and it is unbounded. Measuring its rows reported run 1's data
+        # (DECIMAL(9,6)) as the carrier and refused run 2's larger values
+        # as a collapse into a column that holds them (D68).
+        _measure_unconstrained_decimals(cur, schema, table, columns)
     return columns
 
 
@@ -2853,9 +2973,13 @@ def _sample_logical_type(value: Any, key: str = "") -> str:
     if isinstance(value, dict):
         return "OBJECT"
     if isinstance(value, str):
-        from services.schema_inference import infer_column
+        from services.schema_inference import declared_string_logical_type
 
-        inferred = str(infer_column([value], field_name=key)["logical_type"])
+        # A BSON string is a declared string: BSON has its own int, double and
+        # bool types, so text that merely looks like one ('t', '0012',
+        # '20240101') stays text (D190 / D194). Formatted literals (ISO
+        # instant, UUID, JSON text) keep their recognised carrier.
+        inferred = declared_string_logical_type([value], field_name=key)
         if inferred == "JSON":
             return "OBJECT"
         if inferred == "VARCHAR":
@@ -3176,6 +3300,8 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                 col["inferred_type"] = "TEXT"
             # Re-infer from samples only when majority vote stayed textual / weak —
             # never overwrite a high-confidence sticky numeric/date/structural type.
+            # The cells were BSON strings, so the declared-string rule applies:
+            # never a number / boolean / digit-temporal (D190 / D194).
             samples = [s for s in (col.get("samples") or []) if str(s).strip()]
             if (
                 len(samples) >= 2
@@ -3183,15 +3309,10 @@ def _introspect_mongodb(**kwargs) -> dict[str, Any]:
                 and col["inferred_type"] in _TEXTUAL_TYPES
             ):
                 try:
-                    from services.schema_inference import infer_column
+                    from services.schema_inference import declared_string_logical_type
 
-                    intel = infer_column(samples, field_name=col["name"])
-                    logical = str(intel.get("logical_type") or col["inferred_type"])
-                    if logical == "VARCHAR":
-                        logical = "TEXT"
-                    # Never narrow a sticky OBJECT/ARRAY with scalar-only re-infer.
-                    if col["inferred_type"] not in _STRUCTURAL_TYPES:
-                        col["inferred_type"] = logical
+                    logical = declared_string_logical_type(samples, field_name=col["name"])
+                    col["inferred_type"] = "TEXT" if logical == "VARCHAR" else logical
                 except Exception:
                     logger.debug("Mongo sample re-infer failed for %s", col.get("name"), exc_info=True)
         return {"ok": True, "tables": tables, "columns": list(columns.values()), "schema": db_name}
@@ -3227,7 +3348,10 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
         try:
             from connectors.dynamodb_reader import read_table_batch
 
-            from services.schema_inference import infer_schema_map
+            from services.schema_inference import (
+                declared_string_logical_type,
+                infer_schema_map,
+            )
 
             sample, _ = read_table_batch(cfg=cfg, table=table, limit=50)
             if sample.headers:
@@ -3251,7 +3375,16 @@ def _introspect_dynamodb(**kwargs) -> dict[str, Any]:
                 inferred_map, _intel = infer_schema_map(samples_by_col)
                 for name in names:
                     if name in inferred_map and (types.get(name) in {"TEXT", "VARCHAR", "S"} or name not in types):
-                        types[name] = inferred_map[name]
+                        # A typed-text name was declared S (AttributeDefinitions
+                        # or the sampled AttributeValue). DynamoDB has N and
+                        # BOOL, so '0012' / 't' stay text (D190 / D194).
+                        types[name] = (
+                            declared_string_logical_type(
+                                samples_by_col.get(name) or [], field_name=name
+                            )
+                            if name in types
+                            else inferred_map[name]
+                        )
         except Exception:
             logger.warning("DynamoDB sample inference failed for %s", table, exc_info=True)
 
@@ -4320,13 +4453,14 @@ def _kafka_value_to_logical(value: Any) -> str:
         return "ARRAY"
     if isinstance(value, str):
         try:
-            from services.schema_inference import infer_column
+            from services.schema_inference import declared_string_logical_type
 
-            inferred = str(infer_column([value], field_name="")["logical_type"] or "")
-            # A JSON string is not a LOB. Collapsing VARCHAR → TEXT made
-            # Validate fingerprint TEXT (pass-through) while Execute
-            # rematerialized LOGICAL_TEXT → MySQL LONGTEXT / Oracle CLOB.
-            return inferred or "VARCHAR"
+            # JSON spells numbers and booleans itself, so a JSON *string* that
+            # looks like one ("20240101", "0012", "t") is declared text, not
+            # an INTEGER / TIMESTAMP / BOOLEAN (D190). A JSON string is not a
+            # LOB either: collapsing VARCHAR → TEXT made Validate fingerprint
+            # TEXT while Execute rematerialized MySQL LONGTEXT / Oracle CLOB.
+            return declared_string_logical_type([value], field_name="") or "VARCHAR"
         except Exception:
             return "VARCHAR"
     return "TEXT"
@@ -4679,6 +4813,42 @@ def _introspect_weaviate(**kwargs: Any) -> dict[str, Any]:
         "tables": names or [str(match.get("class"))],
         "schema": str(match.get("class") or class_name),
     }
+
+
+def catalog_read_back(dest_db: str, physical: str) -> str:
+    """The ``inferred_type`` this module's introspection reports for ``physical``.
+
+    Introspection hands back a logical lattice type, not the DDL spelling: an
+    Oracle ``CLOB`` reads back as ``TEXT``. Anything that must recognise a type
+    DataFlow itself created (run 2 into its own table) compares against this,
+    not against the CREATE spelling (D198). Engines without a catalog mapper
+    here read back the physical spelling unchanged.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+
+    db = _normalize_dest_db(dest_db)
+    raw = str(physical or "").strip()
+    if not raw:
+        return ""
+    if "oracle" in db:
+        from services.schema_introspect_enterprise import _oracle_to_logical
+
+        return _oracle_to_logical(raw)
+    if db == "sqlserver":
+        from services.schema_introspect_enterprise import _sqlserver_to_logical
+
+        # INFORMATION_SCHEMA spells types lower-case; the reader folds (max) in.
+        return _sqlserver_to_logical(raw.lower())
+    mapper = {
+        "postgresql": _pg_to_logical,
+        "redshift": _pg_to_logical,
+        "mysql": _mysql_to_logical,
+        "bigquery": _bq_to_logical,
+        "clickhouse": _ch_to_logical,
+        "snowflake": _sf_to_logical,
+    }.get(db)
+    return mapper(raw) if mapper else raw
+
 
 _ENTERPRISE_INTROSPECT_EXPORTS = frozenset(
     {

@@ -8,6 +8,7 @@ import hashlib
 import logging
 import os
 import re
+import threading
 from collections.abc import Mapping
 from typing import Any
 
@@ -517,7 +518,12 @@ def _open_sftp_transport(cfg: SFTPConfig) -> Any:
         )
     last_exc: Exception | None = None
     for index, opts in enumerate(attempts):
-        sock = socket.create_connection((cfg.host, int(cfg.port or 22)), timeout=30)
+        from src.ai.copilot.tool_deadline import remaining_seconds
+
+        left = remaining_seconds()
+        # Inside a tool call the handshake may not outlive the call (D169).
+        wait = 30.0 if left is None else max(2.0, min(30.0, left))
+        sock = socket.create_connection((cfg.host, int(cfg.port or 22)), timeout=wait)
         transport_kwargs: dict[str, Any] = {
             "strict_kex": opts["strict_kex"],
             "server_sig_algs": opts["server_sig_algs"],
@@ -530,7 +536,7 @@ def _open_sftp_transport(cfg: SFTPConfig) -> Any:
         try:
             if opts["legacy"]:
                 _enable_legacy_ssh(transport)
-            transport.start_client(timeout=30)
+            transport.start_client(timeout=wait)
             verify_host_key(cfg, transport)
             return transport
         except RuntimeError:
@@ -576,13 +582,99 @@ def _handshake_closed_before_auth(cfg: SFTPConfig, exc: BaseException) -> Runtim
     )
 
 
+class _SharedTransport:
+    """One authenticated SSH transport shared by an endpoint scope (D189).
+
+    A single ``start_transfer`` from SFTP logged in again for every listing,
+    stat, spill download, preview and uniqueness probe (ten logins on the local
+    test server, more than a hundred in QA's run). Each login is a TCP
+    handshake, a key exchange and an authentication. Inside an endpoint scope
+    the logins share one transport; every consumer still gets its own SFTP
+    channel, and a transport the server dropped is reopened once.
+    """
+
+    def __init__(self, open_fn) -> None:
+        self._open = open_fn
+        self._lock = threading.Lock()
+        self.transport = open_fn()
+
+    def live(self) -> Any:
+        with self._lock:
+            if not self.transport.is_active():
+                self.transport = self._open()
+            return self.transport
+
+    def shut(self) -> None:
+        with self._lock:
+            try:
+                self.transport.close()
+            except Exception:  # noqa: BLE001 - closing must never raise
+                logger.debug("shared SFTP transport close failed", exc_info=True)
+
+
+class _BorrowedTransport:
+    """What a consumer holds: the shared transport, whose ``close`` is the scope's."""
+
+    def __init__(self, transport: Any) -> None:
+        self._transport = transport
+
+    def close(self) -> None:
+        """The endpoint scope closes the login."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._transport, name)
+
+
 def connect_sftp(cfg: SFTPConfig):
-    """Return (transport, sftp) client pair using paramiko, host key verified."""
+    """Return (transport, sftp) client pair using paramiko, host key verified.
+
+    Inside an endpoint scope the authenticated transport is shared per
+    endpoint (see :class:`_SharedTransport`).
+    """
     try:
         import paramiko
     except Exception as exc:
         raise RuntimeError(f"paramiko is not installed: {exc}") from exc
 
+    from services.endpoint_session import borrow, in_scope
+
+    if in_scope("sftp"):
+        secret = hashlib.sha256(
+            f"{cfg.password}\0{getattr(cfg, 'private_key', '')}".encode()
+        ).hexdigest()
+        key = (
+            str(cfg.host).lower(),
+            int(cfg.port or 22),
+            str(cfg.username),
+            secret,
+            str(getattr(cfg, "host_key", "") or ""),
+            str(getattr(cfg, "known_hosts", "") or ""),
+            str(getattr(cfg, "host_key_policy", "") or ""),
+        )
+        shared, _release = borrow(
+            "sftp",
+            key,
+            lambda: _SharedTransport(lambda: _authenticated_transport(cfg, paramiko)),
+            close=lambda s: s.shut(),
+            shared=True,
+        )
+        transport = shared.live()
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        if sftp is None:
+            raise RuntimeError("Could not open SFTP client")
+        return _BorrowedTransport(transport), sftp
+    transport = _authenticated_transport(cfg, paramiko)
+    try:
+        sftp = paramiko.SFTPClient.from_transport(transport)
+        if sftp is None:
+            raise RuntimeError("Could not open SFTP client")
+    except Exception:
+        transport.close()
+        raise
+    return transport, sftp
+
+
+def _authenticated_transport(cfg: SFTPConfig, paramiko: Any) -> Any:
     pkey = load_private_key(cfg)
 
     transport = _open_sftp_transport(cfg)
@@ -595,13 +687,10 @@ def connect_sftp(cfg: SFTPConfig):
             raise RuntimeError(
                 "SFTP requires a password or private key for authentication."
             )
-        sftp = paramiko.SFTPClient.from_transport(transport)
-        if sftp is None:
-            raise RuntimeError("Could not open SFTP client")
     except Exception:
         transport.close()
         raise
-    return transport, sftp
+    return transport
 
 
 def test_sftp(

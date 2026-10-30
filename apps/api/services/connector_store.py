@@ -526,9 +526,24 @@ def _save_all(connectors: list[SavedConnector]) -> None:
         payload.append(_encrypt_connector_doc(c.to_dict()))
     text = json.dumps({"connectors": payload}, indent=2, default=json_default)
     # Atomic write so a crash mid-write cannot leave a half-written file.
-    tmp = store_path.with_suffix(store_path.suffix + ".tmp")
-    tmp.write_text(text, encoding="utf-8")
-    tmp.replace(store_path)
+    # One temp file per writer: concurrent saves (parallel test_connector
+    # calls stamp their result) shared one ``.tmp`` name, and the second
+    # ``replace`` found it already moved (FileNotFoundError, D181 run).
+    import tempfile
+
+    fd, tmp_name = tempfile.mkstemp(
+        prefix=store_path.name + ".", suffix=".tmp", dir=str(store_path.parent)
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp_name, store_path)
+    except BaseException:
+        try:
+            os.unlink(tmp_name)
+        except OSError:
+            pass
+        raise
 
 
 def _seed_enabled() -> bool:

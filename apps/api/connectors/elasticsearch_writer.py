@@ -207,6 +207,9 @@ def _to_es_value(value: Any, source_type: str) -> Any:
     handled, bound = absent_sql_bind(value)
     if handled:
         return bound
+    from services.value_serializer import document_bind_value
+
+    value = document_bind_value(value)
     # A carrier arrives parameterised (``DECIMAL(12,4)``, ``ARRAY<JSON>``) when it
     # comes from Studio/Map stamps rather than a live ES field type. Dispatch on
     # the base token so the value is coerced by its family instead of falling

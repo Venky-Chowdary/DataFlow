@@ -866,6 +866,19 @@ def _stream_database_transfer_impl(
                     },
                 )
                 run.tally.dest_summary["watermark"] = wm
+                # D188 — COPY seeds ``cursor >= watermark`` (D60/D98) and its
+                # high-water mark is the staging MAX: the same window contract
+                # as the row path, so Gate-8 judges only the rows it copied.
+                from services.incremental_drift import stamp_run_window
+
+                stamp_run_window(
+                    run.tally.dest_summary,
+                    cursor=run.cfg.cursor_source_col,
+                    pk=run.cfg.cursor_pk_source or "",
+                    seed=pre_copy_watermark,
+                    seed_inclusive=True,
+                    high=wm,
+                )
                 # D110 — if verification removes this run's batch, the route
                 # watermark must roll back to this pre-run value.
                 run.tally.dest_summary.setdefault(
@@ -990,6 +1003,12 @@ def _stream_database_transfer_impl(
         refuse_unusable_cursor_state(
             scope, run.cfg.dest_type, run.cfg.dest_cfg, resolve_dest_table(run.cfg.dest_type, run.cfg.destination, run.cfg.table)
         )
+        from .engine_kafka import kafka_offsets_bound_the_read
+
+        if kafka_offsets_bound_the_read(run.cfg.src_read_type, run.cfg.src_cfg):
+            # The group's committed offsets are the delta; a per-partition
+            # _kafka_offset watermark dropped other partitions' new messages.
+            run.cfg.watermark = None
     # A source whose read call cannot carry the cursor bound (Redis SCAN, Dynamo
     # Scan, an ES search) hands its whole population over, so the bound is
     # applied to each page instead. Without it "incremental" degraded into a
@@ -2643,6 +2662,27 @@ def _stream_database_transfer_impl(
         # them (D42: "committed rows into a table that doesn't exist").
         from services.error_handling import TransferCancelled
 
+        if isinstance(_row_exc, TransferCancelled) and not getattr(_row_exc, "superseded", False):
+            # D199 — every pooled writer has stopped (the dispatcher drained
+            # them); count what the destination really holds.
+            from services.job_status import measure_cancel_landing
+
+            measure_cancel_landing(
+                _row_exc,
+                dest_type=run.cfg.dest_type,
+                dest_cfg=run.cfg.dest_cfg,
+                table=str(run.cfg.dest_table),
+                sync_mode=str(run.cfg.effective_sync or ""),
+                rows_before=run.tally.dest_summary.get(PRECOUNT_KEY),
+                table_existed_before=run.tally.dest_summary.get("dest_table_existed_before"),
+                keyed=bool(run.cfg.write_mode == "upsert" and run.cfg.pk_target_cols),
+                atomic_overwrite=bool(
+                    run.cfg.dest_type in ("postgresql", "redshift")
+                    and (getattr(run.cfg.destination, "extra", None) or {}).get(
+                        "pg_overwrite_in_transaction"
+                    )
+                ),
+            )
         if not isinstance(_row_exc, TransferCancelled):
             try:
                 from services.batch_undo import (
@@ -2903,6 +2943,24 @@ def _stream_database_transfer_impl(
         # No cursor bound or no key scope → keep the write-pass digest and
         # its honest write-confirmed label.
         _reread = False
+    # M3 / D188 — publish the exact cursor window this run selected so every
+    # Gate-8 population (the ladder's own source re-read, the destination key
+    # filter, the transform proof) is scoped to it. Before D188 only the
+    # warehouse re-read branch stamped it: a write-pass route (SQL Server ->
+    # MySQL) left the ladder comparing whole tables, so a source row edited
+    # without moving its cursor — legitimately not picked up — failed every
+    # later run as an L4/L5 mismatch.
+    if run.cfg.incremental and run.cfg.cursor_source_col and not run.cfg.sdk_source:
+        from services.incremental_drift import stamp_run_window
+
+        stamp_run_window(
+            run.tally.dest_summary,
+            cursor=run.cfg.cursor_source_col,
+            pk=run.cfg.cursor_pk_source or "",
+            seed=window_seed_bookmark,
+            seed_inclusive=window_seed_inclusive,
+            high=running_cursor,
+        )
     if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()
         final_checksum = write_pass_fp.digest()
@@ -2958,19 +3016,7 @@ def _stream_database_transfer_impl(
             _seed_cursor_part = _split_bm(
                 str(checksum_cursor_after), has_tiebreak=_seed_tiebreak
             )[0]
-        # M3 — publish the exact window the digest covers so Gate-8 scopes
-        # every other population the same way (the ladder's own source
-        # re-read and the destination key filter are unbounded without it —
-        # a whole-table digest compared to a window digest reads as a
-        # checksum mismatch on a correct run).
-        if run.cfg.incremental and checksum_cursor_col:
-            run.tally.dest_summary["incremental_window_cursor"] = checksum_cursor_col
-            run.tally.dest_summary["incremental_window_pk"] = run.cfg.cursor_pk_source or ""
-            if checksum_cursor_after not in (None, ""):
-                run.tally.dest_summary["incremental_window_seed"] = str(checksum_cursor_after)
-                run.tally.dest_summary["incremental_window_seed_inclusive"] = window_seed_inclusive
-            if checksum_cursor_max not in (None, ""):
-                run.tally.dest_summary["incremental_window_max"] = str(checksum_cursor_max)
+        # The run's window is published once, above, for every digest mode.
         use_checksum_keyset = False
         if run.cfg.incremental and checksum_cursor_col:
             use_checksum_keyset = True

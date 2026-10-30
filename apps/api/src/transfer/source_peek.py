@@ -182,7 +182,12 @@ def peek_stream_source(
             if not schema:
                 schema = {c: "string" for c in columns}
     sample_rows = [dict(zip(probe.headers, row)) for row in probe.rows[:100]]
-    result = (columns, schema, probe.total_rows, sample_rows)
+    total_rows = probe.total_rows
+    if total_rows is None and not probe.rows and (getattr(probe, "meta", None) or {}).get("final_page"):
+        # A topic read to the run's frozen log end with nothing in it: a
+        # measured 0, not an unknown size (D151).
+        total_rows = 0
+    result = (columns, schema, total_rows, sample_rows)
     return (*result, probe) if include_batch else result
 
 

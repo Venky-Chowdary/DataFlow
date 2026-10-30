@@ -262,6 +262,49 @@ def _resolved(
     }
 
 
+def _acknowledged_drift_omissions(
+    sched: PipelineSchedule,
+    request: dict[str, Any],
+    acknowledgments: dict[str, bool] | None,
+    *,
+    actor: str,
+    reason: str,
+) -> list[dict[str, Any]]:
+    """Declared-omission mapping rows for an acknowledged unmapped-column finding.
+
+    Only a source-drift finding that named its unmapped columns, approved with
+    the schema-drift attestation. A column the plan already maps or omits is
+    left alone; nothing is mapped, widened or added.
+    """
+    if str(request.get("kind") or "") != KIND_SOURCE_DRIFT:
+        return []
+    if not bool((acknowledgments or {}).get("schema_drift")):
+        return []
+    evidence = request.get("evidence") if isinstance(request.get("evidence"), dict) else {}
+    named = [str(c).strip() for c in (evidence.get("unmapped_columns") or []) if str(c).strip()]
+    covered = {
+        str(m.get("source") or "").strip().lower()
+        for m in (sched.mappings or [])
+        if isinstance(m, dict)
+    }
+    at = datetime.now(timezone.utc).isoformat()
+    out: list[dict[str, Any]] = []
+    for col in named:
+        if col.lower() in covered:
+            continue
+        covered.add(col.lower())
+        out.append({
+            "source": col,
+            "target": "",
+            "intentional_omit": True,
+            "omit_reason": "dropped_not_required",
+            "omit_reason_text": f"Schema drift acknowledged: {reason}",
+            "omit_approved_by": actor,
+            "omit_approved_at": at,
+        })
+    return out
+
+
 def approve_request(
     schedule_id: str,
     approval_id: str,
@@ -304,6 +347,20 @@ def approve_request(
             + " changed after this request was raised. Re-open the schedule and "
             "decide against what it looks like now."
         )
+
+    # A drift acknowledgement on "N source column(s) are neither mapped nor
+    # declared omitted" is the operator declaring them omitted (D119). It is
+    # recorded on the plan, so the run and every later one (G13, the drift
+    # guard) read a decision, and the signature binds the plan it approved.
+    omissions = _acknowledged_drift_omissions(
+        sched, request, acknowledgments, actor=actor, reason=reason
+    )
+    if omissions:
+        import copy
+
+        planned = copy.copy(sched)
+        planned.mappings = list(sched.mappings or []) + omissions
+        binding = binding_from_schedule(planned)
 
     grant: StandingAuthorization | None = None
     if grant_standing and not bool(request.get("approvable")):
@@ -350,6 +407,8 @@ def approve_request(
         "retry_attempt": 0,
         "last_status": "approved",
     }
+    if omissions:
+        patch["mappings"] = list(sched.mappings or []) + omissions
     if grant is not None:
         patch["standing_authorization"] = grant.to_dict()
 
@@ -369,6 +428,7 @@ def approve_request(
             "scopes": list(grant.scopes) if grant else [],
             "expires_at": grant.expires_at if grant else "",
             "binding_hash": binding.get("binding_hash", ""),
+            "declared_omitted": [m["source"] for m in omissions],
         },
     )
     _approval_event(

@@ -2371,7 +2371,10 @@ _BIND_DISPATCH: dict[str, Any] = {
     # unaffected — psycopg2 still parses jsonb into native dict/list.
     "json": lambda v, r: coerce_json_wire(v, as_text=True),
     "integer": lambda v, r: coerce_integer_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
-    "float": lambda v, r: coerce_float_wire(v, ddl_type=r.ddl_arg),
+    # The engine decides whether bare REAL is 4 or 8 bytes (SQLite / MySQL REAL
+    # is a double). Without it SQLite refused 5e-324 and 1.8e308 as "outside
+    # REAL" at write time after a green preflight (D59).
+    "float": lambda v, r: coerce_float_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
     "decimal": lambda v, r: coerce_decimal_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
     "interval": lambda v, r: coerce_interval_wire(v, ddl_type=r.ddl_arg, engine=r.eng),
     "geography": lambda v, r: coerce_geography_wire(v, ddl_type=r.ddl_arg, engine=r.eng),

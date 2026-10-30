@@ -121,9 +121,20 @@ class RedactedConfig(Mapping[str, Any]):
 
 
 def probe_config_from_endpoint(db_type: str, endpoint: Any) -> RedactedConfig:
-    """Secret-carrying probe config for an endpoint, safe to place in metadata."""
+    """Secret-carrying probe config for an endpoint, safe to place in metadata.
+
+    TLS / driver keywords the endpoint carries under ``extra`` (for example
+    SQL Server ``trust_server_certificate``) ride on top level: a probe that
+    opened a stricter handshake than the writer failed, and the destination
+    FK orphan probe refused every SQL Server run (D112).
+    """
+    from connectors.generic_sql import connection_options
+
+    extra = getattr(endpoint, "extra", None)
+    tls = connection_options(dict(extra) if isinstance(extra, dict) else {})
     return RedactedConfig(
         {
+            **tls,
             "type": db_type,
             "host": endpoint.host,
             "port": endpoint.port,

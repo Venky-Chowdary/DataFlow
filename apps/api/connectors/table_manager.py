@@ -275,6 +275,22 @@ def empty_existing_for_overwrite(
     )
 
 
+def overwrite_keeps_row_copy(db_type: str) -> bool:
+    """True when :func:`empty_existing_for_overwrite` takes the generic SQL path.
+
+    PostgreSQL empties inside the load transaction, MySQL renames aside and
+    SQLite publishes a stage table atomically; every other in-place engine
+    (SQL Server, Oracle, DuckDB and the SQL engines the generic driver serves)
+    empties with an independent commit and needs a recoverable copy.
+    """
+    from services.db_type_utils import overwrite_engine_kind
+
+    dt = overwrite_engine_kind(db_type)
+    if dt in ("postgresql", "redshift", "mysql", "mariadb", "sqlite"):
+        return False
+    return dt == "generic_sql" or _routes_generic_sql_mutate(dt)
+
+
 def _empty_postgresql(
     cfg: dict[str, Any],
     table_name: str,
@@ -408,6 +424,217 @@ def _empty_generic_sql(
                 raise TableDropError(table_name, exc) from exc
     finally:
         release_engine(engine)
+
+
+#: ``EndpointConfig.extra["overwrite_backup_engine"]`` for a row-copy backup.
+ROW_COPY_BACKUP_ENGINE = "sql_row_copy"
+
+
+def generic_overwrite_backup_name(table_name: str) -> str:
+    """Run-scoped backup identifier (63 chars: the tightest common limit)."""
+    import secrets
+
+    suffix = f"__df_bak_{secrets.token_hex(3)}"
+    return f"{str(table_name or 't')[: 63 - len(suffix)]}{suffix}"
+
+
+def _generic_dialect(cfg: dict[str, Any]) -> str:
+    return str(cfg.get("type") or cfg.get("db_type") or "ansi").lower()
+
+
+def _generic_refs(cfg: dict[str, Any], table_name: str, schema: str | None, backup: str):
+    from connectors.sql_identifiers import quote_table_ref
+
+    dialect = _generic_dialect(cfg)
+    sch = schema or cfg.get("schema")
+    return (
+        dialect,
+        quote_table_ref(table_name, sch, dialect=dialect),
+        quote_table_ref(backup, sch, dialect=dialect),
+    )
+
+
+def retire_generic_sql_overwrite(
+    db_type: str,
+    cfg: dict[str, Any],
+    table_name: str,
+    schema: str | None = None,
+) -> tuple[str, str | None]:
+    """Keep a recoverable copy of the live rows, then empty the live table.
+
+    The generic SQL writer loads an overwrite in batches that each commit, so
+    the emptied table cannot share one transaction with the load. A failure
+    part-way used to leave the destination empty or partial with nothing to
+    restore. The previous rows are copied to a run-scoped backup table first
+    (in the same transaction as the empty where the engine's DDL is
+    transactional); :func:`restore_generic_sql_overwrite` puts them back into
+    the *same* live table object on failure, so its constraints, indexes and
+    triggers stay (the D195 publish contract), and
+    :func:`discard_generic_sql_overwrite` drops the copy on success.
+
+    Returns ``(state, backup)``: ``("absent", None)`` when there is no live
+    table, ``("emptied", backup)`` otherwise. An engine that cannot copy a
+    table (no ``CREATE TABLE AS``) falls back to the plain empty and returns
+    ``("emptied", None)``.
+    """
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from services.engine_pool import release_engine
+
+    gcfg = _generic_sql_cfg(cfg, db_type)
+    backup = generic_overwrite_backup_name(table_name)
+    dialect, live_ref, bak_ref = _generic_refs(gcfg, table_name, schema, backup)
+    copy_sql = (
+        f"SELECT * INTO {bak_ref} FROM {live_ref}"
+        if dialect in {"sqlserver", "mssql"}
+        else f"CREATE TABLE {bak_ref} AS SELECT * FROM {live_ref}"
+    )
+    engine = get_sqlalchemy_engine(gcfg)
+    try:
+        with engine.connect() as conn:
+            try:
+                conn.execute(sa.text(copy_sql))  # nosec B608 - quoted identifiers
+            except Exception as exc:
+                _rollback_quietly(conn)
+                if _missing_table_error(exc):
+                    return "absent", None
+                logger.warning(
+                    "Overwrite of %s cannot keep a recoverable copy (%s); "
+                    "emptying without one",
+                    live_ref,
+                    exc,
+                )
+                return _empty_generic_sql(gcfg, table_name, schema), None
+            try:
+                # DELETE, not TRUNCATE: it is transactional everywhere and a
+                # referencing foreign key does not refuse it.
+                conn.execute(sa.text(f"DELETE FROM {live_ref}"))  # nosec B608
+                conn.commit()
+            except Exception as exc:
+                _rollback_quietly(conn)
+                _drop_quietly(conn, bak_ref)
+                raise TableDropError(table_name, exc) from exc
+        return "emptied", backup
+    finally:
+        release_engine(engine)
+
+
+def restore_generic_sql_overwrite(
+    db_type: str,
+    cfg: dict[str, Any],
+    table_name: str,
+    backup: str,
+    schema: str | None = None,
+) -> None:
+    """Put the pre-run rows back into the live table, in one transaction.
+
+    The live object is kept (rows are replaced, the table is not renamed), so
+    its constraints, indexes and triggers survive the failed run.
+    """
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from services.engine_pool import release_engine
+
+    gcfg = _generic_sql_cfg(cfg, db_type)
+    dialect, live_ref, bak_ref = _generic_refs(gcfg, table_name, schema, backup)
+    engine = get_sqlalchemy_engine(gcfg)
+    try:
+        if dialect in {"sqlserver", "mssql"}:
+            from services.dest_overwrite_swap import sqlserver_swap_staged_dest
+
+            raw = engine.raw_connection()
+            try:
+                cur = raw.cursor()
+                sqlserver_swap_staged_dest(
+                    cur,
+                    schema=str(schema or gcfg.get("schema") or "dbo"),
+                    dest_table=table_name,
+                    staging_table=backup,
+                    quote=lambda name: "[" + str(name).replace("]", "]]") + "]",
+                )
+                raw.commit()
+            except Exception:
+                try:
+                    raw.rollback()
+                except Exception:  # noqa: BLE001 - surface the original failure
+                    logger.debug("overwrite restore rollback skipped", exc_info=True)
+                raise
+            finally:
+                raw.close()
+            return
+        with engine.connect() as conn:
+            live_cols = list(conn.execute(sa.text(f"SELECT * FROM {live_ref} WHERE 1=0")).keys())  # nosec B608
+            bak_cols = {
+                str(c).casefold(): str(c)
+                for c in conn.execute(sa.text(f"SELECT * FROM {bak_ref} WHERE 1=0")).keys()  # nosec B608
+            }
+            pairs = [(bak_cols[c.casefold()], c) for c in live_cols if c.casefold() in bak_cols]
+            quote = _generic_column_quoter(dialect)
+            try:
+                conn.execute(sa.text(f"DELETE FROM {live_ref}"))  # nosec B608
+                conn.execute(  # nosec B608 - quoted identifiers
+                    sa.text(
+                        f"INSERT INTO {live_ref} ({', '.join(quote(l) for _b, l in pairs)}) "
+                        f"SELECT {', '.join(quote(b) for b, _l in pairs)} FROM {bak_ref}"
+                    )
+                )
+                conn.commit()
+            except Exception:
+                _rollback_quietly(conn)
+                raise
+            _drop_quietly(conn, bak_ref)
+    finally:
+        release_engine(engine)
+
+
+def discard_generic_sql_overwrite(
+    db_type: str,
+    cfg: dict[str, Any],
+    backup: str,
+    schema: str | None = None,
+) -> None:
+    """Drop the run's backup copy after the overwrite committed."""
+    from connectors.generic_sql import get_sqlalchemy_engine
+    from services.engine_pool import release_engine
+
+    gcfg = _generic_sql_cfg(cfg, db_type)
+    _dialect, _live_ref, bak_ref = _generic_refs(gcfg, backup, schema, backup)
+    engine = get_sqlalchemy_engine(gcfg)
+    try:
+        with engine.connect() as conn:
+            _drop_quietly(conn, bak_ref, raise_errors=True)
+    finally:
+        release_engine(engine)
+
+
+def _generic_column_quoter(dialect: str) -> Callable[[str], str]:
+    if dialect in {"mysql", "mariadb", "databricks", "bigquery"}:
+        return lambda name: quote_sql_identifier(name, "`")
+    if dialect in {"sqlserver", "mssql"}:
+        return lambda name: quote_sql_identifier(name, "[")
+    return lambda name: quote_sql_identifier(name, '"')
+
+
+def _rollback_quietly(conn: Any) -> None:
+    try:
+        conn.rollback()
+    except Exception:  # noqa: BLE001 - surface the original failure
+        logger.debug("rollback skipped", exc_info=True)
+
+
+def _drop_quietly(conn: Any, ref: str, *, raise_errors: bool = False) -> None:
+    import sqlalchemy as sa
+
+    try:
+        conn.execute(sa.text(f"DROP TABLE {ref}"))  # nosec B608 - quoted identifier
+        conn.commit()
+    except Exception as exc:
+        _rollback_quietly(conn)
+        if raise_errors and not _missing_table_error(exc):
+            raise
+        logger.warning("Could not drop overwrite backup %s: %s", ref, exc)
 
 
 def postgres_columns_to_keep(
@@ -609,37 +836,88 @@ def _mysql_tables_present(cur: Any, names: list[str]) -> set[str]:
     return {str(row[0]) for row in cur.fetchall()}
 
 
+MYSQL_ROW_BACKUP_MARK = "dataflow:overwrite-row-backup"
+
+
+def _mysql_ddl_connection(cfg: dict[str, Any]) -> Any:
+    from connectors.mysql_conn import enable_autocommit, get_connection
+
+    conn = get_connection(
+        host=cfg.get("host", "") or "127.0.0.1",
+        port=int(cfg.get("port") or 3306),
+        database=cfg.get("database", ""),
+        username=cfg.get("username", ""),
+        password=cfg.get("password", ""),
+        connection_string=cfg.get("connection_string", ""),
+        ssl=bool(cfg.get("ssl")),
+        purpose="ddl",
+    )
+    enable_autocommit(conn)
+    return conn
+
+
+def _mysql_table_comment(cur: Any, name: str) -> str:
+    cur.execute(
+        "SELECT TABLE_COMMENT FROM information_schema.TABLES "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
+        (name,),
+    )
+    row = cur.fetchone()
+    return str(row[0] or "") if row else ""
+
+
+def _mysql_stored_columns(cur: Any, name: str) -> list[str]:
+    """Columns a row copy may write (generated columns compute themselves)."""
+    cur.execute(
+        "SELECT COLUMN_NAME FROM information_schema.COLUMNS "
+        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
+        "AND EXTRA NOT LIKE %s ORDER BY ORDINAL_POSITION",
+        (name, "%GENERATED%"),
+    )
+    return [str(row[0]) for row in cur.fetchall()]
+
+
+def _mysql_copy_rows_back(cur: Any, table_name: str, backup: str) -> None:
+    """Put the backup's rows into the live table in one transaction."""
+    from connectors.sql_identifiers import quote_sql_identifier
+
+    cols = ", ".join(quote_sql_identifier(c, "`") for c in _mysql_stored_columns(cur, backup))
+    src_q = quote_sql_identifier(table_name, "`")
+    bak_q = quote_sql_identifier(backup, "`")
+    cur.execute("START TRANSACTION")
+    try:
+        cur.execute(f"DELETE FROM {src_q}")  # nosec B608
+        cur.execute(f"INSERT INTO {src_q} ({cols}) SELECT {cols} FROM {bak_q}")  # nosec B608
+        cur.execute("COMMIT")
+    except Exception:
+        cur.execute("ROLLBACK")
+        raise
+
+
 def retire_mysql_overwrite(
     cfg: dict[str, Any],
     table_name: str,
     mappings: list[Any] | None = None,
 ) -> tuple[str | None, list[dict[str, str]]]:
-    """Rename the live table aside so CREATE does not wait on its metadata lock.
+    """Copy the live rows aside, then empty the live table in place (D195).
 
-    DROP then CREATE left the table missing when CREATE hung, and cancel could
-    not unblock the session that held the statement. The original rows stay in
-    ``<table>__df_bak`` until the load finishes or the job restores them.
+    The live table object stays: its CHECK, FOREIGN KEY, NOT NULL, DEFAULT,
+    indexes, comment and triggers are the destination's, not DataFlow's.
+    Renaming it aside and letting the writer CREATE a replacement from
+    DataFlow's DDL lost all of them. MySQL ``TRUNCATE`` commits on its own,
+    so the pre-run rows are kept in ``<table>__df_bak`` (a ``CREATE TABLE
+    LIKE`` copy marked :data:`MYSQL_ROW_BACKUP_MARK`) until the load finishes;
+    a failed load copies them back.
 
-    Returns ``(backup_name or None, columns the new table must keep)``.
+    Returns ``(backup_name or None, columns the load must keep)``.
     """
-    from connectors.mysql_conn import enable_autocommit, get_connection
     from connectors.sql_identifiers import quote_sql_identifier
     from services.overwrite_keep import columns_to_keep
 
     backup = mysql_overwrite_backup_name(table_name)
     conn = None
     try:
-        conn = get_connection(
-            host=cfg.get("host", "") or "127.0.0.1",
-            port=int(cfg.get("port") or 3306),
-            database=cfg.get("database", ""),
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=bool(cfg.get("ssl")),
-            purpose="ddl",
-        )
-        enable_autocommit(conn)
+        conn = _mysql_ddl_connection(cfg)
         with conn.cursor() as cur:
             cur.execute(
                 "SELECT COLUMN_NAME, COLUMN_TYPE FROM information_schema.COLUMNS "
@@ -652,28 +930,30 @@ def retire_mysql_overwrite(
             present = _mysql_tables_present(cur, [table_name, backup])
             src_q = quote_sql_identifier(table_name, "`")
             bak_q = quote_sql_identifier(backup, "`")
-            if table_name in present and backup in present:
-                # The live name is this run's replacement and the backup is
-                # the pre-run table. DROP of the backup deletes those rows
-                # (a second start used to do that, then the failure path
-                # emptied the replacement). Drop the replacement, put the
-                # pre-run table back, then retire that restored table.
-                cur.execute(f"DROP TABLE {src_q}")
-                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
-                present.discard(backup)
-                present.add(table_name)
-            elif table_name not in present and backup in present:
-                # The previous overwrite renamed the table and died before
-                # restore. Put it back, then retire it for this run.
-                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
-                present.discard(backup)
-                present.add(table_name)
+            if backup in present:
+                row_backup = _mysql_table_comment(cur, backup) == MYSQL_ROW_BACKUP_MARK
+                if row_backup and table_name in present:
+                    # The previous run emptied the live table and died before
+                    # settling. Its backup holds the pre-run rows: put them
+                    # back, then take this run's backup from them.
+                    _mysql_copy_rows_back(cur, table_name, backup)
+                    cur.execute(f"DROP TABLE {bak_q}")
+                elif table_name in present:
+                    # A rename-aside backup from an older build: the live
+                    # name is that run's replacement. Put the original back.
+                    cur.execute(f"DROP TABLE {src_q}")
+                    cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+                elif not row_backup:
+                    cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+                else:
+                    raise TableDropError(
+                        table_name,
+                        f"backup {backup} holds the pre-run rows but {table_name} is missing",
+                    )
+                present = _mysql_tables_present(cur, [table_name, backup])
             if table_name not in present:
                 return None, kept
             if backup in present:
-                # Only a backup we just restored would still be here, and the
-                # branch above already renamed it aside. Never DROP a backup
-                # that still holds the pre-run rows.
                 logger.error(
                     "MySQL overwrite refused to drop backup %s while %s is live",
                     backup,
@@ -683,8 +963,20 @@ def retire_mysql_overwrite(
                     table_name,
                     f"backup {backup} still holds the pre-run rows",
                 )
-            cur.execute(f"RENAME TABLE {src_q} TO {bak_q}")
+            cols = ", ".join(
+                quote_sql_identifier(c, "`") for c in _mysql_stored_columns(cur, table_name)
+            )
+            cur.execute(f"CREATE TABLE {bak_q} LIKE {src_q}")
+            cur.execute(f"ALTER TABLE {bak_q} COMMENT = %s", (MYSQL_ROW_BACKUP_MARK,))
+            cur.execute(f"INSERT INTO {bak_q} ({cols}) SELECT {cols} FROM {src_q}")  # nosec B608
+
+            def _run(sql: str) -> None:
+                cur.execute(sql)
+
+            _execute_empty_statements(_run, "mysql", src_q)
         return backup, kept
+    except TableDropError:
+        raise
     except Exception as exc:  # noqa: BLE001 - any DDL failure must fail the overwrite
         raise TableDropError(table_name, exc) from exc
     finally:
@@ -696,31 +988,33 @@ def retire_mysql_overwrite(
 
 
 def restore_mysql_overwrite(cfg: dict[str, Any], table_name: str, backup: str) -> None:
-    """Drop a partial replacement and rename the backup back to the live name."""
-    from connectors.mysql_conn import enable_autocommit, get_connection
+    """Put the pre-run rows back after a failed load.
+
+    A row backup (:data:`MYSQL_ROW_BACKUP_MARK`) is copied back into the live
+    table, which never left. A rename-aside backup from an older build is
+    renamed back over the partial replacement.
+    """
     from connectors.sql_identifiers import quote_sql_identifier
 
     conn = None
     try:
-        conn = get_connection(
-            host=cfg.get("host", "") or "127.0.0.1",
-            port=int(cfg.get("port") or 3306),
-            database=cfg.get("database", ""),
-            username=cfg.get("username", ""),
-            password=cfg.get("password", ""),
-            connection_string=cfg.get("connection_string", ""),
-            ssl=bool(cfg.get("ssl")),
-            purpose="ddl",
-        )
-        enable_autocommit(conn)
+        conn = _mysql_ddl_connection(cfg)
         with conn.cursor() as cur:
             present = _mysql_tables_present(cur, [table_name, backup])
             src_q = quote_sql_identifier(table_name, "`")
             bak_q = quote_sql_identifier(backup, "`")
+            if backup not in present:
+                return
+            if (
+                table_name in present
+                and _mysql_table_comment(cur, backup) == MYSQL_ROW_BACKUP_MARK
+            ):
+                _mysql_copy_rows_back(cur, table_name, backup)
+                cur.execute(f"DROP TABLE {bak_q}")
+                return
             if table_name in present:
                 cur.execute(f"DROP TABLE {src_q}")
-            if backup in present:
-                cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
+            cur.execute(f"RENAME TABLE {bak_q} TO {src_q}")
     except Exception as exc:  # noqa: BLE001 - restore must surface every DDL failure
         raise TableDropError(table_name, exc) from exc
     finally:

@@ -561,7 +561,7 @@ def test_integrity_nulls_not_distinct_blocks_multi_null():
 
     result = _check_duplicate_keys(
         [{"source": "code", "target": "code"}],
-        [{"code": None}, {"code": ""}, {"code": "x"}],
+        [{"code": None}, {"code": None}, {"code": "x"}],
         "strict",
         dest_kind="postgresql",
         primary_key="code",
@@ -577,6 +577,26 @@ def test_integrity_nulls_not_distinct_blocks_multi_null():
     )
     assert result["passed"] is False
     assert result["blocks_transfer"] is True
+
+
+def test_integrity_nulls_not_distinct_keeps_null_and_empty_string_apart():
+    """NULLS NOT DISTINCT makes two NULLs collide; NULL and '' are still two
+    values on PostgreSQL (D53: '' is a key, not a NULL)."""
+    from services.data_integrity import _check_duplicate_keys
+
+    result = _check_duplicate_keys(
+        [{"source": "code", "target": "code"}],
+        [{"code": None}, {"code": ""}, {"code": "x"}],
+        "strict",
+        dest_kind="postgresql",
+        primary_key="code",
+        sync_mode="append",
+        destination_unique_keys=[
+            {"name": "uq_code", "columns": ["code"], "nulls_not_distinct": True}
+        ],
+        target_types={"code": "VARCHAR(40)"},
+    )
+    assert result["blocks_transfer"] is False
 
 
 def test_composite_unique_allows_same_code_different_org():

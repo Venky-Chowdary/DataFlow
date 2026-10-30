@@ -650,10 +650,47 @@ def _fail_runtime_job(
     if cancelled:
         from services.job_status import cancel_outcome_for
 
+        if getattr(exc, "destination_rows_now", None) is None and request is not None:
+            # A route that did not count its destination (COPY fast paths,
+            # adapters): at least show what the table holds beside the tally.
+            try:
+                from services.dest_precount import precount_table
+
+                from .adapters import resolve_connector_config, resolve_dest_table
+                from .connector_capabilities import resolve_driver_type
+
+                _dst = request.destination
+                if str(getattr(_dst, "kind", "") or "") == "database":
+                    _dtype = resolve_driver_type(str(_dst.format or ""))
+                    _src_name = str(
+                        getattr(request.source, "table", "")
+                        or getattr(request.source, "collection", "")
+                        or ""
+                    )
+                    _now = precount_table(
+                        _dtype,
+                        resolve_connector_config(_dst),
+                        resolve_dest_table(_dtype, _dst, _src_name),
+                    )
+                    if _now is not None:
+                        exc.destination_rows_now = int(_now)  # type: ignore[attr-defined]
+            except Exception as count_exc:  # noqa: BLE001 - the tally still stands
+                logger.debug("cancel destination count unavailable: %s", count_exc)
         outcome = cancel_outcome_for(
-            status_kwargs.get("records_processed", prev.get("records_processed"))
+            status_kwargs.get("records_processed", prev.get("records_processed")),
+            destination_rows_by_run=getattr(exc, "destination_rows_by_run", None),
+            destination_rows_now=getattr(exc, "destination_rows_now", None),
         )
         status_kwargs["cancel_outcome"] = outcome
+        if outcome.get("rows_committed_source") == "destination_count":
+            # D199 — the destination's own count replaces the committed-batch
+            # tally wherever the job reports it.
+            status_kwargs["records_processed"] = outcome["rows_committed"]
+        if outcome["partial_write"]:
+            # The error text is the cancel message too: the exception's own
+            # "N row(s) were already written" is the tally, not the count.
+            display = outcome["message"]
+            status_kwargs["error"] = display
         if outcome["partial_write"]:
             logger.warning(
                 "Job %s cancelled after %s row(s) committed; nothing was rolled back",

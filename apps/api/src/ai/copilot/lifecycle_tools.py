@@ -163,13 +163,17 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
             "type": "object",
             "properties": {
                 "job_id": {"type": "string"},
+                "selector": {
+                    "type": "string",
+                    "description": "'last', 'running' or 'failed' when no id was given",
+                },
                 "key_ids": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Key IDs from the job's drift evidence; empty selects all evidenced keys.",
                 },
             },
-            "required": ["job_id"],
+            "required": [],
         },
     },
     {
@@ -940,6 +944,10 @@ def _connector(
         return None, _tool_result(tool, success=False, output=None,
             error=f"No connector matched “{name or connector_id}”. Name a saved connector from Connectors.",
         )
+    # A deadline then names this connector's host, not "a system" (D169).
+    from .tool_deadline import note_step
+
+    note_step(f"{tool}: reaching connector {conn.get('name') or ''}".strip(), conn, role="connector", if_unset=True)
     return conn, None
 
 

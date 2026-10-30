@@ -24,6 +24,8 @@ _INFORMATIONAL_WARN_KINDS = frozenset({
     "uuid_carrier_equivalent",
     "objectid_carrier_equivalent",
     "fixed_width_not_enforced",
+    # A bare NUMERIC onto the engine's unbounded exact decimal (D68).
+    "unbounded_decimal_carrier",
 })
 
 
@@ -70,7 +72,7 @@ def apply_create_new_risk_stamps(
         is_precision_collapse_coercion,
         normalize_logical_type as _nlt,
     )
-    from services.data_profiler import source_types_are_authoritative
+    from services.data_profiler import source_numbers_are_typed
     from services.type_system import (
         assess_create_new_type_risk,
         ddl_type,
@@ -79,12 +81,9 @@ def apply_create_new_risk_stamps(
 
     samples_by_src = source_samples or {}
     # A relational/warehouse source declared its own carriers; a file had them
-    # inferred from text, and only that inference can be wrong. MongoDB tags
-    # every value with its BSON type, so a double there is an IEEE double too.
-    declared_source = bool(source_db_type) and (
-        source_types_are_authoritative("database", source_db_type)
-        or source_db_type.strip().lower() == "mongodb"
-    )
+    # inferred from text, and only that inference can be wrong. A BSON double
+    # or a Kafka JSON/Avro number is an IEEE double on the wire too (D161).
+    declared_source = source_numbers_are_typed(source_db_type)
     out: list[dict] = []
     for m in mappings:
         row = dict(m)

@@ -112,20 +112,39 @@ class FakeS3:
         return _Paginator()
 
 
+# Every module that binds ``boto3_client`` by name at import time. They must
+# all be imported BEFORE any of them is patched: a module first imported while
+# ``aws_common.boto3_client`` is the fake copies the fake into its own
+# namespace, monkeypatch then records the fake as that module's "original",
+# and teardown "restores" the fake. Later S3 tests in the same process (any
+# order under pytest-randomly) then talk to this in-memory bucket.
+_BOTO3_CLIENT_BINDERS = (
+    "connectors.aws_common",
+    "connectors.s3",
+    "connectors.s3_reader",
+    "connectors.s3_writer",
+    "services.copy_s3_common",
+)
+
+
 @pytest.fixture
 def fake_s3(monkeypatch):
-    fake = FakeS3()
-    import connectors.s3_writer as s3w
-    import connectors.aws_common as awsc
+    import importlib
 
-    monkeypatch.setattr(s3w, "boto3_client", lambda *a, **k: fake)
+    from services.object_streaming import clear_spill_cache
+
+    modules = [importlib.import_module(name) for name in _BOTO3_CLIENT_BINDERS]
+    fake = FakeS3()
+    for mod in modules:
+        monkeypatch.setattr(mod, "boto3_client", lambda *a, **k: fake)
+    import connectors.s3_writer as s3w
+
     monkeypatch.setattr(s3w, "_ensure_bucket", lambda *a, **k: None)
-    monkeypatch.setattr(awsc, "boto3_client", lambda *a, **k: fake)
-    import connectors.s3_reader as s3r
-    import services.copy_s3_common as csc
-    monkeypatch.setattr(s3r, "boto3_client", lambda *a, **k: fake)
-    monkeypatch.setattr(csc, "boto3_client", lambda *a, **k: fake)
-    return fake
+    clear_spill_cache()
+    yield fake
+    # The object spill cache is keyed by bucket/key/version; this fake's
+    # version counter restarts per test, so its entries must not outlive it.
+    clear_spill_cache()
 
 
 def _seed(name: str, rows: list[tuple], *, with_seq: bool = False) -> None:

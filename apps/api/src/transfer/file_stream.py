@@ -1120,6 +1120,22 @@ def should_stream_file(
         return False
 
 
+def _stamp_reconcile_sample_locale(
+    dest_summary: dict[str, Any], number_locale: str
+) -> None:
+    """Name the number locale the writer bound the Gate-8 sample's cells under.
+
+    The file route's ``reconcile_sample`` is the reader's parse output: raw
+    CSV text such as ``"1,234"``, not the writer's canonical ``1234`` (the
+    writer's target-space sample is dropped, D184). Gate-8 replays each
+    mapping's transform on those cells, so it must replay it under the locale
+    the writer used; under WIRE a lone group is ambiguous, ``decimal`` refuses
+    it, and the source side fingerprints NULL against a faithful ``1234``.
+    """
+    if number_locale and dest_summary.get("reconcile_sample"):
+        dest_summary["number_locale"] = str(number_locale)
+
+
 def _stash_file_reconcile_sample(
     dest_summary: dict[str, Any],
     sample_rows: list[dict],
@@ -2096,6 +2112,7 @@ def stream_file_to_database(
         # Same digest-basis stamp as the write loop — the copy path's write
         # pass fingerprinted on this basis and Gate-8 must read back on it.
         dest_summary.setdefault("gate8_digest_types", dict(fingerprint_dest_types))
+        _stamp_reconcile_sample_locale(dest_summary, number_locale)
         return rows_copied, copy_ddl, dest_summary, columns
 
     if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():
@@ -2790,6 +2807,14 @@ def stream_file_to_database(
             prior_key_addressed = dest_summary.get(KEY_ADDRESSED_KEY)
             prior_skipped = int(dest_summary.get("rows_skipped") or 0)
             dest_summary = dict(batch_summary)
+            # A SQL/document writer stamps the rows it *wrote* (target-named,
+            # already transformed) as ``reconcile_sample``. Gate-8 reads that
+            # key as SOURCE rows and applies each mapping's transform again,
+            # so a non-idempotent transform (hash_pii, mask_pii) compared
+            # hash(hash(x)) with hash(x) and rolled a correct load back (D184).
+            # The file route's Gate-8 sample is the reader's parse output,
+            # stashed below — the same rule stream.py follows.
+            dest_summary.pop("reconcile_sample", None)
             dest_summary["duplicate_policy"] = decision.policy
             dest_summary["duplicate_policy_reason"] = decision.reason
             dest_summary["rows_skipped"] = prior_skipped + int(
@@ -3046,6 +3071,24 @@ def stream_file_to_database(
         # stays in the destination and cancel_outcome reports it verbatim.
         from services.error_handling import TransferCancelled
 
+        if isinstance(_write_exc, TransferCancelled) and not getattr(
+            _write_exc, "superseded", False
+        ):
+            # D199 — writers have stopped; the destination's count is the
+            # number the cancel message states.
+            from services.job_status import measure_cancel_landing
+
+            measure_cancel_landing(
+                _write_exc,
+                dest_type=dest_type,
+                dest_cfg=dest_cfg,
+                table=str(dest_table),
+                sync_mode=str(effective_sync or ""),
+                rows_before=dest_summary.get(PRECOUNT_KEY),
+                table_existed_before=dest_summary.get("dest_table_existed_before"),
+                keyed=bool(write_mode == "upsert" and pk_target_cols),
+                atomic_overwrite=bool(pg_overwrite_one_txn),
+            )
         if not isinstance(_write_exc, TransferCancelled):
             try:
                 from services.batch_undo import (
@@ -3349,8 +3392,5 @@ def stream_file_to_database(
     # NULL-landed (codec unquoted-empty + carrier bind on non-text '').
     dest_summary.update(dest_summary_extra_cells)
     dest_summary["empty_string_as_null_cells"] = int(empty_cell_nulls[0])
-    # reconcile_sample holds the reader's parse output — already canonical
-    # (EU "1,234" read as "1.234"). Gate-8 fingerprints it under WIRE; the
-    # run's number_locale must NOT be stamped here or the canonical cells
-    # would be re-interpreted ("1.234" → 1234 under EU).
+    _stamp_reconcile_sample_locale(dest_summary, number_locale)
     return written, ddl_log, dest_summary, columns

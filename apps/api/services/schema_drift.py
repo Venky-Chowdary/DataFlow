@@ -849,6 +849,32 @@ def _evolution_summary(evolution: dict[str, Any]) -> str:
     return COMPATIBILITY_NOTES.get(compat, "")
 
 
+_PARAM_TYPE = re.compile(r"^\s*([A-Za-z][A-Za-z0-9_ ]*?)\s*\(([^)]*)\)(.*)$")
+
+
+def widened_dest_carrier(dest_type: str, source_type: str) -> str:
+    """The destination's own carrier at the source's size.
+
+    ``NVARCHAR(50) COLLATE Latin1_General_BIN`` widened for a ``VARCHAR(500)``
+    source is ``NVARCHAR(500) COLLATE Latin1_General_BIN``: the size comes from
+    the source, the family and collation stay the destination's. Writing the
+    source's spelling (``VARCHAR(500)``) onto SQL Server would ALTER a Unicode
+    column to a code-page one, which every gate then grades as the lossy pair
+    the approval was meant to remove. Types without a matching parameter list
+    (``INTEGER`` -> ``BIGINT``) take the source type.
+    """
+    dest_m = _PARAM_TYPE.match(str(dest_type or ""))
+    src_m = _PARAM_TYPE.match(str(source_type or ""))
+    if dest_m and src_m:
+        dest_args = [a.strip() for a in dest_m.group(2).split(",")]
+        src_args = [a.strip() for a in src_m.group(2).split(",")]
+        if len(dest_args) == len(src_args) and all(a.isdigit() for a in src_args):
+            suffix = dest_m.group(3).strip()
+            carrier = f"{dest_m.group(1).strip()}({','.join(src_args)})"
+            return f"{carrier} {suffix}".strip().upper()
+    return str(source_type or "").upper()
+
+
 def propose_dest_widens(
     mappings: list[dict[str, Any]] | None,
     *,
@@ -893,7 +919,7 @@ def propose_dest_widens(
                 "column": src,
                 "target": tgt,
                 "old_type": tgt_type.upper(),
-                "new_type": src_type.upper(),
+                "new_type": widened_dest_carrier(tgt_type, src_type),
                 "reason": "dest_widen_available",
             })
     return out
@@ -1015,6 +1041,28 @@ def plan_destination_evolution(
         key = by_target.get(str(change.get("target") or "").lower())
         if key is not None:
             types[key] = str(change["new_type"])
+    if widens:
+        # Map stamped the fidelity verdict against the table as it stood
+        # (BIGINT -> INT4, DECIMAL(18,4) -> DECIMAL(10,2)). A widened pair is
+        # graded against the carrier it will have. Done here, not by a caller:
+        # Validate re-derived it and Execute did not, so Execute's mapping
+        # review refused the run Validate had passed (D200).
+        from services.mapping_proof import stamp_mapping_fidelity
+
+        widened = {str(c.get("column") or "").lower() for c in widens}
+        planned = [
+            stamp_mapping_fidelity(
+                [m],
+                source_types=source_schema,
+                target_types=types,
+                destination_db_type=dest_db,
+                dest_table_exists=True,
+            )[0]
+            if str(m.get("source") or "").lower() in widened
+            else m
+            for m in planned
+        ]
+        active = write_mappings(planned)
 
     present = {str(c).lower() for c in source_columns}
     for m in active:
@@ -1137,6 +1185,16 @@ def apply_propagate_mappings(
         if kind == "add_column":
             _add(str(change.get("column") or ""), reason="add_column")
         elif kind == "widen_type":
+            # plan_destination_evolution already sized this column against the
+            # live destination carrier. A source-contract widen names only the
+            # source's spelling; re-stamping it overwrote NVARCHAR(500) with
+            # VARCHAR(500) between Validate and the writer.
+            col = str(change.get("source") or change.get("column") or "").lower()
+            if any(
+                m.get("dest_widen") and str(m.get("source") or "").lower() == col
+                for m in mappings
+            ):
+                continue
             applied.extend(stamp_approved_widens(mappings, [change]))
 
     for change in list(evolution.get("soft_net_additive") or []):
@@ -1174,11 +1232,39 @@ def schema_review_copy(drift: dict[str, Any], *, policy: str, column_phrase: str
             "ack_required": True,
             "rule_id": "schema_drift.manual_review",
         }
-    additive = [
-        str(item.get("column") or item.get("source") or "")
+    items = [
+        item
         for item in ((drift or {}).get("schema_evolution") or {}).get("additive") or []
         if isinstance(item, dict)
     ]
+    widens = [i for i in items if str(i.get("kind") or "") == "widen_type"]
+    additive = [
+        str(item.get("column") or item.get("source") or "")
+        for item in items
+        if item not in widens
+    ]
+    if widens and not any(additive):
+        # A column the source widened is not a missing column (D191): name the
+        # change and the one parameter that approves the ALTER.
+        return {
+            "gate_id": "schema_mismatch",
+            "message": (
+                "Source type widening needs approval: "
+                + ", ".join(
+                    f"{w.get('column') or w.get('source')} "
+                    f"{w.get('old_type')} → {w.get('new_type')}"
+                    for w in widens[:6]
+                )
+                + ". The destination column is narrower than the source until "
+                "it is widened. Approve with schema_drift_acknowledged=true (or "
+                "schema_policy=propagate_columns) and Execute ALTERs it before "
+                "writing."
+                f"{column_phrase}"
+            ),
+            "remediation_kind": "approve_type_widening",
+            "ack_required": True,
+            "rule_id": "schema_mismatch.type_widening",
+        }
     names = ", ".join(name for name in additive if name) or "the missing columns"
     return {
         "gate_id": "schema_mismatch",
@@ -1425,7 +1511,7 @@ def detect_schema_drift(
                     "column": src,
                     "target": tgt,
                     "old_type": str(tgt_type).upper(),
-                    "new_type": str(src_type).upper(),
+                    "new_type": widened_dest_carrier(str(tgt_type), str(src_type)),
                     "reason": "dest_widen_available",
                 })
                 continue

@@ -164,6 +164,9 @@ _BATCH_SAMPLE_DRIVERS = frozenset({
     "s3",
     "gcs",
     "adls",
+    # The same object payload over another transport. It fell through to the
+    # SQL path and failed "SQLAlchemy dialect for 'sftp'" (D62 sibling).
+    "sftp",
     "dynamodb",
 })
 
@@ -217,8 +220,15 @@ def _sample_batch_source(
                 database=str(cfg.get("database") or ""),
             )
         )
+    from services.value_serializer import operator_cell
+
     columns = [str(h) for h in (probe.headers or [])]
-    rows = [dict(zip(columns, row)) for row in (probe.rows or [])[:limit]]
+    # Reader rows are wire cells. Shown as-is the operator read NULL as the
+    # literal ``__DF_SQL_NULL__`` (D62); the SQL sample path returns JSON null.
+    rows = [
+        {c: operator_cell(v) for c, v in zip(columns, row)}
+        for row in (probe.rows or [])[:limit]
+    ]
     native = {}
     meta = getattr(probe, "meta", None) or {}
     if isinstance(meta, dict):
@@ -230,14 +240,20 @@ def _sample_batch_source(
 
 
 def _is_nullish(v: Any) -> bool:
-    """Reader NULL, sentinel, and blank. ``0`` and ``False`` stay present.
+    """SQL NULL / absent only. ``''``, whitespace, ``0`` and ``False`` are values.
 
     ``__DF_SQL_NULL__`` used to look like a value, so a column with seven
-    SQL NULLs profiled at null_rate 0.0.
+    SQL NULLs profiled at null_rate 0.0. Counting ``''`` as NULL was the
+    opposite error: a column holding empty strings reported a null rate it
+    does not have (D62). Blank cells are counted on their own (``empty``).
     """
-    from services.value_serializer import is_null_evidence
+    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
 
-    return is_null_evidence(v)
+    return v is None or is_missing_sentinel(v) or is_reader_null_cell(v)
+
+
+def _is_blank(v: Any) -> bool:
+    return isinstance(v, str) and not v.strip()
 
 
 def _try_float(v: Any) -> Decimal | None:
@@ -342,8 +358,11 @@ def _analyze_rows(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, A
     n_rows = len(rows)
     for col in columns[:40]:
         vals = [r.get(col) for r in rows]
-        non_null = [v for v in vals if not _is_nullish(v)]
-        nulls = n_rows - len(non_null)
+        present = [v for v in vals if not _is_nullish(v)]
+        nulls = n_rows - len(present)
+        empties = sum(1 for v in present if _is_blank(v))
+        # Type, distinct and top values read the cells that carry a value.
+        non_null = [v for v in present if not _is_blank(v)]
         kind = _infer_kind(non_null)
         distinct = len({str(v) for v in non_null})
         # Top values by frequency
@@ -371,8 +390,9 @@ def _analyze_rows(rows: list[dict[str, Any]], columns: list[str]) -> dict[str, A
 
         col_prof: dict[str, Any] = {
             "column": col,
-            "non_null": len(non_null),
+            "non_null": len(present),
             "nulls": nulls,
+            "empty_strings": empties,
             "null_rate": round(nulls / n_rows, 4) if n_rows else 0.0,
             "distinct_in_sample": distinct,
             "cardinality_ratio": round(distinct / len(non_null), 4) if non_null else 0.0,
@@ -445,8 +465,15 @@ def sample_connector_object(
     limit: int = _DEFAULT_SAMPLE,
     analyze: bool = True,
     session_id: str = "",
+    full_rows: bool = False,
 ):
-    """Sample rows from a saved-connector table/collection (read-only)."""
+    """Sample rows from a saved-connector table/collection (read-only).
+
+    ``rows`` is a display preview of at most 25 rows. ``full_rows=True``
+    returns every sampled row up to ``limit`` instead: the plan's gates judge
+    the rows they asked for, and a 25-row preview silently hid a bad value in
+    rows 26..limit from them (D189).
+    """
     tool = "sample_connector_object"
     table = (table or "").strip()
     if not table:
@@ -517,7 +544,7 @@ def sample_connector_object(
 
         if batch_source:
             rows, columns, schema = _sample_batch_source(conn, table, limit)
-            preview_rows = rows[: min(limit, 25)]
+            preview_rows = rows if full_rows else rows[: min(limit, 25)]
             meta = {
                 "connector_id": cid,
                 "connector_name": conn.get("name"),
@@ -564,7 +591,7 @@ def sample_connector_object(
                 limit=limit,
             )
         rows, columns, schema, truncated = _run_query(saved, body)
-        preview_rows = rows[: min(limit, 25)]
+        preview_rows = rows if full_rows else rows[: min(limit, 25)]
         meta = {
             "connector_id": cid,
             "connector_name": conn.get("name"),

@@ -9,10 +9,10 @@ from typing import Any
 from services.object_streaming import (
     download_for_object_store,
     download_object,
-    read_rows_from_spill,
+    read_rows_and_schema_from_spill,
 )
 
-from connectors.object_store_common import ReadBatch, sampled_native_types_meta
+from connectors.object_store_common import ReadBatch, object_native_types_meta
 from connectors.sftp_common import connect_sftp, parse_sftp_config, split_remote_path
 
 
@@ -74,7 +74,7 @@ def read_object(
     known_total_rows: int | None = None,
 ) -> ReadBatch:
     path, remote_name = materialize_spill(cfg=cfg, bucket=bucket, key=key)
-    headers, rows, total = read_rows_from_spill(
+    headers, rows, total, declared = read_rows_and_schema_from_spill(
         path,
         remote_name,
         offset=offset,
@@ -90,7 +90,7 @@ def read_object(
         # owes the engine the same declared types. Without this the identical
         # file lands bigint/numeric/date over an upload and three text columns
         # over SFTP — the object-store defect, one transport later.
-        meta=sampled_native_types_meta(headers, rows),
+        meta=object_native_types_meta(headers, rows, declared),
     )
 
 

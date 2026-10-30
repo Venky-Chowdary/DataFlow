@@ -396,6 +396,11 @@ def _safe_connector(
                 f'"columns on {example_table_name()} in {ex}".'
             ),
         )
+    # Until a later step says otherwise, the call is waiting on this system:
+    # a deadline names its host instead of "a system it reads from" (D169).
+    from .tool_deadline import note_step
+
+    note_step(f"{tool}: reading connector {conn.get('name') or ''}".strip(), conn, role="connector", if_unset=True)
     return conn, None
 
 
@@ -467,7 +472,7 @@ def introspect_connector_table(
     Query/aggregation callers keep the raw document keys their pipelines use.
     """
     from services.dialect_profiles import normalize_schema
-    from services.schema_introspect import introspect_schema
+    from services.schema_introspect import introspect_schema, is_object_store_type
 
     from src.transfer.adapters import resolve_connector_config
     from src.transfer.connector_capabilities import resolve_driver_type
@@ -499,7 +504,9 @@ def introspect_connector_table(
         table=table,
         catalog_type=str(cfg.get("type") or ""),
         auth_source=str(cfg.get("auth_source") or ""),
-        reader_cfg=cfg if execute_shape else None,
+        # Object stores dial the connector's endpoint/port from it (D142).
+        reader_cfg=cfg if execute_shape or is_object_store_type(db_type) else None,
+        introspect_purpose=purpose,
     )
     ok = bool(info.get("ok"))
     columns = _normalize_columns(info) if ok else []
@@ -719,7 +726,7 @@ def introspect_connector_schema(
     if err:
         return err
     try:
-        from services.schema_introspect import introspect_schema
+        from services.schema_introspect import introspect_schema, is_object_store_type
 
         from src.transfer.adapters import resolve_connector_config
         from src.transfer.connector_capabilities import resolve_driver_type
@@ -743,6 +750,7 @@ def introspect_connector_schema(
             table=table,
             catalog_type=str(cfg.get("type") or ""),
             auth_source=str(cfg.get("auth_source") or ""),
+            reader_cfg=cfg if is_object_store_type(db_type) else None,
         )
         if not info.get("ok"):
             return _tool_result(

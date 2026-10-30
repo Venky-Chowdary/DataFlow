@@ -60,16 +60,36 @@ def test_estimates_rank_every_table_not_the_first_forty_names(monkeypatch, wide)
     assert [r["table"] for r in res.output["ranked"]] == ["t59", "t58", "t57"]
 
 
-def test_unestimated_engine_counts_first_forty_and_says_so(monkeypatch, wide):
+def test_unestimated_engine_counts_as_far_as_the_budget_goes(monkeypatch, wide):
+    """D201: without estimates the ranking counts tables until its time budget
+    ends (it used to stop at the first 40 names whatever the time). Fast counts
+    cover all 60, so the answer is the whole inventory."""
     monkeypatch.setattr(agg, "_estimate_table_row_counts", lambda conn, names: {})
     res = rank_connector_tables(connector_id="c1", limit=3)
     assert res.success, res.error
+    assert [r["table"] for r in res.output["ranked"]] == ["t59", "t58", "t57"]
+    assert res.output["considered"] == 60 and res.output["total_objects"] == 60
+    assert res.output["exact"] is True
+
+
+def test_unestimated_engine_out_of_budget_says_so(monkeypatch, wide):
+    import time as _time
+
+    monkeypatch.setattr(agg, "_estimate_table_row_counts", lambda conn, names: {})
+    monkeypatch.setattr(agg, "_RANK_COUNT_BUDGET_SECONDS", 0.5)
+
+    def slow(**k):
+        _time.sleep(0.1)
+        return _Counted(int(k["table"][1:]) * 100)
+
+    monkeypatch.setattr(agg, "aggregate_connector_data", slow)
+    res = rank_connector_tables(connector_id="c1", limit=3)
+    assert res.success, res.error
     assert res.output["exact"] is False
-    assert res.output["considered"] == 40 and res.output["total_objects"] == 60
+    assert res.output["skipped"], "uncounted tables are named, not dropped"
     text = _render_table_ranking(res.output)
     assert "largest table on **Wide**" not in text
-    assert "Counted **40** of 60" in text
-    assert "not a ranking of all 60" in text
+    assert "could not be counted" in text
 
 
 def test_full_population_still_reads_as_exact(monkeypatch):

@@ -58,6 +58,8 @@ _SAFE_PROMOTIONS = frozenset({
     ("text", "string"),
 })
 
+_TEXT_TARGET_LOGICALS = frozenset({"string", "text", "varchar"})
+
 _IDENTITY_TRANSFORMS = frozenset({"", "none", "identity", "cast", "auto", "passthrough"})
 
 # Typed parse guards quarantine unparseable cells; within one family they do not
@@ -502,14 +504,16 @@ def classify_mapping_confidence(
     # ``First_Name``, ``Café`` -> ``Caf_``). Judging those against the original
     # spelling by underscores alone demoted every such rerun below the
     # confidence floor (D55); the sanitiser's own mapping is the identity.
-    from connectors.sql_identifiers import sanitize_identifier
+    from connectors.sql_identifiers import sanitized_spellings
 
     name_exact = (
         src_l == tgt_l
         or src_l.replace("_", "") == tgt_l.replace("_", "")
-        or sanitize_identifier(src).lower() == tgt_l
+        or tgt_l in sanitized_spellings(src)
     )
-    type_same = src_logical == tgt_logical
+    # VARCHAR onto an unbounded TEXT column is the same text carrier, not a
+    # promotion: exact name + compatible type is the exact band (D159).
+    type_same = src_logical == tgt_logical or (src_logical, tgt_logical) == ("string", "text")
     safe_promo = (
         (src_logical, tgt_logical) in _SAFE_PROMOTIONS
         or sanctioned_carrier
@@ -549,7 +553,12 @@ def classify_mapping_confidence(
         cls = "safe_type_promotion" if safe_promo else "semantic_inference"
 
     # Wrong-role demotion: numeric-looking name on text-heavy country/currency fields, etc.
-    if profile.get("likely_numeric") and any(
+    # Not for an exact-name pair onto a text carrier: whatever the sampled values
+    # look like, they land byte for byte in the column of the same name (D159).
+    exact_text_pair = name_exact and tgt_logical in _TEXT_TARGET_LOGICALS and (
+        type_same or safe_promo
+    )
+    if not exact_text_pair and profile.get("likely_numeric") and any(
         t in tgt_l for t in ("country", "currency", "status", "state", "city", "email")
     ):
         if cls in {"exact_name_type", "safe_type_promotion"}:

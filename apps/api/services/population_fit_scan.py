@@ -517,6 +517,7 @@ def _write_bind_target_type(
     *,
     sync_mode: str = "",
     dest_table_exists: bool | None = None,
+    dest_db: str = "",
 ) -> tuple[str, bool]:
     """Carrier the write will bind — live DDL wins on an existing object.
 
@@ -526,11 +527,19 @@ def _write_bind_target_type(
     mapping / create-new types win there. ``dest_table_exists is False`` is
     create-new even when a projected schema is sitting in ``dest_types``.
     """
+    from services.db_type_utils import dest_schema_is_recreated_on_overwrite
     from services.sync_cursor import is_overwrite_sync
 
     declared = str(declared or "").strip()
     live = str(live or "").strip()
-    if live and not is_overwrite_sync(sync_mode) and dest_table_exists is not False:
+    # Relational overwrite empties the table and keeps its columns, so the live
+    # carrier is what the rows land in — the same rule Validate's DDL checks
+    # and the writer use. Reading every overwrite as a recreate told the
+    # operator an existing table "does not exist yet".
+    recreated = is_overwrite_sync(sync_mode) and (
+        not dest_db or dest_schema_is_recreated_on_overwrite(dest_db)
+    )
+    if live and not recreated and dest_table_exists is not False:
         return live, True
     return declared or live, False
 
@@ -599,6 +608,7 @@ def bounded_targets(
             live,
             sync_mode=sync_mode,
             dest_table_exists=dest_table_exists,
+            dest_db=dest_db,
         )
         carrier = _carrier_for(target_type, dest_db=dest_db)
         transform = _scannable_transform(m, source_types=src_types, dest_types=types)
@@ -842,6 +852,12 @@ def _temporal_bind_reason(value: Any, target_type: str, dest_db: str) -> str | N
     except ValueError as exc:
         return str(exc)
     if coerced is value and not isinstance(value, (date, datetime, time)):
+        from connectors.sql_temporal import _keeps_era_literal, beyond_python_calendar
+
+        if beyond_python_calendar(value) and _keeps_era_literal(dest_db):
+            # D65 — the bind keeps a BC / five-digit-year literal on the
+            # PostgreSQL family and SQLite's text carrier; it is not unparsed.
+            return None
         shown = value if isinstance(value, str) else str(value)
         return f"Invalid {base}: {shown!r}"
     return None
@@ -1198,7 +1214,11 @@ def scan_rows(
             for idx in counts
         )
     ):
-        envelope_deadline = time.monotonic() + ENVELOPE_CONTINUE_SECONDS
+        from src.ai.copilot.tool_deadline import step_seconds
+
+        # Inside a tool call the envelope may not run past the call's deadline
+        # (D187): it stops, PARTIAL, like the main walk.
+        envelope_deadline = time.monotonic() + step_seconds(ENVELOPE_CONTINUE_SECONDS)
         for row in row_iter:
             if time.monotonic() >= envelope_deadline:
                 envelope_truncated = True

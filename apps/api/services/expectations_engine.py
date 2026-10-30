@@ -19,7 +19,11 @@ from typing import Any, Callable
 
 from services.column_case import lookup_row_value
 from services.db_type_utils import SCHEMALESS_DESTS
-from services.value_serializer import is_null_evidence, present_cell_text
+from services.value_serializer import (
+    is_null_evidence,
+    key_identity_text,
+    present_cell_text,
+)
 
 _logger = logging.getLogger(__name__)
 
@@ -71,6 +75,20 @@ def _present_text(value: Any) -> str | None:
     return present_cell_text(value)
 
 
+def _key_text(value: Any, *, empty_is_null: bool = False) -> str | None:
+    """One identity-key cell, or None when it cannot identify a row.
+
+    A key is its exact value: only SQL NULL / Missing is "no key". ``''`` and
+    whitespace are keys (D53, D70) except on a destination that stores ``''``
+    as NULL (``empty_is_null`` - Oracle VARCHAR2), where the stored key would
+    be NULL. The blank-is-absent rule above is for type evidence, not keys.
+    """
+    text = key_identity_text(value)
+    if text is None or (empty_is_null and text == ""):
+        return None
+    return text
+
+
 def _non_empty(values: list[Any]) -> list[str]:
     out: list[str] = []
     for raw in values:
@@ -85,13 +103,23 @@ def expect_column_unique(
     column: str,
     *,
     severity: str = "block",
+    identity: bool = False,
+    empty_is_null: bool = False,
 ) -> ExpectationResult:
-    """dbt: unique — no duplicate values in column."""
+    """dbt: unique — no duplicate values in column.
+
+    ``identity`` marks the upsert / primary key: its cells compare by exact
+    key value (:func:`_key_text`), not by the trimmed, blank-is-absent text.
+    """
     seen: dict[str, int] = {}
     failures: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
         val = _row_cell(row, column)
-        key = _present_text(val)
+        key = (
+            _key_text(val, empty_is_null=empty_is_null)
+            if identity
+            else _present_text(val)
+        )
         if key is None:
             continue
         seen[key] = seen.get(key, 0) + 1
@@ -115,13 +143,24 @@ def expect_column_not_null(
     *,
     max_null_rate: float = 0.0,
     severity: str = "block",
+    identity: bool = False,
+    empty_is_null: bool = False,
 ) -> ExpectationResult:
-    """dbt: not_null — column must not be empty."""
+    """dbt: not_null — column must not be empty.
+
+    For an ``identity`` (key) column only a missing key counts: ``''`` is a
+    key value (D53) unless the destination stores it as NULL.
+    """
     null_count = 0
     failures: list[dict[str, Any]] = []
     for i, row in enumerate(rows):
         val = _row_cell(row, column)
-        if _is_absent(val):
+        absent = (
+            _key_text(val, empty_is_null=empty_is_null) is None
+            if identity
+            else _is_absent(val)
+        )
+        if absent:
             null_count += 1
             if len(failures) < 10:
                 failures.append({"row_index": i, "value": val})
@@ -463,6 +502,9 @@ def infer_expectations_for_schema(
             composite,
         )
     schemaless = (dest_kind or "").lower() in SCHEMALESS_DESTS
+    from services.reconciliation import destination_empty_string_is_null
+
+    key_empty_is_null = destination_empty_string_is_null(dest_kind)
     require_unique = True
     try:
         from services.primary_key import (
@@ -486,6 +528,8 @@ def infer_expectations_for_schema(
                 "column": col,
                 "max_null_rate": 0.0,
                 "severity": "block",
+                "identity": True,
+                "empty_is_null": key_empty_is_null,
             })
         elif is_primary or is_id:
             # Schemaless destinations only enforce uniqueness/nullability on the
@@ -501,16 +545,25 @@ def infer_expectations_for_schema(
             else:
                 unique_severity = "warn"
             null_severity = "block" if is_primary else "warn"
+            # The declared key compares by exact key value (D53); a heuristic
+            # ``*_id`` column keeps the plain blank-is-absent rule.
+            key_rule = (
+                {"identity": True, "empty_is_null": key_empty_is_null}
+                if is_primary
+                else {}
+            )
             specs.append({
                 "fn": "expect_column_unique",
                 "column": col,
                 "severity": unique_severity,
+                **key_rule,
             })
             specs.append({
                 "fn": "expect_column_not_null",
                 "column": col,
                 "max_null_rate": 0.0,
                 "severity": null_severity,
+                **key_rule,
             })
         if t in {"INTEGER", "DECIMAL", "NUMERIC", "FLOAT", "NUMBER"}:
             if re.search(r"amount|price|total|balance|amt|revenue", col, re.I):

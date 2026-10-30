@@ -71,15 +71,21 @@ def test_validate_blocks_a_grant_failure_instead_of_degrading() -> None:
     assert "refusing to fall back to query CDC" in gate["message"]
 
 
-def test_validate_blocks_a_declared_timestamp_poll_that_drops_deletes() -> None:
+def test_validate_passes_a_declared_timestamp_poll_and_warns_deletes_are_lost() -> None:
+    """D28: the advice to declare modification_timestamp leads to a run.
+
+    The run polls the declared column (inserts and updates land), so Validate
+    passes it with a warning that names the loss: deletes are not captured.
+    """
     gate = _gate(
         LogCaptureProbe("sqlserver", False, "", CAUSE_SERVER_NOT_CONFIGURED, ""),
         cursor_field="updated_at",
         cursor_semantics="modification_timestamp",
     )
-    assert gate["status"] == "block"
+    assert gate["status"] == "pass"
+    assert gate["severity"] == "warn"
     assert "does not emit a change log" in gate["message"]
-    assert "CDC cannot start" in gate["message"]
+    assert "DELETEs on the source are not" in gate["message"]
     assert gate["details"]["cdc_delete_capture"] is False
 
 

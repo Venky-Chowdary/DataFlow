@@ -42,6 +42,45 @@ def _stage_insert(
     return stmt.bindparams(*binds) if binds else stmt
 
 
+_STAGE_INSERT_TARGET = re.compile(r"^\s*INSERT\s+INTO\s+(\S+)\s*\(", re.IGNORECASE)
+
+
+def _stage_insert_compiled(
+    conn: Any, table_obj: sa.Table, stage_insert_sql: str, target_cols: list[str]
+) -> Any:
+    """A compiled Core INSERT into the stage, for drivers typed by input sizes.
+
+    SQLAlchemy calls ``setinputsizes`` only for compiled statements, never for
+    a ``text()`` one, typed binds or not. python-oracledb then binds a
+    ``datetime`` as DATE, so an Oracle MERGE staged ``05:00:00.123`` and the
+    upsert wrote ``05:00:00`` into a TIMESTAMP column the overwrite path had
+    filled exactly: run 2 of an upsert into DataFlow's own table failed Gate 8
+    on every timestamp (Family B, D198). ``None`` when the driver does not use
+    input sizes (the typed ``text()`` stage stays) or the stage is not a plain
+    ``INSERT INTO <name> (...)``.
+    """
+    from sqlalchemy.engine.interfaces import BindTyping
+
+    dialect = getattr(conn, "dialect", None)
+    if getattr(dialect, "bind_typing", None) is not BindTyping.SETINPUTSIZES:
+        return None
+    match = _STAGE_INSERT_TARGET.match(stage_insert_sql or "")
+    ref = match.group(1) if match else ""
+    # Only a single ANSI-quoted stage name is rebuilt (Oracle's PTT / GTT). A
+    # SQL Server ``#temp`` stage keeps its typed ``text()`` insert unchanged.
+    if not (len(ref) > 2 and ref.startswith('"') and ref.endswith('"')) or '"."' in ref:
+        return None
+    name = ref[1:-1].replace('""', '"')
+    columns = [
+        sa.column(sa.sql.quoted_name(c, quote=True), table_obj.c[c].type)
+        for c in target_cols
+        if c in table_obj.c
+    ]
+    if len(columns) != len(target_cols):
+        return None
+    return sa.table(sa.sql.quoted_name(name, quote=True), *columns).insert()
+
+
 def _stage_rows(
     conn: Any,
     table_obj: sa.Table,
@@ -50,7 +89,9 @@ def _stage_rows(
     target_cols: list[str],
 ) -> None:
     """Load ``rows`` into a staging table with type-carrying binds."""
-    insert_sql = _stage_insert(table_obj, stage_insert_sql, target_cols)
+    insert_sql = _stage_insert_compiled(conn, table_obj, stage_insert_sql, target_cols)
+    if insert_sql is None:
+        insert_sql = _stage_insert(table_obj, stage_insert_sql, target_cols)
     for row in rows:
         conn.execute(insert_sql, {c: row.get(c) for c in target_cols})
 

@@ -117,7 +117,11 @@ def _plan(monkeypatch, tmp_path, scoped: bool):
 
     monkeypatch.setattr(sc, "_open_connection", counting)
     if not scoped:
+        import services.endpoint_session as endpoint_session
+
+        # The scope is now opened for every deadline-bound tool call.
         monkeypatch.setattr(sc, "snowflake_plan_scope", contextlib.nullcontext)
+        monkeypatch.setattr(endpoint_session, "endpoint_session_scope", contextlib.nullcontext)
     src = create_connector({"name": "pg-" + table, "type": "postgresql", "schema": "public", **PG})
     dst = create_connector({
         "name": "sf-" + table, "type": "snowflake", "host": "localhost", "port": 443,

@@ -30,10 +30,11 @@ logger = logging.getLogger(__name__)
 if str(_api_root) not in sys.path:
     sys.path.insert(0, str(_api_root))
 
-from services.value_serializer import cell_to_string
+from services.value_serializer import EXPLICIT_NULL, cell_to_string
 
 # Explicit DynamoDB NULL AttributeValue — not the same as a missing attribute.
-DDB_EXPLICIT_NULL = object()
+# One object shared with the verifiers (services.value_serializer).
+DDB_EXPLICIT_NULL = EXPLICIT_NULL
 DDB_NULL_SENTINEL = "__DF_DDB_NULL__"
 # Typed set envelopes so SS/NS/BS are not silently equated with L.
 _SET_KIND_KEY = "_df_ddb_set"

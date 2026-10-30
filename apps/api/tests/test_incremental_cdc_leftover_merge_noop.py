@@ -216,10 +216,36 @@ def test_incremental_batch_scoped_verify_still_catches_tampered_batch_row(
     finally:
         con.close()
 
+    # D188: the re-run is a quiet poll — row 1 is outside its cursor window.
+    # The divergence is measured and named as out-of-window drift (with the
+    # destination-only ghost), not hidden and not this run's failure.
     tampered = UniversalTransferEngine().execute_tracked(
         request, uuid.uuid4().hex[:24]
     )
-    assert not tampered.success
-    # Fail closed: the ghost and the tampered row are left for the operator,
+    assert tampered.success, tampered.error
+    drift = (tampered.reconciliation or {}).get("out_of_window_drift") or {}
+    assert drift.get("changed") == 1 and drift.get("destination_only") == 1, drift
+    assert drift.get("sample_keys") == ["1", "99"], drift
+    assert "Out-of-window drift" in str(tampered.reconciliation.get("message"))
+
+    # Operators who treat any divergence as fatal opt back into fail-closed.
+    import os
+
+    os.environ["DATAFLOW_INCREMENTAL_DRIFT_FAILS"] = "1"
+    try:
+        strict = UniversalTransferEngine().execute_tracked(
+            request, uuid.uuid4().hex[:24]
+        )
+    finally:
+        os.environ.pop("DATAFLOW_INCREMENTAL_DRIFT_FAILS", None)
+    assert not strict.success
+    # Either way the ghost and the tampered row are left for the operator,
     # never silently deleted or overwritten back.
     assert destination_row_count("sqlite", cfg, schema="", table_name=dst_t) == 3
+    con = sqlite3.connect(dst)
+    try:
+        assert con.execute(
+            f'SELECT label FROM "{dst_t}" WHERE id=1'
+        ).fetchone()[0] == "TAMPERED"
+    finally:
+        con.close()

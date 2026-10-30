@@ -277,9 +277,21 @@ def inspect_destination_for_preflight(
                 from services.dialect_profiles import normalize_schema
                 from services.schema_introspect import introspect_schema
 
-                fk_cfg = dict(resolve_connector_config(endpoint) or {})
+                from connectors.generic_sql import (
+                    connection_options,
+                    with_connection_options,
+                )
+
+                fk_cfg = with_connection_options(
+                    dict(resolve_connector_config(endpoint) or {})
+                )
                 live = introspect_schema(
                     db_key,
+                    # TLS / driver keywords (trust_server_certificate, ...):
+                    # without them ODBC Driver 18 refused the handshake, the
+                    # failure was swallowed, and SQL Server CHECK / FK never
+                    # reached the preflight probes (D112).
+                    **connection_options(fk_cfg),
                     host=str(fk_cfg.get("host") or ""),
                     port=int(fk_cfg.get("port") or 0),
                     database=str(fk_cfg.get("database") or ""),

@@ -21,7 +21,7 @@ from connectors.postgresql_reader import text_carry_select_sql
 from services.reconciliation import (
     TargetSampleUnavailable,
 )
-from services.value_serializer import load_http_json
+from services.value_serializer import load_http_json, reader_wire_cell
 
 logger = logging.getLogger(__name__)
 
@@ -701,7 +701,7 @@ def _read_destination_sample(
                         payload = row
                     elif headers:
                         payload = {
-                            headers[i]: row[i] if i < len(row) else None
+                            headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                             for i in range(len(headers))
                         }
                     else:
@@ -1031,7 +1031,7 @@ def _read_destination_sample(
                     d = dict(row)
                 elif headers:
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1068,7 +1068,7 @@ def _read_destination_sample(
                     d = {k: v for k, v in row.items() if k != "attributes"}
                 elif headers:
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1107,7 +1107,7 @@ def _read_destination_sample(
                 elif batch.headers:
                     headers = list(batch.headers)
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1158,7 +1158,7 @@ def _read_destination_sample(
                     d = dict(row)
                 elif headers:
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:
@@ -1204,7 +1204,7 @@ def _read_destination_sample(
                     d = dict(row)
                 elif headers:
                     d = {
-                        headers[i]: row[i] if i < len(row) else None
+                        headers[i]: reader_wire_cell(row[i]) if i < len(row) else None
                         for i in range(len(headers))
                     }
                 else:

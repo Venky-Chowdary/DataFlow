@@ -2534,6 +2534,18 @@ _MYSQL_MAX_KEY_BYTES = 3072
 _MYSQL_UTF8MB4_CHAR_BYTES = 4
 
 
+def _mysql_text_carrier(ddl: str) -> bool:
+    base = re.sub(r"\(.*$", "", str(ddl or "")).strip().split()[0:1]
+    return bool(base) and base[0].upper() in {"TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT"}
+
+
+def _mysql_fixed_key_bytes(ddl: str) -> int:
+    from services.type_system import parse_string_carrier_width
+
+    width = parse_string_carrier_width(ddl)
+    return width * _MYSQL_UTF8MB4_CHAR_BYTES if width else 8
+
+
 def mysql_key_compatible_types(
     *,
     table_name: str,
@@ -2548,7 +2560,8 @@ def mysql_key_compatible_types(
     MySQL cannot index TEXT/BLOB/JSON without a prefix length (error 1170), and
     a prefix would enforce a different uniqueness rule than the source. A key
     column whose carrier is a LOB becomes ``VARCHAR(n)`` from the width the
-    source declares; with no declared width the run is refused before any DDL.
+    source declares; an undeclared text key (PG ``TEXT``) gets the widest
+    full-value key the 3072-byte limit allows. A JSON/BLOB key is refused.
     G6 (Validate) and the MySQL writer (defence in depth) share this one rule.
     """
     from services.type_system import parse_string_carrier_width
@@ -2563,6 +2576,7 @@ def mysql_key_compatible_types(
     declared_types = column_types or {}
     widened: dict[str, int] = {}
     unresolved: list[str] = []
+    budgeted: list[str] = []
     for col in keys:
         idx = target_cols.index(col)
         if not mysql_index_requires_prefix(types[idx]):
@@ -2570,10 +2584,32 @@ def mysql_key_compatible_types(
         declared = declared_types.get(source_of.get(col) or col) or declared_types.get(col)
         width = parse_string_carrier_width(declared)
         if not width:
-            unresolved.append(f"{col} ({declared or types[idx]})")
+            if _mysql_text_carrier(types[idx]):
+                # An unbounded text key (PG TEXT): sized below to the widest
+                # full-value key MySQL can hold — the rule an existing TEXT key
+                # gets (services.upsert_identity). Never a prefix (CR-D126).
+                budgeted.append(col)
+            else:
+                unresolved.append(f"{col} ({declared or types[idx]})")
             continue
         widened[col] = width
         types[idx] = f"VARCHAR({width})"
+    if budgeted and not unresolved:
+        other_bytes = sum(widened.values()) * _MYSQL_UTF8MB4_CHAR_BYTES + sum(
+            _mysql_fixed_key_bytes(types[target_cols.index(c)])
+            for c in keys
+            if c not in widened and c not in budgeted
+        )
+        budget = (_MYSQL_MAX_KEY_BYTES - other_bytes) // _MYSQL_UTF8MB4_CHAR_BYTES // len(budgeted)
+        if budget < 1:
+            unresolved.extend(f"{c} ({types[target_cols.index(c)]})" for c in budgeted)
+        else:
+            for col in budgeted:
+                types[target_cols.index(col)] = f"VARCHAR({budget})"
+            logger.info(
+                "MySQL upsert key carriers sized to the full-value key budget: "
+                "table=%s %s", table_name, {c: f"VARCHAR({budget})" for c in budgeted},
+            )
     key_label = ", ".join(keys)
     where = f"new table {table_name}" if table_name else "the new destination table"
     if unresolved:
@@ -2585,10 +2621,10 @@ def mysql_key_compatible_types(
             f"MySQL cannot enforce the upsert key ({key_label}) on {where}: "
             f"{', '.join(unresolved)} would be created as a TEXT/BLOB "
             "column, which MySQL refuses in a key without a prefix length "
-            "(error 1170). The source declares no width for it, and DataFlow "
-            "will not invent a prefix (that enforces a different uniqueness "
-            "rule). Map the column to VARCHAR(n) sized to its longest value, "
-            "or pre-create the destination table with this key."
+            "(error 1170), and it is not text DataFlow can carry in a "
+            "full-width VARCHAR key. DataFlow will not invent a prefix (that "
+            "enforces a different uniqueness rule). Map the column to "
+            "VARCHAR(n) sized to its longest value, or use a scalar key."
         )
     key_bytes = sum(widened.values()) * _MYSQL_UTF8MB4_CHAR_BYTES
     if key_bytes > _MYSQL_MAX_KEY_BYTES:

@@ -72,6 +72,10 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         # governance read schema_drift as false (R8-002).
         schema_drift_acknowledged=bool(payload.get("schema_drift_acknowledged")),
         fk_risk_acknowledged=bool(payload.get("fk_risk_acknowledged")),
+        # The operator's approval of the disclosed destination DDL (the
+        # upsert's unique index, D101). Execute's preflight and the writer
+        # both gate on it; dropping it here re-refused the approved run.
+        ddl_changes_acknowledged=bool(payload.get("ddl_changes_acknowledged")),
         acknowledgment_actor=str(payload.get("acknowledgment_actor") or "").strip(),
         acknowledgment_reason=str(payload.get("acknowledgment_reason") or "").strip(),
     )

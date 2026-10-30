@@ -106,7 +106,15 @@ def resolve_endpoint_url(cfg: dict[str, Any]) -> str:
     # A host with no dots is an AWS region only when no service port was
     # given (``us-east-1``). ``minio`` + ``9000`` is a Docker endpoint;
     # treating it as a region dropped the host and port.
-    if host and "." not in host and host not in ("localhost", "127.0.0.1", "host.docker.internal"):
+    # A host that already carries its port (``localhost:9100``, ``minio:9100``)
+    # is handled below; appending the Port field here dialled
+    # ``http://localhost:9100:9000`` (D142).
+    if (
+        host
+        and "." not in host
+        and ":" not in host
+        and host not in ("localhost", "127.0.0.1", "host.docker.internal")
+    ):
         port = _explicit_service_port(cfg)
         if port is None:
             return ""
@@ -138,8 +146,13 @@ def is_local_endpoint(cfg: dict[str, Any]) -> bool:
 
 
 def resolve_region(cfg: dict[str, Any]) -> str:
-    host = (cfg.get("host") or "").strip().split(":")[0]
-    if host.startswith("http://") or host.startswith("https://") or host.endswith(".amazonaws.com"):
+    raw = (cfg.get("host") or "").strip()
+    is_url = raw.startswith("http://") or raw.startswith("https://")
+    # D139: ``raw.split(":")[0]`` of an endpoint URL is its scheme, so
+    # ``https://dynamodb.us-east-1.amazonaws.com`` or a DynamoDB Local URL
+    # signed every request for region "https"/"http" and the probe failed.
+    host = (urlparse(raw).hostname or "") if is_url else raw.split(":")[0]
+    if is_url or host.endswith(".amazonaws.com"):
         if host == "s3.amazonaws.com":
             return "us-east-1"
         # Extract region from virtual-hosted style endpoints like s3.us-east-1.amazonaws.com

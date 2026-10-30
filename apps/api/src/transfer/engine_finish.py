@@ -7,6 +7,8 @@ from .models import TransferResult
 from typing import Any
 import logging
 
+from connectors.table_manager import ROW_COPY_BACKUP_ENGINE
+
 logger = logging.getLogger("src.transfer.engine")
 
 
@@ -86,7 +88,7 @@ def _write_success_status(mongo: Any, job_id: str, status: str, **fields: Any) -
         return written
     if not (job.get("cancel_requested") or str(job.get("status") or "") == "cancelled"):
         return written
-    outcome = cancel_outcome_for(fields.get("records_processed"))
+    outcome = cancel_outcome_for(fields.get("records_processed"), tally_is_exact=True)
     logger.warning(
         "Job %s: cancel landed after %s row(s) committed; recording them on the cancelled job",
         job_id,
@@ -212,6 +214,10 @@ def _finish_verified_run(
     )
 
 
+#: Backup kinds a failed overwrite restores and a committed one discards.
+RESTORABLE_BACKUP_ENGINES = frozenset({"mysql", "mongodb", ROW_COPY_BACKUP_ENGINE})
+
+
 def _settle_backup_after_error(destination: EndpointConfig, exc: BaseException) -> bool:
     """Settle the pre-run backup after a run ended on ``exc``.
 
@@ -274,7 +280,7 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
         return ok
     backup = extra.get("overwrite_backup")
     engine_name = str(extra.get("overwrite_backup_engine") or "")
-    if not backup or engine_name not in {"mysql", "mongodb"}:
+    if not backup or engine_name not in RESTORABLE_BACKUP_ENGINES:
         return False
     from .adapters import resolve_connector_config, resolve_dest_table
     from .connector_capabilities import resolve_driver_type
@@ -284,7 +290,20 @@ def _settle_overwrite_backup(destination: EndpointConfig, *, restore: bool) -> b
         db_type = resolve_driver_type(destination.format)
         cfg = resolve_connector_config(destination)
         table_name = resolve_dest_table(db_type, destination)
-        if engine_name == "mongodb":
+        if engine_name == ROW_COPY_BACKUP_ENGINE:
+            from connectors.table_manager import (
+                discard_generic_sql_overwrite,
+                restore_generic_sql_overwrite,
+            )
+
+            schema = cfg.get("schema")
+            if restore:
+                restore_generic_sql_overwrite(
+                    db_type, cfg, table_name, str(backup), schema
+                )
+            else:
+                discard_generic_sql_overwrite(db_type, cfg, str(backup), schema)
+        elif engine_name == "mongodb":
             from connectors.table_manager import (
                 discard_mongodb_overwrite,
                 restore_mongodb_overwrite,

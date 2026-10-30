@@ -1736,12 +1736,41 @@ def is_dialect_native_document_wire(
     db = (dest_db or "").strip().lower()
     if not db:
         return False
+    own = own_json_carrier_spellings(db)
+    return upper in own or bare in own
+
+
+@lru_cache(maxsize=256)
+def own_json_carrier_spellings(dest_db: str) -> frozenset[str]:
+    """Every spelling of the column DataFlow creates for JSON on ``dest_db``.
+
+    That is the CREATE spelling (``ddl_type(db, "JSON")``) *and* what DataFlow's
+    own introspection reads that column back as. Run 2 grades against the
+    read-back, and the two differ where introspection folds the physical type
+    into the logical lattice: Oracle creates ``CLOB`` and reads back ``TEXT``,
+    ClickHouse creates ``String`` and reads back ``TEXT``. Matching the CREATE
+    spelling (or a token list) alone made DataFlow's own JSON column a
+    "collapse" on run 2 (D198; D158 was the SQL Server instance of the same gap).
+    """
+    db = (dest_db or "").strip().lower()
     try:
         native = ddl_type(db, "JSON")
     except Exception:
-        return False
-    native_u = strip_identity_qualifier(native).upper().strip()
-    return upper == native_u or bare == re.sub(r"\s*\(\s*\d+\s*\)", "", native_u).strip()
+        return frozenset()
+    spellings = {native}
+    try:
+        from services.schema_introspect import catalog_read_back
+    except ImportError:  # pragma: no cover - introspection drivers not installed
+        catalog_read_back = None
+    if catalog_read_back is not None:
+        spellings.add(catalog_read_back(db, native))
+    out: set[str] = set()
+    for spelling in spellings:
+        u = strip_identity_qualifier(spelling).upper().strip()
+        if u:
+            out.add(u)
+            out.add(re.sub(r"\s*\(\s*\d+\s*\)", "", u).strip())
+    return frozenset(out)
 
 
 # Document-store ``date`` is an instant carrier, not a calendar date. The rules
@@ -6728,6 +6757,11 @@ def trailing_spaces_insignificant_for_unique(
     return False
 
 
+# The equality key of the empty-string key value. Not "" — that answer means
+# "NULL, no key" to every caller — and not a character a real key carries.
+EMPTY_STRING_KEY = "\x00EMPTY\x00"
+
+
 def unique_equality_key(
     value: Any,
     ddl_type: str | None = None,
@@ -6743,24 +6777,31 @@ def unique_equality_key(
     Trailing spaces follow PAD SPACE (CHAR; MySQL/SS VARCHAR) vs NO PAD
     (PostgreSQL/Oracle VARCHAR) — never invent collisions across engines.
 
-    When ``null_sentinel`` is set (``NULLS NOT DISTINCT``), empty/null cells
-    collide on that sentinel instead of being skipped.
+    When ``null_sentinel`` is set (``NULLS NOT DISTINCT``), null cells collide
+    on that sentinel instead of being skipped.
+
+    Only SQL NULL / Missing returns the empty "no key" answer. ``''`` is a key
+    value (D53): two ``''`` rows collide in a unique index, and under PAD SPACE
+    ``''`` and ``' '`` are the same key. It returns :data:`EMPTY_STRING_KEY`
+    instead, except on a destination that stores ``''`` as NULL (Oracle
+    VARCHAR2), where the stored key is NULL.
     """
-    if value is None:
+    from services.value_serializer import is_reader_null_cell
+
+    if value is None or is_reader_null_cell(value):
         return null_sentinel or ""
     raw = str(value)
     pad_space = trailing_spaces_insignificant_for_unique(
         ddl_type, dest_kind=dest_kind
     )
-    if pad_space:
-        text = raw.rstrip(" ")
-        if not text:
+    # PAD SPACE: trailing spaces do not take part in equality.
+    text = raw.rstrip(" ") if pad_space else raw
+    if not text:
+        from services.reconciliation import destination_empty_string_is_null
+
+        if raw == "" and destination_empty_string_is_null(dest_kind):
             return null_sentinel or ""
-    else:
-        # NO PAD: trailing spaces are significant; only pure-empty is null-like.
-        if raw == "":
-            return null_sentinel or ""
-        text = raw
+        return EMPTY_STRING_KEY
     if is_width_insensitive_collation(ddl_type):
         text = fold_width_forms(text)
     if is_kana_insensitive_collation(ddl_type):

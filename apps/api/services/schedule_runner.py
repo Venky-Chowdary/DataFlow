@@ -789,13 +789,21 @@ def _unmapped_added_columns(sched: Any, request: Any, verdict: Any) -> list[str]
     )
     if getattr(verdict, "verdict", "") != REVIEW or policy in PROPAGATE_POLICIES:
         return []
-    read = mapped_source_columns(list(getattr(request, "mappings", None) or []))
+    from services.mapping_constraints import is_intentional_omit
+
+    mappings = list(getattr(request, "mappings", None) or [])
+    # A declared omission is the operator's decision, the same as G13 reads it.
+    accounted = mapped_source_columns(mappings) | {
+        str(m.get("source") or "").strip().lower()
+        for m in mappings
+        if isinstance(m, dict) and is_intentional_omit(m)
+    }
     names: list[str] = []
     for entry in getattr(verdict, "additive", None) or []:
         if not isinstance(entry, dict) or str(entry.get("kind") or "") != "add_column":
             continue
         name = str(entry.get("column") or "").strip()
-        if name and name.lower() not in read:
+        if name and name.lower() not in accounted:
             names.append(name)
     return names
 
@@ -1243,7 +1251,10 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
             # This beat's verdict will not change by itself, and the next beat
             # would either replay it or — on an append with nothing to collapse
             # a second copy — land the same rows again. Park on one finding.
-            from services.drift_approval import gate_codes_from_job
+            from services.drift_approval import (
+                gate_codes_from_job,
+                unaccounted_sources_from_job,
+            )
 
             _open_finding(
                 schedule_id,
@@ -1256,6 +1267,7 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                     "phase": (job_doc or {}).get("phase", ""),
                     "park_reason": park,
                     "gate_codes": gate_codes_from_job(job_doc),
+                    "unmapped_columns": unaccounted_sources_from_job(job_doc),
                 },
             )
     _notify_schedule(sched, job_id, status, job_doc)

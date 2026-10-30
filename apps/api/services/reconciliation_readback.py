@@ -6,7 +6,7 @@ import logging
 import json
 from services.fingerprint_accumulator import fingerprint_checksum
 from services.readback_projection import project_readback
-from services.value_serializer import load_http_json
+from services.value_serializer import load_http_json, payload_record_wire
 from typing import Any
 
 logger = logging.getLogger("services.reconciliation")
@@ -988,7 +988,9 @@ def verify_mongodb_collection(
             for doc in coll.find(query):
                 if limit and yielded >= limit:
                     break
-                yield doc
+                # The digest reads cells as wire (the way a reader emits them);
+                # a stored text that spells a sentinel is escaped, not NULL.
+                yield payload_record_wire(doc)
                 yielded += 1
 
         columns = target_columns or sorted(
@@ -1079,7 +1081,9 @@ def verify_redis_prefix(
 
         def _row_iter():
             for key in keys:
-                yield redis_json_row(client.get(key))
+                # Wire form, as the digest expects: a stored text that spells
+                # a sentinel is escaped, not read as NULL.
+                yield payload_record_wire(redis_json_row(client.get(key)))
 
         columns = target_columns or []
         if not columns and keys:
@@ -1141,7 +1145,10 @@ def verify_dynamodb_table(
                 for item in page.get("Items", []):
                     if limit and yielded >= limit:
                         break
-                    yield {k: deserializer.deserialize(v) for k, v in item.items()}
+                    # Wire form (see Mongo / Redis above).
+                    yield payload_record_wire(
+                        {k: deserializer.deserialize(v) for k, v in item.items()}
+                    )
                     yielded += 1
 
         columns = target_columns or []
