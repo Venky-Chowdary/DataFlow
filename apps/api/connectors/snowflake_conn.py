@@ -1168,6 +1168,7 @@ class _PlanSession:
     ) -> None:
         self._open = open_fn
         self._login_warehouse = login_warehouse
+        self._shut = False
         self._lock = threading.Lock()
         self._session_parameters = dict(session_parameters or {})
         self._local_emulator = local_emulator
@@ -1240,6 +1241,7 @@ class _PlanSession:
 
     def shut(self) -> None:
         with self._lock:
+            self._shut = True
             try:
                 self._conn.close()
             except Exception as exc:  # noqa: BLE001 - closing must never raise
@@ -1260,6 +1262,14 @@ class _PlanConnection:
 
     def is_closed(self) -> bool:
         return False
+
+    def rollback(self) -> Any:
+        """A step abandoned at its budget hands its connection back after the
+        scope ended the login: nothing is left to roll back, and the pool's
+        reset must not log the closed login as an error."""
+        if self._session._shut:
+            return None
+        return self._session._conn.rollback()
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._session._conn, name)
