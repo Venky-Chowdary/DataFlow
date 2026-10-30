@@ -386,7 +386,8 @@ class FilePreflightContext(PreflightContext):
                 parts: list[tuple[Any, str | None, bool, str | None]] = []
                 displays: list[str] = []
                 for spec in specs:
-                    raw_cell = row.get(spec["source"], "")
+                    # Absent is Missing (no key), never the '' key value (D53).
+                    raw_cell = row.get(spec["source"])
                     raw = cell_to_string(raw_cell) if raw_cell is not None else ""
                     sentinel = "\x00NULL\x00" if spec["nulls_collide"] else None
                     parts.append(

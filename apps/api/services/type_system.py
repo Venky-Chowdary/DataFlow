@@ -6757,6 +6757,11 @@ def trailing_spaces_insignificant_for_unique(
     return False
 
 
+# The equality key of the empty-string key value. Not "" — that answer means
+# "NULL, no key" to every caller — and not a character a real key carries.
+EMPTY_STRING_KEY = "\x00EMPTY\x00"
+
+
 def unique_equality_key(
     value: Any,
     ddl_type: str | None = None,
@@ -6772,24 +6777,31 @@ def unique_equality_key(
     Trailing spaces follow PAD SPACE (CHAR; MySQL/SS VARCHAR) vs NO PAD
     (PostgreSQL/Oracle VARCHAR) — never invent collisions across engines.
 
-    When ``null_sentinel`` is set (``NULLS NOT DISTINCT``), empty/null cells
-    collide on that sentinel instead of being skipped.
+    When ``null_sentinel`` is set (``NULLS NOT DISTINCT``), null cells collide
+    on that sentinel instead of being skipped.
+
+    Only SQL NULL / Missing returns the empty "no key" answer. ``''`` is a key
+    value (D53): two ``''`` rows collide in a unique index, and under PAD SPACE
+    ``''`` and ``' '`` are the same key. It returns :data:`EMPTY_STRING_KEY`
+    instead, except on a destination that stores ``''`` as NULL (Oracle
+    VARCHAR2), where the stored key is NULL.
     """
-    if value is None:
+    from services.value_serializer import is_reader_null_cell
+
+    if value is None or is_reader_null_cell(value):
         return null_sentinel or ""
     raw = str(value)
     pad_space = trailing_spaces_insignificant_for_unique(
         ddl_type, dest_kind=dest_kind
     )
-    if pad_space:
-        text = raw.rstrip(" ")
-        if not text:
+    # PAD SPACE: trailing spaces do not take part in equality.
+    text = raw.rstrip(" ") if pad_space else raw
+    if not text:
+        from services.reconciliation import destination_empty_string_is_null
+
+        if raw == "" and destination_empty_string_is_null(dest_kind):
             return null_sentinel or ""
-    else:
-        # NO PAD: trailing spaces are significant; only pure-empty is null-like.
-        if raw == "":
-            return null_sentinel or ""
-        text = raw
+        return EMPTY_STRING_KEY
     if is_width_insensitive_collation(ddl_type):
         text = fold_width_forms(text)
     if is_kana_insensitive_collation(ddl_type):

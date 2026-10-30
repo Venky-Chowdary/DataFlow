@@ -207,7 +207,7 @@ def test_integrity_blocks_contradictory_usd_eu_grouping():
 # ── Required field null checks ─────────────────────────────────────────────
 
 def test_integrity_blocks_nulls_on_required_id():
-    rows = [{"customer_id": ""}, {"customer_id": "C001"}, {"customer_id": ""}]
+    rows = [{"customer_id": None}, {"customer_id": "C001"}, {"customer_id": None}]
     mappings = [{"source": "customer_id", "target": "customer_id", "confidence": 0.95}]
     report = run_integrity_audit(
         source_columns=["customer_id"],
@@ -680,3 +680,43 @@ def test_transform_dry_run_passes_empty_url_with_cast_and_continue():
     assert transform["blocks_transfer"] is False
     assert int(transform.get("contracted_holdout_count") or 0) >= 1
     assert transform.get("contracted_holdouts")
+
+
+def _required_nulls(rows, **kw):
+    report = run_integrity_audit(
+        source_columns=["customer_id"],
+        mappings=[{"source": "customer_id", "target": "customer_id", "confidence": 0.95, **kw.pop("mapping", {})}],
+        sample_rows=rows,
+        validation_mode="strict",
+        **kw,
+    )
+    return next(c for c in report["checks"] if c["check"] == "required_nulls")
+
+
+def test_empty_string_identity_key_is_a_value_not_a_missing_key():
+    """D53: '' is a key the destination stores; only NULL is a missing key."""
+    rows = [{"customer_id": ""}, {"customer_id": "C001"}, {"customer_id": "C002"}]
+    assert _required_nulls(rows, destination_db_type="postgresql")["blocks_transfer"] is False
+
+
+def test_empty_string_identity_key_blocks_where_the_route_stores_it_as_null():
+    """D53: where '' lands as NULL the key is missing, and Validate says why."""
+    rows = [{"customer_id": ""}, {"customer_id": "C001"}, {"customer_id": "C002"}]
+    oracle = _required_nulls(rows, destination_db_type="oracle")
+    assert oracle["blocks_transfer"] is True
+    assert "stores '' as NULL" in " ".join(oracle["issues"])
+    # A file blank into a non-text key column is written as NULL too.
+    file_typed = _required_nulls(
+        rows,
+        destination_db_type="postgresql",
+        empty_cells_as_null=True,
+        mapping={"target_type": "BIGINT"},
+    )
+    assert file_typed["blocks_transfer"] is True
+    file_text = _required_nulls(
+        rows,
+        destination_db_type="postgresql",
+        empty_cells_as_null=True,
+        mapping={"target_type": "VARCHAR(20)"},
+    )
+    assert file_text["blocks_transfer"] is False

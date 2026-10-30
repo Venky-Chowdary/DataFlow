@@ -631,6 +631,19 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Acknowledge a schema_drift review block so the plan can clear."
                     ),
                 },
+                "ddl_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Approve the destination DDL Validate disclosed (D101): "
+                        "the unique index an upsert into an existing PostgreSQL/"
+                        "MySQL table without one needs. Object with approved_by "
+                        "and reason."
+                    ),
+                    "properties": {
+                        "approved_by": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                },
             },
             "required": [],
         },
@@ -748,6 +761,21 @@ TOOL_DEFINITIONS: list[dict] = [
                         "columns under manual_review) so Validate can proceed. "
                         "The acknowledgement is recorded on the transfer."
                     ),
+                },
+                "ddl_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Approve the destination DDL Validate disclosed for this "
+                        "run (D101) — the unique index an upsert into an existing "
+                        "table without one needs (PostgreSQL/MySQL only; MERGE "
+                        "engines such as Snowflake never need one). Object with "
+                        "approved_by and reason; it covers only the statements "
+                        "the refusal listed."
+                    ),
+                    "properties": {
+                        "approved_by": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
                 },
             },
             "required": [],
@@ -4030,6 +4058,7 @@ class DataPilotTools:
         pii_acknowledgement: dict | None = None,
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
+        ddl_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -4065,6 +4094,7 @@ class DataPilotTools:
             pii_acknowledgement=pii_acknowledgement,
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
+            ddl_acknowledgement=ddl_acknowledgement,
         )
 
     def _start_transfer(
@@ -4101,6 +4131,7 @@ class DataPilotTools:
         pii_acknowledgement: dict | None = None,
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
+        ddl_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -4137,6 +4168,7 @@ class DataPilotTools:
             pii_acknowledgement=pii_acknowledgement,
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
+            ddl_acknowledgement=ddl_acknowledgement,
         )
 
     def _start_dataset_transfer(

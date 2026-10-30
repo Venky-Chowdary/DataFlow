@@ -527,6 +527,32 @@ def _check_financial_precision(
     return report
 
 
+def _route_stores_blank_key_as_null(
+    mapping: dict[str, Any],
+    *,
+    source_type: str,
+    empty_cells_as_null: bool,
+    database_extract: bool,
+) -> bool:
+    """True when this route writes a ``''`` key cell as SQL NULL (D53).
+
+    The same rules the writer applies (``services.blank_cell_contract``): a
+    file blank becomes NULL in a non-text target, and a database carrier that
+    cannot store ``''`` (numeric, temporal, uuid, ...) reached the wire as a
+    flattened NULL. A text key keeps ``''`` as its value.
+    """
+    from services.blank_cell_contract import (
+        _target_is_text,
+        source_carrier_cannot_store_empty,
+    )
+
+    if empty_cells_as_null and not _target_is_text(mapping):
+        return True
+    return bool(
+        database_extract and source_type and source_carrier_cannot_store_empty(source_type)
+    )
+
+
 def _check_required_nulls(
     mappings: list[dict],
     rows: list[dict[str, Any]],
@@ -535,8 +561,19 @@ def _check_required_nulls(
     dest_kind: str = "",
     primary_key: str | None = None,
     validation_mode: str = "strict",
+    source_types: dict[str, str] | None = None,
+    empty_cells_as_null: bool = False,
+    database_extract: bool = False,
 ) -> dict[str, Any]:
     """Enforce nullability on the resolved identity key and exact canonical keys only.
+
+    A key is missing when it is SQL NULL, or when it is ``''`` and *this route*
+    stores that ``''`` as NULL (D53): a destination that folds ``''`` to NULL
+    (Oracle VARCHAR2), a file blank landing in a non-text column (the blank-cell
+    contract writes it as NULL), or a database carrier that cannot hold ``''``.
+    Anywhere else ``''`` is a key value and the write lands it as one — counting
+    it here refused keys the destination stores, while a key the write would
+    turn into NULL passed Validate and died on NOT NULL at Execute.
 
     Optional FK / OAuth fields (``googleId`` → ``google_id``, ``providerId``,
     ``user_id``, …) are often sparse on Mongo/NoSQL sources. Treating every
@@ -547,6 +584,9 @@ def _check_required_nulls(
     issues: list[str] = []
     schemaless = dest_kind in SCHEMALESS_DESTS
     _ = (validation_mode or "strict").strip().lower()
+    from services.reconciliation import destination_empty_string_is_null
+
+    empty_is_null = destination_empty_string_is_null(dest_kind)
 
     # A column the operator declared Omit is never written, so no destination
     # nullability contract applies to it. Judging it would block Validate on a
@@ -586,13 +626,45 @@ def _check_required_nulls(
             continue
         # A NULL cell serialises to the wire sentinel, not "" — count it (and
         # the reader's NULL/Missing spellings) as empty, or a key column that
-        # is entirely NULL sails through as populated.
+        # is entirely NULL sails through as populated. An empty string is a
+        # key value, not a missing one (D53): it counts only where the
+        # destination itself stores '' as NULL (Oracle VARCHAR2).
+        blank_is_null = empty_is_null or _route_stores_blank_key_as_null(
+            m,
+            source_type=str((source_types or {}).get(src) or ""),
+            empty_cells_as_null=empty_cells_as_null,
+            database_extract=database_extract,
+        )
         empty = sum(
-            1 for v in values if is_reader_null_cell(v) or wire_cell_text(v) == ""
+            1
+            for v in values
+            if is_reader_null_cell(v)
+            or (blank_is_null and wire_cell_text(v) == "")
         )
         rate = empty / len(values)
         if rate > null_rate_max:
-            issues.append(f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field)")
+            blank = (
+                sum(
+                    1
+                    for v in values
+                    if not is_reader_null_cell(v) and wire_cell_text(v) == ""
+                )
+                if blank_is_null
+                else 0
+            )
+            where = (
+                f"{dest_kind or 'the destination'} stores '' as NULL"
+                if empty_is_null
+                else "this route writes '' into that column as NULL"
+            )
+            why = (
+                f"; {blank} of them are '' and {where}, so they cannot identify a row"
+                if blank
+                else ""
+            )
+            issues.append(
+                f"{src}: {rate:.0%} null/empty (max {null_rate_max:.0%} for required field){why}"
+            )
     blocks = len(issues) > 0
     return {
         "check": "required_nulls",
@@ -721,7 +793,8 @@ def _sample_unique_constraint_dupes(
         skip = False
         for dest_col, src, ddl, casefold, null_sentinel in col_specs:
             # Preserve trailing spaces for NO PAD engines — cell_to_string only.
-            raw_cell = row.get(src, row.get(dest_col, ""))
+            # An absent cell is Missing (no key), never the '' key value (D53).
+            raw_cell = row.get(src, row.get(dest_col))
             raw = wire_cell_text(raw_cell) if raw_cell is not None else ""
             key_part = unique_equality_key(
                 None if raw_cell is None else raw,
@@ -1565,7 +1638,8 @@ def _check_duplicate_keys(
                 scope_row, target_col, unique_keys=single_uks
             ):
                 continue
-            raw_cell = row.get(primary_key, "")
+            # An absent cell is Missing (no key), never the '' key value (D53).
+            raw_cell = row.get(primary_key)
             raw = wire_cell_text(raw_cell) if raw_cell is not None else ""
             key = unique_equality_key(
                 None if raw_cell is None else raw,
@@ -2196,7 +2270,19 @@ def run_integrity_audit(
                 file_row_quarantine=file_row_quarantine,
             )
         )
-        checks.append(_check_required_nulls(mappings, rows, null_rate_max=cfg["null_rate_max"], dest_kind=dest_kind, primary_key=pk_nulls, validation_mode=validation_mode))
+        checks.append(
+            _check_required_nulls(
+                mappings,
+                rows,
+                null_rate_max=cfg["null_rate_max"],
+                dest_kind=dest_kind,
+                primary_key=pk_nulls,
+                validation_mode=validation_mode,
+                source_types=source_types,
+                empty_cells_as_null=empty_cells_as_null,
+                database_extract=database_extract,
+            )
+        )
         # Duplicate identity keys block when the write path will enforce uniqueness:
         # schemaless destinations, upsert/CDC/mirror/SCD2, overwrite (table recreated),
         # or append when the destination PK is known to include the mapped target.

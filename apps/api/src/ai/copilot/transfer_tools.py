@@ -299,6 +299,58 @@ def _pii_acknowledgement(raw: dict[str, Any] | None) -> dict[str, str] | None:
     return {"approved_by": approved_by, "reason": reason}
 
 
+def _carry_proven_width_narrowings(
+    mappings: list[dict[str, Any]], preflight: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Stage Validate's population-proven width narrowings onto the run's mappings.
+
+    Validate proved every source value fits the bounded destination carrier
+    (``proof_bundle.accepted_width_narrowings``) and graded the pair lossless.
+    Execute checks the staged mappings before it re-runs Validate, so a stale
+    Map "lossy / review" stamp on that pair failed a run Validate had cleared
+    (run 2 into the key column DataFlow sized on run 1). Only exactly the
+    proven pairs are touched; Execute's Validate re-proves them on the rows it
+    actually reads.
+    """
+    accepted = ((preflight or {}).get("proof_bundle") or {}).get(
+        "accepted_width_narrowings"
+    ) or {}
+    if not accepted or not (preflight or {}).get("passed"):
+        return mappings
+    proven = {str(k).casefold() for k in accepted}
+    out: list[dict[str, Any]] = []
+    for m in mappings or []:
+        if isinstance(m, dict) and (
+            f"{m.get('source') or ''}→{m.get('target') or ''}".casefold() in proven
+        ):
+            m = dict(m)
+            if str(m.get("fidelity") or "").lower() == "lossy_cast":
+                m["fidelity"] = None
+            m["type_narrowing"] = False
+            if str(m.get("review_kind") or "").lower() == "lossy":
+                m["requires_review"] = False
+            m["width_narrowing_proven"] = True
+        out.append(m)
+    return out
+
+
+def _ddl_acknowledgement(raw: dict[str, Any] | None) -> dict[str, str] | None:
+    """Validate the operator's approval of disclosed destination DDL (D101)."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("ddl_acknowledgement must be an object with approved_by and reason.")
+    approved_by = str(raw.get("approved_by") or "").strip()
+    reason = str(raw.get("reason") or "").strip()
+    if not approved_by or not reason:
+        raise ValueError(
+            "ddl_acknowledgement needs approved_by and reason — an unsigned "
+            "approval cannot clear disclosed destination DDL."
+        )
+    _LOG.info("Destination DDL approved by %s: %s", approved_by, reason)
+    return {"approved_by": approved_by, "reason": reason}
+
+
 def _is_execute_cleared(preflight: dict[str, Any]) -> bool:
     """Same bar as Studio Execute — passed + approve; never local / review-grade."""
     run_id = str(preflight.get("run_id") or "")
@@ -724,6 +776,7 @@ def plan_transfer(
     column_transforms: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
     shared_destination_acknowledged: bool = False,
+    ddl_acknowledgement: dict[str, Any] | None = None,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -1014,6 +1067,7 @@ def plan_transfer(
 
     try:
         pii_ack = _pii_acknowledgement(pii_acknowledgement)
+        ddl_ack = _ddl_acknowledgement(ddl_acknowledgement)
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
 
@@ -1068,6 +1122,7 @@ def plan_transfer(
             stream_contracts=row_rules["stream_contracts"] or None,
             pii_ack=pii_ack,
             schema_drift_acknowledged=bool(schema_drift_acknowledged),
+            ddl_ack=ddl_ack,
         )
         if (
             _contract_pass == 2
@@ -1089,6 +1144,7 @@ def plan_transfer(
     if contract_refusal:
         preflight = _block_plan_on_contract(preflight, contract_refusal)
 
+    mappings = _carry_proven_width_narrowings(mappings, preflight)
     conversions = _type_conversions(mappings)
     unmapped = [
         r["name"]
@@ -1585,6 +1641,7 @@ def _run_preflight(
     known_row_count: int | None = None,
     pii_ack: dict[str, str] | None = None,
     schema_drift_acknowledged: bool = False,
+    ddl_ack: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.population_fit_scan import STUDIO_FIT_SCAN_SECONDS
@@ -1747,8 +1804,9 @@ def _run_preflight(
             source_filter=source_filter or None,
             stream_contracts=list(stream_contracts or []),
             compliance_acknowledged=bool(pii_ack),
-            acknowledgment_actor=(pii_ack or {}).get("approved_by", ""),
-            acknowledgment_reason=(pii_ack or {}).get("reason", ""),
+            ddl_changes_acknowledged=bool(ddl_ack),
+            acknowledgment_actor=(pii_ack or ddl_ack or {}).get("approved_by", ""),
+            acknowledgment_reason=(pii_ack or ddl_ack or {}).get("reason", ""),
             schema_drift_acknowledged=bool(schema_drift_acknowledged),
             source_population_counted=population_counted,
             rows_are_population=(
@@ -1797,6 +1855,13 @@ def _run_preflight(
         if isinstance(proof_bundle, dict)
         else None
     )
+    # The width narrowings Validate proved travel too: staging stamps them on
+    # the run's mappings so Execute agrees with this verdict.
+    accepted_widths = (
+        (proof_bundle or {}).get("accepted_width_narrowings")
+        if isinstance(proof_bundle, dict)
+        else None
+    )
     return {
         "run_id": result.get("run_id"),
         "passed": bool(result.get("passed")),
@@ -1823,7 +1888,14 @@ def _run_preflight(
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
-        "proof_bundle": {"transfer_decision": decision} if isinstance(decision, dict) else {},
+        "proof_bundle": {
+            **({"transfer_decision": decision} if isinstance(decision, dict) else {}),
+            **(
+                {"accepted_width_narrowings": dict(accepted_widths)}
+                if isinstance(accepted_widths, dict) and accepted_widths
+                else {}
+            ),
+        },
     }
 
 
@@ -2143,6 +2215,7 @@ def start_transfer(
     column_transforms: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
     shared_destination_acknowledged: bool = False,
+    ddl_acknowledgement: dict[str, Any] | None = None,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -2176,6 +2249,7 @@ def start_transfer(
         pii_acknowledgement=pii_acknowledgement,
         column_transforms=column_transforms,
         schema_drift_acknowledged=schema_drift_acknowledged,
+        ddl_acknowledgement=ddl_acknowledgement,
         # The plan evaluates the bound contract against this route (QA MX3-18).
         contract_id=contract_id,
         require_signed_contract=require_signed_contract,
@@ -2296,6 +2370,13 @@ def start_transfer(
         payload["compliance_acknowledged"] = True
         payload["acknowledgment_actor"] = pii_ack["approved_by"]
         payload["acknowledgment_reason"] = pii_ack["reason"]
+    ddl_ack = _ddl_acknowledgement(ddl_acknowledgement)
+    if ddl_ack:
+        # Execute re-runs Validate and the writer gates the index on this
+        # approval (D101): the disclosed DDL and who approved it ride on the job.
+        payload["ddl_changes_acknowledged"] = True
+        payload.setdefault("acknowledgment_actor", ddl_ack["approved_by"])
+        payload.setdefault("acknowledgment_reason", ddl_ack["reason"])
     if payload.get("schema_drift_acknowledged"):
         # Studio requires a signed reason. MCP sends the boolean alone.
         # Confirm and the job record still name who accepted the drift.

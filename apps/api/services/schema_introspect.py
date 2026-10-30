@@ -375,6 +375,11 @@ def _introspect_schema_unscoped(
     # planned engine does not inherit a live schema probe.
     if db_type in {"timescaledb", "timescale"}:
         db_type = "postgresql"
+    # MariaDB is the MySQL catalog (INFORMATION_SCHEMA over the same wire):
+    # without this an existing MariaDB destination was "existence unknown" and
+    # every run 2 into the table DataFlow created was blocked at g6.
+    if db_type == "mariadb":
+        db_type = "mysql"
     if ssl is None:
         # A caller that never said anything about TLS must not make it mandatory.
         from services.connector_store import default_ssl

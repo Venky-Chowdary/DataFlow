@@ -278,6 +278,8 @@ def _untyped_text_token(source_type: str) -> bool:
 
 def _samples_unanimously_naive_datetimes(samples: Any) -> bool:
     """True when every non-empty sample is a zoneless datetime."""
+    import re
+
     from connectors.sql_temporal import parse_sql_datetime
     from services.type_system import temporal_value_has_timezone
 
@@ -285,6 +287,12 @@ def _samples_unanimously_naive_datetimes(samples: Any) -> bool:
     for sample in samples or []:
         if sample is None or not str(sample).strip():
             continue
+        # A bare number is not a wall clock: the datetime parser reads "1" as
+        # epoch second 1, so a text key ("1", "2" — a Kafka message key) was
+        # declared a zoneless TIMESTAMP under source_timezone and then graded
+        # TIMESTAMPTZ -> BIGINT as a collapse. Epoch values carry no zone.
+        if re.fullmatch(r"\s*[+-]?\d+(?:\.\d+)?\s*", str(sample)):
+            return False
         if parse_sql_datetime(sample) is None or temporal_value_has_timezone(sample):
             return False
         saw = True
