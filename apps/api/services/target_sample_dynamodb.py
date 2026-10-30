@@ -85,4 +85,11 @@ def read_dynamodb_target_sample(
         raise TargetSampleUnavailable(
             f"Could not read destination sample from 'dynamodb'.{table_name!r}: {exc}"
         ) from exc
-    return [dict(zip(batch.headers, row)) for row in batch.rows][: int(limit)]
+    from services.value_serializer import reader_wire_cell
+
+    # Scan rows are reader wire cells (NULL is the sentinel), unlike the keyed
+    # BatchGetItem records above, which are typed values.
+    return [
+        {h: reader_wire_cell(v) for h, v in zip(batch.headers, row)}
+        for row in batch.rows
+    ][: int(limit)]

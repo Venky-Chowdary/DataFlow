@@ -29,9 +29,9 @@ def test_value_proof_still_declines_a_value_changing_transform():
 
 
 def test_declared_zone_is_attached_to_the_source_cell_before_the_fingerprint():
-    zones = cvd._declared_zones([_m("ts", ZONE), _m("n", "integer")])
+    zones = cvd._declared_carries([_m("ts", ZONE), _m("n", "integer")])
     assert zones == {"ts": ZONE}  # the zone name keeps its case
-    src = cvd._attach_zones([{"ts": datetime(2024, 1, 2, 3, 4, 5), "n": 1}], zones)
+    src = cvd._apply_carries([{"ts": datetime(2024, 1, 2, 3, 4, 5), "n": 1}], zones)
     dest = [{"ts": datetime(2024, 1, 2, 8, 4, 5, tzinfo=timezone.utc), "n": 1}]
     proof = cvd.compare_row_sets(
         src, dest, ["ts", "n"], engine="postgresql", dest_types={"ts": "TIMESTAMPTZ", "n": "BIGINT"}
@@ -40,7 +40,7 @@ def test_declared_zone_is_attached_to_the_source_cell_before_the_fingerprint():
 
 
 def test_a_wrong_zone_does_not_match():
-    src = cvd._attach_zones([{"ts": datetime(2024, 1, 2, 3, 4, 5)}], {"ts": ZONE})
+    src = cvd._apply_carries([{"ts": datetime(2024, 1, 2, 3, 4, 5)}], {"ts": ZONE})
     dest = [{"ts": datetime(2024, 1, 2, 3, 4, 5, tzinfo=timezone.utc)}]
     proof = cvd.compare_row_sets(
         src, dest, ["ts"], engine="postgresql", dest_types={"ts": "TIMESTAMPTZ"}
@@ -49,4 +49,4 @@ def test_a_wrong_zone_does_not_match():
 
 
 def test_null_source_cells_are_left_alone_by_the_zone():
-    assert cvd._attach_zones([{"ts": None}], {"ts": ZONE}) == [{"ts": None}]
+    assert cvd._apply_carries([{"ts": None}], {"ts": ZONE}) == [{"ts": None}]

@@ -182,7 +182,21 @@ def build_scenarios() -> list[Scenario]:
                     dest_family=fam,
                     mode=mode,
                     expect="block",
-                    note="Empty identity key cells must fail completeness",
+                    note="Missing (NULL) identity key cells must fail completeness",
+                    runner="integrity",
+                )
+            )
+            # D53: '' is a key value. It fails completeness only where the
+            # destination stores '' as NULL (Oracle VARCHAR2).
+            out.append(
+                Scenario(
+                    id=f"required_nulls.empty_string_key.{dest}.{mode}",
+                    rule_class="required_nulls_empty_string",
+                    dest=dest,
+                    dest_family=fam,
+                    mode=mode,
+                    expect="block" if dest == "oracle" else "pass",
+                    note="'' identity key is a value except where the destination stores '' as NULL",
                     runner="integrity",
                 )
             )
@@ -696,7 +710,12 @@ def _run_integrity(sc: Scenario) -> tuple[bool, bool, list[str]]:
         ]
     elif sc.rule_class == "required_nulls":
         cols = ["_id", "title"] if sc.dest_family == "schemaless" else ["id", "title"]
-        rows = [{cols[0]: "", "title": "a"}, {cols[0]: "", "title": "b"}, {cols[0]: "3", "title": "c"}]
+        rows = [{cols[0]: None, "title": "a"}, {cols[0]: None, "title": "b"}, {cols[0]: "3", "title": "c"}]
+        types = {c: "VARCHAR" for c in cols}
+        mappings = [{"source": c, "target": c, "confidence": 0.95} for c in cols]
+    elif sc.rule_class == "required_nulls_empty_string":
+        cols = ["_id", "title"] if sc.dest_family == "schemaless" else ["id", "title"]
+        rows = [{cols[0]: "", "title": "a"}, {cols[0]: "2", "title": "b"}, {cols[0]: "3", "title": "c"}]
         types = {c: "VARCHAR" for c in cols}
         mappings = [{"source": c, "target": c, "confidence": 0.95} for c in cols]
     elif sc.rule_class == "financial_precision":

@@ -118,7 +118,10 @@ def format_snowflake_bind(value: Any, sf_type: str) -> Any:
                 body = utc.strftime("%Y-%m-%d %H:%M:%S.%f").rstrip("0").rstrip(".")
             else:
                 body = utc.strftime("%Y-%m-%d %H:%M:%S")
-            return f"{body} +00:00"
+            # No space before the offset: Snowflake's AUTO formats take
+            # ``YYYY-MM-DD HH24:MI:SS.FFTZH:TZM``; the spaced form is read as a
+            # zone *name* "+00:00" by the DuckDB-backed emulator (fakesnow).
+            return f"{body}+00:00"
         return value
     else:
         # TIMESTAMP_NTZ / bare TIMESTAMP / DATETIME / TIME: keep civil digits.

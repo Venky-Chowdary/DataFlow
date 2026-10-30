@@ -188,8 +188,10 @@ def stage_dataset_transfer(
 
     from .transfer_tools import (
         _dest_table_exists_tri_state,
+        _identity_stream_contract,
         _introspect,
         _is_execute_cleared,
+        _primary_key_csv,
         _run_preflight,
         _safe_connector,
         _schema_rows,
@@ -204,6 +206,14 @@ def stage_dataset_transfer(
             return err
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
+
+    from src.transfer.connector_capabilities import source_only_destination_refusal
+
+    not_a_destination = source_only_destination_refusal(
+        str(dst_conn.get("type") or dst_conn.get("format") or "")
+    )
+    if not_a_destination:
+        return _tool_result(tool, success=False, error=not_a_destination)
 
     table = (dest_table or schema.name).strip()
     if not table:
@@ -275,6 +285,33 @@ def stage_dataset_transfer(
     if zone:
         mappings = apply_declared_source_timezone(src_rows, mappings, zone, dest_db)
 
+    # D58: the caller's key is the stream contract preflight AND Execute read,
+    # built by the same helper start_transfer uses. It used to be stamped onto
+    # the job payload only, after preflight had already refused the keyed load
+    # for carrying no contract.
+    operator_key = ",".join(
+        part.strip()
+        for part in str(upsert_key or primary_key or dedupe_key or "").split(",")
+        if part.strip()
+    )
+    contracts, identity_error = _identity_stream_contract(
+        mode=mode,
+        source_table=schema.name,
+        source_columns=[r["name"] for r in src_rows],
+        mappings=mappings,
+        operator_key=operator_key,
+        catalog_key="",
+    )
+    if identity_error:
+        return _tool_result(tool, success=False, error=identity_error)
+    for contract in contracts:
+        # The file is the snapshot (preflight_cursor_gate exempts keyed file
+        # upserts from a watermark): an updated_at the helper would infer for
+        # a table must not start filtering a re-uploaded file.
+        if contract.pop("cursor_inferred", False):
+            contract.pop("cursor_field", None)
+            contract.pop("cursor_semantics", None)
+
     preflight = _run_preflight(
         src_conn={"id": "", "name": schema.name, "type": file_type, "schema": ""},
         dst_conn=dst_conn,
@@ -292,6 +329,8 @@ def stage_dataset_transfer(
         dest_exists=dest_exists,
         source_kind="file",
         known_row_count=int(getattr(parsed, "row_count", 0) or 0),
+        source_primary_key=_primary_key_csv(contracts[0].get("primary_key")) if contracts else "",
+        stream_contracts=contracts or None,
         pii_ack=pii_ack,
         schema_drift_acknowledged=bool(schema_drift_acknowledged),
     )
@@ -332,22 +371,7 @@ def stage_dataset_transfer(
         "validation_mode": validation_mode,
         "limit": max(0, int(limit or 0)),
         "source_filter": {},
-        "stream_contracts": (
-            [
-                {
-                    "name": schema.name,
-                    "selected": True,
-                    "primary_key": [
-                        c.strip()
-                        for c in str(upsert_key or primary_key or dedupe_key)
-                        .split(",")
-                        if c.strip()
-                    ],
-                }
-            ]
-            if str(upsert_key or primary_key or dedupe_key).strip()
-            else []
-        ),
+        "stream_contracts": contracts,
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),
         "source_path": str(path),

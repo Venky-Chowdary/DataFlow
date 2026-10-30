@@ -836,8 +836,29 @@ def assert_cdc_eos_quarantine_replay(
         )
 
 
+def _decoded_token(resume_token: Any) -> Any:
+    """A JSON-object token as the dict it encodes.
+
+    SQL Server change tracking, SQL Server native CDC and Oracle LogMiner hand
+    their resume token over as a JSON **string**. Read as text, its
+    ``"phase":"snapshot"`` matched none of the ``phase=`` spellings below, so
+    every snapshot chunk was taken for streaming: the snapshot -> stream handoff
+    at the same position then never advanced the dest resume blob, and the next
+    run re-read the snapshot tail under the committed position and failed on a
+    "redelivery checksum mismatch" without applying its changes (D196).
+    """
+    if isinstance(resume_token, (str, bytes, bytearray)):
+        from services.cdc_resume_tokens import unwrap_resume_token
+
+        decoded = unwrap_resume_token(resume_token)
+        if isinstance(decoded, dict):
+            return decoded
+    return resume_token
+
+
 def extract_cdc_phase(resume_token: Any) -> str:
     """Snapshot vs streaming phase — Debezium handoff token, dest-owned."""
+    resume_token = _decoded_token(resume_token)
     if isinstance(resume_token, dict):
         nested = resume_token.get("token")
         if isinstance(nested, (dict, str)) and nested:
@@ -859,6 +880,7 @@ def extract_cdc_phase(resume_token: Any) -> str:
 
 
 def is_incremental_snapshot_token(resume_token: Any) -> bool:
+    resume_token = _decoded_token(resume_token)
     if isinstance(resume_token, dict):
         if resume_token.get("incremental_snapshot") or resume_token.get("snapshot_window"):
             return True
@@ -871,6 +893,7 @@ def is_incremental_snapshot_token(resume_token: Any) -> bool:
 
 def extract_snapshot_window_id(resume_token: Any) -> str:
     """Debezium DDD-3 window id from the incremental-snapshot resume token."""
+    resume_token = _decoded_token(resume_token)
     if isinstance(resume_token, dict):
         nested = resume_token.get("snapshot_window")
         if isinstance(nested, dict) and nested.get("window_id"):
@@ -910,6 +933,7 @@ def next_dest_window_id(incoming_window_id: str, dest_window_id: str) -> str:
 
 
 def extract_snapshot_signal_id(resume_token: Any) -> str:
+    resume_token = _decoded_token(resume_token)
     if isinstance(resume_token, dict):
         if resume_token.get("signal_id"):
             return str(resume_token.get("signal_id") or "").strip()
@@ -929,6 +953,7 @@ def extract_snapshot_signal_id(resume_token: Any) -> str:
 
 
 def extract_snapshot_last_pk(resume_token: Any) -> str:
+    resume_token = _decoded_token(resume_token)
     if isinstance(resume_token, dict):
         if resume_token.get("last_pk") not in (None, ""):
             return str(resume_token.get("last_pk") or "").strip()
@@ -1319,17 +1344,26 @@ def assert_redelivery_checksum(
     if not dest or not incoming:
         return
     if dest != incoming:
+        held = checksum_conflict_quarantine(
+            incoming_lsn=incoming_lsn or "",
+            incoming_checksum=incoming,
+            dest_checksum=dest,
+            change=change,
+        )
+        n_rows = len(
+            list(getattr(change, "inserts", None) or [])
+            + list(getattr(change, "updates", None) or [])
+        ) + len(list(getattr(change, "deletes", None) or []))
+        # The conflicting rows ride on this error for inspection; nothing writes
+        # them to the quarantine store. Saying "quarantined" sent operators to an
+        # empty quarantine (quarantine_row_count 0) for rows that were held back.
         raise ExactlyOnceRouteError(
             "exactly_once redelivery checksum mismatch — dest already committed "
-            "this LSN with a different payload. Refuse silent overwrite; "
-            "conflicting rows are quarantined.",
+            f"position {incoming_lsn or '?'} with a different payload. Refused a "
+            f"silent overwrite: {n_rows} change(s) in this batch were not applied "
+            "and were not written to quarantine. The destination is unchanged.",
             reason=REASON_CHECKSUM,
-            quarantine=checksum_conflict_quarantine(
-                incoming_lsn=incoming_lsn or "",
-                incoming_checksum=incoming,
-                dest_checksum=dest,
-                change=change,
-            ),
+            quarantine=held,
         )
 
 
@@ -1457,6 +1491,41 @@ def log_apply_outcome(
     )
 
 
+def snapshot_chunk_past_dest_hi(
+    *,
+    incoming_phase: str,
+    dest_phase: str,
+    incoming_lsn: str,
+    dest_lsn: str | None,
+    incoming_last_pk: str,
+    dest_last_pk: str,
+    incremental_snapshot: bool = False,
+) -> bool:
+    """True when an initial-snapshot chunk carries keys the dest has not closed.
+
+    Every chunk of an initial snapshot is stamped with the one handoff position
+    the reader took before the dump (the CT version, the CDC max LSN, the
+    binlog file:pos), so chunk 2 arrives at the LSN chunk 1 committed. It is not
+    a redelivery: its keyset bookmark lies past the dest-owned hi. Treating it
+    as one compared its payload with chunk 1's and refused the second chunk of
+    every table larger than one batch (D196). A chunk at or below the dest hi
+    is still a redelivery and still has to match the committed checksum, and an
+    incomparable bookmark never invents an apply.
+    """
+    from services.keyset_pagination import compare_keyset_bookmark
+
+    if incremental_snapshot:
+        return False
+    if (incoming_phase or "").strip().lower() != "snapshot":
+        return False
+    if (dest_phase or "").strip().lower() != "snapshot":
+        return False
+    if not dest_lsn or compare_lsn(incoming_lsn, dest_lsn) != 0:
+        return False
+    cmp = compare_keyset_bookmark(incoming_last_pk, dest_last_pk)
+    return cmp is not None and cmp > 0
+
+
 def decide_eos_apply(
     *,
     incoming_lsn: str,
@@ -1511,6 +1580,16 @@ def decide_eos_apply(
             and (dest_phase or "") == "snapshot"
         ):
             return "handoff_phase", fence
+        if snapshot_chunk_past_dest_hi(
+            incoming_phase=incoming_phase,
+            dest_phase=dest_phase,
+            incoming_lsn=incoming_lsn,
+            dest_lsn=dest_lsn,
+            incoming_last_pk=incoming_last_pk,
+            dest_last_pk=dest_last_pk,
+            incremental_snapshot=incremental_snapshot,
+        ):
+            return "apply", fence
         # The dest checksum describes the batch dest committed *at* its
         # watermark, so it is only comparable to a redelivery of that same LSN
         # that still carries rows. A strictly older LSN is an at-least-once

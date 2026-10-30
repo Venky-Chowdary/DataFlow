@@ -286,9 +286,26 @@ def _build_suggestion(
             sink = safe_type or _safe_target_type(
                 dest_db_type, prefer_structural=structural
             )
+            named = _carrier_refusal_reason(failure_reasons)
+            if named and (
+                not sink or normalize_logical_type(sink) == target_logical
+            ):
+                # The value is well-formed and the carrier cannot hold it (a BC
+                # date on an AD-only DATE). Suggesting the same carrier again
+                # was the misleading half of D65. An offset-bearing value needs
+                # the instant carrier; anything else survives as text.
+                sink = (
+                    _instant_target_type(dest_db_type)
+                    if "into ntz destination" in named.lower()
+                    else None
+                ) or _safe_target_type(dest_db_type, prefer_structural=False)
+                action = recommended_action_for_failure(
+                    fc, source=source, suggested_target_type=sink or ""
+                )
+            why = f" — {named}" if named else ""
             fix = (
                 f"Column '{source}' → {target_type}: {failed} of {sampled} sampled "
-                f"value(s) cannot be cast to {target_logical} (e.g. {examples}). "
+                f"value(s) cannot be cast to {target_logical} (e.g. {examples}){why}. "
                 f"For a new table, create as {sink or 'VARCHAR'}. "
                 f"For an existing typed column, remap to a compatible column or ALTER "
                 f"the destination (mapping Widen alone does not change DDL). "
@@ -306,6 +323,61 @@ def _build_suggestion(
         )
         return fix, None, None, FailureClass.TYPE_CAST_FAILURE.value
     return "", None, None, None
+
+
+def _float_carrier_refusal(value: Any, target_type: str, dest_db_type: str) -> str:
+    """The writer's float bind refusal for one transformed cell, or ``""``."""
+    if not (dest_db_type or "").strip():
+        return ""
+    from connectors.sql_bind import coerce_float_wire
+
+    try:
+        coerce_float_wire(value, ddl_type=target_type, engine=dest_db_type)
+    except (ValueError, TypeError) as exc:
+        return str(exc)
+    return ""
+
+
+def _instant_target_type(dest_db_type: str) -> str | None:
+    db = (dest_db_type or "").strip().lower()
+    if not db:
+        return None
+    try:
+        return ddl_type(db, "timestamptz")
+    except Exception:
+        return None
+
+
+def _carrier_refusal_reason(failure_reasons: list[str] | None) -> str:
+    """The destination bind's own reason when it refused a well-formed value.
+
+    ``coerce_sql_temporal`` names why a carrier cannot hold a value (BC era,
+    range, missing zone). That sentence is the guidance; a generic "cannot be
+    cast" in front of it sent operators to widen into the type that refused.
+    """
+    for reason in failure_reasons or []:
+        text = str(reason or "").strip()
+        low = text.lower()
+        if not text or low.startswith(("invalid ", "empty ")):
+            continue
+        if any(
+            k in low
+            for k in (
+                "bc date",
+                "year past 9999",
+                " is outside ",
+                "has no carrier",
+                "refuses naive",
+                "refuses epoch",
+                "zone rules",
+                "infinity",
+                "into ntz destination",
+                "fractional seconds exceed",
+                "does not exist in timezone",
+            )
+        ):
+            return text.rstrip(".")
+    return ""
 
 
 def _probe_target_not_null(
@@ -755,6 +827,22 @@ def analyze_coercion(
                                     "(domain change — Accept risk if intentional)"
                                 ),
                             })
+                    # The float carrier window the writer binds through (D59):
+                    # SQL Server FLOAT(53) refuses subnormals, a 4-byte REAL
+                    # refuses 1e39. A value Execute refuses must not pass here.
+                    float_refusal = (
+                        _float_carrier_refusal(converted, tgt_type, dest_db_type)
+                        if tgt_logical == "float"
+                        else ""
+                    )
+                    if float_refusal:
+                        failed += 1
+                        if len(sample_failures) < SAMPLE_FAILURE_LIMIT:
+                            sample_failures.append({
+                                "row": idx, "value": cell[:120], "reason": float_refusal,
+                            })
+                            raw_failure_values.append(cell[:120])
+                        continue
                     # Destination-wire probe: transform-engine ISO-Z ≠ SQL/warehouse bind.
                     if use_wire and wire_check_fn is not None:
                         probe_val = converted if converted is not None else cell

@@ -2,7 +2,8 @@
 contained spaces, dashes or accents.
 
 Run 1 creates the PostgreSQL table with sanitised names (``First Name`` ->
-``First_Name``, ``Café`` -> ``Caf_``). Run 2 mapped the original spelling onto
+``First_Name``; ``Café`` -> ``Cafe`` since QA round 4 transliterates accents,
+``Caf_`` before). Run 2 mapped the original spelling onto
 those names and judged it a weak, review-grade match (the identity test only
 forgave underscores), so append was blocked below the confidence floor; an
 overwrite then read the original spelling as new columns, and its read-back
@@ -100,7 +101,8 @@ def test_rerun_into_a_table_with_sanitised_column_names(tmp_path, isolated, reru
             "WHERE table_name = %s ORDER BY ordinal_position",
             (table,),
         )
-        assert [r[0] for r in cur.fetchall()] == ["First_Name", "Caf_", "a_b", "k"]
+        # QA round 4 (D55): accents are transliterated, not replaced by "_".
+        assert [r[0] for r in cur.fetchall()] == ["First_Name", "Cafe", "a_b", "k"]
     finally:
         cur.execute(f"DROP TABLE IF EXISTS {table}")
         pg.close()

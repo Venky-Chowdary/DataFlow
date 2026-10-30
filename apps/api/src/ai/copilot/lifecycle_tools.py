@@ -163,13 +163,17 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
             "type": "object",
             "properties": {
                 "job_id": {"type": "string"},
+                "selector": {
+                    "type": "string",
+                    "description": "'last', 'running' or 'failed' when no id was given",
+                },
                 "key_ids": {
                     "type": "array",
                     "items": {"type": "string"},
                     "description": "Key IDs from the job's drift evidence; empty selects all evidenced keys.",
                 },
             },
-            "required": ["job_id"],
+            "required": [],
         },
     },
     {

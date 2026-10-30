@@ -12,6 +12,35 @@ from datetime import date, datetime, time, timedelta, timezone
 from functools import lru_cache
 from typing import Any
 
+_LEADING_YEAR_RE = re.compile(r"^\s*(\d{4,6})-")
+_BC_SUFFIX_RE = re.compile(r"\bBC\s*$", re.IGNORECASE)
+_FIVE_DIGIT_YEAR_RE = re.compile(r"^\s*[+]?\d{5,}-")
+
+
+def is_bc_temporal_literal(value: Any) -> bool:
+    """True for PostgreSQL's spelling of a BC date / timestamp (``0044-03-15 BC``)."""
+    return isinstance(value, str) and bool(_BC_SUFFIX_RE.search(value))
+
+
+def beyond_python_calendar(value: Any) -> bool:
+    """True when a temporal literal names a year Python ``datetime`` cannot hold.
+
+    PostgreSQL writes years outside 1..9999 AD as ``0044-03-15 BC`` or
+    ``10000-01-01``. They are real values, not malformed text: every step that
+    reads a temporal cell (the PostgreSQL decode, Map's date/datetime
+    transforms, the destination bind, the preflight wire probe) passes the
+    literal through to the one place that knows the destination's calendar,
+    :func:`coerce_sql_temporal`. That keeps it on carriers with a BC era / text
+    and refuses it by name on an AD-only carrier (D65).
+    """
+    if not isinstance(value, str):
+        return False
+    return bool(_BC_SUFFIX_RE.search(value) or _FIVE_DIGIT_YEAR_RE.match(value))
+
+
+def _strip_era(text: str) -> str:
+    return _BC_SUFFIX_RE.sub("", text).rstrip()
+
 
 def round_to_smalldatetime(value: datetime) -> datetime:
     """Round to SQL Server ``SMALLDATETIME`` minute accuracy (Microsoft docs).
@@ -108,7 +137,7 @@ def input_has_timezone(value: Any) -> bool:
         return True
     if not isinstance(value, str):
         return False
-    text = value.strip()
+    text = _strip_era(value.strip())
     if not text:
         return False
     if text.endswith(("Z", "z")) or text.upper().endswith(" UTC"):
@@ -385,9 +414,22 @@ def coerce_sql_temporal(
                 "preserve the literal"
             )
         bounds = dest_temporal_bounds(engine, base)
+        if beyond_python_calendar(value):
+            # PostgreSQL and SQLite's text carrier hold the literal the source
+            # wrote; Python's datetime cannot, so it is never parsed here (D65).
+            if not (engine or "").strip() or _keeps_era_literal(engine):
+                return value.strip()
+            if bounds is None:
+                era = "a BC date" if is_bc_temporal_literal(value) else (
+                    "a year past 9999"
+                )
+                raise ValueError(
+                    f"{value.strip()!r} is {era} - {engine} {base} has no carrier "
+                    "for it. Quarantined; map to TEXT to keep the literal"
+                )
         if bounds is not None:
             lo, hi = bounds
-            if isinstance(value, str) and _BC_SUFFIX_RE.search(value):
+            if is_bc_temporal_literal(value):
                 # PostgreSQL writes BC dates as "0044-03-15 BC". Read as AD it
                 # looked like year 44 - a different date, and the range
                 # message below then blamed a year the source never held.
@@ -679,6 +721,15 @@ def _is_postgres_family(engine: str) -> bool:
     return _normalize_dest_db(eng) in _PG_FAMILY
 
 
+def _keeps_era_literal(engine: str) -> bool:
+    """Destinations that store a BC / five-digit-year literal as written."""
+    if _is_postgres_family(engine):
+        return True
+    from services.type_system import _normalize_dest_db
+
+    return _normalize_dest_db((engine or "").strip().lower()) == "sqlite"
+
+
 def dest_temporal_bounds(
     engine: str, base: str
 ) -> tuple[datetime, datetime] | None:
@@ -725,8 +776,6 @@ def dest_temporal_bounds(
     return None
 
 
-_LEADING_YEAR_RE = re.compile(r"^\s*(\d{4,6})-")
-_BC_SUFFIX_RE = re.compile(r"\bBC\s*$", re.IGNORECASE)
 
 
 def _temporal_year_beyond(value: Any, *, lo: int, hi: int) -> int | None:
@@ -881,6 +930,15 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
             "needs_normalize": False,
         }
 
+    if engine:
+        # The writer's unfit-cell rule, verbatim: a value Execute would hold
+        # out (offset-bearing text into a zoneless carrier, excess fractional
+        # digits) cannot pass Validate (M6).
+        from connectors.writer_quarantine_unfit import temporal_cell_unfit_reason
+
+        unfit = temporal_cell_unfit_reason(value, ddl_type, dest_db=engine)
+        if unfit:
+            return {"ok": False, "wire_value": None, "reason": unfit, "needs_normalize": False}
     try:
         coerced = coerce_sql_temporal(value, ddl_type, engine=engine)
         wire = format_wire_value(value, ddl_type, engine=engine)
@@ -895,6 +953,10 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
     # Still a string after coerce → cannot bind as temporal.
     if isinstance(coerced, str):
         text = coerced.strip()
+        if beyond_python_calendar(text) and _keeps_era_literal(engine):
+            # D65 — a BC / five-digit-year literal binds as itself on the
+            # PostgreSQL family and SQLite's text carrier.
+            return {"ok": True, "wire_value": text, "reason": "", "needs_normalize": False}
         if pg_temporal_special(text) is not None and _is_postgres_family(engine):
             # D63 — the PG family stores 'infinity' / '-infinity' literally;
             # coerce_sql_temporal carried it, so it binds as itself.

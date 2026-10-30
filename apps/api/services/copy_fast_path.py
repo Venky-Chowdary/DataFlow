@@ -1414,18 +1414,36 @@ def copy_between_postgres(
                 dest_table=dest_table,
                 pairs=pairs,
             )
+            constraints_before = None
             if replace_destination:
-                # DROP + CREATE, not CREATE IF NOT EXISTS + TRUNCATE: a stale
-                # dest shell (wrong types, missing collation, leftover indexes)
-                # would otherwise survive the load and still checksum-verify
-                # over the mapped columns.
-                try:
-                    dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
-                except Exception as exc:  # noqa: BLE001 — DROP failure is a catalog/lock condition
-                    raise FastPathUnavailable(
-                        f"cannot drop destination {dest_ref} to replace it: {exc}"
-                    ) from exc
-                create = True
+                # D195: DROP + CREATE rebuilt an existing destination from the
+                # source's shape and dropped its CHECK / FK / DEFAULT / indexes
+                # / comment. An existing table is emptied in place inside this
+                # transaction instead; one whose column types differ from the
+                # source declines to the row path rather than surviving as a
+                # stale shell.
+                from services.dest_overwrite_swap import (
+                    pg_constraint_fingerprint,
+                    pg_empty_live_for_overwrite,
+                )
+
+                existed = pg_empty_live_for_overwrite(
+                    dst_cur,
+                    schema=dest_schema or "public",
+                    table=dest_table,
+                    quote=_quote,
+                    column_types={
+                        tgt: str(shape.types.get(src) or next(
+                            (v for k, v in shape.types.items() if k.lower() == src.lower()), ""
+                        ))
+                        for src, tgt in pairs
+                    },
+                )
+                create = not existed
+                if existed:
+                    constraints_before = pg_constraint_fingerprint(
+                        dst_cur, dest_schema or "public", dest_table, _quote
+                    )
             else:
                 from connectors.sql_identifiers import pg_regclass_literal
 
@@ -1686,6 +1704,20 @@ def copy_between_postgres(
             indexes_carried=tuple(indexes_carried),
             proof_scope=proof_scope,
         )
+        if constraints_before is not None:
+            from services.dest_overwrite_swap import (
+                pg_constraint_fingerprint,
+                verify_constraint_set,
+            )
+
+            with dest_conn.cursor() as check_cur:
+                verify_constraint_set(
+                    constraints_before,
+                    pg_constraint_fingerprint(
+                        check_cur, dest_schema or "public", dest_table, _quote
+                    ),
+                    table=dest_ref,
+                )
         if not result.verified:
             # The destination transaction has not committed, so refusing here
             # leaves the table as it was rather than half-replaced.

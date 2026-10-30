@@ -273,7 +273,7 @@
       "name": "InfluxDB",
       "category": "database",
       "status": "planned",
-      "description": "InfluxDB source and destination connector"
+      "description": "InfluxDB source connector (read only)"
     },
     {
       "id": "cassandra",
@@ -294,14 +294,14 @@
       "name": "Couchbase",
       "category": "database",
       "status": "planned",
-      "description": "Couchbase source and destination connector"
+      "description": "Couchbase source connector (read only)"
     },
     {
       "id": "firebase_realtime_db",
       "name": "Firebase Realtime DB",
       "category": "database",
       "status": "planned",
-      "description": "Firebase Realtime DB source and destination connector"
+      "description": "Firebase Realtime DB source connector (read only)"
     },
     {
       "id": "dynamodb",
@@ -4501,7 +4501,7 @@
       "name": "Google Sheets",
       "category": "saas",
       "status": "planned",
-      "description": "Spreadsheet source and destination"
+      "description": "Spreadsheet source (read only)"
     },
     {
       "id": "motherduck",

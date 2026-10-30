@@ -841,6 +841,9 @@ def write_mapped_rows(
             handled, bound = absent_sql_bind(value)
             if handled:
                 return bound
+            from services.value_serializer import document_bind_value
+
+            value = document_bind_value(value)
             upper = stype.upper()
             # An explicit mapping transform overrides the inferred source type so
             # values like decimal strings are stored as the correct BSON type.

@@ -1026,7 +1026,15 @@ class UniversalTransferEngine:
                 getattr(request, "sync_mode", "") or "",
                 getattr(request, "source", None),
             )
-            assert_mappings_executable(request.mappings)
+            from src.transfer.engine_schema_propagation import (
+                _mapping_review_waits_for_evolution,
+            )
+
+            # Approved evolution: reviewed on the evolved plan (D200).
+            assert_mappings_executable(
+                request.mappings,
+                review=not _mapping_review_waits_for_evolution(request),
+            )
         except (ValueError, DeliveryGuaranteeError, ExactlyOnceRouteError) as mapping_exc:
             mongo = get_mongodb_service()
             mongo.update_job_status(

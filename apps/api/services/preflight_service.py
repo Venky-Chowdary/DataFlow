@@ -805,30 +805,6 @@ def run_file_preflight(
                 adopt_unmapped=schema_policy in PROPAGATE_POLICIES,
             )
         )
-        # Map stamped the fidelity verdict against the table as it stood
-        # (BIGINT → INT4 narrowing); a widened pair is lossless against the
-        # carrier it will have, and G4 reads the stale stamp as a risk-contract
-        # demand otherwise.
-        from services.mapping_proof import stamp_mapping_fidelity
-
-        widened_sources = {
-            str(a["source"]).lower()
-            for a in destination_evolution
-            if a.get("propagate_reason") == "widen_type"
-        }
-        if widened_sources:
-            mappings = [
-                stamp_mapping_fidelity(
-                    [m],
-                    source_types=column_types or {},
-                    target_types=destination_column_types,
-                    destination_db_type=str(destination_db_type or ""),
-                    dest_table_exists=True,
-                )[0]
-                if str(m.get("source") or "").lower() in widened_sources
-                else m
-                for m in mappings
-            ]
 
     # Source nullability defaults to True (unknown), which is the safe reading
     # for files. For an introspected database source it is knowable, and
@@ -1089,6 +1065,68 @@ def run_file_preflight(
         ),
         dest_db=dest_kind,
     )
+    # A width narrowing the exact population scan proved (every value fits)
+    # is not a lossy cast for G4 either — g3/G6 already accept it. Run 2 into
+    # the key column DataFlow sized on run 1 (MySQL TEXT key -> VARCHAR(768))
+    # read back as "TEXT -> VARCHAR(768) lossy" and demanded a contract.
+    # Only the width is waived: any other loss on the pair keeps its flag.
+    if proven_string_narrowings:
+        import re
+
+        from services.type_system import is_lossy_coercion as _lossy
+
+        _waived_pairs: set[tuple[str, str]] = set()
+        for _pm in plan_mappings:
+            _pair = (str(_pm.source or "").casefold(), str(_pm.target or "").casefold())
+            if _pair not in proven_string_narrowings:
+                continue
+            _dest_by_fold = {
+                str(k).casefold(): str(v or "") for k, v in (ddl_dest_types or {}).items()
+            }
+            _tt = _dest_by_fold.get(_pair[1]) or str(_pm.target_type or "")
+            # Only the width may be waived: the pair must be lossless once
+            # the carrier is unbounded in the engine's own spelling.
+            _src_t = str((column_types or {}).get(_pm.source) or "")
+            _width_only = False
+            for _unb in ("TEXT", "NVARCHAR(MAX)", "VARCHAR(MAX)", "CLOB"):
+                _unbounded = re.sub(
+                    r"\b(?:N?VARCHAR2?|N?CHAR|CHARACTER VARYING)\s*\(\s*\d+(?:\s+(?:CHAR|BYTE))?\s*\)",
+                    _unb,
+                    _tt,
+                    count=1,
+                    flags=re.I,
+                )
+                if _unbounded != _tt and not _lossy(_src_t, _unbounded, dest_db=dest_kind):
+                    _width_only = True
+                    break
+            if not _width_only:
+                continue
+            if str(_pm.fidelity or "").lower() == "lossy_cast":
+                _pm.fidelity = None
+            _pm.type_narrowing = False
+            if str(getattr(_pm, "review_kind", "") or "").lower() == "lossy":
+                _pm.requires_review = False
+            _waived_pairs.add(_pair)
+        if _waived_pairs:
+            # The proof bundle and Decision Artifact read the mapping dicts:
+            # give them the same verdict (copies — the caller's list is theirs).
+            _waived_maps: list[dict[str, Any]] = []
+            for _m in mappings:
+                _key = (
+                    str(_m.get("source") or "").casefold(),
+                    str(_m.get("target") or "").casefold(),
+                ) if isinstance(_m, dict) else None
+                if _key in _waived_pairs:
+                    _m = dict(_m)
+                    if str(_m.get("fidelity") or "").lower() == "lossy_cast":
+                        _m["fidelity"] = None
+                    _m["type_narrowing"] = False
+                    _m.pop("typeNarrowing", None)
+                    if str(_m.get("review_kind") or "").lower() == "lossy":
+                        _m["requires_review"] = False
+                    _m["width_narrowing_proven"] = True
+                _waived_maps.append(_m)
+            mappings = _waived_maps
 
     target_cols = list(drift_dest_types.keys())
     ddl_compatible, ddl_issues = evaluate_ddl_compatibility(
@@ -1438,12 +1476,40 @@ def run_file_preflight(
             if _uk_cols and not dest_unique_covering_columns(
                 destination_pk_columns, destination_unique_keys, _uk_cols
             ):
-                _planned_idx = (
-                    f"uidx_{destination_table}_{'_'.join(_uk_cols)}"
+                # One answer for "how does this engine enforce upsert
+                # identity?" (capability registry): MERGE engines get no DDL;
+                # index engines get the exact statements their writer runs on
+                # this table, or a plain refusal when no full-value unique key
+                # can exist (MySQL JSON / over-long TEXT key — CR-D126).
+                from services.upsert_identity import (
+                    UPSERT_IDENTITY_IMPOSSIBLE,
+                    plan_from_destination_config,
+                    plan_upsert_identity,
                 )
-                _planned_ddl = (
-                    f"CREATE UNIQUE INDEX {_planned_idx} ON "
-                    f"{destination_table} ({', '.join(_uk_cols)})"
+
+                _identity_plan = None
+                if dest_upsert_needs_unique_index(dest_kind):
+                    try:
+                        _identity_plan = plan_from_destination_config(
+                            dest_kind,
+                            dict(destination_config or {}),
+                            table=destination_table,
+                            key_columns=_uk_cols,
+                        )
+                    except Exception as _pexc:  # noqa: BLE001 — writer re-plans
+                        logger.warning(
+                            "upsert identity plan unmeasured: %s", _pexc, exc_info=_pexc
+                        )
+                        _identity_plan = plan_upsert_identity(
+                            dest_kind,
+                            table_name=destination_table,
+                            key_columns=_uk_cols,
+                            schema=(dict(destination_config or {}).get("schema") or None),
+                        )
+                _planned_ddl = _identity_plan.disclosure if _identity_plan else ""
+                _identity_impossible = bool(
+                    _identity_plan
+                    and _identity_plan.mode == UPSERT_IDENTITY_IMPOSSIBLE
                 )
                 _dup = {"ran": False, "duplicate_keys": 0, "duplicate_rows": 0,
                         "samples": [], "message": "destination probe skipped"}
@@ -1471,6 +1537,9 @@ def run_file_preflight(
                     "duplicate_samples": _dup.get("samples") or [],
                     "probe_ran": bool(_dup.get("ran")),
                     "ddl_acknowledged": bool(ddl_changes_acknowledged),
+                    "upsert_identity": (
+                        _identity_plan.mode if _identity_plan else "merge"
+                    ),
                 }
                 if _dup.get("duplicate_keys"):
                     upsert_ddl_gate = {
@@ -1489,6 +1558,24 @@ def run_file_preflight(
                         "suggested_actions": [
                             "Remove the duplicate key values listed in the probe",
                             "Pick different upsert key columns",
+                            "Run full refresh overwrite instead of upsert",
+                        ],
+                    }
+                elif _identity_impossible:
+                    upsert_ddl_gate = {
+                        "id": "g_upsert_dest_key",
+                        "status": "block",
+                        "message": _identity_plan.reason[:600],
+                        "duration_ms": 0,
+                        "details": {
+                            **_details,
+                            "planned_ddl": "",
+                            "requires_approval": False,
+                            "remediation_kind": "choose_indexable_key",
+                            "impossible_reason": _identity_plan.reason,
+                        },
+                        "suggested_actions": [
+                            "Pick an upsert key column the destination can index on its full value",
                             "Run full refresh overwrite instead of upsert",
                         ],
                     }
@@ -2446,6 +2533,8 @@ def run_file_preflight(
         validation_mode=validation_mode,
         fk_risk_acknowledged=fk_risk_acknowledged,
         destination_foreign_keys=destination_foreign_keys,
+        destination_config=destination_config,
+        destination_connector_id=destination_connector_id,
         source_config=source_config,
         source_connector_id=source_connector_id,
         source_table=source_table,
@@ -2663,6 +2752,18 @@ def run_file_preflight(
             else ("set_locale" if number_findings else "ok")
         ),
     }
+    # D94: PII the content scan found is said out loud even when it does not
+    # force a review hold (email / phone / IP are medium-risk).
+    from services.preflight_proof_bundle import pii_detection_warning
+
+    _pii_warning = pii_detection_warning(
+        (out.get("proof_bundle") or {}).get("compliance")
+        if isinstance(out.get("proof_bundle"), dict)
+        else None,
+        list(mappings or []),
+    )
+    if _pii_warning:
+        out.setdefault("warnings", []).append(_pii_warning)
     if number_locale_assumed:
         cols = ", ".join(f["column"] for f in number_locale_assumed[:6])
         out.setdefault("warnings", []).append(

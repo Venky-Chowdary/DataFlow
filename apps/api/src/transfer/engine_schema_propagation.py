@@ -115,6 +115,35 @@ def _run_backfill_new_fields(
     )
 
 
+def _mapping_review_waits_for_evolution(request: Any) -> bool:
+    """Whether Execute's mapping review is decided after destination evolution.
+
+    Map graded each pair against the destination as it stands, so a widened
+    source column carries a lossy review raised against the narrower live
+    carrier. Validate clears it by applying the approved evolution
+    (``plan_destination_evolution``) before G4. Execute's review ran on the
+    request's mappings before anything was planned and refused the run
+    Validate had passed (D200). With evolution approved (the same
+    ``destination_evolution_approved`` Validate asks), the review runs on the
+    evolved plan in :func:`_apply_schema_auto_propagate`, which every write
+    path goes through before it writes.
+    """
+    from services.schema_drift import (
+        destination_evolution_approved,
+        effective_schema_policy,
+    )
+
+    if not getattr(request, "mappings", None):
+        return False
+    policy = effective_schema_policy(
+        getattr(request, "schema_policy", None),
+        backfill_new_fields=bool(getattr(request, "backfill_new_fields", False)),
+    )
+    return destination_evolution_approved(
+        policy, acknowledged=bool(getattr(request, "schema_drift_acknowledged", False))
+    )
+
+
 def _apply_schema_auto_propagate(
     *,
     request: Any,
@@ -124,6 +153,28 @@ def _apply_schema_auto_propagate(
     dest_schema_types: dict[str, str] | None,
 ) -> list[dict[str, Any]]:
     """Validate≡Execute schema auto-propagate — pause on hard-break, extend maps."""
+    planned = _plan_schema_auto_propagate(
+        request=request,
+        columns=columns,
+        schema=schema,
+        mappings=mappings,
+        dest_schema_types=dest_schema_types,
+    )
+    if _mapping_review_waits_for_evolution(request):
+        from services.mapping_pipeline import assert_mappings_executable
+
+        assert_mappings_executable(planned)
+    return planned
+
+
+def _plan_schema_auto_propagate(
+    *,
+    request: Any,
+    columns: list[str],
+    schema: dict[str, str],
+    mappings: list[dict[str, Any]],
+    dest_schema_types: dict[str, str] | None,
+) -> list[dict[str, Any]]:
     from src.transfer.engine import (  # lazy: honours monkeypatches on the original module
         _enrich_mappings_with_types,
         resolve_sync_contract,

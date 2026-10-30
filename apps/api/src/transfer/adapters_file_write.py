@@ -2,10 +2,9 @@ from __future__ import annotations
 
 import csv
 import io
-import json
 from typing import Any
 
-from services.value_serializer import cell_to_string, json_default
+from services.value_serializer import cell_to_string
 from src.transfer.models import EndpointConfig
 from src.transfer.adapters import (
     FileExportMapBlocked,
@@ -220,7 +219,7 @@ def write_destination_file(
         # Reader-null binds as None then JSON null — never the extract token.
         return [
             {
-                c: to_json_value(v, c, export_dest_types)
+                c: to_json_value(v, c, export_dest_types, exact_decimal=True)
                 for c, v in present_field_bindings(r).items()
             }
             for r in rows
@@ -257,10 +256,9 @@ def write_destination_file(
         export_mime = "text/tab-separated-values"
     elif fmt == "jsonl":
         records = _json_export_records(export_records)
-        lines = [
-            json.dumps(r, default=json_default, ensure_ascii=False, allow_nan=False)
-            for r in records
-        ]
+        from services.value_serializer import json_dumps_exact_numbers
+
+        lines = [json_dumps_exact_numbers(r) for r in records]
         content = "\n".join(lines).encode("utf-8")
         filename = "export.jsonl"
         export_mime = "application/x-ndjson"
@@ -305,9 +303,9 @@ def write_destination_file(
                 "write JSON bytes under that name"
             )
         records = _json_export_records(export_records)
-        content = json.dumps(
-            records, indent=2, default=json_default, ensure_ascii=False, allow_nan=False
-        ).encode("utf-8")
+        from services.value_serializer import json_dumps_exact_numbers
+
+        content = json_dumps_exact_numbers(records, indent=2).encode("utf-8")
         filename = "export.json"
         export_mime = "application/json"
     return (

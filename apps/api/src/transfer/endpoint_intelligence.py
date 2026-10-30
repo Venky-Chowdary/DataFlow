@@ -1009,7 +1009,14 @@ def _attach_db_sample(out: dict, endpoint: EndpointConfig, sample_limit: int = 1
             from services.json_intelligence import expand_mongo_documents
             from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
-            records = expand_mongo_documents(records, cfg=cfg)
+            # A destination is described as stored. The reader's expansion is
+            # the shape a *read* emits: on a collection DataFlow wrote, the
+            # leaves of a document column (``j`` -> ``j_a``, ``j_a_b``) are no
+            # fields of their own, and reporting them made run 2 overwrite
+            # "empty" columns that do not exist (Family B, D182/D198).
+            purpose = str((endpoint.extra or {}).get("introspect_purpose") or "")
+            if purpose != "destination":
+                records = expand_mongo_documents(records, cfg=cfg)
             bson_types = mongodb_bson_column_types(records)
             homogeneous_date_fields = mongodb_bson_homogeneous_date_fields(records)
             for doc in records:

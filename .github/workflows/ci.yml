@@ -815,6 +815,12 @@ jobs:
           src/ai/first_party/intent_router.py
           src/ai/first_party/intent_labels.py
 
+      - name: No undefined names anywhere in the API (D119)
+        # ``name 'ci_get' is not defined`` reached production; F821/F822/F823
+        # over the whole tree (tests included) is green and must stay so.
+        working-directory: apps/api
+        run: ruff check --config ruff.toml --select F821,F822,F823 .
+
       - name: Mypy Decision Kernel (Phase B8)
         # Strict on services.decision_kernel; type_system follows as a skip-import smoke.
         working-directory: apps/api

@@ -291,9 +291,10 @@ def detect_pii_fields(
         field_evidence[col] = [
             {"category": cat, "rule": "column_name"} for cat in dict.fromkeys(name_hits)
         ] + [
+            # Content is evidence in its own right, also where the name agrees:
+            # "phone by column name" alone read as a name-only detector (D94).
             {"category": cat, "rule": "sample_value"}
             for cat in value_hits
-            if cat not in name_hits
         ]
         personal_name = "name" in categories and bool(
             _HIGH_RISK_NAME_RE.search(col.lower())

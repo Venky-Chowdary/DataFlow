@@ -299,6 +299,58 @@ def _pii_acknowledgement(raw: dict[str, Any] | None) -> dict[str, str] | None:
     return {"approved_by": approved_by, "reason": reason}
 
 
+def _carry_proven_width_narrowings(
+    mappings: list[dict[str, Any]], preflight: dict[str, Any]
+) -> list[dict[str, Any]]:
+    """Stage Validate's population-proven width narrowings onto the run's mappings.
+
+    Validate proved every source value fits the bounded destination carrier
+    (``proof_bundle.accepted_width_narrowings``) and graded the pair lossless.
+    Execute checks the staged mappings before it re-runs Validate, so a stale
+    Map "lossy / review" stamp on that pair failed a run Validate had cleared
+    (run 2 into the key column DataFlow sized on run 1). Only exactly the
+    proven pairs are touched; Execute's Validate re-proves them on the rows it
+    actually reads.
+    """
+    accepted = ((preflight or {}).get("proof_bundle") or {}).get(
+        "accepted_width_narrowings"
+    ) or {}
+    if not accepted or not (preflight or {}).get("passed"):
+        return mappings
+    proven = {str(k).casefold() for k in accepted}
+    out: list[dict[str, Any]] = []
+    for m in mappings or []:
+        if isinstance(m, dict) and (
+            f"{m.get('source') or ''}→{m.get('target') or ''}".casefold() in proven
+        ):
+            m = dict(m)
+            if str(m.get("fidelity") or "").lower() == "lossy_cast":
+                m["fidelity"] = None
+            m["type_narrowing"] = False
+            if str(m.get("review_kind") or "").lower() == "lossy":
+                m["requires_review"] = False
+            m["width_narrowing_proven"] = True
+        out.append(m)
+    return out
+
+
+def _ddl_acknowledgement(raw: dict[str, Any] | None) -> dict[str, str] | None:
+    """Validate the operator's approval of disclosed destination DDL (D101)."""
+    if not raw:
+        return None
+    if not isinstance(raw, dict):
+        raise ValueError("ddl_acknowledgement must be an object with approved_by and reason.")
+    approved_by = str(raw.get("approved_by") or "").strip()
+    reason = str(raw.get("reason") or "").strip()
+    if not approved_by or not reason:
+        raise ValueError(
+            "ddl_acknowledgement needs approved_by and reason — an unsigned "
+            "approval cannot clear disclosed destination DDL."
+        )
+    _LOG.info("Destination DDL approved by %s: %s", approved_by, reason)
+    return {"approved_by": approved_by, "reason": reason}
+
+
 def _is_execute_cleared(preflight: dict[str, Any]) -> bool:
     """Same bar as Studio Execute — passed + approve; never local / review-grade."""
     run_id = str(preflight.get("run_id") or "")
@@ -672,6 +724,20 @@ def _plan_source_types_authoritative(
     return source_types_are_authoritative(kind, fmt)
 
 
+def _engine_format(info: dict[str, Any]) -> str:
+    """The engine name Execute will run this endpoint as.
+
+    Execute's Map and gates read ``request.<endpoint>.format``: the connector's
+    own type (``duckdb``). The introspection driver can be the shared SQL
+    driver (``generic_sql``), and planning under that name graded a different
+    engine: a PostgreSQL TIMESTAMP onto DuckDB's zone-naive TIMESTAMP read as a
+    generic-SQL instant collapse (D202). Same name, same decision.
+    """
+    endpoint = info.get("endpoint")
+    fmt = str(getattr(endpoint, "format", "") or "").strip().lower()
+    return fmt or str(info.get("db_type") or "")
+
+
 def _share_catalog_reads(fn):
     """Run a read-only planning tool with one catalog read per object (D145)
     and one Snowflake login per endpoint (D187)."""
@@ -724,6 +790,7 @@ def plan_transfer(
     column_transforms: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
     shared_destination_acknowledged: bool = False,
+    ddl_acknowledgement: dict[str, Any] | None = None,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -817,6 +884,15 @@ def plan_transfer(
             return err
     except AmbiguousConnectorError as exc:
         return _tool_result(tool, success=False, error=exc.message)
+
+    from src.transfer.connector_capabilities import source_only_destination_refusal
+
+    # D139: a source-only connector is not a destination; say so before any gate.
+    not_a_destination = source_only_destination_refusal(
+        str(dst_conn.get("type") or dst_conn.get("format") or "")
+    )
+    if not_a_destination:
+        return _tool_result(tool, success=False, error=not_a_destination)
 
     from connectors.sql_identifiers import unsafe_destination_identifier_reason
 
@@ -972,33 +1048,66 @@ def plan_transfer(
         source_timezone, zone_error = validate_source_timezone(source_timezone)
         if zone_error:
             return _tool_result(tool, success=False, error=zone_error)
-        src_rows, zone_columns = declare_zone_on_schema(src_rows, source_timezone)
+        src_rows, zone_columns = declare_zone_on_schema(
+            src_rows,
+            source_timezone,
+            source_db=str(src_info.get("db_type") or src_conn.get("type") or ""),
+            source_kind=str(src_conn.get("kind") or "database"),
+        )
         # The declaration is a fact about the source, so it travels with the
         # schema every gate reads — not just with the mapping.
         src_info["schema"] = {
             **(src_info.get("schema") or {}),
             **{r["name"]: r["inferred_type"] for r in src_rows if r["name"] in zone_columns},
         }
+    if column_transforms:
+        from services.timezone_policy import declare_transform_zones_on_schema
+
+        zoned = declare_transform_zones_on_schema(src_rows, column_transforms)
+        if zoned is not src_rows:
+            src_rows = zoned
+            src_info["schema"] = {
+                **(src_info.get("schema") or {}),
+                **{r["name"]: r["inferred_type"] for r in src_rows},
+            }
     dst_rows = _schema_rows(dst_info.get("columns") or [])
 
     from services.mapping_pipeline import run_mapping_pipeline
 
     # Map is Datawrap's own work: it reads neither system. Left on the
     # sampling step, a slow Map was reported as the source (D189).
+    # A table this run creates is typed from the source's declaration: a bare
+    # ``numeric`` measured to DECIMAL(9,6) from today's rows created a column
+    # the next run's larger values overflowed (D68). Same rule as Execute's
+    # auto-map (source_schema_authority.declare_measured_decimals).
+    map_src_rows = src_rows
+    if dest_exists is not True:
+        from services.source_schema_authority import (
+            declare_measured_decimals,
+            measured_decimal_columns,
+        )
+
+        declared = declare_measured_decimals(
+            {r["name"]: r["inferred_type"] for r in src_rows},
+            measured_decimal_columns((src_info.get("raw") or {}).get("columns")),
+            _engine_format(dst_info),
+        )
+        map_src_rows = [{**r, "inferred_type": declared[r["name"]]} for r in src_rows]
+
     note_step(f"mapping the source columns onto {dst_table}")
     mapping = run_mapping_pipeline(
         [r["name"] for r in src_rows],
         [r["name"] for r in dst_rows],
-        source_schemas=src_rows,
+        source_schemas=map_src_rows,
         target_schemas=dst_rows,
         source_samples=samples,
         validation_mode=validation_mode,
-        destination_db_type=str(dst_info.get("db_type") or ""),
+        destination_db_type=_engine_format(dst_info),
         # The engine route maps under the source engine's identity
         # (``_auto_map``). Without it a BSON date read as a zoneless TIMESTAMP
         # and a PostgreSQL / Mongo VARCHAR as a code-page one, so the plan
         # demanded a risk contract for columns Execute stamps preserve (D147).
-        source_db_type=str(src_info.get("db_type") or ""),
+        source_db_type=_engine_format(src_info),
         schema_policy=schema_policy,
         sync_mode=mode,
         destination_table_exists=dest_exists,
@@ -1042,6 +1151,7 @@ def plan_transfer(
 
     try:
         pii_ack = _pii_acknowledgement(pii_acknowledgement)
+        ddl_ack = _ddl_acknowledgement(ddl_acknowledgement)
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
 
@@ -1078,12 +1188,12 @@ def plan_transfer(
             mode=mode,
             schema_policy=schema_policy,
             validation_mode=validation_mode,
-            src_db_type=str(src_info.get("db_type") or ""),
+            src_db_type=_engine_format(src_info),
             source_config=_stamp_callable_source_config(
                 _endpoint_dict(src_info.get("endpoint")),
                 callable_plan,
             ),
-            dest_db_type=str(dst_info.get("db_type") or ""),
+            dest_db_type=_engine_format(dst_info),
             dest_exists=dest_exists,
             source_primary_key=(
                 _primary_key_csv(contracts[0].get("primary_key"))
@@ -1096,6 +1206,7 @@ def plan_transfer(
             stream_contracts=row_rules["stream_contracts"] or None,
             pii_ack=pii_ack,
             schema_drift_acknowledged=bool(schema_drift_acknowledged),
+            ddl_ack=ddl_ack,
         )
         if (
             _contract_pass == 2
@@ -1117,6 +1228,7 @@ def plan_transfer(
     if contract_refusal:
         preflight = _block_plan_on_contract(preflight, contract_refusal)
 
+    mappings = _carry_proven_width_narrowings(mappings, preflight)
     conversions = _type_conversions(mappings)
     unmapped = [
         r["name"]
@@ -1649,6 +1761,7 @@ def _run_preflight(
     known_row_count: int | None = None,
     pii_ack: dict[str, str] | None = None,
     schema_drift_acknowledged: bool = False,
+    ddl_ack: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.population_fit_scan import STUDIO_FIT_SCAN_SECONDS
@@ -1830,6 +1943,12 @@ def _run_preflight(
             destination_unique_keys=list(dest_probe.get("unique_keys") or []),
             destination_foreign_keys=list(dest_probe.get("foreign_keys") or []),
             destination_check_constraints=list(dest_probe.get("check_constraints") or []),
+            # D139: an existing DynamoDB table's HASH/RANGE contract. Without
+            # it g6 refused every run into a table DataFlow had created.
+            destination_dynamo_key_schema=list(dest_probe.get("dynamo_key_schema") or []),
+            destination_dynamo_index_attributes=dict(
+                dest_probe.get("dynamo_index_attributes") or {}
+            ),
             destination_config=dest_probe.get("_probe_cfg") or None,
             source_kind=source_kind or "database",
             source_format=src_db_type,
@@ -1855,8 +1974,9 @@ def _run_preflight(
             source_filter=source_filter or None,
             stream_contracts=list(stream_contracts or []),
             compliance_acknowledged=bool(pii_ack),
-            acknowledgment_actor=(pii_ack or {}).get("approved_by", ""),
-            acknowledgment_reason=(pii_ack or {}).get("reason", ""),
+            ddl_changes_acknowledged=bool(ddl_ack),
+            acknowledgment_actor=(pii_ack or ddl_ack or {}).get("approved_by", ""),
+            acknowledgment_reason=(pii_ack or ddl_ack or {}).get("reason", ""),
             schema_drift_acknowledged=bool(schema_drift_acknowledged),
             source_population_counted=population_counted,
             rows_are_population=(
@@ -1905,6 +2025,13 @@ def _run_preflight(
         if isinstance(proof_bundle, dict)
         else None
     )
+    # The width narrowings Validate proved travel too: staging stamps them on
+    # the run's mappings so Execute agrees with this verdict.
+    accepted_widths = (
+        (proof_bundle or {}).get("accepted_width_narrowings")
+        if isinstance(proof_bundle, dict)
+        else None
+    )
     return {
         "run_id": result.get("run_id"),
         "passed": bool(result.get("passed")),
@@ -1931,7 +2058,14 @@ def _run_preflight(
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
-        "proof_bundle": {"transfer_decision": decision} if isinstance(decision, dict) else {},
+        "proof_bundle": {
+            **({"transfer_decision": decision} if isinstance(decision, dict) else {}),
+            **(
+                {"accepted_width_narrowings": dict(accepted_widths)}
+                if isinstance(accepted_widths, dict) and accepted_widths
+                else {}
+            ),
+        },
         # How the source volume G7 sized from was measured: "exact" COUNT(*),
         # "catalog_estimate" when the count did not fit its step budget, or
         # "sample" (D187).
@@ -2284,6 +2418,7 @@ def start_transfer(
     column_transforms: dict[str, Any] | None = None,
     schema_drift_acknowledged: bool = False,
     shared_destination_acknowledged: bool = False,
+    ddl_acknowledgement: dict[str, Any] | None = None,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -2317,6 +2452,7 @@ def start_transfer(
         pii_acknowledgement=pii_acknowledgement,
         column_transforms=column_transforms,
         schema_drift_acknowledged=schema_drift_acknowledged,
+        ddl_acknowledgement=ddl_acknowledgement,
         # The plan evaluates the bound contract against this route (QA MX3-18).
         contract_id=contract_id,
         require_signed_contract=require_signed_contract,
@@ -2437,6 +2573,13 @@ def start_transfer(
         payload["compliance_acknowledged"] = True
         payload["acknowledgment_actor"] = pii_ack["approved_by"]
         payload["acknowledgment_reason"] = pii_ack["reason"]
+    ddl_ack = _ddl_acknowledgement(ddl_acknowledgement)
+    if ddl_ack:
+        # Execute re-runs Validate and the writer gates the index on this
+        # approval (D101): the disclosed DDL and who approved it ride on the job.
+        payload["ddl_changes_acknowledged"] = True
+        payload.setdefault("acknowledgment_actor", ddl_ack["approved_by"])
+        payload.setdefault("acknowledgment_reason", ddl_ack["reason"])
     if payload.get("schema_drift_acknowledged"):
         # Studio requires a signed reason. MCP sends the boolean alone.
         # Confirm and the job record still name who accepted the drift.

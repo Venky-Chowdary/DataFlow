@@ -518,7 +518,7 @@ def test_engine_uses_resolved_saved_catalog_endpoint_for_route(
     monkeypatch.setattr(
         mapping_pipeline,
         "assert_mappings_executable",
-        lambda _mappings: (_ for _ in ()).throw(StopAfterRoute()),
+        lambda _mappings, **_kw: (_ for _ in ()).throw(StopAfterRoute()),
     )
     request = TransferRequest(
         source=EndpointConfig(

@@ -27,6 +27,7 @@ contract that a downstream reader has to know about.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -203,13 +204,41 @@ def validate_source_timezone(source_timezone: object) -> tuple[str, str]:
     return zone, ""
 
 
+def text_may_carry_wall_clock(source_db: str = "", source_kind: str = "") -> bool:
+    """Whether a source's *text* column can be its temporal carrier.
+
+    SQLite has no temporal storage class, so its wall clocks are TEXT; a file
+    declares nothing. A catalog engine with real temporal types (PostgreSQL,
+    MySQL, SQL Server, ...) declared that column text, and a declared zone must
+    not re-type it (D190): ``source_timezone`` answers the zone question for
+    columns that are temporal, it does not make text temporal.
+    """
+    db = (source_db or "").strip().lower()
+    if not db or db == "sqlite" or db.startswith("sqlite"):
+        return True
+    from services.data_profiler import source_types_are_authoritative
+
+    return not source_types_are_authoritative(source_kind or "database", db)
+
+
 def declare_zone_on_schema(
     source_rows: list[dict[str, Any]],
     zone: str,
+    *,
+    source_db: str = "",
+    source_kind: str = "",
 ) -> tuple[list[dict[str, Any]], set[str]]:
-    """Apply a declared source zone to zoneless temporal schema rows."""
+    """Apply a declared source zone to zoneless temporal schema rows.
+
+    Only columns that are temporal take the zone: a typed zoneless column, an
+    instant column whose samples are wall clocks, and - where text is the
+    temporal carrier (SQLite, files) - a text column whose every sample is a
+    datetime literal. Digits are never a wall clock (D190).
+    """
     from services.transform_engine import ASSUME_TIMEZONE_PREFIX
     from services.type_system import datetime_timezone_polarity
+
+    text_carrier = text_may_carry_wall_clock(source_db, source_kind)
 
     declared: set[str] = set()
     out: list[dict[str, Any]] = []
@@ -226,8 +255,10 @@ def declare_zone_on_schema(
             entry.get("samples") or []
         ):
             declared.add(name)
-        elif _untyped_text_token(source_type) and _samples_unanimously_naive_datetimes(
-            entry.get("samples") or []
+        elif (
+            text_carrier
+            and _untyped_text_token(source_type)
+            and _samples_unanimously_naive_datetimes(entry.get("samples") or [])
         ):
             # SQLite stores a wall-clock column as TEXT. Declaring
             # source_timezone is the operator answering the zone question, so
@@ -242,6 +273,39 @@ def declare_zone_on_schema(
             declared.add(name)
         out.append(entry)
     return out, declared
+
+
+def declare_transform_zones_on_schema(
+    source_rows: list[dict[str, Any]],
+    column_transforms: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Project operator ``assume_timezone:`` transforms onto the source schema.
+
+    ``assume_timezone:X`` on a column is the same declaration as
+    ``source_timezone=X`` for that one column, so Map has to read it the same
+    way: before it grades the pair. Stamped after Map, the mapping kept the
+    fidelity Map gave the zoneless type (``lossy_cast`` naive -> instant), and
+    G4 held the very remediation the gate had asked for (D148).
+    """
+    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+
+    zones = {
+        str(k or "").strip().lower(): str(v or "").strip()
+        for k, v in (column_transforms or {}).items()
+        if str(v or "").strip().lower().startswith(ASSUME_TIMEZONE_PREFIX)
+    }
+    if not zones:
+        return source_rows
+    out: list[dict[str, Any]] = []
+    for row in source_rows:
+        entry = dict(row)
+        transform = zones.get(str(entry.get("name") or "").strip().lower())
+        if transform and entry.get("inferred_type"):
+            entry["inferred_type"] = effective_source_type(
+                str(entry["inferred_type"]), transform
+            )
+        out.append(entry)
+    return out
 
 
 def _sample_temporal_polarities(samples: Any) -> tuple[bool, bool]:
@@ -285,10 +349,34 @@ def _samples_unanimously_naive_datetimes(samples: Any) -> bool:
     for sample in samples or []:
         if sample is None or not str(sample).strip():
             continue
+        # A bare number ("1", "1700000000", a Kafka message key) is never a
+        # wall clock, whatever the datetime parser makes of it (D190, D89).
+        if not is_wall_clock_literal(sample):
+            return False
         if parse_sql_datetime(sample) is None or temporal_value_has_timezone(sample):
             return False
         saw = True
     return saw
+
+
+_BARE_NUMBER = re.compile(r"\s*[+-]?\d+(?:\.\d+)?\s*")
+
+
+def is_wall_clock_literal(sample: Any) -> bool:
+    """True for a written date/time literal, never for a bare digit run.
+
+    ``parse_sql_datetime`` reads ``'1700000000'`` as epoch seconds and
+    ``'20240101'`` as epoch too: right for a bind into a declared TIMESTAMP,
+    wrong as evidence that a text column holds wall clocks (D190).
+    """
+    from connectors.sql_temporal import _integral_digit_token
+
+    if isinstance(sample, bool) or isinstance(sample, (int, float)):
+        return False
+    if _BARE_NUMBER.fullmatch(str(sample)):
+        # Epoch seconds with a fraction ("1700000000.5") carry no zone either.
+        return False
+    return _integral_digit_token(sample) is None
 
 
 def stamp_zone_transform(
@@ -297,15 +385,23 @@ def stamp_zone_transform(
     columns: set[str],
 ) -> list[dict[str, Any]]:
     """Attach a declared zone without replacing operator-chosen transforms."""
-    from services.transform_engine import ASSUME_TIMEZONE_PREFIX
+    from services.transform_engine import (
+        ASSUME_TIMEZONE_PREFIX,
+        normalize_engine_transform,
+    )
 
     out: list[dict[str, Any]] = []
     for mapping in mappings:
         entry = dict(mapping)
         existing = str(entry.get("transform") or "").strip().lower()
+        # ``to_timestamp`` / ``to_date`` are the datetime parse under another
+        # name. Left in place, the declared zone never applied: every naive
+        # value then failed the instant carrier, and Validate held all rows
+        # for one DST-gap cell (D52). assume_timezone parses and asserts the zone.
+        canon = normalize_engine_transform(existing) if existing else ""
         already_typed = existing not in {
             "", "none", "identity", "datetime", "date", "timestamp"
-        }
+        } and (canon or "").lower() not in {"none", "identity", "datetime", "date"}
         if str(entry.get("source") or "") in columns and not already_typed:
             entry["transform"] = f"{ASSUME_TIMEZONE_PREFIX}{zone}"
         out.append(entry)

@@ -17,7 +17,7 @@ job. A finished scan with a missing fingerprint fails the job.
 from __future__ import annotations
 
 import hashlib
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 
@@ -26,6 +26,12 @@ _IDENTITY_TRANSFORMS = frozenset(
 )
 #: Carries the writer applies without changing the value the source holds.
 _CARRIER_TRANSFORMS = frozenset({"json"})
+#: Carries the writer re-renders into one canonical spelling of the same value
+#: (a GUID's case and braces). The source cell is put through the same
+#: transform before it is fingerprinted, exactly as the writer binds it, so a
+#: SQL Server ``6F9619FF-...`` and the destination's ``6f9619ff-...`` are one
+#: value, and a different GUID is still a missing fingerprint.
+_CANONICAL_REWRITES = frozenset({"uuid"})
 _PAGE = 500
 _MAX_PAGES = 400
 
@@ -44,6 +50,8 @@ class CdcValueProof:
     missing: int
     source_rows: int
     dest_rows: int
+    #: Out-of-window drift (D188) when the proof was scoped to a poll window.
+    drift: dict[str, Any] = field(default_factory=dict)
 
     @property
     def matched(self) -> bool:
@@ -82,6 +90,7 @@ def _identity_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, st
             transform not in _IDENTITY_TRANSFORMS
             and transform not in TYPED_CAST_TRANSFORMS
             and transform not in _CARRIER_TRANSFORMS
+            and transform not in _CANONICAL_REWRITES
             and not transform.startswith(ASSUME_TIMEZONE_PREFIX)
         ):
             return None
@@ -89,8 +98,12 @@ def _identity_pairs(mappings: list[dict[str, Any]] | None) -> list[tuple[str, st
     return pairs or None
 
 
-def _declared_zones(mappings: list[dict[str, Any]] | None) -> dict[str, str]:
-    """Destination column -> ``assume_timezone:ZONE`` the writer attaches to it."""
+def _declared_carries(mappings: list[dict[str, Any]] | None) -> dict[str, str]:
+    """Destination column -> the read-side carry the writer applies to it.
+
+    ``assume_timezone:ZONE`` attaches the declared zone; ``uuid`` renders the
+    canonical GUID spelling.
+    """
     from services.transform_engine import ASSUME_TIMEZONE_PREFIX
 
     zones: dict[str, str] = {}
@@ -98,20 +111,27 @@ def _declared_zones(mappings: list[dict[str, Any]] | None) -> dict[str, str]:
         if not isinstance(raw, dict) or raw.get("intentional_omit"):
             continue
         transform = str(raw.get("transform") or "").strip()
-        if transform.lower().startswith(ASSUME_TIMEZONE_PREFIX):
+        if transform.lower() in _CANONICAL_REWRITES:
+            transform = transform.lower()
+        if (
+            transform.lower().startswith(ASSUME_TIMEZONE_PREFIX)
+            or transform in _CANONICAL_REWRITES
+        ):
             target = str(raw.get("target") or raw.get("source") or "").strip()
             zones[target.lower()] = transform
     return zones
 
 
-def _attach_zones(
+def _apply_carries(
     rows: list[dict[str, Any]], zones: dict[str, str]
 ) -> list[dict[str, Any]]:
-    """Give a zoneless source instant the zone the job declared for it.
+    """Read each source cell the way the writer bound it.
 
-    The destination holds the instant the writer built from that declaration, so
-    the source cell is read the same way before it is fingerprinted. A value the
-    transform cannot read is left as it is and fails the comparison.
+    A zoneless source instant gets the zone the job declared for it, and a GUID
+    gets its canonical spelling. The destination holds what the writer built
+    from that declaration, so the source cell is read the same way before it is
+    fingerprinted. A value the transform cannot read is left as it is and fails
+    the comparison.
     """
     if not zones:
         return rows
@@ -266,12 +286,21 @@ def prove_cdc_values(
     dest_table: str,
     mappings: list[dict[str, Any]] | None,
     dest_types: dict[str, str] | None = None,
+    window: Any = None,
+    key_columns: list[str] | None = None,
 ) -> CdcValueProof | None:
     """Scan both tables.
 
     ``None`` means the mapping is not an identity carry, so cell compare
     would reject a correct transform. A scan that cannot finish raises
     ``CdcValueScanIncomplete`` instead of pretending the row count is enough.
+
+    ``window`` is the :class:`~services.incremental_drift.RunWindow` a query-CDC
+    poll selected (source column names). A poll reads ``cursor > watermark``;
+    a source row it did not select — edited without moving the cursor — is
+    not this run's to prove. Only in-window rows must be on the destination;
+    the rows before the window are compared by ``key_columns`` and returned as
+    out-of-window drift, which the caller reports instead of failing (D188).
     """
     if not source_table or not dest_table:
         raise CdcValueScanIncomplete(
@@ -293,13 +322,68 @@ def prove_cdc_values(
         raise CdcValueScanIncomplete(
             "CDC value scan did not finish. Row count is not a cell proof."
         )
-    return compare_row_sets(
-        _attach_zones(_rename(source_rows, pairs), _declared_zones(mappings)),
-        _rename(dest_rows, [(column, column) for column in columns]),
+    carries = _declared_carries(mappings)
+    before: list[dict[str, Any]] = []
+    later: list[dict[str, Any]] = []
+    if window is not None and _window_readable(window, source_columns):
+        from services.incremental_drift import BEFORE_WINDOW, IN_WINDOW
+
+        inside: list[dict[str, Any]] = []
+        for row in source_rows:
+            position = window.position(row)
+            if position == IN_WINDOW:
+                inside.append(row)
+            elif position == BEFORE_WINDOW:
+                before.append(row)
+            else:
+                # Committed after the poll's high-water mark: the next run's.
+                later.append(row)
+        source_rows = inside
+    source_named = _apply_carries(_rename(source_rows, pairs), carries)
+    dest_named = _rename(dest_rows, [(column, column) for column in columns])
+    proof = compare_row_sets(
+        source_named,
+        dest_named,
         columns,
         engine=dest_type,
         dest_types=dest_types,
     )
+    if window is None or not key_columns or not (before or later):
+        return proof
+    to_target = {src.lower(): dest for src, dest in pairs}
+    dest_keys = [to_target.get(k.lower(), "") for k in key_columns]
+    if not all(dest_keys):
+        return proof
+    from services.incremental_drift import measure_drift
+
+    owned = {
+        _row_key(row, dest_keys)
+        for row in source_named + _rename(later, pairs)
+    }
+    drift = measure_drift(
+        source_rows=_apply_carries(_rename(before, pairs), carries),
+        target_rows=dest_named,
+        columns=columns,
+        key_cols=dest_keys,
+        dest_db_type=dest_type,
+        dest_types=dest_types,
+        skip_keys=owned,
+    )
+    return replace(proof, drift=drift) if drift else proof
+
+
+def _window_readable(window: Any, source_columns: list[str]) -> bool:
+    """The window's cursor is a scanned column, so each row can be placed."""
+    names = {str(c).lower() for c in source_columns}
+    return bool(getattr(window, "cursor", "")) and str(window.cursor).lower() in names
+
+
+def _row_key(row: dict[str, Any], key_columns: list[str]) -> str:
+    """The key ``measure_drift`` indexes a destination-named row by."""
+    from services.verification_ladder import _index_by_pk
+
+    keys = list(_index_by_pk([row], list(key_columns)))
+    return keys[0] if keys else ""
 
 
 def identity_rows_missing_on_dest(
@@ -338,8 +422,8 @@ def identity_rows_missing_on_dest(
         raise CdcValueScanIncomplete(
             "CDC value scan did not finish. Row count is not a cell proof."
         )
-    renamed_source = _attach_zones(
-        _rename(source_rows, pairs), _declared_zones(mappings)
+    renamed_source = _apply_carries(
+        _rename(source_rows, pairs), _declared_carries(mappings)
     )
     dest_named = _rename(dest_rows, [(column, column) for column in columns])
     present = {

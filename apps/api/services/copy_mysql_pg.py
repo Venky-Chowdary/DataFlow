@@ -482,8 +482,18 @@ def copy_mysql_to_postgres(
             exists = dst_cur.fetchone() is not None
             existed_before = bool(exists)
             dest_occupied = False
+            swap_at_end = False
+            swap_dest_table = dest_table
             if replace_destination and exists:
-                dst_cur.execute(f"DROP TABLE IF EXISTS {dest_ref}")  # nosec B608
+                # D195: DROP + CREATE rebuilt the destination from DataFlow's
+                # DDL and lost its CHECK / FK / DEFAULT / indexes. Stage the
+                # copy and publish its rows into the live table instead.
+                from services.dest_overwrite_swap import staged_overwrite_name
+
+                stage_table = staged_overwrite_name(dest_table)
+                dest_ref = _table_ref(dest_schema, stage_table)
+                dest_table = stage_table
+                swap_at_end = True
                 exists = False
             if exists:
                 dst_cur.execute(f"SELECT COUNT(*) FROM {dest_ref}")  # nosec B608
@@ -618,6 +628,17 @@ def copy_mysql_to_postgres(
                             f"{dest_part} != source {part['source_count']} "
                             f"(lo={part['lo']!r} hi={part['hi']!r})"
                         )
+            if swap_at_end:
+                from services.dest_overwrite_swap import pg_swap_staged_dest
+
+                pg_swap_staged_dest(
+                    dst_cur,
+                    schema=dest_schema or "public",
+                    dest_table=swap_dest_table,
+                    staging_table=dest_table,
+                    quote=_pg_ident,
+                )
+                created_here = False
             dest_conn.commit()
             source_conn.commit()
             proof = f"dest_count:{dest_count}"

@@ -375,6 +375,9 @@ def _introspect_schema_unscoped(
     # planned engine does not inherit a live schema probe.
     if db_type in {"timescaledb", "timescale"}:
         db_type = "postgresql"
+    # MariaDB is the MySQL catalog (same INFORMATION_SCHEMA, same driver).
+    if db_type in {"mariadb", "maria"}:
+        db_type = "mysql"
     if ssl is None:
         # A caller that never said anything about TLS must not make it mandatory.
         from services.connector_store import default_ssl
@@ -877,7 +880,9 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
             check_meta: dict[str, Any] | None = None
             indexes_meta: dict[str, Any] | None = None
             if target:
-                columns = _pg_fetch_columns(cur, schema, target)
+                columns = _pg_fetch_columns(
+                    cur, schema, target, measure_decimals=not _destination_probe(kwargs)
+                )
                 # Table may live outside the requested schema (common when UI
                 # schema is blank / wrong but database+table are correct).
                 # Destination probes must NOT do this — wrong-schema columns
@@ -899,7 +904,12 @@ def _introspect_postgresql(**kwargs) -> dict[str, Any]:
                         (target, schema),
                     )
                     for found_schema, found_table in cur.fetchall() or []:
-                        columns = _pg_fetch_columns(cur, found_schema, found_table)
+                        columns = _pg_fetch_columns(
+                            cur,
+                            found_schema,
+                            found_table,
+                            measure_decimals=not _destination_probe(kwargs),
+                        )
                         if columns:
                             resolved_schema = found_schema
                             target = found_table
@@ -1936,7 +1946,9 @@ def _fetch_foreign_keys(
     return [fk.to_dict() for fk in measured.items], measured.to_dict()
 
 
-def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
+def _pg_fetch_columns(
+    cur: Any, schema: str, table: str, *, measure_decimals: bool = True
+) -> list[dict]:
     """Read column metadata via ``format_type`` so typmod (vector dim, decimal p,s) survives."""
     try:
         cur.execute(_PG_COLUMN_SQL, (schema, table))
@@ -2037,7 +2049,12 @@ def _pg_fetch_columns(cur: Any, schema: str, table: str) -> list[dict]:
         )
         columns.append(col_pg)
     apply_identity_probe("postgresql", cur, schema, table, columns)
-    _measure_unconstrained_decimals(cur, schema, table, columns)
+    if measure_decimals:
+        # A destination's bare ``numeric`` is the carrier the writer binds
+        # into, and it is unbounded. Measuring its rows reported run 1's data
+        # (DECIMAL(9,6)) as the carrier and refused run 2's larger values
+        # as a collapse into a column that holds them (D68).
+        _measure_unconstrained_decimals(cur, schema, table, columns)
     return columns
 
 

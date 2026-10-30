@@ -2434,6 +2434,18 @@ def _build_table_for_write(
                 if match:
                     plan_collations[key] = match.group(1).strip().strip('"')
 
+    # A LOB cannot be a key (SQL Server 1919, ORA-02329): an unbounded text
+    # key gets the widest full-value carrier the engine enforces (CR-D126).
+    from services.upsert_identity import unbounded_key_widths
+
+    unbounded_key_width = unbounded_key_widths(
+        dialect_name,
+        [c for c in columns if c in pk_set],
+        lambda c: _gsql._sa_type_for_logical(
+            column_types.get(c, "string"), dialect_name, db_type, nullable=False
+        ),
+    )
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
@@ -2464,6 +2476,8 @@ def _build_table_for_write(
         sa_type = _gsql._sa_type_for_logical(
             logical, dialect_name, db_type, nullable=nullable
         )
+        if is_pk and col in unbounded_key_width:
+            sa_type = unbounded_key_width[col]
         collation = plan_collations.get(col)
         if collation and isinstance(sa_type, sa.String):
             # String-family types render ``… COLLATE <name>`` from this attribute
@@ -5161,6 +5175,22 @@ def write_mapped_rows(
             source_ddl = (
                 materialize_dest_ddl(dest_db, source_type) if dest_db else source_type
             )
+            # An approved widen names its carrier (schema_drift
+            # .widened_dest_carrier): NVARCHAR stays NVARCHAR at the source's
+            # length. Re-deriving it from the source spelling ALTERed a SQL
+            # Server NVARCHAR(50) down to code-page VARCHAR(500).
+            widen_to = str(mapping.get("target_type") or "").strip()
+            if mapping.get("dest_widen") and widen_to:
+                source_ddl = (
+                    materialize_dest_ddl(dest_db, widen_to, source_type=source_type)
+                    if dest_db
+                    else widen_to
+                )
+                # ALTER COLUMN without COLLATE resets SQL Server's column to
+                # the database default (a binary column turned case-insensitive).
+                collate = re.search(r"\sCOLLATE\s+\S+", widen_to, re.I)
+                if collate and "collate" not in source_ddl.lower():
+                    source_ddl = f"{source_ddl}{collate.group(0)}"
             candidate_by_col[col] = source_ddl
 
         desired_list, alter_refusals = desired_types_honoring_map_stamps(

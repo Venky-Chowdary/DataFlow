@@ -188,7 +188,9 @@ def test_json_null_export_matches_postgres_text_and_sql_null_stays_absent() -> N
     assert "payload" not in absent
     loaded = json.loads(json_dumps_exact_numbers([present, absent]))
     reread = list(_json_null_cells_as_engine_text(loaded))
-    assert reread[0]["payload"] == "null"
+    # The read-back hands a present JSONL null over as the JSON-null token
+    # (D144: plain columns now keep their key and write SQL NULL as null).
+    assert str(reread[0]["payload"]) == "null"
     assert "payload" not in reread[1]
     source_null = fingerprint_for_reconcile(
         "null", ddl_type="JSON", engine="postgresql"
@@ -601,11 +603,29 @@ def test_cdc_policy_reads_wal_level_from_the_plan_endpoint() -> None:
         assert wal_blocks, gates
 
 
-def test_postgres_wal_downgrade_fails_closed() -> None:
+def test_postgres_wal_downgrade_polls_only_a_declared_cursor() -> None:
+    """wal_level=replica is a server with no change log (D28).
+
+    The run may poll a declared modification-timestamp cursor; a poll on the
+    primary key is still refused by ``query_cdc_change_refusal``, and the run
+    appends the downgrade detail so that refusal names wal_level (R3-H1).
+    """
+    from services.cdc_capability import query_cdc_change_refusal
+
     refusal = LogCaptureRefusal(
         CAUSE_SERVER_NOT_CONFIGURED,
         "wal_level=replica — logical decoding is off on this server",
         "set wal_level=logical",
     )
-    with pytest.raises(RuntimeError, match="wal_level"):
-        _query_cdc_downgrade(LogCaptureUnavailable(refusal, "postgresql"), "postgresql")
+    fields = _query_cdc_downgrade(LogCaptureUnavailable(refusal, "postgresql"), "postgresql")
+    assert fields["cdc_capture_used"] == "query_cursor"
+    assert "wal_level" in str(fields["cdc_capture_downgrade_detail"])
+    assert query_cdc_change_refusal(
+        dialect="postgresql", cursor_field="id", cursor_semantics="",
+        primary_key_columns=["id"], downgrade_cause=CAUSE_SERVER_NOT_CONFIGURED,
+    )
+    assert not query_cdc_change_refusal(
+        dialect="postgresql", cursor_field="updated_at",
+        cursor_semantics="modification_timestamp",
+        primary_key_columns=["id"], downgrade_cause=CAUSE_SERVER_NOT_CONFIGURED,
+    )

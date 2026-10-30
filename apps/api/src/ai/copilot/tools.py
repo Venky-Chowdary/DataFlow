@@ -96,6 +96,59 @@ class ToolDefinition:
     handler: Callable[..., ToolResult]
 
 
+# D58: every parameter a tool's handler takes is advertised in its schema, so
+# an MCP client or the model can name it (tests/test_d58_tool_schemas_match_handlers).
+_ROUTE_ID_PROPS: dict[str, dict] = {
+    "source_connector_id": {
+        "type": "string",
+        "description": "Saved source connector id (list_connectors); use instead of the name.",
+    },
+    "dest_connector_id": {
+        "type": "string",
+        "description": "Saved destination connector id (list_connectors); use instead of the name.",
+    },
+}
+_ROW_RULE_PROPS: dict[str, dict] = {
+    "source_filter": {
+        "type": "object",
+        "description": "Row filter applied to the source read, e.g. {\"column\": \"region\", \"op\": \"=\", \"value\": \"EU\"}.",
+    },
+    "dedupe_key": {
+        "type": "string",
+        "description": "Column(s) that identify a duplicate row; used as the key when upsert_key is not given.",
+    },
+    "rule_questions": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Stated rules not yet applied. Any entry refuses the run and asks for the missing detail.",
+    },
+    "applied_rules": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "Stated rules already applied to the plan, echoed in its data_rules preview.",
+    },
+}
+_KEY_ALIAS_PROPS: dict[str, dict] = {
+    "primary_key": {
+        "type": "string",
+        "description": "Alias of upsert_key. Same identity column or composite.",
+    },
+    "dedupe_key": _ROW_RULE_PROPS["dedupe_key"],
+}
+_CHAT_ONE_RUN_PROPS: dict[str, dict] = {
+    "cadence": {
+        "type": "string",
+        "description": "A stated cadence. One run is staged; the plan reports it as not scheduled (use create_schedule).",
+    },
+    "all_tables": {
+        "type": "boolean",
+        "description": "Operator asked for every table. Refused without a source_table: one table per run.",
+    },
+}
+_WORKSPACE_PROP: dict[str, dict] = {
+    "workspace_id": {"type": "string", "description": "Workspace to scope to; defaults to the caller's."},
+}
+
 TOOL_DEFINITIONS: list[dict] = [
     {
         "name": "list_datasets",
@@ -141,6 +194,14 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "string",
                     "enum": ["any", "passed", "failed", "untested"],
                     "default": "any",
+                },
+                "engine": {
+                    "type": "string",
+                    "description": "Only connectors of this engine (postgresql, mysql, ...).",
+                },
+                "engine_excluded": {
+                    "type": "boolean",
+                    "description": "Invert engine: list every connector that is not that engine.",
                 },
             },
             "required": [],
@@ -391,6 +452,7 @@ TOOL_DEFINITIONS: list[dict] = [
                     ],
                 },
                 "run_id": {"type": "string"},
+                **_WORKSPACE_PROP,
             },
             "required": ["kind"],
         },
@@ -521,6 +583,13 @@ TOOL_DEFINITIONS: list[dict] = [
             "type": "object",
             "properties": {
                 "source_connector_name": {"type": "string", "description": "Saved source connector"},
+                **_ROUTE_ID_PROPS,
+                **_ROW_RULE_PROPS,
+                **_CHAT_ONE_RUN_PROPS,
+                "limit": {
+                    "type": "integer",
+                    "description": "Row cap for the run start_transfer would stage. A plan reads no rows, so the plan itself is unchanged.",
+                },
                 "source_table": {"type": "string", "description": "Source table, collection, or a CALL/SELECT statement"},
                 "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
                 "procedure_call": {"type": "string", "description": "CALL/EXEC text when source_read_mode is procedure"},
@@ -631,6 +700,19 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Acknowledge a schema_drift review block so the plan can clear."
                     ),
                 },
+                "ddl_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Approve the destination DDL Validate disclosed (D101): "
+                        "the unique index an upsert into an existing PostgreSQL/"
+                        "MySQL table without one needs. Object with approved_by "
+                        "and reason."
+                    ),
+                    "properties": {
+                        "approved_by": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                },
             },
             "required": [],
         },
@@ -647,6 +729,9 @@ TOOL_DEFINITIONS: list[dict] = [
             "type": "object",
             "properties": {
                 "source_connector_name": {"type": "string"},
+                **_ROUTE_ID_PROPS,
+                **_ROW_RULE_PROPS,
+                **_CHAT_ONE_RUN_PROPS,
                 "source_table": {"type": "string"},
                 "source_read_mode": {"type": "string"},
                 "procedure_call": {"type": "string"},
@@ -749,6 +834,21 @@ TOOL_DEFINITIONS: list[dict] = [
                         "The acknowledgement is recorded on the transfer."
                     ),
                 },
+                "ddl_acknowledgement": {
+                    "type": "object",
+                    "description": (
+                        "Approve the destination DDL Validate disclosed for this "
+                        "run (D101) — the unique index an upsert into an existing "
+                        "table without one needs (PostgreSQL/MySQL only; MERGE "
+                        "engines such as Snowflake never need one). Object with "
+                        "approved_by and reason; it covers only the statements "
+                        "the refusal listed."
+                    ),
+                    "properties": {
+                        "approved_by": {"type": "string"},
+                        "reason": {"type": "string"},
+                    },
+                },
             },
             "required": [],
         },
@@ -785,6 +885,11 @@ TOOL_DEFINITIONS: list[dict] = [
                     "enum": ["new_column", "removed_column", "new_stream", "removed_stream", "type_change", "cursor_removed", "primary_key_removed", "unknown"],
                 },
                 "auto_apply": {"type": "boolean"},
+                "old_schema": {
+                    "type": "object",
+                    "description": "Previous {column: type} schema; with new_schema, classifies the real change.",
+                },
+                "new_schema": {"type": "object", "description": "Current {column: type} schema."},
             },
             "required": [],
         },
@@ -886,6 +991,17 @@ TOOL_DEFINITIONS: list[dict] = [
             "type": "object",
             "properties": {
                 "source_connector_name": {"type": "string"},
+                **_ROUTE_ID_PROPS,
+                **_ROW_RULE_PROPS,
+                "source_read_mode": {"type": "string", "description": "table, query, or procedure"},
+                "procedure_call": {"type": "string", "description": "CALL/EXEC text when source_read_mode is procedure"},
+                "source_query": {"type": "string", "description": "Read-only SELECT when source_read_mode is query"},
+                "procedure_params": {"type": "object", "description": "Bound :name parameters for CALL/SELECT"},
+                "source_timezone": {
+                    "type": "string",
+                    "description": "IANA zone for source timestamps that carry no offset.",
+                },
+                "limit": {"type": "integer", "description": "Row cap per scheduled run (0 = no cap)."},
                 "source_table": {"type": "string"},
                 "dest_connector_name": {"type": "string"},
                 "dest_table": {"type": "string"},
@@ -1021,6 +1137,7 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Comma-separate a composite key. A column named id is never invented."
                     ),
                 },
+                **_KEY_ALIAS_PROPS,
                 "validation_mode": {"type": "string", "enum": ["strict", "balanced", "lenient"]},
                 "schema_policy": {
                     "type": "string",
@@ -1365,7 +1482,7 @@ TOOL_DEFINITIONS: list[dict] = [
             "jobs, pipelines due or parked on approval, contracts. Use when the "
             "operator asks what's going on, for a briefing, or to summarize the workspace."
         ),
-        "input_schema": {"type": "object", "properties": {}, "required": []},
+        "input_schema": {"type": "object", "properties": {**_WORKSPACE_PROP}, "required": []},
     },
     *LIFECYCLE_TOOL_DEFINITIONS,
 ]
@@ -3111,6 +3228,26 @@ class DataPilotTools:
             except ImportError:
                 gate_ids = []
 
+        from src.transfer.connector_capabilities import source_only_destination_refusal
+
+        # D139: the generic sketch listed every gate for a destination that has
+        # no writer. Name the saved connector's engine, or the engine itself.
+        dest_type = destination
+        try:
+            from services.connector_store import list_connectors
+
+            for saved in list_connectors():
+                if str(getattr(saved, "name", "") or "").strip().casefold() == destination.casefold():
+                    dest_type = str(getattr(saved, "type", "") or destination)
+                    break
+        except Exception:  # noqa: BLE001 - the store is a hint here, not a gate
+            pass
+        not_a_destination = source_only_destination_refusal(dest_type)
+        if not_a_destination:
+            return ToolResult(
+                name="plan_transfer_route", success=False, output=None, error=not_a_destination
+            )
+
         from .example_phrases import example_connector_name, example_dest_connector_name
 
         return ToolResult(name="plan_transfer_route", success=True, output={
@@ -4030,6 +4167,7 @@ class DataPilotTools:
         pii_acknowledgement: dict | None = None,
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
+        ddl_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -4065,6 +4203,7 @@ class DataPilotTools:
             pii_acknowledgement=pii_acknowledgement,
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
+            ddl_acknowledgement=ddl_acknowledgement,
         )
 
     def _start_transfer(
@@ -4101,6 +4240,7 @@ class DataPilotTools:
         pii_acknowledgement: dict | None = None,
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
+        ddl_acknowledgement: dict | None = None,
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -4137,6 +4277,7 @@ class DataPilotTools:
             pii_acknowledgement=pii_acknowledgement,
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
+            ddl_acknowledgement=ddl_acknowledgement,
         )
 
     def _start_dataset_transfer(

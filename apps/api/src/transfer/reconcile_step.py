@@ -7604,6 +7604,7 @@ def _run_reconciliation_impl(
             target_checksum = keyed_checksum
             keyed_scope = WRITTEN_BATCH_KEYS
 
+    cdc_poll_drift: dict[str, Any] = {}
     if (
         _cdc_source_image_gate(dest_summary)
         and engine_digests is None
@@ -7638,6 +7639,7 @@ def _run_reconciliation_impl(
                     dest_table=str(table_name or ""),
                     mappings=list(mapping_dicts or []),
                     dest_types=dest_types,
+                    **_cdc_poll_window(dest_summary),
                 )
             except CdcValueScanIncomplete as exc:
                 return _finalize(
@@ -7661,6 +7663,7 @@ def _run_reconciliation_impl(
                 keyed_scope = CDC_SOURCE_IMAGE_VALUES
                 source_checksum = proof.source_digest
                 target_checksum = proof.dest_digest
+                cdc_poll_drift = proof.drift
 
     # A keyed merge into an occupied destination grows it by ``inserts -
     # deletes``, not by the batch. When the batch digest could not be re-scoped
@@ -7700,8 +7703,32 @@ def _run_reconciliation_impl(
         route_digest_match=dest_summary.get("route_digest_match"),
         rows_written=int(rows_written) if rows_written is not None else None,
     )
+    if cdc_poll_drift:
+        from services.incremental_drift import attach_drift
+
+        return _finalize(
+            attach_drift(report.to_dict(), cdc_poll_drift, resource=str(table_name or ""))
+        )
     return _finalize(report.to_dict())
 
+
+def _cdc_poll_window(dest_summary: dict[str, Any] | None) -> dict[str, Any]:
+    """The query-CDC poll window the run stamped, for the CDC value proof (D188).
+
+    Log CDC stamps none: its image is the whole table. A poll reads
+    ``cursor > watermark`` only, so its proof is scoped to that window.
+    """
+    from services.incremental_drift import RunWindow
+
+    window = RunWindow.from_summary(dest_summary)
+    keys = [
+        str(k)
+        for k in ((dest_summary or {}).get("cdc_poll_key_columns") or [])
+        if str(k).strip()
+    ]
+    if window is None or not keys:
+        return {}
+    return {"window": window, "key_columns": keys}
 
 
 def _leftover_cfg_protecting_run_objects(

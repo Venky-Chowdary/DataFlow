@@ -278,6 +278,27 @@ def evidence_scope(
     return scope
 
 
+def _first_sample_reason(issues_detail: list[dict]) -> str:
+    """The first sampled cell's own refusal, for the gate headline.
+
+    "1 type coercion issue(s)" alone hid the precise cause (a DST-gap wall
+    clock, a BC date) behind a generic count (D52).
+    """
+    for detail in issues_detail or []:
+        if not isinstance(detail, dict) or detail.get("severity") == "warn":
+            continue
+        for failure in detail.get("sample_failures") or []:
+            if isinstance(failure, dict):
+                reason = str(failure.get("reason") or "").strip()
+            else:
+                reason = str(failure or "").strip()
+            if reason:
+                col = str(detail.get("source") or "").strip()
+                head = f"{col}: " if col else ""
+                return f" — {head}{reason[:240]}"
+    return ""
+
+
 def _with_scope(details: dict[str, Any] | None, scope: dict[str, Any]) -> dict[str, Any]:
     out = dict(details or {})
     out["evidence_scope"] = scope
@@ -1560,7 +1581,18 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
             val = _row_cell(row, m.source, None)
             if _sample_is_sql_null_for_not_null(val, target.inferred_type):
                 null_samples += 1
-        if null_samples:
+        if null_samples and _risk_cleared(m) and _continue_policy_disposition(m) == "holdout":
+            # A signed continue-policy (QUARANTINE_ROW / SKIP_ROW / default
+            # CAST_AND_CONTINUE) holds the NULL row out on the write; every
+            # writer routes a NULL bound for a NOT NULL column through the
+            # per-cell policy. Blocking here failed the whole job over the
+            # one row the operator signed to quarantine (D25).
+            warnings.append(
+                f"NOT NULL contract: {m.source} → {m.target} "
+                f"({target.inferred_type}) rejects NULL — {null_samples} "
+                "empty/null sample value(s) held out by the signed Risk Contract"
+            )
+        elif null_samples:
             label = (
                 f"NOT NULL contract: {m.source} → {m.target} "
                 f"({target.inferred_type}) rejects NULL — "
@@ -1660,9 +1692,16 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 ),
             )
         # Sample-proven or strict declared write hazards always block Validate.
+        # The count alone left the operator guessing which column and why
+        # (a NULL into NOT NULL read as "type coercion"); name the first.
+        first_issue = str(issues[0]).strip()[:240]
         return _block(
             GateId.G3_SCHEMA_CONTRACT,
-            f"{len(issues)} type coercion issue(s)",
+            f"{len(issues)} type coercion issue(s)"
+            + (
+                _first_sample_reason(issues_detail)
+                or (f": {first_issue}" if first_issue else "")
+            ),
             start,
             _with_scope(
                 {

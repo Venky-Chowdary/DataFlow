@@ -52,26 +52,41 @@ def _g6(*, dest="mysql", region_type="TEXT", table_exists=False, sync="increment
 
 
 @pytest.mark.parametrize("dest", ["mysql", "mariadb"])
-def test_text_upsert_key_with_no_width_blocks_at_validate(dest):
-    result = _g6(dest=dest)
-    assert result.gate_id == GateId.G6_TARGET_DDL
-    assert result.status == GateStatus.BLOCK
-    assert result.details["rule_id"] == "g6_target_ddl.mysql_lob_key"
-    # The same operator message the writer returns (one shared rule, not a copy).
-    assert result.message.startswith("MySQL cannot enforce the upsert key (region, id)")
-    assert "error 1170" in result.message and "VARCHAR(n)" in result.message
-
-
-def test_validate_and_writer_refuse_with_the_same_message():
+def test_text_upsert_key_with_no_width_is_created_full_width(dest):
+    """CR-D126: a PG TEXT key with no declared width is created as the widest
+    VARCHAR MySQL can enforce on the full value — valid DDL, never a prefix,
+    never the 1170 failure after Validate passed."""
     from services.schema_fidelity import mysql_key_compatible_types
 
-    _types, writer_msg = mysql_key_compatible_types(
+    assert _g6(dest=dest).status == GateStatus.PASS
+    types, refusal = mysql_key_compatible_types(
         table_name="", conflict_columns=["region", "id"],
         target_cols=["region", "id", "amount"], target_types=["TEXT", "BIGINT", "DECIMAL(10,2)"],
         mappings=[{"source": c, "target": c} for c in ("region", "id", "amount")],
         column_types={"region": "TEXT", "id": "INTEGER", "amount": "NUMERIC(10,2)"},
     )
-    assert _g6().message == writer_msg
+    assert refusal is None
+    # 3072-byte key limit, BIGINT's 8 bytes out, 4 bytes per utf8mb4 char.
+    assert types == ["VARCHAR(766)", "BIGINT", "DECIMAL(10,2)"]
+
+
+@pytest.mark.parametrize("dest", ["mysql", "mariadb"])
+def test_json_upsert_key_blocks_at_validate_with_the_writer_message(dest):
+    from services.schema_fidelity import mysql_key_compatible_types
+
+    result = _g6(dest=dest, region_type="JSONB")
+    assert result.gate_id == GateId.G6_TARGET_DDL
+    assert result.status == GateStatus.BLOCK
+    assert result.details["rule_id"] == "g6_target_ddl.mysql_lob_key"
+    _types, writer_msg = mysql_key_compatible_types(
+        table_name="", conflict_columns=["region", "id"],
+        target_cols=["region", "id", "amount"], target_types=["JSON", "BIGINT", "DECIMAL(10,2)"],
+        mappings=[{"source": c, "target": c} for c in ("region", "id", "amount")],
+        column_types={"region": "JSONB", "id": "INTEGER", "amount": "NUMERIC(10,2)"},
+    )
+    # One shared rule: Validate and the writer refuse with the same words.
+    assert result.message == writer_msg
+    assert "error 1170" in result.message and "prefix" in result.message
 
 
 @pytest.mark.parametrize(

@@ -69,6 +69,25 @@ def is_missing_sentinel(value: Any) -> bool:
     return value is Missing or value == DF_MISSING_SENTINEL
 
 
+class _ExplicitNullType:
+    """A store's explicit NULL value (DynamoDB ``{"NULL": true}``), not an absent field."""
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "ExplicitNull"
+
+
+#: The DynamoDB reader returns this for ``{"NULL": true}`` so a source read can
+#: tell it from a missing attribute. Every verifier reads it as SQL NULL (D139:
+#: Gate-8 read-back stringified the bare ``object()`` and failed a correct load).
+EXPLICIT_NULL = _ExplicitNullType()
+
+
+def is_explicit_null(value: Any) -> bool:
+    return value is EXPLICIT_NULL
+
+
 # Wire spellings that mean "no value here" — a DuckDB reader adds its own.
 NULL_WIRE_SENTINELS: frozenset[str] = frozenset(
     {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL, "__df_ddb_null__"}
@@ -112,6 +131,35 @@ def wire_cell(value: Any) -> WireCell:
     return WireCell(cell_to_string(value, preserve_sql_null=True))
 
 
+def reader_wire_cell(value: Any) -> Any:
+    """Mark a cell taken from a connector reader's ``ReadBatch`` as wire.
+
+    ``ReadBatch.rows`` are wire by contract (``cell_to_string(...,
+    preserve_sql_null=True)``): NULL is the ``__DF_SQL_NULL__`` sentinel and a
+    colliding text is already escaped. A consumer that otherwise sees raw
+    driver values (Gate-8's destination sample) must not encode it again.
+    """
+    if isinstance(value, str) and not isinstance(value, (WireCell, WireLiteral)):
+        return WireCell(value)
+    return value
+
+
+def document_bind_value(value: Any) -> Any:
+    """A present wire cell as the value a document store keeps.
+
+    The wire escapes text that spells a sentinel (``__DF_ESC____DF_SQL_NULL__``
+    is the user's text ``__DF_SQL_NULL__``). SQL binds decode that layer
+    (``sql_bind``); the Elasticsearch / MongoDB / DynamoDB writers did not, so
+    the escape itself was stored and read back as different text. Callers
+    handle absence first (``absent_sql_bind``); this decodes one layer. A
+    decoded sentinel spelling stays a :class:`WireLiteral` (a ``str``), so
+    later absence checks in the writer keep it as text, not NULL.
+    """
+    if isinstance(value, str):
+        return unescape_wire_text(value)
+    return value
+
+
 def driver_bind_value(value: Any) -> Any:
     """The value a database driver binds: a :class:`WireLiteral` leaves as ``str``.
 
@@ -149,6 +197,11 @@ def payload_cell_wire(value: Any) -> Any:
     Only text is escaped: ``None`` already is NULL on the wire, and typed
     values (JSON numbers, Parquet decimals) never collide.
     """
+    # A reader's batch cell already crossed the encode (D174): its
+    # ``__DF_SQL_NULL__`` is NULL, and escaping it again turned a real NULL
+    # into the literal text ``__DF_SQL_NULL__``.
+    if isinstance(value, WireCell):
+        return value
     # Every wire spelling contains ``__`` — the cheap test keeps the
     # strip/lower in ``escape_wire_text`` off the per-cell hot path.
     if isinstance(value, str) and "__" in value:
@@ -241,6 +294,24 @@ def absent_sql_bind(value: Any) -> tuple[bool, Any]:
     if is_reader_null_cell(value):
         return True, None
     return False, value
+
+
+def operator_cell(value: Any) -> Any:
+    """One wire cell as an operator reads it in a sample or preview.
+
+    SQL NULL / an absent field is ``None`` (JSON null; the UI says NULL) —
+    never the internal ``__DF_SQL_NULL__`` token and never ``''``. Text is the
+    user's literal: ``''`` and whitespace stay exactly as stored and an
+    escaped sentinel-spelling literal is decoded. Typed cells pass through.
+    Every sampler that shows rows to a person renders through this (D62).
+    """
+    if value is None or is_missing_sentinel(value) or is_frame_missing(value):
+        return None
+    if isinstance(value, str):
+        if is_reader_null_cell(value):
+            return None
+        return str(unescape_wire_text(value))
+    return value
 
 
 def present_cell_text(value: Any) -> str | None:
@@ -605,6 +676,40 @@ def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
     return _demote_exactly_representable(parsed)
 
 
+_JSON_INSIGNIFICANT_WS = frozenset(" \t\n\r")
+
+
+def compact_json_text(text: str) -> str:
+    """Valid JSON text with only the insignificant whitespace removed.
+
+    A JSON document that arrives as *text* (a PG ``json`` / ``jsonb::text``
+    read, a CSV cell, a MySQL JSON read) carries its numbers as the source
+    spelled them. Parsing it and dumping it again rewrote them through
+    binary64: ``1.10`` became ``1.1``, ``1e2`` became ``100.0`` (D192). Every
+    token — numbers, string escapes, key order, duplicate keys — is kept
+    byte-for-byte here; only whitespace *between* tokens goes. The caller has
+    already validated ``text`` as JSON.
+    """
+    out: list[str] = []
+    in_string = False
+    escaped = False
+    for ch in text:
+        if in_string:
+            out.append(ch)
+            if escaped:
+                escaped = False
+            elif ch == "\\":
+                escaped = True
+            elif ch == '"':
+                in_string = False
+        elif ch == '"':
+            in_string = True
+            out.append(ch)
+        elif ch not in _JSON_INSIGNIFICANT_WS:
+            out.append(ch)
+    return "".join(out)
+
+
 def load_http_json(resp: Any) -> Any:
     """HTTP JSON body. Numbers match ``json_loads_exact``.
 
@@ -715,7 +820,29 @@ def _canonical_number_text(value: Any) -> str | None:
     return None
 
 
-def canonical_json_text(document_text: str) -> str | None:
+def _scaled_number_text(value: Any) -> str | None:
+    """A JSON number as PostgreSQL ``numeric`` stores it: value *and* scale.
+
+    ``1.10`` and ``1.1`` are different stored values on an engine that keeps
+    numeric scale (PG ``json``/``jsonb``, a JSON-as-text column): the
+    fingerprint must tell them apart (D192). The exponent is folded into
+    fixed-point (``1e2`` -> ``100``, ``2.50e1`` -> ``25.0``) and zero loses
+    its sign (``-0.0`` -> ``0.0``), exactly as ``jsonb`` renders them.
+    """
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, Decimal):
+        if not value.is_finite():
+            return None
+        if value.is_zero():
+            value = value.copy_abs()
+        return format(value, "f")
+    return _canonical_number_text(value)
+
+
+def canonical_json_text(document_text: str, *, keep_scale: bool = False) -> str | None:
     """Canonical form of a JSON document for fingerprint/semantic compare.
 
     Parses exactly (``json_loads_exact`` — no binary64 rounding), then renders
@@ -723,14 +850,25 @@ def canonical_json_text(document_text: str) -> str | None:
     ``{"n": 3.0}`` and ``{"n": 3}`` — the same JSON value — compare equal while
     ``{"n": 3.0001}`` still differs. Returns ``None`` when the text is not a
     JSON document a strict parser accepts.
+
+    ``keep_scale`` is for destinations that store a JSON number with its
+    scale (PostgreSQL ``json``/``jsonb``, JSON written to a text column):
+    ``{"n": 1.10}`` and ``{"n": 1.1}`` then fingerprint differently, so a
+    write that dropped the trailing zero cannot pass Gate-8 (D192). Engines
+    that store numbers as doubles (MySQL JSON, BSON, VARIANT) keep the
+    value-only compare.
     """
     try:
-        parsed = json_loads_exact(document_text)
+        if keep_scale:
+            parsed = json.loads(document_text, parse_float=Decimal)
+        else:
+            parsed = json_loads_exact(document_text)
     except Exception:
         return None
+    number_text = _scaled_number_text if keep_scale else _canonical_number_text
 
     def render(v: Any) -> str:
-        num = _canonical_number_text(v)
+        num = number_text(v)
         if num is not None:
             return num
         if v is None or isinstance(v, JsonNullToken):

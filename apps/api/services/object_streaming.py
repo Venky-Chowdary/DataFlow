@@ -270,6 +270,10 @@ def _collect_records(
     return records
 
 
+#: Formats whose file carries a typed schema of its own (a catalog, not a guess).
+_SELF_DESCRIBING = frozenset({"parquet"})
+
+
 def read_rows_from_spill(
     path: Path,
     filename: str,
@@ -283,6 +287,27 @@ def read_rows_from_spill(
     Returns ``(headers, rows, total_rows)``.  CSV/JSONL/JSON/Excel/Parquet are
     parsed from disk; other formats fall back to reading the whole spilled file.
     """
+    headers, rows, total, _declared = read_rows_and_schema_from_spill(
+        path, filename, offset=offset, limit=limit, known_total=known_total
+    )
+    return headers, rows, total
+
+
+def read_rows_and_schema_from_spill(
+    path: Path,
+    filename: str,
+    *,
+    offset: int = 0,
+    limit: int = 500,
+    known_total: int | None = None,
+) -> tuple[list[str], list[list[str]], int, dict[str, str]]:
+    """``read_rows_from_spill`` plus the file's DECLARED column types.
+
+    A Parquet file states its schema (``double``, ``decimal128(20,5)``). Typing
+    its columns from the first few sampled rows labelled a double column that
+    holds 123456789.12345 ``DECIMAL(3,2)`` (D62). The declared map is empty
+    for formats that carry no schema (CSV, JSON): those stay sampled.
+    """
     file_type = FileParser.detect_file_type(filename, b"")
 
     if file_type in _STREAMABLE:
@@ -291,7 +316,7 @@ def read_rows_from_spill(
         except ImportError:  # pragma: no cover
             from transfer.file_stream import peek_file_source
 
-        headers, _schema, total, sample = peek_file_source(path, filename)
+        headers, schema, total, sample = peek_file_source(path, filename)
         if offset == 0 and limit <= len(sample):
             records = sample[:limit]
         else:
@@ -299,7 +324,12 @@ def read_rows_from_spill(
                 path, file_type, offset, limit, declared_name=filename
             )
         rows = _records_to_matrix(records, headers)
-        return headers, rows, known_total if known_total is not None else total
+        declared = (
+            {str(k): str(v) for k, v in (schema or {}).items() if v}
+            if file_type in _SELF_DESCRIBING and isinstance(schema, dict)
+            else {}
+        )
+        return headers, rows, known_total if known_total is not None else total, declared
 
     # Fallback for Avro / ORC / XML / unknown: read the spilled file and parse.
     raw = path.read_bytes()
@@ -312,7 +342,7 @@ def read_rows_from_spill(
         for r in result.data[offset : offset + limit]
     ]
     rows = _records_to_matrix(records, headers)
-    return headers, rows, known_total if known_total is not None else len(result.data)
+    return headers, rows, known_total if known_total is not None else len(result.data), {}
 
 
 class _ChunkReader(io.RawIOBase):

@@ -316,6 +316,26 @@ def _non_narrowing_decimal_cast(details: dict[str, Any] | None) -> bool:
     return saw
 
 
+_MISSING_VALUE_RE = re.compile(
+    r"null/empty|null upsert key|null (?:primary |upsert |merge )?key|empty "
+    r"(?:string )?(?:primary |upsert |merge )?key|expect_column_not_null|"
+    r"expect_column_values_to_not_be_null",
+    re.I,
+)
+
+
+def _is_missing_value_signal(message: str, details: dict[str, Any]) -> bool:
+    """Every finding the gate reports is a NULL / empty value, none a type."""
+    issues = [
+        str(i)
+        for i in (details.get("issue_texts") or details.get("issues") or [])
+        if str(i or "").strip()
+    ]
+    if not issues:
+        issues = [message or ""]
+    return all(_MISSING_VALUE_RE.search(i) for i in issues)
+
+
 def _is_fidelity_signal(
     message: str,
     details: dict[str, Any] | None,
@@ -363,7 +383,23 @@ def _is_fidelity_signal(
         # fidelity matcher and send operators to Map with Accept risk.
         if _is_uniqueness_probe_signal(message, details, gate_id):
             return False
+        # NULL / empty values in a required or key column are a data finding
+        # on the source rows, not a type path. Titling them "fidelity
+        # collapse" sent operators to Map to remap a column whose type is fine
+        # (D191); the g9 gate keeps its own headline.
+        if _is_missing_value_signal(message, details):
+            return False
         msg_l = (message or "").lower()
+        # A missing / NULL-stored key value is a data finding on the key, not a
+        # type-path collapse: labelling it "Lossy / fidelity collapse" hid why
+        # Oracle refuses a '' upsert key (it stores '' as NULL — D53).
+        if (
+            "required field" in msg_l
+            and ("null/empty" in msg_l or "stores '' as null" in msg_l)
+            and details.get("fidelity_collapse") is not True
+            and not details.get("issues_detail")
+        ):
+            return False
         # Transform dry-run / empty-url integrity copy — not declared type collapse.
         if (
             "cannot coerce to" in msg_l
@@ -860,6 +896,95 @@ QUARANTINE_REPLAN_FIX = (
 )
 
 
+def _pending_widen_paths(preflight: dict[str, Any]) -> dict[str, str]:
+    """``column -> "OLD → NEW"`` for every approvable destination widen.
+
+    Read from the drift report Validate already produced (``widen_type``
+    entries: a source column that widened past an existing destination carrier
+    of the same family), so the headline and the approval decision share one
+    source.
+    """
+    drift = preflight.get("schema_drift") if isinstance(preflight.get("schema_drift"), dict) else {}
+    evolution = drift.get("schema_evolution") if isinstance(drift.get("schema_evolution"), dict) else {}
+    out: dict[str, str] = {}
+    for item in evolution.get("additive") or []:
+        if not isinstance(item, dict) or str(item.get("kind") or "") != "widen_type":
+            continue
+        col = str(item.get("column") or item.get("source") or "").strip()
+        if col:
+            out[col.lower()] = f"{item.get('old_type')} → {item.get('new_type')}"
+    return out
+
+
+#: Blockers that restate an approvable widen in their own words.
+_WIDEN_RESTATING_BLOCKERS = frozenset({"schema_mismatch", "schema_drift", "g3f_population_fit"})
+
+
+def _type_widening_root(
+    cols: list[str],
+    widening: dict[str, str],
+    *,
+    gate_ids: list[str],
+    absorbed: list[str],
+    sample_n: int | None,
+    est_n: int | None,
+) -> MigrationRootCause:
+    """Root for source columns that widened past the destination (D191)."""
+    label = ", ".join(f"{c} {widening[c.lower()]}" for c in cols[:5]) + (
+        f" (+{len(cols) - 5} more)" if len(cols) > 5 else ""
+    )
+    absorbed_ids = sorted({*absorbed, *_WIDEN_RESTATING_BLOCKERS})
+    return MigrationRootCause(
+        root_id=_root_id("type_widening", cols, gate_ids),
+        kind="type_widening_approval",
+        title="Source type widening needs approval",
+        summary=(
+            f"{len(cols)} source column(s) widened past the existing destination "
+            f"column ({label}) — impacts {len(absorbed)} gate check(s)"
+        ),
+        business_impact=(
+            "The destination column is narrower than the source until it is "
+            "ALTERed. Nothing is lost or written until the widen is approved."
+        ),
+        affected_columns=list(cols),
+        affected_rows_sample=sample_n,
+        estimated_total_rows=est_n,
+        risk_level="medium",
+        recommended_fix=(
+            "Approve the widen: pass schema_drift_acknowledged=true to "
+            "plan_transfer / start_transfer (or use schema_policy="
+            "propagate_columns); Execute ALTERs the destination column to the "
+            "source's size before it writes"
+        ),
+        alternative_fixes=[
+            "Acknowledge drift for this run in Studio",
+            "Map the column to a new, wider destination column",
+        ],
+        recovery_strategy="Re-plan with the approval; the same decision runs at Execute.",
+        expected_runtime_impact="One ALTER COLUMN per widened column before the write.",
+        quarantine_policy="none",
+        documentation="docs/MIGRATION_RISK_CONTRACT.md",
+        impacted_gates=list(gate_ids),
+        absorbed_blocker_ids=absorbed_ids,
+        severity="block",
+    )
+
+
+#: Gates that answer "could the endpoint be reached / read at all".
+ENDPOINT_GATE_IDS = frozenset({"g1_source", "g2_destination"})
+
+
+def endpoint_unavailable_blockers(preflight: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Blocking G1/G2 results: the source could not be read or the destination reached."""
+    return [
+        g
+        for g in ((preflight or {}).get("gates") or [])
+        if isinstance(g, dict)
+        and str(g.get("id") or "") in ENDPOINT_GATE_IDS
+        and str(g.get("status") or "").lower() == "block"
+    ]
+
+
 def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCause]:
     """Collapse multi-gate failures into operator-facing migration roots."""
     if not preflight:
@@ -886,7 +1011,14 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
 
     # Fidelity: collapse even a single fidelity-facing block into one root so
     # operators never see N duplicate CTAs for one lossy mapping path.
-    if len(fidelity_gates) + len(fidelity_blockers) >= 1:
+    # An endpoint that could not be reached or read leaves the type gates
+    # judging nothing: no destination types, no sample. Their blocks are
+    # consequences, and titling them "fidelity collapse" hid the real cause
+    # (D191). The endpoint gate leads instead.
+    if (
+        len(fidelity_gates) + len(fidelity_blockers) >= 1
+        and not endpoint_unavailable_blockers(preflight)
+    ):
         gate_ids = sorted(
             {
                 *[str(g.get("id")) for g in fidelity_gates if g.get("id")],
@@ -953,65 +1085,82 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     f"Fidelity risk across type path — impacts "
                     f"{len(absorbed)} gate check(s); open Map for column detail"
                 )
-            roots.append(
-                MigrationRootCause(
-                    root_id=_root_id("fidelity_collapse", cols, gate_ids or absorbed),
-                    kind="fidelity_collapse",
-                    title="Lossy / fidelity collapse across type path",
-                    summary=summary,
-                    business_impact=(
-                        "Declared source→destination types (or nested shapes) lose "
-                        "precision or domain on write. Execute stays locked until Map "
-                        "remaps carriers or a Migration Risk Contract with an explicit "
-                        "continue policy is signed."
-                    ),
-                    affected_columns=cols,
-                    affected_rows_sample=sample_n,
-                    estimated_total_rows=est_n,
-                    risk_level="high",
-                    recommended_fix=(
-                        # A zone the source never recorded cannot be remapped
-                        # into existence, so that exit leads the fix when this
-                        # is the path — the generic remap advice follows it.
-                        "; ".join(r.rstrip(". ") for r in zone_remedies)
-                        + ". Otherwise: open Map → Remap to a fidelity-preserving type."
-                        if zone_remedies
-                        else (
-                            "Open Map → Remap to a fidelity-preserving type, or "
-                            "Accept · cast & continue (Migration Risk Contract with "
-                            "CAST_AND_CONTINUE) → re-run Validate."
-                        )
-                    ),
-                    alternative_fixes=[
-                        *(
-                            ["Declare the source zone (assume_timezone:<IANA zone>) on Map"]
-                            if zone_remedies
-                            else []
-                        ),
-                        "Remap destination column to TEXT/VARCHAR/STRING",
-                        "Sign QUARANTINE_ROW contract for cast failures",
-                        "Widen DECIMAL/INTEGER capacity when narrowing is the only issue",
-                    ],
-                    recovery_strategy=(
-                        "After remap or Risk Contract, re-Validate. Failed casts under "
-                        "CAST_AND_CONTINUE hold out to quarantine/DLQ — primary table "
-                        "must not invent NULL unless the contract says so."
-                    ),
-                    expected_runtime_impact=(
-                        "Re-Validate is sample-scoped; changing destination DDL requires "
-                        "a new Map revision and full rewrite of already-written tables."
-                    ),
-                    quarantine_policy=(
-                        "holdout_rejected_rows under CAST_AND_CONTINUE "
-                        "(see docs/MIGRATION_RISK_CONTRACT.md)"
-                    ),
-                    rollback_policy="DOCUMENT_ONLY",
-                    documentation="docs/MIGRATION_RISK_CONTRACT.md",
-                    impacted_gates=gate_ids or absorbed,
-                    absorbed_blocker_ids=absorbed,
-                    severity="block",
+            widening = _pending_widen_paths(preflight)
+            if cols and all(c.lower() in widening for c in cols):
+                # Every "collapse" is a source column that widened past an
+                # existing destination carrier: an approvable ALTER, not a
+                # lossy type path. Name that class of change and its one
+                # approval (D191).
+                roots.append(
+                    _type_widening_root(
+                        cols,
+                        widening,
+                        gate_ids=gate_ids or absorbed,
+                        absorbed=absorbed,
+                        sample_n=sample_n,
+                        est_n=est_n,
+                    )
                 )
-            )
+            else:
+                roots.append(
+                    MigrationRootCause(
+                        root_id=_root_id("fidelity_collapse", cols, gate_ids or absorbed),
+                        kind="fidelity_collapse",
+                        title="Lossy / fidelity collapse across type path",
+                        summary=summary,
+                        business_impact=(
+                            "Declared source→destination types (or nested shapes) lose "
+                            "precision or domain on write. Execute stays locked until Map "
+                            "remaps carriers or a Migration Risk Contract with an explicit "
+                            "continue policy is signed."
+                        ),
+                        affected_columns=cols,
+                        affected_rows_sample=sample_n,
+                        estimated_total_rows=est_n,
+                        risk_level="high",
+                        recommended_fix=(
+                            # A zone the source never recorded cannot be remapped
+                            # into existence, so that exit leads the fix when this
+                            # is the path — the generic remap advice follows it.
+                            "; ".join(r.rstrip(". ") for r in zone_remedies)
+                            + ". Otherwise: open Map → Remap to a fidelity-preserving type."
+                            if zone_remedies
+                            else (
+                                "Open Map → Remap to a fidelity-preserving type, or "
+                                "Accept · cast & continue (Migration Risk Contract with "
+                                "CAST_AND_CONTINUE) → re-run Validate."
+                            )
+                        ),
+                        alternative_fixes=[
+                            *(
+                                ["Declare the source zone (assume_timezone:<IANA zone>) on Map"]
+                                if zone_remedies
+                                else []
+                            ),
+                            "Remap destination column to TEXT/VARCHAR/STRING",
+                            "Sign QUARANTINE_ROW contract for cast failures",
+                            "Widen DECIMAL/INTEGER capacity when narrowing is the only issue",
+                        ],
+                        recovery_strategy=(
+                            "After remap or Risk Contract, re-Validate. Failed casts under "
+                            "CAST_AND_CONTINUE hold out to quarantine/DLQ — primary table "
+                            "must not invent NULL unless the contract says so."
+                        ),
+                        expected_runtime_impact=(
+                            "Re-Validate is sample-scoped; changing destination DDL requires "
+                            "a new Map revision and full rewrite of already-written tables."
+                        ),
+                        quarantine_policy=(
+                            "holdout_rejected_rows under CAST_AND_CONTINUE "
+                            "(see docs/MIGRATION_RISK_CONTRACT.md)"
+                        ),
+                        rollback_policy="DOCUMENT_ONLY",
+                        documentation="docs/MIGRATION_RISK_CONTRACT.md",
+                        impacted_gates=gate_ids or absorbed,
+                        absorbed_blocker_ids=absorbed,
+                        severity="block",
+                    )
+                )
 
     # Incomplete Migration Risk Contract — only a standalone root when there is
     # no fidelity collapse. Same lossy path with G3/G6/G9 + missing contract
@@ -1042,8 +1191,17 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         for src in risk_gates + risk_blockers:
             risk_cols.extend(_columns_from_details(src.get("details") or {}))
         risk_cols = list(dict.fromkeys(risk_cols))
+        widen_root = next((r for r in roots if r.kind == "type_widening_approval"), None)
         fidelity_root = next((r for r in roots if r.kind == "fidelity_collapse"), None)
-        if fidelity_root is not None:
+        if widen_root is not None and all(
+            c in widen_root.affected_columns for c in risk_cols
+        ):
+            # The contract G4 asks for is the widen's own lossy pair; the
+            # approval clears both (stamp_approved_widens), so one CTA.
+            widen_root.absorbed_blocker_ids = sorted(
+                set(widen_root.absorbed_blocker_ids) | set(risk_absorbed)
+            )
+        elif fidelity_root is not None:
             merged_cols = list(
                 dict.fromkeys([*fidelity_root.affected_columns, *risk_cols])
             )
@@ -1674,7 +1832,14 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         cols = list(details.get("upsert_key_columns") or [])
         planned_ddl = str(details.get("planned_ddl") or "")
         dup_keys = details.get("duplicate_key_count")
-        if dup_keys:
+        impossible = str(details.get("impossible_reason") or "")
+        # MERGE engines (Snowflake, SQL Server, ...) key the write without an
+        # index: there is no DDL to approve, and a unique constraint created
+        # by hand is not what keys the merge (Snowflake does not enforce it).
+        no_index = not planned_ddl
+        if impossible:
+            summary = impossible
+        elif dup_keys:
             summary = (
                 f"Upsert into this existing table keys on "
                 f"({', '.join(cols)}), but the destination holds "
@@ -1694,7 +1859,9 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 root_id=_root_id("upsert_dest_ddl", cols, absorbed),
                 kind="upsert_dest_ddl",
                 title=(
-                    "Duplicate upsert keys in destination"
+                    "Upsert key cannot be enforced on the destination"
+                    if impossible
+                    else "Duplicate upsert keys in destination"
                     if dup_keys
                     else "Upsert needs destination unique key"
                 ),
@@ -1709,23 +1876,38 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 estimated_total_rows=est_n,
                 risk_level="high",
                 recommended_fix=(
-                    "Deduplicate the destination on the upsert key, then "
+                    "Pick an upsert key the destination can enforce on its "
+                    "full value, then re-validate"
+                    if impossible
+                    else "Deduplicate the destination on the upsert key, then "
+                    "re-validate"
+                    if dup_keys and no_index
+                    else "Deduplicate the destination on the upsert key, then "
                     "approve the disclosed DDL at Validate"
                     if dup_keys
                     else "Approve the disclosed destination DDL at Validate "
                     "and re-run"
                 ),
-                alternative_fixes=[
-                    "Create a unique constraint on the upsert key yourself, then re-validate",
-                    "Pick different upsert key columns",
-                    "Run full refresh overwrite instead of upsert",
-                ],
+                alternative_fixes=(
+                    [
+                        "Pick different upsert key columns",
+                        "Run full refresh overwrite instead of upsert",
+                    ]
+                    if impossible or no_index
+                    else [
+                        "Create a unique constraint on the upsert key yourself, then re-validate",
+                        "Pick different upsert key columns",
+                        "Run full refresh overwrite instead of upsert",
+                    ]
+                ),
                 recovery_strategy=(
                     "Nothing was written, so no cleanup is needed — resolve "
                     "the key and re-run Validate."
                 ),
                 expected_runtime_impact=(
-                    "Creating the disclosed unique index is a one-time DDL "
+                    "None — the merge keys the write without an index"
+                    if no_index
+                    else "Creating the disclosed unique index is a one-time DDL "
                     "on the destination table"
                 ),
                 quarantine_policy="n/a — the batch is refused before any write",
@@ -2056,8 +2238,12 @@ def apply_root_causes_to_preflight(preflight: dict[str, Any]) -> dict[str, Any]:
             ):
                 continue
         remaining.append(b)
-    # Roots first — operator sees cause before residual issues.
-    collapsed = [r.as_operator_blocker() for r in roots] + remaining
+    # Roots first — operator sees cause before residual issues. An endpoint
+    # that could not be reached or read is the cause of everything after it,
+    # so it leads even the roots (D191).
+    endpoint = [b for b in remaining if str(b.get("id") or "") in ENDPOINT_GATE_IDS]
+    remaining = [b for b in remaining if b not in endpoint]
+    collapsed = endpoint + [r.as_operator_blocker() for r in roots] + remaining
     preflight["blockers"] = collapsed
 
     # The verdict was stamped before roots were injected. A severity=block
