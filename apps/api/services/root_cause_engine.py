@@ -2062,7 +2062,8 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                     root_id=_root_id("duplicate_identity", cols, absorbed),
                     kind="duplicate_identity",
                     title=(
-                        "Distinct source keys collide on the destination key"
+                        "Duplicate identity keys: distinct source keys collide "
+                        "on the destination key"
                         if _eq_msg
                         else "Duplicate identity keys"
                     ),
