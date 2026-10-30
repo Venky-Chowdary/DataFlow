@@ -2166,6 +2166,17 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
                 or (m.get("target") or "").lower() in {"id", "_id"}
             ]
         conflict_columns = [c for c in conflict_columns if c]
+        if conflict_columns and dest.kind == "database" and dest.table:
+            from ..transfer.ladder_batch_scope import replay_conflict_key
+
+            conflict_columns = replay_conflict_key(
+                resolve_driver_type(str(dest_cfg.get("type") or dest.format or "")).lower(),
+                dest_cfg,
+                schema=str(dest.schema or dest_cfg.get("schema") or ""),
+                table_name=str(dest.table),
+                columns=[str(m.get("target") or "") for m in mappings if m.get("target")],
+                resolved=conflict_columns,
+            )
     except Exception as exc:
         logger.warning("quarantine replay PK resolve failed: %s", exc, exc_info=exc)
         conflict_columns = []
