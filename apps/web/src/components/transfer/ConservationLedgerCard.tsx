@@ -4,6 +4,7 @@ import {
   conservationKindLabel,
   destHeadline,
   isDestMeasured,
+  isHardDeleteMirror,
   isWriteRefused,
   ledgerEquation,
   ledgerIdentityCells,
@@ -57,6 +58,7 @@ export function ConservationLedgerCard({
   const unbalanced =
     Boolean(ledger && ledger.balanced === false) && !unmeasuredRead && !writeRefused;
   const isMirror = ledger?.conservation_kind === "mirror";
+  const hardMirror = isHardDeleteMirror(ledger);
   const isJob = ledger?.conservation_kind === "job_rollup";
   const isArtifact = ledger?.rows_written_source === "artifact_readback";
   const isVector = ledger?.conservation_kind === "vector" || ledger?.rows_written_source === "identity_readback";
@@ -118,7 +120,9 @@ export function ConservationLedgerCard({
           ? "Every stream ledger is closed. Dest COUNT(*) is not summed across mixed or keyed kinds."
           : "Every stream ledger is closed. Job dest is the sum of dest-engine counts of the same kind."
         : isMirror
-        ? leftover
+        ? hardMirror
+          ? "Every source row is at destination, quarantined, or skipped. Keys missing from the source were deleted — hard delete was declared on the stream contract."
+          : leftover
           ? `Every source row is active at destination, quarantined, or skipped. ${leftover.toLocaleString()} leftover dest key(s) stay as _deleted — physical COUNT(*) does not drop.`
           : "Every source row is active at destination, quarantined, or skipped. Physical COUNT(*) does not drop on soft-delete."
         : isArtifact
@@ -196,7 +200,9 @@ export function ConservationLedgerCard({
                   ? "Every stream has a dest-engine ledger. Dest COUNT(*) is not summed across mixed or keyed kinds. Writer acknowledgement is diagnostic only."
                   : "Sum of dest-engine counts across streams of the same kind. Last-table COUNT(*) is not the job. Writer acknowledgement is diagnostic only."
                 : isMirror
-                ? "Dest-engine COUNT(*) WHERE NOT _deleted. Writer acknowledgement is diagnostic only. Physical COUNT(*) does not drop."
+                ? hardMirror
+                  ? "Dest-engine COUNT(*) after the declared hard delete. Writer acknowledgement is diagnostic only."
+                  : "Dest-engine COUNT(*) WHERE NOT _deleted. Writer acknowledgement is diagnostic only. Physical COUNT(*) does not drop."
                 : isArtifact
                   ? "Independent record count of the written file. Writer acknowledgement is diagnostic only. Gate-8 cell fidelity remains unproven."
                   : isVector

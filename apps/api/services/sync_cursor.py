@@ -277,8 +277,8 @@ class SyncContract:
     #: a table whose rows are updated in place, and a business date is set from
     #: a calendar, not a clock. See :data:`CURSOR_SEMANTICS`.
     cursor_semantics: str = ""
-    #: Mirror delete behavior: ``hard`` (docs default — DELETE missing keys) or
-    #: ``soft`` (declared — keep them as ``_deleted`` tombstones).
+    #: Mirror delete behavior: ``soft`` (default — keep missing keys as
+    #: ``_deleted`` tombstones) or ``hard`` (declared — DELETE them).
     delete_mode: str = ""
     #: Days a declared ``business_date`` cursor re-reads behind the watermark
     #: each run. 0 = no lookback (the cursor then stays refused — D48).

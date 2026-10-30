@@ -11,6 +11,7 @@ import {
   formatJobRowMetric,
   conservationKindLabel,
   isDestMeasured,
+  isHardDeleteMirror,
   isWriteRefused,
   ledgerEquation,
   ledgerIdentityCells,
@@ -431,6 +432,28 @@ describe("mirror active population is dest headline, not physical COUNT(*)", () 
     });
     assert.equal(h.value, "3");
     assert.equal(h.measured, true);
+  });
+});
+
+describe("mirror wording follows the delete mode the run applied (QA demo 1030)", () => {
+  it("soft is the default: an unlabelled mirror ledger is not a hard delete", () => {
+    const soft = readConservationLedger({ row_accounting: { ...mirrorLedger, mirror_delete_mode: "soft" } });
+    assert.equal(soft?.mirror_delete_mode, "soft");
+    assert.equal(isHardDeleteMirror(soft), false);
+    assert.equal(isHardDeleteMirror(readConservationLedger({ row_accounting: mirrorLedger })), false);
+    assert.equal(ledgerIdentityCells(mirrorLedger).find((c) => c.label === "Inferred deletes")?.value, "1");
+  });
+
+  it("a declared hard delete is named as such, not as _deleted soft-deletes", () => {
+    const hard = readConservationLedger({
+      row_accounting: { ...mirrorLedger, dest_count: 3, mirror_delete_mode: "hard", note: "" },
+    });
+    assert.equal(isHardDeleteMirror(hard), true);
+    const cells = ledgerIdentityCells(hard!);
+    assert.equal(cells.find((c) => c.label === "Deleted (hard)")?.value, "1");
+    assert.equal(cells.find((c) => c.label === "Inferred deletes"), undefined);
+    const h = destHeadline({ status: "completed", row_accounting: hard });
+    assert.doesNotMatch(h.title || "", /_deleted/);
   });
 });
 

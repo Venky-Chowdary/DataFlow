@@ -1,10 +1,15 @@
 """D38 regression tests — mirror delete contract.
 
-P3.5: mirror reruns kept deleted keys behind an undeclared ``_deleted``
-column — dest 502 vs source 500 while the job reported matching counts.
-Docs say hard delete is the default; a soft-delete plan must be declared
-on the stream contract, and the verifier must state that tombstones
-exist instead of comparing live rows as if they were the whole table.
+P3.5: mirror reruns kept deleted keys behind a ``_deleted`` column — dest
+502 vs source 500 while the job reported matching counts. The verifier must
+state that tombstones exist instead of comparing live rows as if they were
+the whole table.
+
+Soft delete (``_deleted``) is the product contract the UI, help docs and
+docs/ZERO_LOSS_PROPERTIES.md promise; QA demo 1030 found an undeclared
+contract hard-deleting instead. A hard DELETE is now an explicit
+``delete_mode="hard"`` on the stream contract (tests/test_r7_mirror_soft_delete_rest_e2e.py
+pins the soft default end to end).
 """
 
 from __future__ import annotations
@@ -99,13 +104,13 @@ def _dst_count(db_path: str) -> int:
 
 
 @pytest.mark.skipif(getenv_brand("SKIP_SQLITE") == "1", reason="SQLite tests disabled")
-def test_mirror_hard_delete_default():
-    """Undeclared mirror must DELETE missing keys — no _deleted lattice."""
+def test_mirror_hard_delete_when_declared():
+    """Declared delete_mode=hard DELETEs missing keys — no _deleted lattice."""
     db_path = _make_db(50)
     try:
         engine = UniversalTransferEngine()
         r1 = engine.execute_tracked(
-            _request(db_path, contracts=_contract()), "ha" * 12
+            _request(db_path, contracts=_contract(delete_mode="hard")), "ha" * 12
         )
         assert r1.success, r1.error
         assert r1.records_transferred == 50
@@ -115,7 +120,7 @@ def test_mirror_hard_delete_default():
             conn.commit()
 
         r2 = engine.execute_tracked(
-            _request(db_path, contracts=_contract()), "hb" * 12
+            _request(db_path, contracts=_contract(delete_mode="hard")), "hb" * 12
         )
         assert r2.success, r2.error
         summary = r2.destination_summary or {}
@@ -219,9 +224,9 @@ def test_mirror_hard_delete_clears_legacy_lattice():
             )
             conn.commit()
 
-        # Now mirror again undeclared — the hard default.
+        # Now mirror again with a declared hard delete.
         r3 = engine.execute_tracked(
-            _request(db_path, contracts=_contract()), "lc" * 12
+            _request(db_path, contracts=_contract(delete_mode="hard")), "lc" * 12
         )
         assert r3.success, r3.error
         summary = r3.destination_summary or {}
