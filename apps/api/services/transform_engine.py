@@ -208,11 +208,12 @@ _DATE_LOCALES = frozenset({"DMY", "MDY"})
 # Auto (deployment default may apply). This marker is not a locale and
 # must not be copied onto a report.
 _DATE_LOCALE_REJECTED = "REJECTED"
-#: Not a day/month order: the read's dates are year-first ISO. Pinned by
-#: :func:`infer_date_locale` when the evidence is ISO, or when one column mixes
-#: ISO with slash dates. Under it a slash date (``31/12/2024``) is a second
-#: format whose order nothing declared, so it is refused as ambiguous instead
-#: of being read one way. DMY / MDY consumers see Auto.
+#: Not a day/month order: the read's dates are year-first ISO and no slash
+#: date in it settles DMY or MDY. Pinned by :func:`infer_date_locale`. Under it
+#: a slash date valid under both orders (``01/02/2024``) is refused as
+#: ambiguous instead of being read one way; one valid under only one order
+#: (``31/12/2024``, ``03/15/1985``) has a single reading and keeps it. DMY / MDY
+#: consumers see Auto.
 DATE_LOCALE_ISO = "ISO"
 
 
@@ -267,22 +268,24 @@ def _calendar_reason(text: str) -> str:
 
 
 def mixed_date_format_reason(text: str, date_locale: str = "") -> str:
-    """Why a day/month-ordered date is refused in an ISO-dated read, else ``""``.
+    """Why a slash date is refused in an ISO-dated read, else ``""``.
 
-    ``31/12/2024`` beside ``2024-01-15`` is two formats in one column. Reading
-    it day-first because 31 cannot be a month is a guess the file never made;
-    the operator declares DMY / MDY and the value loads.
+    ``01/02/2024`` beside ``2024-01-15`` is 1 February under DMY and 2 January
+    under MDY, and nothing in the read declares which: refused as ambiguous,
+    the operator declares DMY / MDY and the value loads. ``31/12/2024`` or
+    ``03/15/1985`` is valid under one order only - there is nothing to guess,
+    so it is not refused here (the parse reads its single valid day).
     """
     if _active_date_locale(date_locale):
         return ""
     if (_DATE_LOCALE_VAR.get() or "").strip().upper() != DATE_LOCALE_ISO:
         return ""
     raw = (text or "").strip()
-    if not _SLASH_DATE_RE.match(raw):
+    if not _SLASH_DATE_RE.match(raw) or not _is_ambiguous_mdy_dmy(raw):
         return ""
     return (
-        f"{raw!r} is day/month-ordered but this read's dates are ISO "
-        "(YYYY-MM-DD) — mixed date formats, so the day/month order is "
+        f"{raw!r} is a different day under DMY and MDY and this read's dates "
+        "are ISO (YYYY-MM-DD) — mixed date formats, so the day/month order is "
         "ambiguous; set date locale DMY or MDY to load it"
     )
 
@@ -806,9 +809,13 @@ def infer_date_locale(
     Ambiguous values (both fields <= 12 and unequal) are ignored.
     If an explicit locale is already set, it is returned unchanged.
 
-    ``ISO`` (:data:`DATE_LOCALE_ISO`) when one column mixes year-first ISO
-    dates with slash dates, or when every date seen is ISO: a slash date in
-    such a read has no declared day/month order and is refused as ambiguous.
+    ``ISO`` (:data:`DATE_LOCALE_ISO`) when the dates seen are year-first ISO
+    and no slash date settles an order (none seen, or only ones valid under
+    both): a slash date in such a read that is valid under both orders has no
+    declared day/month order and is refused as ambiguous. ISO beside slash
+    dates that consistently settle one order (``1987-12-31`` with
+    ``03/15/1985`` and ``12-31-1990``) is that order: the ISO values are
+    year-first either way.
     """
     order = _active_date_locale(existing_locale)
     if order:
@@ -849,17 +856,15 @@ def infer_date_locale(
             elif second > 12 and first <= 12:
                 mdy += 1
             # if both > 12 it's invalid; if equal it's locale-independent
-    if iso_cols & slash_cols:
-        # One column, two formats: ISO anchors it, and its slash dates are
-        # ambiguous rather than settled by whichever member has a day > 12.
-        return DATE_LOCALE_ISO
     if dmy and dmy >= mdy:
         return "DMY"
     if mdy and mdy > dmy:
         return "MDY"
-    if iso_cols and not slash_cols:
-        # Every date seen is ISO: a slash date further into the read is a
-        # second format, refused as ambiguous wherever it sits.
+    if iso_cols and (iso_cols & slash_cols or not slash_cols):
+        # ISO, and no slash date settles an order: either every date seen is
+        # ISO, or a column mixes ISO with slash dates valid under both orders.
+        # A slash date valid under both orders is refused as ambiguous
+        # wherever it sits; one valid under one order only keeps that reading.
         return DATE_LOCALE_ISO
     return ""
 

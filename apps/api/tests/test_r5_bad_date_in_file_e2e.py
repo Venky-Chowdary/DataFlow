@@ -9,8 +9,10 @@ rows hold values that look like dates and are not:
   naming no real day or clock. The bulk-load census graded shape only, so the
   PostgreSQL COPY (and MySQL LOAD DATA) took them and aborted the whole load -
   in balanced mode and under a signed CAST_AND_CONTINUE contract alike;
-* ``31/12/2024`` / ``15/01/2024`` in an ISO column: a second, day/month-ordered
-  format. It was read day-first silently; it must be held out as ambiguous;
+* ``01/02/2024`` / ``03/04/2024`` in an ISO column: a second, day/month-ordered
+  format valid under both DMY and MDY (a different day under each). It was
+  read one way silently; it must be held out as ambiguous. ``31/12/2024`` /
+  ``15/01/2024`` are valid under one order only: they load as that day;
 
 The contract, as round 4 set it for numbers:
 
@@ -53,7 +55,10 @@ BAD_DATES = {4800: "2024-02-30", 4850: "0000-00-00", 4900: "2024-13-01"}
 BAD_STAMPS = {
     4800: "2024-02-30 10:00:00", 4850: "2024-02-10 25:61:00", 4900: "0000-00-00 00:00:00",
 }
-MIXED = {4800: "31/12/2024", 4801: "15/01/2024"}
+# Valid under DMY and under MDY, a different day under each: ambiguous.
+MIXED = {4800: "01/02/2024", 4801: "03/04/2024"}
+# Valid under one order only (31 / 15 cannot be a month): one reading.
+RESOLVABLE = {4800: ("31/12/2024", dt.date(2024, 12, 31)), 4801: ("15/01/2024", dt.date(2024, 1, 15))}
 # Blank cells: unquoted empty and quoted "" -> NULL (blank-cell rule). A
 # whitespace cell is its own test: it is not COPY-safe, so it would send every
 # run down the row path and hide the bulk-load abort.
@@ -188,6 +193,10 @@ def dest_table():
 
     def make(engine: str, kind: str | None) -> str:
         table = f"r5d_{uuid.uuid4().hex[:8]}"
+        # Reach the engine first, also when the job will create the table: the
+        # harness skips an engine this host does not run (SQL Server in the
+        # api-and-web CI job) instead of the job failing to reach it.
+        _sql(engine, "SELECT 1")
         made.append((engine, table))
         if kind is not None:
             _sql(engine, _DDL[(engine, kind)].format(t=table))
@@ -349,7 +358,7 @@ def test_whitespace_date_cell_is_the_same_blank_on_every_engine(sftp, dest_table
 
 @pytest.mark.parametrize("mode", ["balanced", "contract"])
 @pytest.mark.parametrize("engine", ["postgresql", "mysql", "sqlserver"])
-def test_day_month_dates_in_an_iso_column_are_ambiguous_not_read_day_first(
+def test_slash_dates_valid_under_both_orders_in_an_iso_column_are_ambiguous(
     sftp, dest_table, engine, mode
 ):
     table = dest_table(engine, "date")
@@ -360,8 +369,35 @@ def test_day_month_dates_in_an_iso_column_are_ambiguous_not_read_day_first(
         assert "ambiguous" in held[value], (value, held[value])
 
 
+@pytest.mark.parametrize("mode", ["balanced", "contract"])
+@pytest.mark.parametrize("engine", ["postgresql", "mysql", "sqlserver"])
+def test_slash_dates_valid_under_one_order_in_an_iso_column_load_as_that_day(
+    sftp, dest_table, engine, mode
+):
+    """``31/12/2024`` cannot be MDY and ``15/01/2024`` cannot be MDY: nothing is
+    ambiguous, so each loads as its single valid day - never held out, never
+    NULL, never a shifted day."""
+    table = dest_table(engine, "date")
+    job = _job(_start(
+        sftp(_csv("date", {i: text for i, (text, _day) in RESOLVABLE.items()})),
+        engine, table, mode=mode,
+    ))
+    assert job.get("status") == "completed", {
+        k: job.get(k) for k in ("status", "error", "rejected_rows", "records_processed")
+    }
+    assert int(job.get("rejected_rows") or 0) == 0, job.get("rejected_rows")
+    assert int(job.get("coerced_null_rows") or 0) == 0, job.get("coerced_null_rows")
+    assert int(job.get("records_processed") or 0) == ROWS, job.get("records_processed")
+    rows = _rows(engine, table)
+    assert sorted(rows) == list(range(1, ROWS + 1))
+    for i, (name, d) in rows.items():
+        assert name == _name(i), (i, name)
+        expected = None if i in BLANKS else (RESOLVABLE[i][1] if i in RESOLVABLE else _good(i, "date"))
+        assert d == expected, (i, d, expected)
+
+
 def test_mixed_formats_inside_the_sample_under_a_contract_are_held_out(sftp, dest_table):
-    bad = {2: "31/12/2024", **MIXED}
+    bad = {2: "05/06/2024", **MIXED}
     table = dest_table("postgresql", "date")
     job = _job(_start(sftp(_csv("date", bad)), "postgresql", table, mode="contract"))
     _assert_held_out_exactly("postgresql", table, "date", bad, job)
@@ -372,5 +408,5 @@ def test_strict_refuses_a_mixed_format_column_naming_the_value(sftp, dest_table)
     staged = _start(sftp(_csv("date", MIXED)), "postgresql", table, mode="strict")
     assert not staged.success
     text = str(staged.error)
-    assert "31/12/2024" in text and "4800" in text and "ambiguous" in text, text
+    assert "01/02/2024" in text and "4800" in text and "ambiguous" in text, text
     assert _rows("postgresql", table) == {pid: (name, d) for pid, name, d in PRIOR}

@@ -58,7 +58,13 @@ def test_bulk_load_census_grades_the_calendar_not_the_shape(value, logical, phys
 
 def test_iso_evidence_pins_iso_and_mixed_columns_are_ambiguous():
     assert infer_date_locale([{"d": "2024-01-15"}], ["d"]) == DATE_LOCALE_ISO
-    assert infer_date_locale([{"d": "2024-01-15"}, {"d": "31/12/2024"}], ["d"]) == DATE_LOCALE_ISO
+    # ISO beside slash dates valid under both orders: no order is settled.
+    assert infer_date_locale([{"d": "2024-01-15"}, {"d": "01/02/2024"}], ["d"]) == DATE_LOCALE_ISO
+    # ISO beside slash dates valid under one order only: that order.
+    assert infer_date_locale([{"d": "2024-01-15"}, {"d": "31/12/2024"}], ["d"]) == "DMY"
+    assert infer_date_locale(
+        [{"d": "03/15/1985"}, {"d": "1987-12-31"}, {"d": "12-31-1990"}], ["d"]
+    ) == "MDY"
     # Separate columns keep their own evidence: ISO beside a DMY column is DMY.
     assert infer_date_locale([{"a": "2024-01-15", "b": "31/12/2024"}], ["a", "b"]) == "DMY"
     assert infer_date_locale([{"b": "31/12/2024"}], ["b"]) == "DMY"
@@ -66,11 +72,17 @@ def test_iso_evidence_pins_iso_and_mixed_columns_are_ambiguous():
 
     token = set_active_date_locale(DATE_LOCALE_ISO)
     try:
-        value, err = apply_transform("31/12/2024", "date")
-        assert value is None and "ambiguous" in err and "31/12/2024" in err
+        for ambiguous in ("01/02/2024", "03-04-2024", "11.12.2024"):
+            value, err = apply_transform(ambiguous, "date")
+            assert value is None and "ambiguous" in err and ambiguous in err
+            with pytest.raises(ValueError, match="ambiguous"):
+                coerce_sql_temporal(ambiguous, "DATE", engine="postgresql")
         assert apply_transform("2024-12-31", "date") == ("2024-12-31", None)
-        with pytest.raises(ValueError, match="ambiguous"):
-            coerce_sql_temporal("31/12/2024", "DATE", engine="postgresql")
+        # Valid under one order only: its single day, at every layer.
+        for text, day in (("31/12/2024", "2024-12-31"), ("03/15/1985", "1985-03-15"),
+                          ("12-31-1990", "1990-12-31"), ("05/05/2024", "2024-05-05")):
+            assert apply_transform(text, "date") == (day, None), text
+            assert str(coerce_sql_temporal(text, "DATE", engine="postgresql")) == day, text
     finally:
         reset_active_date_locale(token)
     # Auto (no pin) and a declared DMY still read it.
