@@ -137,9 +137,19 @@ def _sql(kind: str, tmp_path, sql: str, params: Any = None, fetch: bool = False)
                                password=MSSQL_PASSWORD, database="dataflow",
                                autocommit=True)
     else:
+        import gc
+
         import duckdb
 
-        conn = duckdb.connect(str(tmp_path / "r4w.duckdb"))
+        # A probe in this process may still hold the file read-only; DuckDB
+        # refuses a second in-process connection with another configuration.
+        gc.collect()
+        try:
+            conn = duckdb.connect(str(tmp_path / "r4w.duckdb"))
+        except duckdb.ConnectionException:
+            if not fetch:
+                raise
+            conn = duckdb.connect(str(tmp_path / "r4w.duckdb"), read_only=True)
     try:
         cur = conn.cursor()
         if kind == "sqlserver":
