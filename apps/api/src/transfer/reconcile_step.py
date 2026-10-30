@@ -6,10 +6,8 @@ import copy
 import logging
 import re
 import os
-import contextvars
 import hashlib
 import json
-import shutil
 import sqlite3
 import tempfile
 import time
@@ -407,26 +405,16 @@ _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS = frozenset(
 
 # --- run-scoped proof scratch (leak fix) ------------------------------------
 # The proof stores are sqlite files that grow to hundreds of MB on large runs.
-# They used to be mkstemp()ed straight into the shared temp dir and removed only
-# by __del__, so an exception, a cancel or a killed run left them behind until
-# the disk filled. Each proof now runs inside a private directory that is
-# removed - stores closed first - however the run ends.
-_PROOF_SCRATCH: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "df_proof_scratch", default=None
+# Every store file lives in a directory something owns: the proof's scope, or
+# the store's own private dir removed on close / collection / exit. See
+# ``proof_scratch``: a store opened outside the wrapper used to land in the
+# shared temp dir, where no cleanup ever looked.
+from .proof_scratch import (  # noqa: E402
+    _PROOF_SCRATCH,  # noqa: F401 - re-exported for callers that bind a scope
+    in_proof_scratch,
+    own_scratch,
+    proof_scratch_scope,
 )
-_PROOF_STORES: contextvars.ContextVar[list | None] = contextvars.ContextVar(
-    "df_proof_stores", default=None
-)
-
-
-def _scratch_file(prefix: str, suffix: str) -> tuple[int, str]:
-    return tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=_PROOF_SCRATCH.get())
-
-
-def _track_store(store: Any) -> None:
-    tracked = _PROOF_STORES.get()
-    if tracked is not None:
-        tracked.append(store)
 
 
 class _PinStore:
@@ -441,10 +429,8 @@ class _PinStore:
     """
 
     def __init__(self) -> None:
-        fd, self.path = _scratch_file("df_pinmap_", ".db")
-        os.close(fd)
-        _track_store(self)
-        self.db = sqlite3.connect(self.path)
+        self.path, holder = own_scratch(self, "df_pinmap_", ".db")
+        self.db = holder[0] = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=OFF")
         self.db.execute("PRAGMA synchronous=OFF")
         for ddl in (
@@ -649,17 +635,8 @@ class _PinStore:
         return out
 
     def close(self) -> None:
-        try:
-            self.db.close()
-        except Exception:
-            pass
-        try:
-            os.unlink(self.path)
-        except OSError:
-            pass
-
-    def __del__(self) -> None:  # noqa: D105
-        self.close()
+        # Closes the db, removes the file and any private dir — once.
+        self._scratch_release()
 
 
 class _DiskKeySet:
@@ -671,10 +648,8 @@ class _DiskKeySet:
     """
 
     def __init__(self) -> None:
-        fd, self.path = _scratch_file("df_scope_", ".db")
-        os.close(fd)
-        _track_store(self)
-        self.db = sqlite3.connect(self.path)
+        self.path, holder = own_scratch(self, "df_scope_", ".db")
+        self.db = holder[0] = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=OFF")
         self.db.execute("PRAGMA synchronous=OFF")
         self.db.execute("CREATE TABLE scopek (k TEXT PRIMARY KEY)")
@@ -702,17 +677,8 @@ class _DiskKeySet:
         )
 
     def close(self) -> None:
-        try:
-            self.db.close()
-        except Exception:
-            pass
-        try:
-            os.unlink(self.path)
-        except OSError:
-            pass
-
-    def __del__(self) -> None:  # noqa: D105
-        self.close()
+        # Closes the db, removes the file and any private dir — once.
+        self._scratch_release()
 
 
 _RECIPE_ORACLE_DIALECTS = {
@@ -906,6 +872,7 @@ def _recipe_step_sql(
     return None
 
 
+@in_proof_scratch
 def _transform_applied_proof_impl(
     *,
     shape_recipe: dict[str, Any] | None,
@@ -2289,21 +2256,8 @@ def _transform_applied_proof_impl(
 
 def _transform_applied_proof(**kwargs: Any) -> Any:
     """Run the transform proof with its scratch stores bound to this call."""
-    scratch = tempfile.mkdtemp(prefix="df_proof_")
-    stores: list = []
-    scratch_token = _PROOF_SCRATCH.set(scratch)
-    stores_token = _PROOF_STORES.set(stores)
-    try:
+    with proof_scratch_scope():
         return _transform_applied_proof_impl(**kwargs)
-    finally:
-        _PROOF_STORES.reset(stores_token)
-        _PROOF_SCRATCH.reset(scratch_token)
-        for store in stores:
-            try:
-                store.close()
-            except Exception:  # noqa: BLE001 - cleanup must not mask the result
-                pass
-        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _compute_source_checksum_from_spool(
