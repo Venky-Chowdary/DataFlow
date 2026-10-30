@@ -80,3 +80,35 @@ def agreed_sample_date_locale(sample_rows: list[dict], columns: list[str]) -> st
     if ambiguous_date_columns(sample_rows, columns):
         return ""
     return next(iter(agreed))
+
+
+def shape_typed_values(
+    source_kind: str | None,
+    source_type: str | None = "",
+    *,
+    source_connector_id: str | None = None,
+) -> bool:
+    """The value model a transform recipe runs under for this source.
+
+    Execute's runner decides it from the source format
+    (:func:`services.shape_apply.is_typed_value_source`); Validate and the
+    Transform preview must decide it the same way, or a database source's ''
+    and whitespace are previewed as NULL and written as values.
+    """
+    from services.shape_apply import is_typed_value_source
+
+    kind = resolve_preflight_source_kind(
+        source_kind, source_connector_id=source_connector_id
+    )
+    fmt = str(source_type or "").strip()
+    if not fmt and (source_connector_id or "").strip():
+        try:
+            from services.connector_store import get_connector
+
+            saved = get_connector(str(source_connector_id))
+            fmt = str(getattr(saved, "type", "") or "") if saved else ""
+        except Exception:  # noqa: BLE001 - an unreadable store is a file-rules preview
+            fmt = ""
+    if kind == "file" and not (source_connector_id or "").strip():
+        return False
+    return is_typed_value_source(fmt)

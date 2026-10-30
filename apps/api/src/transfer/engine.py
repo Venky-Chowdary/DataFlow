@@ -54,10 +54,7 @@ try:
     )
     from services.row_filter import apply_row_filter
     from services.scd2_engine import apply_scd2
-    from services.shape_apply import (
-        ShapeRunner,
-        shaped_schema,
-    )
+    from services.shape_apply import shaped_schema
     from services.sync_cursor import (
         destination_exists_for_shape,  # noqa: F401
         is_overwrite_sync,  # noqa: F401
@@ -98,10 +95,7 @@ except (
     )
     from src.services.row_filter import apply_row_filter
     from src.services.scd2_engine import apply_scd2
-    from src.services.shape_apply import (
-        ShapeRunner,
-        shaped_schema,
-    )
+    from src.services.shape_apply import shaped_schema
     from src.services.sync_cursor import (
         map_source_to_target,
         requires_upsert,
@@ -2309,9 +2303,16 @@ class UniversalTransferEngine:
                     try:
                         from services.shape_models import ShapeRecipe
 
-                        _rcp = ShapeRecipe.parse(
-                            getattr(request, "shape_recipe", None) or {},
-                            source_columns=columns,
+                        # The runner parsed it against the SOURCE columns;
+                        # ``columns`` is now the shaped image (a rename
+                        # before the scd2 step would not parse against it).
+                        _rcp = (
+                            shape_runner.recipe
+                            if shape_runner is not None
+                            else ShapeRecipe.parse(
+                                getattr(request, "shape_recipe", None) or {},
+                                source_columns=columns,
+                            )
                         )
                         _st = _rcp.scd2_step
                         if _st is not None:
@@ -3128,7 +3129,7 @@ class UniversalTransferEngine:
             shape_by_stream = shape_plan.shape_by_stream
             approved_shape_hash = shape_plan.approved_shape_hash
             sample_probe = (
-                ShapeRunner(design_runner.recipe) if design_runner is not None else None
+                design_runner.fork() if design_runner is not None else None
             )
             if sample_probe is not None:
                 sample_rows = sample_probe.records(sample_rows)
@@ -3140,9 +3141,7 @@ class UniversalTransferEngine:
                 # The rewrites emptied the first page, not the table. Read on
                 # rather than let the gates judge a run on no rows at all.
                 widened_probe = (
-                    ShapeRunner(design_runner.recipe)
-                    if design_runner is not None
-                    else None
+                    design_runner.fork() if design_runner is not None else None
                 )
                 sample_rows = _widen_design_sample(
                     request.source,
@@ -3633,9 +3632,13 @@ class UniversalTransferEngine:
                     # would run history the operator did not approve.
                     from services.shape_models import ShapeRecipe
 
-                    _rcp = ShapeRecipe.parse(
-                        request.shape_recipe,
-                        source_columns=columns,
+                    _rcp = (
+                        shape_runner.recipe
+                        if shape_runner is not None
+                        else ShapeRecipe.parse(
+                            request.shape_recipe,
+                            source_columns=columns,
+                        )
                     )
                     if _rcp.scd2_step is not None:
                         _scd2_opts_stream = _rcp.scd2_column_names() or {}
@@ -4263,7 +4266,7 @@ class UniversalTransferEngine:
             _settle_locales(request, sample_rows, columns)
             shape_runner = _open_shape_runner(request, columns, schema)
             if shape_runner is not None:
-                sample_probe = ShapeRunner(shape_runner.recipe)
+                sample_probe = shape_runner.fork()
                 sample_rows = sample_probe.records(sample_rows)
                 columns = list(sample_probe.output_columns or columns)
                 schema = shaped_schema(sample_probe, sample_rows, schema)

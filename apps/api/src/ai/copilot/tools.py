@@ -691,7 +691,11 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "object",
                     "description": (
                         "Per-column transforms keyed by source or target column. "
-                        "Applied on the planned mapping as an operator override."
+                        "Applied on the planned mapping as an operator override. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
                     ),
                 },
                 "schema_drift_acknowledged": {
@@ -823,7 +827,11 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "Per-column transforms applied on the load, keyed by "
                         "source or target column name. Example: {\"email\": \"hash_pii\"}. "
-                        "Stamped as an operator override, not only on quarantine replay."
+                        "Stamped as an operator override, not only on quarantine replay. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
                     ),
                 },
                 "schema_drift_acknowledged": {
@@ -1084,7 +1092,11 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "Per-column transforms stored on the schedule mapping, "
                         "keyed by source or target column. Applied on every run, "
-                        "not only on quarantine replay."
+                        "not only on quarantine replay. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
                     ),
                 },
                 "schema_drift_acknowledged": {

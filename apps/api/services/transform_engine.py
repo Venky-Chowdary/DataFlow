@@ -2346,10 +2346,31 @@ def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
         moment = datetime.fromisoformat(str(parsed).replace("Z", "+00:00"))
     except ValueError:
         return None, f"Invalid datetime: {text!r}"
+    attached, err = attach_timezone(moment, zone, wall_text=text, zone_name=zone_name)
+    if err:
+        return None, err
+    return _format_datetime(attached), None
+
+
+def attach_timezone(
+    moment: datetime,
+    zone: Any,
+    *,
+    wall_text: str = "",
+    zone_name: str = "",
+) -> tuple[datetime | None, str | None]:
+    """Place a zoneless wall clock in ``zone`` — the one rule for every path.
+
+    ``assume_timezone:`` on a Map column and a recipe's timestamp cast with a
+    ``timezone`` both call this, so a chain and a single transform cannot
+    disagree about a DST gap or an ambiguous fall-back hour.
+    """
+    zone_name = zone_name or str(getattr(zone, "key", zone))
+    text = wall_text or moment.isoformat(sep=" ")
     # An offset the source stated is an instant already; a declared zone must not
     # move it.
     if moment.tzinfo is not None:
-        return _format_datetime(moment), None
+        return moment, None
     try:
         first = moment.replace(tzinfo=zone, fold=0)
         second = moment.replace(tzinfo=zone, fold=1)
@@ -2376,8 +2397,8 @@ def _apply_assume_timezone(text: str, transform: str) -> tuple[Any, str | None]:
     # fold=1). fold=0 is the earlier occurrence and is an hour off that.
     if utc_first != utc_second:
         chosen = second if _round_trips(second) else first
-        return _format_datetime(chosen), None
-    return _format_datetime(first), None
+        return chosen, None
+    return first, None
 
 
 def _era_literal_through(text: str, transform: str) -> tuple[Any, str | None]:

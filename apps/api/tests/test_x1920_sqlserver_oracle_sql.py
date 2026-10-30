@@ -35,9 +35,11 @@ def test_sqlserver_in_oracle_dialects():
         assert d in _RECIPE_ORACLE_DIALECTS
 
 
-def test_tsql_trim_uses_ltrim_rtrim():
+def test_tsql_trim_strips_what_the_engine_strips():
+    # The engine's trim is str.strip(); LTRIM/RTRIM strip spaces only, so a
+    # tab or NBSP read as a broken step (r5 multi-step, provisional D203).
     sql = _call("trim", {}, "[name]", "sqlserver")
-    assert sql == "LTRIM(RTRIM([name]))"
+    assert sql == "TRIM(:ov0 FROM [name])"
     assert "::text" not in sql and "BTRIM" not in sql
 
 
@@ -69,7 +71,7 @@ def test_tsql_literal_replace_and_cast_covered():
 
 
 def test_pg_and_mysql_emission_unchanged():
-    assert _call("trim", {}, '"n"', "postgresql") == 'TRIM("n")'
+    assert _call("trim", {}, '"n"', "postgresql") == 'BTRIM("n", :ov0)'
     assert _call("cast_column", {"to_type": "text"}, '"n"', "postgresql") == 'CAST("n" AS TEXT)'
     assert "REGEXP_REPLACE" in _call("collapse_whitespace", {}, "`n`", "mysql")
     sql = _call("default_if_null", {"value": "d"}, "`n`", "mysql")

@@ -111,15 +111,7 @@ def _shaped_population_rows(
     """
     if runner is None:
         return rows
-    probe = ShapeRunner(
-        runner.recipe, workspace_id=runner.workspace_id
-    )
-
-    def _iter() -> Iterator[dict[str, Any]]:
-        for row in rows:
-            yield from probe.records([row])
-
-    return _iter()
+    return runner.fork().population(rows)
 
 
 def _shape_stream_refusal(

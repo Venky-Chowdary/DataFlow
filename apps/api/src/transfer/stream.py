@@ -3047,7 +3047,7 @@ def _stream_database_transfer_impl(
         # replays the same approved recipe. Its own runner: the run's shaping
         # effects were counted on the write pass and must not be counted twice.
         reread_shaper = (
-            ShapeRunner(run.cfg.shape_runner.recipe, typed_values=run.cfg.shape_runner.typed_values) if run.cfg.shape_runner is not None else None
+            run.cfg.shape_runner.fork() if run.cfg.shape_runner is not None else None
         )
         reread_holdouts: list[dict[str, Any]] = []
         reread_tombstones_excluded = 0

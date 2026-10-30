@@ -113,8 +113,13 @@ def _iter_table_population_for_preflight(
     read_scope: Any = None,
     source_filter: dict[str, Any] | None = None,
     source_columns: list[str] | None = None,
+    shape_recipe: dict[str, Any] | None = None,
 ):
     """Same projected table walk Execute uses — or None when it cannot run.
+
+    ``shape_recipe``: the walk feeds the approved recipe, so it projects what
+    the recipe reads plus every fit column no step produces — as Execute's
+    walk projects its runner's input columns.
 
     Studio/plan/Pilot used to scan only the preview. A late DECIMAL overflow
     then passed Validate and blocked Execute. Callable extracts, row filters,
@@ -159,6 +164,16 @@ def _iter_table_population_for_preflight(
         kind if kind in {"database", "cloud"} else "database",
         data,
     )
+    if source_columns is None and shape_recipe:
+        source_columns = _recipe_walk_columns(
+            shape_recipe,
+            mappings,
+            column_types=column_types,
+            dest_types=dest_types,
+            dest_db=dest_db,
+            source_kind=source_kind,
+            source_format=source_format or str(data.get("format") or ""),
+        )
     return iter_bounded_table_population_rows(
         endpoint,
         mappings,
@@ -173,6 +188,42 @@ def _iter_table_population_for_preflight(
         or (extra.get("source_filter") if isinstance(extra.get("source_filter"), dict) else None),
         source_columns=source_columns,
     )
+
+
+def _recipe_walk_columns(
+    shape_recipe: dict[str, Any],
+    mappings: list[dict[str, Any]],
+    **target_kw: Any,
+) -> list[str] | None:
+    """Source columns a recipe-shaped fit walk must read, or None (default)."""
+    from services.population_fit_scan import bounded_targets
+    from services.shape_models import ShapeError, ShapeRecipe
+
+    try:
+        recipe = ShapeRecipe.parse(shape_recipe)
+    except ShapeError:
+        return None
+    if not recipe.enabled_steps:
+        return None
+    targets, _undecidable, _safe = bounded_targets(
+        mappings,
+        dest_types=target_kw.get("dest_types"),
+        source_types=target_kw.get("column_types"),
+        dest_db=target_kw.get("dest_db", ""),
+        source_kind=target_kw.get("source_kind", ""),
+        source_format=target_kw.get("source_format", ""),
+    )
+    if not targets:
+        return []
+    produced: set[str] = set()
+    for step in recipe.enabled_steps:
+        produced.update(step.writes)
+    wanted = list(recipe.read_columns)
+    for target in targets:
+        name = str(target.source or "")
+        if name and name not in produced and name not in wanted:
+            wanted.append(name)
+    return wanted
 
 
 def _apply_overwrite_emptied_gate(
@@ -441,6 +492,7 @@ def scan_existing_table_population_fit(
                 sync_mode=sync_mode,
                 read_scope=read_scope if incremental_read_narrows(sync_mode) else None,
                 source_filter=resolved_filter or None,
+                shape_recipe=shape_recipe or None,
             )
         except Exception as walk_exc:
             logger.warning(
@@ -470,13 +522,21 @@ def scan_existing_table_population_fit(
                     yield from table_rows
 
                 walked: Iterable[Mapping[str, Any]] = chained()
+                from services.shape_apply import is_typed_value_source
+
+                _typed_source = str(source_kind or "").lower() != "file" and (
+                    is_typed_value_source(source_format)
+                )
                 if shape_recipe:
                     from services.shape_preflight import shaped_population_rows
 
+                    # The recipe reads the walked source rows (their own
+                    # columns), under the source's value model — the shaped
+                    # image's columns made a rename/derive step unparseable.
                     walked = shaped_population_rows(
                         shape_recipe,
                         walked,
-                        source_columns=columns,
+                        typed_values=_typed_source,
                     ) or walked
                 population_rows = walked
                 rows_are_population = True
@@ -495,6 +555,7 @@ def scan_existing_table_population_fit(
                         sync_mode=sync_mode,
                         read_scope=read_scope if incremental_read_narrows(sync_mode) else None,
                         source_filter=resolved_filter or None,
+                        shape_recipe=shape_recipe or None,
                     )
                     if again is None or not shape_recipe:
                         return again
@@ -503,7 +564,7 @@ def scan_existing_table_population_fit(
                     return shaped_population_rows(
                         shape_recipe,
                         again,
-                        source_columns=columns,
+                        typed_values=_typed_source,
                     ) or again
 
     scan_input: Iterable[Mapping[str, Any]] | None = (

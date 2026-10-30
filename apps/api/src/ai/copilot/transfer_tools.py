@@ -679,6 +679,58 @@ def _apply_column_transforms(
     return out, ""
 
 
+def _recipe_hash(payload: dict[str, Any]) -> str:
+    from services.shape_models import ShapeRecipe
+
+    return ShapeRecipe.parse(payload).recipe_hash
+
+
+def _shape_plan_image(
+    pipelines: dict[str, list[str]],
+    src_names: list[str],
+    src_rows: list[dict[str, Any]],
+    sample_rows: list[dict[str, Any]],
+    source_format: str,
+) -> str | tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]], dict[str, list[str]]]:
+    """Compile pipelines and shape the image Map and the gates see, or refuse.
+
+    Map decides each carrier from the values the writer will receive, so a
+    ``trim, decimal`` column is planned as DECIMAL, not as the source's text.
+    Same image function, same value model as Studio Validate and Execute.
+    """
+    from services.column_transform_chain import compile_column_chains
+    from services.shape_apply import is_typed_value_source
+    from services.shape_preflight import ShapePreflightRefused, shaped_preflight_image
+
+    recipe, refusal = compile_column_chains(pipelines, src_names)
+    if refusal:
+        return refusal
+    try:
+        image = shaped_preflight_image(
+            recipe,
+            columns=src_names,
+            column_types={r["name"]: r["inferred_type"] for r in src_rows},
+            sample_rows=sample_rows,
+            typed_values=is_typed_value_source(source_format),
+        )
+    except ShapePreflightRefused as exc:
+        return str(exc)
+    shaped_rows = list(image.sample_rows or [])
+    samples = _column_samples(shaped_rows, src_names)
+    touched = set(image.retyped_columns) | {
+        str(st.get("column") or "") for st in recipe.get("steps") or []
+    }
+    rows = [
+        {
+            **r,
+            "inferred_type": image.column_types.get(r["name"], r["inferred_type"]),
+            "samples": (samples.get(r["name"]) or []) if r["name"] in touched else r["samples"],
+        }
+        for r in src_rows
+    ]
+    return recipe, rows, shaped_rows, samples
+
+
 def _fidelity_columns_from_preflight(preflight: dict[str, Any], mappings: list[dict[str, Any]]) -> set[str]:
     """Columns a blocked preflight is still talking about."""
     blob_parts: list[str] = []
@@ -1037,6 +1089,12 @@ def plan_transfer(
 
     samples = _column_samples(sample_rows, src_names)
     src_rows = _schema_rows(src_info["columns"], samples)
+    # A list / chained value is a multi-step pipeline: it compiles to the
+    # canonical shape recipe (one execution model with Studio Transform);
+    # a single value stays a Map transform on the mapping.
+    from services.column_transform_chain import split_column_transforms
+
+    column_transforms, column_pipelines = split_column_transforms(column_transforms)
     zone_columns: set[str] = set()
     if source_timezone:
         from services.timezone_policy import (
@@ -1070,6 +1128,18 @@ def plan_transfer(
                 **(src_info.get("schema") or {}),
                 **{r["name"]: r["inferred_type"] for r in src_rows},
             }
+    shape_recipe: dict[str, Any] = {}
+    if column_pipelines:
+        shaped = _shape_plan_image(
+            column_pipelines, src_names, src_rows, sample_rows, _engine_format(src_info)
+        )
+        if isinstance(shaped, str):
+            return _tool_result(tool, success=False, error=shaped)
+        shape_recipe, src_rows, sample_rows, samples = shaped
+        src_info["schema"] = {
+            **(src_info.get("schema") or {}),
+            **{r["name"]: r["inferred_type"] for r in src_rows},
+        }
     dst_rows = _schema_rows(dst_info.get("columns") or [])
 
     from services.mapping_pipeline import run_mapping_pipeline
@@ -1207,6 +1277,7 @@ def plan_transfer(
             pii_ack=pii_ack,
             schema_drift_acknowledged=bool(schema_drift_acknowledged),
             ddl_ack=ddl_ack,
+            shape_recipe=shape_recipe or None,
         )
         if (
             _contract_pass == 2
@@ -1275,6 +1346,16 @@ def plan_transfer(
             # Display lists below are truncated for readability; execution must
             # use this untouched list or wide tables would lose columns.
             "engine_mappings": mappings,
+            # Multi-step column transforms, compiled to the recipe Execute runs.
+            **(
+                {
+                    "shape_recipe": shape_recipe,
+                    "approved_shape_recipe_hash": _recipe_hash(shape_recipe),
+                    "column_pipelines": column_pipelines,
+                }
+                if shape_recipe
+                else {}
+            ),
             "column_types": {r["name"]: r["inferred_type"] for r in src_rows},
             "sync_mode": mode,
             "sync_mode_requested": (sync_mode or "").strip(),
@@ -1762,6 +1843,7 @@ def _run_preflight(
     pii_ack: dict[str, str] | None = None,
     schema_drift_acknowledged: bool = False,
     ddl_ack: dict[str, str] | None = None,
+    shape_recipe: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
     from services.population_fit_scan import STUDIO_FIT_SCAN_SECONDS
@@ -1979,6 +2061,8 @@ def _run_preflight(
             acknowledgment_reason=(pii_ack or ddl_ack or {}).get("reason", ""),
             schema_drift_acknowledged=bool(schema_drift_acknowledged),
             source_population_counted=population_counted,
+            # The population walk is shaped by the same recipe Execute runs.
+            shape_recipe=shape_recipe,
             rows_are_population=(
                 (source_read_mode or "").strip().lower() in {"query", "procedure"}
                 and not sample_rows
@@ -2564,6 +2648,10 @@ def start_transfer(
         # writes are not the rows that were asked for.
         "source_filter": plan.get("source_filter") or {},
         "stream_contracts": plan.get("stream_contracts") or [],
+        # A multi-step column transform is a recipe: Confirm must run the one
+        # Validate approved, under its hash.
+        "shape_recipe": plan.get("shape_recipe") or {},
+        "approved_shape_recipe_hash": plan.get("approved_shape_recipe_hash") or "",
         # Chat can never turn the gates off.
         "skip_preflight": False,
         "preflight_run_id": preflight.get("run_id"),

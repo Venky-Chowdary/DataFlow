@@ -5,10 +5,11 @@ while a transfer loads. It exists so an operator builds a cleansing/casting
 pipeline once and reuses it across transfers — the row-level counterpart of
 the post-load :class:`services.transform_store.TransformProject`.
 
-A recipe executes through the existing :func:`services.transform_engine.apply_transform`
-so every op, alias, parameterized prefix, sentinel rule and quarantine path is
-identical to a per-mapping transform — the recipe is *where the declaration
-lives*, never a second engine.
+A recipe compiles (:func:`compile_recipe`) to the canonical ``shape_recipe``
+and runs through :class:`services.shape_engine.ShapeEngine` — in preview, in
+Validate, in Execute and in Gate-8 — so a bound recipe and a hand-authored
+shape recipe are one program with one hash. The recipe is *where the
+declaration lives*, never a second engine.
 """
 
 from __future__ import annotations
@@ -19,9 +20,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from services.transform_engine import apply_transform, normalize_engine_transform
+from services.transform_engine import normalize_engine_transform
 
-#: What a step does when apply_transform reports a cell error.
+#: What a step does when its cell cannot be transformed.
 #:
 #: ``fail``          — the error propagates; the transfer's normal CAST /
 #:                     quarantine decision applies (default, fail-closed).
@@ -68,12 +69,14 @@ _ENGINE_OP_TO_SHAPE: dict[str, tuple[str, dict[str, Any]]] = {
 _ON_ERROR_TO_SHAPE = {"fail": "refuse"}
 
 #: Engine parameterized ops that map onto shape options faithfully.
-#: ``concat:`` (suffix literal) and ``assume_timezone:`` (attach-not-shift)
-#: have no faithful shape step, so they refuse to compile — listed here so
-#: the refusal is deliberate, not an unhandled branch.
+#: ``assume_timezone:`` is a timestamp cast with a zone: both attach the zone
+#: through ``transform_engine.attach_timezone`` (gap refused, PostgreSQL fold).
+#: ``concat:`` (suffix literal) has no faithful shape step, so it refuses to
+#: compile — listed here so the refusal is deliberate, not an unhandled branch.
 _ENGINE_PREFIX_TO_SHAPE = (
     ("replace:", "replace"),
     ("default:", "default_if_null"),
+    ("assume_timezone:", "cast_column"),
 )
 
 
@@ -385,6 +388,9 @@ def _step_to_shape_wire(step: RecipeStep) -> dict[str, Any]:
                 search, _, repl = arg.partition(":")
                 op = "replace"
                 options = {"search": search, "replacement": repl}
+            elif prefix_hit == "assume_timezone:":
+                op = "cast_column"
+                options = {"to_type": "timestamp", "timezone": arg.strip()}
             else:  # default:
                 op = "default_if_null"
                 options = {"value": arg}
@@ -467,39 +473,6 @@ def compile_recipe(
         payload["output_columns"] = list(recipe.output_columns)
     shape = ShapeRecipe.parse(payload, source_columns=source_columns)
     return payload, shape
-
-
-def apply_recipe_row(
-    row: dict[str, Any], recipe: TransformRecipe
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Apply a recipe's enabled steps, in order, to one row.
-
-    Returns ``(new_row, errors)``. Each error names step index, column, op and
-    the engine error. ``keep_original`` steps record the error but write the
-    raw value; ``fail`` steps propagate the engine error (the caller's CAST /
-    quarantine path decides what a cell error does to the row).
-    """
-    out = dict(row)
-    errors: list[dict[str, Any]] = []
-    for index, step in enumerate(recipe.steps):
-        if not step.enabled:
-            continue
-        value, err = apply_transform(out.get(step.column), step.op)
-        if err is None:
-            out[step.column] = value
-            continue
-        errors.append(
-            {
-                "step": index,
-                "column": step.column,
-                "op": step.op,
-                "on_error": step.on_error,
-                "error": err,
-            }
-        )
-        if step.on_error == "keep_original":
-            continue
-    return out, errors
 
 
 def _preview_via_engine(
@@ -607,33 +580,19 @@ def preview_recipe(
 ) -> dict[str, Any]:
     """Dry-run a recipe over sample rows — before/after plus error counts.
 
-    When the recipe compiles to the shape engine (the transfer path), the
-    preview runs through it — same engine, same semantics. Legacy
-    engine-only ops (incl. ``keep_original``) fall back to the per-cell
-    apply path, which is what makes preview honest for both vocabularies.
+    The preview runs the compiled recipe through the shape engine the
+    transfer runs — one composition model. A recipe that does not compile
+    cannot bind to a transfer, so it previews nothing: the refusal is the
+    answer (a per-cell fallback used to show output no run could produce).
     """
     try:
         payload, _shape = compile_recipe(recipe, params=params)
-    except ValueError:
-        payload = None
-    if payload is not None:
-        return _preview_via_engine(recipe, payload, rows, per_step)
-
-    bound = recipe.bind_parameters(params) if params is not None else recipe
-    results: list[dict[str, Any]] = []
-    failed = 0
-    kept = 0
-    for row in rows:
-        out, errors = apply_recipe_row(row, bound)
-        row_failed = any(e["on_error"] == "fail" for e in errors)
-        row_kept = any(e["on_error"] == "keep_original" for e in errors)
-        failed += int(row_failed)
-        kept += int(row_kept)
-        results.append({"before": row, "after": out, "errors": errors})
-    return {
-        "rows": len(rows),
-        "rows_with_errors": failed,
-        "rows_with_keep_original": kept,
-        "results": results,
-        "compiled": False,
-    }
+    except ValueError as exc:
+        return {
+            "rows": len(rows),
+            "rows_with_errors": 0,
+            "results": [],
+            "compiled": False,
+            "error": str(exc),
+        }
+    return _preview_via_engine(recipe, payload, rows, per_step)

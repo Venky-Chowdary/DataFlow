@@ -281,6 +281,16 @@ def create_schedule(
         # writes the columns preflight judged — not a later re-derivation.
         "mappings": engine_mappings,
         "stream_contracts": plan.get("stream_contracts") or [],
+        # Multi-step column transforms: the recipe and the hash Validate
+        # approved, so every unattended run shapes rows the same way.
+        **(
+            {
+                "shape_recipe": plan["shape_recipe"],
+                "approved_shape_recipe_hash": plan.get("approved_shape_recipe_hash") or "",
+            }
+            if plan.get("shape_recipe")
+            else {}
+        ),
         "cursor_column": str(
             (plan.get("data_rules") or {}).get("cursor_column") or cursor_column or ""
         ).strip(),

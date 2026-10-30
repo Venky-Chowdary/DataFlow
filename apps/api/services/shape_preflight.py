@@ -16,13 +16,13 @@ the values that will actually be written.
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Iterator
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from typing import Any, Mapping, Sequence
 
 from services.schema_inference import infer_schema_map
 from services.set_graph import block_message
-from services.shape_engine import ShapeEngine, ShapeRowError
+from services.shape_engine import ShapeRowError
 from services.shape_models import ShapeError, ShapeRecipe
 
 
@@ -68,12 +68,18 @@ def shaped_preflight_image(
     columns: Sequence[str],
     column_types: Mapping[str, str],
     sample_rows: Sequence[Mapping[str, Any]] | None,
+    typed_values: bool = False,
 ) -> ShapedPreflightImage:
     """Apply an approved recipe to the Validate image, or pass it through.
 
     Raises :class:`ShapePreflightRefused` when the recipe is unrunnable or
     refuses one of the rows Validate holds — Validate fails closed rather than
     scoring a program Execute would abort on.
+
+    ``typed_values`` is the source's value model, the same flag Execute's
+    runner carries: a database's '' and whitespace are stored values, a
+    file's empty cell is NULL. Judging a database sample under file rules
+    predicted values the write never produced.
     """
     declared = [str(c) for c in columns]
     declared_types = {str(k): str(v) for k, v in (column_types or {}).items()}
@@ -98,11 +104,15 @@ def shaped_preflight_image(
     if not recipe.enabled_steps:
         return passthrough
 
-    engine = ShapeEngine(recipe, keep_diverted_records=False)
+    from services.shape_apply import ShapeRunner
+
+    runner = ShapeRunner(recipe, typed_values=typed_values)
+    # Validate counts diverted rows; it never persists them.
+    runner._engine.keep_diverted_records = False
+    effect = runner.effect
     try:
-        shaped = engine.apply_batch(rows)
         # Buffering steps emit at end-of-stream — the sample is the stream.
-        shaped.extend(engine.drain())
+        shaped = list(runner.population(rows))
     except ShapeRowError as exc:
         raise ShapePreflightRefused(
             f"The approved transform recipe refused a sampled row: {exc}"
@@ -115,6 +125,7 @@ def shaped_preflight_image(
         touched=recipe.touched_columns,
         rows=shaped,
         recipe=recipe,
+        typed_values=typed_values,
     )
     return ShapedPreflightImage(
         applied=True,
@@ -122,10 +133,10 @@ def shaped_preflight_image(
         columns=out_columns,
         column_types=out_types,
         sample_rows=None if sample_rows is None else shaped,
-        rows_in=engine.effect.rows_in,
-        rows_out=engine.effect.rows_out,
-        rows_removed=engine.effect.rows_shaped_out,
-        rows_diverted=engine.effect.rows_diverted,
+        rows_in=effect.rows_in,
+        rows_out=effect.rows_out,
+        rows_removed=effect.rows_shaped_out,
+        rows_diverted=effect.rows_diverted,
         retyped_columns=retyped,
     )
 
@@ -147,6 +158,7 @@ def shaped_column_types(
     touched: frozenset[str],
     rows: Sequence[Mapping[str, Any]],
     recipe: ShapeRecipe | None = None,
+    typed_values: bool = False,
 ) -> tuple[dict[str, str], dict[str, str]]:
     """Types for the transformed image: declared where untouched, re-read where not.
 
@@ -158,7 +170,20 @@ def shaped_column_types(
     report the same carrier — a column rounded to whole numbers is ``INTEGER``,
     not a leftover ``DECIMAL(p,s)`` that Map would refuse into an existing INT.
     """
-    from services.shape_apply import apply_shape_type_ceilings
+    from services.shape_apply import apply_shape_type_ceilings, recipe_output_schema
+
+    if recipe is not None:
+        # One rule with Execute (shaped_schema): the carrier Map is shown is
+        # the carrier the writer creates.
+        resolved = recipe_output_schema(
+            recipe, columns, rows, declared_types, typed_values=typed_values
+        )
+        retyped = {
+            name: carrier
+            for name, carrier in resolved.items()
+            if declared_types.get(name, carrier) != carrier
+        }
+        return resolved, retyped
 
     resolved: dict[str, str] = {}
     retyped: dict[str, str] = {}
@@ -203,25 +228,34 @@ def shaped_population_rows(
     rows: Iterable[Mapping[str, Any]] | None,
     *,
     source_columns: Sequence[str] | None = None,
+    typed_values: bool = False,
 ) -> Iterable[Mapping[str, Any]] | None:
     """Apply the approved recipe to a stored-file population, or pass it through.
 
     Validate must scan the image Execute will write. A ``round`` step that
     makes a decimal fit would be blocked if we scanned the raw upload.
+
+    ``source_columns`` are the columns the recipe *reads* (the raw file's
+    header), never the shaped image's: a rename or derive step checked
+    against its own output refused the recipe with HTTP 500.
     """
     if rows is None:
         return None
-    from services.shape_apply import ShapeRunner, build_shape_runner
+    from itertools import chain
 
-    runner = build_shape_runner(recipe_payload, source_columns=source_columns)
+    from services.shape_apply import build_shape_runner
+
+    if source_columns is None:
+        # The walked rows say what the recipe reads: their own keys.
+        it = iter(rows)
+        first = next(it, None)
+        if first is None:
+            return iter(())
+        source_columns = list(first)
+        rows = chain([first], it)
+    runner = build_shape_runner(
+        recipe_payload, source_columns=source_columns, typed_values=typed_values
+    )
     if runner is None:
         return rows
-    probe = ShapeRunner(runner.recipe)
-
-    def _iter() -> Iterator[dict[str, Any]]:
-        for row in rows:
-            shaped = probe.records([dict(row)])
-            if shaped:
-                yield shaped[0]
-
-    return _iter()
+    return runner.population(rows)
