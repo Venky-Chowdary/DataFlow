@@ -716,8 +716,15 @@ def test_a_non_default_collation_is_carried(pg):
         tables.drop()
 
 
-def test_a_stale_destination_shell_is_replaced_not_truncated(pg):
-    """CREATE IF NOT EXISTS + TRUNCATE would keep the wrong types."""
+def test_a_stale_destination_shell_declines_and_is_left_untouched(pg):
+    """A stale shell must neither survive the load nor be rebuilt.
+
+    The old contract (DROP + CREATE) replaced the shell, which also discarded
+    the destination's CHECK / FK / DEFAULT / indexes (D195). An existing table
+    is now kept, so a shell whose types differ from the source must decline
+    to the row path *before* anything is emptied or loaded: CREATE IF NOT
+    EXISTS + TRUNCATE would load into the wrong types and still verify.
+    """
     tables = _Tables(pg, "id bigint, amount numeric(12,2)")
     try:
         tables.insert("INSERT INTO {src} VALUES (1, 10.50)")
@@ -725,19 +732,24 @@ def test_a_stale_destination_shell_is_replaced_not_truncated(pg):
             cur.execute(
                 f'CREATE TABLE "{tables.dst}" (id text, amount integer)'
             )
-        result = _copy(tables, [("id", "id"), ("amount", "amount")])
-        assert result.verified
+            cur.execute(f"INSERT INTO \"{tables.dst}\" VALUES ('old', 7)")
+        with pytest.raises(FastPathUnavailable, match="typed differently"):
+            _copy(tables, [("id", "id"), ("amount", "amount")])
+        # Not truncated, not loaded, not rebuilt: the row path gets the table
+        # exactly as it was.
+        assert tables.rows(tables.dst) == [("old", 7)]
         with pg.cursor() as cur:
             cur.execute(
                 """
-                SELECT format_type(a.atttypid, a.atttypmod)
+                SELECT a.attname, format_type(a.atttypid, a.atttypmod)
                 FROM pg_attribute a
                 JOIN pg_class c ON c.oid = a.attrelid
-                WHERE c.relname = %s AND a.attname = 'amount' AND a.attnum > 0
+                WHERE c.relname = %s AND a.attnum > 0 AND NOT a.attisdropped
+                ORDER BY a.attnum
                 """,
                 (tables.dst,),
             )
-            assert "numeric" in cur.fetchone()[0]
+            assert cur.fetchall() == [("id", "text"), ("amount", "integer")]
     finally:
         tables.drop()
 
