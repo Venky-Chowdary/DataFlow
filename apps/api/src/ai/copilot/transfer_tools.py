@@ -58,6 +58,8 @@ SYNC_MODES = (
     "incremental_append",
     "incremental_upsert",
     "cdc_incremental",
+    # Full-source read, key-idempotent write (D208): no watermark.
+    "upsert",
 )
 
 # Only these words authorise destroying rows that are already there. Matching is
@@ -74,7 +76,13 @@ _OVERWRITE_PHRASES = (
     "full refresh overwrite",
     "full_refresh_overwrite",
 )
-_UPSERT_PHRASES = ("upsert", "merge", "dedupe", "deduplicate", "incremental upsert", "incremental_upsert")
+# D208: only these read from a watermark. A bare "upsert"/"merge" says how to
+# write, not what to read — it is a full-source upsert, never incremental.
+_INCREMENTAL_UPSERT_PHRASES = (
+    "incremental upsert", "incremental_upsert", "incremental merge",
+    "dedupe", "deduplicate",
+)
+_UPSERT_PHRASES = ("upsert", "merge")
 _APPEND_PHRASES = ("append", "add to", "insert into", "full refresh append", "full_refresh_append")
 
 _MAX_PREVIEW_MAPPINGS = 40
@@ -104,9 +112,12 @@ def sync_mode_from_phrase(spoken: str, *, default: str = "full_refresh_append") 
     for phrase in _OVERWRITE_PHRASES:
         if text == phrase or f" {phrase} " in f" {text} ":
             return "full_refresh_overwrite"
-    for phrase in _UPSERT_PHRASES:
+    for phrase in _INCREMENTAL_UPSERT_PHRASES:
         if text == phrase or f" {phrase} " in f" {text} ":
             return "incremental_upsert"
+    for phrase in _UPSERT_PHRASES:
+        if text == phrase or f" {phrase} " in f" {text} ":
+            return "upsert"
     if text == "cdc" or "change data capture" in text or text.startswith("cdc "):
         return "cdc_incremental"
     for phrase in _APPEND_PHRASES:
@@ -907,6 +918,11 @@ def plan_transfer(
         mode = normalize_sync_mode(sync_mode, strict=requested_sync_mode)
     except ValueError as exc:
         return _tool_result(tool, success=False, error=str(exc))
+    if mode == "upsert" and cursor_column:
+        # D208: a named watermark is the operator asking for an incremental
+        # upsert; the plan says so (sync_mode_alias_note) instead of carrying
+        # a cursor the full-source upsert would ignore.
+        mode = "incremental_upsert"
     if callable_plan:
         from services.procedure_source import assert_callable_sync_allowed
 
@@ -1362,7 +1378,11 @@ def plan_transfer(
             **(
                 {
                     "sync_mode_alias_note": (
-                        f"{(sync_mode or '').strip()} and {mode} are the same "
+                        f"{(sync_mode or '').strip()} with cursor_column "
+                        f"{cursor_column} is an incremental upsert: each run reads "
+                        "only rows past the saved watermark."
+                        if mode == "incremental_upsert" and cursor_column
+                        else f"{(sync_mode or '').strip()} and {mode} are the same "
                         "upsert write, not a second copy."
                     )
                 }

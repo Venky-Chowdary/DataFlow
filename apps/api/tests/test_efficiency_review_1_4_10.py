@@ -261,7 +261,7 @@ def test_sync_now_is_idempotent_and_full_resync_names_its_plan(tmp_path):
     assert second["ack_id"] == first["ack_id"]
     assert second["idempotent"] is True
     plan = full_resync_plan(parent)
-    assert plan["sync_mode"] == "incremental_deduped"
+    assert plan["sync_mode"] == "upsert"  # D208: full-source, no watermark
     assert plan["destructive"] is False
     full = prepare_sync(
         mode="full",

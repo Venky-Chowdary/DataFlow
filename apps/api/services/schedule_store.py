@@ -46,6 +46,9 @@ SYNC_MODES = {
     "incremental",
     "incremental_append",
     "incremental_deduped",
+    # D208: full-source upsert on every beat (no watermark). Before this a
+    # schedule could only say upsert as incremental_deduped.
+    "upsert",
     "cdc",
     "scd2",
     "mirror",
