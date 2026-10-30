@@ -37,6 +37,7 @@ ProbeStatus = Literal[
     "skipped_no_destination",
     "skipped_unsupported",
     "error",
+    "timed_out",
 ]
 
 # Sync modes that insert without resolving an existing key. Upsert / merge /
@@ -52,6 +53,12 @@ APPEND_ONLY_SYNC_MODES = frozenset(
 )
 
 MAX_PROBE_VALUES = 500
+
+#: Longest a planning tool spends comparing the append batch with the stored
+#: keys (D206). The comparison is an index lookup; the cap only bounds a lock
+#: queue or an engine that cannot use the index. Unfinished is "not probed",
+#: never clean, and Execute re-probes before its first write.
+APPEND_COLLISION_STEP_SECONDS = 8.0
 
 
 def batch_key_texts(values: list[Any] | None, *, limit: int = MAX_PROBE_VALUES) -> list[str]:
@@ -176,6 +183,98 @@ def key_comparison_carrier(dialect_name: str, values: list[str]) -> Any:
     return sa.String(_BOUNDED_TEXT_LEN) if widest <= _BOUNDED_TEXT_LEN else sa.Text()
 
 
+def _python_type(sa_type: Any) -> type | None:
+    try:
+        return sa_type.python_type if sa_type is not None else None
+    except (NotImplementedError, AttributeError):
+        return None
+
+
+def _integer_key(text: str) -> int | None:
+    """``'7'``, ``' 7'``, ``'+7'`` and ``'7.00'`` land in an integer key as 7."""
+    stripped = text.strip()
+    whole, dot, frac = stripped.partition(".")
+    if dot and (not frac or frac.strip("0")):
+        return None
+    body = whole[1:] if whole[:1] in "+-" else whole
+    return int(whole) if body.isdigit() and body.isascii() else None
+
+
+def native_key_values(sa_type: Any, dialect_name: str, values: list[str]) -> list[Any] | None:
+    """The batch keys in the stored column's own type, or ``None`` to compare as text.
+
+    ``CAST(key AS TEXT) IN (...)`` cannot use the key's index, so every append
+    plan read the whole destination: a seq scan whose cost grows with the rows
+    already stored, run inside the tool's 45s budget (D206). The engine's own
+    comparison on the column is the one its unique index enforces, so it is
+    also the right collision test: an integer key ``'007'`` lands as ``7``.
+    A value that cannot be the column's type cannot be a stored key and is
+    left out. Types without an exact Python twin keep the text comparison.
+    """
+    py = _python_type(sa_type)
+    if py is None or py is bool:
+        return None
+    if issubclass(py, int):
+        return [k for k in (_integer_key(v) for v in values) if k is not None]
+    if issubclass(py, str):
+        # A LOB is never a key and compares only through a cast on these engines.
+        if (dialect_name or "").lower() in _LOB_TEXT_DIALECTS and type(sa_type).__name__.upper() in {
+            "CLOB", "NCLOB", "TEXT", "UNICODETEXT", "LONG",
+        }:
+            return None
+        return list(values)
+    return None
+
+
+def _key_predicate(col: Any, sa_type: Any, dialect_name: str, values: list[str]) -> Any:
+    import sqlalchemy as sa
+
+    native = native_key_values(sa_type, dialect_name, values)
+    if native is not None:
+        return col.in_(native) if native else sa.false()
+    # Compare as text: the batch carries stringified keys while the column may be
+    # uuid / numeric, and an uncast IN () raises "operator does not exist".
+    return sa.cast(col, key_comparison_carrier(dialect_name, values)).in_(values)
+
+
+def _key_equals(col: Any, sa_type: Any, dialect_name: str, value: str) -> Any:
+    import sqlalchemy as sa
+
+    native = native_key_values(sa_type, dialect_name, [value])
+    if native is not None:
+        return col == native[0] if native else sa.false()
+    return sa.cast(col, key_comparison_carrier(dialect_name, [value])) == value
+
+
+def _bounded_destination_read(label: str, cfg: Mapping[str, Any], fn: Any) -> tuple[bool, Any]:
+    """Run one destination read under its own step budget inside a tool call.
+
+    Returns ``(finished, value)``; outside a tool call it simply runs.
+    """
+    from src.ai.copilot.tool_deadline import bounded_step
+
+    run = bounded_step(
+        label, fn, seconds=APPEND_COLLISION_STEP_SECONDS, conn=dict(cfg), role="destination"
+    )
+    if run.error is not None:
+        raise run.error
+    return (not run.timed_out), run.value
+
+
+def _timed_out_result(table: str, key: str, db_type: str, probed: int) -> DestinationCollisionResult:
+    return DestinationCollisionResult(
+        status="timed_out",
+        message=(
+            f"the destination did not answer the key comparison on {table} within "
+            f"{APPEND_COLLISION_STEP_SECONDS:g}s (a lock on the table or a slow server); "
+            "not proven either way"
+        ),
+        db_type=db_type,
+        key_column=key,
+        values_probed=probed,
+    )
+
+
 def _sql_existing_keys(
     cfg: dict[str, Any],
     table: str,
@@ -202,15 +301,17 @@ def _sql_existing_keys(
         key_column = ident.columns.get(key_column, key_column)
     tbl = sa.table(table, schema=schema)
     col = sa.column(sa.sql.quoted_name(key_column, True) if ident.exists else key_column)
-    # Compare as text: the batch carries stringified keys while the column may be
-    # bigint / uuid / numeric, and an uncast IN () raises "operator does not exist".
-    key_carrier = key_comparison_carrier(
-        str(getattr(engine.dialect, "name", "")), values
-    )
     stmt = (
         sa.select(col)
         .select_from(tbl)
-        .where(sa.cast(col, key_carrier).in_(values))
+        .where(
+            _key_predicate(
+                col,
+                ident.column_types.get(key_column),
+                str(getattr(engine.dialect, "name", "")),
+                values,
+            )
+        )
         .limit(limit)
     )
     with engine.connect() as conn:
@@ -520,9 +621,14 @@ def probe_destination_key_collisions(
                 cfg, destination_table, key, probe_values, limit
             )
         elif db_type in SQLISH_SOURCE_TYPES:
-            findings = _sql_existing_keys(
-                cfg, destination_table, key, probe_values, limit
+            finished, findings = _bounded_destination_read(
+                f"checking the append batch's {key} values against destination "
+                f"{destination_table}",
+                cfg,
+                lambda: _sql_existing_keys(cfg, destination_table, key, probe_values, limit),
             )
+            if not finished:
+                return _timed_out_result(destination_table, key, db_type, len(probe_values))
         else:
             return DestinationCollisionResult(
                 status="skipped_unsupported",
@@ -605,7 +711,14 @@ def probe_destination_tuple_collisions(
         if db_type in ("mongodb", "mongodb_atlas"):
             findings = _mongo_existing_tuples(cfg, destination_table, names, batch, limit)
         elif db_type in SQLISH_SOURCE_TYPES:
-            findings = _sql_existing_tuples(cfg, destination_table, names, batch, limit)
+            finished, findings = _bounded_destination_read(
+                f"checking the append batch's ({key}) rows against destination "
+                f"{destination_table}",
+                cfg,
+                lambda: _sql_existing_tuples(cfg, destination_table, names, batch, limit),
+            )
+            if not finished:
+                return _timed_out_result(destination_table, key, db_type, len(batch))
         else:
             return DestinationCollisionResult(
                 status="skipped_unsupported",
@@ -670,16 +783,17 @@ def _sql_existing_tuples(
         sa.column(sa.sql.quoted_name(name, True) if ident.exists else name)
         for name in resolved
     ]
-    texts = ["" if value is None else str(value) for row in tuples for value in row]
-    carrier = key_comparison_carrier(str(getattr(engine.dialect, "name", "")), texts)
+    dialect_name = str(getattr(engine.dialect, "name", ""))
+    types = [ident.column_types.get(name) for name in resolved]
     clauses = []
     for row in tuples:
         parts = []
-        for col, value in zip(cols, row):
+        for col, sa_type, value in zip(cols, types, row):
             if value is None:
                 parts.append(col.is_(None))
             else:
-                parts.append(sa.cast(col, carrier) == str(value))
+                # Native equality keeps the key's index usable (D206).
+                parts.append(_key_equals(col, sa_type, dialect_name, str(value)))
         clauses.append(sa.and_(*parts))
     stmt = sa.select(*cols).select_from(tbl).where(sa.or_(*clauses)).limit(limit)
     with engine.connect() as conn:
