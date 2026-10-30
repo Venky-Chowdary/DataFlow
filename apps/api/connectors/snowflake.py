@@ -99,17 +99,7 @@ def test_snowflake(
             if wh:
                 cur.execute(f'USE WAREHOUSE "{wh}"')
             if list_tables:
-                cur.execute(
-                    """
-                    SELECT table_name
-                    FROM information_schema.tables
-                    WHERE table_schema = %s AND table_type = 'BASE TABLE'
-                    ORDER BY table_name
-                    LIMIT 50
-                    """,
-                    (schema or "PUBLIC",),
-                )
-                tables = [row[0] for row in cur.fetchall()]
+                tables = _list_tables_metadata_only(cur, schema or "PUBLIC")
             else:
                 cur.execute("SELECT 1")
                 tables = []
@@ -137,3 +127,36 @@ def test_snowflake(
                 conn.close()
             except Exception as exc:
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def _list_tables_metadata_only(cur, schema: str) -> list[str]:
+    """Up to 50 table names in ``schema``, answered by Snowflake's metadata
+    service (``SHOW``): no warehouse needed.
+
+    ``information_schema.tables`` runs on the warehouse, so on a suspended
+    one the connection probe paid the 5-10s resume inside the 45s plan
+    deadline (D187). The catalog query stays as the fallback.
+    """
+    from connectors.sql_identifiers import snowflake_fold_identifier
+    from connectors.writer_common import quote_sql_identifier
+
+    try:
+        cur.execute(
+            f"SHOW TERSE TABLES IN SCHEMA {quote_sql_identifier(snowflake_fold_identifier(schema))} LIMIT 50"
+        )
+        names = [desc[0] for desc in (cur.description or [])]
+        index = names.index("name") if "name" in names else 1
+        return sorted(str(row[index]) for row in cur.fetchall())[:50]
+    except Exception as exc:  # noqa: BLE001 - fall back to the catalog query
+        logger.info("SHOW TERSE TABLES unavailable (%s); using information_schema", exc)
+    cur.execute(
+        """
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = %s AND table_type = 'BASE TABLE'
+        ORDER BY table_name
+        LIMIT 50
+        """,
+        (schema,),
+    )
+    return [row[0] for row in cur.fetchall()]

@@ -935,11 +935,7 @@ def plan_transfer(
             return _tool_result(
                 tool,
                 success=False,
-                error=(
-                    f"Could not read `{src_table}` on {src_conn.get('name')}"
-                    + (f": {src_info['error']}" if src_info["error"] else "")
-                    + '. Ask me to "list tables on that connector".'
-                ),
+                error=_source_read_error(src_conn, src_table, str(src_info["error"] or "")),
             )
 
     src_names = [str(c.get("name")) for c in src_info["columns"] if c.get("name")]
@@ -1213,6 +1209,42 @@ def plan_transfer(
             **_preview_bound_contract(contract_id, require_signed_contract),
             **({"contract_blocker": contract_refusal} if contract_refusal else {}),
         },
+    )
+
+
+_UNREACHABLE_MARKERS = (
+    "timeout expired",
+    "timed out",
+    "could not connect",
+    "connection refused",
+    "connection reset",
+    "did not answer",
+    "unreachable",
+    "name or service not known",
+    "no route to host",
+)
+
+
+def _source_read_error(src_conn: dict[str, Any], src_table: str, detail: str) -> str:
+    """Why the source could not be read, naming the source system (D169).
+
+    A source that never answered read "Could not read `orders` ... Ask me to
+    list tables": the advice for a missing table, for a host that is down.
+    """
+    target = describe_target(src_conn)
+    name = src_conn.get("name") or "the source"
+    where = f"{name} ({target})" if target else str(name)
+    if any(marker in detail.lower() for marker in _UNREACHABLE_MARKERS):
+        return (
+            f"source unreachable/slow: {where} did not answer while reading "
+            f"`{src_table}` ({detail.strip()}). Check the host and port, the "
+            "firewall or VPN, and that the database is up, then try again. "
+            "Nothing was staged."
+        )
+    return (
+        f"Could not read the source `{src_table}` on {where}"
+        + (f": {detail.strip()}" if detail.strip() else "")
+        + '. Ask me to "list tables on that connector".'
     )
 
 
