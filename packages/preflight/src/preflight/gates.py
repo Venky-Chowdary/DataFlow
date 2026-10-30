@@ -553,6 +553,23 @@ def _document_instant_reason(
     return ""
 
 
+def _json_number_refusals(ctx: Any, source: str) -> list[str]:
+    """JSON_NUMBER_NOT_EXACT reasons the value-aware probe recorded (D206)."""
+    try:
+        report = ctx.coercion_report() or {}
+    except Exception:  # noqa: BLE001 - no report is no evidence
+        return []
+    col = (report.get("by_source") or {}).get(source) if isinstance(report, dict) else None
+    if not isinstance(col, dict):
+        return []
+    out: list[str] = []
+    for failure in col.get("sample_failures") or []:
+        reason = str((failure or {}).get("reason") or "")
+        if reason.startswith("JSON_NUMBER_NOT_EXACT") and reason not in out:
+            out.append(reason)
+    return out[:1]
+
+
 def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
     start = time.perf_counter()
     dest_by_name = {c.name.lower(): c for c in ctx.plan.destination.target_columns}
@@ -614,6 +631,28 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                             )
                     else:
                         affinity_warnings.append(label)
+                # D206: a JSON number BSON cannot hold (int past int64, wider
+                # than Decimal128). The value-aware probe found it; the writer
+                # refuses the same cell, so Validate must not pass it.
+                for reason in _json_number_refusals(ctx, m.source):
+                    label = f"{m.source}: {reason}"  # no type arrow: not a type-path collapse
+                    affinity_detail.append({
+                        "source": m.source,
+                        "target": m.target,
+                        "source_type": src_type,
+                        "target_type": tgt_type,
+                        "kind": "json_number_not_exact",
+                        "severity": "block",
+                        # A sampled value the carrier cannot hold, not a
+                        # declared type-path collapse (the path is fine).
+                        "probe_cast_only": True,
+                        "message": label,
+                        "risk_acknowledged": _risk_cleared(m),
+                    })
+                    if _risk_cleared(m):
+                        affinity_warnings.append(label + " (risk contract)")
+                    else:
+                        affinity_issues.append(label)
                 truncated = _document_instant_sample_truncation(
                     ctx, m.source, src_type, str(tgt_type or src_type), dest_kind
                 )
@@ -646,7 +685,7 @@ def gate_g3_schema_contract(ctx: PreflightContext) -> GateResult:
                 status=GateStatus.BLOCK,
                 message=(
                     f"Schemaless BSON affinity blocked {len(affinity_issues)} mapping(s) "
-                    f"on {dest_kind}"
+                    f"on {dest_kind}: {str(affinity_issues[0])[:240]}"
                 ),
                 details=_with_scope(
                     {

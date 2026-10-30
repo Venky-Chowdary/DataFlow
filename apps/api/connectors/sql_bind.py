@@ -2437,4 +2437,17 @@ def normalize_sql_bind_value(
         ):
             return value.isoformat()
         return unescape_wire_text(value)
-    return unescape_wire_text(handler(value, route))
+    bound = handler(value, route)
+    if kind in _JSON_DOCUMENT_KINDS:
+        # D206: a native JSON type that re-encodes numbers (MySQL JSON doubles,
+        # Snowflake VARIANT) must not store a different number than the source
+        # wrote. Refused here, Validate's bind probe and the writer agree.
+        from services.json_number_capacity import json_number_refusal
+
+        refusal = json_number_refusal(bound, engine=route.eng, ddl_type=ddl_type)
+        if refusal:
+            raise ValueError(refusal)
+    return unescape_wire_text(bound)
+
+
+_JSON_DOCUMENT_KINDS = frozenset({"json", "array", "struct", "map"})

@@ -238,6 +238,17 @@ def _refuse_unsafe_egress(data: dict[str, Any], existing: Any = None) -> None:
     refusal = connector_save_refusal(data, existing)
     if refusal:
         raise HTTPException(status_code=400, detail=refusal)
+    from connectors.sftp_common import sftp_edit_port_error
+
+    # D208: a URL-shaped SFTP host and a port field that disagree.
+    conflict = sftp_edit_port_error(
+        data.get("type") or getattr(existing, "type", ""),
+        data.get("host"),
+        data.get("port"),
+        getattr(existing, "port", None) if existing is not None else None,
+    )
+    if conflict:
+        raise HTTPException(status_code=400, detail=conflict)
 
 
 @router.post("")

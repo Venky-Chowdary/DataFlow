@@ -234,6 +234,11 @@ def _build_suggestion(
             target_type=target_type,
             source_value=(failure_examples[0] if failure_examples else ""),
         )
+        if target_logical in _STRUCTURAL_LOGICALS and reason0.startswith("JSON_NUMBER_NOT_EXACT"):
+            # D206: valid JSON whose number the native JSON type would round.
+            safe_type = _safe_target_type(dest_db_type, prefer_structural=False)
+            fix = f"Column '{source}' → {target_type}: {reason0}"
+            return fix, safe_type, None, FailureClass.INVALID_NUMERIC.value
         if target_logical in _STRUCTURAL_LOGICALS:
             # A VARIANT/JSON column only accepts valid JSON. Mixed Mongo fields
             # (array in one doc, bare scalar in another) fail on the scalar. The
@@ -835,6 +840,15 @@ def analyze_coercion(
                         if tgt_logical == "float"
                         else ""
                     )
+                    if not float_refusal and tgt_logical in _STRUCTURAL_LOGICALS:
+                        # D206: a native JSON type that would store a different
+                        # number (MySQL JSON doubles, BSON, VARIANT) — the
+                        # writer refuses the same cell, Gate-8 would fail it.
+                        from services.json_number_capacity import json_number_refusal
+
+                        float_refusal = json_number_refusal(
+                            converted, engine=dest_l, ddl_type=tgt_type
+                        )
                     if float_refusal:
                         failed += 1
                         if len(sample_failures) < SAMPLE_FAILURE_LIMIT:

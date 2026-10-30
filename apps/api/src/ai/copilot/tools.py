@@ -2142,6 +2142,10 @@ class DataPilotTools:
             connection_string=draft.get("connection_string"),
             require_name=True,
         )
+        if not bound_err and str(draft.get("type") or "").lower() in {"sftp", "ssh"}:
+            from connectors.sftp_common import sftp_port_conflict
+
+            bound_err = sftp_port_conflict(host, port)  # D208
         if bound_err:
             from .ack_ledger import redact_payload
 

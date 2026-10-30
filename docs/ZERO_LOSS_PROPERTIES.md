@@ -628,6 +628,20 @@ trailing zero fails verification. On the double-storing engines above the
 compare is value-equal (`1.10` == `1.1`), because that is all they can hold.
 Tests: `tests/test_d192_json_number_text_fidelity_e2e.py`.
 
+**Numbers the native type cannot hold (D206, 2026-10-30):** preflight refuses,
+before the write, a sampled document holding a number the destination's native
+JSON type would store as a different value: MySQL `JSON` (outside int64/uint64
+and not exactly a double, e.g. `12345678901234567890.123`), MongoDB/BSON (an
+integer outside int64, or wider than `Decimal128`'s 34 digits — the writer used
+to fall back to a string) and Snowflake `VARIANT` (past 38 fixed-point digits,
+or exponent notation a double cannot hold). The refusal names the column, the
+value and the remedy: a text carrier (`LONGTEXT` / string / `VARCHAR`), or a
+Migration Risk Contract (`CAST_AND_CONTINUE` with quarantine holds the row
+out). The writers refuse the same cells (`services/json_number_capacity.py`,
+`sql_bind.normalize_sql_bind_value`, `mongodb_writer`), so a row past the
+sample is quarantined or fails the run; it is never stored rounded.
+Tests: `tests/test_d206_json_number_beyond_double_e2e.py`.
+
 ## Property 9 — PARTIAL (2026-08-14, dest COUNT(*) conservation)
 
 **Claim:** Every source row is on the destination, quarantined, or

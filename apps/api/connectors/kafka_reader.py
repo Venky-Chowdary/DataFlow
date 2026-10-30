@@ -102,6 +102,10 @@ def _bootstrap(cfg: dict[str, Any]) -> str:
             return cs.replace("bootstrap.servers=", "").strip()
     host = str(cfg.get("host") or cfg.get("bootstrap_servers") or "localhost").strip()
     port = int(cfg.get("port") or 9092)
+    # D208 sibling: ``PLAINTEXT://h:9092`` / ``kafka://h:9092`` name their own
+    # port; the scheme is not part of a bootstrap address.
+    host = ",".join(re.sub(r"^[A-Za-z][A-Za-z0-9+._-]*://", "", h.strip()).rstrip("/")
+                    for h in host.split(","))
     if "," in host or re.search(r"(^[^:]+|\])(:\d+)$", host):
         return host
     return f"{host}:{port}"

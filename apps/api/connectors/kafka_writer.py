@@ -284,7 +284,9 @@ def test_kafka(
     try:
         producer = _producer(cfg)
         producer.close()
-        return True, f"Kafka broker reachable at {_bootstrap(host, port or 9092, connection_string)}"
+        from connectors.kafka_reader import _bootstrap as _dial_bootstrap
+
+        return True, f"Kafka broker reachable at {_dial_bootstrap(cfg)}"
     except Exception as exc:
         return False, f"Kafka connection failed: {exc}"
 
