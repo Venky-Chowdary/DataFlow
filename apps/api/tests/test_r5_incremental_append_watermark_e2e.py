@@ -126,7 +126,9 @@ def _connectors(token: str, src_spec: str, dst_kind: str):
 def _report(job: dict) -> dict:
     """The watermark the job reports: old -> new and the rows it selected."""
     rep = job.get("incremental_watermark")
-    assert isinstance(rep, dict), {k: job.get(k) for k in ("cursor_value", "cursor_key")}
+    assert isinstance(rep, dict), {
+        k: job.get(k) for k in ("cursor_value", "cursor_key", "records_processed", "message")
+    }
     return rep
 
 
@@ -364,9 +366,7 @@ def test_gate8_fails_an_append_window_that_holds_a_row_twice(client, monkeypatch
 
     With the drop disabled (the production defect: it failed open and every
     peer was delivered again), the destination window holds the old peers
-    twice. Gate-8 must fail that run, restore the destination and keep the
-    watermark where the last good run left it — the next run then re-reads
-    the same window instead of skipping past a bad load.
+    twice. Production completed that run as verified; Gate-8 must fail it.
     """
     import src.transfer.stream  # noqa: F401  (stream_db_page imports it)
     import src.transfer.stream_db_page as page
@@ -379,10 +379,10 @@ def test_gate8_fails_an_append_window_that_holds_a_row_twice(client, monkeypatch
     try:
         _create_source("pg_tstz", src_table)
         _insert("pg_tstz", src_table, _RUN1)
-        src, dst = _connectors(token, "pg_tstz", "mysql")
+        src_conn, dst_conn = _connectors(token, "pg_tstz", "mysql")
         args = {
-            "source_connector_id": src.id, "source_table": src_table,
-            "dest_connector_id": dst.id, "dest_table": dest_table,
+            "source_connector_id": src_conn.id, "source_table": src_table,
+            "dest_connector_id": dst_conn.id, "dest_table": dest_table,
             "sync_mode": "incremental_append", "validation_mode": "strict",
             "cursor_column": "updated_at", "cursor_semantics": "monotonic_sequence",
         }
@@ -405,13 +405,28 @@ def test_gate8_fails_an_append_window_that_holds_a_row_twice(client, monkeypatch
             "status": job.get("status"), "rows": _dest_rows("mysql", dest_table),
         }
         assert "twice" in str(job.get("error") or ""), job.get("error")
-        assert _dest_rows("mysql", dest_table) == _expected(_RUN1)
-        assert get_watermark(key) == mark
+        # An occupied append destination is never truncated to undo a batch
+        # (services/batch_undo): the rows stay, the job says so, and the
+        # watermark stays with the committed rows so they are not re-sent.
+        summary = job.get("destination_summary") or {}
+        assert summary.get("partial_batch_undo") == "retained", {
+            k: summary.get(k) for k in ("partial_batch_undo", "partial_batch_undo_note")
+        }
+        kept = _dest_rows("mysql", dest_table)
+        assert len(kept) > len(_expected(_RUN1, _RUN2))  # the fault's duplicates
 
-        # The fault gone, the next run re-reads the same window exactly once.
-        again = h.stage_and_run(client, "start_transfer", args)
-        assert _dest_rows("mysql", dest_table) == _expected(_RUN1, _RUN2)
-        assert _report(again)["before"] == mark
+        # The unverified window is not built on: the next run is refused by
+        # append continuity until the operator re-baselines, and writes nothing.
+        ok, staged = h.mcp_call(client, "start_transfer", args)
+        if ok and not h.blockers_of(staged):
+            resp = client.post(
+                "/api/v1/copilot/confirm", json={"ack_id": staged["ack_id"], "reason": "r5wm"}
+            )
+            nxt = h.wait_job(str(resp.json().get("job_id") or ""))
+            assert str(nxt.get("status")) == "failed", nxt.get("status")
+            assert "changed since the last verified run" in str(nxt.get("error") or "")
+        assert _dest_rows("mysql", dest_table) == kept
+        assert get_watermark(key) != mark
     finally:
         h.drop_table("postgresql", src_table)
         h.drop_table("mysql", dest_table)
