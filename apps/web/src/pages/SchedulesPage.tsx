@@ -1,5 +1,6 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { schedulesPollMs } from "../lib/scheduleRunStatus";
+import { createPoller, type Poller } from "../lib/poller";
 import { SectionLoader } from "../components/LoadingState";
 import { Button } from "../components/ui/Button";
 import { HiddenFileInput } from "../components/ui/HiddenFileInput";
@@ -186,28 +187,35 @@ export function SchedulesPage({ connectors, onViewJobs, onOpenJob, onSchedulesCh
   // page opened: a run that failed, was skipped or lost its worker stayed
   // invisible until a manual reload. Re-read quietly — fast while a run is
   // open, slower at rest — and again when the tab regains focus.
+  // The poller re-arms after a failed read too: one failed request used to
+  // stop this refresh (and the open drawer's last/next run) until a reload.
+  const schedulesRef = useRef(schedules);
+  schedulesRef.current = schedules;
+  const schedulesPollerRef = useRef<Poller | null>(null);
   useEffect(() => {
     if (loading || loadError) return;
-    let cancelled = false;
-    const refresh = async () => {
-      try {
-        const rows = await fetchSchedules();
-        if (!cancelled) setSchedules(rows);
-      } catch {
-        /* a failed background read keeps the last good list */
-      }
-    };
-    const timer = window.setTimeout(() => void refresh(), schedulesPollMs(schedules));
+    const poller = createPoller({
+      read: fetchSchedules,
+      delayMs: (rows) => schedulesPollMs(rows ?? schedulesRef.current),
+      onResult: setSchedules,
+    });
+    schedulesPollerRef.current = poller;
     const onVisible = () => {
-      if (document.visibilityState === "visible") void refresh();
+      if (document.visibilityState === "visible") poller.poke();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      cancelled = true;
-      window.clearTimeout(timer);
+      poller.stop();
+      schedulesPollerRef.current = null;
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [loading, loadError, schedules]);
+  }, [loading, loadError]);
+
+  // A run started from this page (Run now / Sync): switch to the fast cadence now.
+  const pollCadence = schedulesPollMs(schedules);
+  useEffect(() => {
+    schedulesPollerRef.current?.poke();
+  }, [pollCadence]);
 
   useEffect(() => {
     fetchScheduleIntervals()

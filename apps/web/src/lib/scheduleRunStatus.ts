@@ -93,3 +93,18 @@ export function schedulesPollMs(rows: readonly PipelineSchedule[] | null | undef
     ? ACTIVE_POLL_MS
     : IDLE_POLL_MS;
 }
+
+/**
+ * Changes whenever the schedule starts, ends or counts a run. The drawer's
+ * History re-reads on a change, so a run that just started or finished shows
+ * at once instead of on History's own 30 s idle timer (R7).
+ */
+export function historyRefreshKey(sched: PipelineSchedule): string {
+  const current = sched.current_run;
+  return [
+    sched.last_run_at || "",
+    sched.last_status || "",
+    sched.run_count ?? "",
+    current ? `${current.run_id}:${current.status}` : "",
+  ].join("|");
+}
