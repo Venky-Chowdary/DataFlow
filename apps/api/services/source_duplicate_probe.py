@@ -778,15 +778,12 @@ def probe_source_duplicate_keys_result(
 ) -> SourceDuplicateProbeResult:
     """Run the source duplicate probe and return an honest status + findings."""
     try:
-        from services.procedure_source import is_callable_source
+        from services.procedure_source import callable_skip_note, is_callable_source
 
         if is_callable_source(source_config):
             return SourceDuplicateProbeResult(
                 status="skipped_callable",
-                message=(
-                    "Stored-procedure / SQL extract is a result-set snapshot — "
-                    "uniqueness GROUP BY is not run against a procedure name."
-                ),
+                message=callable_skip_note(source_config, "uniqueness GROUP BY"),
                 primary_key_columns=_normalize_pk_columns(primary_key, primary_key_columns),
             )
     except Exception:

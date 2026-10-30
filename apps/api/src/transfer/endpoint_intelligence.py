@@ -344,6 +344,7 @@ def introspect_endpoint(
         connector_id=endpoint.connector_id,
     ) as op:
         out = _introspect_endpoint_guarded(endpoint, sample_content, filename)
+        _hide_internal_objects(out)
         if out.get("connected"):
             op.succeeded(
                 object_count=len(out.get("objects") or []),
@@ -354,6 +355,23 @@ def introspect_endpoint(
         else:
             op.failed(category="not_connected")
         return out
+
+
+def _hide_internal_objects(out: dict) -> None:
+    """Every listing this returns is operator-facing: drop the product's own objects.
+
+    ``services.brand.ARTIFACTS`` is the inventory (CDC ``dataflow_signal``,
+    staging spools, quarantine and backup tables, both brand spellings).
+    """
+    objects = out.get("objects") if isinstance(out, dict) else None
+    if not isinstance(objects, list) or not objects:
+        return
+    from services.brand import is_internal_object_name
+
+    out["objects"] = [
+        o for o in objects
+        if not (isinstance(o, dict) and is_internal_object_name(o.get("name")))
+    ]
 
 
 def _introspect_endpoint_impl(

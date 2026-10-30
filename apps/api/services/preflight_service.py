@@ -1235,6 +1235,7 @@ def run_file_preflight(
                     source_collection=str((source_config or {}).get("collection") or ""),
                     source_schema=str(src_cfg.get("schema") or ""),
                     source_database=str(src_cfg.get("database") or ""),
+                    source_config=src_cfg or None,
                 )
     except Exception:  # noqa: BLE001 — unread catalog blocks, it does not approve
         source_primary_key_columns = []
@@ -1318,7 +1319,11 @@ def run_file_preflight(
     source_duplicate_probe_message = ""
     source_null_key_rows: int | None = None
     source_key_collisions: dict[str, Any] | None = None
-    from services.procedure_source import is_callable_source, source_read_mode_of
+    from services.procedure_source import (
+        callable_skip_note,
+        is_callable_source,
+        source_read_mode_of,
+    )
 
     callable_src = is_callable_source(source_config)
     source_duplicate_probe_expected = bool(
@@ -1329,9 +1334,8 @@ def run_file_preflight(
     )
     if callable_src:
         source_duplicate_probe_status = "skipped_callable"
-        source_duplicate_probe_message = (
-            "Stored-procedure / SQL extract is a result-set snapshot — "
-            "uniqueness GROUP BY is not run against a procedure name."
+        source_duplicate_probe_message = callable_skip_note(
+            source_config, "uniqueness GROUP BY"
         )
     if source_duplicate_probe_expected:
         try:
@@ -2335,9 +2339,11 @@ def run_file_preflight(
         out["callable_extract"] = {
             "mode": source_read_mode_of(source_config),
             "catalog_probes": "skipped",
-            "note": (
-                "Result-set snapshot — FK catalog, uniqueness GROUP BY, and "
-                "population orphan scans are not run against a procedure name."
+            "note": callable_skip_note(
+                source_config,
+                "FK catalog, uniqueness GROUP BY, and population orphan scans",
+                plural=True,
+                lead="Result-set snapshot",
             ),
             "cdc": "refused",
             "history_sync": "refused",

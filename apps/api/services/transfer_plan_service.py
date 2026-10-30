@@ -353,6 +353,7 @@ def run_plan_preflight(
             source_collection=str(source.get("collection") or ""),
             source_schema=str(source.get("schema") or ""),
             source_database=str(source.get("database") or ""),
+            source_config=source,
         ),
     )
 

@@ -175,3 +175,69 @@ describe("jobAverageRowsPerSecond", () => {
     assert.ok(rps >= 270 && rps <= 300);
   });
 });
+
+describe("theaterElapsedMs stops at the terminal or parked time (QA: '240m 55s')", () => {
+  const withTz = <T,>(tz: string, fn: () => T): T => {
+    const prior = process.env.TZ;
+    process.env.TZ = tz;
+    try {
+      return fn();
+    } finally {
+      if (prior === undefined) delete process.env.TZ;
+      else process.env.TZ = prior;
+    }
+  };
+
+  it("reads the job store's offset-less UTC timestamps as UTC west of UTC", () => {
+    // A 55 s run, viewed 10 minutes later from UTC-4 (New York, late October).
+    const startMs = Date.parse("2026-10-30T15:00:00Z");
+    const ms = withTz("America/New_York", () =>
+      theaterElapsedMs({
+        startedAt: "2026-10-30T15:00:00.120000",
+        createdAt: "2026-10-30T14:59:59.900000",
+        completedAt: "2026-10-30T15:00:55.120000",
+        fallbackStartMs: startMs,
+        nowMs: startMs + 10 * 60_000,
+        terminal: true,
+      }),
+    );
+    assert.ok(ms < 60_000, `expected ~55s, got ${Math.round(ms / 1000)}s`);
+    assert.ok(ms >= 55_000 - 500, `expected ~55s, got ${Math.round(ms / 1000)}s`);
+  });
+
+  it("freezes a run parked on a decision at its parked time", () => {
+    const created = "2026-10-30T15:00:00Z";
+    const parkedAt = "2026-10-30T15:02:10Z";
+    const later = Date.parse("2026-10-30T19:00:55Z");
+    const ms = theaterElapsedMs({
+      createdAt: created,
+      startedAt: created,
+      updatedAt: parkedAt,
+      nowMs: later,
+      terminal: false,
+      parked: true,
+    });
+    assert.equal(ms, 130_000);
+  });
+
+  it("stops a finished run without completed_at at its last update, not now", () => {
+    const ms = theaterElapsedMs({
+      createdAt: "2026-10-30T15:00:00Z",
+      updatedAt: "2026-10-30T15:00:55Z",
+      nowMs: Date.parse("2026-10-30T19:00:55Z"),
+      terminal: true,
+    });
+    assert.equal(ms, 55_000);
+  });
+
+  it("keeps ticking a live run", () => {
+    const now = Date.parse("2026-10-30T15:05:00Z");
+    const ms = theaterElapsedMs({
+      createdAt: "2026-10-30T15:00:00Z",
+      updatedAt: "2026-10-30T15:04:59Z",
+      nowMs: now,
+      terminal: false,
+    });
+    assert.equal(ms, 300_000);
+  });
+});

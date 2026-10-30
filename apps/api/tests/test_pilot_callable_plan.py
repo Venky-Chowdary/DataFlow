@@ -36,10 +36,21 @@ def test_resolve_callable_from_procedure_call_without_mode() -> None:
 
 
 def test_resolve_callable_from_table_slot_select() -> None:
-    plan = resolve_callable_plan_source(source_table="SELECT * FROM get_orders(:since)")
+    plan = resolve_callable_plan_source(
+        source_table="SELECT * FROM get_orders(:since)",
+        procedure_params={"since": "2024-01-01"},
+    )
     assert plan is not None
     assert plan["mode"] == "query"
     assert plan["stream_name"] == "get_orders"
+    assert plan["params"] == {"since": "2024-01-01"}
+
+
+def test_query_bind_without_value_is_refused_naming_the_bind() -> None:
+    # Same contract as procedure mode ("Parameter :x is not bound"): a query
+    # that cannot run is refused at plan, not later as a raw driver error (r7).
+    with pytest.raises(ProcedureSourceError, match=":since"):
+        resolve_callable_plan_source(source_table="SELECT * FROM get_orders(:since)")
 
 
 def test_bare_procedure_mode_without_sql_fails_closed() -> None:

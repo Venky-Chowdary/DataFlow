@@ -349,6 +349,22 @@ def is_callable_source(source: Any) -> bool:
     return source_read_mode_of(source) in CALLABLE_MODES
 
 
+def callable_skip_note(source: Any, checks: str, *, plural: bool = False, lead: str = "") -> str:
+    """Why a catalog check did not run on a query / procedure extract — in its own words.
+
+    A SQL query is not a procedure: telling a query author the check "is not run
+    against a procedure name" describes a mode they did not pick.
+    """
+    query = source_read_mode_of(source) == MODE_QUERY
+    head = lead or (
+        "SQL query extract is a result-set snapshot"
+        if query
+        else "Stored-procedure extract is a result-set snapshot"
+    )
+    target = "the tables the query reads" if query else "a procedure name"
+    return f"{head} — {checks} {'are' if plural else 'is'} not run against {target}."
+
+
 _CALLABLE_CFG_KEYS = (
     "source_read_mode",
     "procedure_call",
@@ -937,6 +953,13 @@ def _parse_query(text: str, dialect: str, params: Mapping[str, Any]) -> Callable
             "Query source allows one read-only SELECT/WITH — CALL/EXEC belong in Stored procedure mode."
         )
     binds = {str(k): v for k, v in params.items()}
+    missing = [name for name in query_bind_names(text) if binds.get(name) is None]
+    if missing:
+        raise ProcedureSourceError(
+            "Set a Bound value for "
+            + ", ".join(f":{name}" for name in missing)
+            + " — each :name in the query is sent as a typed parameter."
+        )
     return CallableSpec(
         mode=MODE_QUERY,
         dialect=dialect,
@@ -946,6 +969,25 @@ def _parse_query(text: str, dialect: str, params: Mapping[str, Any]) -> Callable
         params=binds,
         stream_name=_first_relation(text) or "query_result",
     )
+
+
+_QUERY_BIND = re.compile(r"(?<![:\w\\]):([A-Za-z_]\w*)(?!:)")
+
+
+def query_bind_names(text: str) -> list[str]:
+    """``:name`` binds of a query, in order, as ``sqlalchemy.text`` sees them.
+
+    A colon inside a string literal is data and ``::type`` is a cast.
+    """
+    from services.sql_literals import mask_sql_string_literals
+
+    masked, _literals = mask_sql_string_literals(str(text or ""))
+    masked = _COMMENT_LINE.sub(" ", _COMMENT_BLOCK.sub(" ", masked))
+    out: list[str] = []
+    for name in _QUERY_BIND.findall(masked):
+        if name not in out:
+            out.append(name)
+    return out
 
 
 def _first_relation(text: str) -> str:

@@ -1,10 +1,23 @@
 /** Honest Theater % — row ratio while writing; engine phase % before first write. */
 
-function parseEpochMs(value?: string | null): number | null {
+/** ISO date-time with no ``Z`` / ``±hh:mm`` designator. */
+const NAIVE_ISO = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/;
+
+/**
+ * Epoch ms of a server timestamp. The job store returns UTC wall time without
+ * an offset (pymongo hands back naive UTC datetimes). ``Date.parse`` reads such
+ * a string as *local* time, so west of UTC a 55 s run finished "4 h in the
+ * future" and Theater showed "240m 55s" (UTC-4). A server timestamp without an
+ * offset is UTC.
+ */
+export function parseServerTimestampMs(value?: string | null): number | null {
   if (!value) return null;
-  const ms = Date.parse(value);
+  const text = String(value).trim();
+  const ms = Date.parse(NAIVE_ISO.test(text) ? `${text.replace(" ", "T")}Z` : text);
   return Number.isFinite(ms) ? ms : null;
 }
+
+const parseEpochMs = parseServerTimestampMs;
 
 /** Job clock: never prefer a heartbeat-reset `started_at` over an earlier `created_at`. */
 export function earliestJobStartMs(input: {
@@ -25,14 +38,20 @@ export function earliestJobStartMs(input: {
   return Math.min(...candidates);
 }
 
-/** Wall clock for Theater Elapsed. Terminal jobs freeze — never Date.now() after done. */
+/**
+ * Wall clock for Theater Elapsed. Terminal and parked jobs freeze — never
+ * Date.now() after the run stopped. A terminal job without ``completed_at``,
+ * or a job parked on a decision, stops at its last update (``updated_at``).
+ */
 export function theaterElapsedMs(input: {
   startedAt?: string | null;
   createdAt?: string | null;
   completedAt?: string | null;
+  updatedAt?: string | null;
   fallbackStartMs?: number | null;
   nowMs?: number;
   terminal?: boolean;
+  parked?: boolean;
   frozenEndMs?: number | null;
 }): number {
   const now = input.nowMs ?? Date.now();
@@ -47,7 +66,12 @@ export function theaterElapsedMs(input: {
     typeof input.frozenEndMs === "number" && Number.isFinite(input.frozenEndMs) && input.frozenEndMs > 0
       ? input.frozenEndMs
       : null;
-  const end = completed ?? (input.terminal ? (frozen ?? now) : now);
+  const stopped = Boolean(input.terminal || input.parked);
+  const lastUpdate = parseEpochMs(input.updatedAt);
+  const stoppedAt = lastUpdate != null && lastUpdate <= now + 2_000 ? lastUpdate : null;
+  const end = input.parked && !input.terminal
+    ? (stoppedAt ?? frozen ?? now)
+    : (completed ?? (stopped ? (stoppedAt ?? frozen ?? now) : now));
   return Math.max(0, end - start);
 }
 
