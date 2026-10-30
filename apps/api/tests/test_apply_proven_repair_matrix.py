@@ -208,7 +208,29 @@ def test_live_ddl_never_applyable_on_any_dest(dest_db: str, narrow: str) -> None
     assert applyable_widen_actions(report) == []
 
 
-@pytest.mark.parametrize("dest_db,narrow", (("snowflake", "NUMBER(5,2)"), ("mysql", "DECIMAL(5,2)")))
+def test_relational_overwrite_binds_the_kept_table() -> None:
+    """MySQL overwrite keeps the table (dest_schema_is_recreated_on_overwrite):
+    the live carrier is the write bind, as Validate's DDL gates read it (D200)."""
+    mappings = [{"source": "measure", "target": "measure", "target_type": "DECIMAL(5,2)"}]
+    report = scan_population_fit(
+        DECIMAL_ROWS,
+        mappings,
+        dest_types={"measure": "DECIMAL(5,2)"},
+        **_scan_kw(
+            "mysql",
+            dest_table_exists=True,
+            source_kind="file",
+            source_format="csv",
+            source_types={"measure": "VARCHAR"},
+            sync_mode="full_refresh_overwrite",
+        ),
+    )
+    assert report.findings
+    assert report.findings[0].target.binds_live_ddl is True
+    assert applyable_widen_actions(report) == []
+
+
+@pytest.mark.parametrize("dest_db,narrow", (("snowflake", "NUMBER(5,2)"),))
 def test_overwrite_recreate_is_applyable(dest_db: str, narrow: str) -> None:
     """Overwrite drops/recreates — Map type is the write bind, Apply may widen it."""
     mappings = [{"source": "measure", "target": "measure", "target_type": narrow}]
