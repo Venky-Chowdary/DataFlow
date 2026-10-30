@@ -3128,7 +3128,7 @@ export function TransferPage({
       });
     }
     return { ok: true as const, intro, objects };
-  }, [sourceConnector, sourceConnectorId, toast, sourceReadMode, procedureCall]);
+  }, [sourceConnector, sourceConnectorId, toast, sourceReadMode, procedureCall, procedureParams]);
 
   const introspectConnectorSource = useCallback(async () => {
     if (!sourceConnector) return null;

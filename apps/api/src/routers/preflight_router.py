@@ -299,6 +299,7 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
             source_connector_id=body.source_connector_id or "",
             source_table=body.source_table or "",
             source_collection=body.source_collection or "",
+            source_config=body.source_config if isinstance(body.source_config, dict) else None,
         ),
     )
     # The write never sees the raw source when a recipe is approved: shape the
@@ -576,6 +577,7 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
                 source_collection=body.source_collection or "",
                 source_schema=str(src_cfg.get("schema") or ""),
                 source_database=str(src_cfg.get("database") or ""),
+                source_config=src_cfg or None,
             )
     gated = apply_policy_gates(
         result,
