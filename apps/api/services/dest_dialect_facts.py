@@ -221,16 +221,25 @@ def dest_char_is_unpadded(db_type: str | None) -> bool:
 _UUID_TYPELESS_ENGINES = frozenset({"snowflake"})
 
 
-# Engines whose writer keys an upsert with MERGE and never creates a unique
-# index: Snowflake has no indexes and does not enforce UNIQUE, so there is no
-# DDL for the upsert-key gate to disclose. Duplicate target keys still matter
-# (MERGE refuses a nondeterministic match), so only the DDL step is skipped.
-_UPSERT_WITHOUT_UNIQUE_INDEX_ENGINES = frozenset({"snowflake"})
-
-
 def dest_upsert_needs_unique_index(db_type: str | None) -> bool:
-    """True when an upsert into an existing table runs CREATE UNIQUE INDEX."""
-    return _normalize_dest_db(db_type) not in _UPSERT_WITHOUT_UNIQUE_INDEX_ENGINES
+    """True when an upsert into an existing table runs CREATE UNIQUE INDEX.
+
+    Read from the capability registry (``merge_registry.upsert_identity``),
+    never a per-engine list here: only engines whose native upsert fires on a
+    unique constraint (PostgreSQL ``ON CONFLICT``, MySQL ``ON DUPLICATE KEY``)
+    get one. MERGE engines (Snowflake, SQL Server, BigQuery, Databricks,
+    Oracle, ...) key the write themselves and DataFlow creates no index there,
+    so there is no DDL to disclose (D182, D101).
+    """
+    from connectors.merge_registry import (
+        UPSERT_IDENTITY_UNIQUE_INDEX,
+        upsert_identity,
+    )
+
+    db = _normalize_dest_db(db_type)
+    if not db:
+        return True
+    return upsert_identity(db) == UPSERT_IDENTITY_UNIQUE_INDEX
 
 
 def dest_has_no_uuid_type(db_type: str | None) -> bool:

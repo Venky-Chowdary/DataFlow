@@ -85,40 +85,26 @@ def test_preflight_blocks_upsert_existing_dest_without_unique_key_and_duplicates
     assert "duplicate" in (rc.get("summary") or "").lower()
 
 
-def test_upsert_index_creation_disclosed_and_requires_approval(tmp_path):
-    # Clean dest, no unique key: disclosed DDL + approval required, not silence.
+@pytest.mark.parametrize("approved", [False, True])
+def test_merge_keyed_engine_discloses_no_index_ddl(tmp_path, approved):
+    """SQLite's writer (generic_sql) keys the upsert itself — ON CONFLICT, or
+    delete+insert when no unique key exists — and never creates an index. The
+    capability registry says so (``upsert_identity('sqlite') == 'merge'``), so
+    Validate discloses no CREATE UNIQUE INDEX and there is nothing to approve:
+    the old disclosure named DDL no writer ran (D101/D182). PostgreSQL / MySQL /
+    MariaDB, whose writers do create it, are proven live in
+    ``test_r4_upsert_identity_e2e.py``."""
     dest = _sqlite_dest(tmp_path / "d.db", [(10, "a"), (11, "c")], unique=False)
-    res = _preflight(dest)
+    res = _preflight(dest, ddl_changes_acknowledged=approved)
     gate = _gate(res)
     assert gate is not None
-    assert gate["status"] == "block"
+    assert gate["status"] == "pass", gate
     details = gate.get("details") or {}
-    assert details.get("requires_approval") is True
-    ddl = details.get("planned_ddl") or ""
-    assert "CREATE UNIQUE INDEX" in ddl
-    assert "id" in ddl
-    assert res["passed"] is False
-    # The disclosed DDL is on the gate details and surfaced via root cause.
+    assert details.get("planned_ddl") == ""
+    assert details.get("upsert_identity") == "merge"
     rcs = res.get("root_causes") or []
-    rc = next((r for r in rcs if r.get("kind") == "upsert_dest_ddl"), None)
-    assert rc is not None
-    assert "CREATE UNIQUE INDEX" in (rc.get("summary") or "")
-
-
-def test_upsert_index_creation_passes_when_ddl_approved(tmp_path):
-    dest = _sqlite_dest(tmp_path / "d.db", [(10, "a"), (11, "c")], unique=False)
-    res = _preflight(dest, ddl_changes_acknowledged=True)
-    gate = _gate(res)
-    assert gate is not None
-    assert gate["status"] == "pass"
-    assert "approv" in (gate.get("message") or "").lower()
-    # The D101 gate itself is satisfied — approval lifts its block, and no
-    # upsert_dest_ddl root cause remains (other gates are out of this scope).
-    assert not any(
-        r.get("kind") == "upsert_dest_ddl"
-        for r in res.get("root_causes") or []
-    )
-
+    assert not any(r.get("kind") == "upsert_dest_ddl" for r in rcs)
+    assert "CREATE UNIQUE INDEX" not in str(res)
 
 def test_upsert_existing_dest_with_unique_key_needs_no_ddl(tmp_path):
     dest = _sqlite_dest(tmp_path / "d.db", [(10, "a")], unique=True)

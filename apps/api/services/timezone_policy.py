@@ -27,6 +27,7 @@ contract that a downstream reader has to know about.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -348,12 +349,17 @@ def _samples_unanimously_naive_datetimes(samples: Any) -> bool:
     for sample in samples or []:
         if sample is None or not str(sample).strip():
             continue
+        # A bare number ("1", "1700000000", a Kafka message key) is never a
+        # wall clock, whatever the datetime parser makes of it (D190, D89).
         if not is_wall_clock_literal(sample):
             return False
         if parse_sql_datetime(sample) is None or temporal_value_has_timezone(sample):
             return False
         saw = True
     return saw
+
+
+_BARE_NUMBER = re.compile(r"\s*[+-]?\d+(?:\.\d+)?\s*")
 
 
 def is_wall_clock_literal(sample: Any) -> bool:
@@ -366,6 +372,9 @@ def is_wall_clock_literal(sample: Any) -> bool:
     from connectors.sql_temporal import _integral_digit_token
 
     if isinstance(sample, bool) or isinstance(sample, (int, float)):
+        return False
+    if _BARE_NUMBER.fullmatch(str(sample)):
+        # Epoch seconds with a fraction ("1700000000.5") carry no zone either.
         return False
     return _integral_digit_token(sample) is None
 

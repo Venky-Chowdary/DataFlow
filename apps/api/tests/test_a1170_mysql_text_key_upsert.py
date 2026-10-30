@@ -144,19 +144,38 @@ def _mysql():
 
 
 @mysql_live
-def test_live_text_key_without_a_width_is_refused_fast_before_ddl():
+def test_live_text_key_without_a_width_gets_a_full_width_unique_key():
+    """CR-D126: no 1170 and no prefix — the undeclared TEXT key is created as
+    full-width VARCHAR and the unique key covers the whole value."""
     table = "a1170_text_key"
     with _mysql() as conn:
         conn.cursor().execute(f"DROP TABLE IF EXISTS `{table}`")
-    result, seconds = _write(table, "text")
-    assert result.ok is False
-    assert seconds < 30
-    assert "region" in result.error and "1170" in result.error and "VARCHAR(n)" in result.error
-    with _mysql() as conn:
-        cur = conn.cursor()
-        cur.execute("SELECT COUNT(*) FROM information_schema.tables "
-                    "WHERE table_schema = DATABASE() AND table_name = %s", (table,))
-        assert cur.fetchone()[0] == 0, "refusal must come before any DDL"
+    try:
+        first, seconds = _write(table, "text")
+        assert first.ok, first.error
+        assert seconds < 30
+        second, _ = _write(table, "text")
+        assert second.ok, second.error
+        with _mysql() as conn:
+            cur = conn.cursor()
+            cur.execute(f"SELECT COUNT(*) FROM `{table}`")
+            assert cur.fetchone()[0] == 2
+            cur.execute(
+                "SELECT DATA_TYPE, CHARACTER_MAXIMUM_LENGTH FROM information_schema.columns "
+                "WHERE table_schema = DATABASE() AND table_name = %s AND column_name = 'region'",
+                (table,),
+            )
+            assert cur.fetchone() == ("varchar", 766)
+            cur.execute(
+                "SELECT SUB_PART FROM information_schema.statistics WHERE table_schema = DATABASE() "
+                "AND table_name = %s AND non_unique = 0 AND column_name = 'region'",
+                (table,),
+            )
+            subparts = [r[0] for r in cur.fetchall()]
+            assert subparts and all(p is None for p in subparts), subparts
+    finally:
+        with _mysql() as conn:
+            conn.cursor().execute(f"DROP TABLE IF EXISTS `{table}`")
 
 
 @mysql_live

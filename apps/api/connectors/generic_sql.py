@@ -2434,6 +2434,18 @@ def _build_table_for_write(
                 if match:
                     plan_collations[key] = match.group(1).strip().strip('"')
 
+    # A LOB cannot be a key (SQL Server 1919, ORA-02329): an unbounded text
+    # key gets the widest full-value carrier the engine enforces (CR-D126).
+    from services.upsert_identity import unbounded_key_widths
+
+    unbounded_key_width = unbounded_key_widths(
+        dialect_name,
+        [c for c in columns if c in pk_set],
+        lambda c: _gsql._sa_type_for_logical(
+            column_types.get(c, "string"), dialect_name, db_type, nullable=False
+        ),
+    )
+
     cols = []
     for col in columns:
         logical = column_types.get(col, "string")
@@ -2464,6 +2476,8 @@ def _build_table_for_write(
         sa_type = _gsql._sa_type_for_logical(
             logical, dialect_name, db_type, nullable=nullable
         )
+        if is_pk and col in unbounded_key_width:
+            sa_type = unbounded_key_width[col]
         collation = plan_collations.get(col)
         if collation and isinstance(sa_type, sa.String):
             # String-family types render ``… COLLATE <name>`` from this attribute

@@ -390,6 +390,16 @@ def _is_fidelity_signal(
         if _is_missing_value_signal(message, details):
             return False
         msg_l = (message or "").lower()
+        # A missing / NULL-stored key value is a data finding on the key, not a
+        # type-path collapse: labelling it "Lossy / fidelity collapse" hid why
+        # Oracle refuses a '' upsert key (it stores '' as NULL — D53).
+        if (
+            "required field" in msg_l
+            and ("null/empty" in msg_l or "stores '' as null" in msg_l)
+            and details.get("fidelity_collapse") is not True
+            and not details.get("issues_detail")
+        ):
+            return False
         # Transform dry-run / empty-url integrity copy — not declared type collapse.
         if (
             "cannot coerce to" in msg_l
@@ -1822,7 +1832,14 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
         cols = list(details.get("upsert_key_columns") or [])
         planned_ddl = str(details.get("planned_ddl") or "")
         dup_keys = details.get("duplicate_key_count")
-        if dup_keys:
+        impossible = str(details.get("impossible_reason") or "")
+        # MERGE engines (Snowflake, SQL Server, ...) key the write without an
+        # index: there is no DDL to approve, and a unique constraint created
+        # by hand is not what keys the merge (Snowflake does not enforce it).
+        no_index = not planned_ddl
+        if impossible:
+            summary = impossible
+        elif dup_keys:
             summary = (
                 f"Upsert into this existing table keys on "
                 f"({', '.join(cols)}), but the destination holds "
@@ -1842,7 +1859,9 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 root_id=_root_id("upsert_dest_ddl", cols, absorbed),
                 kind="upsert_dest_ddl",
                 title=(
-                    "Duplicate upsert keys in destination"
+                    "Upsert key cannot be enforced on the destination"
+                    if impossible
+                    else "Duplicate upsert keys in destination"
                     if dup_keys
                     else "Upsert needs destination unique key"
                 ),
@@ -1857,23 +1876,38 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 estimated_total_rows=est_n,
                 risk_level="high",
                 recommended_fix=(
-                    "Deduplicate the destination on the upsert key, then "
+                    "Pick an upsert key the destination can enforce on its "
+                    "full value, then re-validate"
+                    if impossible
+                    else "Deduplicate the destination on the upsert key, then "
+                    "re-validate"
+                    if dup_keys and no_index
+                    else "Deduplicate the destination on the upsert key, then "
                     "approve the disclosed DDL at Validate"
                     if dup_keys
                     else "Approve the disclosed destination DDL at Validate "
                     "and re-run"
                 ),
-                alternative_fixes=[
-                    "Create a unique constraint on the upsert key yourself, then re-validate",
-                    "Pick different upsert key columns",
-                    "Run full refresh overwrite instead of upsert",
-                ],
+                alternative_fixes=(
+                    [
+                        "Pick different upsert key columns",
+                        "Run full refresh overwrite instead of upsert",
+                    ]
+                    if impossible or no_index
+                    else [
+                        "Create a unique constraint on the upsert key yourself, then re-validate",
+                        "Pick different upsert key columns",
+                        "Run full refresh overwrite instead of upsert",
+                    ]
+                ),
                 recovery_strategy=(
                     "Nothing was written, so no cleanup is needed — resolve "
                     "the key and re-run Validate."
                 ),
                 expected_runtime_impact=(
-                    "Creating the disclosed unique index is a one-time DDL "
+                    "None — the merge keys the write without an index"
+                    if no_index
+                    else "Creating the disclosed unique index is a one-time DDL "
                     "on the destination table"
                 ),
                 quarantine_policy="n/a — the batch is refused before any write",

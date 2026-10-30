@@ -52,19 +52,6 @@ from connectors.writer_common import writer_meta_with_source_rows
 
 logger = logging.getLogger(__name__)
 
-# MySQL can't index these without a prefix length (error 1170), and a prefix
-# is unique on the prefix only: two keys sharing it collide and ON DUPLICATE
-# KEY UPDATE overwrites the other row (CR-D126).
-_MYSQL_PREFIX_KEY_TYPES = frozenset(
-    {"text", "tinytext", "mediumtext", "longtext", "blob", "tinyblob",
-     "mediumblob", "longblob", "json"}
-)
-_MYSQL_TEXT_KEY_TYPES = frozenset({"text", "tinytext", "mediumtext", "longtext"})
-# InnoDB DYNAMIC/COMPRESSED index limit; utf8mb4 needs 4 bytes per character.
-_MYSQL_KEY_BYTES = 3072
-_MYSQL_KEY_CHAR_BYTES = 4
-
-
 def _mysql_full_width_key_columns(
     cursor: Any,
     *,
@@ -74,65 +61,28 @@ def _mysql_full_width_key_columns(
 ) -> None:
     """Make an existing table's LOB key columns indexable on their full value.
 
-    A TEXT key becomes ``VARCHAR(n)`` — ``n`` the widest the 3072-byte index
-    limit allows — when every stored value fits; a longer value, or a
-    JSON/BLOB key, refuses the upsert with the reason. Never a prefix.
+    The rule lives in :func:`services.upsert_identity.mysql_full_width_key_plan`
+    — the same one Validate discloses (D101) — so the ALTER run here is the one
+    the operator approved. A key that cannot be enforced on its full value
+    refuses with the reason. Never a prefix (CR-D126).
     """
-    cursor.execute(
-        "SELECT COLUMN_NAME, DATA_TYPE, IS_NULLABLE, CHARACTER_SET_NAME, "
-        "COLLATION_NAME, CHARACTER_OCTET_LENGTH "
-        "FROM INFORMATION_SCHEMA.COLUMNS "
-        "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s",
-        (table_name,),
+    from services.upsert_identity import mysql_full_width_key_plan
+
+    def _query(sql: str, params: Any) -> list[tuple]:
+        cursor.execute(sql, tuple(params) if params else None)
+        return list(cursor.fetchall())
+
+    modify, refusal = mysql_full_width_key_plan(
+        _query, table_name=table_name, table_q=table_q, key_columns=conflict_cols
     )
-    info = {str(row[0]): row for row in cursor.fetchall()}
-    lob = [
-        c for c in conflict_cols
-        if c in info and str(info[c][1]).lower() in _MYSQL_PREFIX_KEY_TYPES
-    ]
-    if not lob:
+    if refusal:
+        raise ValueError(refusal)
+    if not modify:
         return
-    key_label = ", ".join(conflict_cols)
-    for col in lob:
-        dtype = str(info[col][1]).lower()
-        if dtype not in _MYSQL_TEXT_KEY_TYPES:
-            raise ValueError(
-                f"Upsert key ({key_label}) on existing table '{table_name}': "
-                f"column {col} is {dtype.upper()}, which MySQL cannot index on "
-                "its full value, and a prefix index would let distinct keys "
-                "overwrite each other. Use a scalar key column (or a generated "
-                "VARCHAR column extracted from it) as the upsert key."
-            )
-    other_bytes = sum(
-        int(info[c][5] or 8) if c in info else 8 for c in conflict_cols if c not in lob
-    )
-    width = (_MYSQL_KEY_BYTES - other_bytes) // _MYSQL_KEY_CHAR_BYTES // len(lob)
-    modify: list[str] = []
-    for col in lob:
-        quoted = quote_sql_identifier(col, "`")
-        cursor.execute(f"SELECT MAX(CHAR_LENGTH({quoted})) FROM {table_q}")  # nosec B608
-        longest = int((cursor.fetchone() or [0])[0] or 0)
-        if longest > width:
-            raise ValueError(
-                f"Upsert key ({key_label}) on existing table '{table_name}': "
-                f"{col} holds values up to {longest} characters, but MySQL can "
-                f"enforce uniqueness on the full value only up to {width} "
-                f"characters (VARCHAR({width}), {_MYSQL_KEY_BYTES}-byte key "
-                "limit). DataFlow will not index a prefix — distinct keys "
-                "sharing it would overwrite each other. Use a shorter key column."
-            )
-        _name, _dtype, nullable, charset, collation, _octets = info[col]
-        spec = f"VARCHAR({width})"
-        if charset:
-            spec += f" CHARACTER SET {charset}"
-        if collation:
-            spec += f" COLLATE {collation}"
-        spec += " NULL" if str(nullable).upper() == "YES" else " NOT NULL"
-        modify.append(f"MODIFY {quoted} {spec}")
     cursor.execute(f"ALTER TABLE {table_q} {', '.join(modify)}")
     logger.info(
-        "MySQL upsert key %s on %s converted to VARCHAR(%d) for a full-width unique key",
-        lob, table_name, width,
+        "MySQL upsert key on %s made full-width for a unique key: %s",
+        table_name, modify,
     )
 
 
