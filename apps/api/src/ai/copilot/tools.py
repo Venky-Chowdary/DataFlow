@@ -704,6 +704,16 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Acknowledge a schema_drift review block so the plan can clear."
                     ),
                 },
+                "vector_layout": {
+                    "type": "string",
+                    "enum": ["table", "document"],
+                    "description": (
+                        "pgvector destinations only (D209): 'table' creates the "
+                        "typed table the Map shows; 'document' is an embedding/RAG "
+                        "load (id, content, embedding, metadata). Omitted: the "
+                        "saved connector's choice, else the existing table's shape."
+                    ),
+                },
                 "ddl_acknowledgement": {
                     "type": "object",
                     "description": (
@@ -856,6 +866,16 @@ TOOL_DEFINITIONS: list[dict] = [
                         "approved_by": {"type": "string"},
                         "reason": {"type": "string"},
                     },
+                },
+                "vector_layout": {
+                    "type": "string",
+                    "enum": ["table", "document"],
+                    "description": (
+                        "pgvector destinations only (D209): 'table' creates the "
+                        "typed table the Map shows; 'document' is an embedding/RAG "
+                        "load (id, content, embedding, metadata). Omitted: the "
+                        "saved connector's choice, else the existing table's shape."
+                    ),
                 },
             },
             "required": [],
@@ -4197,6 +4217,7 @@ class DataPilotTools:
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
+        vector_layout: str = "",
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -4233,6 +4254,7 @@ class DataPilotTools:
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
+            vector_layout=vector_layout,
         )
 
     def _start_transfer(
@@ -4270,6 +4292,7 @@ class DataPilotTools:
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
+        vector_layout: str = "",
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -4307,6 +4330,7 @@ class DataPilotTools:
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
+            vector_layout=vector_layout,
         )
 
     def _start_dataset_transfer(

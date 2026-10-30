@@ -1283,13 +1283,14 @@ def vector_payload_number(val: Any, declared_type: str) -> Any:
         return prepared
 
 
-def vector_prepare_metadata(meta: Any) -> dict[str, Any]:
+def vector_prepare_metadata(meta: Any, *, keep_null: bool = False) -> dict[str, Any]:
     """Walk a metadata mapping; omit reader-null. Always a dict.
 
     ``sanitize_json_value`` leaves extract ``SQL_NULL_SENTINEL`` as a string,
     so Qdrant / Milvus / Weaviate / pgvector / Pinecone stored the wire
     spelling. ``vector_prepare_cell`` already owns one cell. 0 / false stay.
-    List[str] tags stay a list.
+    List[str] tags stay a list. ``keep_null`` (pgvector JSONB, D209) keeps a
+    SQL NULL as JSON null instead of dropping the key.
     """
     from services.value_serializer import is_reader_null_cell
 
@@ -1298,10 +1299,12 @@ def vector_prepare_metadata(meta: Any) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for key, val in meta.items():
         if is_reader_null_cell(val):
+            if keep_null:
+                out[str(key)] = None
             continue
         if isinstance(val, dict):
-            nested = vector_prepare_metadata(val)
-            if nested:
+            nested = vector_prepare_metadata(val, keep_null=keep_null)
+            if nested or keep_null:
                 out[str(key)] = nested
             continue
         if isinstance(val, list) and all(isinstance(item, str) for item in val):
@@ -1309,6 +1312,8 @@ def vector_prepare_metadata(meta: Any) -> dict[str, Any]:
             continue
         prepared = vector_prepare_cell(val)
         if prepared is None:
+            if keep_null:
+                out[str(key)] = None
             continue
         out[str(key)] = prepared
     return out
@@ -2437,6 +2442,7 @@ def prepare_records_for_vector_write(
     label: str = "vector",
     destination_column_nullability: dict[str, bool] | None = None,
     destination_column_types: dict[str, str] | None = None,
+    keep_null: bool = False,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], str | None]:
     """Apply Map transforms + Risk Contracts before embedding/upsert.
 
@@ -2553,11 +2559,12 @@ def prepare_records_for_vector_write(
         row: dict[str, Any] = {}
         for i, h in enumerate(headers):
             declared = vector_payload_declared_type("", source_types.get(h.lower(), ""))
-            cell = vector_payload_number(
-                raw[i] if i < len(raw) else None, declared
-            )
+            raw_cell = raw[i] if i < len(raw) else None
+            cell = vector_payload_number(raw_cell, declared)
             if cell is not None:
                 row[h] = cell
+            elif keep_null and i < len(raw) and _sql_null_cell(raw_cell):
+                row[h] = None
         for i, tgt in enumerate(target_cols):
             src = source_for_target[i] if i < len(source_for_target) else ""
             declared = vector_payload_declared_type(
@@ -2567,12 +2574,25 @@ def prepare_records_for_vector_write(
             val = vector_payload_number(tup[i] if i < len(tup) else None, declared)
             if val is None:
                 # Omit DF_MISSING / null overlay — do not invent "" into metadata.
+                # A SQL NULL is kept as None when asked (pgvector JSONB, D209).
+                if keep_null and i < len(tup) and _sql_null_cell(tup[i]):
+                    # Never blank a value the header pass already carried.
+                    for name in (tgt, src):
+                        if name and row.get(name) is None:
+                            row[name] = None
                 continue
             row[tgt] = val
             if src:
                 row[src] = val
         records.append(row)
     return records, list(rejected), None
+
+
+def _sql_null_cell(value: Any) -> bool:
+    """A reader SQL NULL, as opposed to a field the record never had (Missing)."""
+    from services.value_serializer import is_missing_sentinel, is_reader_null_cell
+
+    return is_reader_null_cell(value) and not is_missing_sentinel(value)
 
 
 def sample_values_by_source_from_batch(

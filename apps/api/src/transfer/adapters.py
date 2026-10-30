@@ -618,8 +618,10 @@ def resolve_connector_config(
     # OpenShift is a hosting plane — resolve Service DNS onto the real store.
     # Never a Kubernetes API write. See services.openshift_dest.
     from services.openshift_dest import apply_openshift_hosting
+    from services.pgvector_layout import apply_layout_to_cfg
 
-    cfg = apply_openshift_hosting(cfg)
+    # D209: a pgvector destination whose layout is ``table`` is PostgreSQL.
+    cfg = apply_layout_to_cfg(apply_openshift_hosting(cfg))
     return cfg
 
 

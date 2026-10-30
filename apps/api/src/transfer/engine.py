@@ -732,8 +732,12 @@ class UniversalTransferEngine:
         request.source = resolve_endpoint(
             request.source, workspace_id=request.workspace_id
         )
+        from services.pgvector_layout import stamp_destination_layout
+
+        # D209: decide a pgvector destination's layout once, before resolving.
         request.destination = resolve_endpoint(
-            request.destination, workspace_id=request.workspace_id
+            stamp_destination_layout(request.destination, request.workspace_id),
+            workspace_id=request.workspace_id,
         )
 
     def execute_tracked(

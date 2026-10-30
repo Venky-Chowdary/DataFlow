@@ -843,6 +843,7 @@ def plan_transfer(
     schema_drift_acknowledged: bool = False,
     shared_destination_acknowledged: bool = False,
     ddl_acknowledgement: dict[str, Any] | None = None,
+    vector_layout: str = "",
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -1041,6 +1042,16 @@ def plan_transfer(
         dst_info = dst_read.value
 
     dest_exists = _dest_table_exists_tri_state(dst_info)
+    # D209: a pgvector destination is a typed table or a vector-document
+    # table. Decide which once; the Map, preflight, payload and job share it.
+    from services.pgvector_layout import LAYOUT_DOCUMENT, plan_layout
+
+    try:
+        pgvector_layout = plan_layout(
+            dst_conn, dst_info, dst_table, dest_exists, requested=vector_layout
+        )
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
 
     if callable_plan:
         try:
@@ -1141,6 +1152,11 @@ def plan_transfer(
             **{r["name"]: r["inferred_type"] for r in src_rows},
         }
     dst_rows = _schema_rows(dst_info.get("columns") or [])
+    # Document metadata keys are the source's own columns, not the physical
+    # id/content/embedding/metadata columns of an existing document table.
+    is_document = bool(pgvector_layout and pgvector_layout[0] == LAYOUT_DOCUMENT)
+    map_dst_rows = [] if is_document else dst_rows
+    map_dest_exists = False if is_document else dest_exists
 
     from services.mapping_pipeline import run_mapping_pipeline
 
@@ -1151,7 +1167,7 @@ def plan_transfer(
     # the next run's larger values overflowed (D68). Same rule as Execute's
     # auto-map (source_schema_authority.declare_measured_decimals).
     map_src_rows = src_rows
-    if dest_exists is not True:
+    if map_dest_exists is not True:
         from services.source_schema_authority import (
             declare_measured_decimals,
             measured_decimal_columns,
@@ -1167,9 +1183,9 @@ def plan_transfer(
     note_step(f"mapping the source columns onto {dst_table}")
     mapping = run_mapping_pipeline(
         [r["name"] for r in src_rows],
-        [r["name"] for r in dst_rows],
+        [r["name"] for r in map_dst_rows],
         source_schemas=map_src_rows,
-        target_schemas=dst_rows,
+        target_schemas=map_dst_rows,
         source_samples=samples,
         validation_mode=validation_mode,
         destination_db_type=_engine_format(dst_info),
@@ -1180,7 +1196,7 @@ def plan_transfer(
         source_db_type=_engine_format(src_info),
         schema_policy=schema_policy,
         sync_mode=mode,
-        destination_table_exists=dest_exists,
+        destination_table_exists=map_dest_exists,
         # Warehouse DDL is fact. Object stores, files, and procedure extracts
         # are a sample: marking them authoritative made the plan say TEXT
         # while the integrity check bound the profiled DECIMAL.
@@ -1264,7 +1280,7 @@ def plan_transfer(
                 callable_plan,
             ),
             dest_db_type=_engine_format(dst_info),
-            dest_exists=dest_exists,
+            dest_exists=map_dest_exists,
             source_primary_key=(
                 _primary_key_csv(contracts[0].get("primary_key"))
                 if contracts
@@ -1307,6 +1323,16 @@ def plan_transfer(
         if not any((m.get("source_column") or m.get("source")) == r["name"] for m in mappings)
     ]
     proof = mapping.get("mapping_proof") or {}
+    from services.pgvector_layout import (
+        attach_contract_to_preflight,
+        plan_destination_contract,
+    )
+
+    contract = plan_destination_contract(
+        pgvector_layout, dst_conn, mappings, {r["name"]: r["inferred_type"] for r in src_rows}
+    )
+    if contract:
+        preflight = attach_contract_to_preflight(preflight, contract)
 
     return _tool_result(
         tool,
@@ -1342,7 +1368,10 @@ def plan_transfer(
                 "table": dst_table,
                 "column_count": len(dst_rows),
                 "table_exists": dest_exists,
+                **({"vector_layout": contract["layout"]} if contract else {}),
             },
+            # D209: the physical shape the job creates, column by column.
+            **({"destination_contract": contract} if contract else {}),
             # Display lists below are truncated for readability; execution must
             # use this untouched list or wide tables would lose columns.
             "engine_mappings": mappings,
@@ -2505,6 +2534,7 @@ def start_transfer(
     schema_drift_acknowledged: bool = False,
     shared_destination_acknowledged: bool = False,
     ddl_acknowledgement: dict[str, Any] | None = None,
+    vector_layout: str = "",
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -2539,6 +2569,7 @@ def start_transfer(
         column_transforms=column_transforms,
         schema_drift_acknowledged=schema_drift_acknowledged,
         ddl_acknowledgement=ddl_acknowledgement,
+        vector_layout=vector_layout,
         # The plan evaluates the bound contract against this route (QA MX3-18).
         contract_id=contract_id,
         require_signed_contract=require_signed_contract,
@@ -2637,6 +2668,12 @@ def start_transfer(
             "connector_id": destination["connector_id"],
             "schema": destination.get("schema") or "",
             "table": destination["table"],
+            # D209: the job builds the layout the plan showed.
+            **(
+                {"extra": {"vector_layout": destination["vector_layout"]}}
+                if destination.get("vector_layout")
+                else {}
+            ),
         },
         "mappings": engine_mappings,
         "column_types": plan.get("column_types") or {},
