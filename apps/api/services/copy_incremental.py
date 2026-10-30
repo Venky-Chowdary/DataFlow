@@ -206,16 +206,12 @@ def mysql_cursor_predicate_sql(
     cursor_column: str,
     watermark: str | None,
     pk_column: str = "",
-    types: list[tuple[str, str]] | None = None,
 ) -> str:
     """SQL fragment matching ``mysql_reader`` lexicographic cursor seek.
 
     INSERT SELECT / LOAD DATA cannot bind ``%s`` in the COPY-shaped SELECT, so
-    values are ``mogrify``'d the same way MySQL PK-range predicates are —
-    typed by the catalog ``types`` (a string compared with a numeric column
-    is compared as DOUBLE; D207 family).
+    values are ``mogrify``'d the same way MySQL PK-range predicates are.
     """
-    from connectors.cursor_bind import declared_cursor_param
     from services.copy_mysql_pg import _mysql_ident
 
     bookmark = present_cursor_bookmark(watermark)
@@ -225,7 +221,7 @@ def mysql_cursor_predicate_sql(
     # D60/D98 — run watermark re-reads the whole tie group (>=).
     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
     clause = f"{cursor_ident} >= %s"
-    params = (declared_cursor_param(cur_val, types, cursor_column),)
+    params = (cur_val,)
     pred = cur.mogrify(clause, params)
     if isinstance(pred, bytes):
         pred = pred.decode()
@@ -531,17 +527,11 @@ def _mysql_source_where(
             )
             if cur.fetchone() is None:
                 raise FastPathUnavailable("incremental COPY source table is absent")
-            cur.execute(
-                "SELECT column_name, data_type FROM information_schema.columns "
-                "WHERE table_schema = DATABASE() AND table_name = %s",
-                (source_table,),
-            )
             return mysql_cursor_predicate_sql(
                 cur,
                 cursor_column=cursor_column,
                 watermark=watermark,
                 pk_column=pk_column,
-                types=[(str(r[0]), str(r[1])) for r in cur.fetchall()],
             )
     finally:
         try:

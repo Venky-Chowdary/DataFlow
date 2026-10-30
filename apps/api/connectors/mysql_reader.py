@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 from connectors.base import ReadBatch
-from connectors.cursor_bind import declared_cursor_param
 from connectors.mysql_conn import get_connection
 from connectors.sql_identifiers import (
     quote_sql_identifier,
@@ -302,6 +301,11 @@ def read_table_scan_batch(
             )
         cur = conn.cursor()
         try:
+            if known_total_rows is not None:
+                total = known_total_rows
+            else:
+                cur.execute(f"SELECT COUNT(*) FROM {table_ref}{where_sql}", params)  # nosec B608
+                total = int(cur.fetchone()[0])
             identity = reflection_cache.dsn_identity(
                 driver="mysql",
                 host=host,
@@ -310,20 +314,12 @@ def read_table_scan_batch(
                 username=username,
                 connection_string=connection_string,
             )
-            types = _column_types(cur, safe_table, identity=identity)
-            if filter_value is not None:
-                # D207 family: a typed bind, never a string compared as DOUBLE.
-                params = (declared_cursor_param(filter_value, types, filter_column),)
-            if known_total_rows is not None:
-                total = known_total_rows
-            else:
-                cur.execute(f"SELECT COUNT(*) FROM {table_ref}{where_sql}", params)  # nosec B608
-                total = int(cur.fetchone()[0])
             order_cols = _order_by_columns(cur, safe_table, columns, identity=identity)
             order_by = _order_by_sql(order_cols)
             if filter_q:
                 order_by = f"{filter_q}, {order_by}"
                 order_cols = [filter_column] + order_cols
+            types = _column_types(cur, safe_table, identity=identity)
             col_list = _mysql_select_list(columns, types)
             if col_list is None:
                 cur.execute(
@@ -443,7 +439,6 @@ def read_table_cursor_batch(
                     # D60/D98 — run-seed watermark: re-read the whole tie group
                     # (cursor >= watermark); page edges still seek with > below.
                     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
-                    cur_val = declared_cursor_param(cur_val, types, cursor_column)
                     if pk_q:
                         query = (
                             f"{base} WHERE {cursor_q} >= %s "
@@ -459,9 +454,6 @@ def read_table_cursor_batch(
                     cur_val, pk_val = split_cursor_bookmark(
                         bookmark, has_tiebreak=True
                     )
-                    cur_val = declared_cursor_param(cur_val, types, cursor_column)
-                    if pk_val != "":
-                        pk_val = declared_cursor_param(pk_val, types, pk)
                     if pk_val == "":
                         # Cursor-only watermark with a tie-break: seek on the
                         # cursor, order on both for a deterministic page edge.
@@ -479,7 +471,6 @@ def read_table_cursor_batch(
                 else:
                     query = f"{base} WHERE {cursor_q} > %s ORDER BY {cursor_q} LIMIT %s"
                     cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=False)
-                    cur_val = declared_cursor_param(cur_val, types, cursor_column)
                     cur.execute(query, (cur_val, limit))
             else:
                 if pk_q:

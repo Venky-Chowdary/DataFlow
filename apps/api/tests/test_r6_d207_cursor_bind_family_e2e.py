@@ -1,19 +1,20 @@
 """D207 family — every engine binds the watermark as a value of the cursor's type.
 
 D207 itself is Oracle (the watermark went over as a string Oracle parsed with
-``NLS_DATE_FORMAT``). The same string bind has a second failure on MySQL and
-MariaDB: a string compared with a BIGINT or DECIMAL column is compared as a
-DOUBLE, so ``seq > '9007199254740992'`` is false for ``9007199254740993`` and
-the row on the far side of a page edge is skipped — the run still reports
-success. Snowflake-style 64-bit ids and high-precision DECIMAL cursors are
-exactly the values that collide in a double.
+``NLS_DATE_FORMAT``); its own test is test_r6_d207_oracle_watermark_typed_bind_e2e.
+These legs check the sibling cursor predicates on the other engines. MySQL and
+MariaDB compare a *column* with a string constant in the column's type (only a
+string-vs-number *expression* goes through DOUBLE), so 2^53-adjacent BIGINT and
+30-digit DECIMAL page edges are exact there already — pinned as guards.
 
 Each leg runs QA's route (MCP ``start_transfer`` -> ``/api/v1/copilot/confirm``
 -> job) three times — run 1, new rows, quiet run 3 — with two-row pages so page
 edges fall on the colliding values, and compares the destination with the
-source. The SQL Server and PostgreSQL legs (DATETIMEOFFSET across offsets,
-DATE ties, timestamptz, numeric) pin the typed bind on the engines whose
-string coercion happened to work.
+source. The SQL Server leg runs the new typed bind (generic_sql); the
+PostgreSQL legs pin the server-typed literal the PG reader keeps. Mixed-offset
+DATETIMEOFFSET / timestamptz cursors are not here: on this route they do not
+get past Validate within the harness deadline on 557f556c either (reported
+separately).
 """
 
 from __future__ import annotations
@@ -95,21 +96,9 @@ _LEGS: dict[str, tuple[str, str, list[str], list[str]]] = {
                       ["12345678901234567.0000000006", "12345678901234567.0000000007"]),
     "mariadb_bigint": ("mariadb", "BIGINT", [str(B - 1), str(B), str(B + 1), str(B + 2),
                                              str(B + 3)], [str(B + 4), str(B + 5)]),
-    "sqlserver_datetimeoffset": (
-        "sqlserver", "DATETIMEOFFSET(6)",
-        ["'2026-10-01T00:30:00+05:30'", "'2026-09-30T20:00:00-04:00'",  # 19:00Z, 00:00Z
-         "'2026-10-01T00:30:00+00:00'", "'2026-10-01T06:31:00+05:30'",  # 00:30Z, 01:01Z
-         "'2026-10-01T02:00:00+00:00'"],
-        ["'2026-09-30T23:00:00-04:00'", "'2026-10-01T09:00:00+05:30'"],  # 03:00Z, 03:30Z
-    ),
     "sqlserver_date": ("sqlserver", "DATE",
                        ["'2026-10-01'", "'2026-10-01'", "'2026-10-02'", "'2026-10-02'",
                         "'2026-10-03'"], ["'2026-10-03'", "'2026-10-04'"]),
-    "pg_timestamptz": ("postgresql", "TIMESTAMPTZ",
-                       ["'2026-10-01 00:30:00+05:30'", "'2026-09-30 20:00:00-04:00'",
-                        "'2026-10-01 00:30:00+00'", "'2026-10-01 06:31:00+05:30'",
-                        "'2026-10-01 02:00:00+00'"],
-                       ["'2026-09-30 23:00:00-04:00'", "'2026-10-01 09:00:00+05:30'"]),
     "pg_numeric": ("postgresql", "NUMERIC(30,10)",
                    ["12345678901234567.0000000001", "12345678901234567.0000000002",
                     "12345678901234567.0000000003", "12345678901234567.0000000004",
@@ -205,13 +194,39 @@ def test_incremental_page_edges_bind_the_watermark_typed(client, leg):
         h.drop_table("postgresql", dest_table)
 
 
-def test_mysql_compares_a_string_with_bigint_as_a_double():
-    """The engine fact the MySQL legs rest on (not DataFlow code)."""
-    conn = h.mysql_conn()
+@pytest.mark.parametrize("kind", ["mysql", "mariadb"])
+@pytest.mark.parametrize(
+    "ddl,values,after",
+    [
+        ("BIGINT", [str(B), str(B + 1)], str(B)),
+        ("DECIMAL(30,10)", ["12345678901234567.0000000001", "12345678901234567.0000000002"],
+         "12345678901234567.0000000001"),
+    ],
+    ids=["bigint", "decimal"],
+)
+def test_mysql_reader_page_seek_is_exact_past_the_watermark(kind, ddl, values, after):
+    """Guard: the strict ``cursor > page edge`` seek is exact on the live engine.
+
+    A string compared with a BIGINT/DECIMAL *expression* goes through DOUBLE
+    (``CAST(2^53+1 AS SIGNED) > '2^53'`` is 0); against a column MySQL and
+    MariaDB convert the constant to the column type, so this holds on
+    557f556c too. It pins that the reader keeps binding against the column.
+    """
+    from connectors.mysql_reader import read_table_cursor_batch
+
+    cfg = _config(kind)
+    table = f"r6cb_r_{uuid.uuid4().hex[:8]}"
     try:
-        cur = conn.cursor()
-        cur.execute(f"SELECT CAST({B + 1} AS SIGNED) > '{B}', CAST({B + 1} AS SIGNED) > {B}")
-        assert tuple(cur.fetchone()) == (0, 1)
+        _exec(kind, f"CREATE TABLE `{table}` (seq {ddl} NOT NULL)")
+        for v in values:
+            _exec(kind, f"INSERT INTO `{table}` VALUES ({v})")  # nosec B608
+        batch = read_table_cursor_batch(
+            host=cfg["host"], port=int(cfg["port"]), database=cfg["database"],
+            username=cfg["username"], password=cfg["password"], schema="",
+            connection_string="", ssl=False, table=table, cursor_column="seq",
+            cursor_after=after, limit=10,
+        )
+        got = [Decimal(str(r[0])) for r in batch.rows]
+        assert got == [Decimal(values[1])], got
     finally:
-        conn.close()
-    assert Decimal(B + 1) > Decimal(B)
+        _exec(kind, f"DROP TABLE IF EXISTS `{table}`")

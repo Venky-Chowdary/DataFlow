@@ -185,19 +185,6 @@ def _column_order_keys(values: list[str]) -> list[Any]:
     keys = [_numeric_order_key(v) for v in values]
     if keys and all(k is not None for k in keys):
         return keys
-    # D207 family: a zone-bearing cursor (SQL Server DATETIMEOFFSET keeps each
-    # row's own offset) orders by instant, not by its text.
-    from connectors.cursor_bind import parse_cursor_datetime
-
-    stamps = [parse_cursor_datetime(v) if v and v[:4].isdigit() else None for v in values]
-    if stamps and all(t is not None for t in stamps):
-        aware = {t.tzinfo is not None for t in stamps}
-        if aware == {True}:
-            from datetime import timezone
-
-            return [t.astimezone(timezone.utc) for t in stamps]
-        if aware == {False}:
-            return stamps
     return list(values)
 
 

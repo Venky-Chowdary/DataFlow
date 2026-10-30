@@ -4,9 +4,10 @@ A saved watermark is text (``'2026-10-01T00:30:00'``). Every incremental
 predicate used to send it as a string inside ``CAST(:p AS <column type>)``, so
 the *engine* parsed it — and Oracle parses a string into DATE / TIMESTAMP /
 TIMESTAMP WITH TIME ZONE with the session's ``NLS_*_FORMAT`` (``DD-MON-RR``):
-ORA-01843 "not a valid month" on every run after the first. SQL Server parses a
-space-separated string into legacy DATETIME by the login's DATEFORMAT, and a
-string compared with a MySQL numeric column compares as DOUBLE.
+ORA-01843 "not a valid month" on every run after the first. SQL Server also
+parses a space-separated string into legacy DATETIME by the login's DATEFORMAT.
+(The PG / MySQL / Snowflake readers bind raw DB-API parameters that the server
+types against the column; they do not go through this module.)
 
 This module is the one owner of that bind: the text is parsed *here* into the
 Python value matching the column's declared type (``datetime`` / ``date`` /
@@ -237,33 +238,3 @@ def count_cursor_window(conn: Any, table_obj: Any, col: Any, text: Any) -> int |
     except Exception:  # noqa: BLE001 - an uncountable window is unknown, not zero
         return None
 
-
-_DECLARED_INTEGER = {"tinyint", "smallint", "mediumint", "int", "integer", "bigint", "year"}
-_DECLARED_DECIMAL = {"decimal", "numeric", "dec", "fixed"}
-
-
-def declared_cursor_param(text: Any, types: Any, column: str) -> Any:
-    """DB-API bind for a raw-SQL cursor predicate, typed by the catalog.
-
-    ``types`` is ``[(name, data_type)]`` from the source catalog. MySQL and
-    MariaDB compare a *string* with an integer or DECIMAL column as DOUBLE, so
-    ``bigint_col > '9007199254740992'`` is false for ``9007199254740993`` and
-    the row is skipped silently; a typed int / Decimal compares exactly.
-    Temporal columns keep the ISO text: both engines parse it themselves with
-    no session date format involved.
-    """
-    if text is None:
-        return None
-    raw = str(text)
-    want = (column or "").casefold()
-    declared = ""
-    for name, data_type in types or []:
-        if str(name).casefold() == want:
-            declared = str(data_type or "").strip().lower()
-            break
-    base = declared.split("(", 1)[0].split()[0] if declared else ""
-    if base in _DECLARED_INTEGER:
-        return cursor_python_value(raw, "integer", column=column)
-    if base in _DECLARED_DECIMAL:
-        return cursor_python_value(raw, "decimal", column=column)
-    return raw
