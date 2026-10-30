@@ -1120,6 +1120,22 @@ def should_stream_file(
         return False
 
 
+def _stamp_reconcile_sample_locale(
+    dest_summary: dict[str, Any], number_locale: str
+) -> None:
+    """Name the number locale the writer bound the Gate-8 sample's cells under.
+
+    The file route's ``reconcile_sample`` is the reader's parse output: raw
+    CSV text such as ``"1,234"``, not the writer's canonical ``1234`` (the
+    writer's target-space sample is dropped, D184). Gate-8 replays each
+    mapping's transform on those cells, so it must replay it under the locale
+    the writer used; under WIRE a lone group is ambiguous, ``decimal`` refuses
+    it, and the source side fingerprints NULL against a faithful ``1234``.
+    """
+    if number_locale and dest_summary.get("reconcile_sample"):
+        dest_summary["number_locale"] = str(number_locale)
+
+
 def _stash_file_reconcile_sample(
     dest_summary: dict[str, Any],
     sample_rows: list[dict],
@@ -2096,6 +2112,7 @@ def stream_file_to_database(
         # Same digest-basis stamp as the write loop — the copy path's write
         # pass fingerprinted on this basis and Gate-8 must read back on it.
         dest_summary.setdefault("gate8_digest_types", dict(fingerprint_dest_types))
+        _stamp_reconcile_sample_locale(dest_summary, number_locale)
         return rows_copied, copy_ddl, dest_summary, columns
 
     if in_file_dedupe == "keep_last" and contract and contract.primary_key_columns():
@@ -3375,8 +3392,5 @@ def stream_file_to_database(
     # NULL-landed (codec unquoted-empty + carrier bind on non-text '').
     dest_summary.update(dest_summary_extra_cells)
     dest_summary["empty_string_as_null_cells"] = int(empty_cell_nulls[0])
-    # reconcile_sample holds the reader's parse output — already canonical
-    # (EU "1,234" read as "1.234"). Gate-8 fingerprints it under WIRE; the
-    # run's number_locale must NOT be stamped here or the canonical cells
-    # would be re-interpreted ("1.234" → 1234 under EU).
+    _stamp_reconcile_sample_locale(dest_summary, number_locale)
     return written, ddl_log, dest_summary, columns
