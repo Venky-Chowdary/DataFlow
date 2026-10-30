@@ -111,9 +111,10 @@ def measure_cancel_landing(
     25,120). By the time the cancel reaches here every writer has stopped, so
     a COUNT is the real number. It is attributed to *this run* only when the
     arithmetic is exact: an append (rows before known) or an overwrite that
-    cleared or created the table. A keyed upsert's COUNT growth is new keys
-    only, and an atomic overwrite rolls back, so those keep the tally,
-    labelled as a lower bound, beside the destination's own count.
+    cleared or created the table, or a keyed upsert into a table that did not
+    exist or was empty before the job. A keyed upsert into a populated table
+    grows by new keys only, and an atomic overwrite rolls back, so those keep
+    the tally, labelled as a lower bound, beside the destination's own count.
     """
     try:
         from services.dest_precount import precount_table
@@ -134,6 +135,13 @@ def measure_cancel_landing(
         before = _count(rows_before)
         if before is not None and now >= before:
             by_run = int(now) - before
+    elif table_existed_before is False or _count(rows_before) == 0:
+        # A keyed upsert into a table this job created, or that was empty
+        # before its first pass, has no older key a write could have replaced:
+        # every row there is this job's. On a resumed pass ``rows_before`` is
+        # the first pass's pre-write count, so the number covers every pass
+        # (QA: "121,856 committed" while MySQL held 151,744).
+        by_run = int(now)
     if by_run is not None:
         exc.destination_rows_by_run = by_run  # type: ignore[attr-defined]
 
