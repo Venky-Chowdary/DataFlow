@@ -532,6 +532,27 @@ def assert_callable_sync_allowed(sync_mode: str, source: Any) -> None:
         raise ProcedureSourceError(reason)
 
 
+def callable_stream_table(source: Any, cfg: Any, *, dialect: str = "") -> str:
+    """Stream label of a query / procedure source, or ``""`` for a table read.
+
+    The one answer every reader uses before any per-dialect table requirement:
+    a query-mode source has no table, and asking for one ("Source table name
+    required") refused every MySQL query-mode run (QA round 11).
+    """
+    if not (is_callable_source(source) or is_callable_source(cfg)):
+        return ""
+    try:
+        spec = parse_callable_source(
+            procedure_text_of(source) or procedure_text_of(cfg),
+            dialect=dialect,
+            mode=source_read_mode_of(source) or source_read_mode_of(cfg),
+            params=procedure_params_of(source) or procedure_params_of(cfg),
+        )
+        return stream_name_for_callable(spec)
+    except Exception:
+        return "procedure_result"
+
+
 def parse_callable_source(
     text: str,
     *,

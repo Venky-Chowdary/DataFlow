@@ -2757,6 +2757,18 @@ def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") ->
             return "0"
         if lowered in {"true", "t", "'true'", "'t'"}:
             return "1"
+    # MySQL TINYINT(1) / BIT(1) defaults arrive as ``0``/``1``/``b'0'``. Onto a
+    # real BOOLEAN column PostgreSQL rejects an integer default ("column is of
+    # type boolean but default expression is of type integer"), and the CREATE
+    # failure aborted the rest of the load's transaction (QA round 11, Rfam).
+    # One rule for that: services.pg_default_legal (the caller also drops and
+    # reports a default no boolean literal means, when this returns it as is).
+    if not numeric_bool and lowered not in {"true", "false"}:
+        from services.pg_default_legal import pg_boolean_default
+
+        pg_bool = pg_boolean_default(text, dest_type, dest_name)
+        if pg_bool:
+            return pg_bool
     return text
 
 

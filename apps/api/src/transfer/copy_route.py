@@ -13,6 +13,7 @@ from typing import Any
 
 from services.checkpoint_service import Checkpoint
 from services.copy_fast_path import (
+    copy_create_carrier,
     declared_copy_carrier,
     note_copy_decline,
 )
@@ -4299,7 +4300,7 @@ def _try_sqlite_pg_copy_fast_path(
             )
             return None
         pairs.append((source_col, target_col))
-        pg_ddls.append(pg_type(declared) if declared else "TEXT")
+        pg_ddls.append(pg_type(copy_create_carrier(item, declared)) if declared else "TEXT")
 
     inc_mode = (incremental_mode or "").strip().lower()
     try:
@@ -8185,7 +8186,7 @@ def _try_sqlserver_pg_copy_fast_path(
             note_copy_decline(f"SQL Server→PG COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
-        pg_ddls.append(pg_type(declared) if declared else "TEXT")
+        pg_ddls.append(pg_type(copy_create_carrier(item, declared)) if declared else "TEXT")
 
     try:
         result = copy_sqlserver_to_postgres(
@@ -8297,7 +8298,7 @@ def _try_mysql_pg_copy_fast_path(
             )
             return None
         pairs.append((source_col, target_col))
-        pg_ddls.append(pg_type(declared))
+        pg_ddls.append(pg_type(copy_create_carrier(item, declared)))
 
     inc_mode = (incremental_mode or "").strip().lower()
     try:
@@ -10670,7 +10671,7 @@ def _try_oracle_pg_copy_fast_path(
             note_copy_decline(f"Oracle→PG COPY declined: {source_col} type {declared} is not COPY-safe")
             return None
         pairs.append((source_col, target_col))
-        pg_ddls.append(pg_type(declared) if declared else "TEXT")
+        pg_ddls.append(pg_type(copy_create_carrier(item, declared)) if declared else "TEXT")
 
     try:
         result = copy_oracle_to_postgres(

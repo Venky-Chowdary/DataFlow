@@ -2627,7 +2627,10 @@ def run_file_preflight(
         or destination_foreign_keys
         or (out.get("constraint_findings") or [])
     )
-    dest_ri_gate = build_dest_ri_validate_gate(has_relationships=has_relationships)
+    dest_ri_gate = build_dest_ri_validate_gate(
+        has_relationships=has_relationships,
+        parent_finding=(out.get("fk_parent_plan") or {}).get("finding"),
+    )
     out["gates"] = [
         g
         for g in out["gates"]

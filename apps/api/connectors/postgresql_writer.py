@@ -199,6 +199,10 @@ def _fetch_pg_column_types(cursor: Any, schema: str, table_name: str) -> dict[st
                 ddl = f"VARCHAR({int(char_len)})"
             elif data in {"CHARACTER", "CHAR"} and char_len:
                 ddl = f"CHAR({int(char_len)})"
+            elif data in {"BIT", "BIT VARYING"} and char_len:
+                # Bare ``BIT`` reads as the BOOLEAN logical and cast every
+                # ``10101010`` cell as a boolean; the width is the bitstring.
+                ddl = f"{data}({int(char_len)})"
             elif udt in _udt_scalar:
                 ddl = _udt_scalar[udt]
             elif data in {

@@ -1493,43 +1493,11 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         (db_name, requested or target),
                     )
                     rows = cur.fetchall()
-                # Wrong database in the form is common for *source* discovery.
-                # Destination probes must stay in the operator-chosen database —
-                # otherwise a host-wide `users` table makes railway.users look real.
-                if not rows and not bool(kwargs.get("strict_namespace")):
-                    cur.execute(
-                        """
-                        SELECT table_schema, table_name
-                        FROM information_schema.tables
-                        WHERE table_type = 'BASE TABLE'
-                          AND LOWER(table_name) = LOWER(%s)
-                          AND table_schema NOT IN (
-                            'mysql', 'information_schema', 'performance_schema', 'sys'
-                          )
-                        ORDER BY CASE
-                          WHEN table_schema = %s THEN 0
-                          ELSE 1
-                        END
-                        LIMIT 5
-                        """,
-                        (requested or target, db_name),
-                    )
-                    for found_db, found_table in cur.fetchall() or []:
-                        cur.execute(
-                            """
-                            SELECT column_name, column_type, is_nullable, EXTRA,
-                                   COLLATION_NAME, CHARACTER_SET_NAME, COLUMN_DEFAULT
-                            FROM information_schema.columns
-                            WHERE table_schema = %s AND table_name = %s
-                            ORDER BY ordinal_position
-                            """,
-                            (found_db, found_table),
-                        )
-                        rows = cur.fetchall()
-                        if rows:
-                            db_name = found_db
-                            target = found_table
-                            break
+                # No host-wide fallback: a MySQL connector names its database.
+                # Scanning information_schema.tables across every schema of the
+                # server for a lookalike name hung Validate on hosts with
+                # thousands of schemas (QA round 11, Ensembl) and could bind a
+                # different database's table.
                 for row in rows:
                     name, dtype, nullable = row[0], row[1], row[2]
                     extra = str(row[3] if len(row) > 3 else "").lower()
@@ -1590,15 +1558,19 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 foreign_keys, foreign_keys_meta = _fetch_foreign_keys(
                     "mysql", cur, db_name, target
                 )
-                physical_storage = probe_physical_storage(
-                    "mysql", cur, db_name, target
-                ).to_dict()
-                check_meta = probe_check_constraints(
-                    "mysql", cur, db_name, target
-                ).to_dict()
-                indexes_meta = probe_secondary_indexes(
-                    "mysql", cur, db_name, target
-                ).to_dict()
+                from services.catalog_statement_cap import mysql_catalog_cap
+
+                # Optional evidence: each catalog statement is capped (round 11).
+                with mysql_catalog_cap(cur):
+                    physical_storage = probe_physical_storage(
+                        "mysql", cur, db_name, target
+                    ).to_dict()
+                    check_meta = probe_check_constraints(
+                        "mysql", cur, db_name, target
+                    ).to_dict()
+                    indexes_meta = probe_secondary_indexes(
+                        "mysql", cur, db_name, target
+                    ).to_dict()
                 apply_identity_probe("mysql", cur, db_name, target, columns)
         conn.close()
         return {

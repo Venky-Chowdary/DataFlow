@@ -705,6 +705,10 @@ class FileParser:
         payload.  This keeps billion-row CSV/JSONL ingest path-compatible.
         """
         filename_lower = (filename or "").lower()
+        # A SQLite database is recognised by its header before any name or
+        # text heuristic (a .db upload with commas in a page is still SQLite).
+        if content and bytes(content[:16]) == b"SQLite format 3\x00":
+            return "sqlite"
 
         def _from_extension(name: str) -> str | None:
             if name.endswith(".json"):
@@ -737,6 +741,8 @@ class FileParser:
                 return "docx"
             if name.endswith((".html", ".htm")):
                 return "html"
+            if name.endswith((".sqlite", ".sqlite3")):
+                return "sqlite"
             return None
 
         ext_result = _from_extension(filename_lower)

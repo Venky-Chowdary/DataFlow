@@ -6310,14 +6310,27 @@ def _run_reconciliation_impl(
                 str(ri_src_cfg.get("type") or source_endpoint.format or "")
             ).lower()
             ri_source_schema = str(schema_from_cfg(ri_src_type, ri_src_cfg) or "")
-        ri_state = _referential_integrity_evidence(
-            db_type=db_type,
-            cfg=cfg,
-            schema=str(schema or ""),
-            table=str(table_name or ""),
-            schema_state=schema_state,
-            source_schema=ri_source_schema,
-        )
+        from .stream_foreign_keys import fk_route_policy
+
+        if fk_route_policy(endpoint) == "ignore":
+            # The operator chose foreign_keys=ignore: rows copied as read, no
+            # parent relationship promised at the destination (round 11).
+            ri_state = {
+                "verified": False,
+                "asked": False,
+                "reason": "foreign_keys=ignore on this route",
+                "relations": [],
+                "orphan_rows": 0,
+            }
+        else:
+            ri_state = _referential_integrity_evidence(
+                db_type=db_type,
+                cfg=cfg,
+                schema=str(schema or ""),
+                table=str(table_name or ""),
+                schema_state=schema_state,
+                source_schema=ri_source_schema,
+            )
         if int(ri_state.get("orphan_rows") or 0) > 0 and source_endpoint is not None:
             _classify_ri_anomaly_origin(ri_state, source_endpoint, schema_state)
         physical_state["referential_integrity"] = ri_state

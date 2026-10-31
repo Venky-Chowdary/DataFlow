@@ -1252,12 +1252,24 @@ class UniversalTransferEngine:
             with log_cm, span_cm as span:
                 start = time.monotonic()
                 start_mem = self._peak_memory_bytes()
+                from .stream_foreign_keys import (
+                    pop_fk_risk_acknowledged,
+                    push_fk_risk_acknowledged,
+                )
+
+                # Validate ≡ Execute: the FK risk ack reaches the write guard.
+                fk_ack = push_fk_risk_acknowledged(bool(request.fk_risk_acknowledged))
                 try:
                     result = self._execute_tracked_core(request, job_id, resume=resume)
                 except BaseException as exc:
                     if start_span is not None:
                         set_span_error(span, exc)
                     raise
+                finally:
+                    pop_fk_risk_acknowledged(fk_ack)
+                    from .endpoint_kind import discard_staged_upload
+
+                    discard_staged_upload(request)
                 elapsed = time.monotonic() - start
                 result.elapsed_seconds = round(elapsed, 3)
                 result.records_per_second = (
@@ -1481,6 +1493,23 @@ class UniversalTransferEngine:
                 success=False, error=msg, operation=request.operation, job_id=job_id
             )
 
+        # Round 11: canonical endpoint kinds before the route is judged —
+        # ``file`` → ``file_export``, a SQLite export / upload → database/sqlite.
+        from .endpoint_kind import normalize_destination, stage_sqlite_upload
+
+        try:
+            request.destination = normalize_destination(
+                request.destination, table_hint=str(request.source.table or "")
+            )
+            stage_sqlite_upload(request, job_id)
+        except ValueError as exc:
+            msg = str(exc)
+            mongo.update_job_status(
+                job_id, "failed", error=msg, phase="failed", progress_pct=0
+            )
+            return TransferResult(
+                success=False, error=msg, operation=request.operation, job_id=job_id
+            )
         src_fmt = request.source.format or "csv"
         dst_fmt = request.destination.format or "mongodb"
         ok, msg = validate_transfer(
@@ -3205,88 +3234,104 @@ class UniversalTransferEngine:
                 message=execute_preflight_progress_message(request),
             )
             if not request.skip_preflight:
-                dest_ok, dest_msg = probe_destination(request.destination)
-                parity = _engine_module._execute_preflight_parity_kwargs(
-                    request,
-                    destination_connected=dest_ok,
-                    destination_table_exists_fallback=dest_table_exists_flag,
+                from src.ai.copilot.tool_deadline import (
+                    deadline_scope,
+                    preflight_deadline_seconds,
+                    without_deadline,
                 )
-                pf = run_file_preflight(
-                    columns=columns,
-                    column_types=schema,
-                    row_count=total_rows,
-                    mappings=mappings,
-                    destination_connected=dest_ok,
-                    destination_error=None if dest_ok else dest_msg,
-                    source_kind=request.source.kind,
-                    source_format=request.source.format,
-                    sync_mode=request.sync_mode,
-                    sample_rows=_preflight_sample_rows(sample_rows),
-                    # Read-only projected re-read of the same table the write
-                    # loop is about to stream, so a narrowing carrier is decided
-                    # before the first batch. A just-approved Studio Validate
-                    # already asked that; write-time fit still binds every row.
-                    # CDC never walks here (the write loop owns the cursor).
-                    population_rows=(
-                        None
-                        if reuse_fit or _sync_mode_is_cdc(request)
-                        else _table_population_rows(
+
+                # Round 11: catalog probes run under the preflight deadline
+                # (statement budget + bounded steps); the population walk is
+                # the run's own read and keeps its socket timeouts.
+                from services.catalog_statement_cap import (
+                    attach_budget_findings,
+                    collect_budget_findings,
+                )
+
+                with deadline_scope(preflight_deadline_seconds()), collect_budget_findings() as _budget:
+                    dest_ok, dest_msg = probe_destination(request.destination)
+                    parity = _engine_module._execute_preflight_parity_kwargs(
+                        request,
+                        destination_connected=dest_ok,
+                        destination_table_exists_fallback=dest_table_exists_flag,
+                    )
+                    pf = run_file_preflight(
+                        columns=columns,
+                        column_types=schema,
+                        row_count=total_rows,
+                        mappings=mappings,
+                        destination_connected=dest_ok,
+                        destination_error=None if dest_ok else dest_msg,
+                        source_kind=request.source.kind,
+                        source_format=request.source.format,
+                        sync_mode=request.sync_mode,
+                        sample_rows=_preflight_sample_rows(sample_rows),
+                        # Read-only projected re-read of the same table the write
+                        # loop is about to stream, so a narrowing carrier is decided
+                        # before the first batch. A just-approved Studio Validate
+                        # already asked that; write-time fit still binds every row.
+                        # CDC never walks here (the write loop owns the cursor).
+                        population_rows=(
+                            None
+                            if reuse_fit or _sync_mode_is_cdc(request)
+                            else without_deadline(_table_population_rows(
+                                request,
+                                mappings,
+                                column_types=schema,
+                                dest_types=dest_schema_types,
+                                dest_db=dst_fmt.lower(),
+                                shape_runner=design_runner,
+                            ))
+                        ),
+                        population_replay=lambda: without_deadline(_table_population_rows(
                             request,
                             mappings,
                             column_types=schema,
                             dest_types=dest_schema_types,
                             dest_db=dst_fmt.lower(),
                             shape_runner=design_runner,
-                        )
-                    ),
-                    population_replay=lambda: _table_population_rows(
-                        request,
-                        mappings,
-                        column_types=schema,
-                        dest_types=dest_schema_types,
-                        dest_db=dst_fmt.lower(),
-                        shape_runner=design_runner,
-                    ),
-                    rows_are_population=not reuse_fit and not _sync_mode_is_cdc(request),
-                    skip_population_fit=reuse_fit,
-                    source_filter=request.source_filter or None,
-                    confidence_threshold=confidence_threshold_for_mode(
-                        request.validation_mode
-                    ),
-                    destination_column_types=dest_schema_types,
-                    column_nullability=_source_nullability_probe(request.source),
-                    destination_column_nullability=(
-                        (request.destination.extra or {}).get("schema_nullability") or {}
-                    ),
-                    **_destination_filler_metadata(request.destination.extra),
-                    destination_db_type=dst_fmt.lower(),
-                    validation_mode=request.validation_mode,
-                    source_table=(
-                        request.source.table
-                        or request.source.collection
-                        or request.source_filename
-                        or ""
-                    ),
-                    source_connector_id=request.source.connector_id or "",
-                    source_config=endpoint_to_dict(request.source),
-                    destination_table=(
-                        request.destination.table
-                        or request.destination.collection
-                        or ""
-                    ),
-                    source_filename=request.source_filename or "",
-                    source_file_id=str(
-                        (getattr(request.source, "extra", None) or {}).get("file_id")
-                        or getattr(request, "source_file_id", "")
-                        or ""
-                    ).strip(),
-                    schema_policy=request.schema_policy,
-                    backfill_new_fields=request.backfill_new_fields,
-                    date_locale=request.date_locale,
-                    number_locale=getattr(request, "number_locale", "") or "",
-                    resume=resume,
-                    **parity,
-                )
+                        )),
+                        rows_are_population=not reuse_fit and not _sync_mode_is_cdc(request),
+                        skip_population_fit=reuse_fit,
+                        source_filter=request.source_filter or None,
+                        confidence_threshold=confidence_threshold_for_mode(
+                            request.validation_mode
+                        ),
+                        destination_column_types=dest_schema_types,
+                        column_nullability=_source_nullability_probe(request.source),
+                        destination_column_nullability=(
+                            (request.destination.extra or {}).get("schema_nullability") or {}
+                        ),
+                        **_destination_filler_metadata(request.destination.extra),
+                        destination_db_type=dst_fmt.lower(),
+                        validation_mode=request.validation_mode,
+                        source_table=(
+                            request.source.table
+                            or request.source.collection
+                            or request.source_filename
+                            or ""
+                        ),
+                        source_connector_id=request.source.connector_id or "",
+                        source_config=endpoint_to_dict(request.source),
+                        destination_table=(
+                            request.destination.table
+                            or request.destination.collection
+                            or ""
+                        ),
+                        source_filename=request.source_filename or "",
+                        source_file_id=str(
+                            (getattr(request.source, "extra", None) or {}).get("file_id")
+                            or getattr(request, "source_file_id", "")
+                            or ""
+                        ).strip(),
+                        schema_policy=request.schema_policy,
+                        backfill_new_fields=request.backfill_new_fields,
+                        date_locale=request.date_locale,
+                        number_locale=getattr(request, "number_locale", "") or "",
+                        resume=resume,
+                        **parity,
+                    )
+                    pf = attach_budget_findings(pf, _budget)
                 pf = apply_policy_gates(
                     pf,
                     _engine_module._execute_policy_gates_for_request(

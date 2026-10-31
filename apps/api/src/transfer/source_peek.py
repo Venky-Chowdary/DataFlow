@@ -135,12 +135,18 @@ def peek_stream_source(
 ) -> tuple:
     """Return columns, schema, row count, and sample rows for preflight."""
     from .adapters import _introspect_table_schema, resolve_connector_config
-    from .connector_capabilities import resolve_driver_type
+    from .connector_capabilities import resolve_driver_type, source_read_driver
     from .stream import CHUNK_SIZE, _read_batch, _source_name, _unwrap_read
+
+    from services.procedure_source import callable_stream_table
 
     src_type = resolve_driver_type(source.format or "")
     src_cfg = resolve_connector_config(source)
-    table = _source_name(source)
+    # A query / procedure source has no table: its stream label comes first,
+    # before any table requirement (the batch reader then runs the extract).
+    table = _source_name(source) or callable_stream_table(
+        source, src_cfg, dialect=source_read_driver(src_type)
+    )
     if not table:
         raise ValueError("Source table/collection name required for streaming transfer")
 

@@ -37,6 +37,11 @@ EXPORT_EXTENSIONS: frozenset[str] = frozenset(
         "avro",
         "orc",
         "xml",
+        # A SQLite export is a database file written into the exports folder
+        # (``file_export``/``sqlite`` routes to ``database``/``sqlite``, round 11).
+        "sqlite",
+        "sqlite3",
+        "db",
     }
 )
 
