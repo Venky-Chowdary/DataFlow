@@ -32,8 +32,10 @@ def stores(tmp_path, monkeypatch):
     monkeypatch.setattr(team_store, "mongo_database", lambda: None)
     monkeypatch.setattr(user_store, "mongo_database", lambda: None)
     import services.tenant_store as tenant_store
+    from services import mfa_store
 
     monkeypatch.setattr(tenant_store, "STORE_PATH", tmp_path / "tenants.json")
+    monkeypatch.setattr(mfa_store, "mongo_database", lambda: None)
     return tmp_path
 
 
@@ -81,8 +83,18 @@ def _signed_in(client, *, email: str, workspace_id: str, workspace_role: str) ->
     return peer
 
 
+def _enroll_two_factor(client) -> None:
+    """Requiring MFA is refused from a session the policy would hold (round 11)."""
+    from services import totp
+
+    secret = client.post("/api/v1/auth/mfa/totp/enroll", json={}).json()["secret"]
+    code = totp.totp(totp.secret_bytes(secret))
+    assert client.post("/api/v1/auth/mfa/totp/confirm", json={"code": code}).status_code == 200
+
+
 def test_platform_admin_creates_a_tenant_for_a_workspace(admin):
     ws_id = _workspace(admin, "Acme")
+    _enroll_two_factor(admin)
 
     created = admin.post(
         "/api/v1/workspace/tenant",

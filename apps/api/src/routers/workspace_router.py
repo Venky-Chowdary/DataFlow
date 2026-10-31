@@ -928,6 +928,10 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             status_code=403,
             detail="workspace_id does not match X-Workspace-Id",
         )
+    if body.mfa_required:
+        from services.mfa_enforcement import assert_may_require_mfa
+
+        assert_may_require_mfa(request)
     try:
         tenant = create_tenant(
             workspace_id=workspace_id,
@@ -968,6 +972,10 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
         raise HTTPException(status_code=404, detail="Tenant not found")
     actor = _actor(request)
     _require_tenant_admin(request, tenant.workspace_id)
+    if body.mfa_required and not tenant.mfa_required:
+        from services.mfa_enforcement import assert_may_require_mfa
+
+        assert_may_require_mfa(request)
     try:
         updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -982,6 +990,8 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
         details={
             "tenant_id": tenant_id,
             "fields": sorted(body.model_dump(exclude_none=True).keys()),
+            **({"mfa_required": body.mfa_required} if body.mfa_required is not None
+               and body.mfa_required != tenant.mfa_required else {}),
         },
     )
     return updated.to_dict()
@@ -1095,6 +1105,9 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         tenant and tenant.ip_allowlist and (tenant.custom_domain or "").strip() and ip_flag
     )
     session_enforced = bool(tenant and getattr(tenant, "enforce_session_timeout", False))
+    from services.mfa_enforcement import posture as mfa_posture
+
+    mfa_block = mfa_posture(tenant)
     byok = key_status_summary(tenant.id) if tenant else {"configured": False}
     encryption_ready = bool(secrets_encryption_ready())
     prod = is_production()
@@ -1137,8 +1150,9 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         # and allowed. The shared app host never evaluates the CIDR list.
         "ip_allowlist_enforced": ip_enforced,
         "mfa_required": tenant.mfa_required if tenant else False,
-        # Login MFA is not wired; the flag is policy memory only.
-        "mfa_enforced": False,
+        # True only when the tenant requires it AND sign-in is enforced
+        # (services.mfa_enforcement holds password sessions without a factor).
+        "mfa_enforced": mfa_block["enforced"],
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
         # Idle timeout enforced on sign-in sessions when the tenant turns
         # enforce_session_timeout on (services.session_policy). API keys and
@@ -1164,7 +1178,7 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
                 "scope": "sign-in sessions of members of this workspace (strictest workspace wins)",
                 "not_covered": "API keys; absolute token lifetime is DATAFLOW_TOKEN_TTL_SEC",
             },
-            "mfa": {"enforced": False, "status": "design_only", "design": "docs/MFA_ENFORCEMENT_DESIGN.md"},
+            "mfa": mfa_block,
         },
         # True when this tenant has an active BYOK key. New connector secrets
         # are wrapped with that key; enc:v1 leftovers stay readable until re-saved.
@@ -1229,6 +1243,22 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
             {"name": "Vulnerability scanning", "status": "recommended_external"},
         ],
     }
+
+
+def _mfa_report_line(posture: dict[str, Any]) -> str:
+    block = (posture.get("enforcement") or {}).get("mfa") or {}
+    if block.get("enforced"):
+        counts = (
+            f"; {block['members_enrolled']}/{block['members_total']} members enrolled"
+            if "members_total" in block else ""
+        )
+        sso = "SSO sessions exempt (IdP MFA)" if block.get("sso_exempt") else "SSO sessions held too"
+        return (
+            "- Two-factor authentication (TOTP): required and enforced for every member's password "
+            f"sign-in; {sso}; API keys and service accounts not affected{counts}"
+        )
+    missing = ", ".join(block.get("missing") or []) or "tenant.mfa_required"
+    return f"- Two-factor authentication (TOTP): available, not required for this workspace (missing: {missing})"
 
 
 def _posture_scope_workspace(request: Request, tenant: Tenant | None) -> str:
@@ -1303,7 +1333,7 @@ async def get_security_report(request: Request):
         f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
         f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (missing: ' + ', '.join(posture['enforcement']['ip_allowlist']['missing']) + ')' if posture['ip_allowlist_enabled'] else 'disabled')}",
         f"- Connector egress allowlist: {'on' if posture.get('egress_allowlist_enabled') else 'off (private ranges refused; metadata and link-local cannot be listed)'}",
-        f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired; design: docs/MFA_ENFORCEMENT_DESIGN.md)",
+        _mfa_report_line(posture),
         f"- Session timeout: {posture['session_timeout_hours']}h idle; enforced={'yes (sign-in sessions; API keys excluded)' if posture['session_timeout_enforced'] else 'no (recorded only; turn on enforce_session_timeout)'}",
         "",
         "## Deployment & data path",

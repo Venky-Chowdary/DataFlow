@@ -14,6 +14,7 @@ import { WorkspaceSwitcher } from "./components/ui/WorkspaceSwitcher";
 import { StatusPopover } from "./components/StatusPopover";
 import { DataProvider } from "./lib/DataContext";
 import { ForcePasswordChange } from "./components/ForcePasswordChange";
+import { MfaSessionGate } from "./components/MfaChallenge";
 import { PERMISSIONS, PermissionsProvider, useWriteGate } from "./lib/PermissionsContext";
 import { StudioActionsProvider } from "./lib/StudioActionsContext";
 import { AUTH_REQUIRED_EVENT, deleteConnector, fetchConnectors, fetchJobs, fetchSchedules, fetchTransferCapabilities, noteApiSuccess, probeApiHealth, shouldMarkApiOffline } from "./lib/api";
@@ -1238,7 +1239,9 @@ function DataTransferAppInner() {
           <StudioActionsProvider>
             <PermissionsProvider signedIn={Boolean(userEmail)}>
               <ForcePasswordChange>
-                <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
+                <MfaSessionGate onSignOut={signOut}>
+                  <AppShell initialScreen={entryScreen} userEmail={userEmail} onSignOut={signOut} />
+                </MfaSessionGate>
               </ForcePasswordChange>
             </PermissionsProvider>
           </StudioActionsProvider>

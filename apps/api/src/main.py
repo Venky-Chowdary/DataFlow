@@ -45,6 +45,7 @@ from .middleware.tenant_scope_middleware import TenantScopeMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
+from .routers.mfa_router import admin_router as mfa_admin_router, router as mfa_router
 from .routers.iam_router import router as iam_router
 from .routers.scim_router import router as scim_router
 from .routers.automation_router import router as automation_router
@@ -699,6 +700,10 @@ app.include_router(schedules_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 # Compatibility mount when VITE_API_BASE omits /api/v1 (hits /auth/login).
 app.include_router(auth_router)
+# Two-factor (TOTP) self-service and the challenge exchange, on both mounts.
+app.include_router(mfa_router, prefix="/api/v1")
+app.include_router(mfa_router)
+app.include_router(mfa_admin_router, prefix="/api/v1")
 # Self-serve signup: every route 404s while DATAWRAP_SIGNUP_ENABLED is off.
 app.include_router(signup_router, prefix="/api/v1")
 app.include_router(signup_router)

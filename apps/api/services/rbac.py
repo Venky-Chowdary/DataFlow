@@ -234,6 +234,9 @@ _PUBLIC_PATHS = {
     "/auth/logout",
     "/auth/bootstrap",
     "/auth/sso/providers",
+    # Second step of a password sign-in: the signed challenge is the credential.
+    "/api/v1/auth/login/mfa",
+    "/auth/login/mfa",
     "/api/v1/transfer/capabilities",
     "/api/v1/transfer/platform",
     "/api/v1/transfer/readiness",
@@ -280,6 +283,9 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     # Listing/revoking your own sessions is likewise account-self.
     ("*", "/api/v1/auth/sessions", Permission.ACCOUNT_SELF),
     ("*", "/auth/sessions", Permission.ACCOUNT_SELF),
+    # Your own second factor (enrol, confirm, step up, recovery codes, disable).
+    ("*", "/api/v1/auth/mfa", Permission.ACCOUNT_SELF),
+    ("*", "/auth/mfa", Permission.ACCOUNT_SELF),
     # Changing your own sign-in email: both steps need your session — the
     # mailed OTP proves the new address, the session binds it to this account.
     ("POST", "/api/v1/auth/email/change", Permission.ACCOUNT_SELF),

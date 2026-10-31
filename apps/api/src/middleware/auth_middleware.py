@@ -229,6 +229,13 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
     return None
 
 
+def _mfa_detached(request: Request, token: str) -> bool:
+    from services.mfa_enforcement import detach_if_held
+
+    detach_if_held(request, token=token)
+    return not getattr(request.state, "user", None)
+
+
 def _attach_user(request: Request, token: str) -> bool:
     return _attach_user_reason(request, token) is None
 
@@ -386,7 +393,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             ):
                 # Public routes still attach identity when a Bearer token is present
                 # (MCP tools/call uses this; discovery works without a token).
-                if token and _attach_user_reason(request, token) is None:
+                # A session held by the workspace MFA policy is anonymous here.
+                if (
+                    token
+                    and _attach_user_reason(request, token) is None
+                    and not _mfa_detached(request, token)
+                ):
                     from services import audit_coverage
 
                     principal_context = audit_coverage
@@ -469,6 +481,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             forbidden = _tenant_bind_forbidden(request)
             if forbidden is not None:
                 return forbidden
+            # Workspace "require MFA": a held session reaches enrolment only.
+            from services.mfa_enforcement import gate as mfa_gate
+
+            held = mfa_gate(request, token=token, cookie_doc=cookie_doc if not token else None)
+            if held is not None:
+                return held
 
             return await call_next(request)
         finally:

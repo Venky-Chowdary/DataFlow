@@ -27,7 +27,19 @@ describe("posture rows", () => {
     assert.match(row.desc, /DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE/);
   });
 
-  it("MFA is never badged enforced", () => {
+  it("MFA is badged enforced only when the API says it is enforced", () => {
     assert.equal(mfaRow().on, false);
+    assert.equal(mfaRow({ ...base, mfa_required: true, mfa_enforced: false } as SecurityPosture).on, false);
+    assert.match(mfaRow(base).desc, /not required/);
+    const on = mfaRow({
+      ...base,
+      mfa_required: true,
+      mfa_enforced: true,
+      enforcement: { mfa: { enforced: true, sso_exempt: true, members_total: 4, members_enrolled: 1 } },
+    } as SecurityPosture);
+    assert.equal(on.on, true);
+    assert.match(on.desc, /1 of 4 members/);
+    assert.match(on.desc, /SSO sessions are exempt/);
+    assert.match(on.desc, /API keys are not affected/);
   });
 });

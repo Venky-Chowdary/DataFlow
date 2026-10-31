@@ -477,8 +477,13 @@ def incremental_modes_are_canonical() -> bool:
 
 
 def login_mfa_enforced() -> bool:
-    """Login MFA is policy memory only — workspace_router.mfa_enforced stays False."""
-    return False
+    """Login MFA is wired (round 11): TOTP enrolment, sign-in challenge, and the
+    workspace ``mfa_required`` gate in services.mfa_enforcement."""
+    try:
+        from services.mfa_enforcement import gate  # noqa: F401
+    except ImportError:
+        return False
+    return True
 
 
 def ip_allowlist_enforced_without_custom_domain() -> bool:
@@ -937,16 +942,28 @@ def ip_allowlist_card() -> CapabilityCard | None:
 
 
 def require_mfa_card() -> CapabilityCard | None:
-    if login_mfa_enforced():
-        return None
+    if not login_mfa_enforced():
+        return CapabilityCard(
+            title="Can I require MFA",
+            text=(
+                "You can require MFA as policy memory only; login MFA is not "
+                "wired, so mfa_enforced is false. "
+                "Saving the flag does not challenge sign-in."
+            ),
+            source_module="src/routers/workspace_router.py · mfa_enforced",
+            category="enterprise",
+        )
     return CapabilityCard(
         title="Can I require MFA",
         text=(
-            "You can require MFA as policy memory only; login MFA is not "
-            "wired, so mfa_enforced is false. "
-            "Saving the flag does not challenge sign-in."
+            "Yes, you can require MFA: turn on Require two-factor authentication in Settings → "
+            "Enterprise and every member who signs in with a password is held at authenticator-app "
+            "(TOTP) setup until they enrol; enrolled accounts enter a code at sign-in. "
+            "Each person sets it up under Settings → Security and gets ten one-time recovery codes. "
+            "SSO sessions are exempt because the identity provider handles the second factor, and API keys are not affected. "
+            "The security posture reports mfa_enforced true only while the policy is on."
         ),
-        source_module="src/routers/workspace_router.py · mfa_enforced",
+        source_module="services/mfa_enforcement.py · src/routers/mfa_router.py",
         category="enterprise",
     )
 

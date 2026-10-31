@@ -189,7 +189,8 @@ async function parseApiError(res: Response, fallback: string): Promise<string> {
   return (await readApiRefusal(res, fallback)).detail;
 }
 
-async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
+/** Authenticated fetch (Bearer + X-Workspace-Id + CSRF); shared by the lib/*Api modules. */
+export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal, ...requestInit } = init;
   const headers = new Headers(requestInit.headers);
   const session = readSession();
@@ -3549,6 +3550,15 @@ export type EffectiveIdentity = {
   workspace_choice_ambiguous: boolean;
   must_change_password: boolean;
   auth_required: boolean;
+  /** Two-factor standing; ``hold`` set = this session only reaches two-factor setup. */
+  mfa?: {
+    enrolled: boolean;
+    required: boolean;
+    hold: "mfa_enrollment_required" | "mfa_verification_required" | null;
+    session_verified: boolean;
+    via_sso: boolean;
+    sso_exempt: boolean;
+  };
 };
 
 /** Who the API says you are, and what it will let you do in this workspace. */
@@ -4095,11 +4105,22 @@ export async function fetchSignupMetrics(): Promise<SignupMetrics | null> {
   return (await res.json()) as SignupMetrics;
 }
 
-export async function loginWorkspace(email: string, password: string): Promise<{
+export interface LoginSession {
   token: string;
   expires_at: number;
   user: { email: string; name: string; role: string };
-}> {
+  must_change_password?: boolean;
+}
+
+/** 202 from /auth/login: the password matched an account with two-factor on. */
+export interface LoginMfaChallenge {
+  mfa_required: true;
+  challenge: string;
+  challenge_expires_at: number;
+  methods: string[];
+}
+
+export async function loginWorkspace(email: string, password: string): Promise<LoginSession | LoginMfaChallenge> {
   const res = await apiFetch(`${API_BASE}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -4632,7 +4653,14 @@ export type SecurityPosture = {
   enforcement?: {
     ip_allowlist?: { enforced?: boolean; missing?: string[]; scope?: string };
     session_timeout?: { enforced?: boolean; hours?: number | null };
-    mfa?: { enforced?: boolean; status?: string };
+    mfa?: {
+      enforced?: boolean;
+      status?: string;
+      sso_exempt?: boolean;
+      missing?: string[];
+      members_total?: number;
+      members_enrolled?: number;
+    };
   };
   byok_encrypts_secrets?: boolean;
   tls_version: string;

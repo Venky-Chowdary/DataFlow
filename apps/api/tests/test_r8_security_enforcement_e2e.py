@@ -11,7 +11,7 @@ MFA, IP allowlist and session timeout. Round 8:
   used to badge it enforced whenever a list and a domain were saved, even
   with the flag off (requests were only audited) — now it requires the flag
   and names what is missing.
-* **MFA** stays design-only (docs/MFA_ENFORCEMENT_DESIGN.md), reported so.
+* **MFA** (round 11) is enforced when the tenant sets ``mfa_required``; tests/test_r11_mfa_e2e.py.
 """
 
 from __future__ import annotations
@@ -90,7 +90,8 @@ def test_ip_allowlist_is_reported_enforced_only_when_it_actually_is(ent, monkeyp
     off = ent.admin.get("/api/v1/workspace/security/posture", headers={"X-Workspace-Id": ws}).json()
     assert off["ip_allowlist_enforced"] is False
     assert off["enforcement"]["ip_allowlist"]["missing"] == ["DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1"]
-    assert off["mfa_enforced"] is False and off["enforcement"]["mfa"]["status"] == "design_only"
+    # MFA is real since round 11; this tenant does not require it, so not enforced.
+    assert off["mfa_enforced"] is False and off["enforcement"]["mfa"]["status"] == "available"
 
     monkeypatch.setenv("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE", "1")
     on = ent.admin.get("/api/v1/workspace/security/posture", headers={"X-Workspace-Id": ws}).json()

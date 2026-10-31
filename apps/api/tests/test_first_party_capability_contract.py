@@ -355,7 +355,7 @@ def test_enforcing_modules_back_the_silent_wrong_cluster() -> None:
     )
 
     assert viewer_has_audit_read() is True
-    assert login_mfa_enforced() is False
+    assert login_mfa_enforced() is True
     assert ip_allowlist_enforced_without_custom_domain() is False
     assert bigquery_is_transfer_ready() is True
     assert adls_service_principal_shipped() is True
@@ -378,7 +378,7 @@ def test_enforcing_modules_back_the_silent_wrong_cluster() -> None:
         / "routers"
         / "workspace_router.py"
     ).read_text(encoding="utf-8")
-    assert '"mfa_enforced": False' in router
+    assert '"mfa_enforced": mfa_block["enforced"]' in router
     assert "ip_allowlist and (tenant.custom_domain" in router
 
 
@@ -512,7 +512,7 @@ def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:
     assert "file export" not in audit_csv_lead
     assert "select format csv" not in audit_csv_lead
     assert "ip allowlist" in allowlist_lead
-    assert "mfa_enforced is false" in mfa_lead or "login mfa is not wired" in mfa_lead
+    assert "two-factor" in mfa_lead and "not wired" not in mfa_lead
     assert "resume token" in watermark_lead
     assert "exactly-once is not claimed platform-wide" not in watermark_lead or "resume token" in watermark_lead
     assert "separate run" not in watermark_lead
