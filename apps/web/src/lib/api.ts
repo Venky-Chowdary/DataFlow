@@ -1193,7 +1193,7 @@ export interface ModelCapabilities {
     available: boolean;
     status: string;
     blocked_reason?: string;
-    key_state?: "ready" | "none" | "disabled" | "undecryptable";
+    key_state?: "ready" | "none" | "disabled" | "undecryptable" | "unreachable";
   }[];
   settings_storage?: { path?: string; persistent: boolean; reason: string };
   guarantees: string[];
@@ -3735,6 +3735,8 @@ export async function testAiProviderKey(provider: string): Promise<{
   ok: boolean;
   provider: string;
   error: string;
+  base_url?: string;
+  models?: string[];
   capabilities: ModelCapabilities;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}/test`, { method: "POST" });

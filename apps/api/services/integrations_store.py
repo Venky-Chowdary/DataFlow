@@ -220,10 +220,12 @@ def apply_integrations_to_env() -> None:
             os.environ[model_env_key] = str(model)
 
     ollama = data["ai_providers"].get("ollama", {})
-    if ollama.get("base_url") and not os.environ.get("OLLAMA_BASE_URL"):
-        os.environ["OLLAMA_BASE_URL"] = str(ollama["base_url"])
-    if ollama.get("model") and not os.environ.get("OLLAMA_MODEL"):
-        os.environ["OLLAMA_MODEL"] = str(ollama["model"])
+    # A value this process hydrated follows the store: otherwise the first
+    # saved base URL stuck in the environment and a later change never applied.
+    for env_key, field in (("OLLAMA_BASE_URL", "base_url"), ("OLLAMA_MODEL", "model")):
+        if ollama.get(field) and (not os.environ.get(env_key) or env_key in _HYDRATED_ENV):
+            os.environ[env_key] = str(ollama[field])
+            _HYDRATED_ENV.add(env_key)
 
 
 # ── SSO ──────────────────────────────────────────────────────────────────────
@@ -469,7 +471,9 @@ def provider_key_state(provider: str) -> str:
     import os
 
     if provider == "ollama":
-        return "ready"
+        if not ai_provider_enabled("ollama"):
+            return "disabled"
+        return "ready" if ollama_status()["reachable"] else "unreachable"
     if not ai_provider_enabled(provider):
         return "disabled"
     env_val = os.environ.get({"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider, ""), "")
@@ -493,8 +497,15 @@ def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
         key = row.get("api_key", "")
         # Configured means a key we can actually use (env or store), not merely
         # a byte string sitting in the file.
-        row["configured"] = bool(resolve_provider_api_key(provider)) or provider == "ollama"
         row["key_state"] = provider_key_state(provider)
+        if provider == "ollama":
+            # Ollama has no key: it is usable only when its server answers.
+            status = ollama_status()
+            row["configured"] = row["key_state"] == "ready"
+            row["reachable"] = status["reachable"]
+            row["status_detail"] = status["detail"]
+        else:
+            row["configured"] = bool(resolve_provider_api_key(provider))
         row["api_key"] = _mask_secret(key) if key else ""
         out[provider] = row
     return out
@@ -517,6 +528,7 @@ def update_ai_provider(provider: str, patch: dict[str, Any]) -> dict[str, Any]:
     data["updated_at"] = _now()
     _save(data)
     apply_integrations_to_env()
+    _OLLAMA_PROBE.clear()
     return get_ai_provider_configs()[provider]
 
 
@@ -625,6 +637,45 @@ def resolve_provider_model(provider: str, default: str) -> str:
         return os.environ[env_key]
     data = _load_raw()
     return str(data["ai_providers"].get(provider, {}).get("model") or default)
+
+
+_OLLAMA_PROBE_TTL_SEC = 10.0
+_OLLAMA_PROBE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def ollama_status(*, fresh: bool = False) -> dict[str, Any]:
+    """Whether the configured Ollama server answers, and which models it has.
+
+    ``GET {base_url}/api/tags`` with a short timeout. Cached for a few seconds
+    per base URL so a Settings page refresh does not stall on a dead host;
+    ``fresh`` (the Test button) always probes.
+    """
+    import time
+
+    base_url = resolve_ollama_base_url().rstrip("/")
+    now = time.monotonic()
+    cached = _OLLAMA_PROBE.get(base_url)
+    if not fresh and cached and now - cached[0] < _OLLAMA_PROBE_TTL_SEC:
+        return cached[1]
+    result: dict[str, Any] = {"base_url": base_url, "reachable": False, "models": [], "detail": ""}
+    try:
+        import httpx
+
+        resp = httpx.get(f"{base_url}/api/tags", timeout=2.0)
+        if resp.status_code == 200:
+            body = resp.json() if resp.content else {}
+            result["models"] = [
+                str(m.get("name") or m.get("model") or "")
+                for m in (body.get("models") or [])
+                if isinstance(m, dict)
+            ]
+            result["reachable"] = True
+        else:
+            result["detail"] = f"Ollama answered HTTP {resp.status_code} at {base_url}."
+    except Exception as exc:  # noqa: BLE001 — any failure means unreachable
+        result["detail"] = f"Ollama is not reachable at {base_url} ({type(exc).__name__})."
+    _OLLAMA_PROBE[base_url] = (now, result)
+    return result
 
 
 def resolve_ollama_base_url(default: str = "http://localhost:11434") -> str:

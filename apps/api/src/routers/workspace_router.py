@@ -334,6 +334,8 @@ def test_ai_provider(provider: str):
 
     from ..ai.llm.provider import clear_auth_failures, get_model_capabilities, verify_cloud_api_key
 
+    if provider == "ollama":
+        return _test_ollama(get_model_capabilities)
     if provider not in {"openai", "anthropic"}:
         raise HTTPException(status_code=400, detail=f"{provider} has no cloud key to test")
 
@@ -351,6 +353,35 @@ def test_ai_provider(provider: str):
         "ok": ok,
         "provider": provider,
         "error": "" if ok else (err or "API key rejected"),
+        "capabilities": get_model_capabilities(),
+    }
+
+
+def _test_ollama(get_model_capabilities) -> dict[str, Any]:
+    """Probe the Ollama server now and check the configured model is pulled."""
+    from services.integrations_store import (
+        ai_provider_enabled,
+        ollama_status,
+        resolve_provider_model,
+    )
+
+    status = ollama_status(fresh=True)
+    model = resolve_provider_model("ollama", "llama3.2")
+    error = ""
+    if not ai_provider_enabled("ollama"):
+        error = "Ollama is disabled in Settings."
+    elif not status["reachable"]:
+        error = status["detail"] or f"Ollama is not reachable at {status['base_url']}."
+    elif model and not any(
+        name == model or name.split(":", 1)[0] == model.split(":", 1)[0] for name in status["models"]
+    ):
+        error = f"Ollama is reachable but model {model!r} is not pulled (run: ollama pull {model})."
+    return {
+        "ok": not error,
+        "provider": "ollama",
+        "error": error,
+        "base_url": status["base_url"],
+        "models": status["models"],
         "capabilities": get_model_capabilities(),
     }
 
@@ -954,6 +985,22 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     }
 
 
+def _posture_scope_workspace(request: Request, tenant: Tenant | None) -> str:
+    """The workspace a posture/report is about: the tenant's, else the named
+    one, else the caller's own workspace (single membership / bound key)."""
+    if tenant and tenant.workspace_id:
+        return tenant.workspace_id
+    named = (request.headers.get("x-workspace-id") or "").strip() or str(
+        getattr(request.state, "tenant_workspace_id", "") or ""
+    )
+    if named:
+        return named
+    try:
+        return str(tenant_scope(request).workspace_id or "")
+    except HTTPException:
+        return ""
+
+
 @router.get("/security/posture")
 async def get_security_posture(request: Request):
     """Posture for the workspace this request names.
@@ -967,12 +1014,7 @@ async def get_security_posture(request: Request):
 
     tenant = _authorized_request_tenant(request)
     body = _security_posture(tenant)
-    named = (request.headers.get("x-workspace-id") or "").strip() or str(
-        getattr(request.state, "tenant_workspace_id", "") or ""
-    )
-    body["scope_workspace_id"] = (
-        tenant.workspace_id if tenant and tenant.workspace_id else named
-    ) or None
+    body["scope_workspace_id"] = _posture_scope_workspace(request, tenant) or None
     return JSONResponse(
         content=jsonable_encoder(body),
         headers={"Cache-Control": "no-store"},
@@ -984,6 +1026,16 @@ async def get_security_report(request: Request):
     """Return a downloadable, human-readable compliance report for the tenant."""
     tenant = _authorized_request_tenant(request)
     posture = _security_posture(tenant)
+    # The report is about the workspace the request is scoped to, tenant or not.
+    # "none — request carried no workspace scope" was printed whenever the
+    # workspace had no tenant profile, even though the request named it.
+    scope_ws = _posture_scope_workspace(request, tenant)
+    if scope_ws and not posture.get("workspace_id"):
+        posture["workspace_id"] = scope_ws
+    workspace_name = ""
+    if scope_ws:
+        ws_row = get_workspace(scope_ws)
+        workspace_name = getattr(ws_row, "name", "") if ws_row else ""
 
     lines = [
         "# Datawrap Security & Compliance Report",
@@ -993,6 +1045,8 @@ async def get_security_report(request: Request):
         # an auditor has to say when no tenant profile backs these controls.
         f"Tenant ID: {posture['tenant_id'] or 'none — no tenant profile configured for this workspace'}",
         f"Workspace ID: {posture['workspace_id'] or 'none — request carried no workspace scope'}",
+        *( [f"Workspace: {workspace_name}"] if workspace_name else [] ),
+        "Scope: this report covers only the workspace above.",
         f"Custom domain: {posture['custom_domain'] or 'not configured'}",
         f"Primary data region: {posture['data_region']}",
         "",

@@ -22,6 +22,7 @@ import { TenantSettings } from "./settings/TenantSettings";
 import { chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
 import { auditActorLabel } from "../lib/auditActor";
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
+import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
 import { connectorEgressState } from "../lib/egressPosture";
 import { TENANT_SAVED_EVENT, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
@@ -407,13 +408,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       const result = await testAiProviderKey(provider);
       setModelCapabilities(result.capabilities);
       setEngineStatus(await fetchPilotEngineStatus());
-      toast({
-        title: result.ok ? `${provider} key works` : `${provider} key rejected`,
-        message: result.ok
-          ? "The provider accepted the saved key."
-          : result.error || "The provider rejected the saved key.",
-        tone: result.ok ? "success" : "error",
-      });
+      toast({ ...providerTestToast(provider, result), tone: result.ok ? "success" : "error" });
     } catch (err) {
       toast({
         title: "Key test failed",
@@ -1214,14 +1209,14 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           >
                             {provider.available ? "Update credentials" : "Configure"}
                           </button>
-                          {provider.tier === "cloud" && provider.configured && (
+                          {providerHasTest(provider) && (
                             <button
                               type="button"
                               className="df2-btn df2-btn-sm"
                               disabled={aiTesting === provider.provider}
                               onClick={() => void testProviderKey(provider.provider)}
                             >
-                              {aiTesting === provider.provider ? "Testing…" : "Test key"}
+                              {aiTesting === provider.provider ? "Testing…" : providerTestLabel(provider.provider)}
                             </button>
                           )}
                           {provider.tier === "cloud" && provider.key_state && provider.key_state !== "none" && (
