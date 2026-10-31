@@ -270,10 +270,15 @@ export function TenantSettings() {
 
           <div className="df2-settings-policy-row df2-team-spaced">
             <div>
-              <h3>Require MFA for admins</h3>
-              <p>Recorded policy. Login MFA is not wired — this switch does not challenge TOTP or WebAuthn yet.</p>
+              <h3>Require two-factor authentication</h3>
+              <p>
+                Every member who signs in with a password must use an authenticator app (TOTP). Members who
+                have not set it up can only reach two-factor setup until they do. Single sign-on sessions are
+                exempt (your identity provider handles MFA); API keys are not affected. Set it up for your own
+                account first under Settings → Security.
+              </p>
             </div>
-            <button type="button" role="switch" aria-checked={mfaRequired} className={`df2-switch ${mfaRequired ? "on" : ""}`} onClick={() => setMfaRequired((v) => !v)}>
+            <button type="button" role="switch" aria-checked={mfaRequired} aria-label="Require two-factor authentication" className={`df2-switch ${mfaRequired ? "on" : ""}`} onClick={() => setMfaRequired((v) => !v)}>
               <span className="df2-switch-thumb" />
             </button>
           </div>

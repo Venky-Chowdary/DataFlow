@@ -4,7 +4,9 @@ import { DtIcon } from "../components/DtIcon";
 import { AuthButton } from "../components/AuthButton";
 import { PasswordToggle } from "../components/AuthFlow";
 import { useToast } from "../components/Toast";
-import { ApiError, fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType } from "../lib/api";
+import { ApiError, fetchSsoProviders, loginWorkspace, ssoStartUrl, SsoType, type LoginSession } from "../lib/api";
+import { isMfaChallenge } from "../lib/mfaApi";
+import { LoginMfaStep } from "../components/MfaChallenge";
 import { fetchSignupConfig } from "../lib/signupApi";
 import { classifySignInFailure, SignInFailure } from "../lib/signInFailure";
 import { UI_PREVIEW_TOKEN, writeSession } from "../lib/session";
@@ -62,6 +64,8 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
   const [ssoProviders, setSsoProviders] = useState<Array<{ type: SsoType; label: string; login_path: string }>>([]);
   const [signupEnabled, setSignupEnabled] = useState(false);
   const [pendingVerify, setPendingVerify] = useState<{ challengeId: string; email: string } | null>(null);
+  // Password matched an account with two-factor on: the second step is pending.
+  const [mfaStep, setMfaStep] = useState<{ challenge: string; email: string } | null>(null);
 
   useEffect(() => {
     fetchSsoProviders().then(setSsoProviders).catch(() => setSsoProviders([]));
@@ -111,19 +115,12 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
     setChecking(true);
     try {
       const result = await loginWorkspace(emailTrimmed, password);
-      writeSession(
-        {
-          email: result.user.email,
-          name: result.user.name,
-          role: result.user.role,
-          token: result.token,
-          expires_at: result.expires_at,
-          signed_in_at: Date.now(),
-        },
-        remember,
-      );
-      toast({ title: "Signed in", message: `Opening ${targetLabel}.`, tone: "success" });
-      onAuthenticated(result.user.email);
+      if (isMfaChallenge(result)) {
+        setPassword("");
+        setMfaStep({ challenge: result.challenge, email: emailTrimmed });
+        return;
+      }
+      finishSignIn(result);
     } catch (err) {
       const msg = err instanceof Error ? err.message : "";
       const kind = classifySignInFailure(err);
@@ -149,6 +146,30 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
     } finally {
       setChecking(false);
     }
+  };
+
+  const finishSignIn = (result: LoginSession & { recovery_codes_remaining?: number; mfa_method?: string }) => {
+    writeSession(
+      {
+        email: result.user.email,
+        name: result.user.name,
+        role: result.user.role,
+        token: result.token,
+        expires_at: result.expires_at,
+        signed_in_at: Date.now(),
+      },
+      remember,
+    );
+    if (result.mfa_method === "recovery") {
+      toast({
+        title: "Signed in with a recovery code",
+        message: `${result.recovery_codes_remaining ?? 0} recovery codes left. Create new ones in Settings → Security.`,
+        tone: "warning",
+      });
+    } else {
+      toast({ title: "Signed in", message: `Opening ${targetLabel}.`, tone: "success" });
+    }
+    onAuthenticated(result.user.email);
   };
 
   const startSso = (type: SsoType, label: string) => {
@@ -198,6 +219,14 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
 
         <div className="lp-login-auth-inner">
             <div className="lp-login-auth-card">
+            {mfaStep ? (
+              <LoginMfaStep
+                challenge={mfaStep.challenge}
+                email={mfaStep.email}
+                onSignedIn={finishSignIn}
+                onBack={() => setMfaStep(null)}
+              />
+            ) : (<>
             <div className="lp-login-auth-head">
               <p className="lp-login-auth-kicker">Secure workspace access</p>
               <h2 id="login-form-title">Welcome back</h2>
@@ -357,6 +386,7 @@ export function LoginPage({ target, onAuthenticated, onBack, onLegal, onSignup, 
                 <span>Sign-in audited</span>
               </li>
             </ul>
+            </>)}
             {onLegal ? (
               <p className="lp-login-legal">
                 <AuthButton variant="link" onClick={() => onLegal("privacy")}>Privacy</AuthButton>

@@ -4,7 +4,7 @@
  * Badges must say exactly what the API enforces: session timeout is an idle
  * timeout only when the tenant turns enforcement on; the IP allowlist only on
  * the tenant custom domain with DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE on; MFA
- * is not enforced (design only).
+ * only while the tenant requires it (round 11).
  */
 import type { SecurityPosture } from "./api";
 
@@ -36,11 +36,20 @@ export function ipAllowlistRow(p: SecurityPosture): PostureRow {
   };
 }
 
-export function mfaRow(): PostureRow {
+export function mfaRow(p?: SecurityPosture | null): PostureRow {
+  const block = p?.enforcement?.mfa;
+  const on = Boolean(p?.mfa_enforced);
+  const counts =
+    typeof block?.members_total === "number" && typeof block?.members_enrolled === "number"
+      ? ` ${block.members_enrolled} of ${block.members_total} members have set it up.`
+      : "";
+  const sso = block?.sso_exempt === false ? " SSO sessions are held too." : " SSO sessions are exempt (the identity provider does MFA).";
   return {
-    title: "MFA required for admins",
-    desc: "Recorded policy. Login MFA is not enforced yet (design proposal in docs/MFA_ENFORCEMENT_DESIGN.md).",
-    on: false,
+    title: "Two-factor authentication",
+    desc: on
+      ? `Enforced: password sign-ins need an authenticator-app code; members without one can only reach setup.${sso} API keys are not affected.${counts}`
+      : "Available, not required. Turn on \"Require two-factor authentication\" under Enterprise to enforce it.",
+    on,
     pending: false,
   };
 }
