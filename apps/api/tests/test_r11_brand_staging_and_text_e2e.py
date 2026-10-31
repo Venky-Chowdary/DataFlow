@@ -126,9 +126,15 @@ def test_staging_table_is_internal_hidden_and_switches_with_the_flag(client, mon
                                 "ssl": False, **h.dest_config("postgresql"), "schema": schema})
 
         # Run 1, flag off: the legacy name, exactly as before.
+        from services import brand
+
+        art = brand.artifact("pre_ingestion_staging_table")
         summary = _run(client, src.id, dst.id, src_table, dest_table)
-        assert summary.get("staging_table") == legacy
-        assert _exists(legacy, schema)
+        # The stage name comes from the job and the brand artifact. A clean
+        # promote drops the stage (claude/r11-pg-writer), so it is not looked
+        # for in the database; nothing of ours is left behind under either name.
+        assert summary.get("staging_table") == legacy == f"{dest_table}{art.legacy}"
+        assert not _exists(legacy, schema) and not _exists(new, schema)
         listed = _listed(client, dst.id)
         assert dest_table in listed
         assert legacy not in listed, "the product's staging table is shown to the operator"
@@ -136,8 +142,8 @@ def test_staging_table_is_internal_hidden_and_switches_with_the_flag(client, mon
         # Run 2, flag on, into the table run 1 created.
         monkeypatch.setenv("DATAWRAP_BRAND_OBJECT_NAMES", "1")
         summary = _run(client, src.id, dst.id, src_table, dest_table)
-        assert summary.get("staging_table") == new
-        assert _exists(new, schema) and not _exists(legacy, schema)
+        assert summary.get("staging_table") == new == f"{dest_table}{brand.name_for_new('pre_ingestion_staging_table')}"
+        assert not _exists(new, schema) and not _exists(legacy, schema)
         assert sorted(h.query("postgresql", f"SELECT id, note FROM {schema}.{dest_table} ORDER BY id")) == ROWS
         created = [e for e in _audit("brand.object_name.created")
                    if e["details"].get("kind") == "pre_ingestion_staging_table"]
@@ -148,7 +154,7 @@ def test_staging_table_is_internal_hidden_and_switches_with_the_flag(client, mon
         monkeypatch.setenv("DATAWRAP_BRAND_OBJECT_NAMES", "0")
         summary = _run(client, src.id, dst.id, src_table, dest_table)
         assert summary.get("staging_table") == legacy
-        assert not _exists(new, schema)
+        assert not _exists(new, schema) and not _exists(legacy, schema)
         assert sorted(h.query("postgresql", f"SELECT id, note FROM {schema}.{dest_table} ORDER BY id")) == ROWS
     finally:
         h.drop_table("postgresql", src_table)

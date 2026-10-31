@@ -44,6 +44,7 @@ from services.db_type_utils import (
     dest_declares_column_ddl,
     normalize_dest_kind,
 )
+from services.append_delta_probe import probe_append_key_collisions_over_delta
 from services.destination_key_collision_probe import probe_append_key_collisions
 from services.preflight_file_plan import (
     _fit_scan_deadline,
@@ -1426,7 +1427,11 @@ def run_file_preflight(
     # The rows this run will read. An incremental append past a watermark only
     # writes the delta, so the collision probe must judge the delta — probing
     # the whole table refused every run after the first, on every engine.
-    destination_collision = probe_append_key_collisions(
+    destination_collision = probe_append_key_collisions_over_delta(
+        source_kind=source_kind, source_format=source_format,
+        source_connector_id=source_connector_id, source_config=source_config,
+        source_filter=dict(source_filter or {}), column_types=column_types or {},
+        read_scope=read_scope, probe=probe_append_key_collisions,
         mappings=mappings,
         source_columns=columns,
         sample_rows=sample_rows or [],

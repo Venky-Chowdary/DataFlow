@@ -58,11 +58,13 @@ def test_destination_collision_owns_its_root_cause() -> None:
     root = next(r for r in roots if r.kind == "destination_key_collision")
     assert "username" in root.summary
     assert "upsert" in root.recommended_fix.lower()
-    # The one control that resolves it is the sync mode, so no dedupe advice.
+    # The controls that resolve it are the sync mode (or the dedupe_skip
+    # duplicate policy, R11), so no advice to dedupe the source.
     blob = " ".join(
         [root.summary, root.recommended_fix, root.business_impact, *root.alternative_fixes]
     ).lower()
-    assert "dedupe" not in blob
+    assert "dedupe_skip" in blob and "incremental_deduped" in blob
+    assert "dedupe" not in blob.replace("dedupe_skip", "").replace("incremental_deduped", "")
     assert "duplicate rows in the source" not in blob
 
 

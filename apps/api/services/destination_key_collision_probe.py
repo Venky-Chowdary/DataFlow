@@ -54,6 +54,9 @@ APPEND_ONLY_SYNC_MODES = frozenset(
 
 MAX_PROBE_VALUES = 500
 
+#: Most keys one probe call checks (in MAX_PROBE_VALUES-sized queries).
+MAX_DELTA_PROBE_VALUES = 200_000
+
 #: Longest a planning tool spends comparing the append batch with the stored
 #: keys (D206). The comparison is an index lookup; the cap only bounds a lock
 #: queue or an engine that cannot use the index. Unfinished is "not probed",
@@ -597,7 +600,10 @@ def probe_destination_key_collisions(
             message="No single-column identity key resolved for collision probe",
             db_type=db_type,
         )
-    probe_values = batch_key_texts(values, limit=MAX_PROBE_VALUES)
+    # Every key of the batch/delta is probed, MAX_PROBE_VALUES per query: a
+    # collision past the first 500 keys used to pass the probe and abort the
+    # insert (QA round 11, M3).
+    probe_values = batch_key_texts(values, limit=MAX_DELTA_PROBE_VALUES)
     if not probe_values:
         return DestinationCollisionResult(
             status="skipped_no_values",
@@ -618,17 +624,23 @@ def probe_destination_key_collisions(
     try:
         if db_type in ("mongodb", "mongodb_atlas"):
             findings = _mongo_existing_keys(
-                cfg, destination_table, key, probe_values, limit
+                cfg, destination_table, key, probe_values[:MAX_PROBE_VALUES], limit
             )
         elif db_type in SQLISH_SOURCE_TYPES:
-            finished, findings = _bounded_destination_read(
-                f"checking the append batch's {key} values against destination "
-                f"{destination_table}",
-                cfg,
-                lambda: _sql_existing_keys(cfg, destination_table, key, probe_values, limit),
-            )
-            if not finished:
-                return _timed_out_result(destination_table, key, db_type, len(probe_values))
+            findings = []
+            for start in range(0, len(probe_values), MAX_PROBE_VALUES):
+                chunk = probe_values[start : start + MAX_PROBE_VALUES]
+                finished, found = _bounded_destination_read(
+                    f"checking the append batch's {key} values against destination "
+                    f"{destination_table}",
+                    cfg,
+                    lambda chunk=chunk: _sql_existing_keys(cfg, destination_table, key, chunk, limit),
+                )
+                if not finished:
+                    return _timed_out_result(destination_table, key, db_type, len(probe_values))
+                findings.extend(found or [])
+                if len(findings) >= limit:
+                    break
         else:
             return DestinationCollisionResult(
                 status="skipped_unsupported",
@@ -890,6 +902,16 @@ def live_single_column_unique_keys(
     return names
 
 
+#: What to do about an append that re-delivers stored keys (one wording for
+#: Validate and the writer): the modes that land an updated row, or the policy
+#: that keeps the stored row and loads only the new keys.
+APPEND_COLLISION_REMEDY = (
+    "Use sync mode incremental_deduped / incremental_upsert (or upsert) so an updated row replaces "
+    "the stored one, or set the duplicate policy to dedupe_skip to keep the "
+    "stored row and load only the new keys."
+)
+
+
 def refuse_enforced_append_before_write(
     *,
     destination_config: Mapping[str, Any] | None,
@@ -948,6 +970,6 @@ def refuse_enforced_append_before_write(
                 f"Append refused before insert: {len(result.findings)} key "
                 f"value(s) in this batch are already stored on {key}, which "
                 "enforces uniqueness. No rows from this batch were written. "
-                "Switch this sync to upsert/merge or overwrite."
+                + APPEND_COLLISION_REMEDY
             )
     return None

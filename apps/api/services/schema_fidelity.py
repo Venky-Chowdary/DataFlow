@@ -1072,6 +1072,25 @@ def plan_create_new_fidelity(
             continue
         default_sql = _normalize_default_sql(expr, dest, _dest_type(dest_col))
         dest_dialect = (dest or "").lower()
+        from services.pg_default_legal import pg_boolean_default
+
+        pg_bool = pg_boolean_default(default_sql, _dest_type(dest_col), dest_dialect)
+        if pg_bool == "":
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="default",
+                    name=dest_col,
+                    status="unsupported",
+                    reason=(
+                        "PostgreSQL BOOLEAN takes only true/false; this source "
+                        "default is not a boolean literal. The column is created "
+                        "without it."
+                    ),
+                    source_detail=str(expr)[:200],
+                )
+            )
+            continue
+        default_sql = pg_bool or default_sql
         if dest_dialect in {"mysql", "mariadb"} and not mysql_default_is_legal(
             default_sql, _dest_type(dest_col), dialect=dest_dialect
         ):

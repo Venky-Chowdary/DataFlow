@@ -446,13 +446,30 @@ def _compute_active_checksum(
 
 
 def _dest_engine_count(conn: Any, sql: str) -> int | None:
-    """Dest-engine COUNT(*). Failure is unmeasured — never 0-from-error."""
+    """Dest-engine COUNT(*). Failure is unmeasured — never 0-from-error.
+
+    The COUNT runs inside a savepoint (``begin_nested``): a COUNT cancelled
+    under load used to leave the write transaction aborted, so the soft-delete
+    UPDATE that followed failed "current transaction is aborted" (R11, M5b).
+    """
     import sqlalchemy as sa
 
+    nested = None
+    try:
+        nested = conn.begin_nested()
+    except Exception:  # noqa: BLE001 - engines without savepoints count bare
+        nested = None
     try:
         row = conn.execute(sa.text(sql)).fetchone()
+        if nested is not None:
+            nested.commit()
     except Exception as exc:
         logging.getLogger(__name__).info("mirror transition COUNT failed: %s", exc)
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception as rb_exc:  # noqa: BLE001 - the COUNT stays unmeasured
+                logging.getLogger(__name__).debug("COUNT savepoint rollback failed: %s", rb_exc)
         return None
     if row is None or row[0] is None:
         return None
@@ -949,7 +966,11 @@ def apply_inferred_soft_deletes(
             if delete_mode == "soft":
                 _ensure_soft_delete_column(conn, qualified, soft_delete_column)
             dialect_name = _dialect_of(conn) or engine_dialect
-            _reap_orphan_staging(conn, schema_name or "", dialect_name)
+            conn.commit()
+            # The orphan sweep commits, rolls back and bounds lock waits on the
+            # connection it is given: never the write connection (R11).
+            with engine.connect() as reap_conn:
+                _reap_orphan_staging(reap_conn, schema_name or "", dialect_name)
             _create_pk_staging(conn, stg_qualified, qualified, pk_quoted, dialect_name)
             conn.commit()
             source_key_rows = _stream_insert_pk_staging(

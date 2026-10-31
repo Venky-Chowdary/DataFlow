@@ -283,6 +283,9 @@ def attach_rollback_plan(
         or (dest_summary.get("pre_ingestion_staging") or {}).get("staging_table")
         or None
     )
+    if (dest_summary.get("pre_ingestion_staging") or {}).get("retained") is False:
+        # A clean promote already dropped the stage (R11 M10): nothing to discard.
+        staging = None
     plan = plan_rollback(
         job_id=job_id,
         sync_mode=sync_mode or str(dest_summary.get("sync_mode") or ""),
