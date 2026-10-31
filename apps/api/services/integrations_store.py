@@ -946,5 +946,6 @@ def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
             "role": resolve_stored_api_key_role(item.get("role")),
             "scopes": item.get("scopes"),
             "kind": item.get("kind") or "api_key",
+            "workspace_id": item.get("workspace_id") or "",
         }
     return None

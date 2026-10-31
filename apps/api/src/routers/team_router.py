@@ -25,7 +25,6 @@ from services.team_store import (
     TeamStoreError,
     WorkspaceNotFound,
     add_workspace_member,
-    can_read_workspace,
     create_workspace,
     delete_workspace,
     get_workspace,
@@ -95,25 +94,65 @@ def _actor(request: Request) -> str:
     return normalize_email(getattr(request.state, "user_email", None) or "") or "anonymous"
 
 
-def _is_platform_admin(email: str) -> bool:
-    """Whether this signed-in identity administers the deployment.
+def _is_platform_admin(request: Request) -> bool:
+    """Whether the *request principal* administers the deployment.
 
-    ``lookup_user`` covers both the environment-provisioned bootstrap admin and
-    stored accounts, so a deployment always has someone who can create the first
-    workspace. The decision itself is the tenant scope's single definition of an
-    unrestricted actor (which also lets a deployment with authentication
-    switched off have its single local operator as admin).
+    Decided on the identity the auth middleware attached — for an API key, the
+    key itself (``tenant_scope.actor_is_unrestricted``: an ``admin`` key minted
+    by a platform admin). Looking the creator's email up instead made every
+    key a platform admin minted, even a viewer key, a platform admin here.
     """
     from services.tenant_scope import actor_is_unrestricted
 
-    return actor_is_unrestricted(lookup_user(email))
+    user = getattr(request.state, "user", None)
+    if user is None:
+        email = getattr(request.state, "user_email", None)
+        user = lookup_user(email) if email else None
+    return actor_is_unrestricted(user)
 
 
 def _require_platform_admin(request: Request) -> str:
     actor = _actor(request)
-    if not _is_platform_admin(actor):
+    if not _is_platform_admin(request):
         raise HTTPException(status_code=403, detail="Platform administrator role required")
     return actor
+
+
+def _principal(request: Request, workspace_id: str):
+    from services.effective_principal import request_principal
+
+    return request_principal(request, workspace_id)
+
+
+def _audit_refusal(
+    error: TeamStoreError,
+    *,
+    principal: Any,
+    operation: str,
+    workspace_id: str,
+    target: str,
+    attempted_role: str | None,
+    from_role: str = "",
+) -> None:
+    """Every refused membership change names who tried what on whom."""
+    if isinstance(error, (WorkspaceNotFound, MemberAlreadyExists, TeamStoreBusy)):
+        return
+    _audit(
+        "team.member.denied",
+        actor=principal.email,
+        resource=f"/team/workspaces/{workspace_id}/members/{target}",
+        level="warn",
+        details={
+            "workspace_id": workspace_id,
+            "operation": operation,
+            "target": target,
+            "attempted_role": attempted_role,
+            "from_role": from_role or None,
+            "reason": getattr(error, "reason", "refused"),
+            "detail": str(error),
+            "principal": principal.describe(),
+        },
+    )
 
 
 def _audit(action: str, *, actor: str, resource: str, level: str, details: dict[str, Any]) -> None:
@@ -288,7 +327,7 @@ async def delete_user_route(email: str, request: Request):
 async def get_workspaces(request: Request):
     """Workspaces the caller may act in — every one for a platform administrator."""
     actor = _actor(request)
-    platform_admin = _is_platform_admin(actor)
+    platform_admin = _is_platform_admin(request)
     workspaces = list_workspaces() if platform_admin else list_workspaces_for_user(actor)
     return {
         "workspaces": [
@@ -352,11 +391,9 @@ async def delete_workspace_route(workspace_id: str, request: Request):
 
 @router.get("/workspaces/{workspace_id}/members")
 async def get_members(workspace_id: str, request: Request):
-    actor = _actor(request)
-    platform_admin = _is_platform_admin(actor)
     if not get_workspace(workspace_id):
         raise HTTPException(status_code=404, detail="Workspace not found")
-    if not platform_admin and not can_read_workspace(workspace_id, actor):
+    if not _principal(request, workspace_id).member_role:
         raise HTTPException(status_code=403, detail="Workspace access denied")
     members = list_workspace_members(workspace_id)
     accounts = {str(u.get("email")): u for u in list_users()}
@@ -391,13 +428,13 @@ async def post_member(workspace_id: str, body: MemberBody, request: Request):
     rather than leaving an admin to discover it at the login screen.
     """
     actor = _actor(request)
-    platform_admin = _is_platform_admin(actor)
     if not get_workspace(workspace_id):
         raise HTTPException(status_code=404, detail="Workspace not found")
     try:
         email = validate_email(body.email)
     except UserStoreError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
+    principal = _principal(request, workspace_id)
     # Membership first, so authority and the duplicate refusal are both decided
     # before a login is minted: creating an account for someone who is already a
     # member left a fresh one-time password behind a 409 nobody could act on.
@@ -407,11 +444,19 @@ async def post_member(workspace_id: str, body: MemberBody, request: Request):
             email=email,
             role=body.role,
             added_by=actor,
-            actor_is_platform_admin=platform_admin,
             refuse_existing=True,
             name=body.name,
+            principal=principal,
         )
     except TeamStoreError as e:
+        _audit_refusal(
+            e,
+            principal=principal,
+            operation="add",
+            workspace_id=workspace_id,
+            target=email,
+            attempted_role=body.role,
+        )
         raise _http_error(e) from e
     account = get_user(email)
     issued: str | None = None
@@ -460,15 +505,25 @@ async def patch_member_role(
         raise HTTPException(
             status_code=404, detail=f"{target} is not a member of this workspace"
         )
+    principal = _principal(request, workspace_id)
     try:
         membership = add_workspace_member(
             workspace_id=workspace_id,
             email=target,
             role=body.role,
             added_by=actor,
-            actor_is_platform_admin=_is_platform_admin(actor),
+            principal=principal,
         )
     except TeamStoreError as e:
+        _audit_refusal(
+            e,
+            principal=principal,
+            operation="role_change",
+            workspace_id=workspace_id,
+            target=target,
+            attempted_role=body.role,
+            from_role=previous,
+        )
         raise _http_error(e) from e
     _audit(
         "team.member.role_change",
@@ -488,14 +543,25 @@ async def patch_member_role(
 @router.delete("/workspaces/{workspace_id}/members/{email}")
 async def delete_member(workspace_id: str, email: str, request: Request):
     actor = _actor(request)
+    principal = _principal(request, workspace_id)
+    previous = get_workspace_role(workspace_id=workspace_id, email=email)
     try:
         remove_workspace_member(
             workspace_id=workspace_id,
             email=email,
             removed_by=actor,
-            actor_is_platform_admin=_is_platform_admin(actor),
+            principal=principal,
         )
     except TeamStoreError as e:
+        _audit_refusal(
+            e,
+            principal=principal,
+            operation="remove",
+            workspace_id=workspace_id,
+            target=normalize_email(email),
+            attempted_role=None,
+            from_role=previous,
+        )
         raise _http_error(e) from e
     _audit(
         "team.member.remove",
