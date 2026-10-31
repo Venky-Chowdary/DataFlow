@@ -46,6 +46,7 @@ from services.source_reread import (
     align_source_populations,
     alignment_when_write_pass_empty,
     reread_pagination_plan,
+    reread_loop_supports,
     should_reread_source,
 )
 from services.primary_key import dest_is_key_addressed
@@ -3008,7 +3009,9 @@ def _stream_database_transfer_impl(
             )
             + "Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second scan."
         )
-    elif _reread and run.cfg.src_read_type in REREAD_SCAN_SOURCES:
+    elif _reread and reread_loop_supports(
+        run.cfg.src_read_type, partial_write_pass=_partial_write_pass
+    ):
         # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
         from connectors.sql_snapshot_scan import close_table_scan
 
