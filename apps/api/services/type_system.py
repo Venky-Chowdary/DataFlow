@@ -4061,8 +4061,9 @@ def code_page_sink_would_collapse(
     if not dest_db:
         return False
     src_engine = source_db or active_source_engine()
-    # D212: only a source that declares a single-byte code page is safe on a
-    # code-page sink; an Oracle VARCHAR2 or an unstated MySQL charset is not.
+    # D212: a source that declares a single-byte code page is safe on a
+    # code-page sink; any other source is a collapse when a value it holds
+    # does not encode in the destination's page (see the population fit).
     if source_text_declared_single_byte(src_engine, source_type):
         return False
     if normalize_logical_type(source_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
@@ -4082,7 +4083,15 @@ def code_page_sink_would_collapse(
         return False
     fit = _code_page_population_fit(population, dest_db, target_type)
     if fit is None:
-        return True
+        # A source measured Unicode (PostgreSQL, a file, a utf8mb4 column, a
+        # national carrier) on an unread code page stays a collapse. An
+        # unmeasured one (an Oracle VARCHAR2, a MySQL column with no stated
+        # charset, an unbound engine) is judged by its values: no sampled
+        # value outside the page is no evidence of loss. The writer still
+        # quarantines a later cell the page cannot hold (D212).
+        return source_text_is_unicode(src_engine) or source_column_holds_unicode(
+            src_engine, source_type
+        ) or is_national_string_carrier(source_type)
     return not fit
 
 

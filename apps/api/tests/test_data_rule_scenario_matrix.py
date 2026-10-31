@@ -152,8 +152,20 @@ def build_scenarios() -> list[Scenario]:
                     dest=dest,
                     dest_family=fam,
                     mode=mode,
-                    expect="warn",
-                    note="U+200B is valid Unicode the destination keeps — warn, never block (D69)",
+                    # SQL Server VARCHAR under the default collation is a
+                    # Windows-1252 code page. Live SQL Server 2022
+                    # (SQL_Latin1_General_CP1_CI_AS): 'hello\u200bworld'
+                    # inserted into VARCHAR(50) reads back as 'hello?world'
+                    # (bytes 68656c6c6f3f776f726c64) while NVARCHAR and a
+                    # *_UTF8 collation keep U+200B. The destination does not
+                    # keep it there, so the code-page sink blocks (D212).
+                    expect="block" if dest == "sqlserver" else "warn",
+                    note=(
+                        "U+200B into a SQL Server code-page VARCHAR is stored as '?' "
+                        "(live evidence) — block, never a silent rewrite (D212)"
+                        if dest == "sqlserver"
+                        else "U+200B is valid Unicode the destination keeps — warn, never block (D69)"
+                    ),
                     runner="integrity",
                 )
             )
