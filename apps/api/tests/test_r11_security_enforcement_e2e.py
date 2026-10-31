@@ -417,3 +417,55 @@ def test_unset_hop_count_and_a_public_peer_blocks(ent, hops_unset):
         "/api/v1/workspace/tenant", json={"workspace_id": ent.workspace("R11 hops guard"), "name": "G",
                                           "ip_allowlist": LIST})
     assert guard.status_code == 400 and OUTSIDE in guard.json()["detail"]
+
+
+# ── MFA-held sessions are still inside the IP allowlist ─────────────────────
+
+
+def test_mfa_held_session_cannot_enrol_from_outside_the_allowlist(ent, one_proxy, monkeypatch):
+    """A stolen password from outside the list must not enrol an attacker's
+    authenticator on an account that has not enrolled yet."""
+    from test_r11_mfa_e2e import code_for
+
+    real = time.time
+    offset = [0.0]
+    monkeypatch.setattr(time, "time", lambda: real() + offset[0])
+
+    ws = ent.workspace("R11 mfa + allowlist")
+    admin = ent.admin
+    inside = {"X-Workspace-Id": ws, **_from(INSIDE)}
+    # The admin enrols first (the MFA policy requires it), from inside.
+    started = admin.post("/api/v1/auth/mfa/totp/enroll", json={}, headers=inside)
+    assert started.status_code == 200, started.text
+    secret = started.json()["secret"]
+    assert admin.post("/api/v1/auth/mfa/totp/confirm", json={"code": code_for(secret)},
+                      headers=inside).status_code == 200
+    offset[0] += 30
+    saved = admin.post("/api/v1/workspace/tenant",
+                       json={"workspace_id": ws, "name": "Both", "mfa_required": True, "ip_allowlist": LIST},
+                       headers=inside)
+    assert saved.status_code == 200, saved.text
+
+    member = ent.member(email="r11-mfa-held@example.com", workspace_id=ws, role="editor")
+    held = member.get(SETTINGS, headers=_from(INSIDE))
+    assert held.status_code == 403 and held.json()["reason"] == "mfa_enrollment_required"
+
+    # From outside the list: refused on the enrolment routes too (with or
+    # without a workspace header), and audited.
+    no_header = ent.bearer(member.headers["Authorization"].split(" ", 1)[1])
+    for client in (member, no_header):
+        for path, body in (("/api/v1/auth/mfa/totp/enroll", {}),
+                           ("/api/v1/auth/mfa/totp/confirm", {"code": "123456"})):
+            res = client.post(path, json=body, headers=_from(OUTSIDE))
+            assert res.status_code == 403, (path, res.text)
+            assert res.json()["reason"] == "ip_not_in_workspace_allowlist"
+    assert any(e["details"]["path"] == "/api/v1/auth/mfa/totp/enroll"
+               for e in _events(ent, "workspace.ip_allowlist.blocked"))
+
+    # From inside: enrolment works and the session is released.
+    started = member.post("/api/v1/auth/mfa/totp/enroll", json={}, headers=_from(INSIDE))
+    assert started.status_code == 200, started.text
+    secret = started.json()["secret"]
+    done = member.post("/api/v1/auth/mfa/totp/confirm", json={"code": code_for(secret)}, headers=_from(INSIDE))
+    assert done.status_code == 200, done.text
+    assert member.get(SETTINGS, headers=_from(INSIDE)).status_code == 200
