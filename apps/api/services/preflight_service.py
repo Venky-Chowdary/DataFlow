@@ -369,6 +369,7 @@ def run_file_preflight(
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
     resume: bool = False,
+    source_encoding: dict[str, Any] | None = None,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     population_replay: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None,
     rows_are_population: bool = False,
@@ -1395,11 +1396,17 @@ def run_file_preflight(
                         dest_db=destination_db_type,
                         sync_mode=sync_mode,
                     )
+                    from services.dest_key_oracle import engine_key_oracle
+
                     source_key_collisions = probe_transformed_key_collisions(
                         _key_rows if _key_rows is not None else (sample_rows or []),
                         key_sources=list(source_pk_cols),
                         transforms=_key_xforms,
                         equalizers=_key_eq,
+                        engine_groups=engine_key_oracle(
+                            _key_eq, list(source_pk_cols), dest_kind=dest_kind,
+                            destination_config=destination_config,
+                        ),
                     )
             else:
                 source_duplicate_probe_status = "skipped_no_pk"
@@ -2571,6 +2578,9 @@ def run_file_preflight(
             ),
         ]
         out["passed"] = False
+    from services.source_encoding_guess import apply_encoding_gate, preflight_file_encoding
+
+    apply_encoding_gate(out, source_encoding or preflight_file_encoding(source_format, source_config))
     out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
     out["total_gates"] = len(out["gates"])
     out["readiness_score"] = round(
