@@ -2,7 +2,9 @@
 
 A mirror sync keeps the destination table in sync with the source:
 - source rows are upserted (business columns only)
-- destination rows no longer in the source are soft-deleted
+- destination rows no longer in the source are soft-deleted (``_deleted``
+  set, ``_deleted_at`` stamped, the physical row kept) -- the default; a
+  stream contract may declare ``delete_mode="hard"`` to DELETE them instead
 - rows that reappear after being deleted are reactivated.
 
 ``_deleted`` is dest-owned lattice, not a business column. Fivetran SET
@@ -35,16 +37,35 @@ from services.staging_reaper import (
 )
 
 SOFT_DELETE_COLUMN = "_deleted"
+#: When the inferred-delete pass flagged the row (NULL while active).
+SOFT_DELETE_AT_COLUMN = "_deleted_at"
 _KEY_SEP = "\x1f"
+
+
+def resolve_mirror_delete_mode(contract: Any = None, options: Any = None) -> str:
+    """The mirror delete behaviour a run applies: ``soft`` unless declared.
+
+    Studio, the schedule form, help docs and docs/ZERO_LOSS_PROPERTIES.md all
+    promise a soft delete (``_deleted``; physical COUNT(*) stays). An
+    undeclared contract defaulted to a hard DELETE, so QA's mirror dropped
+    552 -> 540 rows with no ``_deleted`` column (QA demo 1030). ``hard`` is an
+    explicit opt-in on the stream contract (``delete_mode``).
+    """
+    declared = str(
+        (getattr(contract, "delete_mode", "") if contract is not None else "")
+        or (options or {}).get("delete_mode")
+        or ""
+    ).strip().lower()
+    return declared or "soft"
 
 
 def lattice_column_names(columns: Any) -> tuple[str, ...]:
     """Dest-owned mirror lattice columns present on this table object."""
-    folded = SOFT_DELETE_COLUMN.casefold()
+    folded = {SOFT_DELETE_COLUMN.casefold(), SOFT_DELETE_AT_COLUMN.casefold()}
     found: list[str] = []
     for raw in columns:
         name = str(getattr(raw, "name", raw) or "")
-        if name and name.casefold() == folded:
+        if name and name.casefold() in folded:
             found.append(name)
     return tuple(found)
 
@@ -265,18 +286,78 @@ def _ensure_soft_delete_column(
         type_sql = "INTEGER"
     else:
         type_sql = "BOOLEAN"
-    ddl = (
-        f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} {type_sql} DEFAULT {false_lit}"
+    _add_lattice_column(
+        conn, _add_column_ddl(dialect_name, qualified, col_quoted, f"{type_sql} DEFAULT {false_lit}")
     )
+    at_quoted = quote_stored_identifier(dialect_name, SOFT_DELETE_AT_COLUMN)
+    _add_lattice_column(
+        conn, _add_column_ddl(dialect_name, qualified, at_quoted, _timestamp_type(dialect_name))
+    )
+
+
+def _add_column_ddl(dialect: str, qualified: str, col_quoted: str, spec: str) -> str:
+    from services.dialect_profiles import warehouse_sql_quote_dialect
+
+    family = warehouse_sql_quote_dialect(dialect)
+    if family == "oracle":
+        return f"ALTER TABLE {qualified} ADD ({col_quoted} {spec})"
+    if family == "sqlserver" or dialect.lower().startswith("mssql"):
+        return f"ALTER TABLE {qualified} ADD {col_quoted} {spec}"
+    return f"ALTER TABLE {qualified} ADD COLUMN {col_quoted} {spec}"
+
+
+def _timestamp_type(dialect: str) -> str:
+    from services.dialect_profiles import warehouse_sql_quote_dialect
+
+    low = (dialect or "").lower()
+    family = warehouse_sql_quote_dialect(dialect)
+    if low.startswith("postgres") or low in {"redshift", "duckdb"}:
+        return "TIMESTAMPTZ" if low != "redshift" else "TIMESTAMP"
+    if low in {"mysql", "mariadb"}:
+        return "DATETIME(6)"
+    if family == "sqlserver" or low.startswith("mssql"):
+        return "DATETIME2"
+    if low == "snowflake":
+        return "TIMESTAMP_TZ"
+    return "TIMESTAMP"
+
+
+def _add_lattice_column(conn: Any, ddl: str) -> None:
+    """ADD the column; an existing column (or a refused ALTER) is not an error."""
+    import sqlalchemy as sa
+
     try:
         conn.execute(sa.text(ddl))
         conn.commit()
-        return
     except Exception:
         try:
             conn.rollback()
         except Exception as exc:
             logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
+
+
+def _has_column(conn: Any, qualified: str, column: str) -> bool:
+    """SELECT the column WHERE 1=0 inside a savepoint; False when absent."""
+    import sqlalchemy as sa
+
+    col_q = quote_stored_identifier(_dialect_of(conn), column)
+    nested = None
+    try:
+        nested = conn.begin_nested()
+    except Exception:
+        nested = None
+    try:
+        conn.execute(sa.text(f"SELECT {col_q} FROM {qualified} WHERE 1=0"))  # nosec B608
+        if nested is not None:
+            nested.commit()
+        return True
+    except Exception:
+        if nested is not None:
+            try:
+                nested.rollback()
+            except Exception as exc:
+                logging.getLogger(__name__).debug("Exception suppressed: %s", exc, exc_info=exc)
+        return False
 
 
 def _update_deleted_batch(
@@ -473,9 +554,12 @@ def apply_inferred_deletes_via_staging(
             f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
         )
         if lattice_present:
+            at_clear = ""
+            if _has_column(conn, target_qualified, SOFT_DELETE_AT_COLUMN):
+                at_clear = f", {quote_stored_identifier(dialect_name, SOFT_DELETE_AT_COLUMN)} = NULL"
             conn.execute(
                 sa.text(
-                    f"UPDATE {target_qualified} SET {col_quoted} = {false_lit} "  # nosec B608
+                    f"UPDATE {target_qualified} SET {col_quoted} = {false_lit}{at_clear} "  # nosec B608
                     f"WHERE {deleted_pred} AND EXISTS "
                     f"(SELECT 1 FROM {staging_from} WHERE {join_pred})"
                 )
@@ -513,10 +597,16 @@ def apply_inferred_deletes_via_staging(
         f"WHERE {active_pred} "
         f"AND NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred})",
     )
+    # ``_deleted_at`` records when the flag was set; a reactivated row clears it.
+    at_set = at_clear = ""
+    if _has_column(conn, target_qualified, SOFT_DELETE_AT_COLUMN):
+        at_q = quote_stored_identifier(dialect_name, SOFT_DELETE_AT_COLUMN)
+        at_set = f", {at_q} = CURRENT_TIMESTAMP"
+        at_clear = f", {at_q} = NULL"
     conn.execute(
         sa.text(
             f"UPDATE {target_qualified} "  # nosec B608
-            f"SET {col_quoted} = {false_lit} "
+            f"SET {col_quoted} = {false_lit}{at_clear} "
             f"WHERE EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred}) "
             f"AND {deleted_pred}"
         )
@@ -524,7 +614,7 @@ def apply_inferred_deletes_via_staging(
     conn.execute(
         sa.text(
             f"UPDATE {target_qualified} "  # nosec B608
-            f"SET {col_quoted} = {true_lit} "
+            f"SET {col_quoted} = {true_lit}{at_set} "
             f"WHERE NOT EXISTS (SELECT 1 FROM {staging_from} WHERE {join_pred}) "
             f"AND {active_pred}"
         )

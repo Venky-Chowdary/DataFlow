@@ -47,6 +47,8 @@ export type ConservationLedger = {
   rows_shaped_out: number;
   rows_source_filtered: number;
   shape_recipe_hash: string;
+  /** Mirror only: "soft" (_deleted flags, physical COUNT(*) stays) or a declared "hard" DELETE. */
+  mirror_delete_mode: string;
 };
 
 export type StreamLedgerSlice = {
@@ -135,7 +137,13 @@ export function readConservationLedger(
     rows_shaped_out: num(raw.rows_shaped_out) ?? 0,
     rows_source_filtered: num(raw.rows_source_filtered) ?? 0,
     shape_recipe_hash: String(raw.shape_recipe_hash ?? ""),
+    mirror_delete_mode: String(raw.mirror_delete_mode ?? ""),
   };
+}
+
+/** True when the run declared a hard-delete mirror (rows DELETEd, no _deleted flags). */
+export function isHardDeleteMirror(ledger: { conservation_kind?: string; mirror_delete_mode?: string } | null | undefined): boolean {
+  return ledger?.conservation_kind === "mirror" && ledger?.mirror_delete_mode === "hard";
 }
 
 function parsePerStream(value: unknown): StreamLedgerSlice[] | null {
@@ -381,7 +389,9 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
       return {
         value: Number(ledger.active_count).toLocaleString(),
         label: running ? "Active so far" : "Active at dest",
-        title: ledger.note || "Dest-engine COUNT(*) WHERE NOT _deleted. Physical COUNT(*) does not drop.",
+        title: ledger.note || (isHardDeleteMirror(ledger)
+          ? "Dest-engine COUNT(*). Keys missing from the source were deleted (hard delete declared)."
+          : "Dest-engine COUNT(*) WHERE NOT _deleted. Physical COUNT(*) does not drop."),
         measured: true,
         tone: unbalanced ? "danger" : "ok",
       };
@@ -706,7 +716,7 @@ function identityCellsForKind(ledger: ConservationLedger): LedgerIdentityCell[] 
   if (ledger.conservation_kind === "mirror") {
     return [
       { label: "Active", value: fmt(ledger.active_count) },
-      { label: "Inferred deletes", value: fmt(ledger.inferred_deletes) },
+      { label: isHardDeleteMirror(ledger) ? "Deleted (hard)" : "Inferred deletes", value: fmt(ledger.inferred_deletes) },
       { label: "Reactivated", value: fmt(ledger.reactivated) },
       { label: "Physical COUNT(*)", value: fmt(ledger.dest_count) },
     ];

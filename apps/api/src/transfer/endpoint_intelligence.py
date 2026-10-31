@@ -95,6 +95,11 @@ def _joined_object_key(endpoint: Any, cfg: dict[str, Any], raw: str) -> str:
     key = str(raw or "").strip()
     if not key:
         return ""
+    from .object_path import source_pattern_sample_key
+
+    picked = source_pattern_sample_key(endpoint, cfg, key, _s3_family_format)
+    if picked:
+        return picked
     schema = str(cfg.get("schema") or getattr(endpoint, "schema", "") or "")
     return normalize_object_base_key(key, schema, str(cfg.get("file_format") or ""))
 
@@ -309,7 +314,9 @@ def _introspect_endpoint_guarded(
     scope_cfg = {
         "host": str(endpoint.host or ""),
         "connection_string": str(endpoint.connection_string or ""),
-        "endpoint_url": str((endpoint.extra or {}).get("endpoint_url") or ""),
+        "endpoint_url": str(
+            endpoint.endpoint_url or (endpoint.extra or {}).get("endpoint_url") or ""
+        ),
         "type": str(endpoint.format or endpoint.kind or ""),
         "workspace_id": str((endpoint.extra or {}).get("workspace_id") or ""),
     }
@@ -685,6 +692,10 @@ def _introspect_endpoint_impl(
             username=cfg.get("username", ""), password=cfg.get("password", ""),
             schema=cfg.get("schema", ""), connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
+            # The S3-compatible endpoint the read dials; dropped, Studio's
+            # probe signed for AWS and said "Access denied" (QA demo 1030).
+            endpoint_url=str(cfg.get("endpoint_url") or ""),
+            path_style=bool(cfg.get("path_style")),
         )
         out["connected"] = probe.ok
         out["objects"] = [{"name": t, "type": "object"} for t in probe.tables]

@@ -113,6 +113,15 @@ def run_plan_mapping(
         job_id=str(plan_id or "").strip(),
     )
 
+    from services.schema_drift_map_review import flag_rename_suggestions
+
+    flag_rename_suggestions(
+        list(result.get("mappings") or []),
+        source_columns=list(plan.source_columns),
+        target_columns=list(plan.target_columns),
+        schema_policy=str(policies.get("schema_policy", "manual_review")),
+        table_exists=table_exists,
+    )
     updated = add_mapping_revision(plan_id, result)
     append_audit_event(
         action="transfer_plan.mapped",

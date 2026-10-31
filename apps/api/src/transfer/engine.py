@@ -2544,12 +2544,10 @@ class UniversalTransferEngine:
                         _mirror_contract = _resolve_mirror_contract(
                             list(getattr(request, "stream_contracts", None) or [])
                         )
-                        # D38: docs default is a hard delete; ``_deleted``
-                        # tombstones only when the contract declares soft.
-                        _mirror_delete_mode = (
-                            (_mirror_contract.delete_mode if _mirror_contract else "")
-                            or "hard"
-                        )
+                        # Soft delete is the default; hard only when declared.
+                        from services.mirror_engine import resolve_mirror_delete_mode
+
+                        _mirror_delete_mode = resolve_mirror_delete_mode(_mirror_contract)
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
                             records,

@@ -566,6 +566,15 @@ async def map_columns_route(body: MapColumnsRequest):
             prior_mappings=list(body.prior_mappings or []),
             job_id=str(body.job_id or "").strip(),
         )
+    from services.schema_drift_map_review import flag_rename_suggestions
+
+    flag_rename_suggestions(
+        result["mappings"],
+        source_columns=list(body.source_columns or []),
+        target_columns=list(body.target_columns or []),
+        schema_policy=body.schema_policy or "manual_review",
+        table_exists=body.destination_table_exists,
+    )
     nested_fields: list[dict[str, str]] = []
     try:
         from services.json_intelligence import flatten_column_recommendations

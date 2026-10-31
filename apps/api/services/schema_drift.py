@@ -1219,6 +1219,23 @@ def schema_review_copy(drift: dict[str, Any], *, policy: str, column_phrase: str
     contract that no longer matches still says drift and can be acknowledged.
     """
     saved = bool((drift or {}).get("saved_contract", True))
+    renames = [r for r in (drift or {}).get("auto_matched_renames") or [] if isinstance(r, dict)]
+    if renames:
+        pairs = ", ".join(
+            f"{r.get('column')} → {r.get('to')} ({round(float(r.get('confidence') or 0) * 100)}% auto-match)"
+            for r in renames[:6]
+        )
+        return {
+            "gate_id": "schema_drift",
+            "message": (
+                f"Source column renamed: {pairs}. Policy '{policy}' needs your "
+                "approval — open Map and approve or remap the column, or "
+                "acknowledge drift for this run."
+            ),
+            "remediation_kind": "review_mappings",
+            "ack_required": True,
+            "rule_id": "schema_drift.rename",
+        }
     if saved:
         return {
             "gate_id": "schema_drift",
@@ -1279,6 +1296,14 @@ def schema_review_copy(drift: dict[str, Any], *, policy: str, column_phrase: str
         "ack_required": False,
         "rule_id": "schema_mismatch.add_column",
     }
+
+
+from services.schema_drift_map_review import (  # noqa: E402
+    approved_in_map,
+    auto_matched_renames,
+    rename_issue,
+    strip_map_approved,
+)
 
 
 def detect_schema_drift(
@@ -1741,9 +1766,44 @@ def detect_schema_drift(
                 "new_type": str(typ),
                 "nullable": True,
                 "reason": "mapped_target_absent",
+                # An approved create-new row in Map is the review manual_review
+                # asks for; without it the gate re-derived the ADD and looped.
+                "approved_in_map": approved_in_map(mapping),
             })
             present.add(tgt.lower())
         classification["additive"] = additive
+
+    # A cross-name auto-match onto an existing column whose old name left the
+    # source is a rename (dropped + new column), never a silent pass under a
+    # policy that asks for manual approval (QA demo 1030: 82% semantic match).
+    map_renames: list[dict[str, Any]] = []
+    if live_ddl_contract and active_mappings and normalize_schema_policy(
+        schema_policy
+    ) in {"manual_review", "type_locked"}:
+        map_renames = auto_matched_renames(
+            active_mappings,
+            source_columns=source_columns,
+            target_columns=target_columns,
+            source_schema=source_schema,
+        )
+        if map_renames:
+            if not isinstance(classification, dict):
+                classification = {
+                    "additive": [], "breaking": [], "severity": "none", "renamed": [],
+                }
+            breaking = list(classification.get("breaking") or [])
+            named = {str(b.get("column") or "").lower() for b in breaking}
+            for item in map_renames:
+                if str(item["column"]).lower() not in named:
+                    breaking.append(item)
+            classification["breaking"] = breaking
+            classification["renamed"] = [
+                *list(classification.get("renamed") or []),
+                *[r for r in map_renames if not r.get("approved_in_map")],
+            ]
+            if any(not r.get("approved_in_map") for r in map_renames):
+                classification["severity"] = "breaking"
+    map_approved_changes = strip_map_approved(classification)
 
     # Destination-only columns the source never fed are not drift. A stored
     # fingerprint of the mapped columns alone used to call the extra destination
@@ -1780,6 +1840,15 @@ def detect_schema_drift(
             "mapping contract."
         )
     non_breaking_audit: list[dict[str, Any]] = list(evolution.get("audit") or [])
+    if map_approved_changes:
+        non_breaking_audit.append({
+            "decision": "approved_in_map",
+            "changes": [
+                {k: c.get(k) for k in ("kind", "column", "to", "source", "confidence") if c.get(k) is not None}
+                for c in map_approved_changes
+            ],
+            "note": "The operator approved these schema changes in Map.",
+        })
     if dest_only_preserve:
         non_breaking_audit.append({
             "decision": "auto_pass",
@@ -1819,10 +1888,14 @@ def detect_schema_drift(
             f"Source column(s) removed: {', '.join(soft_drops[:8])} — "
             "destination column(s) keep their history and are not written"
         )
+    pending_map_renames = [r for r in map_renames if not r.get("approved_in_map")]
+    if pending_map_renames:
+        issues.append(rename_issue(pending_map_renames))
     soft_renames = [
         (str(c.get("column") or ""), str(c.get("to") or ""))
         for c in (evolution.get("soft_net_additive") or [])
         if c.get("kind") == "rename" and c.get("column")
+        and c.get("reason") != "auto_matched_rename"
     ]
     if soft_renames:
         pairs = ", ".join(f"{a}→{b}" for a, b in soft_renames[:8])
@@ -1864,6 +1937,8 @@ def detect_schema_drift(
         ),
         "classification": classification,
         "schema_evolution": evolution,
+        "auto_matched_renames": pending_map_renames,
+        "approved_in_map": map_approved_changes,
         "saved_contract": saved_contract,
         "table_exists": table_exists,
         "create_new": create_new,

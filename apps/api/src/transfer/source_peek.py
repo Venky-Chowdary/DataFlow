@@ -12,6 +12,7 @@ circular.
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from typing import Any
 
 from .models import EndpointConfig
@@ -101,6 +102,29 @@ def _peek_each_file(
     if not columns:
         return None
     return columns, schema or {col: "string" for col in columns}, total, sample_rows, probe
+
+
+def _matched_files(
+    source: EndpointConfig, src_type: str, src_cfg: dict[str, Any], table: str, src_db: str
+) -> list[str] | None:
+    """File names a pattern source reads, in load order; None for a plain key."""
+    if src_type not in {"sftp", "s3", "gcs", "adls"}:
+        return None
+    from services.file_pickup import (
+        file_not_arrived,
+        is_file_pattern,
+        list_remote_files,
+        ordered_files,
+    )
+
+    if not is_file_pattern(table):
+        return None
+    listed = ordered_files(
+        list_remote_files(src_type, src_cfg, str(source.database or src_db or ""), table)
+    )
+    if not listed:
+        raise file_not_arrived(table, getattr(source, "extra", None))
+    return [item.name for item in listed]
 
 
 def peek_stream_source(
@@ -247,6 +271,24 @@ def iter_stream_source_column_rows(
     src_db = source.database or src_cfg.get("database") or (
         "test" if src_type == "mongodb" else ""
     )
+    files = _matched_files(source, src_type, src_cfg, table, src_db)
+    if files is not None:
+        # A prefix/glob is the set of files Execute loads one by one; a GET on
+        # the pattern is "matches N objects" and Validate's population walk
+        # failed closed on every Studio prefix source (QA demo 1030).
+        emitted = 0
+        for name in files:
+            one = replace(source, table=name, collection="")
+            for row in iter_stream_source_column_rows(
+                one, columns, limit=(limit - emitted) if limit > 0 else 0,
+                chunk_size=chunk_size, cursor_column=cursor_column,
+                cursor_after=cursor_after, cursor_primary_key=cursor_primary_key,
+            ):
+                yield row
+                emitted += 1
+                if limit > 0 and emitted >= limit:
+                    return
+        return
     page = int(chunk_size or CHUNK_SIZE)
     scan_state: dict[str, Any] | None = (
         {} if src_type in SNAPSHOT_SCAN_SOURCES else None
