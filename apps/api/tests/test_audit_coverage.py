@@ -36,6 +36,14 @@ def audit_app(monkeypatch, tmp_path):
 
     from src.main import app
 
+    # The K1 startup repair (services.orphaned_api_keys) binds a workspace-less
+    # key to its creator's sole workspace. These tests are about audit
+    # coverage of a workspace-less admin key, so the repair stays out of the
+    # lifespan here (it has its own suite: test_r11_orphaned_api_keys_e2e.py).
+    from services import orphaned_api_keys
+
+    monkeypatch.setattr(orphaned_api_keys, "run_orphaned_api_key_migration", lambda *a, **k: None)
+
     actor = "audit-actor@example.test"
     key = integrations_store.create_api_key("Audit test", actor, role="admin")
     workspace = team_store.create_workspace(name="Audit coverage", created_by=actor)
