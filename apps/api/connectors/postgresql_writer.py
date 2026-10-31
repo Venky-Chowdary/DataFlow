@@ -19,6 +19,7 @@ from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
 from connectors.schema_drift import widen_existing_columns_native
+from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -2850,7 +2851,9 @@ def write_mapped_rows(
                                 conn.rollback()
                             except Exception as exc:
                                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
-                        if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
+                        if is_sql_data_error(chunk_exc) and salvage_policy(
+                            policy, mappings
+                        ) in SALVAGE_POLICIES:
                             if insert is None:
                                 insert = _build_insert()
                             # SAVEPOINT per row + single commit — avoids one RTT/commit
