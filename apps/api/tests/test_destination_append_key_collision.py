@@ -84,7 +84,7 @@ def test_append_blocks_when_destination_already_holds_the_key(tmp_path: Path) ->
     g6 = _gate(result, "g6_target_ddl")
     assert g6["status"] == "block", g6
     assert "existing destination key" in g6["message"]
-    assert "upsert/merge" in g6["message"]
+    assert "incremental_deduped" in g6["message"] and "dedupe_skip" in g6["message"]
     assert result["passed"] is False
 
 
@@ -117,7 +117,7 @@ def test_append_warns_when_a_heap_already_holds_the_key(tmp_path: Path) -> None:
     g6 = _gate(result, "g6_target_ddl")
     assert g6["status"] == "warn", g6
     assert "second copy" in g6["message"]
-    assert "upsert/merge" in g6["message"]
+    assert "incremental_deduped" in g6["message"] and "dedupe_skip" in g6["message"]
     assert result["passed"] is True
 
 

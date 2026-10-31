@@ -73,10 +73,26 @@ def test_discard_staging_drops_the_staging_table(client, send_plan):
         dst = create_connector({"name": f"r7s-d-{token}", "role": "destination", "workspace_id": "",
                                 "ssl": False, **h.dest_config("postgresql")})
         job = _run_staged(client, src.id, dst.id, src_table, dest_table)
-        plan = (job.get("destination_summary") or {}).get("rollback_plan") or {}
-        stage = str(plan.get("staging_table") or "")
+        # R11 (QA M10): a clean promote drops its stage, so the clean run's plan
+        # no longer offers a discard of a table that is gone.
+        clean_plan = (job.get("destination_summary") or {}).get("rollback_plan") or {}
+        assert clean_plan.get("strategy") != "DISCARD_STAGING", clean_plan
+        stage = f"{dest_table}_df_staging"
+        assert not _exists(stage)
+        # A retained stage (blocked or held-back promote) is what Discard
+        # staging is for: keep one and give the job the plan such a run gets.
+        from services.migration_rollback import plan_rollback
+        from services.mongodb_service import get_mongodb_service
+
+        h.execute("postgresql", f"CREATE TABLE {stage} (id int, note text)")
+        plan = plan_rollback(job_id=str(job["_id"]), sync_mode="full_refresh_overwrite",
+                             destination_table=dest_table, staging_table=stage,
+                             dest_type="postgresql").to_dict()
+        get_mongodb_service().update_job_fields(str(job["_id"]), {
+            "destination_summary": {**(job.get("destination_summary") or {}), "rollback_plan": plan},
+        })
         assert plan.get("strategy") == "DISCARD_STAGING" and plan.get("executable") is True, plan
-        assert stage and _exists(stage), (stage, plan)
+        assert _exists(stage)
         rows_before = h.query("postgresql", f"SELECT id, note FROM {dest_table} ORDER BY id")
         assert len(rows_before) == 5
 

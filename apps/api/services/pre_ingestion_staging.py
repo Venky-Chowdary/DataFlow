@@ -6,7 +6,10 @@ When ``write_via_staging`` is enabled:
 
 1. Every source row lands in ``{table}_df_staging`` (inspectable), with cells
    that failed conversion stored as NULL. The stage is a complete landing zone:
-   a row the operator must diagnose is never absent from it.
+   a row the operator must diagnose is never absent from it. A clean promote
+   drops the stage; it is kept (and the summary says so) only when the promote
+   was blocked or held rows back, and a kept stage past its TTL is reaped by
+   the next staging run (``services.staging_retention``, QA round 11 M10).
 2. Rows with any cell failure are **not** written to the primary table, so the
    primary is never altered by a bad row.
 3. Findings still go to ``{table}_df_quarantine`` via the existing DLQ path,
@@ -31,11 +34,58 @@ from services.procedure_destination import sibling_table_endpoint
 logger = logging.getLogger(__name__)
 
 
+#: The brand artifact for the stage suffix (``_df_staging`` / ``_dw_staging``).
+STAGING_ARTIFACT = "pre_ingestion_staging_table"
+_LEGACY_SUFFIX = "_df_staging"
+
+
+def staging_suffixes() -> tuple[str, ...]:
+    """Every suffix a stage of ours may carry (old name first)."""
+    from services import brand
+
+    if STAGING_ARTIFACT not in brand.ARTIFACTS:
+        return (_LEGACY_SUFFIX,)
+    return tuple(dict.fromkeys(brand.known_names(STAGING_ARTIFACT)))
+
+
+def staging_suffix(dest_table: str = "") -> str:
+    """The suffix a new stage takes now (brand-switchable, audited when new)."""
+    from services import brand
+
+    if STAGING_ARTIFACT not in brand.ARTIFACTS:
+        return _LEGACY_SUFFIX
+    suffix = brand.name_for_new(STAGING_ARTIFACT)
+    if suffix != brand.artifact(STAGING_ARTIFACT).legacy:
+        brand.audit_new_name(STAGING_ARTIFACT, suffix, dest_table or "import")
+    return suffix
+
+
 def staging_table_name(dest_table: str | None) -> str:
     """Stable per-target staging table (pairs with ``{table}_df_quarantine``)."""
     base = re.sub(r"[^a-zA-Z0-9_]", "_", (dest_table or "import").strip()) or "import"
     base = re.sub(r"_+", "_", base).strip("_")[:48] or "import"
-    return f"{base}_df_staging"[:63]
+    return f"{base}{staging_suffix(str(dest_table or ''))}"[:63]
+
+
+def _retain(stage_ep: Any, staging_meta: dict[str, Any], why: str, ddl_log: list[str]) -> None:
+    """Keep the stage for inspection: stamp it for the TTL reaper and say so."""
+    from services.staging_retention import STAGING_RETENTION_TTL_SECONDS, stamp_retained
+
+    stamped = stamp_retained(stage_ep)
+    days = max(1, STAGING_RETENTION_TTL_SECONDS // 86400)
+    staging_meta["retained"] = True
+    staging_meta["retained_reason"] = (
+        f"Staging table {stage_ep.table} retained: {why}. Inspect it; "
+        + (f"it is dropped automatically after {days} day(s)." if stamped
+           else "the next staging run into this table replaces it.")
+    )
+    ddl_log.append(f"PRE-INGESTION STAGE RETAINED: {stage_ep.table} ({why})")
+
+
+def _drop_clean_stage(stage_ep: Any, staging_meta: dict[str, Any], ddl_log: list[str]) -> None:
+    staging_meta["retained"] = False
+    staging_meta["dropped"] = bool(_drop_table(stage_ep))
+    ddl_log.append(f"PRE-INGESTION STAGE DROPPED: {stage_ep.table} (clean promote)")
 
 
 # SQL table writers only — Mongo/document DLQ ≠ pre-ingestion staging tables.
@@ -120,6 +170,10 @@ def write_via_pre_ingestion_staging(
 
     stage_ep = staging_endpoint(destination)
     ddl_log: list[str] = []
+    from services.staging_retention import reap_expired_stages
+
+    for name in reap_expired_stages(destination, staging_suffixes()):
+        ddl_log.append(f"PRE-INGESTION STAGE REAPED (past retention TTL): {name}")
 
     # 1) Refresh staging and load *every* source row so the stage is a complete,
     #    inspectable landing zone. ``coerce_null`` is explicit here rather than
@@ -171,6 +225,8 @@ def write_via_pre_ingestion_staging(
 
     # 2) Strict / maximum: fail-closed — leave primary untouched.
     if rejected_row_nums and mode in ("strict", "maximum"):
+        _retain(stage_ep, staging_meta,
+                f"promote blocked, {len(rejected_row_nums)} row(s) failed validation", ddl_log)
         summary: dict[str, Any] = {
             "table": getattr(destination, "table", None) or getattr(destination, "collection", None),
             "type": dest_type,
@@ -206,6 +262,8 @@ def write_via_pre_ingestion_staging(
         _drop_table(destination)
 
     if not clean_records:
+        _retain(stage_ep, staging_meta,
+                f"no clean rows to promote, {len(rejected_row_nums)} row(s) held back", ddl_log)
         summary = {
             "table": getattr(destination, "table", None) or getattr(destination, "collection", None),
             "type": dest_type,
@@ -222,19 +280,31 @@ def write_via_pre_ingestion_staging(
         ddl_log.append("PRE-INGESTION PROMOTE: 0 clean rows (all quarantined)")
         return 0, ddl_log, summary
 
-    promoted_n, promo_ddl, promo_summary = write_destination_database(
-        destination,
-        clean_records,
-        columns,
-        schema,
-        mappings,
-        on_checkpoint=on_checkpoint,
-        validation_mode=validation_mode,
-        backfill_new_fields=backfill_new_fields,
-        write_mode=write_mode,
-        conflict_columns=conflict_columns,
-        job_id=job_id,
-    )
+    try:
+        promoted_n, promo_ddl, promo_summary = write_destination_database(
+            destination,
+            clean_records,
+            columns,
+            schema,
+            mappings,
+            on_checkpoint=on_checkpoint,
+            validation_mode=validation_mode,
+            backfill_new_fields=backfill_new_fields,
+            write_mode=write_mode,
+            conflict_columns=conflict_columns,
+            job_id=job_id,
+        )
+    except Exception:
+        _retain(stage_ep, staging_meta, "the promote failed", ddl_log)
+        raise
+    promote_rejects = int((promo_summary or {}).get("rejected_rows") or 0)
+    if rejected_row_nums or promote_rejects or (promo_summary or {}).get("ok") is False:
+        held = len(rejected_row_nums) + promote_rejects
+        _retain(stage_ep, staging_meta,
+                f"{held} row(s) held back from the promote" if held else "the promote did not finish clean",
+                ddl_log)
+    else:
+        _drop_clean_stage(stage_ep, staging_meta, ddl_log)
     ddl_log.extend(list(promo_ddl or [])[:50])
     ddl_log.append(
         f"PRE-INGESTION PROMOTE: {promoted_n} clean row(s) → "

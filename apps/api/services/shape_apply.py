@@ -421,6 +421,11 @@ def recipe_output_schema(
                 ):
                     inferred[column] = _text_carrier(prior.get(column, ""))
 
+    # A derive's type follows from its operands' declared types (DECIMAL(10,2)
+    # * 2 -> DECIMAL(11,2)); a shaped sample only bounds the rows it saw (R11).
+    from services.shape_type_propagation import propagated_derive_types
+
+    propagated = propagated_derive_types(recipe, prior)
     out: dict[str, str] = {}
     for column in columns:
         if column not in touched and column in prior:
@@ -431,7 +436,7 @@ def recipe_output_schema(
         if origin and origin not in touched and origin in prior:
             out[column] = prior[origin]
             continue
-        declared = inferred.get(column) or prior.get(column) or "VARCHAR"
+        declared = propagated.get(column) or inferred.get(column) or prior.get(column) or "VARCHAR"
         ceiling = ceilings.get(column)
         if ceiling is not None:
             declared = _capped_decimal(declared, ceiling)

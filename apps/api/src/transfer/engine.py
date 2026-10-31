@@ -3412,9 +3412,11 @@ class UniversalTransferEngine:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
-                from services.population_fit_scan import stamp_create_widens
+                from services.create_width_adopt import adopt_validate_create_widths
 
-                stamp_create_widens(mappings, pf.get("population_fit"))
+                adopt_validate_create_widths(
+                    mappings, pf, dest_db=str(getattr(request.destination, "format", "") or "")
+                )
 
             # Data contract / circuit breaker enforcement.
             try:
@@ -4529,9 +4531,11 @@ class UniversalTransferEngine:
                 mongo.update_job_status(
                     job_id, "running", phase="preflight", progress_pct=15, preflight=pf
                 )
-                from services.population_fit_scan import stamp_create_widens
+                from services.create_width_adopt import adopt_validate_create_widths
 
-                stamp_create_widens(mappings, pf.get("population_fit"))
+                adopt_validate_create_widths(
+                    mappings, pf, dest_db=str(getattr(request.destination, "format", "") or "")
+                )
 
             # Data contract / circuit breaker enforcement.
             try:

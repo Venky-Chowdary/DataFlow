@@ -2525,21 +2525,25 @@ def gate_g6_target_ddl(ctx: PreflightContext) -> GateResult:
                 f"The rows after watermark {delta_scope.get('watermark')} on "
                 f"{delta_scope.get('cursor_column')} carry {len(found)} key(s) the "
                 f"destination already stores on {key}, so an append cannot store "
-                "them again. Switch this sync to upsert/merge (key-resolved), "
-                "which is how an updated row is meant to land."
+                "them again. Use sync mode incremental_deduped / incremental_upsert (or upsert) so an "
+                "updated row replaces the stored one, or set the duplicate policy "
+                "to dedupe_skip to keep the stored row and load only the new keys."
             )
         elif enforced:
             cause = (
                 f"Append would duplicate {len(found)} existing destination key(s) on "
                 f"{key} — the destination enforces uniqueness, so the insert aborts. "
-                "Switch this sync to upsert/merge (key-resolved) or overwrite."
+                "Use sync mode incremental_deduped / incremental_upsert (or upsert) so an updated row "
+                "replaces the stored one, or set the duplicate policy to dedupe_skip "
+                "to keep the stored row and load only the new keys."
             )
         else:
             cause = (
                 f"Append would store a second copy of {collision_count} row(s) the "
                 f"destination already holds on {key}. The destination does not "
-                "reject that insert, so the duplicate would land. Use upsert/merge "
-                "(key-resolved) or overwrite."
+                "reject that insert, so the duplicate would land. Use sync mode "
+                "incremental_deduped / incremental_upsert (or upsert), or set the "
+                "duplicate policy to dedupe_skip to load only the new keys; or overwrite."
             )
         details = {
             "sample_collisions": found[:5],

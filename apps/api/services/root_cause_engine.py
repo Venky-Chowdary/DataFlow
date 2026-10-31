@@ -1791,9 +1791,11 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 estimated_total_rows=est_n,
                 risk_level="high",
                 recommended_fix=(
-                    f"Switch this sync to upsert/merge on {key} — that is how a row "
-                    "the destination already has is meant to land. Use overwrite "
-                    "instead if this load should replace the existing table."
+                    f"Use sync mode incremental_deduped / incremental_upsert (or upsert) on {key} so an "
+                    "updated row replaces the stored one, or set the duplicate "
+                    "policy to dedupe_skip to keep the stored row and load only the "
+                    "new keys. Use overwrite instead if this load should replace "
+                    "the existing table."
                 ),
                 alternative_fixes=[
                     "Full refresh · overwrite to replace the destination generation",
