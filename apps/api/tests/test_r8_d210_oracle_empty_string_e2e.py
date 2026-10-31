@@ -78,6 +78,7 @@ def _drop_ora(table: str) -> None:
 def client(tmp_path, monkeypatch):
     h.isolate(tmp_path, monkeypatch)
     monkeypatch.setenv("DATAFLOW_SEED_DEMO", "false")
+    monkeypatch.setenv("DATAFLOW_TRAINING", "off")  # no background training at shutdown
     from fastapi.testclient import TestClient
     from src.main import app
 
