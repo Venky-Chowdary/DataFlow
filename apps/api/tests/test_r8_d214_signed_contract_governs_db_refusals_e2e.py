@@ -292,3 +292,39 @@ def test_mysql_append_into_existing_utf8mb3_table_quarantines_db_refusals(mysql_
     _assert_replay_closes(job_id, len(bad))
     got = _q(my, f"SELECT id, small, note FROM `{r['dst']}` ORDER BY id")
     assert got == sorted(rows + [(100000, 1, "prior")])
+
+
+def _signed(column: str, policy: str) -> dict:
+    from services.migration_risk_contract import create_migration_risk_contract
+
+    contract = create_migration_risk_contract(
+        column=column, source_type="integer", destination_type="tinyint",
+        approved_by="qa", reason="D214", execution_policy=policy, target=column,
+        table="t",
+    )
+    return {"source": column, "target": column, "risk_contract": contract.to_dict()}
+
+
+def test_the_contract_decides_a_database_refusal_and_nothing_else():
+    """The rule under the e2e: which refused rows the signature covers."""
+    from connectors.contract_salvage import contract_row_detail, salvage_policy
+
+    maps = [_signed("small", "CAST_AND_CONTINUE"), {"source": "note", "target": "note"}]
+    # The posture alone no longer refuses a Map that signs continue only.
+    assert salvage_policy("fail", maps) == "quarantine"
+    assert salvage_policy("quarantine", maps) == "quarantine"
+    assert salvage_policy("fail", [{"source": "small", "target": "small"}]) == "fail"
+    # A fail-closed signature anywhere keeps the batch error fatal.
+    assert salvage_policy("fail", maps + [_signed("x", "FAIL_JOB")]) == "fail"
+
+    signed = contract_row_detail({"row": 3, "column": "small", "policy": "fail"}, maps)
+    assert (signed["policy"], signed["execution_policy"]) == ("quarantine", "CAST_AND_CONTINUE")
+    # The driver did not name the column (SQL Server overflow): the job's signature.
+    unnamed = contract_row_detail({"row": 3, "column": "*", "policy": "fail"}, maps)
+    assert unnamed["execution_policy"] == "CAST_AND_CONTINUE"
+    # A named column nobody signed keeps the strict posture.
+    unsigned = {"row": 3, "column": "note", "policy": "fail"}
+    assert contract_row_detail(dict(unsigned), maps) == unsigned
+    # A quarantine posture is left exactly as it was.
+    q = {"row": 3, "column": "small", "policy": "quarantine"}
+    assert contract_row_detail(dict(q), maps) == q
