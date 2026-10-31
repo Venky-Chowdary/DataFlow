@@ -196,8 +196,29 @@ def describe_target(conn: Any) -> str:
             host = parsed.hostname or ""
             port = port or parsed.port or ""
     if not host:
+        # D187: a Snowflake connector may carry only its account (top level or
+        # under ``extra``). Without it the destination dropped out of a
+        # timeout message and the source was blamed alone.
+        extra = conn.get("extra") if isinstance(conn.get("extra"), dict) else {}
+        account = str(
+            conn.get("account") or cfg.get("account") or extra.get("account") or ""
+        ).strip()
+        if account:
+            return account
         return ""
     return f"{host}:{port}" if port else host
+
+
+def _system_label(conn: Any) -> str:
+    """``host:port`` or, for a system without one, its connector name / type."""
+    target = describe_target(conn)
+    if target or not isinstance(conn, dict):
+        return target
+    name = str(conn.get("name") or "").strip()
+    kind = str(conn.get("type") or conn.get("format") or "").strip()
+    if name and kind:
+        return f"{kind} connector '{name}'"
+    return name or kind
 
 
 def note_step(
@@ -224,7 +245,8 @@ def note_step(
         also=tuple(
             (other_role, target)
             for other_role, other in also
-            if (target := describe_target(other))
+            # A system with no host still has a name: never drop it (D187).
+            if (target := _system_label(other))
         ),
     )
     with progress.lock:

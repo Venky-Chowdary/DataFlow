@@ -77,7 +77,20 @@ def test_inside_a_scope_one_login_serves_every_consumer(fake_open):
         # another endpoint is another login
         sc.get_connection(**{**KW, "warehouse": "OTHER"})
         assert len(fake_open) == 2
-    assert all(conn.closed for conn in fake_open)
+    # The scope ended: each login is parked for the next tool call (QA round
+    # 10 D187), not closed, and the next scope takes it instead of logging in.
+    assert not any(conn.closed for conn in fake_open)
+    with sc.snowflake_plan_scope():
+        sc.get_connection(**KW).cursor()
+    assert len(fake_open) == 2
+
+
+def test_with_parking_off_the_scope_closes_every_login(fake_open, monkeypatch):
+    monkeypatch.setenv("DATAFLOW_SNOWFLAKE_WARM_LOGIN_SECONDS", "0")
+    with sc.snowflake_plan_scope():
+        sc.get_connection(**KW).cursor()
+        sc.get_connection(**{**KW, "warehouse": "OTHER"}).cursor()
+    assert len(fake_open) == 2 and all(conn.closed for conn in fake_open)
 
 
 def test_a_lost_session_is_reopened_once(fake_open):

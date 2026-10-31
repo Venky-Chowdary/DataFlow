@@ -290,6 +290,9 @@ def dispose_all() -> int:
 def reset_for_tests() -> None:
     """Dispose everything and zero the counters."""
     dispose_all()
+    from connectors.snowflake_warm_login import reset_for_tests as _reset_warm_logins
+
+    _reset_warm_logins()  # parked Snowflake plan logins (D187)
     with _LOCK:
         _STATS.hits = 0
         _STATS.misses = 0
