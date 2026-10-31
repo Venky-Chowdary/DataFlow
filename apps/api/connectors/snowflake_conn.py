@@ -1018,6 +1018,18 @@ _SESSION_STATEMENT = re.compile(
 )
 
 
+_BEGIN = re.compile(r"^\s*(?:BEGIN|START\s+TRANSACTION)\b", re.I)
+
+
+def _opens_transaction(command: Any, key: str | None, normalized: str) -> bool:
+    """``BEGIN`` / ``START TRANSACTION`` or ``AUTOCOMMIT = FALSE`` on the login."""
+    if not isinstance(command, str):
+        return False
+    if _BEGIN.match(command):
+        return True
+    return key == "AUTOCOMMIT" and "FALSE" in normalized
+
+
 def _session_statement_key(sql: Any) -> str | None:
     """``ALTER SESSION SET x`` / ``USE x`` statements set session state."""
     if not isinstance(sql, str):
@@ -1082,6 +1094,9 @@ class _PlanCursor:
                     raise answer.error
                 self._replay = Replay(answer)
                 return self
+        if _opens_transaction(command, key, normalized):
+            with session._lock:
+                session._txn_open = True
         try:
             result = self._cur.execute(command, *args, **kwargs)
         except Exception as exc:
@@ -1165,9 +1180,16 @@ class _PlanSession:
         session_parameters: dict[str, Any] | None = None,
         local_emulator: bool = False,
         login_warehouse: str = "",
+        warm_key: Any = None,
     ) -> None:
+        from connectors import snowflake_warm_login as warm
+
         self._open = open_fn
         self._login_warehouse = login_warehouse
+        #: D187: the endpoint key this login is parked under when the call ends.
+        self._warm_key = warm_key if warm_key is not None and warm.enabled(local_emulator) else None
+        #: An explicit transaction (BEGIN / AUTOCOMMIT off) is open on the login.
+        self._txn_open = False
         self._shut = False
         self._lock = threading.Lock()
         self._session_parameters = dict(session_parameters or {})
@@ -1178,17 +1200,32 @@ class _PlanSession:
         self._context: dict[str, str] = {}
         #: Read-only catalog answers kept for this login (normalized SQL -> Answer).
         self._answers: dict[str, Any] = {}
-        self._conn = open_fn()
-        self._learn_login()
+        context = None
+        if self._warm_key is not None:
+            self._conn, context = warm.open_or_take(self._warm_key, open_fn)
+        else:
+            self._conn = open_fn()
+        if context is not None:
+            # A parked login of the previous call: it holds exactly the session
+            # it was parked with, so nothing is re-read.
+            self._state = self._login_state_from_parameters()
+            self._context = dict(context)
+        else:
+            self._learn_login()
+        self._login_state = dict(self._state)
+        self._login_context = dict(self._context)
+
+    def _login_state_from_parameters(self) -> dict[str, str]:
+        return {
+            name.upper(): f"ALTER SESSION SET {name.upper()} = {value}".upper()
+            for name, value in self._session_parameters.items()
+        }
 
     def _learn_login(self) -> None:
         """What the login set, read in one statement instead of one per step."""
         from connectors.snowflake_session_state import Answer, context_query
 
-        self._state = {
-            name.upper(): f"ALTER SESSION SET {name.upper()} = {value}".upper()
-            for name, value in self._session_parameters.items()
-        }
+        self._state = self._login_state_from_parameters()
         self._context.clear()
         self._answers.clear()
         sql, kinds = context_query(self._local_emulator)
@@ -1241,11 +1278,30 @@ class _PlanSession:
 
     def shut(self) -> None:
         with self._lock:
+            already = self._shut
             self._shut = True
+            if not already and self._parkable():
+                from connectors import snowflake_warm_login as warm
+
+                if warm.park(self._warm_key, self._conn, self._context):
+                    return
             try:
                 self._conn.close()
             except Exception as exc:  # noqa: BLE001 - closing must never raise
                 logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+
+    def _parkable(self) -> bool:
+        """The login still holds the session it was set up with (D187)."""
+        if self._warm_key is None or self._txn_open:
+            logger.debug("Snowflake plan login not parked: warm=%s txn=%s", self._warm_key is not None, self._txn_open)
+            return False
+        ok = self._state == self._login_state and self._context == self._login_context
+        if not ok:
+            logger.debug(
+                "Snowflake plan login not parked: session changed (%s -> %s, %s -> %s)",
+                self._login_state, self._state, self._login_context, self._context,
+            )
+        return ok
 
 
 class _PlanConnection:
@@ -1269,6 +1325,11 @@ class _PlanConnection:
         reset must not log the closed login as an error."""
         if self._session._shut:
             return None
+        if not self._session._txn_open:
+            # The plan login runs autocommit and nothing opened a transaction:
+            # the pool's reset ROLLBACK has nothing to undo, and on a real
+            # account it is a round trip inside the tool's deadline (D187).
+            return None
         return self._session._conn.rollback()
 
     def __getattr__(self, name: str) -> Any:
@@ -1291,6 +1352,13 @@ def get_connection(**kwargs: Any) -> Any:
     """A Snowflake connection; one shared login per endpoint inside an endpoint scope."""
     from services.endpoint_session import borrow, in_scope
 
+    from src.ai.copilot.tool_deadline import remaining_seconds
+
+    left = remaining_seconds()
+    if left is not None and left <= 0:
+        # A step whose budget is spent (its tool call already answered) must
+        # not start a Snowflake login nobody will use (D187).
+        raise TimeoutError("the tool call's time is spent; Snowflake login not started")
     if not in_scope("snowflake"):
         return _open_connection(**kwargs)
     # The passphrase only matters to a key-pair login; callers pass the password
@@ -1308,14 +1376,18 @@ def get_connection(**kwargs: Any) -> Any:
     )
     from connectors.snowflake_session_state import PLAN_SESSION_PARAMETERS
 
+    local = _is_local_account(str(kwargs.get("account") or ""))
+    # The emulator's catalog is a file: a login parked for one is not another's.
+    warm_key = (*key, _fakesnow_db_path() if local else "")
     session, _release = borrow(
         "snowflake",
         key,
         lambda: _PlanSession(
             lambda: _open_connection(**kwargs, session_parameters=PLAN_SESSION_PARAMETERS),
             session_parameters=PLAN_SESSION_PARAMETERS,
-            local_emulator=_is_local_account(str(kwargs.get("account") or "")),
+            local_emulator=local,
             login_warehouse=str(kwargs.get("warehouse") or ""),
+            warm_key=warm_key,
         ),
         close=lambda s: s.shut(),
         shared=True,

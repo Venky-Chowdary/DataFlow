@@ -36,6 +36,7 @@ from services.copy_mysql_pg import (
 )
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
+    sqlite_temporal_text,
     sqlite_connect,
     sqlite_create_sql,
     sqlite_ident,
@@ -72,22 +73,13 @@ def mysql_value_to_sqlite(value: Any) -> Any:
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, timedelta):
-        # pymysql returns TIME as timedelta — sqlite3 cannot bind it (X-38:
-        # 'Error binding parameter 1 - probably unsupported type'). Store the
-        # canonical clock text Gate-8 fingerprints, so read-back digests match.
-        from services.reconciliation import normalize_cell
-
-        return normalize_cell(value, ddl_type="", engine="sqlite")
-    if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            raise FastPathUnavailable(
-                "timestamptz MySQL value is not SQLite COPY-safe"
-            )
-        if value.hour or value.minute or value.second or value.microsecond:
-            return value.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
-        return date(value.year, value.month, value.day).isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
+        # pymysql returns TIME as timedelta — sqlite3 cannot bind it (X-38).
+        # Six fractional digits when there are any, as the source digest reads
+        # it: '03:04:05.12' against '03:04:05.120000' failed a faithful copy.
+        return sqlite_temporal_text(value, source_label="MySQL")
+    if isinstance(value, (datetime, date)):
+        # D224: full precision, and a midnight DATETIME keeps its clock.
+        return sqlite_temporal_text(value, source_label="MySQL")
     if isinstance(value, Decimal):
         # dest-canonical text, never str()/float — str(Decimal) renders
         # small magnitudes in scientific notation (-1E-10), which a

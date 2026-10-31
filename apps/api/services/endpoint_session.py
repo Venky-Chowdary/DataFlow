@@ -105,7 +105,9 @@ def endpoint_session_scope(engines: Iterable[str] | None = None) -> Iterator[Non
 
 def in_scope(engine: str = "") -> bool:
     scope = _scope.get()
-    if scope is None:
+    if scope is None or scope.closed:
+        # A step still running after its tool call ended (abandoned at its
+        # budget) holds a copy of a scope that is gone: it owns its sessions.
         return False
     return not engine or scope.engines is None or engine in scope.engines
 
@@ -135,7 +137,12 @@ def borrow(
     database, user, credential, role, warehouse...).
     """
     scope = _scope.get()
-    if scope is None or (scope.engines is not None and engine not in scope.engines):
+    if (
+        scope is None
+        or scope.closed
+        or (scope.engines is not None and engine not in scope.engines)
+    ):
+        # Closed: nothing would ever close a session opened into it (D187).
         return open_fn(), None
     pool_key = (engine, key)
     with scope.lock:

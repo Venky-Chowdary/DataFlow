@@ -485,24 +485,32 @@ class PostgreSqlChangeStreamCdc:
         primary_keys: dict[str, str] | None = None,
     ) -> None:
         from services.cdc_multi_table import normalize_table_list
+        from services.cdc_table_name import bare_table_keys, split_cdc_tables
 
         self.cfg = cfg
-        self.schema = schema
-        self.tables = normalize_table_list(table)
+        # D223: 'public.t' with schema 'public' is table 't', joined once.
+        as_named = normalize_table_list(table)
+        resolved_schema, self.tables = split_cdc_tables(
+            as_named, schema or "public", dialect="postgresql"
+        )
+        self.schema = resolved_schema or schema
         if not self.tables:
             raise ValueError("PostgreSQL CDC requires at least one table")
         self.table = self.tables[0]
         from services.cdc_identity import require_cdc_primary_keys_map
 
         self.primary_keys = require_cdc_primary_keys_map(
-            self.tables, primary_key=primary_key, primary_keys=primary_keys
+            self.tables, primary_key=primary_key,
+            primary_keys=bare_table_keys(primary_keys, self.schema),
         )
         self.primary_key = self.primary_keys[self.table]
         self.cursor_key = cursor_key
         self.columns = columns
         self.batch_size = batch_size
         self.database = cfg.get("database") or "postgres"
-        slot_table: str | list[str] = self.tables if len(self.tables) > 1 else self.table
+        # Slot / publication names stay derived from the name as given, so a
+        # job that already holds a slot for 'public.t' resumes on it.
+        slot_table: str | list[str] = as_named if len(as_named) > 1 else as_named[0]
         slot, lsn, phase = decode_pg_resume_token(
             resume_token,
             database=self.database,

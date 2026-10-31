@@ -338,6 +338,17 @@ def _isolate_process_env(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
+def _isolate_parked_snowflake_logins():
+    """A Snowflake plan login parked by one test is never taken by another (D187)."""
+    yield
+    try:
+        from connectors.snowflake_warm_login import reset_for_tests
+    except ImportError:
+        return
+    reset_for_tests()
+
+
+@pytest.fixture(autouse=True)
 def _isolate_app_state():
     """Restore FastAPI ``app.state`` fields written by a test's startup.
 

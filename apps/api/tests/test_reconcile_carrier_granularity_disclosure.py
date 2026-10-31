@@ -70,12 +70,21 @@ def _reconcile(db: Path, target_ts_type: str) -> dict:
 
 
 def test_narrowed_instant_column_passes_and_is_named(tmp_path: Path) -> None:
-    report = _reconcile(_seed(tmp_path), "DATETIME")
+    # An explicit whole-second carrier. (A bare SQLite DATETIME is text and
+    # keeps every digit — D224 — so it is no narrowing; see below.)
+    report = _reconcile(_seed(tmp_path), "DATETIME(0)")
     assert report["passed"] is True, report
     rounded = report.get("carrier_rounded_columns")
     assert [c["column"] for c in rounded or []] == ["order_ts"], report
     assert "declared narrowing" in str(report.get("message") or ""), report
-    assert "order_ts TIMESTAMP_NTZ → DATETIME" in str(report.get("message") or ""), report
+    assert "order_ts TIMESTAMP_NTZ → DATETIME(0)" in str(report.get("message") or ""), report
+
+
+def test_bare_sqlite_datetime_is_not_a_narrowing(tmp_path: Path) -> None:
+    """D224: SQLite stores DATETIME as text with every fractional digit."""
+    report = _reconcile(_seed(tmp_path), "DATETIME")
+    assert report["passed"] is True, report
+    assert not report.get("carrier_rounded_columns"), report
 
 
 def test_carrier_that_keeps_the_precision_claims_nothing_extra(tmp_path: Path) -> None:

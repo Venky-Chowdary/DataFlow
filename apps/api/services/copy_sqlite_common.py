@@ -180,6 +180,45 @@ def _bind_naive_temporal_text(value: str | None) -> str | None:
     return text.replace("T", " ", 1)
 
 
+def sqlite_temporal_text(value: Any, *, source_label: str) -> Any:
+    """SQLite TEXT for a driver temporal at the precision the source carries.
+
+    SQLite has no temporal storage class, so the text IS the value (QA D224).
+    A naive ``datetime`` keeps every microsecond and its clock: midnight stays
+    ``YYYY-MM-DD 00:00:00`` (a DATETIME column is not a DATE). Only a Python
+    ``date`` lands as a calendar day. ``time`` / MySQL ``timedelta`` TIME keep
+    six fractional digits when they have any — the same spelling the source
+    digest reads. tz-aware values decline to the row path. Other values pass
+    through unchanged.
+    """
+    from datetime import timedelta
+
+    if isinstance(value, datetime):
+        if value.tzinfo is not None:
+            raise FastPathUnavailable(
+                f"timestamptz {source_label} value is not SQLite COPY-safe"
+            )
+        return value.isoformat(sep=" ")
+    if isinstance(value, date):
+        return value.isoformat()
+    if isinstance(value, time):
+        if value.tzinfo is not None:
+            raise FastPathUnavailable(
+                f"timetz {source_label} value is not SQLite COPY-safe"
+            )
+        return value.isoformat()
+    if isinstance(value, timedelta):
+        total_us = value // timedelta(microseconds=1)
+        sign = "-" if total_us < 0 else ""
+        total_us = abs(total_us)
+        secs, micros = divmod(total_us, 1_000_000)
+        hh, rem = divmod(secs, 3600)
+        mm, ss = divmod(rem, 60)
+        clock = f"{sign}{hh:02d}:{mm:02d}:{ss:02d}"
+        return f"{clock}.{micros:06d}" if micros else clock
+    return value
+
+
 def sqlite_type_is_copy_safe(declared: str) -> bool:
     raw = (declared or "").strip().upper().replace(" ", "")
     if not raw:

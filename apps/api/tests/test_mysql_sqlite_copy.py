@@ -127,8 +127,10 @@ def test_mysql_sqlite_python_date_to_iso_text():
     assert mysql_value_to_sqlite("") == ""
     assert mysql_value_to_sqlite(True) == 1
     assert mysql_value_to_sqlite(date(2020, 1, 2)) == "2020-01-02"
-    assert mysql_value_to_sqlite(datetime(2020, 1, 2)) == "2020-01-02"
+    # D224: a DATETIME at midnight keeps its clock; the fraction is kept.
+    assert mysql_value_to_sqlite(datetime(2020, 1, 2)) == "2020-01-02 00:00:00"
     assert mysql_value_to_sqlite(datetime(2020, 1, 2, 12, 30, 0)) == "2020-01-02 12:30:00"
+    assert mysql_value_to_sqlite(datetime(2020, 1, 2, 12, 30, 0, 120)) == "2020-01-02 12:30:00.000120"  # noqa: DTZ001
     with pytest.raises(FastPathUnavailable, match="binary"):
         mysql_value_to_sqlite(b"x")
 
