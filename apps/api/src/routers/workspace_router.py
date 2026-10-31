@@ -1171,9 +1171,12 @@ async def run_workspace_benchmark(body: BenchmarkRequest):
     (so this API process's environment is untouched and memory is measured),
     but a large run outlives proxy timeouts: the page uses ``/benchmark/runs``.
     """
-    from services.benchmark_runs import run_blocking
+    from services.benchmark_runs import BenchmarkBusy, run_blocking
 
-    run = await asyncio.to_thread(run_blocking, body.rows)
+    try:
+        run = await asyncio.to_thread(run_blocking, body.rows)
+    except BenchmarkBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     report = run.get("report") or {
         "target": "sqlite", "rows": body.rows, "success": False,
         "error": run.get("error") or "Benchmark failed",
@@ -1190,19 +1193,30 @@ async def run_workspace_benchmark(body: BenchmarkRequest):
 
 
 @router.post("/benchmark/runs")
-async def start_benchmark_run(body: BenchmarkRequest):
-    """Start the Proofs → Scale benchmark in the background; poll ``GET .../runs/{id}``."""
-    from services.benchmark_runs import start_run
+async def start_benchmark_run(body: BenchmarkRequest, request: Request):
+    """Start the Proofs → Scale benchmark in the background; poll ``GET .../runs/{id}``.
 
-    run, started = start_run(body.rows)
+    The run belongs to the request's workspace; only that workspace (or a
+    platform admin) can poll it.
+    """
+    from services.benchmark_runs import BenchmarkBusy, start_run
+
+    scope = tenant_scope(request)
+    try:
+        run, started = start_run(
+            body.rows, workspace_id=scope.workspace_id, started_by=_actor(request)
+        )
+    except BenchmarkBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return JSONResponse({"run": run, "started": started}, status_code=202 if started else 200)
 
 
 @router.get("/benchmark/runs/{run_id}")
-async def get_benchmark_run(run_id: str, format: str = "json"):
+async def get_benchmark_run(run_id: str, request: Request, format: str = "json"):
     from services.benchmark_runs import get_run
 
-    run = get_run(run_id)
+    scope = tenant_scope(request)
+    run = get_run(run_id, workspace_id=scope.workspace_id, unrestricted=scope.unrestricted)
     if run is None:
         raise HTTPException(status_code=404, detail="Benchmark run not found")
     if format == "md":
