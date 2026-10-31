@@ -59,6 +59,13 @@ ADMIN_EVENTS: dict[str, str] = {
     action: f"Workspace administration: {action.split('.', 1)[1].replace('.', ' ').replace('_', ' ')}."
     for _m, _t, action in ADMIN_ROUTES
 }
+# Refusals of deployment-wide settings writes (services.platform_settings):
+# one name for every route in the general / SSO / AI-provider groups, with the
+# route's own action in the details.
+ADMIN_EVENTS["platform_settings.write.denied"] = (
+    "A write to deployment-wide settings (general, SSO, AI providers, Pilot engine) "
+    "was refused because the caller is not a platform admin."
+)
 
 
 def _compile(template: str) -> re.Pattern[str]:
