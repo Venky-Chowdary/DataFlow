@@ -910,7 +910,14 @@ def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> N
             base_url=public_url(),
             web_url=web_url(),
         )
-        results = notify_workspace(sched.workspace_id or "", payload)
+        from services.notification_delivery_log import delivery_context
+
+        with delivery_context(
+            schedule_id=sched.id,
+            job_id=job_id,
+            event=f"schedule.run.{'succeeded' if success else 'failed'}",
+        ):
+            results = notify_workspace(sched.workspace_id or "", payload)
         log_job_notifications(job_id, results)
     except Exception:
         logger.exception("Failed to send schedule notification for %s", sched.id)
@@ -1117,6 +1124,12 @@ def _park_reason(sched: Any, decision: dict[str, Any], entry: dict[str, Any]) ->
     kind = str(failure_class.get("kind") or "") if isinstance(failure_class, dict) else str(failure_class)
     if kind == DETERMINISTIC:
         return "deterministic_refusal"
+    if not decision.get("retry") and _missing_source_table(
+        sched, str(entry.get("error") or entry.get("reason") or "")
+    ):
+        # The table this schedule reads is gone: no later beat can find it, so
+        # park on one finding that names it (QA SC5) instead of grinding.
+        return "source_table_missing"
     if not decision.get("retry") and (decision.get("decision") or {}).get("allowed") is False:
         return "committed_rows_cannot_be_replayed"
     # Finished runs only: a skipped beat or the record still open for this very
@@ -1401,6 +1414,27 @@ def _collapse_repeated_finding(message: str) -> str:
     return collapse_operator_message(sanitize_operator_finding(message))
 
 
+SOURCE_TABLE_MISSING_CODE = "SOURCE_TABLE_MISSING"
+
+
+def _missing_source_table(sched: Any, message: str) -> str:
+    """The schedule's source table when ``message`` says that table is missing."""
+    from connectors.sql_identifiers import split_qualified_table
+    from services.failure_retry_policy import missing_relation_name
+
+    named = missing_relation_name(message)
+    if named is None:
+        return ""
+    source = str(getattr(sched, "source_table", "") or "").strip()
+    if not source or getattr(sched, "source_read_mode", "") in ("procedure", "query"):
+        return ""
+    _sch, wanted = split_qualified_table(source)
+    if not named:
+        return source  # the driver named no table; the run read only this one
+    _nsch, got = split_qualified_table(named)
+    return source if got.lower() == wanted.lower() else ""
+
+
 def _open_finding(
     schedule_id: str,
     exc: BaseException | str,
@@ -1462,10 +1496,22 @@ def _open_finding(
             from services.drift_approval import message_is_unmapped_column_drift
 
             unmapped_sentence = message_is_unmapped_column_drift(message)
+            missing_table = _missing_source_table(sched, message)
             if is_empty_mapping_refusal(message):
                 code = EMPTY_MAPPING_CODE
                 scopes = ()
                 corrective = EMPTY_MAPPING_CORRECTIVE
+            elif missing_table:
+                # No signature can create a table: name it and the fix (QA SC5).
+                code = SOURCE_TABLE_MISSING_CODE
+                scopes = ()
+                corrective = (
+                    f"Source table '{missing_table}' does not exist on the source "
+                    "connector. Create it, or PATCH source_table to an existing "
+                    "table, then resume the pipeline."
+                )
+                if missing_table not in message:
+                    message = f"Source table '{missing_table}' does not exist. {message}"
             elif matched or unmapped_sentence:
                 # The gate id is the classification. The coverage sentence
                 # does not say "schema drift", and matching that phrase

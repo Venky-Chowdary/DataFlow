@@ -386,23 +386,55 @@ def _send_webhook(channel: NotificationChannel, payload: dict[str, Any]) -> dict
     body = json.dumps(payload, default=json_default).encode("utf-8")
     secret = str(channel.config.get(SECRET_CONFIG_KEY) or "")
     signed = dict(headers or {})
+    stamp = ""
     if secret:
         # The signature covers exactly the bytes sent; it is added last so a
         # configured custom header can never replace it.
-        signed.update(signature_headers(secret, body))
-    return _http_post(url, payload, signed, raw_body=body)
+        sig = signature_headers(secret, body)
+        signed.update(sig)
+        from services.webhook_signing import TIMESTAMP_HEADER
+
+        stamp = str(sig.get(TIMESTAMP_HEADER) or "")
+    result = _http_post(url, payload, signed, raw_body=body)
+    if stamp:
+        # The delivery log keeps which signature went out (its timestamp),
+        # never the signature or the secret.
+        result = {**result, "signed": True, "signature_timestamp": stamp}
+    return result
 
 
 def _payload_text(payload: dict[str, Any]) -> str:
     return payload.get("text") or json.dumps(payload, default=json_default, indent=2)
 
 
-def send_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> dict[str, Any]:
-    """Deliver ``payload`` and emit one ``notification.delivery.*`` event.
+def send_to_channel(
+    channel: NotificationChannel,
+    payload: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Deliver ``payload``, emit one ``notification.delivery.*`` event, and
+    append the attempt to the delivery log.
 
     The event names the channel kind and id, never the URL, recipients, or
     error text. A failed delivery is WARNING: it does not fail the job.
+    ``context`` names what the delivery is about (``schedule_id``, ``job_id``,
+    ``event``) for the delivery log (QA SC9); every path — job alerts,
+    schedule alerts for runs refused before a job existed, test-sends — comes
+    through here, so every attempt is recorded once.
     """
+    from services.notification_delivery_log import build_record, record_delivery
+
+    def _log(result: dict[str, Any] | None, started_at: float, error: BaseException | None = None) -> None:
+        record_delivery(build_record(
+            channel=channel,
+            payload=payload,
+            result=result,
+            duration_ms=(time.monotonic() - started_at) * 1000.0,
+            context=context,
+            error=error,
+        ))
+
     kind = str(channel.kind or "")
     fields = {
         "channel_kind": kind if kind in _CHANNEL_KINDS else "unknown",
@@ -414,7 +446,9 @@ def send_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> di
             logger, "notification.delivery.skipped", outcome="skipped",
             reason="channel_disabled", **fields,
         )
-        return {"ok": False, "error": "Channel disabled"}
+        skipped = {"ok": False, "error": "Channel disabled"}
+        _log(skipped, time.monotonic())
+        return skipped
     started = time.monotonic()
     try:
         result = _dispatch_to_channel(channel, payload)
@@ -424,7 +458,9 @@ def send_to_channel(channel: NotificationChannel, payload: dict[str, Any]) -> di
             level=logging.WARNING, error=exc, reason="exception",
             duration_ms=(time.monotonic() - started) * 1000.0, **fields,
         )
+        _log(None, started, exc)
         raise
+    _log(result, started)
     status = result.get("status") if isinstance(result, dict) else None
     ok = bool(isinstance(result, dict) and result.get("ok"))
     emit_event(
@@ -455,7 +491,12 @@ def _dispatch_to_channel(channel: NotificationChannel, payload: dict[str, Any]) 
     return {"ok": False, "error": f"Unknown channel kind: {kind}"}
 
 
-def notify_workspace(workspace_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+def notify_workspace(
+    workspace_id: str,
+    payload: dict[str, Any],
+    *,
+    context: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
     """Broadcast a payload to every enabled channel in a workspace."""
     channels = list_channels(workspace_id=workspace_id, enabled_only=True)
     results = []
@@ -463,29 +504,25 @@ def notify_workspace(workspace_id: str, payload: dict[str, Any]) -> list[dict[st
         decrypted = get_channel_decrypted(channel.id)
         if not decrypted:
             continue
-        results.append({"channel_id": channel.id, "kind": channel.kind, **send_to_channel(decrypted, payload)})
+        sent = send_to_channel(decrypted, payload, context=context)
+        results.append({"channel_id": channel.id, "kind": channel.kind, **sent})
     return results
 
 
 def log_job_notifications(job_id: str, results: list[dict[str, Any]]) -> bool:
-    """Persist per-channel delivery results on the job record for the UI."""
-    if not results:
+    """Persist per-channel delivery results on the job record for the UI.
+
+    A run refused before a job existed has no job record (``job_id`` is ""):
+    its deliveries live in the delivery log only. The job store decides how a
+    job is addressed (Mongo ObjectId, memory id) — ``ObjectId("")`` raised and
+    the memory store was never written.
+    """
+    if not results or not str(job_id or "").strip():
         return False
     try:
-        from datetime import datetime, timezone
-
-        from bson import ObjectId
-
         from services.mongodb_service import get_mongodb_service
 
-        mongo = get_mongodb_service()
-        db = mongo.get_database()
-        collection = db["transfer_jobs"]
-        collection.update_one(
-            {"_id": ObjectId(job_id)},
-            {"$set": {"notifications": results, "updated_at": datetime.now(timezone.utc)}},
-        )
-        return True
+        return bool(get_mongodb_service().update_job_fields(job_id, {"notifications": results}))
     except Exception:
         logger.exception("Failed to persist notification log for job=%s", job_id)
         return False

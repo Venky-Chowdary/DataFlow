@@ -9,11 +9,11 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-import yaml
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
 from services.brand import PRODUCT_SLUG
+from services.gitops_yaml import dump_artifact_yaml
 
 from ..services.contract_store import get_contract_store
 from ..services.data_contract import (
@@ -405,7 +405,7 @@ def export_contract(
     artifact = contract_artifact(contract)
     if format == "yaml":
         return Response(
-            content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
+            content=dump_artifact_yaml(artifact),
             media_type="application/x-yaml",
             headers={
                 "Content-Disposition": f"attachment; filename={PRODUCT_SLUG}-contract-{contract_id}.yaml"

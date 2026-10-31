@@ -550,11 +550,23 @@ def resolve_plan_change(
     request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
     if not request or str(request.get("status") or STATUS_OPEN) != STATUS_OPEN:
         return None
+    from services.schedule_mapping_contract import is_empty_mapping_finding
+    from services.schedule_store import next_run_for
+
+    now = datetime.now(timezone.utc)
+    if is_empty_mapping_finding(str(request.get("code") or ""), str(request.get("finding") or "")):
+        # Persisting the mapping contract arms the pipeline; it does not owe a
+        # missed run. The first run is the next cadence slot, as on any enable
+        # — "now" showed an unaligned next_run_at (QA SC8).
+        next_due = next_run_for(sched, now)
+    else:
+        # A drift/plan acceptance re-runs the refused beat straight away.
+        next_due = now.isoformat()
     patch = {
         "approval_request": _resolved(
             request, status=STATUS_APPROVED, actor=actor, reason=reason
         ),
-        "next_run_at": datetime.now(timezone.utc).isoformat(),
+        "next_run_at": next_due,
         "retry_at": None,
         "retry_attempt": 0,
         "last_status": "approved",

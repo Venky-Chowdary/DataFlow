@@ -839,8 +839,31 @@ async def test_notification(channel_id: str, request: Request):
         error="",
         retry_url="",
     )
-    result = send_to_channel(channel, payload)
+    result = send_to_channel(channel, payload, context={"event": "test"})
     return {"success": result.get("ok"), "detail": result}
+
+
+@router.get("/notifications/{channel_id}/deliveries")
+async def list_notification_deliveries(channel_id: str, request: Request, limit: int = 50):
+    """Every delivery attempt to this channel, newest first (QA SC9).
+
+    Records name the event, schedule and job, the HTTP status, the outcome and
+    a redacted error — never the URL, headers, secret or payload.
+    """
+    from services.notification_delivery_log import list_deliveries
+    from services.notification_store import get_channel
+
+    channel = get_channel(channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    _assert_channel_visible(request, channel.workspace_id)
+    rows = await asyncio.to_thread(
+        list_deliveries,
+        workspace_id=channel.workspace_id or "",
+        channel_id=channel_id,
+        limit=limit,
+    )
+    return {"channel_id": channel_id, "deliveries": rows}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

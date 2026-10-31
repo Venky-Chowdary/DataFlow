@@ -12,6 +12,7 @@ from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.brand import PRODUCT_SLUG
 from services.cdc_capture_release import release_schedule_cdc_capture
+from services.gitops_yaml import dump_artifact_yaml
 from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
     INTERVALS,
@@ -207,7 +208,8 @@ class ScheduleResponse(BaseModel):
     dest_connector_id: str
     dest_table: str
     interval: str
-    #: hourly | daily | weekly. Present even when ``interval`` is a label.
+    #: hourly | daily | weekly | cron | every_Nm. Present even when
+    #: ``interval`` is a label; ``cron`` whenever a cron expression is set.
     interval_preset: str = ""
     #: Human cadence. Cron wins over the preset.
     cadence_label: str = ""
@@ -291,9 +293,17 @@ class ScheduleResponse(BaseModel):
     last_run_id: str = ""
     current_run: Optional[dict[str, Any]] = None
     last_skip: Optional[dict[str, Any]] = None
+    #: Why the store saved this schedule differently from the request (e.g.
+    #: "Created disabled: ..."); empty once it no longer applies.
+    enabled_note: str = ""
+    #: What this write must tell the caller without refusing it (draft saved
+    #: disabled, source table unverifiable). Empty on reads.
+    warnings: list[str] = Field(default_factory=list)
 
     @classmethod
-    def from_schedule(cls, s: PipelineSchedule) -> ScheduleResponse:
+    def from_schedule(
+        cls, s: PipelineSchedule, *, warnings: Optional[list[str]] = None
+    ) -> ScheduleResponse:
         from services.schedule_run_lifecycle import derive_status
 
         data = project_operator_cadence(s.to_dict())
@@ -305,6 +315,7 @@ class ScheduleResponse(BaseModel):
         from services.schedule_store import visible_next_run_at
 
         data["next_run_at"] = visible_next_run_at(s)
+        data["warnings"] = list(warnings or [])
         # run_history / running_instance stay on the history endpoint.
         allowed = set(cls.model_fields)
         return cls(**{k: v for k, v in data.items() if k in allowed})
@@ -440,8 +451,6 @@ def export_dataflow_manifest(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Export schedules (+ contracts) visible in this workspace as dataflow.yaml."""
-    import yaml
-
     from services.gitops_manifest import build_dataflow_manifest
     from services.team_store import require_workspace_isolation
 
@@ -453,7 +462,7 @@ def export_dataflow_manifest(
     )
     if format == "yaml":
         return Response(
-            content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
+            content=dump_artifact_yaml(artifact),
             media_type="application/x-yaml",
             headers={"Content-Disposition": f"attachment; filename={PRODUCT_SLUG}.yaml"},
         )
@@ -602,8 +611,15 @@ async def create_pipeline_schedule(
         payload["workspace_id"] = ws
     elif payload.get("workspace_id"):
         assert_resource_workspace(request, str(payload.get("workspace_id") or ""), write=True)
+    warnings: list[str] = []
     try:
-        sched = create_schedule(payload)
+        sched = create_schedule(
+            payload,
+            # Only an explicit enabled:true is a request to arm (QA SC7); an
+            # omitted flag saves an unmapped schedule as a draft and says so.
+            refuse_empty_enable="enabled" in body.model_fields_set and body.enabled,
+            warnings=warnings,
+        )
     except ApiError:
         raise
     except PermissionError as exc:
@@ -626,7 +642,7 @@ async def create_pipeline_schedule(
             "enabled": bool(sched.enabled),
         },
     )
-    return ScheduleResponse.from_schedule(sched)
+    return ScheduleResponse.from_schedule(sched, warnings=warnings)
 
 
 @router.put("/{schedule_id}", response_model=ScheduleResponse)
@@ -647,8 +663,9 @@ async def patch_pipeline_schedule(
     data.pop("workspace_id", None)
     if not data:
         return ScheduleResponse.from_schedule(existing)
+    warnings: list[str] = []
     try:
-        updated = update_schedule(schedule_id, data)
+        updated = update_schedule(schedule_id, data, warnings=warnings)
     except ApiError:
         raise
     except PermissionError as exc:
@@ -673,7 +690,7 @@ async def patch_pipeline_schedule(
             "enabled": bool(updated.enabled),
         },
     )
-    return ScheduleResponse.from_schedule(updated)
+    return ScheduleResponse.from_schedule(updated, warnings=warnings)
 
 
 @router.get("/{schedule_id}/export")
@@ -684,8 +701,6 @@ def export_pipeline_schedule(
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
     """Export a schedule as a versionable YAML/JSON artifact for GitOps."""
-    import yaml
-
     from services.gitops_manifest import schedule_artifact
 
     resolve_read_workspace(request, workspace_id)
@@ -693,11 +708,38 @@ def export_pipeline_schedule(
     artifact = schedule_artifact(sched)
     if format == "yaml":
         return Response(
-            content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
+            content=dump_artifact_yaml(artifact),
             media_type="application/x-yaml",
             headers={"Content-Disposition": f"attachment; filename=schedule-{schedule_id}.yaml"},
         )
     return artifact
+
+
+@router.get("/{schedule_id}/notifications")
+async def list_schedule_notifications(
+    schedule_id: str,
+    request: Request,
+    limit: int = 50,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Alert deliveries for this schedule's runs, newest first (QA SC9).
+
+    Includes runs refused before a job existed. Records carry no URL, secret
+    or payload.
+    """
+    import asyncio
+
+    from services.notification_delivery_log import list_deliveries
+
+    resolve_read_workspace(request, workspace_id)
+    sched = _bound_schedule(request, schedule_id)
+    rows = await asyncio.to_thread(
+        list_deliveries,
+        workspace_id=getattr(sched, "workspace_id", "") or "",
+        schedule_id=schedule_id,
+        limit=limit,
+    )
+    return {"schedule_id": schedule_id, "deliveries": rows}
 
 
 @router.post("/import", response_model=ScheduleResponse, status_code=201)
