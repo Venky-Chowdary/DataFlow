@@ -880,6 +880,16 @@ def _exact_decimal_holds(observation: dict[str, Any], target_type: str, dest_db:
     )
 
     tgt = (target_type or "").strip()
+    need_scale = int(observation.get("exact_scale", observation.get("max_scale")) or 0)
+    need_int = int(
+        observation.get("exact_int_digits", observation.get("max_int_digits")) or 0
+    )
+    if tgt and _native_exact_decimal_carrier(tgt, dest_db) is not None:
+        # The destination's own exact-decimal carrier (SQLite TEXT, Mongo
+        # Decimal128, DynamoDB N, Elasticsearch keyword, ...): the digits land
+        # as written up to the carrier's capacity (D161 remainder).
+        cap = _native_exact_decimal_carrier(tgt, dest_db) or 0
+        return cap <= 0 or need_int + need_scale <= cap
     if not tgt or normalize_logical_type(tgt) != LOGICAL_DECIMAL:
         return False
     p, s = parse_numeric_precision_scale(tgt)
@@ -887,11 +897,51 @@ def _exact_decimal_holds(observation: dict[str, Any], target_type: str, dest_db:
         # A bare NUMERIC is exact and unbounded only on the PostgreSQL family.
         return (dest_db or "").strip().lower() in _UNBOUNDED_EXACT_NUMERIC_DIALECTS
     s = int(s or 0)
-    need_scale = int(observation.get("exact_scale", observation.get("max_scale")) or 0)
-    need_int = int(
-        observation.get("exact_int_digits", observation.get("max_int_digits")) or 0
-    )
     return s >= need_scale and int(p) - s >= need_int
+
+
+#: Engines whose exact decimal is a native carrier with no ``(p,s)`` spelling,
+#: and the significant digits it keeps (Decimal128: 34; DynamoDB N: 38).
+_NATIVE_DECIMAL_DIGITS = {"mongodb": 34, "documentdb": 34, "cosmosdb": 34, "dynamodb": 38}
+
+
+def _native_exact_decimal_carrier(target_type: str, dest_db: str) -> int | None:
+    """Digits ``target_type`` keeps exactly when it is ``dest_db``'s DECIMAL carrier.
+
+    ``0`` means unbounded (a text carrier writes the cell's characters, so no
+    digit is rounded); ``None`` means ``target_type`` is not the carrier the
+    destination's own create-new picks for an exact decimal. Only that carrier
+    counts: a user's ``VARCHAR(8)`` is not a decimal column.
+    """
+    from services.type_system import (
+        LOGICAL_STRING,
+        LOGICAL_TEXT,
+        is_unlimited_string_carrier,
+        normalize_logical_type,
+    )
+
+    db = (dest_db or "").strip().lower()
+    if not db:
+        return None
+    try:
+        from services.decision_kernel import InventContext, invent_dest_type
+
+        carrier = str(
+            invent_dest_type("DECIMAL(38,10)", dest_db=db, context=InventContext.CREATE_NEW)
+            or ""
+        ).strip()
+    except Exception:  # noqa: BLE001 - an engine invent cannot answer: not proven exact
+        return None
+    if not carrier or carrier.split("(", 1)[0].strip().upper() != (
+        target_type.split("(", 1)[0].strip().upper()
+    ):
+        return None
+    logical = normalize_logical_type(carrier)
+    if logical in {LOGICAL_STRING, LOGICAL_TEXT}:
+        return 0 if is_unlimited_string_carrier(target_type) or "(" not in target_type else None
+    if "(" in carrier:
+        return None  # a sized DECIMAL(p,s): the bounded check above decides
+    return _NATIVE_DECIMAL_DIGITS.get(db)
 
 
 def ieee_float_create_new_risk(
