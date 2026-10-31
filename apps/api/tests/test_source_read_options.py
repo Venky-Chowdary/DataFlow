@@ -362,9 +362,11 @@ def test_declared_encoding_lets_the_profile_read_a_non_utf8_export():
     """The Encoding control has to work where the operator uses it: the upload
     profile, not only the write path."""
     content = "id,name\ncaf\u00e9,\u20ac20\n".encode("cp1252")
-    refused = FileParser.parse(content, "export.csv")
-    assert refused.success is False
-    assert "not valid UTF-8" in (refused.error or "")
+    # Round 10: an undeclared Windows-1252 export is sniffed (the same sniff the
+    # streaming writer uses) and read exactly, not refused.
+    sniffed = FileParser.parse(content, "export.csv")
+    assert sniffed.success, sniffed.error
+    assert sniffed.data == [{"id": "caf\u00e9", "name": "\u20ac20"}]
 
     result = FileParser.parse(
         content, "export.csv", read_options=ReadOptions(encoding="cp1252")

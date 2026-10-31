@@ -15,8 +15,11 @@ are the source probe's finding and are not repeated here.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable, Mapping
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 #: Distinct keys held at once. A bigger population is reported as partial
 #: coverage rather than silently claimed.
@@ -50,18 +53,22 @@ def probe_transformed_key_collisions(
     transforms: Mapping[str, str],
     limit: int = 5,
     equalizers: Mapping[str, Any] | None = None,
+    engine_groups: Any = None,
 ) -> dict[str, Any]:
     """Count written keys that two different source keys collapse into.
 
     ``equalizers`` (D205) maps a key column to ``(normalize, ddl, rules)`` from
     :func:`services.dest_key_equality.key_equalizers`: the destination's own
     comparison (PAD SPACE, case / accent folding) applied to the written key.
+    ``engine_groups`` (:func:`services.dest_key_oracle.engine_key_oracle`)
+    asks the destination itself for the keys its collation makes equal.
     """
     from services.transform_engine import apply_transform
 
     equalizers = dict(equalizers or {})
 
     seen: dict[tuple[str, ...], tuple[str, ...]] = {}
+    as_written: dict[tuple[str, ...], tuple[str, ...]] = {}
     collisions: list[dict[str, Any]] = []
     collision_count = 0
     scanned = 0
@@ -72,6 +79,7 @@ def probe_transformed_key_collisions(
         scanned += 1
         raw: list[str] = []
         written: list[str] = []
+        pre_eq: list[str] = []
         usable = True
         for col in key_sources:
             cell = row.get(col)
@@ -88,6 +96,7 @@ def probe_transformed_key_collisions(
                 written.append(str(value))
             else:
                 written.append(text)
+            pre_eq.append(written[-1])
             if col in equalizers:
                 written[-1] = equalizers[col][0](written[-1])
             raw.append(text)
@@ -100,6 +109,7 @@ def probe_transformed_key_collisions(
                 complete = False
                 continue
             seen[key] = tuple(raw)
+            as_written[key] = tuple(pre_eq)
         elif first != tuple(raw):
             collision_count += 1
             if len(collisions) < limit:
@@ -108,9 +118,30 @@ def probe_transformed_key_collisions(
                     "source_keys": [", ".join(first), ", ".join(raw)],
                     "source_key_parts": [list(first), list(raw)],
                 })
+    engine_checked = False
+    if engine_groups is not None and len(seen) > 1:
+        keys = list(seen)
+        try:
+            groups = engine_groups([as_written[k] for k in keys])
+            engine_checked = True
+        except Exception:  # noqa: BLE001 - the modelled rules above still hold
+            logger.warning("destination key-collation check failed", exc_info=True)
+            groups = []
+        for ids in groups:
+            members = [seen[keys[i]] for i in ids if 0 <= i < len(keys)]
+            for other in members[1:]:
+                collision_count += 1
+                if len(collisions) < limit:
+                    collisions.append({
+                        "written_key": ", ".join(as_written[keys[ids[0]]]),
+                        "source_keys": [", ".join(members[0]), ", ".join(other)],
+                        "source_key_parts": [list(members[0]), list(other)],
+                        "destination_collation": True,
+                    })
     return {
         "ran": True,
         "complete": complete,
+        "destination_collation_checked": engine_checked,
         "rows_scanned": scanned,
         "collision_count": collision_count,
         "collisions": collisions,

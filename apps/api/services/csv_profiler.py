@@ -83,11 +83,46 @@ def detect_encoding(content: bytes) -> str:
         if content.startswith(bom):
             return encoding
     sample = content[:_ENCODING_PREFIX]
+    utf16 = _bomless_utf16(sample)
+    if utf16:
+        return utf16
     try:
         sample.decode("utf-8")
         return "utf-8"
+    except UnicodeDecodeError as exc:
+        if exc.start >= len(sample) - 3 and len(content) > len(sample):
+            # The prefix cut a multi-byte character in two; the text is UTF-8.
+            return "utf-8"
+    # Not UTF-8: a single-byte export. Windows-1252 is the code page Excel and
+    # Windows tools write ("ANSI"), and it is latin-1 plus the printable
+    # 0x80-0x9F row (€ ‚ „ … ‘ ’ “ ” – —). Decoding that row as latin-1 turned
+    # '€' into the C1 control U+0080. Bytes Windows-1252 leaves undefined keep
+    # the latin-1 reading (round 10).
+    try:
+        sample.decode("cp1252")
+        return "cp1252"
     except UnicodeDecodeError:
         return "latin-1"
+
+
+def _bomless_utf16(sample: bytes) -> str:
+    """``utf-16-le`` / ``utf-16-be`` for UTF-16 text written without a BOM.
+
+    Tabular text is mostly ASCII, and ASCII in UTF-16 puts a NUL beside every
+    character: on the odd byte (little endian) or the even byte (big endian).
+    UTF-8 and single-byte text carry no NULs, so the pattern is unambiguous.
+    """
+    probe = sample[: min(len(sample), 4096) // 2 * 2]
+    if len(probe) < 4:
+        return ""
+    even_nul = probe[0::2].count(0)
+    odd_nul = probe[1::2].count(0)
+    half = len(probe) // 2
+    if odd_nul >= half * 0.3 and even_nul <= half * 0.05:
+        return "utf-16-le"
+    if even_nul >= half * 0.3 and odd_nul <= half * 0.05:
+        return "utf-16-be"
+    return ""
 
 
 def _csv_prefix_bytes(content: bytes | str) -> bytes:

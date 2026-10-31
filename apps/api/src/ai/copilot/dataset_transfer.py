@@ -165,10 +165,16 @@ def stage_dataset_transfer(
                     "Name the uploaded file."
                 ),
             )
+        unreadable = getattr(getattr(analyst, "feeder", None), "unreadable", {}) or {}
+        why = unreadable.get(str(hint or "").strip().rsplit(".", 1)[0].lower())
         return _tool_result(
             tool,
             success=False,
-            error=f"Uploaded dataset '{hint}' was not found.",
+            error=(
+                f"Uploaded dataset '{hint}' could not be read: {why}"
+                if why
+                else f"Uploaded dataset '{hint}' was not found."
+            ),
         )
 
     try:
