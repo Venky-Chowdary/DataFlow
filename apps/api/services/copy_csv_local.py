@@ -1846,6 +1846,8 @@ def try_copy_local_csv(
     """Identity local CSV COPY, or None to keep the row path."""
     if not csv_local_copy_enabled():
         return None
+    if (dest_cfg or {}).get("vector_layout") == "table":
+        return None  # pgvector typed table: the row path embeds each row (D209)
     if not identity_file_copy_route(file_type, dest_type):
         return None
     if shape_runner is not None:

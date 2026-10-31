@@ -911,6 +911,9 @@ def test_group_role_sync_manual_membership_last_admin_and_restart(scim_client):
     from services import scim_store
 
     owner = "workspace-owner@example.test"
+    # The owner is a real login, so it is the spare admin when SCIM demotes the
+    # group member (an admin with no login does not count; QA enterprise #25).
+    scim_client["modules"]["user_store"].create_user(email=owner, password="Owner-Password-2026!")
     workspace = team_store.create_workspace(name="SCIM roles", created_by=owner)
     last_owner = "last-admin-owner@example.test"
     last_workspace = team_store.create_workspace(name="SCIM last admin", created_by=last_owner)

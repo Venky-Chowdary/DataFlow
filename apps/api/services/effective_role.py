@@ -99,6 +99,44 @@ def resolved_workspace_id(user: dict[str, Any] | None, workspace_id: str = "") -
     return str(memberships[0].get("workspace_id") or "")
 
 
+def cap_role(role: str, cap: str | None) -> str:
+    """``role``, lowered to ``cap`` when a cap applies (``None`` = no cap)."""
+    if cap is None:
+        return role
+    return role if _rank(role) <= _rank(cap) else cap
+
+
+def api_key_creator_cap(user: dict[str, Any], workspace_id: str = "") -> str | None:
+    """The most an API key may do here: its creator's current role.
+
+    ``None`` means no cap applies — a key whose creator never was an identity
+    in this deployment (no account, no environment entry, no membership): the
+    legacy/system credentials minted before keys recorded a person. A creator
+    whose stored account is disabled caps the key at viewer.
+    """
+    creator = str(user.get("email") or "").strip().lower()
+    if not creator or creator == "api-key":
+        return None
+    try:
+        from services.team_store import list_memberships_for_user
+        from services.user_store import get_user_record
+        from src.services.auth_service import lookup_user
+
+        stored = get_user_record(creator)
+        if stored and str(stored.get("status") or "active") != "active":
+            return "viewer"
+        account = lookup_user(creator)
+        if account is None:
+            if stored is None and not list_memberships_for_user(creator):
+                return None
+            account = {"email": creator, "role": "member"}
+    except Exception:  # noqa: BLE001 - fail closed, never lift the cap
+        # A store that cannot be read must not lift the cap.
+        return "viewer"
+    session_like = {k: v for k, v in account.items() if k not in ("auth_kind", "scopes")}
+    return resolve_effective_role(session_like, workspace_id)
+
+
 def resolve_effective_role(user: dict[str, Any] | None, workspace_id: str = "") -> str:
     """The caller's gate role for ``workspace_id``.
 
@@ -114,8 +152,10 @@ def resolve_effective_role(user: dict[str, Any] | None, workspace_id: str = "") 
     # A workspace API key is its own principal. The role stored on the key is
     # the gate. Looking up the creator's membership promoted every key an
     # admin minted to admin, so an editor key could list and revoke keys.
+    # It is also never more than the person who minted it may do *today*: a
+    # key an admin minted stops acting as admin once that admin is demoted.
     if str(user.get("auth_kind") or "") == "api_key":
-        return platform_role
+        return cap_role(platform_role, api_key_creator_cap(user, workspace_id))
     if platform_role == "admin":
         return "admin"
     email = str(user.get("email") or "").strip()

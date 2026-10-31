@@ -656,16 +656,16 @@ def _actor(request: Request) -> str:
 
 
 def _check_workspace_read(request: Request, workspace_id: str | None):
-    from services.team_store import can_read_workspace
-    actor = _actor(request)
-    if workspace_id and not can_read_workspace(workspace_id, actor):
+    from services.effective_principal import request_may_read_workspace
+
+    if workspace_id and not request_may_read_workspace(request, workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
 
 
 def _check_workspace_write(request: Request, workspace_id: str | None):
-    from services.team_store import can_write_workspace
-    actor = _actor(request)
-    if workspace_id and not can_write_workspace(workspace_id, actor):
+    from services.effective_principal import request_may_write_workspace
+
+    if workspace_id and not request_may_write_workspace(request, workspace_id):
         raise HTTPException(status_code=403, detail="Workspace write access denied")
 
 

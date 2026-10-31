@@ -2940,6 +2940,9 @@ def run_file_preflight(
     from services.file_pickup import attach_direct_dated_file_warning
 
     attach_direct_dated_file_warning(out, source_table or source_filename)
+    from services.mirror_delete_notice import attach_mirror_delete_notice
+
+    attach_mirror_delete_notice(out, sync_mode, stream_contracts)
     _lift_in_file_collapse_advisories(out)
     out = apply_root_causes_to_preflight(
         _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))

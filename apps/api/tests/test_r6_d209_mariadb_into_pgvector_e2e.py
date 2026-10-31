@@ -7,14 +7,14 @@ source in ``test_d209_pgvector_destination_contract_e2e.py``. This drives the
 same route from a real MariaDB table (``start_transfer`` -> Confirm -> job),
 run 1 and run 2:
 
-* undeclared destination (production default, flag off): the plan names the
+* destination opting into the document layout: the plan names the
   document layout and its columns honestly; every source column lands in
   ``metadata`` with NULL kept as JSON null, and Gate-8 proves each value;
 * ``vector_layout=table``: the typed table the plan promised, with every source
   column as a real column and every cell equal (NULL, '', unicode).
 
-Whether a new pgvector table should default to the typed layout (QA's
-expectation) is the owner's call on ``DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT``.
+With no layout given a new table is typed (owner decision, round 8): see
+``test_r8_pgvector_typed_default_mariadb_e2e.py``.
 """
 
 from __future__ import annotations
@@ -159,15 +159,15 @@ def _assert_documents(src: str, dst: str) -> None:
             assert _same(meta[key], value), (row[0], key, meta[key], value)
 
 
-def test_undeclared_pgvector_from_mariadb_is_the_document_layout_it_plans(client, tables):
+def test_document_opt_in_from_mariadb_is_the_document_layout_it_plans(client, tables):
     src, dst = tables["src"], tables["dst"]
-    dest = _connector("pgvector", "destination")
+    dest = _connector("pgvector", "destination", {"vector_layout": "document"})
     args = dict(source_connector_id=tables["source"], source_table=src,
                 dest_connector_id=dest, dest_table=dst)
 
     plan, job = _run(client, sync_mode="full_refresh_overwrite", **args)
     contract = _assert_plan_is_the_table(plan, dst)
-    assert (contract["layout"], contract["layout_reason"]) == ("document", "default_document")
+    assert (contract["layout"], contract["layout_reason"]) == ("document", "declared")
     assert [f["key"] for f in contract["metadata_fields"]] == list(_COLS) + ["rev"]
     _assert_documents(src, dst)
     recon = job.get("reconciliation") or {}
@@ -179,7 +179,7 @@ def test_undeclared_pgvector_from_mariadb_is_the_document_layout_it_plans(client
     plan2, job2 = _run(client, sync_mode="incremental_upsert", primary_key="id",
                        cursor_column="rev", cursor_semantics="monotonic_sequence", **args)
     contract2 = _assert_plan_is_the_table(plan2, dst)
-    assert contract2["layout_reason"] == "existing_document_table"
+    assert contract2["layout"] == "document"
     _assert_documents(src, dst)
     assert ((job2.get("reconciliation") or {}).get("document_value_proof") or {}).get("passed")
 

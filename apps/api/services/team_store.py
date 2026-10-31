@@ -65,25 +65,29 @@ class TeamStoreError(Exception):
     reason is its own type so the operator is told which one happened.
     """
 
+    reason = "refused"
+
 
 class TeamStoreBusy(TeamStoreError):
     """The workspace membership lock could not be acquired promptly."""
 
+    reason = "busy"
+
 
 class WorkspaceNotFound(TeamStoreError):
-    pass
+    reason = "workspace_not_found"
 
 
 class PermissionDenied(TeamStoreError):
-    pass
+    reason = "permission"
 
 
 class MemberNotFound(TeamStoreError):
-    pass
+    reason = "member_not_found"
 
 
 class LastAdminProtected(TeamStoreError):
-    pass
+    reason = "last_admin"
 
 
 class MemberAlreadyExists(TeamStoreError):
@@ -94,6 +98,8 @@ class MemberAlreadyExists(TeamStoreError):
     silently demote an admin to viewer on a typo. The role change has its own
     route, so the add path refuses and names the role held today.
     """
+
+    reason = "already_member"
 
 
 @contextmanager
@@ -194,12 +200,90 @@ def workspace_membership_lock(workspace_id: str):
 
 
 def _assert_not_last_admin(workspace_id: str, email: str) -> None:
-    """Refuse a change that would leave a workspace with nobody who can administer it."""
-    admins = [m for m in _read_memberships(workspace_id=workspace_id) if m.role == "admin"]
-    if len(admins) <= 1 and any(m.email == normalize_email(email) for m in admins):
+    """Refuse a change that would leave no administrator who can sign in.
+
+    Only admins who can actually log in count (``services.sign_in_capability``):
+    an invitation creates a membership, not an account, and counting an invited
+    admin with no login let the owner's demotion through on production. Callers
+    hold ``workspace_membership_lock`` so two concurrent demotions cannot each
+    see the other as the spare admin.
+    """
+    from services.sign_in_capability import can_sign_in
+
+    target = normalize_email(email)
+    others = [
+        m
+        for m in _read_memberships(workspace_id=workspace_id)
+        if m.role == "admin" and m.email != target
+    ]
+    if not any(can_sign_in(m.email) for m in others):
         raise LastAdminProtected(
-            "This is the only admin — grant the admin role to someone else first"
+            "This is the last admin who can sign in — grant the admin role to "
+            "someone with an account first"
         )
+
+
+class _Authority:
+    """What the acting principal may do in the workspace being changed."""
+
+    def __init__(self, role: str, permissions: frozenset[str] | set[str], platform_admin: bool):
+        self.role = role
+        self.permissions = frozenset(permissions)
+        self.platform_admin = platform_admin
+
+    def has(self, permission: str) -> bool:
+        return permission in self.permissions
+
+
+_RANK = {"viewer": 0, "operator": 1, "editor": 2, "admin": 3}
+
+
+def _authority(
+    workspace_id: str, actor_email: str, actor_is_platform_admin: bool, principal: Any
+) -> _Authority:
+    """The acting principal's authority, from ``services.effective_principal``.
+
+    Routes pass the principal resolved from the request (an API key's own role,
+    capped at its creator's; a service account's scopes). Store-level callers
+    that pass only an email (SCIM, signup, scripts) are a session principal for
+    that email, which is what the email lookup always meant.
+    """
+    from services.rbac import role_permissions
+
+    if principal is not None:
+        return _Authority(principal.member_role, principal.permissions, principal.platform_admin)
+    if actor_is_platform_admin:
+        return _Authority("admin", role_permissions("admin"), True)
+    role = get_workspace_role(workspace_id=workspace_id, email=actor_email)
+    return _Authority(role, role_permissions(role) if role else set(), False)
+
+
+def _authorize_change(
+    authority: _Authority, *, current: str, requested: str | None
+) -> None:
+    """The membership rules every route shares.
+
+    - Bringing someone in needs ``member.invite`` and never grants a role above
+      the actor's own; granting admin needs workspace administration.
+    - Changing an existing member's role is role management: admin only.
+    - Removing a member needs ``member.invite``; removing an admin needs admin.
+    """
+    from services.rbac import Permission
+
+    manage = authority.has(Permission.WORKSPACE_MANAGE)
+    if requested is not None and current and requested != current and not manage:
+        raise PermissionDenied("Changing a member's role requires the workspace admin role")
+    if current == "admin" and not manage:
+        raise PermissionDenied("Only a workspace admin can change or remove another admin")
+    if not authority.has(Permission.MEMBER_INVITE) and not manage:
+        raise PermissionDenied("Adding or removing members requires the workspace admin or editor role")
+    if requested is not None:
+        if _RANK.get(requested, 0) > _RANK.get(authority.role, -1):
+            raise PermissionDenied(
+                f"Cannot grant the {requested} role: it is above your own ({authority.role or 'none'})"
+            )
+        if requested == "admin" and not manage:
+            raise PermissionDenied("Only a workspace admin can grant the admin role")
 
 
 def _is_transactions_unsupported(exc: OperationFailure) -> bool:
@@ -557,6 +641,7 @@ def add_workspace_member(
     actor_is_platform_admin: bool = False,
     refuse_existing: bool = False,
     name: str = "",
+    principal: Any = None,
 ) -> Membership:
     with workspace_membership_lock(workspace_id):
         return _add_workspace_member(
@@ -567,6 +652,7 @@ def add_workspace_member(
             actor_is_platform_admin=actor_is_platform_admin,
             refuse_existing=refuse_existing,
             name=name,
+            principal=principal,
         )
 
 
@@ -579,6 +665,7 @@ def _add_workspace_member(
     actor_is_platform_admin: bool = False,
     refuse_existing: bool = False,
     name: str = "",
+    principal: Any = None,
 ) -> Membership:
     """Add or re-role a member, or raise the reason it cannot be done.
 
@@ -592,16 +679,12 @@ def _add_workspace_member(
     if not workspace_id or not get_workspace(workspace_id):
         raise WorkspaceNotFound("Workspace not found")
     role = normalize_role(role)
-    actor_role = get_workspace_role(workspace_id=workspace_id, email=added_by)
-    if actor_role not in _WRITE_ROLES and not actor_is_platform_admin:
-        raise PermissionDenied("Adding members requires the workspace admin or editor role")
-    # An editor may bring in peers but may not mint another administrator.
-    if role == "admin" and actor_role != "admin" and not actor_is_platform_admin:
-        raise PermissionDenied("Only a workspace admin can grant the admin role")
+    authority = _authority(workspace_id, added_by, actor_is_platform_admin, principal)
     existing = next(
         (m for m in _read_memberships(workspace_id=workspace_id, email=email)),
         None,
     )
+    _authorize_change(authority, current=existing.role if existing else "", requested=role)
     if existing and refuse_existing:
         raise MemberAlreadyExists(
             f"{normalize_email(email)} is already a member of this workspace "
@@ -627,6 +710,7 @@ def remove_workspace_member(
     email: str,
     removed_by: str,
     actor_is_platform_admin: bool = False,
+    principal: Any = None,
 ) -> None:
     with workspace_membership_lock(workspace_id):
         _remove_workspace_member(
@@ -634,6 +718,7 @@ def remove_workspace_member(
             email=email,
             removed_by=removed_by,
             actor_is_platform_admin=actor_is_platform_admin,
+            principal=principal,
         )
 
 
@@ -643,22 +728,46 @@ def _remove_workspace_member(
     email: str,
     removed_by: str,
     actor_is_platform_admin: bool = False,
+    principal: Any = None,
 ) -> None:
     """Remove a member, refusing to leave a workspace with no administrator."""
     if not workspace_id or not get_workspace(workspace_id):
         raise WorkspaceNotFound("Workspace not found")
-    actor_role = get_workspace_role(workspace_id=workspace_id, email=removed_by)
-    if actor_role not in _WRITE_ROLES and not actor_is_platform_admin:
-        raise PermissionDenied("Removing members requires the workspace admin or editor role")
+    authority = _authority(workspace_id, removed_by, actor_is_platform_admin, principal)
     target_role = get_workspace_role(workspace_id=workspace_id, email=email)
     if not target_role:
+        # Refuse an unauthorized caller before telling it who is a member.
+        _authorize_change(authority, current="", requested=None)
         raise MemberNotFound(f"{normalize_email(email)} is not a member of this workspace")
-    if actor_role == "editor" and target_role == "admin" and not actor_is_platform_admin:
-        raise PermissionDenied("Only a workspace admin can remove another admin")
+    _authorize_change(authority, current=target_role, requested=None)
     if target_role == "admin":
         _assert_not_last_admin(workspace_id, email)
     if not _delete_membership(workspace_id, email):
         raise MemberNotFound(f"{normalize_email(email)} is not a member of this workspace")
+
+
+def break_glass_set_admin(*, workspace_id: str, email: str, actor: str) -> tuple[str, Membership]:
+    """Make ``email`` an admin of the workspace, bypassing membership authorization.
+
+    Only ``team_router.break_glass_restore_admin`` calls this, after it has
+    checked that a platform administrator signed in as themselves asked, with a
+    reason, for someone who can sign in — and it audits the result. Returns the
+    role held before ("" when not a member) and the new membership.
+    """
+    with workspace_membership_lock(workspace_id):
+        if not workspace_id or not get_workspace(workspace_id):
+            raise WorkspaceNotFound("Workspace not found")
+        existing = next(iter(_read_memberships(workspace_id=workspace_id, email=email)), None)
+        membership = Membership(
+            workspace_id=workspace_id,
+            email=normalize_email(email),
+            role="admin",
+            added_at=existing.added_at if existing else _now(),
+            added_by=existing.added_by if existing else normalize_email(actor),
+            name=existing.name if existing else "",
+        )
+        _write_membership(membership)
+        return (existing.role if existing else ""), membership
 
 
 def get_workspace_role(*, workspace_id: str, email: str) -> str:

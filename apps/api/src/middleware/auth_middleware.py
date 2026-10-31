@@ -175,6 +175,8 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         }
         if key_info.get("scopes") is not None:
             user["scopes"] = key_info["scopes"]
+        if key_info.get("workspace_id"):
+            user["workspace_id"] = key_info["workspace_id"]
         # Workspace API keys may carry tenant binding (same claims as users).
         if key_info.get("tenant_id"):
             user["tenant_id"] = key_info["tenant_id"]
