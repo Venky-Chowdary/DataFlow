@@ -90,6 +90,8 @@ _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _NUMERIC_WIRE_MARKS = ("$", "€", "£", "¥")
 _NUMERIC_WIRE_CODES = ("USD", "EUR", "GBP")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
+# A clock with a fraction ('03:04:05.250000', MySQL TIME up to 838 hours).
+_CLOCK_FRACTION_RE = re.compile(r"^-?\d{1,3}:[0-5]\d:[0-5]\d\.\d{1,9}$")
 # RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
 _TEXT_FAMILY_DDL_RE = re.compile(
     r"^(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?|BPCHAR|(?:N)?(?:VAR)?CHAR2|TEXT|TINYTEXT|"
@@ -3506,6 +3508,12 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             text = raw_text.strip()
     else:
         text = raw_text.strip()
+    if _CLOCK_FRACTION_RE.match(text):
+        # D224: '03:04:05.250000' and '03:04:05.25' are one clock — the same
+        # trailing-zero fold the time/timedelta branches above apply, so a
+        # TIME(6) read back as text compares to the driver value at full
+        # precision whichever spelling the writer or digest used.
+        text = text.rstrip("0").rstrip(".")
     # Type-driven honesty: on a declared TEXT-family column the cell IS text —
     # '01' vs '1', 'A' vs 'A ', and '30.99' vs '30.990' are real value changes
     # and must not collapse under the numeric/bool folds below. Format-variant

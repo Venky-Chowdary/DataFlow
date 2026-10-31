@@ -7089,6 +7089,11 @@ def destination_temporal_fractional_digits(
         if db in {"bigquery", "bq"}:
             # BigQuery DATETIME is microsecond.
             return 6
+        if db in {"sqlite", "redis"}:
+            # D224: a text carrier keeps every digit the writer bound. Reading
+            # SQLite DATETIME as FSP 0 made Gate-8 fingerprint the source at
+            # whole seconds, so a copy that dropped the microseconds verified.
+            return _bare_temporal_digits(db)
         if db in _MSSQL_TEMPORAL_ENGINES:
             # SQL Server legacy ``datetime`` keeps 1/300 s — three digits, whose
             # endings are .000/.003/.007 (services.carrier_instant rounds them).

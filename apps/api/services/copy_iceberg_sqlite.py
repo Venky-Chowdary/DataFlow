@@ -38,6 +38,7 @@ from services.copy_iceberg_pg import (
 from services.copy_pg_iceberg import iceberg_copy_endpoint
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
+    sqlite_temporal_text,
     sqlite_connect,
     sqlite_create_sql,
     sqlite_ident,
@@ -69,16 +70,9 @@ def iceberg_value_to_sqlite(value: Any) -> Any:
         return None
     if isinstance(value, bool):
         return int(value)
-    if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            raise FastPathUnavailable(
-                "timestamptz Iceberg value is not SQLite COPY-safe"
-            )
-        if value.hour or value.minute or value.second or value.microsecond:
-            return value.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
-        return date(value.year, value.month, value.day).isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
+    if isinstance(value, (datetime, date)):
+        # D224: full precision, and a midnight DATETIME keeps its clock.
+        return sqlite_temporal_text(value, source_label="Iceberg")
     if isinstance(value, Decimal):
         # dest-canonical text, never str()/float — str(Decimal) renders
         # small magnitudes in scientific notation (-1E-10), which a
