@@ -300,6 +300,7 @@
   "POST /api/v1/team/users/{email}/password": "workspace.manage",
   "POST /api/v1/team/users/{email}/reset-password": "workspace.manage",
   "POST /api/v1/team/workspaces": "workspace.manage",
+  "POST /api/v1/team/workspaces/{workspace_id}/break-glass/restore-admin": "workspace.read",
   "POST /api/v1/team/workspaces/{workspace_id}/members": "workspace.read",
   "POST /api/v1/training-agent/run": "workspace.manage",
   "POST /api/v1/training-agent/run/sync": "workspace.manage",

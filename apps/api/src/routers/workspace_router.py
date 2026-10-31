@@ -19,11 +19,9 @@ from services.byok_key_manager import (
     public_key_dict,
     rotate_key,
 )
-from services.team_store import (
-    can_write_workspace,
-    get_workspace,
-)
 from services.admin_audit import record_admin_change
+from services.effective_principal import request_may_write_workspace
+from services.team_store import get_workspace
 from services.workspace_access import tenant_scope
 from services.tenant_store import (
     Tenant,
@@ -554,7 +552,7 @@ async def get_notifications(workspace_id: str | None = None, request: Request = 
 async def post_notification(body: NotificationChannelCreate, request: Request):
     actor = _actor(request)
     ws_id = body.workspace_id or ""
-    if ws_id and not can_write_workspace(ws_id, actor):
+    if ws_id and not request_may_write_workspace(request, ws_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     from services.notification_store import create_channel
 
@@ -580,7 +578,7 @@ async def patch_notification(channel_id: str, body: NotificationChannelUpdate, r
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     updates = body.model_dump(exclude_none=True)
     updated = update_channel(channel_id, updates=updates)
@@ -597,7 +595,7 @@ async def delete_notification(channel_id: str, request: Request):
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     if not delete_channel(channel_id):
         raise HTTPException(status_code=500, detail="Delete failed")
@@ -613,7 +611,7 @@ async def test_notification(channel_id: str, request: Request):
     channel = get_channel_decrypted(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     payload = build_job_payload(
         job_id="test",
@@ -1237,9 +1235,12 @@ async def run_workspace_benchmark(body: BenchmarkRequest):
     (so this API process's environment is untouched and memory is measured),
     but a large run outlives proxy timeouts: the page uses ``/benchmark/runs``.
     """
-    from services.benchmark_runs import run_blocking
+    from services.benchmark_runs import BenchmarkBusy, run_blocking
 
-    run = await asyncio.to_thread(run_blocking, body.rows)
+    try:
+        run = await asyncio.to_thread(run_blocking, body.rows)
+    except BenchmarkBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     report = run.get("report") or {
         "target": "sqlite", "rows": body.rows, "success": False,
         "error": run.get("error") or "Benchmark failed",
@@ -1256,19 +1257,30 @@ async def run_workspace_benchmark(body: BenchmarkRequest):
 
 
 @router.post("/benchmark/runs")
-async def start_benchmark_run(body: BenchmarkRequest):
-    """Start the Proofs → Scale benchmark in the background; poll ``GET .../runs/{id}``."""
-    from services.benchmark_runs import start_run
+async def start_benchmark_run(body: BenchmarkRequest, request: Request):
+    """Start the Proofs → Scale benchmark in the background; poll ``GET .../runs/{id}``.
 
-    run, started = start_run(body.rows)
+    The run belongs to the request's workspace; only that workspace (or a
+    platform admin) can poll it.
+    """
+    from services.benchmark_runs import BenchmarkBusy, start_run
+
+    scope = tenant_scope(request)
+    try:
+        run, started = start_run(
+            body.rows, workspace_id=scope.workspace_id, started_by=_actor(request)
+        )
+    except BenchmarkBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return JSONResponse({"run": run, "started": started}, status_code=202 if started else 200)
 
 
 @router.get("/benchmark/runs/{run_id}")
-async def get_benchmark_run(run_id: str, format: str = "json"):
+async def get_benchmark_run(run_id: str, request: Request, format: str = "json"):
     from services.benchmark_runs import get_run
 
-    run = get_run(run_id)
+    scope = tenant_scope(request)
+    run = get_run(run_id, workspace_id=scope.workspace_id, unrestricted=scope.unrestricted)
     if run is None:
         raise HTTPException(status_code=404, detail="Benchmark run not found")
     if format == "md":

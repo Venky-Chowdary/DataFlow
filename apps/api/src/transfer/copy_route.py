@@ -604,6 +604,9 @@ def _try_copy_fast_path(
     if is_callable_source(source) or is_callable_source(src_cfg):
         note_copy_decline("callable source is a result set, not a table")
         return None
+    if (dest_cfg or {}).get("vector_layout") == "table":
+        note_copy_decline("pgvector typed table embeds each row on the row path")
+        return None
 
     # D107: an approved destination widen must ALTER the live carrier before
     # rows land — the row path owns that. Server-to-server COPY binds into

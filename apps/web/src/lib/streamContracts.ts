@@ -1,6 +1,7 @@
 /** Per-stream cursor / primary-key overrides for multi-stream Advanced settings. */
 
 import { evaluateCursorSemantics } from "./cursorSemantics";
+import type { MirrorDeleteMode } from "./mirrorDeleteMode";
 import { statementKind } from "./sourceReadMode";
 
 export interface StreamFieldContract {
@@ -33,6 +34,8 @@ export interface BuildStreamContractsInput {
   streamFields: Record<string, StreamFieldContract>;
   /** Debezium-compatible snapshot mode (CDC only). */
   snapshotMode?: string;
+  /** Mirror only: soft (default, `_deleted` flags) or an explicit hard DELETE. */
+  mirrorDeleteMode?: MirrorDeleteMode;
 }
 
 export function resolveStreamFields(
@@ -91,6 +94,9 @@ export function buildStreamContracts(input: BuildStreamContractsInput & {
         : {}),
       ...(input.syncMode === "cdc" && input.snapshotMode
         ? { snapshot_mode: input.snapshotMode }
+        : {}),
+      ...(input.syncMode === "mirror" && input.mirrorDeleteMode === "hard"
+        ? { delete_mode: "hard" }
         : {}),
       ...(maps && maps.length
         ? {

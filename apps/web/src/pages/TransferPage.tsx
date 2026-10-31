@@ -262,6 +262,7 @@ import {
   seedStreamFieldsFromCandidates,
   type StreamFieldContract,
 } from "../lib/streamContracts";
+import type { MirrorDeleteMode } from "../lib/mirrorDeleteMode";
 import type { TransferPageProps } from "./transfer/TransferPageProps";
 import {
   ACCEPTED_UPLOAD_EXTENSIONS,
@@ -537,6 +538,8 @@ export function TransferPage({
   const [priorityDirection, setPriorityDirection] = useState<"asc" | "desc">("desc");
   const [rowLimit, setRowLimit] = useState(0);
   const [snapshotMode, setSnapshotMode] = useState("initial");
+  // Mirror: soft delete unless the operator explicitly picks a hard DELETE.
+  const [mirrorDeleteMode, setMirrorDeleteMode] = useState<MirrorDeleteMode>("soft");
   const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
     CDC_DELIVERY_AT_LEAST_ONCE,
   );
@@ -1222,6 +1225,7 @@ export function TransferPage({
     defaultCursorSemantics: cursorSemantics,
     streamFields,
     snapshotMode: syncMode === "cdc" ? snapshotMode : undefined,
+    mirrorDeleteMode: syncMode === "mirror" ? mirrorDeleteMode : undefined,
     streamMappings: isMultiStreamSource
       ? {
           ...streamMappings,
@@ -8653,6 +8657,8 @@ export function TransferPage({
         compositeKeySuggestions={compositeKeySuggestions}
         snapshotMode={snapshotMode}
         onSnapshotModeChange={setSnapshotMode}
+        mirrorDeleteMode={mirrorDeleteMode}
+        onMirrorDeleteModeChange={setMirrorDeleteMode}
         deliveryGuarantee={deliveryGuarantee}
         onDeliveryGuaranteeChange={setDeliveryGuarantee}
         exactlyOnceWired={exactlyOnceWiredDest(destDriverType || destType)}

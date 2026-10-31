@@ -34,12 +34,23 @@ def start_lease_heartbeat(
     ttl_seconds: int | None = None,
     interval_seconds: float | None = None,
     on_lost: Callable[[], None] | None = None,
+    fence: int | None = None,
 ) -> Callable[[], None]:
     """Extend ``job_id``'s lease until the returned stop function runs.
 
     ``on_lost`` runs once when a heartbeat is refused (the lease expired or
     another worker took the fence). The writer must treat that as cancel.
+
+    ``fence`` is the fence this run acquired (default: the process's current
+    one at start). The beat extends that fence only. When a newer run of the
+    same job in this process has taken a newer fence (a resume while the
+    cancelled run was still stopping), this run was superseded, not robbed:
+    ``on_lost`` would cancel the newer run, so the beat just stops. The old
+    run stops on the run-attempt fence (D168). QA D213.
     """
+    from services.worker_leases import active_fence
+
+    own_fence = fence if fence is not None else active_fence(job_id)
     ttl = int(ttl_seconds if ttl_seconds is not None else lease_ttl_seconds())
     interval = float(interval_seconds if interval_seconds is not None else max(5, ttl // 2))
     stop_event = threading.Event()
@@ -49,10 +60,17 @@ def start_lease_heartbeat(
         # this interval when the interval is half the TTL, so waiting first
         # lets reclaim start a second writer before the first beat lands.
         while not stop_event.is_set():
-            if store.heartbeat(job_id, ttl_seconds=ttl):
+            if store.heartbeat(job_id, ttl_seconds=ttl, fence=own_fence):
                 if stop_event.wait(interval):
                     break
                 continue
+            current = active_fence(job_id)
+            if own_fence is not None and current is not None and current > own_fence:
+                emit_event(
+                    _logger, "job.lease.heartbeat", outcome="skipped",
+                    job_id=job_id, reason_code="superseded_in_process",
+                )
+                break
             _logger.warning("Lease heartbeat failed for job %s", job_id)
             emit_event(
                 _logger, "job.lease.heartbeat", outcome="failed",

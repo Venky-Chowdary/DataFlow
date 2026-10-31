@@ -1400,11 +1400,12 @@ def _account_mirror(
     leftover = None
     if physical is not None:
         leftover = max(int(physical) - int(active), 0)
+    from services.mirror_delete_notice import MIRROR_LEDGER_HARD_TEXT, MIRROR_LEDGER_SOFT_TEXT
+
     if unaccounted == 0 and _mode == "hard":
         note = (
             f"Mirror population closed: dest-engine COUNT(*) = {active} equals "
-            "rows read minus hold-outs and skips. Keys missing from the source "
-            "were deleted (hard delete declared on the stream contract)."
+            f"rows read minus hold-outs and skips. {MIRROR_LEDGER_HARD_TEXT}"
         )
         if inferred:
             note += f" This run deleted {inferred} row(s)."
@@ -1412,10 +1413,8 @@ def _account_mirror(
         note = (
             f"Mirror active population closed: dest-engine COUNT(*) WHERE NOT "
             f"_deleted = {active} equals rows read minus hold-outs and skips. "
-            "Physical COUNT(*) does not drop — leftover dest keys stay as "
-            f"soft-deletes"
-            + (f" ({leftover} leftover row(s))" if leftover else "")
-            + "."
+            f"{MIRROR_LEDGER_SOFT_TEXT}"
+            + (f" ({leftover} leftover row(s) flagged _deleted.)" if leftover else "")
         )
         if inferred:
             note += f" This run inferred {inferred} delete(s)."
