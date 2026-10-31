@@ -81,24 +81,58 @@ test("marketing pages never publish CI blockers as product gaps", () => {
   }
 });
 
-test("catalog honesty lead never treats tiles as transfer-live", () => {
+test("catalog lead states the measured driver count, never the tile count", () => {
   const lead = catalogHonestyLead();
-  assert.match(lead, /Catalog tiles are not transfer-live/);
-  assert.match(lead, new RegExp(String(TRANSFER_READY_DRIVERS)));
-  assert.doesNotMatch(lead, /650|700\+|certified connectors/i);
+  assert.match(lead, new RegExp(`^${TRANSFER_READY_DRIVERS} drivers are transfer-ready`));
+  assert.doesNotMatch(lead, /650|700\+|717|certified connectors/i);
 });
 
-test("marketing stack notes Planned names instead of inventing native MERGE", () => {
-  const warehouses = MARKETING_STACK.find((row) => row.family === "Warehouses");
-  const apps = MARKETING_STACK.find((row) => row.family === "Applications");
-  assert.ok(warehouses && apps);
-  assert.equal(warehouses.badge, "Mixed");
-  assert.match(warehouses.note, /Planned/);
-  assert.match(warehouses.note, /Redshift/);
-  assert.doesNotMatch(warehouses.note, /Native MERGE/i);
-  assert.match(apps.note, /Shopify stays Planned/);
-  assert.match(apps.note, /Stripe is a named incremental-cursor SKU/);
-  assert.match(apps.note, /Salesforce and HubSpot are certified/);
+test("marketing stack names only transfer-ready drivers", () => {
+  // Catalog status `planned` in docs/CONNECTOR_READINESS_MATRIX.md. Naming one
+  // of these on a public page would sell a tile as a live transfer.
+  const planned = /\b(Redshift|Databricks|ClickHouse|MariaDB|CockroachDB|Shopify)\b/;
+  assert.ok(MARKETING_STACK.length > 0);
+  for (const row of MARKETING_STACK) {
+    assert.equal(row.badge, "Transfer-ready");
+    assert.doesNotMatch(row.items, planned, `${row.family} names a planned driver`);
+    assert.doesNotMatch(row.note, planned, `${row.family} note names a planned driver`);
+    assert.doesNotMatch(row.note, /Native MERGE/i);
+  }
+});
+
+test("public pages never name a planned connector or an unbuilt control", () => {
+  // MFA enforcement is design-only (docs/MFA_ENFORCEMENT_DESIGN.md); the IP
+  // allowlist only applies to tenant custom domains; zero-loss absolutes and
+  // planned connectors are left out (docs/MARKETING_AUDIT_2026-10.md §4).
+  const forbidden =
+    /\b(MFA|multi-factor|IP allow-?list|zero data loss|0 silent drops|Redshift|Databricks|ClickHouse|Shopify)\b|"(redshift|databricks|clickhouse|shopify)"/i;
+  const marketingFiles = [
+    ...sourceFiles(path.join(SRC, "pages", "marketing")),
+    path.join(SRC, "pages", "LandingPage.tsx"),
+    ...sourceFiles(path.join(SRC, "components", "landing")),
+    ...sourceFiles(path.join(SRC, "components", "marketing")),
+  ].filter((file) => !file.endsWith(".test.tsx") && !file.endsWith(".test.ts"));
+  for (const file of marketingFiles) {
+    const hit = readFileSync(file, "utf8").match(forbidden);
+    assert.equal(hit, null, `${path.relative(SRC, file)} claims ${hit?.[0]}`);
+  }
+});
+
+test("public pages carry no disclaimer copy", () => {
+  // Owner policy 2026-10-31: positive copy only. What is not real is left out
+  // instead of being announced as missing.
+  const disclaimers =
+    /not transfer-live|stays? Planned|at-least-once upsert until|We do not invent|no SOC|is not claimed|not yet|Honest labels/i;
+  const marketingFiles = [
+    ...sourceFiles(path.join(SRC, "pages", "marketing")),
+    path.join(SRC, "pages", "LandingPage.tsx"),
+    ...sourceFiles(path.join(SRC, "components", "landing")),
+    ...sourceFiles(path.join(SRC, "components", "marketing")),
+  ].filter((file) => !file.endsWith(".test.tsx") && !file.endsWith(".test.ts"));
+  for (const file of marketingFiles) {
+    const hit = readFileSync(file, "utf8").match(disclaimers);
+    assert.equal(hit, null, `${path.relative(SRC, file)} publishes "${hit?.[0]}"`);
+  }
 });
 
 test("public pages do not sell the catalog as live or native MERGE", () => {

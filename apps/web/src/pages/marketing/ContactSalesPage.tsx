@@ -21,10 +21,10 @@ const SOURCES = [
 const DESTINATIONS = [
   "Snowflake",
   "BigQuery",
-  "Redshift",
-  "Databricks",
+  "Iceberg / S3",
   "PostgreSQL",
   "SQL Server",
+  "Oracle",
   "Other",
 ] as const;
 
@@ -231,7 +231,6 @@ export function ContactSalesPage({
               <span>
                 One business day. General questions:{" "}
                 <a className="lp-sales-mail" href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
-                No SOC 2 certificate is claimed.
               </span>
             </p>
             {/* The drawing carries these three steps above 960px; below it, the list does. */}
