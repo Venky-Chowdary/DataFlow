@@ -8,9 +8,10 @@ dropped), the embedded text was the payload when filled and a JSON copy of the
 row otherwise, and Gate-8 called the cells "unproven" while the run succeeded.
 
 One destination contract now: the layout is decided once (an explicit
-``vector_layout``, else the existing table's shape, else the document layout
-unless ``DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT=1``) and the plan shows it
-column by column. Every test drives the user's route — ``start_transfer`` ->
+``vector_layout``, else the existing table's shape, else a typed table with an
+embedding column — owner decision, round 8; see
+``test_r8_pgvector_typed_default_e2e.py``) and the plan shows it column by
+column. Every test drives the user's route — ``start_transfer`` ->
 ``/api/v1/copilot/confirm`` -> job — PostgreSQL -> pgvector on a real
 PostgreSQL with the pgvector extension, run 1 and run 2, NULL / '' / unicode,
 and compares the plan's promised columns with ``pg_attribute`` cell by cell.
@@ -86,8 +87,6 @@ def client(tmp_path, monkeypatch):
         "DATAFLOW_EMBEDDING_MODEL": "hash/32",
     }.items():
         monkeypatch.setenv(key, value)
-    monkeypatch.delenv("DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT", raising=False)
-    monkeypatch.delenv("DATAWRAP_PGVECTOR_TYPED_TABLE_DEFAULT", raising=False)
     monkeypatch.setattr("src.services.auth_service.auth_required", lambda: False)
 
     import services.connector_store as connector_store
@@ -274,22 +273,20 @@ def test_typed_layout_creates_the_planned_table_run1_and_run2(client, tables):
     assert (job2.get("reconciliation") or {}).get("passed") is True
 
 
-def test_typed_default_flag_and_existing_typed_table_keeps_its_shape(client, tables, monkeypatch):
+def test_typed_default_and_existing_typed_table_keeps_its_shape(client, tables):
     src, dst = tables["src"], tables["dst"]
     source = _connector("postgresql", "source")
     dest = _connector("pgvector", "destination")
 
-    monkeypatch.setenv("DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT", "1")
     plan, _job = _run(
         client, source_connector_id=source, source_table=src, dest_connector_id=dest,
         dest_table=dst, sync_mode="full_refresh_overwrite",
     )
     contract = _assert_plan_is_the_table(plan, dst)
-    assert (contract["layout"], contract["layout_reason"]) == ("table", "typed_default_flag")
+    assert (contract["layout"], contract["layout_reason"]) == ("table", "typed_default")
     _assert_typed_cells(src, dst)
 
-    # Flag back off: the table DataFlow created stays typed on run 2.
-    monkeypatch.delenv("DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT")
+    # Run 2: the typed table DataFlow created stays typed.
     _sql(f"UPDATE {src} SET payload = NULL, rev = 2 WHERE id = 1")
     plan2, _job2 = _run(
         client, source_connector_id=source, source_table=src, dest_connector_id=dest,
@@ -381,39 +378,30 @@ def test_document_layout_matches_the_plan_run1_and_run2(client, tables):
     _assert_gate8_proved_every_value(job2, 5)
 
 
-def test_undeclared_pgvector_shows_the_document_table_it_builds(client, tables, monkeypatch):
-    """Flag off (production default): the plan promises the document table."""
-    audits: list[str] = []
-    import services.would_apply_audit as would
-
-    real = would.audit_would_apply
-    monkeypatch.setattr(
-        would, "audit_would_apply",
-        lambda action, **kw: (audits.append(action), real(action, **kw)),
-    )
+def test_connector_document_opt_in_shows_the_document_table_it_builds(client, tables):
+    """A connector that opts into the document layout gets the table its plan shows."""
     src, dst = tables["src"], tables["dst"]
     source = _connector("postgresql", "source")
-    dest = _connector("pgvector", "destination")
+    dest = _connector("pgvector", "destination", {"vector_layout": "document"})
 
     plan, job = _run(
         client, source_connector_id=source, source_table=src, dest_connector_id=dest,
         dest_table=dst, sync_mode="full_refresh_overwrite",
     )
     contract = _assert_plan_is_the_table(plan, dst)
-    assert (contract["layout"], contract["layout_reason"]) == ("document", "default_document")
+    assert (contract["layout"], contract["layout_reason"]) == ("document", "declared")
     assert contract["embedded_text_rule"]["kind"] == "row_json"
-    assert "pgvector.would_create_typed_table" in audits
     _assert_document_cells(src, dst, rule_column=None)
     _assert_gate8_proved_every_value(job, 4)
 
-    # Run 2: the document table DataFlow created keeps working, undeclared.
+    # Run 2: the document table DataFlow created keeps working.
     _sql(f"UPDATE {src} SET name = NULL, rev = 2 WHERE id = 4")
     plan2, job2 = _run(
         client, source_connector_id=source, source_table=src, dest_connector_id=dest,
         dest_table=dst, sync_mode="incremental_upsert", primary_key="id", cursor_column="rev", cursor_semantics="monotonic_sequence",
     )
     contract2 = _assert_plan_is_the_table(plan2, dst)
-    assert contract2["layout_reason"] == "existing_document_table"
+    assert contract2["layout"] == "document"
     _assert_document_cells(src, dst, rule_column=None)
     _assert_gate8_proved_every_value(job2, 4)
 

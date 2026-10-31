@@ -6,6 +6,8 @@
  * AWS DMS Full Load / MISSING_TARGET lie this product refuses.
  */
 
+import { MIRROR_LEDGER_HARD_TEXT, MIRROR_LEDGER_SOFT_TEXT } from "./mirrorDeleteMode";
+
 export type ConservationLedger = {
   rows_read: number | null;
   rows_written: number | null;
@@ -390,8 +392,8 @@ export function destHeadline(source: LedgerCarrier | null | undefined): RowMetri
         value: Number(ledger.active_count).toLocaleString(),
         label: running ? "Active so far" : "Active at dest",
         title: ledger.note || (isHardDeleteMirror(ledger)
-          ? "Dest-engine COUNT(*). Keys missing from the source were deleted (hard delete declared)."
-          : "Dest-engine COUNT(*) WHERE NOT _deleted. Physical COUNT(*) does not drop."),
+          ? `Dest-engine COUNT(*). ${MIRROR_LEDGER_HARD_TEXT}`
+          : `Dest-engine COUNT(*) WHERE NOT _deleted. ${MIRROR_LEDGER_SOFT_TEXT}`),
         measured: true,
         tone: unbalanced ? "danger" : "ok",
       };
