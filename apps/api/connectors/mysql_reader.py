@@ -74,8 +74,15 @@ def _json_names_from_types(types: list[tuple[str, str]]) -> frozenset[str]:
 def _mysql_select_list(
     columns: list[str] | None, types: list[tuple[str, str]]
 ) -> str | None:
-    """Project JSON as CHAR so the engine spelling (not a decoded tree) is the wire."""
-    json_cols = _json_names_from_types(types)
+    """Project JSON as CHAR so the engine spelling (not a decoded tree) is the wire.
+
+    TIME too: it is a signed interval (-838:59:59 .. 838:59:59) and MySQL's own
+    text (``-01:02:03.000000`` for TIME(6)) is the exact value; the driver's
+    ``timedelta`` re-rendered it without the declared fraction.
+    """
+    json_cols = _json_names_from_types(types) | frozenset(
+        name for name, data_type in types if data_type == "time"
+    )
     if not json_cols and not columns:
         return None
     names = list(columns) if columns else [name for name, _ in types]
