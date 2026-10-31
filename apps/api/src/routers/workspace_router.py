@@ -497,6 +497,15 @@ class NotificationChannelUpdate(BaseModel):
     config: dict[str, Any] | None = None
 
 
+def _channel_scope_writable(request: Request, workspace_id: str) -> bool:
+    """Write access to channels of ``workspace_id``; unscoped ones are deployment-wide."""
+    if workspace_id:
+        return request_may_write_workspace(request, workspace_id)
+    from src.services import auth_service
+
+    return not auth_service.auth_required() or _is_platform_admin(request)
+
+
 @router.get("/notifications")
 async def get_notifications(workspace_id: str | None = None, request: Request = None):
     # The request's tenant scope decides which workspace this lists (D154): the
@@ -520,8 +529,11 @@ async def get_notifications(workspace_id: str | None = None, request: Request = 
 @router.post("/notifications")
 async def post_notification(body: NotificationChannelCreate, request: Request):
     actor = _actor(request)
-    ws_id = body.workspace_id or ""
-    if ws_id and not request_may_write_workspace(request, ws_id):
+    # Stamp the request's workspace when the body names none: the list reads
+    # the caller's workspace, so a channel stored with workspace_id '' was
+    # never listed (QA enterprise #45).
+    ws_id = (body.workspace_id or "").strip() or tenant_scope(request).workspace_id
+    if not _channel_scope_writable(request, ws_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     from services.notification_store import create_channel
 
@@ -547,7 +559,7 @@ async def patch_notification(channel_id: str, body: NotificationChannelUpdate, r
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
+    if not _channel_scope_writable(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     updates = body.model_dump(exclude_none=True)
     updated = update_channel(channel_id, updates=updates)
@@ -564,7 +576,7 @@ async def delete_notification(channel_id: str, request: Request):
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
+    if not _channel_scope_writable(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     if not delete_channel(channel_id):
         raise HTTPException(status_code=500, detail="Delete failed")
@@ -580,7 +592,7 @@ async def test_notification(channel_id: str, request: Request):
     channel = get_channel_decrypted(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
+    if not _channel_scope_writable(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     payload = build_job_payload(
         job_id="test",
