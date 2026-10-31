@@ -4482,6 +4482,16 @@ export interface NotificationChannel {
   created_at: string;
   updated_at: string;
   created_by: string;
+  /** Webhook channels: a signing secret exists (never returned on reads). */
+  signing_secret_set?: boolean;
+  /** Present only in the create / rotate response — shown once. */
+  signing_secret?: string;
+}
+
+export async function rotateNotificationSigningSecret(id: string): Promise<NotificationChannel> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}/signing-secret/rotate`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not rotate the signing secret"));
+  return res.json();
 }
 
 export async function fetchNotificationChannels(workspaceId?: string): Promise<{ channels: NotificationChannel[] }> {

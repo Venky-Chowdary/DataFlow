@@ -567,7 +567,53 @@ async def post_notification(body: NotificationChannelCreate, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return channel.to_dict()
+    out = channel.to_dict()
+    secret = getattr(channel, "created_signing_secret", "")
+    if secret:
+        out.update(_signing_disclosure(secret))
+    return out
+
+
+def _signing_disclosure(secret: str) -> dict[str, Any]:
+    from services.webhook_signing import SIGNATURE_HEADER, TIMESTAMP_HEADER
+
+    return {
+        "signing_secret": secret,
+        "signing": {
+            "shown_once": True,
+            "algorithm": "HMAC-SHA256",
+            "signature_header": SIGNATURE_HEADER,
+            "timestamp_header": TIMESTAMP_HEADER,
+            "signed_message": "<timestamp>.<raw request body>",
+            "header_format": "t=<timestamp>,v1=<hex digest>",
+            "replay_window_seconds": 300,
+            "docs": "docs/WEBHOOK_SIGNING.md",
+        },
+    }
+
+
+@router.post("/notifications/{channel_id}/signing-secret/rotate")
+async def rotate_notification_signing_secret(channel_id: str, request: Request):
+    """Issue a new signing secret for a webhook channel (shown once).
+
+    The old secret stops signing immediately; update the receiver first or
+    accept both during the switch on the receiving side.
+    """
+    from services.notification_store import get_channel, rotate_signing_secret
+
+    channel = get_channel(channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    try:
+        rotated = rotate_signing_secret(channel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rotated is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    updated, secret = rotated
+    return {**updated.to_dict(), **_signing_disclosure(secret)}
 
 
 @router.patch("/notifications/{channel_id}")

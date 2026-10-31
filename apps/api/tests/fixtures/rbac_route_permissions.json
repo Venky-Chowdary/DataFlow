@@ -336,6 +336,7 @@
   "POST /api/v1/workspace/benchmark": "workspace.manage",
   "POST /api/v1/workspace/benchmark/runs": "workspace.manage",
   "POST /api/v1/workspace/notifications": "workspace.manage",
+  "POST /api/v1/workspace/notifications/{channel_id}/signing-secret/rotate": "workspace.manage",
   "POST /api/v1/workspace/notifications/{channel_id}/test": "workspace.manage",
   "POST /api/v1/workspace/proofs/desktop-lab": "job.run",
   "POST /api/v1/workspace/proofs/desktop-lab-cross": "job.run",
