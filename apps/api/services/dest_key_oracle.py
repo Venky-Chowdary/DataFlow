@@ -75,6 +75,40 @@ def engine_key_oracle(
     return _groups
 
 
+#: Keys per OPENJSON round trip; one JSON text parameter carries the whole chunk.
+_JSON_CHUNK = 20_000
+
+
+def _fill_sqlserver_by_json(conn: Any, table: str, names: str, width: int, keys: list) -> bool:
+    """Load the keys in a few OPENJSON round trips; False means use executemany.
+
+    pyodbc sends a parameterised executemany one row per round trip, so 200k
+    keys cost minutes inside preflight's deadline. OPENJSON needs compatibility
+    level 130+ (SQL Server 2016); an older database falls back.
+    """
+    import json
+
+    import sqlalchemy as sa
+
+    shape = ", ".join(f"c{i} NVARCHAR(4000) '$[{i + 1}]'" for i in range(width))
+    load = sa.text(
+        f"INSERT INTO {table} (id, {names}) SELECT id, {names} "  # nosec B608
+        f"FROM OPENJSON(:doc) WITH (id INT '$[0]', {shape})"
+    )
+    try:
+        for start in range(0, len(keys), _JSON_CHUNK):
+            doc = json.dumps(
+                [[start + n, *key] for n, key in enumerate(keys[start:start + _JSON_CHUNK])],
+                ensure_ascii=False,
+            )
+            conn.execute(load, {"doc": doc})
+    except Exception:  # noqa: BLE001 - old compatibility level: row-wise load
+        logger.debug("key oracle OPENJSON load unavailable", exc_info=True)
+        conn.execute(sa.text(f"DELETE FROM {table}"))  # nosec B608
+        return False
+    return True
+
+
 def _engine_groups(
     cfg: dict[str, Any], kind: str, ddls: list[str], keys: list[tuple[str, ...]]
 ) -> list[list[int]]:
@@ -113,12 +147,13 @@ def _engine_groups(
     with engine.connect() as conn:
         conn.execute(sa.text(create))
         try:
-            rows = [
-                {"id": idx, **{f"c{i}": part for i, part in enumerate(key)}}
-                for idx, key in enumerate(keys)
-            ]
-            for start in range(0, len(rows), 5_000):
-                conn.execute(insert, rows[start:start + 5_000])
+            if not (kind in _SQLSERVER and _fill_sqlserver_by_json(conn, table, names, width, keys)):
+                rows = [
+                    {"id": idx, **{f"c{i}": part for i, part in enumerate(key)}}
+                    for idx, key in enumerate(keys)
+                ]
+                for start in range(0, len(rows), 5_000):
+                    conn.execute(insert, rows[start:start + 5_000])
             for (members,) in conn.execute(query):
                 ids = sorted(int(x) for x in str(members or "").split(",") if x.strip())
                 if len(ids) > 1:
