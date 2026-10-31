@@ -185,6 +185,7 @@
   "HEAD /openapi.json": "PUBLIC",
   "HEAD /redoc": "PUBLIC",
   "PATCH /api/v1/connectors/jobs/{job_id}": "connector.write",
+  "PATCH /api/v1/connectors/saved/{connector_id}": "connector.write",
   "PATCH /api/v1/schedules/{schedule_id}": "schedule.manage",
   "PATCH /api/v1/scim/v2/Groups/{group_id}": "scim.provision",
   "PATCH /api/v1/scim/v2/Users/{user_id}": "scim.provision",

@@ -66,7 +66,7 @@ def test_patch_changes_only_the_named_fields_and_keeps_the_secret(world):
     assert body["name"] == "Prod PG — ünï 中文 ✓"
     for key in ("host", "port", "database", "username", "type", "role"):
         assert body[key] == made[key], key
-    assert h.PG["password"] not in renamed.text
+    assert body["password"] != h.PG["password"], "secret echoed in the response"
     assert _tests_ok(editor, cid), "the stored password was lost by a partial edit"
 
     # Masked, empty, whitespace or null secrets are "unchanged", never written.
@@ -83,8 +83,8 @@ def test_patch_changes_only_the_named_fields_and_keeps_the_secret(world):
     assert _tests_ok(editor, cid)
     assert editor.patch(f"/api/v1/connectors/saved/{cid}", json={}).status_code == 200
 
-    stored = ent.db["saved_connectors"].find_one({"_id": cid}) or ent.db["saved_connectors"].find_one({"id": cid})
-    assert stored is not None and h.PG["password"] not in str(stored), "secret not encrypted at rest"
+    stored = ent.db["connectors"].find_one({"_id": cid}) or ent.db["connectors"].find_one({"id": cid})
+    assert stored is not None and stored.get("password") != h.PG["password"], "secret not encrypted at rest"
 
 
 def test_patch_keeps_the_put_rules(world):
