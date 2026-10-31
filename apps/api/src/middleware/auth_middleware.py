@@ -143,6 +143,24 @@ def _heal_rekey_if_pending(stored: dict | None, email: str) -> None:
             logger.error("rekey heal audit event failed", exc_info=True)
 
 
+def _session_idled_out(token: str, email: str) -> bool:
+    """Workspace idle-timeout policy for a bearer session (services.session_policy).
+
+    Revokes the session when it has idled out; otherwise records activity."""
+    from services.auth_sessions import revoke_session, session_last_seen, touch_session
+    from services.session_policy import TOUCH_INTERVAL_SEC, enforce_idle
+    from src.services.auth_service import token_jti
+
+    jti = token_jti(token) or ""
+    if not jti:
+        return False
+    if not enforce_idle(email=email, last_seen_at=session_last_seen(jti)):
+        revoke_session(jti)
+        return True
+    touch_session(jti, min_interval=TOUCH_INTERVAL_SEC)
+    return False
+
+
 def _attach_user_reason(request: Request, token: str) -> str | None:
     email = verify_token(token)
     if email:
@@ -151,6 +169,8 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         stored = get_stored_user(email)
         if stored and stored.get("status") == "disabled":
             return "disabled_user"
+        if _session_idled_out(token, email):
+            return "session_idle_timeout"
         _heal_rekey_if_pending(stored, email)
         request.state.user_email = email
         user = lookup_user(email)
@@ -259,9 +279,13 @@ def _attach_cookie_user(request: Request, doc: dict) -> str | None:
     request.state.user_email = email
     user = lookup_user(email)
     request.state.user = user if user else {"email": email, "role": "viewer"}
-    request.state.cookie_session_jti = doc["jti"]
     from services.auth_state import get_auth_state
+    from services.session_policy import enforce_idle
 
+    if not enforce_idle(email=email, last_seen_at=doc.get("last_seen_at") or doc.get("created_at")):
+        get_auth_state().revoke_session(doc["jti"])
+        return "session_idle_timeout"
+    request.state.cookie_session_jti = doc["jti"]
     get_auth_state().touch_session(doc["jti"])
     return None
 
@@ -424,6 +448,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
                         status_code=401,
                         content={"detail": "Authentication required"},
                         headers={"WWW-Authenticate": bearer_challenge()},
+                    )
+                if reason_code == "session_idle_timeout":
+                    return JSONResponse(
+                        status_code=401,
+                        content={
+                            "detail": "Your session expired after inactivity (workspace policy). Sign in again.",
+                            "reason": "session_idle_timeout",
+                        },
                     )
                 return JSONResponse(status_code=401, content={"detail": "Authentication required"})
 

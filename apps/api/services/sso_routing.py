@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from services.integrations_store import get_sso_configs
+from services.integrations_store import get_sso_configs, validate_sso_config
 
 
 def provider_for_email(email: str) -> str | None:
@@ -25,6 +25,9 @@ def provider_for_email(email: str) -> str | None:
         return None
     for sso_type, cfg in configs.items():
         if not cfg.get("enabled"):
+            continue
+        # Never route a sign-in to a provider that cannot complete it.
+        if not validate_sso_config(sso_type).get("ready"):
             continue
         claimed = [str(d).strip().lower()
                    for d in (cfg.get("email_domains") or [])]

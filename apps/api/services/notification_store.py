@@ -42,6 +42,11 @@ class NotificationChannel:
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
+        # The webhook signing secret is shown once (create / rotate), never in
+        # a read: only whether one is set.
+        config = dict(d.get("config") or {})
+        d["signing_secret_set"] = bool(config.pop("signing_secret", ""))
+        d["config"] = config
         return d
 
     @classmethod
@@ -94,6 +99,7 @@ def _encrypt_config(config: dict[str, Any]) -> dict[str, Any]:
         "api_key",
         "client_secret",
         "webhook_url",
+        "signing_secret",
     ):
         if key in out and isinstance(out[key], str) and out[key]:
             out[key] = encrypt_secret(out[key])
@@ -109,6 +115,7 @@ def _decrypt_config(config: dict[str, Any]) -> dict[str, Any]:
         "api_key",
         "client_secret",
         "webhook_url",
+        "signing_secret",
     ):
         if key in out and isinstance(out[key], str) and out[key]:
             out[key] = decrypt_secret(out[key])
@@ -127,6 +134,13 @@ def create_channel(
     kind = kind.lower().strip()
     if kind not in _ALLOWED_KINDS:
         raise ValueError(f"Unsupported notification kind: {kind}")
+    from services.webhook_signing import SECRET_CONFIG_KEY, new_signing_secret
+
+    config = {k: v for k, v in (config or {}).items() if k != SECRET_CONFIG_KEY}
+    signing_secret = ""
+    if kind == "webhook":
+        signing_secret = new_signing_secret()
+        config[SECRET_CONFIG_KEY] = signing_secret
     data = _load_raw()
     channel = NotificationChannel(
         id=str(uuid.uuid4()),
@@ -134,13 +148,15 @@ def create_channel(
         kind=kind,
         label=label.strip()[:128] or kind,
         enabled=enabled,
-        config=_encrypt_config(config or {}),
+        config=_encrypt_config(config),
         created_at=_now(),
         updated_at=_now(),
         created_by=created_by,
     )
-    data["channels"].append(channel.to_dict())
+    data["channels"].append(asdict(channel))
     _save(data)
+    # Plaintext for the create response only (never persisted in clear).
+    channel.created_signing_secret = signing_secret  # type: ignore[attr-defined]
     return channel
 
 
@@ -172,7 +188,13 @@ def update_channel(channel_id: str, *, updates: dict[str, Any]) -> NotificationC
     for i, raw in enumerate(data.get("channels", [])):
         if raw.get("id") == channel_id:
             if "config" in updates and isinstance(updates["config"], dict):
-                raw["config"] = _encrypt_config(updates["config"])
+                from services.webhook_signing import SECRET_CONFIG_KEY
+
+                kept = (raw.get("config") or {}).get(SECRET_CONFIG_KEY, "")
+                incoming = {k: v for k, v in updates["config"].items() if k != SECRET_CONFIG_KEY}
+                raw["config"] = _encrypt_config(incoming)
+                if kept:  # already ciphertext; a config edit never drops or sets it
+                    raw["config"][SECRET_CONFIG_KEY] = kept
             for key in ("label", "enabled", "kind"):
                 if key in updates:
                     raw[key] = updates[key]
@@ -190,3 +212,23 @@ def delete_channel(channel_id: str) -> bool:
         return False
     _save(data)
     return True
+
+
+def rotate_signing_secret(channel_id: str) -> tuple[NotificationChannel, str] | None:
+    """Replace a webhook channel's signing secret; returns the new plaintext once."""
+    from services.webhook_signing import SECRET_CONFIG_KEY, new_signing_secret
+
+    data = _load_raw()
+    for raw in data.get("channels", []):
+        if raw.get("id") != channel_id:
+            continue
+        if raw.get("kind") != "webhook":
+            raise ValueError("Only webhook channels are signed")
+        secret = new_signing_secret()
+        config = dict(raw.get("config") or {})
+        config[SECRET_CONFIG_KEY] = encrypt_secret(secret)
+        raw["config"] = config
+        raw["updated_at"] = _now()
+        _save(data)
+        return NotificationChannel.from_dict(raw), secret
+    return None

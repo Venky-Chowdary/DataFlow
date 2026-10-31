@@ -19,6 +19,7 @@ from services.byok_key_manager import (
     public_key_dict,
     rotate_key,
 )
+from services.admin_audit import record_admin_change
 from services.effective_principal import request_may_write_workspace
 from services.team_store import get_workspace
 from services.workspace_access import tenant_scope
@@ -52,6 +53,7 @@ class TenantCreateBody(BaseModel):
     security_contact_email: str = Field(default="", max_length=128)
     mfa_required: bool = Field(default=False)
     session_timeout_hours: int = Field(default=8, ge=1, le=24)
+    enforce_session_timeout: bool = Field(default=False)
     ip_allowlist: list[str] = Field(default_factory=list)
     egress_allowlist: list[str] = Field(default_factory=list)
 
@@ -64,6 +66,8 @@ class TenantUpdateBody(BaseModel):
     security_contact_email: str | None = Field(default=None, max_length=128)
     mfa_required: bool | None = Field(default=None)
     session_timeout_hours: int | None = Field(default=None, ge=1, le=24)
+    # Turns session_timeout_hours from recorded policy into an enforced idle timeout.
+    enforce_session_timeout: bool | None = Field(default=None)
     ip_allowlist: list[str] | None = Field(default=None)
     egress_allowlist: list[str] | None = Field(default=None)
 
@@ -91,6 +95,10 @@ class SsoConfigBody(BaseModel):
     redirect_uri: str | None = None
     scopes: str | None = None
     tenant_id: str | None = None
+    # Domains whose sign-ins route to this IdP (``POST /auth/sso/route``).
+    email_domains: list[str] | None = Field(default=None, max_length=100)
+    # ``client_secret`` blank keeps the stored secret; this removes it.
+    clear_client_secret: bool | None = None
 
 
 class AiProviderBody(BaseModel):
@@ -179,28 +187,40 @@ def _named_workspace_id(request: Request) -> str:
 async def get_settings():
     from services.workspace_store import get_workspace_settings
 
-    return get_workspace_settings()
+    return {
+        **get_workspace_settings(),
+        # What retention_days does, stated by the API itself (QA enterprise #4).
+        "retention_enforcement": {
+            "applies_to": "finished jobs (completed, failed, cancelled) in the requesting workspace",
+            "mode": "admin_purge",
+            "scheduled": False,
+            "purge_route": "POST /api/v1/workspace/jobs/retention/purge (dry run first)",
+        },
+    }
 
 
 @router.patch("/settings")
 async def patch_settings(body: WorkspaceSettingsBody, request: Request):
-    from services.audit_log import append_audit_event
     from services.workspace_store import update_workspace_settings
 
+    from services.workspace_store import InvalidTimezone
+
     actor = _actor(request)
-    updated = update_workspace_settings(
-        org_name=body.org_name,
-        timezone=body.timezone,
-        retention_days=body.retention_days,
-        studio_schema_browser=body.studio_schema_browser,
-        studio_canvas=body.studio_canvas,
-        actor=actor,
-    )
-    append_audit_event(
-        action="workspace.settings.update",
-        resource="/workspace/settings",
-        actor=actor,
-        level="info",
+    try:
+        updated = update_workspace_settings(
+            org_name=body.org_name,
+            timezone=body.timezone,
+            retention_days=body.retention_days,
+            studio_schema_browser=body.studio_schema_browser,
+            studio_canvas=body.studio_canvas,
+            actor=actor,
+        )
+    except InvalidTimezone as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_admin_change(
+        request,
+        "workspace.settings.update",
+        target="workspace_settings",
         details={
             "org_name": updated["org_name"],
             "timezone": updated["timezone"],
@@ -222,21 +242,31 @@ async def get_sso():
 
 @router.patch("/sso/{sso_type}")
 async def patch_sso(sso_type: str, body: SsoConfigBody, request: Request):
-    from services.audit_log import append_audit_event
     from services.integrations_store import update_sso_config, validate_sso_config
+
+    from services.integrations_store import SsoConfigRefused
 
     try:
         updated = update_sso_config(sso_type, body.model_dump(exclude_none=True))
+    except SsoConfigRefused as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": str(exc), "missing_fields": exc.missing},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     check = validate_sso_config(sso_type)
-    append_audit_event(
-        action="workspace.sso.update",
-        resource=f"/workspace/sso/{sso_type}",
-        actor=_actor(request),
-        level="info",
-        details={"type": sso_type, "enabled": updated.get("enabled"), "ready": check["ready"]},
+    record_admin_change(
+        request,
+        "workspace.sso.update",
+        target=sso_type,
+        details={
+            "type": sso_type,
+            "enabled": updated.get("enabled"),
+            "ready": check["ready"],
+            "changed_fields": sorted(body.model_dump(exclude_none=True).keys()),
+        },
     )
     return {"config": updated, "validation": check}
 
@@ -259,7 +289,6 @@ async def get_ai_providers():
 def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
     # Sync on purpose: the live key check does blocking network I/O, so FastAPI
     # must run this in a worker thread instead of on the event loop.
-    from services.audit_log import append_audit_event
     from services.integrations_store import update_ai_provider
 
     payload = body.model_dump(exclude_none=True)
@@ -282,11 +311,10 @@ def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    append_audit_event(
-        action="workspace.ai_provider.update",
-        resource=f"/workspace/ai-providers/{provider}",
-        actor=_actor(request),
-        level="info",
+    record_admin_change(
+        request,
+        "workspace.ai_provider.update",
+        target=provider,
         details={"provider": provider, "enabled": updated.get("enabled"), "model": updated.get("model")},
     )
     return updated
@@ -295,7 +323,6 @@ def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
 @router.delete("/ai-providers/{provider}/key")
 def delete_ai_provider_key_route(provider: str, request: Request):
     """Forget the saved key; on auto Pilot returns to the local engine."""
-    from services.audit_log import append_audit_event
     from services.integrations_store import delete_ai_provider_key
 
     from ..ai.llm.provider import clear_auth_failures
@@ -306,11 +333,10 @@ def delete_ai_provider_key_route(provider: str, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     clear_auth_failures()
 
-    append_audit_event(
-        action="workspace.ai_provider.key_removed",
-        resource=f"/workspace/ai-providers/{provider}",
-        actor=_actor(request),
-        level="info",
+    record_admin_change(
+        request,
+        "workspace.ai_provider.key_removed",
+        target=provider,
         details={"provider": provider},
     )
     return updated
@@ -326,6 +352,8 @@ def test_ai_provider(provider: str):
 
     from ..ai.llm.provider import clear_auth_failures, get_model_capabilities, verify_cloud_api_key
 
+    if provider == "ollama":
+        return _test_ollama(get_model_capabilities)
     if provider not in {"openai", "anthropic"}:
         raise HTTPException(status_code=400, detail=f"{provider} has no cloud key to test")
 
@@ -347,6 +375,35 @@ def test_ai_provider(provider: str):
     }
 
 
+def _test_ollama(get_model_capabilities) -> dict[str, Any]:
+    """Probe the Ollama server now and check the configured model is pulled."""
+    from services.integrations_store import (
+        ai_provider_enabled,
+        ollama_status,
+        resolve_provider_model,
+    )
+
+    status = ollama_status(fresh=True)
+    model = resolve_provider_model("ollama", "llama3.2")
+    error = ""
+    if not ai_provider_enabled("ollama"):
+        error = "Ollama is disabled in Settings."
+    elif not status["reachable"]:
+        error = status["detail"] or f"Ollama is not reachable at {status['base_url']}."
+    elif model and not any(
+        name == model or name.split(":", 1)[0] == model.split(":", 1)[0] for name in status["models"]
+    ):
+        error = f"Ollama is reachable but model {model!r} is not pulled (run: ollama pull {model})."
+    return {
+        "ok": not error,
+        "provider": "ollama",
+        "error": error,
+        "base_url": status["base_url"],
+        "models": status["models"],
+        "capabilities": get_model_capabilities(),
+    }
+
+
 @router.get("/pilot-engine")
 async def get_pilot_engine():
     from services.integrations_store import get_pilot_engine_preference
@@ -359,7 +416,6 @@ async def get_pilot_engine():
 
 @router.patch("/pilot-engine")
 async def patch_pilot_engine(body: PilotEngineBody, request: Request):
-    from services.audit_log import append_audit_event
     from services.integrations_store import set_pilot_engine_preference
 
     from ..ai.llm.provider import pilot_engine_decision
@@ -370,11 +426,10 @@ async def patch_pilot_engine(body: PilotEngineBody, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     decision = pilot_engine_decision()
-    append_audit_event(
-        action="workspace.pilot_engine.update",
-        resource="/workspace/pilot-engine",
-        actor=_actor(request),
-        level="info",
+    record_admin_change(
+        request,
+        "workspace.pilot_engine.update",
+        target="pilot_engine",
         details={"preference": saved, "engine": decision["engine"], "source": decision["source"]},
     )
     return {"preference": saved, **decision}
@@ -446,21 +501,60 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
 
 @router.delete("/api-keys/{key_id}")
 async def delete_api_key(key_id: str, request: Request):
-    from services.audit_log import append_audit_event
     from services.integrations_store import list_api_keys, revoke_api_key
 
     if not any(
         k["id"] == key_id and _own_workspace_key(request, k) for k in list_api_keys()
     ) or not revoke_api_key(key_id):
         raise HTTPException(status_code=404, detail="API key not found")
-    append_audit_event(
-        action="workspace.api_key.revoke",
-        resource=f"/workspace/api-keys/{key_id}",
-        actor=_actor(request),
-        level="warn",
+    record_admin_change(
+        request,
+        "workspace.api_key.revoke",
+        target=key_id,
         details={"id": key_id},
     )
     return {"ok": True}
+
+
+class JobRetentionPurgeBody(BaseModel):
+    dry_run: bool = True
+    confirm_token: str = Field(default="", max_length=128)
+
+
+@router.post("/jobs/retention/purge")
+def purge_job_retention(body: JobRetentionPurgeBody, request: Request):
+    """Delete this workspace's finished jobs older than ``retention_days``.
+
+    Dry run first (default): returns the count and a ``confirm_token``; apply
+    with ``dry_run: false`` and that token. Never touches unfinished jobs or
+    another workspace. Nothing runs on a schedule. See services.job_retention.
+    """
+    from services.job_retention import RetentionTokenInvalid, purge_expired_jobs
+    from services.workspace_store import get_workspace_settings
+
+    scope = tenant_scope(request)
+    workspace_id = str(scope.workspace_id or "")
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="Name the workspace (X-Workspace-Id) to purge its jobs")
+    if not _can_admin_workspace(request, workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace admin required")
+    retention_days = int(get_workspace_settings()["retention_days"])
+    try:
+        result = purge_expired_jobs(
+            workspace_id=workspace_id,
+            retention_days=retention_days,
+            dry_run=body.dry_run,
+            confirm_token=body.confirm_token,
+        )
+    except RetentionTokenInvalid as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_admin_change(
+        request,
+        "workspace.jobs.retention.purge",
+        target=workspace_id,
+        details={k: v for k, v in result.items() if k not in {"confirm_token", "sample_job_ids"}},
+    )
+    return result
 
 
 @router.get("/pii-hash-key")
@@ -577,7 +671,53 @@ async def post_notification(body: NotificationChannelCreate, request: Request):
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return channel.to_dict()
+    out = channel.to_dict()
+    secret = getattr(channel, "created_signing_secret", "")
+    if secret:
+        out.update(_signing_disclosure(secret))
+    return out
+
+
+def _signing_disclosure(secret: str) -> dict[str, Any]:
+    from services.webhook_signing import SIGNATURE_HEADER, TIMESTAMP_HEADER
+
+    return {
+        "signing_secret": secret,
+        "signing": {
+            "shown_once": True,
+            "algorithm": "HMAC-SHA256",
+            "signature_header": SIGNATURE_HEADER,
+            "timestamp_header": TIMESTAMP_HEADER,
+            "signed_message": "<timestamp>.<raw request body>",
+            "header_format": "t=<timestamp>,v1=<hex digest>",
+            "replay_window_seconds": 300,
+            "docs": "docs/WEBHOOK_SIGNING.md",
+        },
+    }
+
+
+@router.post("/notifications/{channel_id}/signing-secret/rotate")
+async def rotate_notification_signing_secret(channel_id: str, request: Request):
+    """Issue a new signing secret for a webhook channel (shown once).
+
+    The old secret stops signing immediately; update the receiver first or
+    accept both during the switch on the receiving side.
+    """
+    from services.notification_store import get_channel, rotate_signing_secret
+
+    channel = get_channel(channel_id)
+    if not channel:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace access denied")
+    try:
+        rotated = rotate_signing_secret(channel_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if rotated is None:
+        raise HTTPException(status_code=404, detail="Channel not found")
+    updated, secret = rotated
+    return {**updated.to_dict(), **_signing_disclosure(secret)}
 
 
 @router.patch("/notifications/{channel_id}")
@@ -732,6 +872,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             security_contact_email=body.security_contact_email,
             mfa_required=body.mfa_required,
             session_timeout_hours=body.session_timeout_hours,
+            enforce_session_timeout=body.enforce_session_timeout,
             ip_allowlist=body.ip_allowlist,
             egress_allowlist=body.egress_allowlist,
         )
@@ -880,7 +1021,14 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     from services.recovery_honesty import honesty_dict as recovery_honesty_dict
     from services.secret_vault import secrets_encryption_ready
 
+    from src.middleware.tenant_middleware import _allowlist_enforced
+
     region = tenant.data_region if tenant else "us-east-1"
+    ip_flag = bool(_allowlist_enforced())
+    ip_enforced = bool(
+        tenant and tenant.ip_allowlist and (tenant.custom_domain or "").strip() and ip_flag
+    )
+    session_enforced = bool(tenant and getattr(tenant, "enforce_session_timeout", False))
     byok = key_status_summary(tenant.id) if tenant else {"configured": False}
     encryption_ready = bool(secrets_encryption_ready())
     prod = is_production()
@@ -917,17 +1065,41 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "pii_detection": False,  # detector hooks exist; not attested as always-on
         "ip_allowlist_enabled": bool(tenant and tenant.ip_allowlist),
         "egress_allowlist_enabled": bool(tenant and tenant.egress_allowlist),
-        # Enforced only when Host resolves this tenant (custom domain). The
-        # vanity app host never evaluates the CIDR list — do not badge it as live.
-        "ip_allowlist_enforced": bool(
-            tenant and tenant.ip_allowlist and (tenant.custom_domain or "").strip()
-        ),
+        # Enforced only when Host resolves this tenant (custom domain) AND the
+        # operator turned DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE on; otherwise a
+        # request it would block is audited (tenant.ip_allowlist.would_block)
+        # and allowed. The shared app host never evaluates the CIDR list.
+        "ip_allowlist_enforced": ip_enforced,
         "mfa_required": tenant.mfa_required if tenant else False,
         # Login MFA is not wired; the flag is policy memory only.
         "mfa_enforced": False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
-        # Token TTL is DATAFLOW_TOKEN_TTL_SEC, not tenant.session_timeout_hours.
-        "session_timeout_enforced": False,
+        # Idle timeout enforced on sign-in sessions when the tenant turns
+        # enforce_session_timeout on (services.session_policy). API keys and
+        # the absolute token TTL (DATAFLOW_TOKEN_TTL_SEC) are separate.
+        "session_timeout_enforced": session_enforced,
+        "enforcement": {
+            "ip_allowlist": {
+                "enforced": ip_enforced,
+                "scope": "requests whose Host is the tenant custom domain",
+                "requires": ["tenant.ip_allowlist", "tenant.custom_domain",
+                             "DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1"],
+                "missing": [m for m, ok in (
+                    ("tenant.ip_allowlist", bool(tenant and tenant.ip_allowlist)),
+                    ("tenant.custom_domain", bool(tenant and (tenant.custom_domain or "").strip())),
+                    ("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1", ip_flag),
+                ) if not ok],
+                "not_covered": "the shared app host and API keys used against it",
+            },
+            "session_timeout": {
+                "enforced": session_enforced,
+                "kind": "idle",
+                "hours": tenant.session_timeout_hours if tenant else None,
+                "scope": "sign-in sessions of members of this workspace (strictest workspace wins)",
+                "not_covered": "API keys; absolute token lifetime is DATAFLOW_TOKEN_TTL_SEC",
+            },
+            "mfa": {"enforced": False, "status": "design_only", "design": "docs/MFA_ENFORCEMENT_DESIGN.md"},
+        },
         # True when this tenant has an active BYOK key. New connector secrets
         # are wrapped with that key; enc:v1 leftovers stay readable until re-saved.
         "byok_encrypts_secrets": bool(tenant and byok.get("active_count")),
@@ -993,6 +1165,22 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     }
 
 
+def _posture_scope_workspace(request: Request, tenant: Tenant | None) -> str:
+    """The workspace a posture/report is about: the tenant's, else the named
+    one, else the caller's own workspace (single membership / bound key)."""
+    if tenant and tenant.workspace_id:
+        return tenant.workspace_id
+    named = (request.headers.get("x-workspace-id") or "").strip() or str(
+        getattr(request.state, "tenant_workspace_id", "") or ""
+    )
+    if named:
+        return named
+    try:
+        return str(tenant_scope(request).workspace_id or "")
+    except HTTPException:
+        return ""
+
+
 @router.get("/security/posture")
 async def get_security_posture(request: Request):
     """Posture for the workspace this request names.
@@ -1006,12 +1194,7 @@ async def get_security_posture(request: Request):
 
     tenant = _authorized_request_tenant(request)
     body = _security_posture(tenant)
-    named = (request.headers.get("x-workspace-id") or "").strip() or str(
-        getattr(request.state, "tenant_workspace_id", "") or ""
-    )
-    body["scope_workspace_id"] = (
-        tenant.workspace_id if tenant and tenant.workspace_id else named
-    ) or None
+    body["scope_workspace_id"] = _posture_scope_workspace(request, tenant) or None
     return JSONResponse(
         content=jsonable_encoder(body),
         headers={"Cache-Control": "no-store"},
@@ -1023,6 +1206,16 @@ async def get_security_report(request: Request):
     """Return a downloadable, human-readable compliance report for the tenant."""
     tenant = _authorized_request_tenant(request)
     posture = _security_posture(tenant)
+    # The report is about the workspace the request is scoped to, tenant or not.
+    # "none — request carried no workspace scope" was printed whenever the
+    # workspace had no tenant profile, even though the request named it.
+    scope_ws = _posture_scope_workspace(request, tenant)
+    if scope_ws and not posture.get("workspace_id"):
+        posture["workspace_id"] = scope_ws
+    workspace_name = ""
+    if scope_ws:
+        ws_row = get_workspace(scope_ws)
+        workspace_name = getattr(ws_row, "name", "") if ws_row else ""
 
     lines = [
         "# Datawrap Security & Compliance Report",
@@ -1032,6 +1225,8 @@ async def get_security_report(request: Request):
         # an auditor has to say when no tenant profile backs these controls.
         f"Tenant ID: {posture['tenant_id'] or 'none — no tenant profile configured for this workspace'}",
         f"Workspace ID: {posture['workspace_id'] or 'none — request carried no workspace scope'}",
+        *( [f"Workspace: {workspace_name}"] if workspace_name else [] ),
+        "Scope: this report covers only the workspace above.",
         f"Custom domain: {posture['custom_domain'] or 'not configured'}",
         f"Primary data region: {posture['data_region']}",
         "",
@@ -1040,10 +1235,10 @@ async def get_security_report(request: Request):
         f"- TLS minimum version: {posture['tls_version']}",
         f"- Audit logging: {'enabled' if posture['audit_logging'] else 'disabled'}",
         f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
-        f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (needs custom domain)' if posture['ip_allowlist_enabled'] else 'disabled')}",
+        f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (missing: ' + ', '.join(posture['enforcement']['ip_allowlist']['missing']) + ')' if posture['ip_allowlist_enabled'] else 'disabled')}",
         f"- Connector egress allowlist: {'on' if posture.get('egress_allowlist_enabled') else 'off (private ranges refused; metadata and link-local cannot be listed)'}",
-        f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired)",
-        f"- Session timeout: recorded={posture['session_timeout_hours']}h; enforced=no (token TTL is DATAFLOW_TOKEN_TTL_SEC)",
+        f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired; design: docs/MFA_ENFORCEMENT_DESIGN.md)",
+        f"- Session timeout: {posture['session_timeout_hours']}h idle; enforced={'yes (sign-in sessions; API keys excluded)' if posture['session_timeout_enforced'] else 'no (recorded only; turn on enforce_session_timeout)'}",
         "",
         "## Deployment & data path",
         f"- Models: {', '.join((posture.get('deployment') or {}).get('models') or [])}",

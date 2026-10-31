@@ -300,7 +300,7 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "/api/v1/connectors/{connector_id}",
         } and "connector_id" in params:
             values = {"connector_id": "B_MONGO_CONNECTOR_ID"}
-        elif template.startswith("/api/v1/connectors/jobs/{job_id}"):
+        elif template.startswith(("/api/v1/connectors/jobs/{job_id}", "/api/v1/jobs/{job_id}")):
             values = {"job_id": "B_JOB_ID"}
         elif template.startswith("/api/v1/transfer/{job_id}/"):
             values = {"job_id": "B_JOB_ID", "signal_id": "B_SIGNAL_SENTINEL"}

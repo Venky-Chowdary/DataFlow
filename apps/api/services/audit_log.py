@@ -8,6 +8,7 @@ local JSONL file.
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 import threading
@@ -17,14 +18,17 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from services.audit_chain_keys import hmac_hex, keyring, legacy_login_secret, signing_key
 from services.audit_chain_link import (
     append_with_retry,
     canonical_record,
     ensure_chain_indexes,
+    file_store_lock,
     file_workspace_tip,
     is_duplicate_position,
     link_fields,
     mongo_workspace_tip,
+    position_id,
     workspace_key,
 )
 from services.log_redaction import (
@@ -119,24 +123,17 @@ def _mongo_collection():
 
 
 def _hmac_event_hash(event: dict[str, Any], secret: bytes) -> str:
-    import hashlib
-    import hmac as hmac_mod
-
-    body_for_hash = {k: v for k, v in event.items() if k not in ("_id", "event_hash")}
-    canon = json.dumps(body_for_hash, sort_keys=True, separators=(",", ":"), default=json_default)
-    return hmac_mod.new(secret, canon.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac_hex(event, secret)
 
 
 def _platform_hmac_secret() -> bytes:
-    try:
-        from services.auth_service import _token_secret
+    """The login secret. Chain records written before D221 were signed with it.
 
-        raw = _token_secret()
-        return raw if isinstance(raw, bytes) else str(raw or "").encode("utf-8")
-    except Exception:
-        from services.brand_env import getenv_brand
-
-        return (getenv_brand("AUTH_SECRET", "") or "dev-only-not-for-production").encode("utf-8")
+    New chain records are signed with the chain's own key
+    (``services.audit_chain_keys.signing_key``); this stays for verifying
+    those older records and for callers outside the chain.
+    """
+    return legacy_login_secret()
 
 
 def _latest_record_from_file() -> dict[str, Any] | None:
@@ -235,12 +232,17 @@ def append_audit_event(
 ) -> dict[str, Any]:
     """Record a redacted audit event to MongoDB (preferred) or a local JSONL file.
 
-    Events are hash-chained with HMAC-SHA256 (keyed by the platform auth secret):
-    ``prev_hash`` + ``event_hash`` over a canonical payload. Plain SHA-256 chains
-    can be reforged by anyone with store write access; HMAC requires the secret.
+    Events are hash-chained with HMAC-SHA256 under the chain's own key
+    (``DATAFLOW_AUDIT_HMAC_KEY``; each record names it in ``key_id``), never the
+    login secret: ``prev_hash`` + ``event_hash`` over a canonical payload. Plain
+    SHA-256 chains can be reforged by anyone with store write access; HMAC
+    requires the key.
 
-    Process-local ``_APPEND_LOCK`` serializes writers to reduce chain forks. Cross-
-    process/replica races still need a single authoritative store (Mongo preferred).
+    Writers in separate processes are serialized by the store, not by
+    ``_APPEND_LOCK`` (which only covers this process's threads): in Mongo the
+    record's ``_id`` is its chain position, so a second writer to the same
+    position gets a duplicate-key error and re-links; the file store holds an
+    ``flock`` across read-tip-and-append (D221).
     """
     from services.audit_coverage import current_request_audit
 
@@ -258,6 +260,16 @@ def append_audit_event(
                 details["correlation_id_rejected"] = True
             if tracker.get("workspace_header_rejected"):
                 details["workspace_header_rejected"] = True
+
+    if tracker is not None and not action.startswith("http."):
+        from services.admin_audit import ADMIN_EVENTS
+
+        if action in ADMIN_EVENTS:
+            # A handler's own admin event: the middleware must not add a second
+            # one, and it belongs to the workspace the request was made in.
+            tracker["admin_event"] = action
+            if not (workspace_id or "").strip():
+                workspace_id = str(tracker.get("workspace_id") or "") or None
 
     if principal is None:
         from services.audit_coverage import current_request_principal
@@ -282,7 +294,7 @@ def append_audit_event(
     with _APPEND_LOCK:
         state: dict[str, Any] = {"stage": "chain_read", "event": None}
         try:
-            secret = _platform_hmac_secret()
+            key_id, secret, _key_source = signing_key()
 
             state["stage"] = "redact"
             redacted = _redact(details or {})
@@ -325,8 +337,12 @@ def append_audit_event(
                         if value is not None
                     },
                     **link_fields(tip=tip, workspace_tip=ws_tip),
+                    "key_id": key_id,
                     "hash_alg": "HMAC-SHA256",
                 }
+                # The position is the _id: unique in every Mongo collection, so
+                # two processes can never both take it (D221).
+                event["_id"] = position_id(event["chain_seq"])
                 state["event"] = event
                 # Hash exactly what the store will hand back (R7).
                 event = canonical_record(event)
@@ -335,7 +351,11 @@ def append_audit_event(
                 state["stage"] = "persist"
                 return event
 
-            persisted = append_with_retry(build, _persist_event)
+            if coll is None:
+                with file_store_lock(STORE_PATH):
+                    persisted = append_with_retry(build, _persist_event)
+            else:
+                persisted = append_with_retry(build, _persist_event)
         except Exception as exc:
             event = state["event"]
             try:
@@ -395,13 +415,14 @@ def _persist_event(event: dict[str, Any]) -> dict[str, Any]:
                 fallback="file",
                 error=exc,
             )
-            file_tip, file_ws_tip = _file_tips(workspace_key(event))
-            event.update(link_fields(tip=file_tip, workspace_tip=file_ws_tip))
-            event["event_hash"] = _hmac_event_hash(
-                event,
-                _platform_hmac_secret(),
-            )
-            return persist_to_file()
+            with file_store_lock(STORE_PATH):
+                file_tip, file_ws_tip = _file_tips(workspace_key(event))
+                event.update(link_fields(tip=file_tip, workspace_tip=file_ws_tip))
+                key = keyring().get(str(event.get("key_id") or ""))
+                if key is None:
+                    event["key_id"], key, _source = signing_key()
+                event["event_hash"] = _hmac_event_hash(event, key)
+                return persist_to_file()
 
     return persist_to_file()
 
@@ -488,6 +509,39 @@ def _event_in_scope(
     return True
 
 
+def _action_terms(action: str | None) -> tuple[set[str], list[str]]:
+    exact: set[str] = set()
+    prefixes: list[str] = []
+    for term in str(action or "").split(","):
+        term = term.strip()
+        if not term:
+            continue
+        if term.endswith("*"):
+            prefixes.append(term[:-1])
+        else:
+            exact.add(term)
+    return exact, prefixes
+
+
+def _action_mongo_query(action: str | None) -> Any:
+    exact, prefixes = _action_terms(action)
+    if not exact and not prefixes:
+        return None
+    if not prefixes:
+        return exact.pop() if len(exact) == 1 else {"$in": sorted(exact)}
+    pattern = "|".join(
+        [f"^{re.escape(p)}" for p in prefixes] + [f"^{re.escape(e)}$" for e in sorted(exact)]
+    )
+    return {"$regex": pattern}
+
+
+def _action_matches(action: str | None, value: str) -> bool:
+    exact, prefixes = _action_terms(action)
+    if not exact and not prefixes:
+        return True
+    return value in exact or any(value.startswith(p) for p in prefixes)
+
+
 def list_audit_events(
     *,
     limit: int = 100,
@@ -499,8 +553,14 @@ def list_audit_events(
     until: str | None = None,
     after_seq: int | None = None,
     workspace_filter: WorkspaceFilter | None = None,
+    action: str | None = None,
+    search: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return recent events, or an ascending chain-sequence cursor page.
+
+    ``action`` is a comma-separated list of exact action names; an entry
+    ending in ``*`` (``team.member.*``) matches that prefix. ``search`` is a
+    case-insensitive substring of the action, resource or actor.
 
     ``workspace_id`` / ``tenant_id`` are exact matches. Unscoped historical
     events (empty workspace) are excluded from a scoped query so one tenant
@@ -522,6 +582,15 @@ def list_audit_events(
                 query["level"] = level
             if actor:
                 query["actor"] = actor
+            action_query = _action_mongo_query(action)
+            if action_query is not None:
+                query["action"] = action_query
+            if search and search.strip():
+                needle = {"$regex": re.escape(search.strip()), "$options": "i"}
+                # Under $and: the workspace filter below may bring its own $or.
+                query["$and"] = [
+                    {"$or": [{"action": needle}, {"resource": needle}, {"actor": needle}]}
+                ]
             if workspace_filter is not None:
                 query.update(workspace_filter.mongo_query())
             if ws:
@@ -563,6 +632,13 @@ def list_audit_events(
         if level and level != "all" and ev.get("level") != level:
             continue
         if actor and ev.get("actor") != actor:
+            continue
+        if not _action_matches(action, str(ev.get("action") or "")):
+            continue
+        if search and search.strip() and not any(
+            search.strip().lower() in str(ev.get(field) or "").lower()
+            for field in ("action", "resource", "actor")
+        ):
             continue
         if after_seq is not None and chain_seq_of(ev) <= after_seq:
             continue
@@ -799,16 +875,17 @@ def purge_expired_audit_events(
                 legal_hold=legal_hold,
                 dry_run=dry_run,
             )
-        return _purge_file_events(
-            cutoff=(
-                now_utc - timedelta(days=retention_days)
-                if cutoff is not None and not legal_hold
-                else None
-            ),
-            retention_days=retention_days,
-            legal_hold=legal_hold,
-            dry_run=dry_run,
-        )
+        with file_store_lock(STORE_PATH):
+            return _purge_file_events(
+                cutoff=(
+                    now_utc - timedelta(days=retention_days)
+                    if cutoff is not None and not legal_hold
+                    else None
+                ),
+                retention_days=retention_days,
+                legal_hold=legal_hold,
+                dry_run=dry_run,
+            )
 
 
 def _purge_file_events(

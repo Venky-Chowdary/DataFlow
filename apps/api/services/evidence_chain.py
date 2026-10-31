@@ -18,7 +18,7 @@ honest about a real store:
   record, so a pack and the chain can be checked against each other.
 
 What this proves: the records that remain have not been edited or removed since
-they were written by a process holding the platform HMAC secret, and an exported
+they were written by a process holding the chain key they name, and an exported
 pack matches the record filed for it. What it does not prove: that the recorded
 facts were true, that the writer was who it claimed, or that the store's owner
 could not have discarded records *and* their checkpoint. Only an external WORM /
@@ -104,11 +104,11 @@ def record_truncation(
 
     Without this the verifier cannot tell retention from deletion. The checkpoint
     is itself HMAC-signed, so forging "retention removed the record you are
-    looking for" requires the platform secret.
+    looking for" requires the chain key.
     """
     if removed_count <= 0:
         return None
-    from services.audit_log import _hmac_event_hash, _platform_hmac_secret
+    from services.audit_chain_keys import sign
 
     checkpoint = {
         "kind": "chain_truncation",
@@ -118,10 +118,8 @@ def record_truncation(
         "first_kept_event_hash": first_kept_event_hash or None,
         "hash_alg": "HMAC-SHA256",
     }
-    checkpoint["checkpoint_hmac"] = _hmac_event_hash(
-        {k: v for k, v in checkpoint.items() if k != "checkpoint_hmac"},
-        _platform_hmac_secret(),
-    )
+    # Signed with the chain key and naming it (D221), like every chain record.
+    checkpoint = sign(checkpoint, field="checkpoint_hmac")
     path = truncation_store_path()
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -143,7 +141,7 @@ def record_truncation(
 
 def list_truncations() -> list[dict[str, Any]]:
     """Signed retention checkpoints, oldest first. Unsigned entries are dropped."""
-    from services.audit_log import _hmac_event_hash, _platform_hmac_secret
+    from services.audit_chain_keys import verify_side_record
 
     path = truncation_store_path()
     if not path.exists():
@@ -152,7 +150,6 @@ def list_truncations() -> list[dict[str, Any]]:
         lines = path.read_text(encoding="utf-8").strip().splitlines()
     except Exception:
         return []
-    secret = _platform_hmac_secret()
     out: list[dict[str, Any]] = []
     for line in lines:
         if not line.strip():
@@ -163,13 +160,9 @@ def list_truncations() -> list[dict[str, Any]]:
             continue
         if not isinstance(entry, dict):
             continue
-        claimed = str(entry.get("checkpoint_hmac") or "")
-        expected = _hmac_event_hash(
-            {k: v for k, v in entry.items() if k != "checkpoint_hmac"}, secret
-        )
         # An unsigned or edited checkpoint is not evidence of retention — ignore
         # it so it cannot be used to excuse a deletion.
-        if claimed and claimed == expected:
+        if verify_side_record(entry, field="checkpoint_hmac") is not None:
             out.append(entry)
     return out
 
@@ -232,17 +225,28 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     ``event_hash_missing``
         The record carries no hash, so nothing about it can be verified.
     ``event_hash_mismatch``
-        Recomputing the HMAC over the record's own content disagrees with the
-        stored hash: the record was altered after it was written, or written
-        under a different platform secret, or (``cause`` =
+        Recomputing the HMAC, under the key the record names, disagrees with
+        the stored hash: the record was altered after it was written, or (for a
+        record with no ``key_id``, written before D221) it was signed under a
+        login secret this deployment no longer lists, or (``cause`` =
         ``legacy_datetime_roundtrip``) it predates canonical hashing and holds a
         value the store rewrote.
+    ``key_mismatch``
+        The record names a signing key (``key_id``) this deployment does not
+        hold, so its HMAC cannot be checked. Not evidence of tampering; the
+        record is unverified until that key is listed again (D221).
     ``broken_link``
-        ``prev_hash`` does not name the previous record: a record between them
-        was deleted, or the two were reordered.
+        ``prev_hash`` does not name the previous record, nor any earlier one: a
+        record between them was deleted, or the records were reordered.
     ``fork``
-        Two records claim the same predecessor — a concurrent writer or a
-        replayed segment. The chain is no longer a single line of history.
+        Two records claim the same predecessor, or a record links to an earlier
+        position while a sibling branch sits between them — concurrent writers
+        or a replayed segment. The chain is no longer a single line of history,
+        but no record was removed.
+
+    Each finding has a ``category`` (``tampering``, ``fork``, ``key_mismatch``,
+    ``legacy_hash_input``) and the report totals them in ``categories``, so a
+    fork or a key rotation is never counted as tampering.
     ``unexplained_prefix``
         The oldest record points at a predecessor that is not in the store and
         no signed retention checkpoint accounts for it.
@@ -262,6 +266,8 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
                 "checked": 0,
                 "chain_head": None,
                 "findings": [],
+                "categories": {name: 0 for name in CATEGORIES},
+                "tampering_detected": False,
                 "reanchored": [],
                 "retention_checkpoints": truncations,
                 "walked_limit": limit,
@@ -274,13 +280,12 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
             ws,
         )
 
-    from services.audit_log import _hmac_event_hash, _platform_hmac_secret
+    from services.audit_log import _hmac_event_hash
 
-    secret = _platform_hmac_secret()
     if ws:
         positions = [i for i, ev in enumerate(events) if _event_workspace(ev) == ws]
         findings = _walk(
-            events, positions, secret, _hmac_event_hash, truncations,
+            events, positions, _hmac_event_hash, truncations,
             link_field="ws_prev_hash",
             prefix_explained=_retention_explains_first(events, truncations),
         )
@@ -288,7 +293,7 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     else:
         positions = list(range(len(events)))
         findings = _walk(
-            events, positions, secret, _hmac_event_hash, truncations,
+            events, positions, _hmac_event_hash, truncations,
             link_field="prev_hash", prefix_explained=None,
         )
         head = events[-1]
@@ -296,12 +301,22 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
     for f in found:
         ev = events[f["index"]]
         f["cause"] = _cause(f["kind"], ev)
+        f["category"] = finding_category(f["kind"], f["cause"])
         if not ws:
             f["workspace_id"] = _event_workspace(ev) or None
     found, reanchored = split_reanchored(found, events)
+    categories = {name: 0 for name in CATEGORIES}
+    for f in found:
+        categories[f["category"]] += 1
+    from services.audit_chain_keys import describe
+
     return present_verify_report(
         {
             "verified": not found,
+            "categories": categories,
+            "tampering_detected": categories["tampering"] > 0,
+            "signing": describe(),
+            "legacy_records": _legacy_summary(events, positions, found),
             "checked": len(positions),
             "chain_head": str((head or {}).get("event_hash") or "") or None,
             "findings": found,
@@ -310,8 +325,8 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
             "walked_limit": limit,
             "honesty": (
                 "Verification covers the records still in the store: it proves they "
-                "were not edited or removed since a holder of the platform secret "
-                "wrote them. It does not prove the recorded facts are true, nor that "
+                "were not edited or removed since a holder of the chain key they "
+                "name wrote them. It does not prove the recorded facts are true, nor that "
                 "records were never discarded together with their checkpoint. Only an "
                 "external WORM / timestamp anchor narrows that."
             ),
@@ -328,7 +343,6 @@ def _event_workspace(event: dict[str, Any]) -> str:
 def _walk(
     events: list[dict[str, Any]],
     positions: list[int],
-    secret: bytes,
     hmac_of: Any,
     truncations: list[dict[str, Any]],
     *,
@@ -340,9 +354,13 @@ def _walk(
     For the workspace line only records that carry ``link_field`` are
     link-checked (older records predate it).
     """
+    from services.audit_chain_keys import check_signature
+
     findings: list[ChainFinding] = []
     seen_prev: dict[str, int] = {}
+    walked: dict[str, int] = {}
     prev_hash: str | None = None
+    prev_seq: int | None = None
     for n, index in enumerate(positions):
         event = events[index]
         event_id = str(event.get("id") or event.get("event_id") or "")
@@ -356,22 +374,45 @@ def _walk(
                     detail="Record carries no event_hash, so it cannot be verified.",
                 )
             )
-        elif hmac_of(event, secret) != stored_hash:
-            findings.append(
-                ChainFinding(
-                    "event_hash_mismatch",
-                    index=index,
-                    event_id=event_id,
-                    detail=(
-                        "Recomputed HMAC does not match the stored event_hash: "
-                        "this record was altered after it was written, or it "
-                        "was written under a different platform secret."
-                    ),
+        else:
+            verdict, key_id = check_signature(event, hmac_of)
+            if verdict == "unknown_key":
+                findings.append(
+                    ChainFinding(
+                        "key_mismatch",
+                        index=index,
+                        event_id=event_id,
+                        detail=(
+                            f"Signed under key {key_id}, which this deployment does "
+                            "not hold, so its HMAC cannot be checked. This is a key "
+                            "configuration gap, not evidence of tampering: list that "
+                            "key in DATAFLOW_AUDIT_HMAC_RETIRED_KEYS to verify it."
+                        ),
+                    )
                 )
-            )
+            elif verdict == "mismatch":
+                findings.append(
+                    ChainFinding(
+                        "event_hash_mismatch",
+                        index=index,
+                        event_id=event_id,
+                        detail=(
+                            "Recomputed HMAC does not match the stored event_hash: "
+                            "this record was altered after it was written."
+                            if key_id
+                            else "Recomputed HMAC does not match the stored event_hash "
+                            "under the login secret or any retired key: this record "
+                            "(written before the chain had its own key) was altered, "
+                            "or was signed under a login secret since rotated — list "
+                            "that secret in DATAFLOW_AUDIT_HMAC_RETIRED_KEYS."
+                        ),
+                    )
+                )
 
         linked = link_field in event
         claimed_prev = event.get(link_field) or None
+        seq = _position(event)
+        branched = False
         if linked and n == 0:
             explained = (
                 prefix_explained
@@ -392,22 +433,49 @@ def _walk(
                     )
                 )
         elif linked and str(claimed_prev or "") != str(prev_hash or ""):
-            findings.append(
-                ChainFinding(
-                    "broken_link",
-                    index=index,
-                    event_id=event_id,
-                    detail=(
-                        f"prev_hash={_short(claimed_prev)} does not name the "
-                        f"preceding record ({_short(prev_hash)}): a record between "
-                        "them was removed, or the two were reordered."
-                    ),
+            parent = walked.get(str(claimed_prev or ""))
+            if (
+                parent is not None
+                and seq > 0
+                and _position(events[parent]) == seq - 1
+                and (prev_seq is None or prev_seq <= seq)
+            ):
+                # It names the record one position back, which is still here:
+                # a sibling branch was written in between. Nothing was removed.
+                branched = True
+                first = seen_prev.get(str(claimed_prev))
+                findings.append(
+                    ChainFinding(
+                        "fork",
+                        index=index,
+                        event_id=event_id,
+                        detail=(
+                            f"Record claims the predecessor already claimed at index "
+                            f"{first}: history forks here and is no longer a single line."
+                            if first is not None
+                            else f"Record links to {_short(claimed_prev)} (index "
+                            f"{parent}), not to the record before it: a concurrent "
+                            "writer's branch sits in between. No record is missing."
+                        ),
+                    )
                 )
-            )
+            else:
+                findings.append(
+                    ChainFinding(
+                        "broken_link",
+                        index=index,
+                        event_id=event_id,
+                        detail=(
+                            f"prev_hash={_short(claimed_prev)} does not name the "
+                            f"preceding record ({_short(prev_hash)}): a record between "
+                            "them was removed, or the two were reordered."
+                        ),
+                    )
+                )
 
         if linked and claimed_prev:
             first = seen_prev.get(str(claimed_prev))
-            if first is not None:
+            if first is not None and not branched:
                 findings.append(
                     ChainFinding(
                         "fork",
@@ -420,10 +488,64 @@ def _walk(
                         ),
                     )
                 )
-            else:
+            elif first is None:
                 seen_prev[str(claimed_prev)] = index
+        if stored_hash:
+            walked[stored_hash] = index
         prev_hash = stored_hash or prev_hash
+        prev_seq = seq
     return findings
+
+
+def _position(event: dict[str, Any]) -> int:
+    try:
+        return int(event.get("chain_seq") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+#: Report categories. Only ``tampering`` means content or history was changed.
+CATEGORIES = ("tampering", "fork", "key_mismatch", "legacy_hash_input")
+
+
+def finding_category(kind: str, cause: str) -> str:
+    if kind == "fork":
+        return "fork"
+    if kind == "key_mismatch":
+        return "key_mismatch"
+    if kind == "event_hash_mismatch" and cause == "legacy_datetime_roundtrip":
+        return "legacy_hash_input"
+    return "tampering"
+
+
+def _legacy_summary(
+    events: list[dict[str, Any]], positions: list[int], findings: list[dict[str, Any]]
+) -> dict[str, Any]:
+    """How the records written before the chain had its own key fare.
+
+    When none of them verifies, the likeliest cause is a rotated login secret,
+    not wholesale alteration — but the store alone cannot tell the two apart,
+    so this says so instead of guessing.
+    """
+    legacy = [i for i in positions if events[i].get("event_hash") and not events[i].get("key_id")]
+    failed = {
+        f["index"] for f in findings
+        if f["kind"] == "event_hash_mismatch" and f["index"] in set(legacy)
+    }
+    out: dict[str, Any] = {
+        "count": len(legacy),
+        "hmac_verified": len(legacy) - len(failed),
+        "hmac_failed": len(failed),
+    }
+    if legacy and len(failed) == len(legacy):
+        out["note"] = (
+            "No record written before the chain had its own key verifies under the "
+            "current login secret or any retired key. That is what a rotated login "
+            "secret looks like; it is also what altering all of them would look like. "
+            "List the previous login secret in DATAFLOW_AUDIT_HMAC_RETIRED_KEYS to tell "
+            "them apart."
+        )
+    return out
 
 
 def _retention_explains_first(

@@ -60,6 +60,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "scim.group.patch": "A SCIM group was patched.",
     "scim.group.delete": "A SCIM group was deleted.",
     "scim.group.role_change": "A SCIM group changed a workspace role.",
+    "scim.group.role_capped": "A mapped SCIM role was capped or skipped because it exceeds the token's grant.",
     "scim.group.member_add": "Members were added to a SCIM group.",
     "scim.group.member_remove": "Members were removed from a SCIM group.",
     # Self-serve signup surface (DATAWRAP_SIGNUP_ENABLED).
@@ -91,6 +92,15 @@ SECURITY_EVENTS: dict[str, str] = {
     "sales.lead.created": "A contact-sales lead was received.",
     "email.event.received": "An email delivery webhook event was received.",
 }
+
+def _register_admin_events() -> None:
+    from services.admin_audit import ADMIN_EVENTS
+
+    for name, description in ADMIN_EVENTS.items():
+        SECURITY_EVENTS.setdefault(name, description)
+
+
+_register_admin_events()
 
 _REQUEST_PRINCIPAL: ContextVar[dict[str, str] | None] = ContextVar(
     "audit_request_principal", default=None
@@ -127,12 +137,14 @@ def note_workspace_header(request: Request) -> None:
 
         if not requested_workspace_id(request):
             return
-        authorized_workspace_id(request)
+        authorized = authorized_workspace_id(request)
         tracker = current_request_audit()
         if tracker is not None:
             tracker["workspace_header_rejected"] = bool(
                 getattr(request.state, "workspace_header_rejected", False)
             )
+            # The workspace an admin event in this request belongs to.
+            tracker["workspace_id"] = str(authorized or "")
     except Exception:
         return
 

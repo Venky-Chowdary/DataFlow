@@ -70,6 +70,7 @@ def chain(monkeypatch, tmp_path):
     monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
     monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "test-secret-not-production")
+    monkeypatch.setenv("DATAFLOW_AUDIT_HMAC_KEY", "test-audit-chain-key")
     try:
         yield {"coll": coll, "db_name": name}
     finally:
@@ -259,6 +260,8 @@ _WRITER = textwrap.dedent(
     import os, sys, time
     sys.path[:0] = [p for p in os.environ["R7_PATH"].split(os.pathsep) if p]
     os.environ["DATAFLOW_AUTH_SECRET"] = "test-secret-not-production"
+    # D221: every writer process signs with the same chain key.
+    os.environ["DATAFLOW_AUDIT_HMAC_KEY"] = "test-audit-chain-key"
     import pymongo
     from services.value_serializer import control_plane_codec_options
     from services import audit_log

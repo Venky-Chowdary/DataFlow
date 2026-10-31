@@ -148,3 +148,27 @@ def purge_expired(*, now: int | None = None) -> int:
             data["sessions"] = keep
             _save(data)
     return removed
+
+
+def session_last_seen(jti: str) -> int | None:
+    """When this session last made a request (``created_at`` before any touch)."""
+    with _LOCK:
+        row = _load()["sessions"].get(jti)
+    if not isinstance(row, dict):
+        return None
+    return int(row.get("last_seen_at") or row.get("created_at") or 0) or None
+
+
+def touch_session(jti: str, *, min_interval: int = 60, now: int | None = None) -> None:
+    """Record activity; writes at most once per ``min_interval`` seconds."""
+    current = int(now if now is not None else time.time())
+    with _LOCK:
+        data = _load()
+        row = data["sessions"].get(jti)
+        if not isinstance(row, dict):
+            return
+        last = int(row.get("last_seen_at") or row.get("created_at") or 0)
+        if current - last < min_interval:
+            return
+        row["last_seen_at"] = current
+        _save(data)

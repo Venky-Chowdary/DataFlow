@@ -16,10 +16,46 @@ reports each record that fails, by index and event id:
 | Finding | Meaning |
 | --- | --- |
 | `event_hash_missing` | Record carries no hash; nothing about it can be verified. |
-| `event_hash_mismatch` | Recomputed HMAC ≠ stored hash: the record was altered after it was written, or written under a different platform secret. |
-| `broken_link` | `prev_hash` does not name the previous record: a record between them was removed, or the two were reordered. |
-| `fork` | Two records claim one predecessor — concurrent writer or replayed segment; history is no longer a single line. |
+| `event_hash_mismatch` | Recomputed HMAC (under the key the record names) ≠ stored hash: the record was altered after it was written. For a record with no `key_id` (written before D221) it may instead have been signed under a login secret that has since been rotated. |
+| `key_mismatch` | The record names a signing key (`key_id`) this deployment does not hold, so it cannot be checked. A key configuration gap, not tampering. |
+| `broken_link` | `prev_hash` does not name the previous record nor any earlier one: a record between them was removed, or the records were reordered. |
+| `fork` | Two records claim one predecessor, or a record links one position back past a sibling branch — concurrent writers or a replayed segment; history is no longer a single line, but nothing was removed. |
 | `unexplained_prefix` | The oldest record points at an absent predecessor and no signed retention checkpoint accounts for it. |
+
+Each finding carries a `category` and the report totals them in `categories`:
+`tampering` (`event_hash_missing`, `event_hash_mismatch`, `broken_link`,
+`unexplained_prefix`), `fork`, `key_mismatch`, `legacy_hash_input` (records
+broken by the pre-R7 hash input). `tampering_detected` is true only when the
+`tampering` count is non-zero.
+
+### Signing key (D221)
+
+The chain has its own key, `DATAFLOW_AUDIT_HMAC_KEY` (or
+`DATAWRAP_AUDIT_HMAC_KEY`); set the same value on every process that writes
+audit records (API, worker, scheduler, CDC worker). Every record stores
+`key_id`, a public fingerprint of the key that signed it. To rotate, set the new
+key and move the old one into `DATAFLOW_AUDIT_HMAC_RETIRED_KEYS`
+(comma-separated); records keep verifying under the key they name.
+
+Records written before D221 have no `key_id` and verify under the login secret
+(`DATAFLOW_AUTH_SECRET`), exactly as before, or under any retired key — so a
+login secret that was rotated away can be listed there to make its records
+verifiable again. The login secret is no longer used to sign anything new.
+
+If `DATAFLOW_AUDIT_HMAC_KEY` is unset the login secret is still not used: the
+process generates a random key once and keeps it at `<data dir>/audit_chain.key`
+(mode 0600), shared by processes on the same volume, and logs a warning.
+Processes on other hosts generate their own, and their records then show as
+`key_mismatch` (not tampering) until the key is configured.
+
+Appends are atomic across processes: in MongoDB the record's `_id` is its chain
+position (`audit-chain:<seq>`), which MongoDB keeps unique on every collection
+without any optional index, so a second writer to the same position gets a
+duplicate-key error and re-links to the new tip. The file store takes an `flock`
+across read-tip-and-append.
+
+The owner's read-only production check is `apps/api/scripts/audit_chain_check.py`
+(see `docs/AUDIT_CHAIN_PRODUCTION_CHECK.md`).
 
 The **walk** is deliberately not workspace-filtered: the chain links every
 record, so skipping another tenant's rows would invent broken links. When
