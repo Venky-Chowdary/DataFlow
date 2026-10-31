@@ -60,6 +60,7 @@ SECURITY_EVENTS: dict[str, str] = {
     "scim.group.patch": "A SCIM group was patched.",
     "scim.group.delete": "A SCIM group was deleted.",
     "scim.group.role_change": "A SCIM group changed a workspace role.",
+    "scim.group.role_capped": "A mapped SCIM role was capped or skipped because it exceeds the token's grant.",
     "scim.group.member_add": "Members were added to a SCIM group.",
     "scim.group.member_remove": "Members were removed from a SCIM group.",
     # Self-serve signup surface (DATAWRAP_SIGNUP_ENABLED).

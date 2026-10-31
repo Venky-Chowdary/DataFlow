@@ -272,6 +272,35 @@ def get_scim_group_mappings():
         raise HTTPException(status_code=503, detail="SCIM storage is unavailable") from exc
 
 
+def _enforce_mapping_workspace_authority(request: Request, workspace_id: str, role: str) -> None:
+    """A mapping grants ``role`` in ``workspace_id``: the caller must hold it there.
+
+    ``enforce_grant_bounds`` measures the caller in the workspace the request
+    names; a mapping names its own workspace, so an admin of one workspace could
+    otherwise map a group to admin of another.
+    """
+    if not _auth_service.auth_required():
+        return
+    ceiling = scim_service.role_ceiling(getattr(request.state, "user", None), workspace_id)
+    order = {"viewer": 1, "editor": 2, "admin": 3}
+    if ceiling is not None and order.get(role, 9) <= order.get(ceiling, 0):
+        return
+    actor = actor_email(request)
+    audit_log.append_audit_event(
+        action="iam.privilege_escalation.denied",
+        resource="PUT /api/v1/iam/scim/group-mappings",
+        actor=actor,
+        level="warn",
+        workspace_id=workspace_id,
+        details={"route": "PUT /api/v1/iam/scim/group-mappings", "caller": actor,
+                 "target_role": role, "workspace_id": workspace_id, "ceiling": ceiling},
+    )
+    raise HTTPException(
+        status_code=403,
+        detail=f"Cannot map a group to {role} in a workspace where you do not hold that role",
+    )
+
+
 @router.put("/scim/group-mappings")
 def put_scim_group_mappings(body: ScimGroupMappingsUpdate, request: Request):
     mappings: dict[str, dict[str, str]] = {}
@@ -289,6 +318,7 @@ def put_scim_group_mappings(body: ScimGroupMappingsUpdate, request: Request):
             target_role=membership_role_to_gate_role(mapping.role),
             target_scopes=None,
         )
+        _enforce_mapping_workspace_authority(request, mapping.workspace_id, mapping.role)
         mappings[key] = {
             "workspace_id": mapping.workspace_id,
             "role": mapping.role,
