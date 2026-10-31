@@ -4534,6 +4534,7 @@ export type Tenant = {
   security_contact_email: string;
   mfa_required: boolean;
   session_timeout_hours: number;
+  enforce_session_timeout?: boolean;
   ip_allowlist: string[];
   egress_allowlist: string[];
   created_at: string;
@@ -4612,6 +4613,12 @@ export type SecurityPosture = {
   mfa_enforced?: boolean;
   session_timeout_hours: number;
   session_timeout_enforced?: boolean;
+  /** Exactly what each control enforces (round 8). */
+  enforcement?: {
+    ip_allowlist?: { enforced?: boolean; missing?: string[]; scope?: string };
+    session_timeout?: { enforced?: boolean; hours?: number | null };
+    mfa?: { enforced?: boolean; status?: string };
+  };
   byok_encrypts_secrets?: boolean;
   tls_version: string;
   compliance: Array<{ framework: string; status: string; evidence: string }>;

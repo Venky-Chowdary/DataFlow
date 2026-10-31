@@ -23,6 +23,7 @@ import { chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
 import { auditActorLabel } from "../lib/auditActor";
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
 import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
+import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
 import { connectorEgressState } from "../lib/egressPosture";
 import { TENANT_SAVED_EVENT, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
@@ -899,10 +900,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts.", on: posture.encryption_at_rest, pending: false },
                           { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access.", on: posture.audit_logging, pending: false },
                           { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review.", on: posture.pii_detection, pending: false },
-                          { title: "IP allowlisting", desc: posture.ip_allowlist_enforced ? "Enforced when Host matches this tenant custom domain." : "Stored CIDR list. Not enforced on the default app host.", on: Boolean(posture.ip_allowlist_enforced), pending: false },
+                          ipAllowlistRow(posture),
                           { title: "Connector egress", desc: egressCopy, on: egress === "on", pending: egress === "unknown" },
-                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Recorded only. Token TTL is DATAFLOW_TOKEN_TTL_SEC — this value does not sign sessions out.", on: false, pending: false },
-                          { title: "MFA required for admins", desc: "Recorded policy. Login MFA is not wired.", on: false, pending: false },
+                          sessionTimeoutRow(posture),
+                          mfaRow(),
                         ].map((item) => (
                           <div key={item.title} className="df2-settings-policy-row" data-testid={item.title === "Connector egress" ? "connector-egress-row" : undefined}>
                             <div>

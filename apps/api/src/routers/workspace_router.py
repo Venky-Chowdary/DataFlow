@@ -53,6 +53,7 @@ class TenantCreateBody(BaseModel):
     security_contact_email: str = Field(default="", max_length=128)
     mfa_required: bool = Field(default=False)
     session_timeout_hours: int = Field(default=8, ge=1, le=24)
+    enforce_session_timeout: bool = Field(default=False)
     ip_allowlist: list[str] = Field(default_factory=list)
     egress_allowlist: list[str] = Field(default_factory=list)
 
@@ -65,6 +66,8 @@ class TenantUpdateBody(BaseModel):
     security_contact_email: str | None = Field(default=None, max_length=128)
     mfa_required: bool | None = Field(default=None)
     session_timeout_hours: int | None = Field(default=None, ge=1, le=24)
+    # Turns session_timeout_hours from recorded policy into an enforced idle timeout.
+    enforce_session_timeout: bool | None = Field(default=None)
     ip_allowlist: list[str] | None = Field(default=None)
     egress_allowlist: list[str] | None = Field(default=None)
 
@@ -768,6 +771,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             security_contact_email=body.security_contact_email,
             mfa_required=body.mfa_required,
             session_timeout_hours=body.session_timeout_hours,
+            enforce_session_timeout=body.enforce_session_timeout,
             ip_allowlist=body.ip_allowlist,
             egress_allowlist=body.egress_allowlist,
         )
@@ -916,7 +920,14 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     from services.recovery_honesty import honesty_dict as recovery_honesty_dict
     from services.secret_vault import secrets_encryption_ready
 
+    from src.middleware.tenant_middleware import _allowlist_enforced
+
     region = tenant.data_region if tenant else "us-east-1"
+    ip_flag = bool(_allowlist_enforced())
+    ip_enforced = bool(
+        tenant and tenant.ip_allowlist and (tenant.custom_domain or "").strip() and ip_flag
+    )
+    session_enforced = bool(tenant and getattr(tenant, "enforce_session_timeout", False))
     byok = key_status_summary(tenant.id) if tenant else {"configured": False}
     encryption_ready = bool(secrets_encryption_ready())
     prod = is_production()
@@ -953,17 +964,41 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "pii_detection": False,  # detector hooks exist; not attested as always-on
         "ip_allowlist_enabled": bool(tenant and tenant.ip_allowlist),
         "egress_allowlist_enabled": bool(tenant and tenant.egress_allowlist),
-        # Enforced only when Host resolves this tenant (custom domain). The
-        # vanity app host never evaluates the CIDR list — do not badge it as live.
-        "ip_allowlist_enforced": bool(
-            tenant and tenant.ip_allowlist and (tenant.custom_domain or "").strip()
-        ),
+        # Enforced only when Host resolves this tenant (custom domain) AND the
+        # operator turned DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE on; otherwise a
+        # request it would block is audited (tenant.ip_allowlist.would_block)
+        # and allowed. The shared app host never evaluates the CIDR list.
+        "ip_allowlist_enforced": ip_enforced,
         "mfa_required": tenant.mfa_required if tenant else False,
         # Login MFA is not wired; the flag is policy memory only.
         "mfa_enforced": False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
-        # Token TTL is DATAFLOW_TOKEN_TTL_SEC, not tenant.session_timeout_hours.
-        "session_timeout_enforced": False,
+        # Idle timeout enforced on sign-in sessions when the tenant turns
+        # enforce_session_timeout on (services.session_policy). API keys and
+        # the absolute token TTL (DATAFLOW_TOKEN_TTL_SEC) are separate.
+        "session_timeout_enforced": session_enforced,
+        "enforcement": {
+            "ip_allowlist": {
+                "enforced": ip_enforced,
+                "scope": "requests whose Host is the tenant custom domain",
+                "requires": ["tenant.ip_allowlist", "tenant.custom_domain",
+                             "DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1"],
+                "missing": [m for m, ok in (
+                    ("tenant.ip_allowlist", bool(tenant and tenant.ip_allowlist)),
+                    ("tenant.custom_domain", bool(tenant and (tenant.custom_domain or "").strip())),
+                    ("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1", ip_flag),
+                ) if not ok],
+                "not_covered": "the shared app host and API keys used against it",
+            },
+            "session_timeout": {
+                "enforced": session_enforced,
+                "kind": "idle",
+                "hours": tenant.session_timeout_hours if tenant else None,
+                "scope": "sign-in sessions of members of this workspace (strictest workspace wins)",
+                "not_covered": "API keys; absolute token lifetime is DATAFLOW_TOKEN_TTL_SEC",
+            },
+            "mfa": {"enforced": False, "status": "design_only", "design": "docs/MFA_ENFORCEMENT_DESIGN.md"},
+        },
         # True when this tenant has an active BYOK key. New connector secrets
         # are wrapped with that key; enc:v1 leftovers stay readable until re-saved.
         "byok_encrypts_secrets": bool(tenant and byok.get("active_count")),
@@ -1099,10 +1134,10 @@ async def get_security_report(request: Request):
         f"- TLS minimum version: {posture['tls_version']}",
         f"- Audit logging: {'enabled' if posture['audit_logging'] else 'disabled'}",
         f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
-        f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (needs custom domain)' if posture['ip_allowlist_enabled'] else 'disabled')}",
+        f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (missing: ' + ', '.join(posture['enforcement']['ip_allowlist']['missing']) + ')' if posture['ip_allowlist_enabled'] else 'disabled')}",
         f"- Connector egress allowlist: {'on' if posture.get('egress_allowlist_enabled') else 'off (private ranges refused; metadata and link-local cannot be listed)'}",
-        f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired)",
-        f"- Session timeout: recorded={posture['session_timeout_hours']}h; enforced=no (token TTL is DATAFLOW_TOKEN_TTL_SEC)",
+        f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired; design: docs/MFA_ENFORCEMENT_DESIGN.md)",
+        f"- Session timeout: {posture['session_timeout_hours']}h idle; enforced={'yes (sign-in sessions; API keys excluded)' if posture['session_timeout_enforced'] else 'no (recorded only; turn on enforce_session_timeout)'}",
         "",
         "## Deployment & data path",
         f"- Models: {', '.join((posture.get('deployment') or {}).get('models') or [])}",

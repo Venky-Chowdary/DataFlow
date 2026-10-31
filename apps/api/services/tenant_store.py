@@ -94,6 +94,8 @@ class Tenant:
     security_contact_email: str = ""
     mfa_required: bool = False
     session_timeout_hours: int = 8
+    # Off by default: session_timeout_hours is recorded policy until this is on.
+    enforce_session_timeout: bool = False
     ip_allowlist: list[str] = field(default_factory=list)
     # Connector egress. Empty means private ranges stay refused. This is not
     # the inbound API allowlist, and it is not a deploy setting.
@@ -116,6 +118,7 @@ class Tenant:
             security_contact_email=data.get("security_contact_email", ""),
             mfa_required=bool(data.get("mfa_required", False)),
             session_timeout_hours=int(data.get("session_timeout_hours", 8)),
+            enforce_session_timeout=bool(data.get("enforce_session_timeout", False)),
             ip_allowlist=list(data.get("ip_allowlist", []) or []),
             egress_allowlist=list(data.get("egress_allowlist", []) or []),
             created_at=data.get("created_at", _now()),
@@ -141,6 +144,7 @@ def create_tenant(
     security_contact_email: str = "",
     mfa_required: bool = False,
     session_timeout_hours: int = 8,
+    enforce_session_timeout: bool = False,
     ip_allowlist: list[str] | None = None,
     egress_allowlist: list[str] | None = None,
 ) -> Tenant:
@@ -162,6 +166,7 @@ def create_tenant(
         security_contact_email=security_contact_email.strip()[:128],
         mfa_required=mfa_required,
         session_timeout_hours=max(1, min(24, int(session_timeout_hours))),
+        enforce_session_timeout=bool(enforce_session_timeout),
         ip_allowlist=_validate_allowlist(ip_allowlist or []),
         egress_allowlist=_validate_egress_allowlist(egress_allowlist or []),
     )
@@ -228,6 +233,8 @@ def update_tenant(tenant_id: str, **kwargs: Any) -> Tenant | None:
                 raw["mfa_required"] = bool(kwargs["mfa_required"])
             if "session_timeout_hours" in kwargs:
                 raw["session_timeout_hours"] = max(1, min(24, int(kwargs["session_timeout_hours"])))
+            if "enforce_session_timeout" in kwargs:
+                raw["enforce_session_timeout"] = bool(kwargs["enforce_session_timeout"])
             if "ip_allowlist" in kwargs:
                 raw["ip_allowlist"] = _validate_allowlist(kwargs["ip_allowlist"])
             if "egress_allowlist" in kwargs:
