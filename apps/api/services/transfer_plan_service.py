@@ -480,6 +480,9 @@ def run_plan_preflight(
         fit_scan_seconds=STUDIO_FIT_SCAN_SECONDS,
         on_fit_progress=_plan_fit_progress(plan_id, int(plan.row_count_estimate or 0)),
     )
+    from services.mirror_delete_notice import attach_mirror_delete_notice
+
+    attach_mirror_delete_notice(pf, str(policies.get("sync_mode") or ""), stream_contracts)
     pf = apply_policy_gates(
         pf,
         run_transfer_policy_gates(

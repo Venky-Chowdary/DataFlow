@@ -1796,6 +1796,20 @@
   margin-bottom: 12px;
 }
 
+.df2-adv-mirror-delete-field {
+  margin-bottom: 12px;
+}
+
+.df2-adv-mirror-delete-warning {
+  margin: 8px 0 0;
+  padding: 8px 10px;
+  border: 1px solid var(--df-danger-border);
+  border-radius: var(--df-radius-sm);
+  background: var(--df-danger-bg);
+  color: var(--df-danger);
+  font-weight: 600;
+}
+
 .df2-result-gate8,
 .df2-theater-gate8 {
   margin: 12px 0;

@@ -715,6 +715,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "else a typed table with an embedding column."
                     ),
                 },
+                "delete_mode": {
+                    "type": "string",
+                    "enum": ["soft", "hard"],
+                    "description": (
+                        "Mirror sync only. 'soft' (default): destination rows whose "
+                        "key left the source are kept and flagged _deleted. 'hard': "
+                        "they are physically DELETEd; the plan warns before staging."
+                    ),
+                },
                 "ddl_acknowledgement": {
                     "type": "object",
                     "description": (
@@ -877,6 +886,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "load (id, content, embedding, metadata). Omitted: the "
                         "saved connector's choice, else the existing table's shape, "
                         "else a typed table with an embedding column."
+                    ),
+                },
+                "delete_mode": {
+                    "type": "string",
+                    "enum": ["soft", "hard"],
+                    "description": (
+                        "Mirror sync only. 'soft' (default): destination rows whose "
+                        "key left the source are kept and flagged _deleted. 'hard': "
+                        "they are physically DELETEd; the plan warns before staging."
                     ),
                 },
             },
@@ -4229,6 +4247,7 @@ class DataPilotTools:
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
         vector_layout: str = "",
+        delete_mode: str = "",
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -4266,6 +4285,7 @@ class DataPilotTools:
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
             vector_layout=vector_layout,
+            delete_mode=delete_mode,
         )
 
     def _start_transfer(
@@ -4304,6 +4324,7 @@ class DataPilotTools:
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
         vector_layout: str = "",
+        delete_mode: str = "",
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -4342,6 +4363,7 @@ class DataPilotTools:
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
             vector_layout=vector_layout,
+            delete_mode=delete_mode,
         )
 
     def _start_dataset_transfer(

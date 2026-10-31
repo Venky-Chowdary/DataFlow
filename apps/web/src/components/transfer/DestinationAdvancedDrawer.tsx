@@ -10,6 +10,11 @@ import { FilterTabs } from "../ui/FilterTabs";
 import { DtIcon } from "../DtIcon";
 import type { StreamFieldContract } from "../../lib/streamContracts";
 import { resolveStreamFields } from "../../lib/streamContracts";
+import {
+  MIRROR_SOFT_DELETE_TEXT,
+  mirrorDeleteText,
+  type MirrorDeleteMode,
+} from "../../lib/mirrorDeleteMode";
 import { destStreamPlaceholder } from "../../lib/sourceReadMode";
 import {
   CURSOR_SEMANTICS,
@@ -129,6 +134,9 @@ interface DestinationAdvancedDrawerProps {
   /** Debezium-compatible snapshot mode (CDC). */
   snapshotMode?: string;
   onSnapshotModeChange?: (mode: string) => void;
+  /** Mirror: soft delete (default) or an explicit hard DELETE of missing keys. */
+  mirrorDeleteMode?: MirrorDeleteMode;
+  onMirrorDeleteModeChange?: (mode: MirrorDeleteMode) => void;
   /** Priority-first sync: sort source by this column before write. */
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc";
@@ -276,6 +284,8 @@ export function DestinationAdvancedDrawer({
   compositeKeySuggestions = [],
   snapshotMode = "initial",
   onSnapshotModeChange,
+  mirrorDeleteMode = "soft",
+  onMirrorDeleteModeChange,
   priorityColumn = "",
   priorityDirection = "desc",
   rowLimit = 0,
@@ -416,10 +426,7 @@ export function DestinationAdvancedDrawer({
             )}
             {syncMode === "mirror" && (
               <p>
-                Missing source keys are <strong>soft-deleted</strong> on the destination
-                (<code>_deleted</code>), not hard-deleted. Physical <code>COUNT(*)</code> stays;
-                the conservation identity is dest-engine <code>COUNT(*) WHERE NOT _deleted</code>.
-                Writer acknowledgement is not active population.
+                {mirrorDeleteText(mirrorDeleteMode)} Writer acknowledgement is not active population.
               </p>
             )}
           </aside>
@@ -516,6 +523,29 @@ export function DestinationAdvancedDrawer({
                     </button>
                   );
                 })}
+          </div>
+        )}
+
+        {syncMode === "mirror" && (
+          <div className="df2-field df2-adv-mirror-delete-field">
+            <label className="df2-label" htmlFor="df2-adv-mirror-delete">Missing source keys</label>
+            <select
+              id="df2-adv-mirror-delete"
+              className="df2-input df2-select"
+              value={mirrorDeleteMode}
+              onChange={(e) => onMirrorDeleteModeChange?.(e.target.value === "hard" ? "hard" : "soft")}
+              disabled={!onMirrorDeleteModeChange}
+            >
+              <option value="soft">Soft delete — flag _deleted, keep the row (default)</option>
+              <option value="hard">Hard delete — physically DELETE the destination row</option>
+            </select>
+            {mirrorDeleteMode === "hard" ? (
+              <p className="df2-adv-mirror-delete-warning" role="alert">
+                {mirrorDeleteText("hard")}
+              </p>
+            ) : (
+              <p className="df2-label-hint">{MIRROR_SOFT_DELETE_TEXT}</p>
+            )}
           </div>
         )}
 
@@ -1223,7 +1253,7 @@ export function DestinationAdvancedDrawer({
           <p className="df2-label-hint" style={{ margin: "12px 0 0" }}>
             {syncMode === "scd2"
               ? "SCD Type 2 requires a primary key on each stream to version rows (valid-from / valid-to)."
-              : "Mirror sync requires a primary key on each stream. Dest keys missing from the source are flagged _deleted; physical COUNT(*) does not drop."}
+              : `Mirror sync requires a primary key on each stream. ${mirrorDeleteText(mirrorDeleteMode)}`}
             {streamNeedsReview ? " Select a primary key above before running." : ""}
           </p>
         )}

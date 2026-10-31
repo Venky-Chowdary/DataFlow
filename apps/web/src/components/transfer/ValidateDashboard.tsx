@@ -27,6 +27,7 @@ import {
   isInternalGateId,
 } from "../../lib/preflightGates";
 import { EngineStageTicker } from "../EngineStageTicker";
+import { preflightHardDeleteWarning } from "../../lib/mirrorDeleteMode";
 import type { ValidateProgress } from "../../lib/engineProgress";
 import {
   buildBlockingGateSummaries,
@@ -1207,6 +1208,8 @@ export function ValidateDashboard({
    * truth: the gates read the source as declared.
    */
   const transformImage = preflight?.transform_image ?? null;
+  // A declared mirror hard delete is said before Execute, in the engine's words.
+  const hardDeleteWarning = preflightHardDeleteWarning(preflight);
   const transformRetyped = Object.entries(transformImage?.retyped_columns ?? {})
     .sort(([a], [b]) => a.localeCompare(b));
 
@@ -1826,6 +1829,12 @@ export function ValidateDashboard({
                 population. The source is not modified — the recipe runs on the read, and Execute is
                 refused if its identity changes.
               </p>
+            </div>
+          )}
+
+          {!running && hardDeleteWarning && (
+            <div className="df2-vd-exec-summary" role="alert" data-testid="mirror-hard-delete-warning">
+              <p className="df2-vd-exec-summary-sub">{hardDeleteWarning}</p>
             </div>
           )}
 
