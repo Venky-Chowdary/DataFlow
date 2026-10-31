@@ -352,9 +352,9 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
     if isinstance(inferred, str):
         # MySQL-only tokens (UNSIGNED, display width, YEAR) become the signed
         # carrier that holds every value before any per-dialect mapping.
-        from services.mysql_carrier_legalize import legal_carrier_for_dest
+        from services.mysql_carrier_legalize import legal_ddl_carrier_for_dest
 
-        inferred = legal_carrier_for_dest(db_type, inferred) or inferred
+        inferred = legal_ddl_carrier_for_dest(db_type, inferred) or inferred
     nested = _nested_ddl_for_dest(db, inferred)
     if nested:
         return nested

@@ -119,9 +119,10 @@ def mysql_signed_carrier(carrier: str | None) -> str | None:
         base = re.sub(r"\s+", " ", m.group(1).upper())
         mods = _modifiers(m.group(4))
         has_md = m.group(3) is not None
-        if not mods and not has_md and not (base == "FLOAT" and m.group(2)):
+        if not mods and not has_md:
+            # FLOAT(p) / DOUBLE / REAL alone are standard spellings, not MySQL-only.
             return None
-        if base == "FLOAT":
+        if base in {"FLOAT", "REAL"}:
             if m.group(2) and not has_md and int(m.group(2)) > 24:
                 return "FLOAT8"
             return "FLOAT4"
@@ -151,6 +152,21 @@ def legal_carrier_for_dest(db_type: str | None, carrier: str | None) -> str | No
     if _dest_spells_mysql_tokens(str(db_type or "")):
         return None
     return mysql_signed_carrier(carrier)
+
+
+_DDL_ONLY_RE = re.compile(r"\(|ZEROFILL|^INT[1-8]\b", re.IGNORECASE)
+
+
+def legal_ddl_carrier_for_dest(db_type: str | None, carrier: str | None) -> str | None:
+    """Like :func:`legal_carrier_for_dest`, for ``ddl_type``'s logical input.
+
+    ``ddl_type`` already maps the bare keywords (``BIGINT UNSIGNED`` → each
+    dialect's own choice); only spellings it cannot read — display widths,
+    ``ZEROFILL``, ``INT4 UNSIGNED`` — are rewritten there.
+    """
+    if not carrier or not _DDL_ONLY_RE.search(str(carrier).strip()):
+        return None
+    return legal_carrier_for_dest(db_type, carrier)
 
 
 def _decimal_capacity(carrier: str) -> tuple[int, int] | None:

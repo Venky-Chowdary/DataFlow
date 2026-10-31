@@ -46,7 +46,9 @@ def _mysql_column_types(cur, table: str) -> list[tuple[str, str]]:
         (table,),
     )
     out: list[tuple[str, str]] = []
-    for name, data_type, precision in cur.fetchall():
+    for row in cur.fetchall():
+        name, data_type = row[0], row[1]
+        precision = row[2] if len(row) > 2 else None
         dtype = str(data_type or "").lower()
         if dtype == "bit":
             # The width decides the bitstring wire (``_mysql_select_list``).
