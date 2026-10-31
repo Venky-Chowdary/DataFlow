@@ -204,7 +204,7 @@ class _Route:
         )
 
     def dest_rows(self) -> list[tuple] | None:
-        sql = f"SELECT id, a, n FROM {{t}} ORDER BY id"  # nosec B608
+        sql = "SELECT id, a, n FROM {t} ORDER BY id"  # nosec B608
         try:
             if self.ms is None:
                 con = sqlite3.connect(self.sqlite_path)
