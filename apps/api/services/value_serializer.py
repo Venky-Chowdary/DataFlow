@@ -644,6 +644,26 @@ def _decimal_to_json(value: Decimal) -> Any:
     return safe_decimal_text(value)
 
 
+class JsonFraction(float):
+    """A JSON fraction binary64 holds exactly, with the text the source wrote.
+
+    ``12.50`` and ``"12.50"`` in one Kafka field landed in its text column as
+    ``12.5`` and ``12.50``: the number was re-spelled through ``repr`` (D203).
+    It is still a float for typing; on the wire it is the source's own text.
+    """
+
+    literal: str
+
+
+class _LiteralDecimal(Decimal):
+    literal: str
+
+    def __new__(cls, text: str) -> "_LiteralDecimal":
+        obj = Decimal.__new__(cls, text)
+        obj.literal = text
+        return obj
+
+
 def _demote_exactly_representable(value: Any) -> Any:
     """Return floats where binary64 is exact, Decimals where it is not."""
     if isinstance(value, Decimal):
@@ -652,8 +672,12 @@ def _demote_exactly_representable(value: Any) -> Any:
         except (OverflowError, ValueError, InvalidOperation):
             return value
         if math.isfinite(as_float) and Decimal(repr(as_float)) == value:
+            if isinstance(value, _LiteralDecimal):
+                fraction = JsonFraction(as_float)
+                fraction.literal = value.literal
+                return fraction
             return as_float
-        return value
+        return Decimal(value) if isinstance(value, _LiteralDecimal) else value
     if isinstance(value, list):
         return [_demote_exactly_representable(v) for v in value]
     if isinstance(value, dict):
@@ -661,7 +685,9 @@ def _demote_exactly_representable(value: Any) -> Any:
     return value
 
 
-def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
+def json_loads_exact(
+    text: str, *, parse_constant: Any = None, keep_literals: bool = False
+) -> Any:
     """``json.loads`` that does not round numbers off through binary64.
 
     The stdlib parses every non-integer JSON number into a float, so
@@ -672,7 +698,11 @@ def json_loads_exact(text: str, *, parse_constant: Any = None) -> Any:
     which ``_decimal_to_json`` then writes as exact text per this module's
     documented policy.
     """
-    parsed = json.loads(text, parse_float=Decimal, parse_constant=parse_constant)
+    parsed = json.loads(
+        text,
+        parse_float=_LiteralDecimal if keep_literals else Decimal,
+        parse_constant=parse_constant,
+    )
     return _demote_exactly_representable(parsed)
 
 
@@ -1079,6 +1109,9 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
 
     if value is None:
         return SQL_NULL_SENTINEL if preserve_sql_null else ""
+
+    if isinstance(value, JsonFraction):
+        return value.literal
 
     # Sparse CDC / STOP_COLUMN / coerce omit — never serialize the sentinel into
     # CSV/JSON/export wires (would look like a real client value).
