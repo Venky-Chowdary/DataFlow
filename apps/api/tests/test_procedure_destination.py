@@ -236,7 +236,14 @@ def test_procedure_dialects_parse_and_non_sql_sinks_refuse() -> None:
     """
     call = {"dest_write_mode": "procedure", "dest_procedure_call": "CALL public.land(:id)"}
     parsed = 0
-    for dialect in sorted(PROCEDURE_DIALECTS):
+    # Family keys plus hosted tiles, which resolve onto their family (QA r11).
+    hosted = (
+        "postgres", "pgvector", "mariadb", "mssql", "cockroachdb", "timescaledb",
+        "yugabytedb", "alloydb", "amazon_rds_postgresql", "amazon_rds_mysql",
+        "amazon_rds_sql_server", "azure_sql_database", "microsoft_sql_server",
+        "amazon_aurora", "amazon_aurora_postgresql", "amazon_rds_oracle",
+    )
+    for dialect in sorted(PROCEDURE_DIALECTS) + list(hosted):
         plan = plan_dest_procedure({"type": dialect, "extra": call})
         assert plan is not None and plan.mode == MODE_ROW_APPLY, dialect
         parsed += 1
@@ -252,7 +259,7 @@ def test_procedure_dialects_parse_and_non_sql_sinks_refuse() -> None:
         with pytest.raises(ProcedureDestinationError):
             plan_dest_procedure({"type": dialect, "extra": call})
         refused += 1
-    assert parsed == len(PROCEDURE_DIALECTS)
+    assert parsed == len(PROCEDURE_DIALECTS) + len(hosted)
     assert parsed >= 18
     assert refused == len(QUERY_ONLY_DIALECTS) + 10
 

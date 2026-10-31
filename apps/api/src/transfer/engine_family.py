@@ -154,3 +154,31 @@ def family_or_kind(kind: str | None) -> str:
     its engine, every other key is looked up exactly as before.
     """
     return sql_duplex_family(kind) or (kind or "").strip().lower()
+
+
+class FamilyMembers:
+    """``kind in members`` answered by the resolver, not by a listed spelling.
+
+    For modules that keep a membership constant (``_MSSQL_WIRES``): every tile
+    of ``family`` is a member, plus ``also`` — engines outside the duplex
+    driver that share the wire (Synapse speaks T-SQL). Supports ``&`` with a
+    set of names, as the constants it replaces did.
+    """
+
+    __slots__ = ("family", "also")
+
+    def __init__(self, family: str, also: tuple[str, ...] = ()) -> None:
+        self.family = family
+        self.also = frozenset(also)
+
+    def __contains__(self, kind: object) -> bool:
+        raw = str(kind or "").strip().lower()
+        return bool(raw) and (raw in self.also or engine_family(raw) == self.family)
+
+    def __and__(self, names: object) -> set[str]:
+        return {n for n in names if n in self}  # type: ignore[union-attr]
+
+    __rand__ = __and__
+
+    def __repr__(self) -> str:
+        return f"FamilyMembers({self.family!r}, also={sorted(self.also)!r})"

@@ -87,6 +87,7 @@ from services.engine_pool import release_engine
 from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
 from services.value_serializer import cell_to_string
+from src.transfer.engine_family import FamilyMembers
 
 _gsql = sys.modules[__name__]
 
@@ -1460,11 +1461,10 @@ _DuckDBJSON = _ExactJSON
 #: Dialects whose catalogs fold unquoted identifiers to a single case.
 _FOLDING_DIALECTS: Final = {"oracle", "snowflake", "db2", "ibm_db_sa"}
 
-_ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw", "oracle_atp"}
-
-
-_MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
-_MYSQL_WIRES: Final = {"mysql", "mariadb", "tidb", "singlestore"}
+# Wire membership comes from the one engine resolver (hosted tiles included).
+_ORACLE_WIRES: Final = FamilyMembers("oracle")
+_MSSQL_WIRES: Final = FamilyMembers("sqlserver", also=("synapse", "azure_synapse"))
+_MYSQL_WIRES: Final = FamilyMembers("mysql")
 
 
 def physical_table_spelling(

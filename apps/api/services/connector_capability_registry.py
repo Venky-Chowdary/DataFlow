@@ -1217,7 +1217,9 @@ def _normalize_connector_id(key: str) -> str:
     from src.transfer.engine_family import sql_duplex_family
 
     k = (key or "").lower().strip()
-    return CONNECTOR_ALIASES.get(k) or sql_duplex_family(k) or k
+    if k in CONNECTOR_ALIASES or k in CAPABILITY_REGISTRY:
+        return CONNECTOR_ALIASES.get(k, k)
+    return sql_duplex_family(k) or k
 
 
 def _align_registry_honesty() -> None:
