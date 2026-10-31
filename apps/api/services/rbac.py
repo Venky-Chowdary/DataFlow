@@ -768,10 +768,15 @@ class RBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         route_method = "GET" if method == "HEAD" else method
-        if _request_matches_real_route(request.app, route_method, path):
-            permission = _required_permission(route_method, path)
-        else:
-            permission = NO_RULE
+        if not _request_matches_real_route(request.app, route_method, path):
+            # A route the API does not serve has no permission to check: let the
+            # router answer it (404, or 405 for a known path with another
+            # method). Answering 403 "No RBAC rule" read as a missing grant and
+            # was what the web's dead fallbacks surfaced (QA round 9). Only an
+            # authenticated caller gets here — AuthMiddleware runs first, so a
+            # stranger still learns nothing about the route map.
+            return await call_next(request)
+        permission = _required_permission(route_method, path)
         user = getattr(request.state, "user", None)
 
         if permission is NO_RULE:

@@ -71,7 +71,7 @@ def test_unknown_route_semantics_around_the_404(r9):
 
     owner = r9.owner
     # A real path with a method it does not serve is 405, not "no rule".
-    wrong_method = owner.delete("/api/v1/connectors/jobs")
+    wrong_method = owner.post("/api/v1/usage/summary", json={})
     assert wrong_method.status_code == 405, wrong_method.text
     # A made-up path anywhere is 404.
     assert owner.get("/api/v1/definitely-not-a-route").status_code == 404
@@ -102,8 +102,10 @@ def _web_paths() -> list[tuple[str, int, str]]:
         text = path.read_text(encoding="utf-8", errors="ignore")
         for match in _TEMPLATE.finditer(text):
             raw = match.group(1)
-            # A trailing ${…} glued to a segment is a query string (``retry${query}``).
-            raw = re.sub(r"(?<=[^/])\$\{[^}]*\}$", "", raw).split("?")[0]
+            # A ${…} glued to a segment builds the query string
+            # (``retry${query}``, ``preflight${runId ? `?…` : ""}``): cut there.
+            glued = re.search(r"(?<=[^/])\$\{", raw)
+            raw = (raw[: glued.start()] if glued else raw).split("?")[0]
             concrete = re.sub(r"\$\{[^}]*\}", "x", raw).rstrip("/")
             if not concrete or concrete == "/x":
                 continue
