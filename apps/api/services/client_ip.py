@@ -43,6 +43,19 @@ def trusted_proxy_count() -> int:
         return 0
 
 
+def trusted_proxy_count_configured() -> bool:
+    """True when the operator set the hop count explicitly (even to 0).
+
+    Unset is not the same as 0 for enforcement: an unset count behind a proxy
+    makes every caller look like the proxy, so IP allowlists only enforce on
+    an address they can trust (services.ip_allowlist_policy).
+    """
+    for name in ("DATAWRAP_TRUSTED_PROXY_COUNT", "DATAFLOW_TRUSTED_PROXY_COUNT", "TRUSTED_PROXY_COUNT"):
+        if str(os.environ.get(name) or "").strip():
+            return True
+    return False
+
+
 def _strip_port(value: str) -> str:
     """``203.0.113.5:443`` -> ``203.0.113.5``; ``[2001:db8::1]:443`` -> ``2001:db8::1``."""
     v = value.strip()
@@ -97,6 +110,7 @@ def client_ip_from_request(request: Any, *, trusted_proxies: int | None = None) 
 
 
 __all__ = [
+    "trusted_proxy_count_configured",
     "client_ip_from_request",
     "resolve_client_ip",
     "trusted_proxy_count",

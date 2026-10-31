@@ -124,11 +124,13 @@ which also takes the scheme from `X-Forwarded-Proto`). uvicorn runs with
 | Docker Compose (`deploy/nginx.conf`, nginx is the edge) | browser -> nginx -> API | `1` |
 | API reached directly, no proxy | browser -> API | `0` (default) |
 
-- **Default `0` is the safe default**: forwarded headers are ignored and the
+- **Unset (default) behaves as `0`**: forwarded headers are ignored and the
   socket peer is used, which cannot be spoofed. Behind a proxy that peer is
-  the proxy, so every user looks the same; the lock-out guard then refuses
-  lists (the message names the private address the server sees) until the
-  count is set.
+  the proxy, so every user looks the same; while the count is unset, IP
+  allowlists are therefore not enforced on private/proxy addresses (see the
+  allowlist section) and the Enterprise page says so. Setting the count
+  explicitly — including `0` for an API reached directly — turns enforcement
+  on for every address.
 - Too high a count lets a client choose its address by prepending entries;
   too low a count makes every user look like a proxy. A chain shorter than
   the count falls back to the socket peer.
@@ -582,6 +584,18 @@ tenant custom domain, which nginx never forwards, so it never applied.
   `tenant.ip_allowlist.would_block` audit event, for the whole deployment. The
   posture, the compliance report and the save response then say "saved, not
   enforced — ask your platform administrator to enable it".
+
+- **Deploy safety (trusted address only)**: a list is enforced only on a
+  client address the server can trust, i.e. `DATAWRAP_TRUSTED_PROXY_COUNT` is
+  set (even to `0`) or the resolved address is public. With the count unset
+  and a private, loopback, link-local or CGNAT (`100.64/10`) address — what
+  every request looks like behind Railway before the count is set — nothing
+  is blocked: the request is admitted and audited as
+  `tenant.ip_allowlist.would_block` with reason `client_ip_untrusted`, the
+  lock-out guard accepts the save, and the save response, posture and report
+  show the list as **not enforced** ("the platform's proxy hop count is not
+  configured; ask your platform administrator to set it"). The API logs one
+  warning at startup when lists exist and the count is unset.
 
 The allowlist is only as good as the client address the API sees: set the
 trusted proxy hop count below **before** customers save lists. The save

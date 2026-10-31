@@ -31,6 +31,24 @@ describe("posture rows", () => {
     assert.doesNotMatch(row.desc, ENV_NAME);
   });
 
+  it("IP allowlist with no proxy hop count reads not enforced and says who fixes it", () => {
+    const row = ipAllowlistRow({
+      ...base,
+      ip_allowlist_enforced: false,
+      enforcement: { ip_allowlist: { status: "untrusted_client_ip" } },
+    } as SecurityPosture);
+    assert.equal(row.on, false);
+    assert.match(row.desc, /proxy hop count is not configured/);
+    assert.match(row.desc, /platform administrator/);
+    const f = tenantSaveFeedback({
+      ip_allowlist: { enforced: false, status: "untrusted_client_ip" },
+      session_timeout: { enforced: true, status: "enforced", hours: 8 },
+      warnings: ["The IP allowlist is saved but not enforced: the platform's proxy hop count is not configured ..."],
+    });
+    assert.equal(f.tone, "warning");
+    assert.ok(f.lines.includes("IP allowlist: saved, not enforced (requests are only logged)."));
+  });
+
   it("IP allowlist enforced covers every host", () => {
     const row = ipAllowlistRow({ ...base, ip_allowlist_enforced: true } as SecurityPosture);
     assert.equal(row.on, true);

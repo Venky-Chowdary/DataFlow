@@ -88,3 +88,24 @@ def test_revocation_in_either_store_wins(tmp_path, monkeypatch):
     assert auth_sessions.revoke_session(jti)
     assert not auth_sessions.session_active(jti, "rev@example.com")
     assert auth_sessions.revoke_all_for_email("rev@example.com") == 0
+
+
+def test_startup_warns_once_when_lists_exist_and_the_hop_count_is_unset(monkeypatch, caplog):
+    import logging
+
+    from services import ip_allowlist_policy as policy
+    from services.tenant_store import Tenant
+
+    for name in ("DATAWRAP_TRUSTED_PROXY_COUNT", "DATAFLOW_TRUSTED_PROXY_COUNT", "TRUSTED_PROXY_COUNT"):
+        monkeypatch.delenv(name, raising=False)
+    listed = [Tenant(id="t", workspace_id="w", ip_allowlist=["203.0.113.0/24"])]
+    monkeypatch.setattr("services.tenant_store.list_tenants", lambda: listed)
+    log = logging.getLogger("r11.startup")
+    with caplog.at_level(logging.WARNING, logger="r11.startup"):
+        assert policy.warn_if_hop_count_unset(log) is True
+    assert sum("TRUSTED_PROXY_COUNT is unset" in r.getMessage() for r in caplog.records) == 1
+    monkeypatch.setenv("DATAWRAP_TRUSTED_PROXY_COUNT", "3")
+    assert policy.warn_if_hop_count_unset(log) is False
+    monkeypatch.delenv("DATAWRAP_TRUSTED_PROXY_COUNT")
+    monkeypatch.setattr("services.tenant_store.list_tenants", lambda: [])
+    assert policy.warn_if_hop_count_unset(log) is False

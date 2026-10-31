@@ -116,6 +116,13 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    try:
+        # Saved IP allowlists with no proxy hop count: say so once at boot.
+        from services.ip_allowlist_policy import warn_if_hop_count_unset
+
+        warn_if_hop_count_unset(logging.getLogger("datawrap.security"))
+    except Exception as ae:  # pragma: no cover - a hint must never block boot
+        print(f"[!] IP allowlist startup check skipped: {ae}")
     global _SECURITY_SETTINGS_SNAPSHOT_RECORDED
     with _SECURITY_SETTINGS_SNAPSHOT_LOCK:
         record_snapshot = not _SECURITY_SETTINGS_SNAPSHOT_RECORDED

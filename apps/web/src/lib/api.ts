@@ -4558,7 +4558,7 @@ export type Tenant = {
   enforcement?: TenantEnforcement;
 };
 
-export type ControlStatus = "enforced" | "audit_only" | "recorded_only" | "not_configured";
+export type ControlStatus = "enforced" | "audit_only" | "untrusted_client_ip" | "recorded_only" | "not_configured";
 
 /** `enforcement` block of the tenant save response and the security posture (QA round 11). */
 export type TenantEnforcement = {

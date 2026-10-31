@@ -1306,7 +1306,7 @@ async def get_security_report(request: Request):
         f"- TLS minimum version: {posture['tls_version']}",
         f"- Audit logging: {'enabled' if posture['audit_logging'] else 'disabled'}",
         f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
-        f"- IP allowlisting: {'enforced on every signed-in request and API key call to this workspace' if posture.get('ip_allowlist_enforced') else ('saved, not enforced (missing: ' + ', '.join(posture['enforcement']['ip_allowlist']['missing']) + '; ask your platform administrator to enable it)' if posture['ip_allowlist_enabled'] else 'disabled')}",
+        f"- IP allowlisting: {'enforced on every signed-in request and API key call to this workspace' if posture.get('ip_allowlist_enforced') else ('saved, not enforced (missing: ' + ', '.join(posture['enforcement']['ip_allowlist']['missing']) + ('; ask your platform administrator to enable it' if posture['enforcement']['ip_allowlist']['status'] == 'audit_only' else '') + ')' if posture['ip_allowlist_enabled'] else 'disabled')}",
         f"- Connector egress allowlist: {'on' if posture.get('egress_allowlist_enabled') else 'off (private ranges refused; metadata and link-local cannot be listed)'}",
         f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired; design: docs/MFA_ENFORCEMENT_DESIGN.md)",
         f"- Session timeout: {posture['session_timeout_hours']}h idle; enforced={'yes (sign-in sessions; API keys excluded)' if posture['session_timeout_enforced'] else 'no (recorded only; turn on Enforce as idle timeout in Enterprise settings)'}",

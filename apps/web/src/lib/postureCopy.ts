@@ -31,6 +31,8 @@ export function ipAllowlistRow(p: SecurityPosture): PostureRow {
     desc = "Enforced for every sign-in session and API key using this workspace, on any host.";
   } else if (status === "audit_only") {
     desc = "Saved, not enforced: requests from outside the list are only logged. Ask your platform administrator to enable IP allowlist enforcement.";
+  } else if (status === "untrusted_client_ip") {
+    desc = "Saved, not enforced: the platform's proxy hop count is not configured, so real client addresses are not visible and requests are only logged. Ask your platform administrator to set it.";
   }
   return { title: "IP allowlisting", desc, on: Boolean(p.ip_allowlist_enforced), pending: false };
 }
@@ -67,7 +69,9 @@ export function tenantSaveFeedback(e: TenantEnforcement | undefined): SaveFeedba
   const lines: string[] = [];
   const ip = e.ip_allowlist;
   if (ip?.status === "enforced") lines.push("IP allowlist: enforced.");
-  else if (ip?.status === "audit_only") lines.push("IP allowlist: saved, not enforced (requests are only logged).");
+  else if (ip?.status === "audit_only" || ip?.status === "untrusted_client_ip") {
+    lines.push("IP allowlist: saved, not enforced (requests are only logged).");
+  }
   else lines.push("IP allowlist: none saved.");
   const st = e.session_timeout;
   if (st?.enforced) lines.push(`Session timeout: enforced (${st.hours}h idle).`);

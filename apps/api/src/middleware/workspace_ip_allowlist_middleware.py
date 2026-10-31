@@ -54,12 +54,17 @@ class WorkspaceIpAllowlistMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         details = _details(request, refusal)
+        admit = ""
         if not policy.enforcement_on():
+            admit, reason_code = "switched_off_by_platform", policy.BLOCK_REASON
+        elif not policy.client_ip_trusted(refusal.client_ip):
+            # Hop count unset and a private/proxy address: never block on it.
+            admit, reason_code = "proxy_hop_count_unset", policy.UNTRUSTED_REASON
+        if admit:
             record_security_event(
                 "tenant.ip_allowlist.would_block", outcome="skipped", request=request,
-                resource=request.url.path, reason_code=policy.BLOCK_REASON, level="warn",
-                details={**details, "enforcement": "switched_off_by_platform"},
-                workspace_id=refusal.workspace_id,
+                resource=request.url.path, reason_code=reason_code, level="warn",
+                details={**details, "enforcement": admit}, workspace_id=refusal.workspace_id,
             )
             return await call_next(request)
 

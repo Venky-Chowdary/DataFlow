@@ -19,6 +19,13 @@ host as on a custom domain, for sign-in sessions and API keys alike
   (``workspace.ip_allowlist.break_glass``) every time.
 * **Lock-out guard.** :func:`lockout_refusal` refuses to save a list that
   excludes the address of the admin saving it.
+* **Trusted address only.** A list is enforced only on a client address the
+  server can trust: the trusted proxy hop count is configured (even to 0), or
+  the resolved address is public. With the count unset and a private/CGNAT/
+  loopback address (the proxy itself, on a first deploy before ops sets the
+  count) nothing is blocked; the request is audited as
+  ``tenant.ip_allowlist.would_block`` with reason ``client_ip_untrusted`` and
+  the posture reports the list as not enforced.
 """
 
 from __future__ import annotations
@@ -29,11 +36,19 @@ from typing import Any
 
 from services.brand_env import getenv_brand_bool
 from services.byok_key_manager import is_ip_allowed
-from services.client_ip import client_ip_from_request, trusted_proxy_count
+from services.client_ip import (
+    client_ip_from_request,
+    trusted_proxy_count,
+    trusted_proxy_count_configured,
+)
 
 BREAK_GLASS_HEADER = "X-Datawrap-Break-Glass"
 BREAK_GLASS_MIN_REASON = 8
 BLOCK_REASON = "ip_not_in_workspace_allowlist"
+UNTRUSTED_REASON = "client_ip_untrusted"
+HOPS_UNSET_MESSAGE = (
+    "the platform's proxy hop count is not configured; ask your platform administrator to set it"
+)
 
 
 def enforcement_on() -> bool:
@@ -104,6 +119,32 @@ def _is_routable(ip: str) -> bool:
     return not any(addr in net for net in _PROXY_NETWORKS if net.version == addr.version)
 
 
+def client_ip_trusted(ip: str) -> bool:
+    """Whether an allowlist may act on ``ip`` (see the module docstring)."""
+    return trusted_proxy_count_configured() or _is_routable(ip)
+
+
+def warn_if_hop_count_unset(logger: Any) -> bool:
+    """Startup: one warning when lists exist but the hop count is unset."""
+    if trusted_proxy_count_configured():
+        return False
+    try:
+        from services.tenant_store import list_tenants
+
+        listed = sum(1 for t in list_tenants() if t.ip_allowlist)
+    except Exception:  # noqa: BLE001 — a startup hint must never stop startup
+        return False
+    if not listed:
+        return False
+    logger.warning(
+        "%d workspace IP allowlist(s) are saved but DATAWRAP_TRUSTED_PROXY_COUNT is unset: "
+        "they are enforced only for public client addresses; requests that resolve to a "
+        "private/proxy address are admitted and audited (client_ip_untrusted). Set the hop "
+        "count (docs/DEPLOYMENT.md).", listed,
+    )
+    return True
+
+
 def proxy_hint(ip: str) -> str:
     """Admin-facing hint when the server cannot see real client addresses."""
     if _is_routable(ip):
@@ -125,6 +166,11 @@ def lockout_refusal(request: Any, entries: list[str] | None) -> str | None:
         return None
     ip = client_ip_from_request(request)
     if is_ip_allowed(ip, normalized):
+        return None
+    if not client_ip_trusted(ip):
+        # The server cannot see the caller's real address yet (hop count
+        # unset); the list is saved but not enforced, and the save response
+        # says so. Refusing would block every save over the proxy's address.
         return None
     return (
         f"This IP allowlist does not include your current IP address ({ip or 'unknown'}). "
