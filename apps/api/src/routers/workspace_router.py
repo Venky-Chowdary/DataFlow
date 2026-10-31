@@ -185,15 +185,20 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
     from services.audit_log import append_audit_event
     from services.workspace_store import update_workspace_settings
 
+    from services.workspace_store import InvalidTimezone
+
     actor = _actor(request)
-    updated = update_workspace_settings(
-        org_name=body.org_name,
-        timezone=body.timezone,
-        retention_days=body.retention_days,
-        studio_schema_browser=body.studio_schema_browser,
-        studio_canvas=body.studio_canvas,
-        actor=actor,
-    )
+    try:
+        updated = update_workspace_settings(
+            org_name=body.org_name,
+            timezone=body.timezone,
+            retention_days=body.retention_days,
+            studio_schema_browser=body.studio_schema_browser,
+            studio_canvas=body.studio_canvas,
+            actor=actor,
+        )
+    except InvalidTimezone as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     append_audit_event(
         action="workspace.settings.update",
         resource="/workspace/settings",
