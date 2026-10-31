@@ -100,7 +100,15 @@ def test_null_sentinel_is_sql_null_before_semantic_validation():
 def test_hash_pii_names_the_missing_key_and_writes_nothing(monkeypatch):
     monkeypatch.delenv("DATAFLOW_PII_HASH_KEY", raising=False)
     monkeypatch.delenv("DATAFLOW_SECRET", raising=False)
+    # Round 8: keys are per-workspace and auto-provisioned; "no key" now means
+    # the key store cannot answer, and the message names no infrastructure.
+    from services import pii_hash_keys
+
+    def _unavailable(_workspace_id):
+        raise pii_hash_keys.PiiHashKeyUnavailable("store down")
+
+    monkeypatch.setattr(pii_hash_keys, "workspace_key", _unavailable)
     value, err = apply_transform("ada@example.com", "hash_pii")
     assert value is None
-    assert err and "DATAFLOW_PII_HASH_KEY" in err
-    assert "No row was hashed" in err
+    assert err and "hashing key" in err and "PII_HASH_KEY" not in err
+    assert "no row was hashed" in err

@@ -20,6 +20,9 @@ _EMPTY_FILE: dict[str, Any] = {
     "groups": [],
     "group_mappings": {},
     "managed_memberships": [],
+    # Memberships that existed before a mapped group took them over, with the
+    # role to restore when the member leaves every mapped group (R8).
+    "adopted_memberships": [],
 }
 _LOCK = threading.RLock()
 _PREPARED_DATABASES: set[str] = set()
@@ -91,11 +94,13 @@ def _read_state() -> dict[str, Any]:
         return {
             "group_mappings": dict((row or {}).get("group_mappings", {})),
             "managed_memberships": list((row or {}).get("managed_memberships", [])),
+            "adopted_memberships": list((row or {}).get("adopted_memberships", [])),
         }
     raw = load_json_doc(_path(), _EMPTY_FILE)
     return {
         "group_mappings": dict(raw.get("group_mappings", {})),
         "managed_memberships": list(raw.get("managed_memberships", [])),
+        "adopted_memberships": list(raw.get("adopted_memberships", [])),
     }
 
 
@@ -114,6 +119,7 @@ def _write_state(state: dict[str, Any]) -> None:
     with json_doc_transaction(_path(), _EMPTY_FILE) as data:
         data["group_mappings"] = dict(state.get("group_mappings", {}))
         data["managed_memberships"] = list(state.get("managed_memberships", []))
+        data["adopted_memberships"] = list(state.get("adopted_memberships", []))
 
 
 def get_user(user_id: str) -> dict[str, Any] | None:
@@ -319,5 +325,26 @@ def set_managed_memberships(memberships: dict[tuple[str, str], str]) -> None:
         state["managed_memberships"] = [
             {"workspace_id": workspace_id, "email": email, "role": role}
             for (workspace_id, email), role in sorted(memberships.items())
+        ]
+        _write_state(state)
+
+
+def get_adopted_memberships() -> dict[tuple[str, str], str]:
+    """``(workspace_id, email) -> role held before a mapped group adopted it``."""
+    with _LOCK:
+        rows = _read_state().get("adopted_memberships", [])
+        result = {}
+        for row in rows:
+            if isinstance(row, dict) and row.get("workspace_id") and row.get("email"):
+                result[(row["workspace_id"], row["email"].strip().lower())] = row.get("prior_role", "")
+        return result
+
+
+def set_adopted_memberships(adopted: dict[tuple[str, str], str]) -> None:
+    with _LOCK:
+        state = _read_state()
+        state["adopted_memberships"] = [
+            {"workspace_id": workspace_id, "email": email, "prior_role": role}
+            for (workspace_id, email), role in sorted(adopted.items())
         ]
         _write_state(state)

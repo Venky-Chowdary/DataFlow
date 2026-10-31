@@ -90,6 +90,8 @@ _NUMERIC_RE = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 _NUMERIC_WIRE_MARKS = ("$", "€", "£", "¥")
 _NUMERIC_WIRE_CODES = ("USD", "EUR", "GBP")
 _DATE_LIKE_CHARS = frozenset("-:/T ")
+# A clock with a fraction ('03:04:05.250000', MySQL TIME up to 838 hours).
+_CLOCK_FRACTION_RE = re.compile(r"^-?\d{1,3}:[0-5]\d:[0-5]\d\.\d{1,9}$")
 # RFC 4122 UUID wire — engines differ on case (PG lower, some drivers upper).
 _TEXT_FAMILY_DDL_RE = re.compile(
     r"^(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?|BPCHAR|(?:N)?(?:VAR)?CHAR2|TEXT|TINYTEXT|"
@@ -2231,14 +2233,18 @@ def verify_sqlserver_table(
         try:
             cur.execute(f"SELECT COUNT(*) FROM {table_ref}")  # nosec B608
             count = int(cur.fetchone()[0])
+            from connectors.sqlserver_tick import full_precision_select_list
+
+            # DATETIME2(7): pymssql keeps six digits; read the seventh as text.
+            select_list = full_precision_select_list(cur, table_ref, None)
             ids, pk = keyed_readback_scope(written_ids, pk_column)
             if ids:
                 where = keyed_readback_where(
                     pk, ids, dialect="sqlserver", placeholders=["%s"] * len(ids)
                 )
-                cur.execute(f"SELECT * FROM {table_ref} {where}", tuple(ids))  # nosec B608
+                cur.execute(f"SELECT {select_list} FROM {table_ref} {where}", tuple(ids))  # nosec B608
             else:
-                cur.execute(f"SELECT * FROM {table_ref}")  # nosec B608
+                cur.execute(f"SELECT {select_list} FROM {table_ref}")  # nosec B608
             names = [d[0] for d in cur.description] if cur.description else []
             columns, projected = project_readback(names, target_columns, _iter_fetchmany(cur))
             checksum = canonical_checksum_from_iter(
@@ -3374,14 +3380,16 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
         # (X-26 live: tiny decimals flagged 'did not apply as declared').
         return format(value, "f") if isinstance(value, Decimal) else str(value)
     if isinstance(value, _datetime):
+        from connectors.sqlserver_tick import tick_of
+
+        tick = tick_of(value)
         if value.tzinfo is not None:
             value = value.astimezone(timezone.utc).replace(tzinfo=None)
         # Canonical form is UTC wall-clock without a Z marker so TIMESTAMPTZ
         # sources match NTZ sinks that stored the same UTC components, while
         # offset-aware values still differ from a different naive wall clock.
-        if value.microsecond:
-            return value.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
-        return value.strftime("%Y-%m-%dT%H:%M:%S")
+        # A DATETIME2(7) seventh digit is compared too.
+        return _wall_clock_text(value, tick)
     if isinstance(value, _date):
         return _datetime.combine(value, _time.min).strftime("%Y-%m-%dT%H:%M:%S")
     if isinstance(value, _time):
@@ -3506,6 +3514,12 @@ def normalize_cell(value: Any, *, ddl_type: str = "", engine: str = "") -> str:
             text = raw_text.strip()
     else:
         text = raw_text.strip()
+    if _CLOCK_FRACTION_RE.match(text):
+        # D224: '03:04:05.250000' and '03:04:05.25' are one clock — the same
+        # trailing-zero fold the time/timedelta branches above apply, so a
+        # TIME(6) read back as text compares to the driver value at full
+        # precision whichever spelling the writer or digest used.
+        text = text.rstrip("0").rstrip(".")
     # Type-driven honesty: on a declared TEXT-family column the cell IS text —
     # '01' vs '1', 'A' vs 'A ', and '30.99' vs '30.990' are real value changes
     # and must not collapse under the numeric/bool folds below. Format-variant
@@ -3625,9 +3639,10 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
             else:
                 obj = obj.astimezone(timezone.utc)
             obj = obj.replace(tzinfo=None)
-        if obj.microsecond:
-            return obj.strftime("%Y-%m-%dT%H:%M:%S.%f").rstrip("0").rstrip(".")
-        return obj.strftime("%Y-%m-%dT%H:%M:%S")
+        from connectors.sqlserver_tick import tick_from_text
+
+        # fromisoformat keeps six digits; DATETIME2(7) text spells a seventh.
+        return _wall_clock_text(obj, tick_from_text(iso))
     except ValueError:
         # Fall back: strip invented trailing Z from transform parser.
         if text.endswith("Z") and not aware_or_epoch:
@@ -3635,6 +3650,13 @@ def _checksum_datetime_utc_wall(iso_text: str, *, original: str | None = None) -
         if text.endswith("Z"):
             return text[:-1]  # still wall-clock form for checksum
         return text
+
+
+def _wall_clock_text(value: _datetime, tick: int = 0) -> str:
+    """``YYYY-MM-DDTHH:MM:SS[.f…]``: trailing zeros folded, up to 7 digits."""
+    fraction = (f"{value.microsecond:06d}" + (str(tick) if tick else "")).rstrip("0")
+    base = value.strftime("%Y-%m-%dT%H:%M:%S")
+    return f"{base}.{fraction}" if fraction else base
 
 
 def _checksum_datetime_utc_z(iso_text: str) -> str:

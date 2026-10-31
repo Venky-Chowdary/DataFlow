@@ -975,6 +975,10 @@ def read_sqlserver_rows(
     )
     try:
         cur = conn.cursor()
+        from connectors.sqlserver_tick import full_precision_select_list
+
+        # DATETIME2(7): pymssql keeps six digits; read the seventh as text.
+        col_sql = full_precision_select_list(cur, table_ref, list(columns) if columns else None)
         cur.execute(f"SELECT {col_sql} FROM {table_ref}")  # nosec B608
         rows: list[dict[str, Any]] = []
         names: list[str] = []

@@ -70,7 +70,9 @@ def iceberg_csv_cell(value: Any) -> str:
             and value.microsecond == 0
         ):
             return value.date().isoformat()
-        return value.isoformat(sep=" ", timespec="seconds")
+        # D224: the CSV cell is parsed back into an Iceberg microsecond
+        # timestamp — ``timespec="seconds"`` dropped the fraction on the wire.
+        return value.isoformat(sep=" ")
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, Decimal):

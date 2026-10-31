@@ -8,6 +8,12 @@ signup (which enforces workspace isolation) so owners keep their history.
     python scripts/backfill_legacy_workspaces.py               # dry run
     python scripts/backfill_legacy_workspaces.py --apply
     python scripts/backfill_legacy_workspaces.py --apply --owner-email ops@example.com
+
+Claim everything into one workspace you choose instead (D218: the owner's
+history lands where the owner works; still dry run unless ``--apply``):
+
+    python scripts/backfill_legacy_workspaces.py --workspace-id <id>
+    python scripts/backfill_legacy_workspaces.py --workspace-id <id> --apply
 """
 
 from __future__ import annotations
@@ -34,10 +40,17 @@ def main(argv: list[str] | None = None) -> int:
         default="",
         help="platform owner for rows with no owner on record (default: the bootstrap admin)",
     )
+    parser.add_argument(
+        "--workspace-id",
+        default="",
+        help="claim every unscoped row into this existing workspace (default: each row's owner)",
+    )
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
     try:
-        report = backfill_legacy_workspaces(apply=args.apply, owner_email=args.owner_email)
+        report = backfill_legacy_workspaces(
+            apply=args.apply, owner_email=args.owner_email, workspace_id=args.workspace_id
+        )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2

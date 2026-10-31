@@ -156,7 +156,22 @@ def test_audit_store_failure_does_not_break_sensitive_request(audit_app, monkeyp
         "/api/v1/audit/tip", headers=_headers(audit_app)
     )
     assert tip.status_code == 200
-    assert tip.json()["audit_access_failures"] == 1
+    # The count is the whole deployment's: a workspace admin's key does not
+    # see it (D220); a key minted by a platform admin does.
+    assert tip.json()["audit_access_failures"] is None
+    from src.services import auth_service
+
+    real_lookup = auth_service.lookup_user
+    monkeypatch.setattr(
+        auth_service,
+        "lookup_user",
+        lambda email: {"email": email, "role": "admin"}
+        if email == audit_app["actor"]
+        else real_lookup(email),
+    )
+    platform_tip = audit_app["client"].get("/api/v1/audit/tip", headers=_headers(audit_app))
+    assert platform_tip.status_code == 200
+    assert platform_tip.json()["audit_access_failures"] == 1
 
 
 def test_every_audit_rule_matches_a_real_included_app_route(audit_app):
@@ -188,6 +203,10 @@ def test_rbac_denial_audit_deduplicates_and_reports_suppressed_count(
 ):
     from services import audit_coverage, integrations_store
 
+    from r8_key_owner import ensure_key_owners
+
+    # Round 8: a key needs an accountable creator.
+    ensure_key_owners("viewer@example.test")
     viewer = integrations_store.create_api_key(
         "Viewer", "viewer@example.test", role="viewer"
     )

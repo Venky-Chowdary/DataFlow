@@ -84,9 +84,15 @@ class OracleFlashbackCdc:
         columns: list[str] | None = None,
         cursor_key: str = "",
     ) -> None:
+        from services.cdc_table_name import split_cdc_table
+
         self.cfg = cfg
+        # D223: a qualified name carries its own schema, joined once.
+        resolved_schema, table = split_cdc_table(
+            table, schema or cfg.get("schema") or cfg.get("username") or "", dialect="oracle"
+        )
         self.table = table
-        self.schema = (schema or cfg.get("schema") or cfg.get("username") or "").upper()
+        self.schema = (resolved_schema or "").upper()
         from services.cdc_identity import require_cdc_primary_key
 
         self.primary_key = require_cdc_primary_key(primary_key, table=table).upper()

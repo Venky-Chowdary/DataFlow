@@ -45,7 +45,7 @@ from services import (
 )
 from services.brand_env import getenv_brand
 from services.mongodb_service import get_mongodb_service
-from services.team_store import create_workspace, normalize_email
+from services.team_store import create_workspace, get_workspace, normalize_email
 from services.tenant_scope import ordered_memberships
 from services.transform_library import get_transform_library
 from services.transform_store import get_transform_store
@@ -64,11 +64,13 @@ class BackfillReport:
     platform_owner: str
     counts: dict[str, dict[str, int]] = field(default_factory=dict)
     created_workspaces: list[str] = field(default_factory=list)
+    target_workspace: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "applied": self.applied,
             "platform_owner": self.platform_owner,
+            "target_workspace": self.target_workspace or None,
             "counts": self.counts,
             "created_workspaces": self.created_workspaces,
         }
@@ -107,15 +109,24 @@ def default_platform_owner() -> str:
 
 
 class _Workspaces:
-    """Owner email -> personal workspace id, creating one only on apply."""
+    """Owner email -> personal workspace id, creating one only on apply.
 
-    def __init__(self, platform_owner: str, *, apply: bool, report: BackfillReport):
+    With ``target`` (``--workspace-id``) every row is claimed into that one
+    workspace instead: the owner chooses where the history lands (D218).
+    """
+
+    def __init__(
+        self, platform_owner: str, *, apply: bool, report: BackfillReport, target: str = ""
+    ):
         self.platform_owner = platform_owner
         self.apply = apply
         self.report = report
+        self.target = target
         self._cache: dict[str, str] = {}
 
     def for_owner(self, email: str) -> str:
+        if self.target:
+            return self.target
         email = normalize_email(email) or self.platform_owner
         if email in self._cache:
             return self._cache[email]
@@ -139,13 +150,22 @@ def _unique(owners: Iterable[str]) -> str:
     return distinct.pop() if len(distinct) == 1 else ""
 
 
-def backfill_legacy_workspaces(*, apply: bool = False, owner_email: str = "") -> BackfillReport:
-    """Assign every unscoped connector, job, schedule, DLQ and usage row an owner."""
+def backfill_legacy_workspaces(
+    *, apply: bool = False, owner_email: str = "", workspace_id: str = ""
+) -> BackfillReport:
+    """Assign every unscoped connector, job, schedule, DLQ and usage row an owner.
+
+    ``workspace_id`` claims every unscoped row into that existing workspace
+    instead of inferring an owner per row (refused when it does not exist).
+    """
+    target = str(workspace_id or "").strip()
+    if target and get_workspace(target) is None:
+        raise ValueError(f"Workspace {target!r} does not exist")
     platform_owner = normalize_email(owner_email) or default_platform_owner()
-    if not platform_owner:
+    if not platform_owner and not target:
         raise ValueError("No platform owner: pass --owner-email or set DATAWRAP_ADMIN_EMAIL")
-    report = BackfillReport(applied=apply, platform_owner=platform_owner)
-    workspaces = _Workspaces(platform_owner, apply=apply, report=report)
+    report = BackfillReport(applied=apply, platform_owner=platform_owner, target_workspace=target)
+    workspaces = _Workspaces(platform_owner, apply=apply, report=report, target=target)
     mongo = get_mongodb_service()
 
     # Owner evidence first: jobs name their actor, and connectors/schedules are

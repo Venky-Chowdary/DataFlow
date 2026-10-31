@@ -24,6 +24,7 @@ import {
   type JobHistory,
 } from "../lib/jobHistory";
 import { isJobSuccess, jobStatusBadgeClass, jobStatusLabel, uniqueListKey } from "../lib/uiUtils";
+import { parseServerTimestampMs } from "../lib/jobTheaterProgress";
 import { JobProgress, TransferJob } from "../lib/types";
 import { QuarantinePanel } from "../components/transfer/QuarantinePanel";
 import { Gate8ProofCard } from "../components/transfer/Gate8ProofCard";
@@ -147,10 +148,11 @@ interface JobDetailRecord extends JobProgress {
 
 function formatJobDuration(startedAt?: string, completedAt?: string): string | null {
   if (!startedAt) return null;
-  const start = Date.parse(startedAt);
-  if (!Number.isFinite(start)) return null;
-  const end = completedAt ? Date.parse(completedAt) : Date.now();
-  if (!Number.isFinite(end) || end < start) return null;
+  // Job-store timestamps are UTC without an offset; Date.parse reads them as local.
+  const start = parseServerTimestampMs(startedAt);
+  if (start == null) return null;
+  const end = completedAt ? parseServerTimestampMs(completedAt) : Date.now();
+  if (end == null || end < start) return null;
   const s = Math.floor((end - start) / 1000);
   if (s < 60) return `${s}s`;
   const m = Math.floor(s / 60);

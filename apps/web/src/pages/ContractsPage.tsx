@@ -25,6 +25,11 @@ import {
   resetContractBreaker,
   signContract,
 } from "../lib/api";
+import {
+  applyContractResponse,
+  contractStatusCounts,
+  reconcileContracts,
+} from "../lib/contractReadModel";
 
 const CONTRACTS_CHANGED = "df2:contracts-changed";
 const LAST_CONTRACT_KEY = "df2.last-saved-contract";
@@ -51,8 +56,15 @@ function readOptimisticContract(): DataContractSummary | null {
 }
 
 function upsertContract(list: DataContractSummary[], next: DataContractSummary): DataContractSummary[] {
-  const rest = list.filter((c) => c.id !== next.id);
-  return [next, ...rest];
+  return reconcileContracts(list, next).rows;
+}
+
+function dropOptimisticContract(): void {
+  try {
+    sessionStorage.removeItem(LAST_CONTRACT_KEY);
+  } catch {
+    /* ignore */
+  }
 }
 
 export function ContractsPage({ active = true }: { active?: boolean }) {
@@ -84,8 +96,10 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
     pendingReload.current = false;
     try {
       const rows = await fetchContracts();
-      const optimistic = readOptimisticContract();
-      const merged = optimistic ? upsertContract(rows, optimistic) : rows;
+      // The server row wins: the Save-as-contract copy is only a placeholder
+      // until the list catches up (it used to beat a later Sign forever).
+      const { rows: merged, dropOptimistic } = reconcileContracts(rows, readOptimisticContract());
+      if (dropOptimistic) dropOptimisticContract();
       setContracts(merged);
       setLoadError("");
       const map: Record<string, string> = {};
@@ -129,7 +143,7 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
         } catch {
           /* ignore */
         }
-        setContracts((prev) => upsertContract(prev, contract));
+        setContracts((prev) => applyContractResponse(prev, contract));
         setLoadError("");
       }
       if (activeRef.current) {
@@ -146,10 +160,11 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
     if (active && pendingReload.current) void load();
   }, [active, load]);
 
-  const signed = contracts.filter((c) => c.status === "signed").length;
-  const drafts = contracts.filter((c) => c.status === "draft").length;
-  const broken = contracts.filter((c) => c.status === "broken").length;
-  const deprecated = contracts.filter((c) => c.status === "deprecated").length;
+  const statusCounts = contractStatusCounts(contracts);
+  const signed = statusCounts.signed;
+  const drafts = statusCounts.draft;
+  const broken = statusCounts.broken;
+  const deprecated = statusCounts.deprecated;
   const selectedContract = contracts.find((c) => c.id === selectedId) ?? null;
 
   const filteredContracts = useMemo(() => {
@@ -187,7 +202,12 @@ export function ContractsPage({ active = true }: { active?: boolean }) {
     }
     setBusyId(id);
     try {
-      await fn();
+      const result = await fn();
+      // Show the server's answer at once (Sign → "Signed vN"), then reload.
+      const row = result as DataContractSummary | undefined;
+      if (row && typeof row === "object" && row.id === id && row.status) {
+        setContracts((prev) => applyContractResponse(prev, row));
+      }
       toast({ title: ok, tone: "success" });
       await load();
     } catch (e) {

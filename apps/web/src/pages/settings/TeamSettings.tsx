@@ -22,6 +22,7 @@ import {
 } from "../../lib/api";
 import {
   getActiveWorkspaceId,
+  landingWorkspaceId,
   notifyWorkspaceDirectory,
   setActiveWorkspaceId,
   useActiveWorkspaceId,
@@ -30,6 +31,8 @@ import { useVisibleRefresh } from "../../lib/visibleRefresh";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { isLastWorkspaceAdmin, LAST_ADMIN_PROTECTED } from "../../lib/workspaceAdmin";
+import { INVITE_DEFAULTS } from "../../lib/teamInvite";
+import { IssuedPasswordNotice } from "../../components/team/IssuedPasswordNotice";
 
 const ROLE_LABELS: Record<string, string> = {
   admin: "Admin",
@@ -90,7 +93,7 @@ export function TeamSettings() {
   const [inviteEmail, setInviteEmail] = useState("");
   const [inviteName, setInviteName] = useState("");
   const [inviteRole, setInviteRole] = useState<WorkspaceRole>("viewer");
-  const [createLogin, setCreateLogin] = useState(true);
+  const [createLogin, setCreateLogin] = useState<boolean>(INVITE_DEFAULTS.createLogin);
   const [inviting, setInviting] = useState(false);
   const [removingEmail, setRemovingEmail] = useState<string | null>(null);
   const [roleChangeEmail, setRoleChangeEmail] = useState<string | null>(null);
@@ -100,12 +103,12 @@ export function TeamSettings() {
   const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
-    const { workspaces: rows, platformAdmin: isAdmin } = await fetchWorkspaces();
+    const { workspaces: rows, platformAdmin: isAdmin, defaultWorkspaceId } = await fetchWorkspaces();
     setWorkspaces(rows);
     setPlatformAdmin(isAdmin);
     const current = getActiveWorkspaceId();
     if (rows.length && (!current || !rows.some((w) => w.id === current))) {
-      setActiveWorkspaceId(rows[0].id);
+      setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId));
     }
     return isAdmin;
   }, []);
@@ -214,11 +217,12 @@ export function TeamSettings() {
       });
       setInviteEmail("");
       setInviteName("");
+      setCreateLogin(INVITE_DEFAULTS.createLogin);
       if (result.temporaryPassword) {
         setIssuedPassword({ email: result.membership.email, password: result.temporaryPassword });
         toast({
           title: "Member added with a login",
-          message: `Give ${result.membership.email} the one-time password shown below.`,
+          message: `Reveal the one-time password below and give it to ${result.membership.email}.`,
           tone: "success",
         });
       } else {
@@ -361,16 +365,11 @@ export function TeamSettings() {
         />
 
         {issuedPassword && (
-          <div className="df2-team-secret">
-            <div>
-              <strong>One-time password for {issuedPassword.email}</strong>
-              <span>Shown once. They will be asked to change it at first sign-in.</span>
-            </div>
-            <code className="df2-team-secret-value">{issuedPassword.password}</code>
-            <Button size="sm" onClick={() => setIssuedPassword(null)}>
-              Done
-            </Button>
-          </div>
+          <IssuedPasswordNotice
+            email={issuedPassword.email}
+            password={issuedPassword.password}
+            onDone={() => setIssuedPassword(null)}
+          />
         )}
 
         <div className="df2-team-block">

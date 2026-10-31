@@ -255,17 +255,23 @@ class MySqlChangeStreamCdc:
         primary_keys: dict[str, str] | None = None,
     ) -> None:
         from services.cdc_multi_table import normalize_table_list
+        from services.cdc_table_name import bare_table_keys, split_cdc_tables
 
         self.cfg = cfg
-        self.database = cfg.get("database") or cfg.get("schema") or ""
-        self.tables = normalize_table_list(table)
+        default_db = cfg.get("database") or cfg.get("schema") or ""
+        # D223: 'shop.orders' is table orders in database shop, joined once.
+        resolved_db, self.tables = split_cdc_tables(
+            normalize_table_list(table), default_db, dialect="mysql"
+        )
+        self.database = resolved_db or default_db
         if not self.tables:
             raise ValueError("MySQL CDC requires at least one table")
         self.table = self.tables[0]
         from services.cdc_identity import require_cdc_primary_keys_map
 
         self.primary_keys = require_cdc_primary_keys_map(
-            self.tables, primary_key=primary_key, primary_keys=primary_keys
+            self.tables, primary_key=primary_key,
+            primary_keys=bare_table_keys(primary_keys, self.database),
         )
         self.primary_key = self.primary_keys[self.table]
         self.columns = columns

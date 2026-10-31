@@ -38,8 +38,7 @@ def test_memory_store_counts_past_the_list_page() -> None:
     assert counts["signed"] == 53
 
 
-def test_full_page_uses_the_store_census(monkeypatch) -> None:
-    module = _briefing()
+def test_briefing_counts_past_the_list_page(monkeypatch) -> None:
     store = InMemoryContractStore()
     for i in range(80):
         store.save_contract(
@@ -50,16 +49,16 @@ def test_full_page_uses_the_store_census(monkeypatch) -> None:
             )
         )
     monkeypatch.setattr("services.contract_store.get_contract_store", lambda: store)
-    page = [{"status": "signed"} for _ in range(module._CONTRACT_PAGE)]
-    total, unsigned = module._contract_census("", page)
-    assert total == 80
-    assert unsigned == 40
+    facts = _briefing()._contract_facts("")
+    assert facts["contract_count"] == 80
+    assert facts["contracts_unsigned"] == 40
+    assert facts["contracts_by_status"] == {"signed": 40, "draft": 40}
 
 
-def test_short_page_is_the_population() -> None:
-    module = _briefing()
-    total, unsigned = module._contract_census(
-        "",
-        [{"status": "draft"}, {"status": "signed"}],
-    )
-    assert (total, unsigned) == (2, 1)
+def test_short_population_is_counted_exactly(monkeypatch) -> None:
+    store = InMemoryContractStore()
+    store.save_contract(DataContract(id="d", name="d", status=ContractStatus.DRAFT))
+    store.save_contract(DataContract(id="s", name="s", status=ContractStatus.SIGNED))
+    monkeypatch.setattr("services.contract_store.get_contract_store", lambda: store)
+    facts = _briefing()._contract_facts("")
+    assert (facts["contract_count"], facts["contracts_unsigned"]) == (2, 1)

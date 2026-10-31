@@ -69,7 +69,11 @@ def _temporal_unfit_reason(
         calendar_reason = mixed_date_format_reason(raw)
     if calendar_reason:
         return f"{calendar_reason} (destination {typ})"
-    if check_fsp and temporal_value_exceeds_precision(raw, typ):
+    if (
+        check_fsp
+        and temporal_value_exceeds_precision(raw, typ)
+        and not _only_tick_past_cap(raw, typ, dest_db)
+    ):
         return (
             f"fractional seconds exceed destination {typ} "
             "— quarantined (refuse silent truncate)"
@@ -94,6 +98,34 @@ def _temporal_unfit_reason(
             "explicit UTC transform)"
         )
     return ""
+
+
+def _only_tick_past_cap(raw: Any, typ: str, dest_db: str) -> bool:
+    """A DATETIME2(7) seventh digit into a carrier already at its maximum.
+
+    Validate admits SQL Server's default 100 ns tick into a destination that
+    cannot be widened (PostgreSQL / MySQL keep microseconds); the bind keeps
+    six digits and reconcile names the column a declared narrowing
+    (``services.carrier_instant``). Holding every such row out would make the
+    route unrunnable for the digit no carrier there can store. A declared
+    precision below the engine's cap still quarantines: that column can widen.
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+    from services.type_system import (
+        _TEMPORAL_FSP_CAPS,
+        parse_temporal_fractional_precision,
+        value_fractional_second_digits,
+    )
+
+    cap = _TEMPORAL_FSP_CAPS.get(_normalize_dest_db(dest_db) if dest_db else "")
+    if cap is None or cap >= 7:
+        return False
+    declared = parse_temporal_fractional_precision(typ)
+    return (
+        declared is not None
+        and declared >= cap
+        and value_fractional_second_digits(raw) == 7
+    )
 
 
 def quarantine_unfit_temporals(

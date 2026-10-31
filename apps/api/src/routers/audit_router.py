@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
+from pydantic import BaseModel, Field
 
 from services.audit_coverage import record_security_event
 from services.workspace_access import tenant_scope as _tenant_scope
@@ -69,6 +70,44 @@ def _report_workspace(scope) -> str:
     if not scope.workspace_id and not scope.unrestricted:
         raise HTTPException(status_code=403, detail="No workspace membership")
     return scope.workspace_id
+
+
+def _require_platform_admin(request: Request, scope, permission: str) -> None:
+    """Platform-wide audit actions (purge, seal the platform head) — D220.
+
+    The chain and its retention are shared by every tenant, so a workspace
+    admin (every self-serve signup is one) may neither run them nor read the
+    platform figures they return.
+    """
+    if scope.unrestricted:
+        return
+    from services.audit_coverage import record_authz_denial
+
+    record_authz_denial(
+        request,
+        required_permission=permission,
+        effective_role=str(getattr(request.state, "effective_role", "") or "member"),
+        reason="platform_admin_required",
+    )
+    raise HTTPException(
+        status_code=403,
+        detail="This acts on the platform-wide audit trail: platform administrators only.",
+    )
+
+
+def _workspace_checkpoints(checkpoints: object) -> list[dict[str, object]]:
+    """Retention checkpoints as a workspace may see them: when, not how many.
+
+    A checkpoint's ``removed_count`` and boundary hashes describe the whole
+    platform chain (D220).
+    """
+    if not isinstance(checkpoints, list):
+        return []
+    return [
+        {"kind": c.get("kind"), "at": c.get("at")}
+        for c in checkpoints
+        if isinstance(c, dict)
+    ]
 
 
 def _next_after_seq(
@@ -141,6 +180,13 @@ async def list_events(
     limit: int = Query(50, ge=1, le=500),
     level: str | None = Query(None, description="info | success | warn | error | all"),
     after_seq: int | None = Query(None, ge=0),
+    action: str | None = Query(
+        None,
+        max_length=512,
+        description="Comma-separated action names; a trailing * matches a prefix (team.member.*)",
+    ),
+    q: str | None = Query(None, max_length=200, description="Substring of action, resource or actor"),
+    search: str | None = Query(None, max_length=200, description="Alias of q"),
 ):
     from services.audit_log import list_audit_events
 
@@ -155,11 +201,15 @@ async def list_events(
         level=level,
         workspace_filter=scope.strict_filter(),
         after_seq=after_seq,
+        action=action,
+        search=q or search,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
+    from services.audit_actor_display import add_actor_display
+
     return JSONResponse(
         {
-            "events": events,
+            "events": add_actor_display(events),
             "count": len(events),
             "workspace_id": workspace_id or None,
             "tenant_id": tenant_id or None,
@@ -304,15 +354,43 @@ async def export_events(
 
 
 @router.get("/tip")
-async def get_audit_tip():
-    """Return the HMAC chain tip plus the latest external anchor receipt."""
+async def get_audit_tip(request: Request):
+    """The chain head for the caller's scope.
+
+    A platform admin gets the platform head, the anchor receipts and the
+    process-wide count of audit write failures. Everyone else — every self-serve signup is a workspace admin — gets the
+    head of their own workspace's records and none of the platform figures
+    (D220): anchors seal the platform head, and the failure count is the
+    whole deployment's.
+    """
     from services.audit_anchor import latest_anchor, list_anchors
     from services.audit_coverage import audit_access_failure_count
-    from services.audit_log import latest_event_hash
+    from services.audit_log import latest_event_hash, list_audit_events
+    from services.workspace_filter import WorkspaceFilter
 
+    scope = tenant_scope(request)
+    if not scope.unrestricted:
+        workspace_id = _report_workspace(scope)
+        latest = list_audit_events(limit=1, workspace_filter=WorkspaceFilter.only(workspace_id))
+        head = str((latest[0] if latest else {}).get("event_hash") or "") or None
+        return {
+            "scope": "workspace",
+            "workspace_id": workspace_id,
+            "tip_hash": head,
+            "anchor": None,
+            "anchors_recent": [],
+            "matched": False,
+            "audit_access_failures": None,
+            "honesty": (
+                "Head of this workspace's own audit records (HMAC-SHA256). Anchors "
+                "seal the platform-wide chain and are a platform administrator's view."
+            ),
+        }
     tip = latest_event_hash()
     anchor = latest_anchor()
     return {
+        "scope": "platform",
+        "workspace_id": None,
         "tip_hash": tip,
         "anchor": anchor,
         "anchors_recent": list_anchors(limit=5),
@@ -350,18 +428,24 @@ async def verify_audit_chain(
     request: Request,
     limit: int = Query(5000, ge=1, le=20000, description="Records to walk, oldest first"),
 ):
-    """Re-walk the evidence chain. The walk is platform-wide (HMAC links every
-    record). Findings named in the response are this workspace's when
-    ``X-Workspace-Id`` is set — another tenant's event ids are withheld.
+    """Re-walk the evidence chain.
 
-    With no header the findings are the caller's own workspace's; only a
-    platform admin gets the platform-wide list of broken event ids (D154).
+    With ``X-Workspace-Id`` (or for any non-admin) this is the workspace's own
+    chain: its records and the per-workspace links between them, so another
+    tenant's records can neither fail nor appear in the verdict (R7). With no
+    header a platform admin gets the platform-wide walk, each finding naming
+    its workspace.
     """
     from services.evidence_chain import verify_chain
 
     scope = tenant_scope(request)
     workspace_id = _report_workspace(scope)
     result = verify_chain(limit=limit, workspace_id=workspace_id)
+    if workspace_id:
+        result = {
+            **result,
+            "retention_checkpoints": _workspace_checkpoints(result.get("retention_checkpoints")),
+        }
     record_security_event(
         "audit.verify.read", outcome="succeeded", request=request,
         resource=request.url.path, status=200,
@@ -369,6 +453,47 @@ async def verify_audit_chain(
             "ok": bool(result.get("verified")),
             "verified_count": result.get("checked", 0),
         },
+    )
+    return result
+
+
+class ReanchorBody(BaseModel):
+    reason: str = Field(min_length=10, max_length=500)
+    accept_causes: list[str] = Field(default_factory=lambda: ["legacy_datetime_roundtrip"])
+    dry_run: bool = True
+
+
+@router.post("/chain/reanchor")
+async def reanchor_audit_chain(body: ReanchorBody, request: Request):
+    """Platform admin: migrate records the old hash input broke (R7).
+
+    Dry run by default. Applying it files ``audit.chain.reanchored`` into the
+    chain and seals each accepted record as it stands; see
+    ``services.audit_chain_reanchor``. A workspace admin cannot do this: the
+    chain is shared, so the decision is the platform's.
+    """
+    from services.audit_chain_reanchor import ReanchorError, reanchor_chain
+    from services.audit_log import actor_from_request
+
+    scope = tenant_scope(request)
+    if not scope.unrestricted or scope.workspace_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Re-anchoring the audit chain is a platform administrator action.",
+        )
+    try:
+        result = reanchor_chain(
+            actor=actor_from_request(request),
+            reason=body.reason,
+            accept_causes=body.accept_causes,
+            dry_run=body.dry_run,
+        )
+    except ReanchorError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    record_security_event(
+        "audit.chain.reanchor", outcome="succeeded", request=request,
+        resource=request.url.path, status=200,
+        details={"dry_run": body.dry_run, "accepted": len(result["accepted"])},
     )
     return result
 
@@ -438,6 +563,7 @@ async def purge_audit_retention(
     )
     from services.audit_log import actor_from_request, workspace_id_from_request
 
+    _require_platform_admin(request, tenant_scope(request), "audit.retention.purge")
     correlation_id = getattr(request.state, "correlation_id", None)
     if correlation_id is None:
         correlation_id = request.headers.get("X-Correlation-ID")
@@ -460,10 +586,15 @@ async def purge_audit_retention(
 
 
 @router.post("/tip/anchor")
-async def force_anchor_tip():
-    """Manually seal the current tip (ops / compliance export)."""
+async def force_anchor_tip(request: Request):
+    """Manually seal the current platform tip (ops / compliance export).
+
+    Platform administrators only: it seals and returns the platform head.
+    """
     from services.audit_anchor import anchor_tip, latest_anchor
     from services.audit_log import latest_event_hash
+
+    _require_platform_admin(request, tenant_scope(request), "audit.tip.anchor")
 
     tip = latest_event_hash()
     if not tip:

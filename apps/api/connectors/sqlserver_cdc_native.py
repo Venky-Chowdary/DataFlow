@@ -439,17 +439,22 @@ class SqlServerNativeCdc:
         row_filter: str = "",
     ) -> None:
         from services.cdc_multi_table import normalize_table_list, tables_digest
+        from services.cdc_table_name import bare_table_keys, split_cdc_tables
 
         self.cfg = cfg
-        self.tables = normalize_table_list(table)
+        # D223: 'dbo.t' with schema 'dbo' is table 't', never 'dbo.dbo.t'.
+        resolved_schema, self.tables = split_cdc_tables(
+            normalize_table_list(table), schema or "dbo", dialect="sqlserver"
+        )
         if not self.tables:
             raise ValueError("SQL Server CDC requires at least one table")
         self.table = self.tables[0]
-        self.schema = schema or "dbo"
+        self.schema = resolved_schema or "dbo"
         from services.cdc_identity import require_cdc_primary_keys_map
 
         self.primary_keys = require_cdc_primary_keys_map(
-            self.tables, primary_key=primary_key, primary_keys=primary_keys
+            self.tables, primary_key=primary_key,
+            primary_keys=bare_table_keys(primary_keys, self.schema),
         )
         self.primary_key = self.primary_keys[self.table]
         self.batch_size = max(1, int(batch_size or 500))
@@ -874,7 +879,7 @@ class SqlServerNativeCdc:
             )
 
     def _conn(self):
-        from connectors.generic_sql import connection_options, get_connection
+        from connectors.generic_sql import connection_options, get_connection, with_connection_options
 
         return get_connection(
             host=self.cfg.get("host") or "localhost",
@@ -885,7 +890,9 @@ class SqlServerNativeCdc:
             connection_string=self.cfg.get("connection_string") or "",
             ssl=bool(self.cfg.get("ssl")),
             db_type="sqlserver",
-            **connection_options(self.cfg),
+            # TLS options may sit under ``extra`` (the resolved source config);
+            # a refused handshake read as "CDC not enabled" otherwise.
+            **connection_options(with_connection_options(self.cfg)),
         )
 
     def _capture_instances_for_table(

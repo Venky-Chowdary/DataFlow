@@ -127,7 +127,8 @@ export function callableExtractNote(
   if (mode === "procedure" || mode === "query") {
     return (
       "Result-set snapshot — FK catalog, uniqueness GROUP BY, and "
-      + "population orphan scans are not run against a procedure name."
+      + "population orphan scans are not run against "
+      + (mode === "query" ? "the tables the query reads." : "a procedure name.")
     );
   }
   return "";

@@ -2544,12 +2544,10 @@ class UniversalTransferEngine:
                         _mirror_contract = _resolve_mirror_contract(
                             list(getattr(request, "stream_contracts", None) or [])
                         )
-                        # D38: docs default is a hard delete; ``_deleted``
-                        # tombstones only when the contract declares soft.
-                        _mirror_delete_mode = (
-                            (_mirror_contract.delete_mode if _mirror_contract else "")
-                            or "hard"
-                        )
+                        # Soft delete is the default; hard only when declared.
+                        from services.mirror_engine import resolve_mirror_delete_mode
+
+                        _mirror_delete_mode = resolve_mirror_delete_mode(_mirror_contract)
                         mirror_summary = apply_inferred_soft_deletes(
                             request.destination,
                             records,
@@ -4244,6 +4242,13 @@ class UniversalTransferEngine:
                 message="Analyzing uploaded file…",
             )
             read_options = resolve_read_options(request)
+            # A guessed text encoding is recorded on the job and judged by
+            # preflight (warn when it holds, refuse when the bytes contradict it).
+            from services.source_encoding_guess import record_file_encoding
+
+            source_encoding = record_file_encoding(
+                mongo, job_id, content, filename, read_options
+            )
             columns, schema, total_rows, sample_rows = peek_file_source(
                 content, filename, read_options
             )
@@ -4396,6 +4401,7 @@ class UniversalTransferEngine:
                     date_locale=request.date_locale,
                     number_locale=getattr(request, "number_locale", "") or "",
                     resume=resume,
+                    source_encoding=source_encoding,
                     **parity,
                 )
                 pf = apply_policy_gates(

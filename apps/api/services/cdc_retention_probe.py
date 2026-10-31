@@ -921,8 +921,8 @@ def probe_sqlserver_retention(
                 min_lsn = cdc._min_lsn(cur)
         result = classify_lsn_retention(resume, min_lsn, cursor_key=ck)
         result.capture_instance = str(getattr(cdc, "capture_instance", "") or "")
-        result.details["table"] = table
-        result.details["schema"] = schema
+        result.details["table"] = cdc.table
+        result.details["schema"] = cdc.schema
         return result
     except Exception as exc:
         ct = probe_sqlserver_ct_retention(
@@ -1007,9 +1007,9 @@ def probe_sqlserver_ct_retention(
             ct_enabled=catalog.get("ct_enabled"),
             cursor_key=ck,
         )
-        result.details["table"] = table
-        result.details["schema"] = schema
-        result.capture_instance = f"{schema}.{table}"
+        result.details["table"] = cdc.table
+        result.details["schema"] = cdc.schema
+        result.capture_instance = f"{cdc.schema}.{cdc.table}"
         return result
     except Exception as exc:
         return RetentionProbeResult(

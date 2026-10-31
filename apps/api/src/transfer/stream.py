@@ -46,6 +46,7 @@ from services.source_reread import (
     align_source_populations,
     alignment_when_write_pass_empty,
     reread_pagination_plan,
+    reread_loop_supports,
     should_reread_source,
 )
 from services.primary_key import dest_is_key_addressed
@@ -779,6 +780,12 @@ def _stream_database_transfer_impl(
         )
     _copy_profile = PhaseProfile()
     _copy_started = time.perf_counter()
+    from services.cancel_check import progress_mark, progress_rewind
+
+    # Rows a COPY reports belong to it: a decline or failure rolls them back,
+    # and the row path counts its own from the same mark (62,528 of 40,000).
+    _progress_mark = progress_mark()
+    fast = None
     try:
         from .stream_dest_procedure import decline_copy_for_destination_sql
 
@@ -813,6 +820,8 @@ def _stream_database_transfer_impl(
             job_id=run.cfg.job_id,
         )
     finally:
+        if fast is None:
+            progress_rewind(_progress_mark)
         reset_copy_decline_capture(_decline_token)
         reset_fast_path_create_scope(_create_scope_token)
     if fast is not None:
@@ -3008,7 +3017,9 @@ def _stream_database_transfer_impl(
             )
             + "Set DATAFLOW_RECONCILE_SOURCE_REREAD=1 to force a second scan."
         )
-    elif _reread and run.cfg.src_read_type in REREAD_SCAN_SOURCES:
+    elif _reread and reread_loop_supports(
+        run.cfg.src_read_type, partial_write_pass=_partial_write_pass
+    ):
         # Independent re-read — snapshot scan (no OFFSET) on warehouse sources.
         from connectors.sql_snapshot_scan import close_table_scan
 

@@ -30,9 +30,20 @@ def _client() -> TestClient:
     return TestClient(app)
 
 
+# An enabled provider must be complete (R8: enabling with required fields
+# blank is refused), so claims are made on a usable configuration.
+_COMPLETE = {
+    "saml": {"entity_id": "urn:sp", "sso_url": "https://idp.test/saml", "x509_cert": "MIIC" + "A" * 40},
+    "oidc": {"issuer": "https://idp.test", "client_id": "c", "client_secret": "s",
+             "redirect_uri": "https://app.test/cb"},
+    "azure_ad": {"tenant_id": "t", "client_id": "c", "client_secret": "s",
+                 "redirect_uri": "https://app.test/cb"},
+}
+
+
 def _claim(sso_type: str, domains: list[str], enabled: bool = True):
     integrations_store.update_sso_config(
-        sso_type, {"enabled": enabled, "email_domains": domains})
+        sso_type, {**_COMPLETE[sso_type], "enabled": enabled, "email_domains": domains})
 
 
 def test_no_claim_returns_null():
@@ -68,6 +79,7 @@ def test_email_domains_persist_on_config():
     _claim("oidc", ["acme.com", "acme.io"])
     cfg = integrations_store.get_sso_configs()["oidc"]
     assert cfg["email_domains"] == ["acme.com", "acme.io"]
+    # Domains are normalized to lower case on save (R8).
 
 
 def test_route_is_ip_throttled_but_shape_never_changes(monkeypatch):

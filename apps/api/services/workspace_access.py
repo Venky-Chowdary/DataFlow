@@ -58,7 +58,16 @@ def authorized_workspace_id(request: Request) -> str:
             setattr(state, cache_key, "")
             return ""
 
-        if can_read_workspace(workspace_id, actor_email(request)):
+        user = getattr(state, "user", None)
+        if isinstance(user, dict) and str(user.get("auth_kind") or "") == "api_key":
+            # An API key reads its own workspace only, never its creator's
+            # other memberships (tenant scope, services.effective_principal).
+            from services.tenant_scope import _base_scope
+
+            allowed = workspace_id in _base_scope(request).member_workspace_ids
+        else:
+            allowed = can_read_workspace(workspace_id, actor_email(request))
+        if allowed:
             result = workspace_id
             state.workspace_header_rejected = False
         else:
@@ -129,19 +138,24 @@ def assert_resource_workspace(
     resource_workspace_id: str | None,
     *,
     write: bool = False,
+    not_found_detail: str = "Not found",
 ) -> None:
     """404 an id-addressed resource the request's tenant scope does not cover.
 
     Same rule as the lists: foreign workspaces, a workspace other than the
     declared header scope, and (isolation enforced) unscoped legacy rows for
-    anyone but a platform admin. ``write=True`` is required on every route
-    that mutates the resource: the caller's RBAC permission comes from their
-    role, which is independent of the resource's workspace, so read
-    membership there must not be enough to change what lives in it (403).
+    anyone but a platform admin. The 404 carries ``not_found_detail`` — pass
+    the route's own "X not found" text so another workspace's id answers
+    byte-for-byte like an id that does not exist (D222): a 403 there tells a
+    stranger the id is real. ``write=True`` is required on every route that
+    mutates the resource: the caller's RBAC permission comes from their role,
+    which is independent of the resource's workspace, so read membership there
+    must not be enough to change what lives in it (403 — the caller can already
+    see the resource, so that refusal reveals nothing).
     """
     scope = resolve_tenant_scope(request)
     if not scope.allows(resource_workspace_id):
-        raise HTTPException(status_code=404, detail="Not found")
+        raise HTTPException(status_code=404, detail=not_found_detail)
     if write and not scope.can_write(resource_workspace_id):
         raise HTTPException(status_code=403, detail="Write access to workspace denied")
 

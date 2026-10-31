@@ -143,26 +143,34 @@ def live_source_primary_key_columns(
     source_collection: str = "",
     source_schema: str = "",
     source_database: str = "",
+    source_config: Any = None,
 ) -> list[str]:
-    """Catalog primary key of a saved source, or empty when it has none."""
+    """Catalog primary key of a saved source, or empty when it has none.
+
+    A query / procedure result set has no catalog key: the stream label names
+    the extract's first relation, not the rows the extract returns.
+    """
     connector_id = (source_connector_id or "").strip()
     stream = (source_table or source_collection or "").strip()
     if not connector_id or not stream:
         return []
-    try:
-        from services.connector_probe import endpoint_from_saved_connector
-
-        endpoint = endpoint_from_saved_connector(
-            connector_id,
-            table=source_table or stream,
-            collection=source_collection or stream,
-            schema=source_schema or "",
-            database=source_database or "",
-        )
-    except Exception:  # noqa: BLE001 — same fail-closed rule as the endpoint helper
-        logger.debug("saved source primary key lookup failed", exc_info=True)
-        return []
+    endpoint = _saved_source_endpoint(
+        connector_id,
+        source_table=source_table,
+        source_collection=source_collection,
+        stream=stream,
+        source_schema=source_schema,
+        source_database=source_database,
+        source_config=source_config,
+    )
     if endpoint is None:
+        return []
+    try:
+        from services.procedure_source import is_callable_source
+
+        if is_callable_source(endpoint):
+            return []
+    except Exception:  # noqa: BLE001 — unread mode blocks, it does not approve
         return []
     return endpoint_primary_key_columns(endpoint)
 
@@ -174,16 +182,49 @@ def live_source_column_types(
     source_collection: str = "",
     source_schema: str = "",
     source_database: str = "",
+    source_config: Any = None,
 ) -> dict[str, str]:
     """Introspect the saved source connector for its declared column types.
 
     Returns ``{}`` when there is no saved connector or introspection fails —
     Validate then keeps the posted declaration rather than inventing types.
+
+    A query / procedure source (``source_config`` carries the extract) is
+    described by its result set, the shape Execute reads. Its stream label is
+    the extract's first relation (``SELECT … FROM orders`` → ``orders``), so a
+    catalog lookup by that name described the base *table* and merged every
+    table column into the query's types: Validate then fingerprinted a schema
+    Execute never reads ("source schema drifted since Validate").
     """
     connector_id = (source_connector_id or "").strip()
     stream = (source_table or source_collection or "").strip()
     if not connector_id or not stream:
         return {}
+    endpoint = _saved_source_endpoint(
+        connector_id,
+        source_table=source_table,
+        source_collection=source_collection,
+        stream=stream,
+        source_schema=source_schema,
+        source_database=source_database,
+        source_config=source_config,
+    )
+    if endpoint is None:
+        return {}
+    return endpoint_source_column_types(endpoint)
+
+
+def _saved_source_endpoint(
+    connector_id: str,
+    *,
+    source_table: str,
+    source_collection: str,
+    stream: str,
+    source_schema: str,
+    source_database: str,
+    source_config: Any,
+):
+    """The saved source as Execute builds it, extract (query/CALL + binds) included."""
     try:
         from services.connector_probe import endpoint_from_saved_connector
 
@@ -194,12 +235,25 @@ def live_source_column_types(
             schema=source_schema or "",
             database=source_database or "",
         )
-        if endpoint is None:
-            return {}
     except Exception:
         logger.debug("live source introspect failed for %s", connector_id, exc_info=True)
-        return {}
-    return endpoint_source_column_types(endpoint)
+        return None
+    if endpoint is None or source_config is None:
+        return endpoint
+    try:
+        from services.procedure_source import (
+            is_callable_source,
+            merge_callable_source_extra,
+        )
+
+        if is_callable_source(source_config):
+            endpoint.extra = merge_callable_source_extra(
+                endpoint.extra, source_config
+            )
+    except Exception:
+        logger.debug("callable source extract merge failed", exc_info=True)
+        return None
+    return endpoint
 
 
 def reconcile_source_types(

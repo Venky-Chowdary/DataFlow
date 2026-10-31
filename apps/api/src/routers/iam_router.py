@@ -19,7 +19,7 @@ from services.rbac import (
     principal_permissions,
     role_permissions,
 )
-from services.workspace_access import actor_email
+from services.workspace_access import actor_email, tenant_scope
 from src.services import auth_service as _auth_service
 
 router = APIRouter(prefix="/iam", tags=["IAM"])
@@ -37,7 +37,15 @@ class ServiceAccountCreate(BaseModel):
 
 
 class ApiKeyRotation(BaseModel):
-    overlap_seconds: int = Field(default=86400, ge=0, le=604800)
+    # 0 = the old key is revoked at once. A grace is opt-in, short, listed
+    # (``grace_until``) and revocable.
+    overlap_seconds: int = Field(
+        default=0, ge=0, le=integrations_store.MAX_ROTATION_GRACE_SECONDS
+    )
+
+
+class RotatedKeyRepair(BaseModel):
+    dry_run: bool = True
 
 
 class ScimTokenCreate(BaseModel):
@@ -142,6 +150,7 @@ def create_service_account(body: ServiceAccountCreate, request: Request):
             expires_in=body.expires_in,
             scopes=body.scopes,
             kind="service_account",
+            workspace_id=tenant_scope(request).workspace_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -157,20 +166,39 @@ def create_service_account(body: ServiceAccountCreate, request: Request):
 
 
 @router.get("/service-accounts")
-def list_service_accounts():
+def list_service_accounts(request: Request):
+    # The key store is deployment-wide: list only what this caller's workspace
+    # owns (every key for a platform admin), like GET /workspace/api-keys.
     return [
         key
         for key in integrations_store.list_api_keys()
-        if key.get("kind") in {"service_account", "scim"}
+        if key.get("kind") in {"service_account", "scim"} and _key_visible(request, key)
     ]
+
+
+def _key_visible(request: Request, key: dict[str, Any]) -> bool:
+    """The same visibility as the workspace key list: own workspace, or platform admin."""
+    from src.routers.workspace_router import _own_workspace_key
+
+    return _own_workspace_key(request, key)
 
 
 @router.post("/api-keys/{key_id}/rotate")
 def rotate_api_key(key_id: str, body: ApiKeyRotation, request: Request):
+    # Read revoked keys too, so re-rotating a key that was already rotated
+    # (and therefore revoked) answers "already rotated", not "not found".
     existing = next(
-        (item for item in integrations_store.list_api_keys() if item.get("id") == key_id),
+        (
+            integrations_store._public_api_key(item)
+            for item in integrations_store.load_api_key_records()
+            if item.get("id") == key_id
+        ),
         None,
     )
+    # A key in another workspace is not there for this caller: rotating it
+    # minted a credential the caller owned for someone else's workspace.
+    if existing is None or not _key_visible(request, existing):
+        raise HTTPException(status_code=404, detail="API key not found")
     if existing is not None:
         enforce_grant_bounds(
             request,
@@ -202,6 +230,31 @@ def rotate_api_key(key_id: str, body: ApiKeyRotation, request: Request):
     return key
 
 
+@router.post("/api-keys/repair-rotated")
+def repair_rotated_api_keys(request: Request, body: RotatedKeyRepair | None = None):
+    """Platform-admin repair for keys the pre-fix rotate endpoint orphaned.
+
+    Dry run by default: reports each orphan and the workspace/owner it would
+    get back. ``{"dry_run": false}`` applies it, after which the keys are
+    listed in their workspace and revocable with DELETE.
+    """
+    from services.tenant_scope import actor_is_unrestricted
+
+    user = getattr(request.state, "user", None)
+    if not actor_is_unrestricted(user):
+        raise HTTPException(status_code=403, detail="Platform administrator role required")
+    dry_run = True if body is None else body.dry_run
+    repairs = integrations_store.repair_rotated_api_keys(dry_run=dry_run)
+    audit_log.append_audit_event(
+        action="iam.api_key.repair_rotated",
+        resource="api_keys",
+        actor=actor_email(request),
+        level="info" if dry_run else "warn",
+        details={"dry_run": dry_run, "repairs": repairs},
+    )
+    return {"dry_run": dry_run, "repairs": repairs}
+
+
 @router.delete("/service-accounts/{key_id}")
 def revoke_service_account(key_id: str, request: Request):
     actor = actor_email(request)
@@ -214,7 +267,7 @@ def revoke_service_account(key_id: str, request: Request):
         ),
         None,
     )
-    if key is None:
+    if key is None or not _key_visible(request, key):
         raise HTTPException(status_code=404, detail="Service account not found")
     try:
         if not integrations_store.revoke_api_key(key_id):
@@ -251,6 +304,7 @@ def create_scim_token(request: Request, body: ScimTokenCreate | None = None):
             expires_in=(body.expires_in if body else integrations_store.DEFAULT_API_KEY_LIFETIME),
             scopes=["scim.provision"],
             kind="scim",
+            workspace_id=tenant_scope(request).workspace_id,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -272,6 +326,35 @@ def get_scim_group_mappings():
         raise HTTPException(status_code=503, detail="SCIM storage is unavailable") from exc
 
 
+def _enforce_mapping_workspace_authority(request: Request, workspace_id: str, role: str) -> None:
+    """A mapping grants ``role`` in ``workspace_id``: the caller must hold it there.
+
+    ``enforce_grant_bounds`` measures the caller in the workspace the request
+    names; a mapping names its own workspace, so an admin of one workspace could
+    otherwise map a group to admin of another.
+    """
+    if not _auth_service.auth_required():
+        return
+    ceiling = scim_service.role_ceiling(getattr(request.state, "user", None), workspace_id)
+    order = {"viewer": 1, "editor": 2, "admin": 3}
+    if ceiling is not None and order.get(role, 9) <= order.get(ceiling, 0):
+        return
+    actor = actor_email(request)
+    audit_log.append_audit_event(
+        action="iam.privilege_escalation.denied",
+        resource="PUT /api/v1/iam/scim/group-mappings",
+        actor=actor,
+        level="warn",
+        workspace_id=workspace_id,
+        details={"route": "PUT /api/v1/iam/scim/group-mappings", "caller": actor,
+                 "target_role": role, "workspace_id": workspace_id, "ceiling": ceiling},
+    )
+    raise HTTPException(
+        status_code=403,
+        detail=f"Cannot map a group to {role} in a workspace where you do not hold that role",
+    )
+
+
 @router.put("/scim/group-mappings")
 def put_scim_group_mappings(body: ScimGroupMappingsUpdate, request: Request):
     mappings: dict[str, dict[str, str]] = {}
@@ -289,6 +372,7 @@ def put_scim_group_mappings(body: ScimGroupMappingsUpdate, request: Request):
             target_role=membership_role_to_gate_role(mapping.role),
             target_scopes=None,
         )
+        _enforce_mapping_workspace_authority(request, mapping.workspace_id, mapping.role)
         mappings[key] = {
             "workspace_id": mapping.workspace_id,
             "role": mapping.role,

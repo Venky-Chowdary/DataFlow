@@ -31,16 +31,20 @@ def test_sqlite_timestamp_carrier_is_not_a_narrowing(source_type):
 
 
 def test_sqlite_bare_temporal_keeps_microseconds():
+    # QA round 10: the text also keeps a SQL Server DATETIME2(7) seventh digit.
     for spelling in ("TIMESTAMP", "TIMESTAMP_NTZ", "TIME"):
-        assert destination_temporal_fractional_digits(spelling, dest_db="sqlite") == 6
+        assert destination_temporal_fractional_digits(spelling, dest_db="sqlite") == 7
 
 
 def test_real_narrowing_still_blocks():
     # MySQL bare TIMESTAMP is FSP 0; an explicit SQLite TIMESTAMP(0) is a
-    # declared whole-second column; SQL Server DATETIME2 holds 7 digits.
+    # declared whole-second column. SQL Server DATETIME2 holds 7 digits, and
+    # so does SQLite's bare text TIMESTAMP (QA round 10): no collapse there,
+    # but a declared TIMESTAMP(6) still is one.
     assert is_precision_collapse_coercion("TIMESTAMP(6)", "TIMESTAMP", dest_db="mysql")
     assert is_precision_collapse_coercion("TIMESTAMP(6)", "TIMESTAMP(0)", dest_db="sqlite")
-    assert is_precision_collapse_coercion("DATETIME2", "TIMESTAMP", dest_db="sqlite")
+    assert not is_precision_collapse_coercion("DATETIME2", "TIMESTAMP", dest_db="sqlite")
+    assert is_precision_collapse_coercion("DATETIME2", "TIMESTAMP(6)", dest_db="sqlite")
     # Unnamed engine stays fail-closed.
     assert is_precision_collapse_coercion("TIMESTAMP(6)", "TIMESTAMP", dest_db="")
 

@@ -49,6 +49,8 @@ from services.copy_fast_path import (
 )
 from services.engine_checksum import _NO_OP_TYPE_TRANSFORMS
 
+from services.copy_range_proof import range_keys_match  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 _SAFE_PG_BASES = frozenset({
@@ -852,13 +854,22 @@ def copy_postgres_to_mysql(
                             dst_cur, table_q, dest_ident, part
                         )
                         expected = int(part["source_count"])
-                        if already == expected:
+                        # A count is not identity: skip only a range that holds this
+                        # source range's keys (append of N new keys into N rows).
+                        if already == expected and range_keys_match(
+                            src_dialect="postgresql", src_cur=src_cur, src_ref=source_ref, src_ident=src_ident,
+                            dst_dialect="mysql", dst_cur=dst_cur, dst_ref=table_q, dst_ident=dest_ident,
+                            part=part,
+                        ):
                             part["action"] = "skip"
                             part["dest_count"] = already
                         elif already == 0:
                             part["action"] = "load"
                         else:
-                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
+                            occupied_pk_range_action(
+                                already, expected, replace_destination=replace_destination,
+                                keys_proven=False,
+                            )
                             _delete_mysql_range(
                                 dst_cur, table_q, dest_ident, part
                             )

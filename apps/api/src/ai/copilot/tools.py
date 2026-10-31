@@ -711,7 +711,17 @@ TOOL_DEFINITIONS: list[dict] = [
                         "pgvector destinations only (D209): 'table' creates the "
                         "typed table the Map shows; 'document' is an embedding/RAG "
                         "load (id, content, embedding, metadata). Omitted: the "
-                        "saved connector's choice, else the existing table's shape."
+                        "saved connector's choice, else the existing table's shape, "
+                        "else a typed table with an embedding column."
+                    ),
+                },
+                "delete_mode": {
+                    "type": "string",
+                    "enum": ["soft", "hard"],
+                    "description": (
+                        "Mirror sync only. 'soft' (default): destination rows whose "
+                        "key left the source are kept and flagged _deleted. 'hard': "
+                        "they are physically DELETEd; the plan warns before staging."
                     ),
                 },
                 "ddl_acknowledgement": {
@@ -874,7 +884,17 @@ TOOL_DEFINITIONS: list[dict] = [
                         "pgvector destinations only (D209): 'table' creates the "
                         "typed table the Map shows; 'document' is an embedding/RAG "
                         "load (id, content, embedding, metadata). Omitted: the "
-                        "saved connector's choice, else the existing table's shape."
+                        "saved connector's choice, else the existing table's shape, "
+                        "else a typed table with an embedding column."
+                    ),
+                },
+                "delete_mode": {
+                    "type": "string",
+                    "enum": ["soft", "hard"],
+                    "description": (
+                        "Mirror sync only. 'soft' (default): destination rows whose "
+                        "key left the source are kept and flagged _deleted. 'hard': "
+                        "they are physically DELETEd; the plan warns before staging."
                     ),
                 },
             },
@@ -1182,6 +1202,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "IANA zone for timestamp values that have no offset. "
                         "Required when a column mixes those values with offset-bearing "
                         "ones. Empty does not invent UTC. Offset-bearing values stay as written."
+                    ),
+                },
+                "source_encoding": {
+                    "type": "string",
+                    "description": (
+                        "The file's text encoding (cp1251, cp1250, iso-8859-7, utf-16...). "
+                        "Declared, it is read strictly. Undeclared, a non-UTF-8 file is "
+                        "read as Windows-1252 with a preflight warning, or refused when "
+                        "its bytes cannot be Windows-1252."
                     ),
                 },
                 "contract_id": {"type": "string"},
@@ -1726,6 +1755,12 @@ def _preview_endpoint(draft: dict[str, Any]) -> tuple[str, int | None, bool]:
         return host, url.port or draft.get("port") or None, bool(url.password)
     return host or "(from URL)", draft.get("port"), False
 
+
+
+def _contract_status_label(contract: Any) -> str:
+    from services.contract_read_model import status_label
+
+    return status_label(contract)
 
 class DataPilotTools:
     """Execute Datawrap Pilot tools against live app state."""
@@ -4009,6 +4044,9 @@ class DataPilotTools:
                 "id": d.get("id") or d.get("contract_id"),
                 "name": d.get("name") or d.get("title") or d.get("id"),
                 "status": d.get("status"),
+                "version": d.get("version"),
+                # Same "Signed v3" the Contracts page shows (contract_read_model).
+                "status_label": _contract_status_label(d),
                 "updated_at": str(d.get("updated_at") or ""),
             })
         total = sum(int(n) for n in census.values()) if census else len(rows)
@@ -4218,6 +4256,7 @@ class DataPilotTools:
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
         vector_layout: str = "",
+        delete_mode: str = "",
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -4255,6 +4294,7 @@ class DataPilotTools:
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
             vector_layout=vector_layout,
+            delete_mode=delete_mode,
         )
 
     def _start_transfer(
@@ -4293,6 +4333,7 @@ class DataPilotTools:
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
         vector_layout: str = "",
+        delete_mode: str = "",
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -4331,6 +4372,7 @@ class DataPilotTools:
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
             vector_layout=vector_layout,
+            delete_mode=delete_mode,
         )
 
     def _start_dataset_transfer(
@@ -4351,6 +4393,7 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        source_encoding: str = "",
     ) -> ToolResult:
         from .dataset_transfer import stage_dataset_transfer
 
@@ -4371,6 +4414,7 @@ class DataPilotTools:
             upsert_key=upsert_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            source_encoding=source_encoding,
         )
 
     def _create_schedule(
@@ -6764,6 +6808,14 @@ def infer_tools_from_message(message: str) -> list[tuple[str, dict]]:
     ):
         planned.append(("brief_workspace", {}))
         return planned
+
+    # A plain row count is one intent → COUNT(*) on the resolved connector,
+    # ahead of the sample route that answered it with 25 rows (QA, r7).
+    from .row_count_intent import plan_row_count
+
+    row_count = plan_row_count(message)
+    if row_count:
+        return row_count
 
     nav_map = {
         "pilot": ["data pilot", "go to pilot", "open pilot"],

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import contextvars
+import re
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -16,6 +17,9 @@ from typing import Any, Iterator
 def norm_workspace_id(workspace_id: Any) -> str:
     """``""`` for every spelling of "no workspace" (empty, None, missing)."""
     return str(workspace_id or "").strip()
+
+
+_BLANK = re.compile(r"^\s+$")
 
 
 @dataclass(frozen=True)
@@ -53,11 +57,14 @@ class WorkspaceFilter:
         """The same predicate as :meth:`matches` for a Mongo ``find``.
 
         ``$in``/``$nin`` with ``None`` also match a missing field, which is how
-        the oldest rows were written.
+        the oldest rows were written. A whitespace-only id is "no workspace"
+        to :func:`norm_workspace_id` too; without the regex arm no Mongo query
+        matched it, so such a row was visible to nobody and the legacy backfill
+        never found it (D218).
         """
         if self.is_everything:
             return {}
-        unscoped = ["", None]
+        unscoped: list[Any] = ["", None, _BLANK]
         if self.workspace_ids is None:
             return {field: {"$nin": unscoped}}
         arms: list[dict[str, Any]] = [{field: {"$in": sorted(self.workspace_ids)}}]

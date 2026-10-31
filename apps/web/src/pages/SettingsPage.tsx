@@ -10,7 +10,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, purgeJobRetention, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
   fetchSignupMetrics,
   type SignupMetrics,
 } from "../lib/api";
@@ -20,6 +20,11 @@ import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
 import { chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
+import { auditActorLabel } from "../lib/auditActor";
+import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
+import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
+import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
+import { purgeConfirmCopy, RETENTION_HINT } from "../lib/jobRetention";
 import { connectorEgressState } from "../lib/egressPosture";
 import { TENANT_SAVED_EVENT, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
@@ -88,6 +93,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [ssoEditor, setSsoEditor] = useState<SsoType | null>(null);
   const [ssoDraft, setSsoDraft] = useState<SsoConfig | null>(null);
   const [ssoSaving, setSsoSaving] = useState(false);
+  const [ssoDomainsText, setSsoDomainsText] = useState("");
+  const [ssoClearSecret, setSsoClearSecret] = useState(false);
   const [aiEditor, setAiEditor] = useState<string | null>(null);
   const [aiDraft, setAiDraft] = useState({ api_key: "", model: "", base_url: "", enabled: true });
   const [aiSaving, setAiSaving] = useState(false);
@@ -113,7 +120,13 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const workspaceManage = useWriteGate(PERMISSIONS.workspaceManage);
   // The key store is deployment-wide, so keys are IAM administration (iam.manage).
   const iamManage = useWriteGate(PERMISSIONS.iamManage);
-  const retentionPurgeDisabled = !workspaceManage.allowed
+  // Retention purges the platform-wide trail, so it is a platform admin's (D220).
+  const [platformAdmin, setPlatformAdmin] = useState(false);
+  const retentionAllowed = workspaceManage.allowed && platformAdmin;
+  const retentionReason = !workspaceManage.allowed
+    ? workspaceManage.reason
+    : "Audit retention acts on the platform-wide trail: platform administrators only.";
+  const retentionPurgeDisabled = !retentionAllowed
     || retentionLoading
     || !retentionResult?.dry_run
     || retentionResult.legal_hold
@@ -177,11 +190,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       })
       .finally(() => setSettingsLoading(false));
     fetchWorkspaces()
-      .then(({ workspaces: rows }) => {
+      .then(({ workspaces: rows, platformAdmin: isPlatformAdmin }) => {
         const current = rows.find((w) => w.id === activeWorkspace);
         setWorkspaceLabel(current?.name || "");
+        setPlatformAdmin(isPlatformAdmin);
       })
-      .catch(() => setWorkspaceLabel(""));
+      .catch(() => {
+        setWorkspaceLabel("");
+        setPlatformAdmin(false);
+      });
   }, [activeWorkspace]);
 
   const loadModelsAndSso = useCallback(() => {
@@ -240,7 +257,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
           events.map((ev) => ({
             id: ev.id,
             time: new Date(ev.time).toLocaleString(),
-            actor: ev.actor,
+            actor: auditActorLabel(ev),
             action: ev.action,
             resource: ev.resource,
             level: (ev.level === "success" ? "success" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : "info") as AuditLog["level"],
@@ -299,6 +316,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       scopes: cfg?.scopes ?? "openid email profile",
       tenant_id: cfg?.tenant_id ?? "",
     });
+    setSsoDomainsText((cfg?.email_domains ?? []).join(", "));
+    setSsoClearSecret(false);
     setSsoEditor(type);
   };
 
@@ -312,12 +331,45 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     return false;
   };
 
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  const runRetentionPurge = async () => {
+    if (!mayAdminister()) return;
+    setRetentionBusy(true);
+    try {
+      const dry = await purgeJobRetention({ dry_run: true });
+      const copy = purgeConfirmCopy({ ...dry, would_remove: dry.would_remove ?? 0 });
+      if (copy.nothing) {
+        toast({ title: copy.title, message: copy.message, tone: "success" });
+        return;
+      }
+      const ok = await confirm({ title: copy.title, message: copy.message, confirmLabel: "Delete jobs", cancelLabel: "Keep them", tone: "danger" });
+      if (!ok) return;
+      const done = await purgeJobRetention({ dry_run: false, confirm_token: dry.confirm_token });
+      toast({ title: "Old jobs purged", message: `${done.removed ?? 0} finished jobs deleted.`, tone: "success" });
+    } catch (err) {
+      toast({ title: "Purge failed", message: err instanceof Error ? err.message : "", tone: "error" });
+    } finally {
+      setRetentionBusy(false);
+    }
+  };
+
   const saveSsoConfig = async () => {
     if (!ssoEditor || !ssoDraft) return;
     if (!mayAdminister()) return;
+    if (ssoDraft.enabled) {
+      const missing = missingForEnable(ssoEditor, ssoDraft, ssoConfigs?.[ssoEditor], ssoClearSecret);
+      if (missing.length) {
+        toast({
+          title: "Provider can't be enabled yet",
+          message: `Fill in ${missing.join(", ")}, or turn the provider off to save a draft.`,
+          tone: "warning",
+        });
+        return;
+      }
+    }
     setSsoSaving(true);
     try {
-      const result = await updateSsoConfig(ssoEditor, ssoDraft);
+      const result = await updateSsoConfig(ssoEditor, buildSsoPatch(ssoDraft, ssoDomainsText, ssoClearSecret));
       setSsoConfigs((prev) => ({ ...(prev ?? {} as Record<SsoType, SsoConfig>), [ssoEditor]: result.config }));
       toast({
         title: result.validation.ok ? "SSO configured" : "SSO saved — needs attention",
@@ -390,13 +442,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       const result = await testAiProviderKey(provider);
       setModelCapabilities(result.capabilities);
       setEngineStatus(await fetchPilotEngineStatus());
-      toast({
-        title: result.ok ? `${provider} key works` : `${provider} key rejected`,
-        message: result.ok
-          ? "The provider accepted the saved key."
-          : result.error || "The provider rejected the saved key.",
-        tone: result.ok ? "success" : "error",
-      });
+      toast({ ...providerTestToast(provider, result), tone: result.ok ? "success" : "error" });
     } catch (err) {
       toast({
         title: "Key test failed",
@@ -616,7 +662,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   };
 
   const previewAuditRetention = async () => {
-    if (!workspaceManage.allowed) return;
+    if (!retentionAllowed) return;
     setRetentionLoading(true);
     setRetentionError("");
     setRetentionResult(null);
@@ -630,7 +676,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   };
 
   const purgeAuditRetentionNow = async () => {
-    if (!workspaceManage.allowed) return;
+    if (!retentionAllowed) return;
     if (!await confirm({
       title: "Purge expired audit events?",
       message: "This permanently removes events outside the configured retention window. A retention checkpoint will be recorded.",
@@ -847,7 +893,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         )}
                       </div>
                     </div>
-                    <p className="df2-settings-hint">Retention is stored on the workspace profile. Job archival is not wired — completed jobs are not deleted by this value. Write targets stay on each connector.</p>
+                    <p className="df2-settings-hint">{RETENTION_HINT} Write targets stay on each connector.</p>
+                    {generalEditable && (
+                      <button type="button" className="df2-btn df2-btn-ghost" data-testid="job-retention-purge" disabled={retentionBusy} onClick={() => void runRetentionPurge()}>
+                        {retentionBusy ? "Checking…" : "Purge old jobs…"}
+                      </button>
+                    )}
                   </div>
                   <div className="df2-settings-section-footer">
                     <Button
@@ -887,10 +938,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           { title: "Encryption at rest", desc: "AES-256 for stored connector credentials and job artifacts.", on: posture.encryption_at_rest, pending: false },
                           { title: "Audit logging", desc: "Immutable trail for transfers, configuration, and API access.", on: posture.audit_logging, pending: false },
                           { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review.", on: posture.pii_detection, pending: false },
-                          { title: "IP allowlisting", desc: posture.ip_allowlist_enforced ? "Enforced when Host matches this tenant custom domain." : "Stored CIDR list. Not enforced on the default app host.", on: Boolean(posture.ip_allowlist_enforced), pending: false },
+                          ipAllowlistRow(posture),
                           { title: "Connector egress", desc: egressCopy, on: egress === "on", pending: egress === "unknown" },
-                          { title: `Session timeout (${posture.session_timeout_hours}h)`, desc: "Recorded only. Token TTL is DATAFLOW_TOKEN_TTL_SEC — this value does not sign sessions out.", on: false, pending: false },
-                          { title: "MFA required for admins", desc: "Recorded policy. Login MFA is not wired.", on: false, pending: false },
+                          sessionTimeoutRow(posture),
+                          mfaRow(),
                         ].map((item) => (
                           <div key={item.title} className="df2-settings-policy-row" data-testid={item.title === "Connector egress" ? "connector-egress-row" : undefined}>
                             <div>
@@ -1153,7 +1204,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-permission-notice" role="alert" data-testid="settings-storage-warning">
                     <DtIcon name="alert" size={16} />
                     <p>
-                      <strong>Saved keys will not survive a restart. </strong>
+                      <strong>Saved keys may need to be entered again. </strong>
                       {modelCapabilities.settings_storage.reason}
                     </p>
                   </div>
@@ -1197,14 +1248,14 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           >
                             {provider.available ? "Update credentials" : "Configure"}
                           </button>
-                          {provider.tier === "cloud" && provider.configured && (
+                          {providerHasTest(provider) && (
                             <button
                               type="button"
                               className="df2-btn df2-btn-sm"
                               disabled={aiTesting === provider.provider}
                               onClick={() => void testProviderKey(provider.provider)}
                             >
-                              {aiTesting === provider.provider ? "Testing…" : "Test key"}
+                              {aiTesting === provider.provider ? "Testing…" : providerTestLabel(provider.provider)}
                             </button>
                           )}
                           {provider.tier === "cloud" && provider.key_state && provider.key_state !== "none" && (
@@ -1353,6 +1404,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                               <div className="df2-api-key-card-meta-row">
                                 <span className="df2-api-key-card-meta">Prefix: <code>{key.prefix}…</code></span>
                                 <span className="df2-api-key-card-meta">Role: {key.role || "editor"}</span>
+                                {key.access_label && (
+                                  <span className="df2-api-key-card-meta" data-testid="api-key-access">
+                                    Access: {key.access_label}
+                                  </span>
+                                )}
                                 <span className="df2-api-key-card-meta">
                                   Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
                                 </span>
@@ -1526,15 +1582,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 </div>
                 <div className="df2-settings-section-body">
                   <PermissionNotice
-                    allowed={workspaceManage.allowed}
-                    reason={workspaceManage.reason}
-                    what="Audit retention requires workspace.manage."
+                    allowed={retentionAllowed}
+                    reason={retentionAllowed ? "" : retentionReason}
+                    what="Audit retention is a platform administrator action."
                   />
                   <div className="df2-settings-section-actions">
                     <Button
                       variant="secondary"
-                      disabled={!workspaceManage.allowed || retentionLoading}
-                      title={workspaceManage.reason || undefined}
+                      disabled={!retentionAllowed || retentionLoading}
+                      title={retentionAllowed ? undefined : retentionReason}
                       data-testid="audit-retention-preview"
                       onClick={() => void previewAuditRetention()}
                     >
@@ -1543,7 +1599,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <Button
                       variant="danger"
                       disabled={retentionPurgeDisabled}
-                      title={workspaceManage.reason || undefined}
+                      title={retentionAllowed ? undefined : retentionReason}
                       data-testid="audit-retention-purge"
                       onClick={() => void purgeAuditRetentionNow()}
                     >
@@ -1625,6 +1681,19 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <div className="df2-settings-field df2-settings-field--full"><label>Redirect URI</label><input className="df2-input" value={ssoDraft.redirect_uri ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, redirect_uri: e.target.value })} /></div>
                   </div>
                 )}
+                {ssoEditor !== "saml" && ssoConfigs?.[ssoEditor]?.client_secret && (
+                  <label className="df2-settings-field df2-mt-md" data-testid="sso-clear-secret">
+                    <span>
+                      <input id="sso-clear-secret" type="checkbox" checked={ssoClearSecret} onChange={(e) => setSsoClearSecret(e.target.checked)} />{" "}
+                      Remove the stored client secret
+                    </span>
+                  </label>
+                )}
+                <div className="df2-settings-field df2-settings-field--full df2-mt-md">
+                  <label htmlFor="sso-email-domains">Email domains</label>
+                  <input id="sso-email-domains" className="df2-input" placeholder="example.com, corp.example.com" value={ssoDomainsText} onChange={(e) => setSsoDomainsText(e.target.value)} />
+                  <p className="df2-label-hint">Sign-ins from these domains are sent to this provider. A domain belongs to one provider.</p>
+                </div>
               </div>
               <div className="df2-card-footer">
                 <button type="button" className="df2-btn df2-btn-ghost" onClick={() => void testSsoConfig(ssoEditor).then((r) => toast({ title: r.ok ? "SSO ready" : "SSO incomplete", message: r.message, tone: r.ok ? "success" : "warning" }))}>

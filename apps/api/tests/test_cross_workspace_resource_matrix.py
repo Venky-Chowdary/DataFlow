@@ -255,6 +255,20 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
         role="viewer",
         created_by="matrix",
     )
+    from services import benchmark_runs
+
+    bench_run_id = "b" * 32
+    monkeypatch.setitem(
+        benchmark_runs._RUNS,
+        bench_run_id,
+        {
+            "id": bench_run_id,
+            "rows": 1000,
+            "status": "completed",
+            "report": {"target": "B_BENCH_SENTINEL"},
+            "workspace_id": workspace_b,
+        },
+    )
     mongo = _MongoFixture(workspace_b)
     connectors_module = importlib.import_module("src.routers.connectors_router")
     monkeypatch.setattr(connectors_module, "get_mongodb_service", lambda: mongo)
@@ -286,7 +300,7 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "/api/v1/connectors/{connector_id}",
         } and "connector_id" in params:
             values = {"connector_id": "B_MONGO_CONNECTOR_ID"}
-        elif template.startswith("/api/v1/connectors/jobs/{job_id}"):
+        elif template.startswith(("/api/v1/connectors/jobs/{job_id}", "/api/v1/jobs/{job_id}")):
             values = {"job_id": "B_JOB_ID"}
         elif template.startswith("/api/v1/transfer/{job_id}/"):
             values = {"job_id": "B_JOB_ID", "signal_id": "B_SIGNAL_SENTINEL"}
@@ -294,7 +308,11 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             values = {"contract_id": contract.id}
         elif "{grant_id}" in template:
             values = {"grant_id": grant.id}
+        elif template == "/api/v1/workspace/benchmark/runs/{run_id}":
+            values = {"run_id": bench_run_id}
         elif template == "/api/v1/workspace/workspaces/{workspace_id}":
+            values = {"workspace_id": workspace_b}
+        elif template == "/api/v1/team/workspaces/{workspace_id}/break-glass/restore-admin":
             values = {"workspace_id": workspace_b}
         elif template.startswith("/api/v1/team/workspaces/{workspace_id}/members"):
             values = {
@@ -332,6 +350,8 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
                 body = {"target_version": 2}
             if template.endswith("/authorization"):
                 body = {"reason": "matrix probe", "scopes": ["run"]}
+            if template.endswith("/break-glass/restore-admin"):
+                body = {"email": "B_MEMBER_SENTINEL@example.com", "reason": "matrix probe"}
             if template.endswith("/members"):
                 body = {"email": "B_MEMBER_SENTINEL@example.com", "role": "viewer"}
         response = _request(editor, method, path, body=body)
@@ -348,6 +368,7 @@ def test_dynamic_cross_workspace_resource_id_routes(resource_matrix, monkeypatch
             "B_MONGO_HOST_SENTINEL",
             "B_JOB_SENTINEL",
             "B_MEMBER_SENTINEL",
+            "B_BENCH_SENTINEL",
         ):
             assert sentinel not in response.text, f"{method} {template} leaked {sentinel}"
         covered += 1

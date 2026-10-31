@@ -32,7 +32,7 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
             by_loaded[key] = by_loaded.get(key, 0) + 1
         job_counts = {"total": len(jobs), "by_status": by_loaded}
     schedules = _load_schedules(workspace_id)
-    contracts = _load_contracts(workspace_id)
+    contract_facts = _contract_facts(workspace_id)
 
     from services.connector_store import connector_health
 
@@ -55,7 +55,8 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
     parked = [s for s in schedules if s.get("needs_approval") or s.get("approval_finding")]
     next_runs = _future_schedules(enabled)
 
-    contract_total, contracts_unsigned_n = _contract_census(workspace_id, contracts)
+    contract_total = int(contract_facts.get("contract_count") or 0)
+    contracts_unsigned_n = int(contract_facts.get("contracts_unsigned") or 0)
 
     job_total = int(job_counts.get("total") or 0) or len(jobs)
     by_status = job_counts.get("by_status") or {}
@@ -105,8 +106,10 @@ def collect_workspace_briefing(*, workspace_id: str = "") -> dict[str, Any]:
         "parked_names": [str(s.get("name") or "") for s in parked[:6] if s.get("name")],
         "contract_count": contract_total,
         "contracts_unsigned": contracts_unsigned_n,
+        "contracts_by_status": dict(contract_facts.get("contracts_by_status") or {}),
+        "recent_contracts": list(contract_facts.get("recent_contracts") or []),
         "attention": attention,
-        "empty_workspace": not connectors and job_total == 0 and not schedules,
+        "empty_workspace": not connectors and job_total == 0 and not schedules and not contract_total,
     }
 
 
@@ -236,61 +239,19 @@ def _load_schedules(workspace_id: str) -> list[dict[str, Any]]:
         return []
 
 
-_CONTRACT_PAGE = 50
-_SIGNED_STATUS = {"SIGNED", "ACTIVE"}
+def _contract_facts(workspace_id: str) -> dict[str, Any]:
+    """Contract status from the one read model the Contracts page uses.
 
-
-def _contract_census(workspace_id: str, contracts: list[dict[str, Any]]) -> tuple[int, int]:
-    """Count the contract population. A full list page is not the population."""
-    unsigned = [
-        c
-        for c in contracts
-        if str(c.get("status") or "").upper() not in _SIGNED_STATUS
-    ]
-    if len(contracts) < _CONTRACT_PAGE or workspace_id:
-        return len(contracts), len(unsigned)
+    A 50-row page used to stand in for the population inside a workspace, so
+    the newest signed rows hid an older Draft and the briefing said "all
+    signed" while the page said Draft.
+    """
     try:
-        from services.contract_store import visible_contracts
+        from services.contract_read_model import briefing_summary
 
-        by_status = visible_contracts(limit=1)[1]
-    except Exception:
-        return len(contracts), len(unsigned)
-    total = sum(int(n) for n in by_status.values())
-    if total < len(contracts):
-        return len(contracts), len(unsigned)
-    unsigned_n = sum(
-        int(n)
-        for status, n in by_status.items()
-        if str(status).upper() not in _SIGNED_STATUS
-    )
-    return total, unsigned_n
+        return briefing_summary(workspace_id=workspace_id)
+    except Exception as exc:  # noqa: BLE001 - a briefing never invents a green
+        import logging
 
-
-def _load_contracts(workspace_id: str) -> list[dict[str, Any]]:
-    try:
-        from services.contract_store import contract_visible, get_contract_store
-
-        store = get_contract_store()
-        rows = store.list_contracts(limit=50) if hasattr(store, "list_contracts") else []
-        rows = [c for c in rows or [] if contract_visible(c)]
-        out = []
-        for c in rows or []:
-            d = c.to_dict() if hasattr(c, "to_dict") else {}
-            meta = getattr(c, "metadata", None) or d.get("metadata") or {}
-            cws = str(meta.get("workspace_id") or "")
-            if workspace_id and cws and cws != workspace_id:
-                continue
-            out.append(
-                {
-                    "id": d.get("id") or getattr(c, "id", ""),
-                    "name": d.get("name") or getattr(c, "name", ""),
-                    "status": str(
-                        getattr(getattr(c, "status", None), "value", None)
-                        or d.get("status")
-                        or ""
-                    ),
-                }
-            )
-        return out
-    except Exception:
-        return []
+        logging.getLogger(__name__).warning("Contract census unavailable: %s", exc, exc_info=exc)
+        return {}

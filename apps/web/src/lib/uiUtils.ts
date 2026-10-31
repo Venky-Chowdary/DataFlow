@@ -25,6 +25,22 @@ export function isJobTerminal(status: string | undefined): boolean {
   );
 }
 
+/**
+ * Parked on an operator decision or a fix: the job is not finished, but nothing
+ * runs until someone acts, so its clock must not keep counting. Mirrors the
+ * API's hold statuses (services/mongodb_service.py).
+ */
+export function isJobParked(status: string | undefined): boolean {
+  return (
+    status === "needs_approval"
+    || status === "needs_confirmation"
+    || status === "needs_review"
+    || status === "awaiting_approval"
+    || status === "paused"
+    || status === "blocked"
+  );
+}
+
 /** Human-readable label for a job status (never surface the raw enum). */
 export function jobStatusLabel(status: string): string {
   switch (status) {

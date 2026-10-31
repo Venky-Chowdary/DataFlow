@@ -1787,6 +1787,10 @@ def _write_destination_database(
             ddl_log.append(
                 f"{db_type.upper()} COLUMN {col} {ddl_type(db_type, schema.get(col, 'string'))}"
             )
+        if db_type == "postgresql" and cfg.get("vector_layout") == "table":
+            from services.pgvector_typed_embedding import augment_writer_kwargs
+
+            augment_writer_kwargs(common, cfg, getattr(endpoint, "extra", None))  # D209
         result = write_mapped_rows(
             **common,
             write_mode=write_mode,

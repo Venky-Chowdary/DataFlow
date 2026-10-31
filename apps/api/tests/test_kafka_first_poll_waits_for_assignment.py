@@ -59,15 +59,56 @@ def test_empty_polls_before_assignment_are_not_end_of_topic(monkeypatch):
     assert cursor and cursor["pending_offsets"]
 
 
-def test_assigned_empty_poll_still_ends_the_batch(monkeypatch):
+class _CaughtUpBridge(_JoiningBridge):
+    """Knows where the log ends: caught up only once its rows were read."""
+
+    def caught_up(self):
+        return self.rows == 0 or self.polls >= self.join_after
+
+
+def test_assigned_empty_poll_ends_the_batch_once_caught_up(monkeypatch):
     from connectors import kafka_reader
 
     monkeypatch.setattr(
-        kafka_reader, "KafkaDebeziumConsumer", lambda c: _JoiningBridge(c, join_after=1, rows=0)
+        kafka_reader, "KafkaDebeziumConsumer", lambda c: _CaughtUpBridge(c, join_after=1, rows=0)
     )
     batch, cursor = kafka_reader.read_topic_batch(cfg={"host": "b"}, topic="t", limit=50)
     assert len(batch.rows) == 0 and cursor is None
     assert _JoiningBridge.instances[-1].polls == 1
+
+
+class _AssignedBeforeFetchBridge(_CaughtUpBridge):
+    """D151: the join lands at the end of a poll; the next polls fetch nothing yet."""
+
+    def has_assignment(self):
+        return True
+
+
+def test_first_empty_poll_after_the_join_is_not_end_of_topic(monkeypatch):
+    """The join can land before any start offset is looked up or fetched (D151)."""
+    from connectors import kafka_reader
+
+    monkeypatch.setattr(
+        kafka_reader, "KafkaDebeziumConsumer",
+        lambda c: _AssignedBeforeFetchBridge(c, join_after=3, rows=4),
+    )
+    batch, cursor = kafka_reader.read_topic_batch(cfg={"host": "b"}, topic="t", limit=50)
+    assert len(batch.rows) == 4 and cursor and cursor["pending_offsets"]
+
+
+def test_assigned_but_nothing_arrives_fails_loudly(monkeypatch):
+    """Unread messages that never arrive are a broker problem, not an empty topic."""
+    import pytest
+
+    from connectors import kafka_reader
+
+    monkeypatch.setattr(kafka_reader, "_JOIN_WAIT_S", 0.0)
+    monkeypatch.setattr(
+        kafka_reader, "KafkaDebeziumConsumer",
+        lambda c: _AssignedBeforeFetchBridge(c, join_after=10**9, rows=4),
+    )
+    with pytest.raises(kafka_reader.KafkaFirstFetchTimeout, match="Nothing was written"):
+        kafka_reader.read_topic_batch(cfg={"host": "b"}, topic="t", limit=50)
 
 
 def test_join_wait_is_bounded(monkeypatch):

@@ -933,7 +933,9 @@ class FileParser:
             if isinstance(content, bytes):
                 # Strict decode — errors="replace" silently corrupts bytes into
                 # U+FFFD and looks like a successful faithful ingest.
-                encoding = opts.encoding or "utf-8"
+                from services.csv_profiler import detect_encoding
+
+                encoding = opts.encoding or detect_encoding(content)
                 try:
                     text = content.decode(encoding).lstrip("\ufeff")
                 except UnicodeDecodeError as exc:
@@ -1483,6 +1485,14 @@ class FileParser:
         ) or ""
         if isinstance(content, bytes):
             decoded = raw_bytes
+            if not declared_encoding and file_type in {"csv", "tsv"}:
+                # The same sniff the streaming writer reads the file with: a
+                # BOM, UTF-16 without one, UTF-8, else Windows-1252. Refusing
+                # here dropped a cp1252 / UTF-16 upload from the dataset index
+                # ("Uploaded dataset ... was not found") (round 10).
+                from services.csv_profiler import detect_encoding
+
+                declared_encoding = detect_encoding(decoded)
             try:
                 content = decoded.decode(declared_encoding or "utf-8")
             except UnicodeDecodeError as exc:

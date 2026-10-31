@@ -543,13 +543,11 @@ def stream_scd2_mirror_transfer(
                 )
 
             # Single SQL pass to reactivate present keys and delete missing
-            # keys. D38: default is the documented HARD delete; ``_deleted``
-            # tombstones exist only when the contract declares soft delete.
-            mirror_delete_mode = (
-                (contract.delete_mode if contract else "")
-                or (scd2_opts or {}).get("delete_mode")
-                or "hard"
-            )
+            # keys. Soft delete (``_deleted``) is the product contract; a hard
+            # DELETE only when the stream contract declares it (QA demo 1030).
+            from services.mirror_engine import resolve_mirror_delete_mode
+
+            mirror_delete_mode = resolve_mirror_delete_mode(contract, scd2_opts)
             if mirror_delete_mode not in {"hard", "soft"}:
                 raise ValueError(
                     f"Unknown mirror delete_mode {mirror_delete_mode!r} — "

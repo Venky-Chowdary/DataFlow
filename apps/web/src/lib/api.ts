@@ -839,19 +839,6 @@ export async function transformRecipeWhereUsed(id: string): Promise<{
   return res.json();
 }
 
-export async function syncJobNow(
-  jobId: string,
-  mode: "delta" | "full" = "delta",
-): Promise<{ job_id?: string }> {
-  const res = await apiFetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/sync`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode }),
-  });
-  if (!res.ok) throw await apiErrorFrom(res, "Sync now is not available on this API yet");
-  return res.json();
-}
-
 export async function syncScheduleNow(
   id: string,
   mode: "delta" | "full" = "delta",
@@ -1193,9 +1180,9 @@ export interface ModelCapabilities {
     available: boolean;
     status: string;
     blocked_reason?: string;
-    key_state?: "ready" | "none" | "disabled" | "undecryptable";
+    key_state?: "ready" | "none" | "disabled" | "undecryptable" | "unreachable";
   }[];
-  settings_storage?: { path: string; persistent: boolean; reason: string };
+  settings_storage?: { path?: string; persistent: boolean; reason: string };
   guarantees: string[];
 }
 
@@ -1491,7 +1478,7 @@ export async function fetchJobs(): Promise<JobHistory> {
     total?: number;
     status_counts?: Record<string, number>;
   }>(
-    [`${API_BASE}/connectors/jobs`, `${API_BASE}/jobs`],
+    [`${API_BASE}/connectors/jobs`],
     "Failed to load jobs",
     { timeoutMs: 45_000 },
   );
@@ -1502,7 +1489,7 @@ export type JobProgress = import("./types").JobProgress;
 
 export async function fetchJob(jobId: string): Promise<JobProgress> {
   return requestJson<JobProgress>(
-    [`${API_BASE}/connectors/jobs/${jobId}`, `${API_BASE}/jobs/${jobId}`],
+    [`${API_BASE}/connectors/jobs/${jobId}`],
     "Job not found"
   );
 }
@@ -1588,10 +1575,7 @@ export async function executeJobRollback(
 }
 
 export async function renameJob(jobId: string, name: string): Promise<JobProgress> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}`,
-    `${API_BASE}/jobs/${jobId}`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1637,10 +1621,7 @@ export async function retryJob(
   options: { force?: boolean } = {},
 ): Promise<{ job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean }> {
   const query = options.force ? "?force=true" : "";
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/retry${query}`,
-    `${API_BASE}/jobs/${jobId}/retry${query}`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/retry${query}`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1724,10 +1705,7 @@ export async function resumeJob(jobId: string): Promise<{
   restarted?: boolean;
   message?: string;
 }> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/resume`,
-    `${API_BASE}/jobs/${jobId}/resume`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/resume`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1750,10 +1728,7 @@ export async function resumeJob(jobId: string): Promise<{
 }
 
 export async function cancelJob(jobId: string): Promise<{ success: boolean; job_id: string; status: string; message?: string }> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/cancel`,
-    `${API_BASE}/jobs/${jobId}/cancel`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/cancel`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -3493,6 +3468,18 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   return data.logs ?? [];
 }
 
+export async function purgeJobRetention(body: { dry_run: boolean; confirm_token?: string }): Promise<{
+  would_remove?: number;
+  removed?: number;
+  cutoff: string;
+  retention_days: number;
+  confirm_token: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/jobs/retention/purge`, { method: "POST", body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not purge old jobs"));
+  return res.json();
+}
+
 export async function fetchWorkspaceSettings(): Promise<{
   org_name: string;
   timezone: string;
@@ -3541,6 +3528,8 @@ export type EffectiveIdentity = {
   name: string;
   platform_role: string;
   workspace_id: string;
+  /** The API's landing workspace for this account: last used, else its own (D218). */
+  default_workspace_id?: string;
   workspace_role: string;
   effective_role: string;
   permissions: string[];
@@ -3573,6 +3562,8 @@ export async function fetchAuditEvents(limit = 50, level?: string): Promise<Arra
   id: string;
   time: string;
   actor: string;
+  /** Name + masked id for an API key / service account (R7). */
+  actor_display?: string;
   action: string;
   resource: string;
   level: string;
@@ -3601,6 +3592,8 @@ export type AuditChainFinding = {
   index: number;
   event_id: string;
   detail: string;
+  cause?: string;
+  workspace_id?: string | null;
 };
 
 export type AuditChainVerification = {
@@ -3611,6 +3604,7 @@ export type AuditChainVerification = {
   retention_checkpoints: Array<{ removed_count: number; at: string }>;
   honesty: string;
   withheld_findings?: number;
+  reanchored?: Array<{ event_id: string; kind: string; cause?: string; reanchored_at?: string; reanchored_by?: string }>;
   workspace_id?: string | null;
   scope?: "workspace" | "platform";
 };
@@ -3637,6 +3631,10 @@ export type SsoConfig = {
   redirect_uri?: string;
   scopes?: string;
   tenant_id?: string;
+  /** Sign-ins from these domains route to this IdP (`/auth/sso/route`). */
+  email_domains?: string[];
+  /** Write-only: remove the stored client secret (blank keeps it). */
+  clear_client_secret?: boolean;
 };
 
 export function resolveApiBase(): string {
@@ -3726,6 +3724,8 @@ export async function testAiProviderKey(provider: string): Promise<{
   ok: boolean;
   provider: string;
   error: string;
+  base_url?: string;
+  models?: string[];
   capabilities: ModelCapabilities;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}/test`, { method: "POST" });
@@ -3774,6 +3774,9 @@ export type WorkspaceApiKey = {
   expires_at?: string | null;
   lifetime?: WorkspaceApiKeyLifetime | string;
   expired?: boolean;
+  /** What the key can reach, computed by the API (D219). */
+  access?: "platform" | "workspace" | string;
+  access_label?: string;
 };
 
 export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
@@ -3926,11 +3929,22 @@ export type PlatformUser = {
   workspaces?: { workspace_id: string; role: WorkspaceRole }[];
 };
 
-export async function fetchWorkspaces(): Promise<{ workspaces: Workspace[]; platformAdmin: boolean; actor: string }> {
+export async function fetchWorkspaces(): Promise<{
+  workspaces: Workspace[];
+  platformAdmin: boolean;
+  actor: string;
+  /** Where this account lands when the browser names no workspace (D218). */
+  defaultWorkspaceId: string;
+}> {
   const res = await apiFetch(`${API_BASE}/team/workspaces`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
   const data = await res.json();
-  return { workspaces: data.workspaces ?? [], platformAdmin: !!data.platform_admin, actor: data.actor ?? "" };
+  return {
+    workspaces: data.workspaces ?? [],
+    platformAdmin: !!data.platform_admin,
+    actor: data.actor ?? "",
+    defaultWorkspaceId: typeof data.default_workspace_id === "string" ? data.default_workspace_id : "",
+  };
 }
 
 export async function createWorkspace(name: string): Promise<Workspace> {
@@ -4471,6 +4485,16 @@ export interface NotificationChannel {
   created_at: string;
   updated_at: string;
   created_by: string;
+  /** Webhook channels: a signing secret exists (never returned on reads). */
+  signing_secret_set?: boolean;
+  /** Present only in the create / rotate response — shown once. */
+  signing_secret?: string;
+}
+
+export async function rotateNotificationSigningSecret(id: string): Promise<NotificationChannel> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}/signing-secret/rotate`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not rotate the signing secret"));
+  return res.json();
 }
 
 export async function fetchNotificationChannels(workspaceId?: string): Promise<{ channels: NotificationChannel[] }> {
@@ -4513,6 +4537,7 @@ export type Tenant = {
   security_contact_email: string;
   mfa_required: boolean;
   session_timeout_hours: number;
+  enforce_session_timeout?: boolean;
   ip_allowlist: string[];
   egress_allowlist: string[];
   created_at: string;
@@ -4541,6 +4566,8 @@ export type BenchmarkReport = {
   destination_summary: Record<string, unknown>;
   error: string;
   timestamp: string;
+  peak_memory_basis?: string;
+  startup_seconds?: number;
   competitors: {
     product: string;
     typical_rps: number;
@@ -4548,7 +4575,20 @@ export type BenchmarkReport = {
     resume_from_checkpoint: boolean;
     observed_max_rows: number;
     notes: string;
+    comparison?: { verdict: "faster" | "slower" | "similar" | "unknown"; ratio: number | null; label: string };
   }[];
+};
+
+export type BenchmarkRun = {
+  id: string;
+  rows: number;
+  status: "queued" | "running" | "succeeded" | "failed";
+  phase: string;
+  progress_pct: number;
+  rows_done: number;
+  elapsed_seconds: number;
+  error: string;
+  report: BenchmarkReport | null;
 };
 
 export type SecurityPosture = {
@@ -4576,6 +4616,12 @@ export type SecurityPosture = {
   mfa_enforced?: boolean;
   session_timeout_hours: number;
   session_timeout_enforced?: boolean;
+  /** Exactly what each control enforces (round 8). */
+  enforcement?: {
+    ip_allowlist?: { enforced?: boolean; missing?: string[]; scope?: string };
+    session_timeout?: { enforced?: boolean; hours?: number | null };
+    mfa?: { enforced?: boolean; status?: string };
+  };
   byok_encrypts_secrets?: boolean;
   tls_version: string;
   compliance: Array<{ framework: string; status: string; evidence: string }>;
@@ -4861,6 +4907,29 @@ export async function runBenchmark(rows = 100_000): Promise<BenchmarkReport> {
   return res.json();
 }
 
+/** Start the Scale benchmark as a background run (returns at once). */
+export async function startBenchmarkRun(rows = 100_000): Promise<BenchmarkRun> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ rows }),
+  });
+  if (!res.ok) throw new Error(await parseApiError(res, "Benchmark failed to start"));
+  return (await res.json()).run;
+}
+
+export async function fetchBenchmarkRun(id: string): Promise<BenchmarkRun> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs/${encodeURIComponent(id)}`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not read the benchmark run"));
+  return (await res.json()).run;
+}
+
+export async function downloadBenchmarkRunReport(id: string): Promise<Blob> {
+  const res = await apiFetch(`${API_BASE}/workspace/benchmark/runs/${encodeURIComponent(id)}?format=md`);
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not download benchmark report"));
+  return res.blob();
+}
+
 export async function downloadBenchmarkReport(rows = 100_000): Promise<Blob> {
   const res = await apiFetch(`${API_BASE}/workspace/benchmark`, {
     method: "POST",
@@ -4889,6 +4958,10 @@ export interface DataContractSummary {
   updated_at: string;
   metadata: Record<string, unknown>;
   preflight_gates?: Record<string, unknown>[];
+  /** Server read model: "Signed v3" — the list, drawer and Pilot all show it. */
+  status_label?: string;
+  signed_version?: number | null;
+  signed_at?: string;
 }
 
 export interface ContractBreaker {

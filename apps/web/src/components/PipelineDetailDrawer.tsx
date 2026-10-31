@@ -5,6 +5,7 @@ import { Button } from "./ui/Button";
 import { Drawer } from "./ui/Drawer";
 import { FilterTabs } from "./ui/FilterTabs";
 import { ScheduleRunHistory } from "./schedules/ScheduleRunHistory";
+import { historyRefreshKey } from "../lib/scheduleRunStatus";
 import {
   fetchContractBreaker,
   fetchJob,
@@ -763,7 +764,12 @@ export function PipelineDetailDrawer({
               <h3><DtIcon name="jobs" size={14} /> Run history</h3>
               <span className="df2-drawer-count">{sched.run_count}</span>
             </div>
-            <ScheduleRunHistory scheduleId={sched.id} onOpenJob={onOpenJob} onEditMapping={onEdit} />
+            <ScheduleRunHistory
+              scheduleId={sched.id}
+              refreshKey={historyRefreshKey(sched)}
+              onOpenJob={onOpenJob}
+              onEditMapping={onEdit}
+            />
           </section>
         )}
 

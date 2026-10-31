@@ -855,6 +855,7 @@ def plan_transfer(
     shared_destination_acknowledged: bool = False,
     ddl_acknowledgement: dict[str, Any] | None = None,
     vector_layout: str = "",
+    delete_mode: str = "",
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -1241,6 +1242,11 @@ def plan_transfer(
     )
     if identity_error:
         return _tool_result(tool, success=False, error=identity_error)
+    from services.mirror_delete_notice import declare_contract_delete_mode
+
+    contracts, delete_mode_error = declare_contract_delete_mode(contracts, mode, delete_mode)
+    if delete_mode_error:
+        return _tool_result(tool, success=False, error=delete_mode_error)
     row_rules["stream_contracts"] = contracts
     if contracts and not row_rules.get("upsert_key") and contracts[0].get("primary_key"):
         row_rules["upsert_key"] = _primary_key_csv(contracts[0].get("primary_key"))
@@ -1345,7 +1351,8 @@ def plan_transfer(
     )
 
     contract = plan_destination_contract(
-        pgvector_layout, dst_conn, mappings, {r["name"]: r["inferred_type"] for r in src_rows}
+        pgvector_layout, dst_conn, mappings, {r["name"]: r["inferred_type"] for r in src_rows},
+        dst_info=dst_info,
     )
     if contract:
         preflight = attach_contract_to_preflight(preflight, contract)
@@ -1388,6 +1395,8 @@ def plan_transfer(
             },
             # D209: the physical shape the job creates, column by column.
             **({"destination_contract": contract} if contract else {}),
+            # Mirror: what happens to destination rows whose key left the source.
+            **({"mirror_delete": preflight["mirror_delete"]} if preflight.get("mirror_delete") else {}),
             # Display lists below are truncated for readability; execution must
             # use this untouched list or wide tables would lose columns.
             "engine_mappings": mappings,
@@ -2198,6 +2207,9 @@ def _run_preflight(
             for b in (result.get("blockers") or [])
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
+        **({"mirror_delete": result["mirror_delete"]} if result.get("mirror_delete") else {}),
+        # A guessed file encoding travels so staging can show it (round 10).
+        **({"source_encoding": result["source_encoding"]} if result.get("source_encoding") else {}),
         "proof_bundle": {
             **({"transfer_decision": decision} if isinstance(decision, dict) else {}),
             **(
@@ -2562,6 +2574,7 @@ def start_transfer(
     shared_destination_acknowledged: bool = False,
     ddl_acknowledgement: dict[str, Any] | None = None,
     vector_layout: str = "",
+    delete_mode: str = "",
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -2597,6 +2610,7 @@ def start_transfer(
         schema_drift_acknowledged=schema_drift_acknowledged,
         ddl_acknowledgement=ddl_acknowledgement,
         vector_layout=vector_layout,
+        delete_mode=delete_mode,
         # The plan evaluates the bound contract against this route (QA MX3-18).
         contract_id=contract_id,
         require_signed_contract=require_signed_contract,

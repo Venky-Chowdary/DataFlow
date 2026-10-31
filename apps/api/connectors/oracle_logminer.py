@@ -1347,18 +1347,26 @@ class OracleLogMinerCdc:
         from services.cdc_multi_table import normalize_table_list, tables_digest
         from services.cdc_identity import require_cdc_primary_keys_map
 
+        from services.cdc_table_name import bare_table_keys, split_cdc_tables
+
         self.cfg = cfg
-        raw_tables = normalize_table_list(table)
+        default_schema = schema or cfg.get("schema") or cfg.get("username") or ""
+        # D223: 'APP.ORDERS' is table ORDERS in schema APP, joined once.
+        resolved_schema, raw_tables = split_cdc_tables(
+            normalize_table_list(table), default_schema, dialect="oracle"
+        )
         if not raw_tables:
             raise ValueError("Oracle LogMiner CDC requires at least one table")
         self.tables = [t.upper() for t in raw_tables]
         self.table = self.tables[0]
-        self.schema = (schema or cfg.get("schema") or cfg.get("username") or "").upper()
+        self.schema = (resolved_schema or "").upper()
         # Normalize caller keys to upper for Oracle identifiers.
         normalized_pks: dict[str, Any] | None = None
         if primary_keys:
             normalized_pks = {
-                str(k).upper(): str(v).upper() for k, v in primary_keys.items() if k and v
+                str(k).upper(): str(v).upper()
+                for k, v in (bare_table_keys(primary_keys, default_schema) or {}).items()
+                if k and v
             }
         mapped = require_cdc_primary_keys_map(
             self.tables,

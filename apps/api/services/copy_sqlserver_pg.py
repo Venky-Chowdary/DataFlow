@@ -49,6 +49,8 @@ from services.copy_sqlserver_sqlserver import (
     _table_ref as _ss_table_ref,
 )
 
+from services.copy_range_proof import range_keys_match  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 _FETCH_BATCH = 8192
@@ -327,14 +329,23 @@ def copy_sqlserver_to_postgres(
                 for part in partitions:
                     already = _pg_range_count(dst_cur, dest_ref, dest_ident, part)
                     expected = int(part["source_count"])
-                    if already == expected:
+                    # A count is not identity: skip only a range that holds this
+                    # source range's keys (append of N new keys into N rows).
+                    if already == expected and range_keys_match(
+                        src_dialect="sqlserver", src_cur=src_cur, src_ref=source_ref, src_ident=src_ident,
+                        dst_dialect="postgresql", dst_cur=dst_cur, dst_ref=dest_ref, dst_ident=dest_ident,
+                        part=part,
+                    ):
                         part["action"] = "skip"
                         part["dest_count"] = already
                     elif already == 0:
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
-                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
+                        occupied_pk_range_action(
+                            already, expected, replace_destination=replace_destination,
+                            keys_proven=False,
+                        )
                         pred = pk_range_predicate(
                             dest_ident,
                             _pg_quoted_literal(dst_cur, part["lo"])

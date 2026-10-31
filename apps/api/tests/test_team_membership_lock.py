@@ -19,6 +19,18 @@ def file_store(tmp_path, monkeypatch):
     monkeypatch.setattr(team_store, "mongo_database", lambda: None)
     monkeypatch.setattr(team_store, "_store_path", lambda: tmp_path / "teams.json")
     monkeypatch.setattr(team_store, "data_dir", lambda: tmp_path, raising=False)
+    _every_admin_can_sign_in(monkeypatch)
+
+
+def _every_admin_can_sign_in(monkeypatch):
+    """These races are about serialization; both admins are real logins here.
+
+    Who counts as a spare admin (only one who can sign in) is covered by
+    tests/test_r8_team_rbac_principal_e2e.py.
+    """
+    from services import sign_in_capability
+
+    monkeypatch.setattr(sign_in_capability, "can_sign_in", lambda _email: True)
 
 
 def _run_last_admin_race(monkeypatch, *, change: str) -> tuple[list[str], int]:
@@ -153,6 +165,7 @@ def test_live_mongo_serializes_concurrent_last_admin_removals(monkeypatch):
     db = client[f"dataflow_team_lock_it_{uuid.uuid4().hex}"]
     monkeypatch.setattr(team_store, "mongo_database", lambda: db)
     monkeypatch.setattr(team_store, "data_dir", lambda: Path("/tmp"), raising=False)
+    _every_admin_can_sign_in(monkeypatch)
     team_store._PREPARED_DATABASES.discard(db.name)
     try:
         results, remaining_admins = _run_last_admin_race(monkeypatch, change="remove")

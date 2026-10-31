@@ -50,6 +50,8 @@ from services.copy_sqlserver_mysql import (
     _select_into_mysql_load_data,
 )
 
+from services.copy_range_proof import range_keys_match  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 
@@ -173,14 +175,23 @@ def copy_oracle_to_mysql(
                 for part in partitions:
                     already = _mysql_range_count(dst_cur, dest_q, dest_ident, part)
                     expected = int(part["source_count"])
-                    if already == expected:
+                    # A count is not identity: skip only a range that holds this
+                    # source range's keys (append of N new keys into N rows).
+                    if already == expected and range_keys_match(
+                        src_dialect="oracle", src_cur=src_cur, src_ref=source_ref, src_ident=src_ident,
+                        dst_dialect="mysql", dst_cur=dst_cur, dst_ref=dest_q, dst_ident=dest_ident,
+                        part=part,
+                    ):
                         part["action"] = "skip"
                         part["dest_count"] = already
                     elif already == 0:
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
-                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
+                        occupied_pk_range_action(
+                            already, expected, replace_destination=replace_destination,
+                            keys_proven=False,
+                        )
                         _delete_mysql_range(dst_cur, dest_q, dest_ident, part)
                         part["action"] = "reload"
                         to_copy.append(part)

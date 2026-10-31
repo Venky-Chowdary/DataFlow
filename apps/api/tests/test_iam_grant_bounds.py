@@ -57,6 +57,13 @@ def grant_app(monkeypatch, tmp_path):
         scopes=["iam.manage", "workspace.manage"],
     )
     workspace = store.create_workspace(name="Grant bounds", created_by="admin@example.test")
+    # Every key's minter administers the workspace the keys act in (round 8:
+    # a key never does more than its creator may, and only manages keys of
+    # its own workspace).
+    for creator in ("scoped@example.test", "read@example.test", "workspace@example.test"):
+        store._write_membership(
+            store.Membership(workspace_id=workspace.id, email=creator, role="admin")
+        )
 
     with TestClient(app) as client:
         yield {
@@ -100,7 +107,9 @@ def _assert_denied(response, context, *, route: str, missing: set[str]):
 def test_scoped_iam_key_cannot_rotate_an_unscoped_admin_key(grant_app):
     client = grant_app["client"]
     store = grant_app["integrations_store"]
-    target = store.create_api_key("Target admin", "target@example.test", role="admin")
+    target = store.create_api_key(
+        "Target admin", "target@example.test", role="admin", workspace_id=grant_app["workspace_id"]
+    )
     response = client.post(
         f"/api/v1/iam/api-keys/{target['id']}/rotate",
         headers=_auth(grant_app["scoped_iam"]),
@@ -196,7 +205,9 @@ def test_full_admin_retains_all_grant_routes(grant_app):
     client = grant_app["client"]
     admin = _auth(grant_app["admin"])
     store = grant_app["integrations_store"]
-    target = store.create_api_key("Target admin", "target@example.test", role="admin")
+    target = store.create_api_key(
+        "Target admin", "target@example.test", role="admin", workspace_id=grant_app["workspace_id"]
+    )
 
     rotated = client.post(
         f"/api/v1/iam/api-keys/{target['id']}/rotate", headers=admin, json={}

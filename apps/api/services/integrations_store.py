@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import logging
 import secrets
 import threading
@@ -31,12 +32,31 @@ API_KEY_LIFETIMES: dict[str, int | None] = {
     "never": None,
 }
 DEFAULT_API_KEY_LIFETIME = "90d"
+#: Every prefix a workspace API key may carry. ``dfk_`` keys stay valid forever;
+#: new keys take ``dwk_`` when the brand flag is on (services.brand).
+API_KEY_PREFIXES = ("dfk_", "dwk_")
+
+
+def is_workspace_api_key(token: str) -> bool:
+    return bool(token) and token.startswith(API_KEY_PREFIXES)
+
+
+def _mint_raw_key(key_id: str) -> str:
+    from services import brand
+
+    prefix = brand.name_for_new("api_key_prefix")
+    if prefix != brand.artifact("api_key_prefix").legacy:
+        brand.audit_new_name("api_key_prefix", prefix, f"api_key:{key_id}")
+    return f"{prefix}{secrets.token_urlsafe(32)}"
 
 _SSO_TYPES = ("saml", "oidc", "azure_ad")
 _CLOUD_PROVIDERS = ("openai", "anthropic")
 _MASK = "••••••••"
 _PILOT_ENGINES = ("auto", "local", "hybrid", "cloud")
 _API_KEY_ROTATION_LOCK = threading.Lock()
+#: Longest grace an operator may ask for when rotating a key. The old key is
+#: revoked at once unless a grace is asked for explicitly.
+MAX_ROTATION_GRACE_SECONDS = 3600
 
 
 def _now() -> str:
@@ -96,14 +116,27 @@ def _empty_store() -> dict[str, Any]:
     }
 
 
-def _load_raw() -> dict[str, Any]:
+def _read_file() -> dict[str, Any] | None:
     if not STORE_PATH.exists():
-        return _empty_store()
+        return None
     try:
         raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("invalid store")
     except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _load_raw() -> dict[str, Any]:
+    from services.integrations_persistence import load_sections, save_sections
+
+    file_raw = _read_file()
+    durable = load_sections()
+    if durable is None and file_raw is not None:
+        # Heal: a settings file written before the database held them (or while
+        # it was down) is copied up once, so the next restart keeps it.
+        save_sections(file_raw)
+    raw = {**(file_raw or {}), **(durable or {})}
+    if not raw:
         return _empty_store()
 
     sso = _default_sso()
@@ -142,6 +175,10 @@ def _load_raw() -> dict[str, Any]:
 
 
 def _save(data: dict[str, Any]) -> None:
+    from services.integrations_persistence import save_sections
+
+    # Database first: it is what survives a restart; the file is a local cache.
+    save_sections(json.loads(json.dumps(data, default=json_default)))
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
 
@@ -186,10 +223,12 @@ def apply_integrations_to_env() -> None:
             os.environ[model_env_key] = str(model)
 
     ollama = data["ai_providers"].get("ollama", {})
-    if ollama.get("base_url") and not os.environ.get("OLLAMA_BASE_URL"):
-        os.environ["OLLAMA_BASE_URL"] = str(ollama["base_url"])
-    if ollama.get("model") and not os.environ.get("OLLAMA_MODEL"):
-        os.environ["OLLAMA_MODEL"] = str(ollama["model"])
+    # A value this process hydrated follows the store: otherwise the first
+    # saved base URL stuck in the environment and a later change never applied.
+    for env_key, field in (("OLLAMA_BASE_URL", "base_url"), ("OLLAMA_MODEL", "model")):
+        if ollama.get(field) and (not os.environ.get(env_key) or env_key in _HYDRATED_ENV):
+            os.environ[env_key] = str(ollama[field])
+            _HYDRATED_ENV.add(env_key)
 
 
 # ── SSO ──────────────────────────────────────────────────────────────────────
@@ -242,12 +281,70 @@ def get_sso_configs() -> dict[str, dict[str, Any]]:
     return out
 
 
+class SsoConfigRefused(ValueError):
+    """An SSO save that would leave an enabled provider unusable or ambiguous."""
+
+    def __init__(self, message: str, *, missing: list[str] | None = None):
+        super().__init__(message)
+        self.missing = list(missing or [])
+
+
+_SSO_REQUIRED = {
+    "saml": ("entity_id", "sso_url", "x509_cert"),
+    "oidc": ("issuer", "client_id", "client_secret", "redirect_uri"),
+    "azure_ad": ("tenant_id", "client_id", "client_secret", "redirect_uri"),
+}
+_DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$")
+
+
+def normalize_email_domains(raw: Any) -> list[str]:
+    """Lower-cased, de-duplicated domains; a leading ``@`` is accepted.
+
+    Raises ``SsoConfigRefused`` naming the first value that is not a domain, so
+    a typo is refused instead of silently never routing anyone.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [part for part in re.split(r"[\s,]+", raw) if part]
+    if not isinstance(raw, list):
+        raise SsoConfigRefused("email_domains must be a list of domains")
+    out: list[str] = []
+    for item in raw:
+        domain = str(item or "").strip().lower().lstrip("@").rstrip(".")
+        if not domain:
+            continue
+        if not _DOMAIN_RE.match(domain):
+            raise SsoConfigRefused(f"{str(item)!r} is not an email domain (expected e.g. example.com)")
+        if domain not in out:
+            out.append(domain)
+    return out
+
+
+def _sso_missing(sso_type: str, cfg: dict[str, Any]) -> list[str]:
+    return [f for f in _SSO_REQUIRED.get(sso_type, ()) if not str(cfg.get(f, "") or "").strip()]
+
+
 def update_sso_config(sso_type: str, patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``patch`` into the stored provider config.
+
+    * ``client_secret`` blank (or the mask) keeps the stored secret;
+      ``clear_client_secret: true`` removes it explicitly.
+    * ``email_domains`` is normalized and must not be claimed by another
+      provider (routing would be ambiguous).
+    * The merged config may be *enabled* only when every required field is
+      set; a disabled draft may be saved incomplete. Nothing is written when
+      the save is refused.
+    """
     if sso_type not in _SSO_TYPES:
         raise ValueError(f"Unknown SSO type: {sso_type}")
     data = _load_raw()
-    cfg = data["sso"][sso_type]
+    cfg = dict(data["sso"][sso_type])
     existing_secret = cfg.get("client_secret", "")
+    patch = dict(patch)
+    clear_secret = bool(patch.pop("clear_client_secret", False))
+    if clear_secret and "client_secret" not in cfg:
+        raise SsoConfigRefused(f"{sso_type} has no client secret to clear")
 
     for key, value in patch.items():
         if key == "client_secret":
@@ -255,8 +352,31 @@ def update_sso_config(sso_type: str, patch: dict[str, Any]) -> dict[str, Any]:
         elif key == "x509_cert":
             if value:
                 cfg["x509_cert"] = str(value)
+        elif key == "email_domains":
+            cfg["email_domains"] = normalize_email_domains(value)
         elif key in cfg or key == "enabled":
             cfg[key] = value
+    if clear_secret:
+        cfg["client_secret"] = ""
+
+    for other in _SSO_TYPES:
+        if other == sso_type:
+            continue
+        taken = set(cfg.get("email_domains") or []) & {
+            str(d).lower() for d in (data["sso"][other].get("email_domains") or [])
+        }
+        if taken:
+            raise SsoConfigRefused(
+                f"{sorted(taken)[0]} is already routed to {other}; a domain can belong to one provider"
+            )
+
+    missing = _sso_missing(sso_type, cfg)
+    if cfg.get("enabled") and missing:
+        raise SsoConfigRefused(
+            f"Cannot enable {sso_type}: missing {', '.join(missing)}. "
+            "Save it disabled as a draft, or fill these in first.",
+            missing=missing,
+        )
 
     data["sso"][sso_type] = cfg
     data["updated_at"] = _now()
@@ -269,18 +389,7 @@ def validate_sso_config(sso_type: str) -> dict[str, Any]:
     cfg = data["sso"][sso_type]
     missing: list[str] = []
 
-    if sso_type == "saml":
-        for field in ("entity_id", "sso_url", "x509_cert"):
-            if not str(cfg.get(field, "")).strip():
-                missing.append(field)
-    elif sso_type == "oidc":
-        for field in ("issuer", "client_id", "client_secret", "redirect_uri"):
-            if not str(cfg.get(field, "")).strip():
-                missing.append(field)
-    elif sso_type == "azure_ad":
-        for field in ("tenant_id", "client_id", "client_secret", "redirect_uri"):
-            if not str(cfg.get(field, "")).strip():
-                missing.append(field)
+    missing.extend(_sso_missing(sso_type, cfg))
 
     enabled = bool(cfg.get("enabled"))
     ready = len(missing) == 0
@@ -320,28 +429,39 @@ def get_sso_config_raw(sso_type: str) -> dict[str, Any]:
 
 
 def storage_status() -> dict[str, Any]:
-    """Where Settings are written and whether that location survives a restart.
+    """Whether saved Settings survive a restart, in words a user can act on.
 
-    A container without a mounted volume writes to its own filesystem, so
-    every redeploy or restart reverts the store to whatever the image shipped
-    with. Reporting that is the difference between "the key vanished" and
-    "the key was never going to stay".
+    Durable when the control-plane database holds them. Otherwise a container
+    without a mounted volume loses them on every deploy; the operator-facing
+    detail (path, volume) goes to the log, never to the Settings screen.
     """
     import os
 
-    path = STORE_PATH
+    from services.integrations_persistence import durable
+
+    if durable():
+        return {"persistent": True, "reason": ""}
     persistent = True
-    reason = ""
+    path = STORE_PATH
     if is_railway():
         root = path.parent.parent if path.parent.name == "data" else path.parent
-        if not (os.path.ismount(root) or os.path.ismount(path.parent)):
-            persistent = False
-            reason = (
-                f"{path.parent} is not a mounted volume on this Railway service, so "
-                "saved settings are lost on every deploy or restart. Attach a volume at "
-                f"{root} (or set DATAFLOW_DATA_DIR to a mounted path)."
+        persistent = bool(os.path.ismount(root) or os.path.ismount(path.parent))
+        if not persistent:
+            logger.warning(
+                "Settings store %s is on an ephemeral disk and no settings database "
+                "is configured; saved keys are lost on restart (mount a volume at %s "
+                "or configure MongoDB).", path, root,
             )
-    return {"path": str(path), "persistent": persistent, "reason": reason}
+    return {
+        "persistent": persistent,
+        "reason": (
+            ""
+            if persistent
+            else "Saved model keys can't be stored durably on this deployment yet, so "
+            "they may need to be entered again after an update. Ask your administrator "
+            "to connect the settings database."
+        ),
+    }
 
 
 def provider_key_state(provider: str) -> str:
@@ -354,7 +474,9 @@ def provider_key_state(provider: str) -> str:
     import os
 
     if provider == "ollama":
-        return "ready"
+        if not ai_provider_enabled("ollama"):
+            return "disabled"
+        return "ready" if ollama_status()["reachable"] else "unreachable"
     if not ai_provider_enabled(provider):
         return "disabled"
     env_val = os.environ.get({"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider, ""), "")
@@ -378,8 +500,15 @@ def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
         key = row.get("api_key", "")
         # Configured means a key we can actually use (env or store), not merely
         # a byte string sitting in the file.
-        row["configured"] = bool(resolve_provider_api_key(provider)) or provider == "ollama"
         row["key_state"] = provider_key_state(provider)
+        if provider == "ollama":
+            # Ollama has no key: it is usable only when its server answers.
+            status = ollama_status()
+            row["configured"] = row["key_state"] == "ready"
+            row["reachable"] = status["reachable"]
+            row["status_detail"] = status["detail"]
+        else:
+            row["configured"] = bool(resolve_provider_api_key(provider))
         row["api_key"] = _mask_secret(key) if key else ""
         out[provider] = row
     return out
@@ -402,6 +531,7 @@ def update_ai_provider(provider: str, patch: dict[str, Any]) -> dict[str, Any]:
     data["updated_at"] = _now()
     _save(data)
     apply_integrations_to_env()
+    _OLLAMA_PROBE.clear()
     return get_ai_provider_configs()[provider]
 
 
@@ -510,6 +640,45 @@ def resolve_provider_model(provider: str, default: str) -> str:
         return os.environ[env_key]
     data = _load_raw()
     return str(data["ai_providers"].get(provider, {}).get("model") or default)
+
+
+_OLLAMA_PROBE_TTL_SEC = 10.0
+_OLLAMA_PROBE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def ollama_status(*, fresh: bool = False) -> dict[str, Any]:
+    """Whether the configured Ollama server answers, and which models it has.
+
+    ``GET {base_url}/api/tags`` with a short timeout. Cached for a few seconds
+    per base URL so a Settings page refresh does not stall on a dead host;
+    ``fresh`` (the Test button) always probes.
+    """
+    import time
+
+    base_url = resolve_ollama_base_url().rstrip("/")
+    now = time.monotonic()
+    cached = _OLLAMA_PROBE.get(base_url)
+    if not fresh and cached and now - cached[0] < _OLLAMA_PROBE_TTL_SEC:
+        return cached[1]
+    result: dict[str, Any] = {"base_url": base_url, "reachable": False, "models": [], "detail": ""}
+    try:
+        import httpx
+
+        resp = httpx.get(f"{base_url}/api/tags", timeout=2.0)
+        if resp.status_code == 200:
+            body = resp.json() if resp.content else {}
+            result["models"] = [
+                str(m.get("name") or m.get("model") or "")
+                for m in (body.get("models") or [])
+                if isinstance(m, dict)
+            ]
+            result["reachable"] = True
+        else:
+            result["detail"] = f"Ollama answered HTTP {resp.status_code} at {base_url}."
+    except Exception as exc:  # noqa: BLE001 — any failure means unreachable
+        result["detail"] = f"Ollama is not reachable at {base_url} ({type(exc).__name__})."
+    _OLLAMA_PROBE[base_url] = (now, result)
+    return result
 
 
 def resolve_ollama_base_url(default: str = "http://localhost:11434") -> str:
@@ -711,6 +880,7 @@ def _public_api_key(item: dict[str, Any], *, secret: str | None = None) -> dict[
         "workspace_id": item.get("workspace_id") or "",
         "rotated_from": item.get("rotated_from"),
         "rotated_to": item.get("rotated_to"),
+        "grace_until": item.get("grace_until") or None,
     }
     if secret is not None:
         row["key"] = secret
@@ -762,10 +932,11 @@ def create_api_key(
             raise ValueError(
                 f"scope is outside the {stored_role} role: {sorted(disallowed_scopes)[0]}"
             )
-    raw = f"dfk_{secrets.token_urlsafe(32)}"
+    key_id = str(uuid.uuid4())
+    raw = _mint_raw_key(key_id)
     prefix = raw[:12]
     record = {
-        "id": str(uuid.uuid4()),
+        "id": key_id,
         "name": name.strip()[:64] or "API key",
         "prefix": prefix,
         "role": stored_role,
@@ -787,10 +958,18 @@ def rotate_api_key(
     key_id: str,
     *,
     actor: str,
-    overlap_seconds: int = 86400,
+    overlap_seconds: int = 0,
 ) -> dict[str, Any]:
-    if not isinstance(overlap_seconds, int) or not 0 <= overlap_seconds <= 604800:
-        raise ValueError("overlap_seconds must be between 0 and 604800")
+    """Replace a key with a new one in the same workspace, owned by the same person.
+
+    The new key inherits the source's workspace and creator (it is the same
+    credential, re-issued), so it is listed and revocable wherever the old one
+    was; ``rotated_by`` records who rotated it. The old key is revoked at once,
+    or — only when ``overlap_seconds`` asks for it — kept until ``grace_until``
+    (at most ``MAX_ROTATION_GRACE_SECONDS``), listed and revocable meanwhile.
+    """
+    if not isinstance(overlap_seconds, int) or not 0 <= overlap_seconds <= MAX_ROTATION_GRACE_SECONDS:
+        raise ValueError(f"overlap_seconds must be between 0 and {MAX_ROTATION_GRACE_SECONDS}")
     with _API_KEY_ROTATION_LOCK:
         source = next(
             (item for item in load_api_key_records() if str(item.get("id")) == key_id),
@@ -798,13 +977,13 @@ def rotate_api_key(
         )
         if source is None:
             raise ApiKeyNotFound(key_id)
+        if source.get("rotated_to"):
+            raise ValueError("already been rotated")
         if _is_revoked(source):
             raise ValueError("revoked API keys cannot be rotated")
         now = datetime.now(timezone.utc)
         if _key_expired(source, now=now):
             raise ValueError("expired API keys cannot be rotated")
-        if source.get("rotated_to"):
-            raise ValueError("already been rotated")
 
         lifetime = source.get("lifetime") or (
             "never" if not source.get("expires_at") else DEFAULT_API_KEY_LIFETIME
@@ -822,8 +1001,8 @@ def rotate_api_key(
             raise ValueError("API key scopes are invalid")
         stored_scopes = sorted(set(scopes)) if scopes is not None else None
 
-        raw = f"dfk_{secrets.token_urlsafe(32)}"
         new_id = str(uuid.uuid4())
+        raw = _mint_raw_key(new_id)
         new_record = {
             "id": new_id,
             "name": source.get("name", "API key"),
@@ -831,21 +1010,25 @@ def rotate_api_key(
             "role": resolve_stored_api_key_role(source.get("role")),
             "key_hash": _hash_api_key(raw),
             "created_at": now.isoformat(),
-            "created_by": actor,
+            "created_by": source.get("created_by") or actor,
+            "rotated_by": actor,
             "last_used_at": None,
             "lifetime": lifetime,
             "expires_at": _expires_at(lifetime, now=now),
             "scopes": stored_scopes,
             "kind": kind,
+            "workspace_id": source.get("workspace_id") or "",
             "rotated_from": key_id,
         }
 
-        overlap_expiry = now + timedelta(seconds=overlap_seconds)
-        source_expiry = _parse_expires_at(source.get("expires_at"))
-        if source_expiry:
-            source["expires_at"] = min(source_expiry, overlap_expiry).isoformat()
+        if overlap_seconds:
+            overlap_expiry = now + timedelta(seconds=overlap_seconds)
+            source_expiry = _parse_expires_at(source.get("expires_at"))
+            grace = min(source_expiry, overlap_expiry) if source_expiry else overlap_expiry
+            source["expires_at"] = grace.isoformat()
+            source["grace_until"] = grace.isoformat()
         else:
-            source["expires_at"] = overlap_expiry.isoformat()
+            source["revoked_at"] = now.isoformat()
         source["rotated_to"] = new_id
 
         _upsert_api_key_record(new_record)
@@ -862,6 +1045,52 @@ def rotate_api_key(
                 raise ValueError("already been rotated")
             _save_file_api_key_record(source)
         return _public_api_key(new_record, secret=raw)
+
+
+def repair_rotated_api_keys(*, dry_run: bool = True) -> list[dict[str, Any]]:
+    """Give keys minted by the pre-fix rotate endpoint their workspace and owner back.
+
+    Before round 8 a rotated key was written with no ``workspace_id`` and the
+    rotating caller as ``created_by``: listed nowhere, revocable by nobody but
+    a platform admin who knew its id, yet authenticating. Walk each such key's
+    ``rotated_from`` chain to the first ancestor that has a workspace and copy
+    that workspace and creator. Revoked keys are left alone. ``dry_run``
+    (default) only reports. Returns one row per key repaired (or to repair).
+    """
+    with _API_KEY_ROTATION_LOCK:
+        records = load_api_key_records()
+        by_id = {str(r.get("id")): r for r in records}
+        repairs: list[dict[str, Any]] = []
+        for record in records:
+            if record.get("workspace_id") or not record.get("rotated_from") or _is_revoked(record):
+                continue
+            ancestor = by_id.get(str(record.get("rotated_from")))
+            seen: set[str] = set()
+            while ancestor is not None and not ancestor.get("workspace_id"):
+                aid = str(ancestor.get("id"))
+                if aid in seen or not ancestor.get("rotated_from"):
+                    ancestor = None
+                    break
+                seen.add(aid)
+                ancestor = by_id.get(str(ancestor.get("rotated_from")))
+            if ancestor is None:
+                continue
+            row = {
+                "id": record["id"],
+                "prefix": record.get("prefix"),
+                "workspace_id": ancestor["workspace_id"],
+                "created_by": ancestor.get("created_by") or record.get("created_by"),
+                "previous_created_by": record.get("created_by"),
+                "rotated_from": record.get("rotated_from"),
+            }
+            repairs.append(row)
+            if not dry_run:
+                fixed = dict(record)
+                fixed["workspace_id"] = row["workspace_id"]
+                fixed["created_by"] = row["created_by"]
+                fixed.setdefault("rotated_by", record.get("created_by"))
+                _upsert_api_key_record(fixed)
+        return repairs
 
 
 def revoke_api_key(key_id: str) -> bool:
@@ -884,7 +1113,7 @@ def revoke_api_key(key_id: str) -> bool:
 
 
 def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
-    if not raw or not raw.startswith("dfk_"):
+    if not is_workspace_api_key(raw):
         return None
     digest = _hash_api_key(raw)
     for item in load_api_key_records():
@@ -901,5 +1130,6 @@ def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
             "role": resolve_stored_api_key_role(item.get("role")),
             "scopes": item.get("scopes"),
             "kind": item.get("kind") or "api_key",
+            "workspace_id": item.get("workspace_id") or "",
         }
     return None

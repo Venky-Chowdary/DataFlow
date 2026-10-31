@@ -622,7 +622,15 @@ def test_hash_pii_shape_step_fails_closed_without_a_key(monkeypatch):
         "DATAWRAP_SECRET",
     ):
         monkeypatch.delenv(name, raising=False)
-    with pytest.raises(ShapeRowError, match="hash_pii is not configured"):
+    # Round 8: keys are per-workspace and auto-provisioned; "no key" now means
+    # the key store cannot answer, and the message names no infrastructure.
+    from services import pii_hash_keys
+
+    def _unavailable(_workspace_id):
+        raise pii_hash_keys.PiiHashKeyUnavailable("store down")
+
+    monkeypatch.setattr(pii_hash_keys, "workspace_key", _unavailable)
+    with pytest.raises(ShapeRowError, match="hashing key"):
         shape_records(
             recipe({"op": "hash_pii", "column": "name"}),
             [{"name": "ada@example.com"}],

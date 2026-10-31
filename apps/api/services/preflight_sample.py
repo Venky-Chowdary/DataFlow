@@ -83,6 +83,36 @@ def source_read_is_privilege_denial(reason: str) -> bool:
     return bool(_PRIVILEGE_READ_RE.search(reason or ""))
 
 
+def _pattern_sample(endpoint: Any, limit: int) -> list[dict] | None:
+    """Rows from each file of a prefix/glob source, as Execute peeks them.
+
+    One GET on ``sales/2026-10/`` is "matches 2 objects", so Studio Validate
+    held every prefix source on G1 (QA demo 1030). The engine's own peek
+    reads the set file by file; Validate reads the same. None = not a pattern.
+    """
+    fmt = str(getattr(endpoint, "format", "") or "").lower()
+    table = str(getattr(endpoint, "table", "") or "")
+    if not table:
+        return None
+    from services.file_pickup import is_file_pattern
+
+    if not is_file_pattern(table):
+        return None
+    try:
+        from src.transfer.connector_capabilities import resolve_driver_type
+        from src.transfer.source_peek import peek_stream_source
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH
+        from transfer.connector_capabilities import resolve_driver_type
+        from transfer.source_peek import peek_stream_source
+
+    if resolve_driver_type(fmt) not in {"s3", "gcs", "adls", "sftp"}:
+        return None
+    _cols, _schema, _total, rows = peek_stream_source(endpoint)
+    return [
+        {k: v for k, v in dict(r).items() if k != "_df_file"} for r in rows[:limit]
+    ]
+
+
 def engine_sample_rows(
     *,
     source_kind: str,
@@ -125,9 +155,11 @@ def engine_sample_rows(
         data.setdefault("type", source_format)
     try:
         endpoint = EndpointConfig.from_dict(kind, data)
-        records, _headers, _schema = read_source_database(
-            endpoint, limit=limit, raise_on_truncate=False
-        )
+        records = _pattern_sample(endpoint, limit)
+        if records is None:
+            records, _headers, _schema = read_source_database(
+                endpoint, limit=limit, raise_on_truncate=False
+            )
     except Exception as exc:  # noqa: BLE001 — the reason is the product output
         logger.warning("Validate source sample read failed for %s: %s", table, exc)
         return EngineSample(

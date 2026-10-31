@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from services.acknowledgment_contract import (
     AcknowledgmentRefused,
@@ -169,6 +169,26 @@ class PreflightRequest(BaseModel):
     # will stream). Browser-local CSV fallback has no file_id — stay sampled.
     source_file_id: str | None = None
 
+    @model_validator(mode="after")
+    def _object_url_source(self) -> "PreflightRequest":
+        """``s3://bucket/key`` is a bucket and a key, as on Execute (QA demo 1030)."""
+        from ..transfer.object_path import split_object_url
+
+        for attr in ("source_table", "source_collection"):
+            split = split_object_url(getattr(self, attr) or "")
+            if split is None:
+                continue
+            bucket, key = split
+            cfg = dict(self.source_config or {})
+            current = str(cfg.get("database") or "").strip()
+            if current and current != bucket:
+                continue
+            cfg.setdefault("database", bucket)
+            cfg["database"] = cfg["database"] or bucket
+            self.source_config = cfg
+            setattr(self, attr, key)
+        return self
+
 
 def _schema_default(db_type: str) -> str:
     from services.dialect_profiles import default_schema_for
@@ -299,6 +319,7 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
             source_connector_id=body.source_connector_id or "",
             source_table=body.source_table or "",
             source_collection=body.source_collection or "",
+            source_config=body.source_config if isinstance(body.source_config, dict) else None,
         ),
     )
     # The write never sees the raw source when a recipe is approved: shape the
@@ -576,6 +597,7 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
                 source_collection=body.source_collection or "",
                 source_schema=str(src_cfg.get("schema") or ""),
                 source_database=str(src_cfg.get("database") or ""),
+                source_config=src_cfg or None,
             )
     gated = apply_policy_gates(
         result,

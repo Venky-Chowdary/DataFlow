@@ -35,6 +35,12 @@ from services.workspace_access import (
 router = APIRouter(prefix="/contracts", tags=["contracts"])
 
 
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+
+    return datetime.now(timezone.utc).isoformat()
+
+
 class _ContractResponse(BaseModel):
     id: str
     name: str
@@ -50,6 +56,11 @@ class _ContractResponse(BaseModel):
     updated_at: str
     metadata: dict[str, Any]
     preflight_gates: list[dict[str, Any]] = Field(default_factory=list)
+    # The read model (services.contract_read_model): the list, drawer, Pilot
+    # briefing and run gate all show these, so they cannot disagree.
+    status_label: str = ""
+    signed_version: int | None = None
+    signed_at: str = ""
 
 
 class _CreateFromTransferRequest(BaseModel):
@@ -97,7 +108,9 @@ class _ContractTestResponse(BaseModel):
 
 
 def _contract_to_response(contract: DataContract) -> _ContractResponse:
-    return _ContractResponse(**contract.to_dict())
+    from services.contract_read_model import contract_view
+
+    return _ContractResponse(**contract_view(contract))
 
 
 def _scoped_contract(
@@ -117,8 +130,9 @@ def _scoped_contract(
         resolve_write_workspace(request, workspace_id)
     else:
         resolve_read_workspace(request, workspace_id)
-    store = get_contract_store()
-    contract = store.get_contract(contract_id)
+    from services.contract_read_model import load_contract
+
+    contract = load_contract(contract_id)
     if not contract:
         raise HTTPException(status_code=404, detail="Contract not found")
     meta = getattr(contract, "metadata", None) or {}
@@ -131,14 +145,11 @@ def list_contracts(
     request: Request,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
+    from services.contract_read_model import visible_population
+
     scope = tenant_scope(request, workspace_id)
-    store = get_contract_store()
-    contracts = []
-    for c in store.list_contracts(limit=200):
-        meta = getattr(c, "metadata", None) or {}
-        if scope.allows(meta.get("workspace_id")):
-            contracts.append(_contract_to_response(c))
-    return _ContractListResponse(contracts=contracts)
+    rows = visible_population(allows=scope.allows, limit=200)
+    return _ContractListResponse(contracts=[_contract_to_response(c) for c in rows])
 
 
 @router.post("", response_model=_ContractResponse)
@@ -164,6 +175,21 @@ def create_contract_from_transfer(
                     transform=c.get("transform"),
                     nullable=bool(c.get("nullable", True)),
                     primary_key=bool(c.get("primary_key", False)),
+                )
+            )
+    elif not mappings and body.column_types:
+        # No mapping rows yet: the bound schema is the agreement's column list.
+        for src, ctype in body.column_types.items():
+            if not str(src or "").strip():
+                continue
+            columns.append(
+                ColumnRule(
+                    source_name=str(src),
+                    target_name=str(src),
+                    source_type=str(ctype or "VARCHAR"),
+                    target_type=str(ctype or "VARCHAR"),
+                    nullable=True,
+                    primary_key=str(src).lower() in {"id", "_id"},
                 )
             )
     else:
@@ -265,6 +291,9 @@ def sign_contract(
     )
     contract.status = ContractStatus.SIGNED
     contract.strict = body.strict
+    # A lifecycle write moves updated_at: the newest-first list and the
+    # drawer's "Updated" must not keep showing the draft's creation time.
+    contract.updated_at = now
     try:
         from services.schema_fingerprint import fingerprint_mappings
 
@@ -304,6 +333,7 @@ def deprecate_contract(
     store = get_contract_store()
     contract = _scoped_contract(request, contract_id, workspace_id, write=True)
     contract.status = ContractStatus.DEPRECATED
+    contract.updated_at = _now_iso()
     store.save_contract(contract)
     return _contract_to_response(contract)
 

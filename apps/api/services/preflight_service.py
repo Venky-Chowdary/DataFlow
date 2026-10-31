@@ -369,6 +369,7 @@ def run_file_preflight(
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
     resume: bool = False,
+    source_encoding: dict[str, Any] | None = None,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     population_replay: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None,
     rows_are_population: bool = False,
@@ -1235,6 +1236,7 @@ def run_file_preflight(
                     source_collection=str((source_config or {}).get("collection") or ""),
                     source_schema=str(src_cfg.get("schema") or ""),
                     source_database=str(src_cfg.get("database") or ""),
+                    source_config=src_cfg or None,
                 )
     except Exception:  # noqa: BLE001 — unread catalog blocks, it does not approve
         source_primary_key_columns = []
@@ -1318,7 +1320,11 @@ def run_file_preflight(
     source_duplicate_probe_message = ""
     source_null_key_rows: int | None = None
     source_key_collisions: dict[str, Any] | None = None
-    from services.procedure_source import is_callable_source, source_read_mode_of
+    from services.procedure_source import (
+        callable_skip_note,
+        is_callable_source,
+        source_read_mode_of,
+    )
 
     callable_src = is_callable_source(source_config)
     source_duplicate_probe_expected = bool(
@@ -1329,9 +1335,8 @@ def run_file_preflight(
     )
     if callable_src:
         source_duplicate_probe_status = "skipped_callable"
-        source_duplicate_probe_message = (
-            "Stored-procedure / SQL extract is a result-set snapshot — "
-            "uniqueness GROUP BY is not run against a procedure name."
+        source_duplicate_probe_message = callable_skip_note(
+            source_config, "uniqueness GROUP BY"
         )
     if source_duplicate_probe_expected:
         try:
@@ -1391,11 +1396,17 @@ def run_file_preflight(
                         dest_db=destination_db_type,
                         sync_mode=sync_mode,
                     )
+                    from services.dest_key_oracle import engine_key_oracle
+
                     source_key_collisions = probe_transformed_key_collisions(
                         _key_rows if _key_rows is not None else (sample_rows or []),
                         key_sources=list(source_pk_cols),
                         transforms=_key_xforms,
                         equalizers=_key_eq,
+                        engine_groups=engine_key_oracle(
+                            _key_eq, list(source_pk_cols), dest_kind=dest_kind,
+                            destination_config=destination_config,
+                        ),
                     )
             else:
                 source_duplicate_probe_status = "skipped_no_pk"
@@ -2335,9 +2346,11 @@ def run_file_preflight(
         out["callable_extract"] = {
             "mode": source_read_mode_of(source_config),
             "catalog_probes": "skipped",
-            "note": (
-                "Result-set snapshot — FK catalog, uniqueness GROUP BY, and "
-                "population orphan scans are not run against a procedure name."
+            "note": callable_skip_note(
+                source_config,
+                "FK catalog, uniqueness GROUP BY, and population orphan scans",
+                plural=True,
+                lead="Result-set snapshot",
             ),
             "cdc": "refused",
             "history_sync": "refused",
@@ -2565,6 +2578,9 @@ def run_file_preflight(
             ),
         ]
         out["passed"] = False
+    from services.source_encoding_guess import apply_encoding_gate, preflight_file_encoding
+
+    apply_encoding_gate(out, source_encoding or preflight_file_encoding(source_format, source_config))
     out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
     out["total_gates"] = len(out["gates"])
     out["readiness_score"] = round(
@@ -2931,9 +2947,15 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
+    from services.oracle_empty_string import attach_oracle_empty_string_warning
+
+    attach_oracle_empty_string_warning(out, dest_kind, plan_mappings)
     from services.file_pickup import attach_direct_dated_file_warning
 
     attach_direct_dated_file_warning(out, source_table or source_filename)
+    from services.mirror_delete_notice import attach_mirror_delete_notice
+
+    attach_mirror_delete_notice(out, sync_mode, stream_contracts)
     _lift_in_file_collapse_advisories(out)
     out = apply_root_causes_to_preflight(
         _block_decision_on_hard_gate(apply_readiness_honesty_caps(out))

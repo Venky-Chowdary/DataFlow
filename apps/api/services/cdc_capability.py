@@ -200,17 +200,63 @@ def query_cdc_change_refusal(
         if on_key
         else f"the poll cursor '{cursor}' is not declared as a modification timestamp"
     )
-    cause = f" ({downgrade_cause})" if downgrade_cause else ""
     return (
-        f"{dialect or 'source'} log-based CDC is not available{cause}, and {why}. "
+        f"{_dialect_label(dialect)} log-based CDC is not available"
+        f"{_CAUSE_TEXT.get(downgrade_cause, '')}, and {why}. "
         "A cursor poll on it sees new rows only: updates and deletes made after "
         "the snapshot would be lost while the run reports completed. "
-        "Enable the source change log, or name a column the source moves on "
-        "every update as the poll cursor (cursor_column=updated_at with "
-        "cursor_semantics=modification_timestamp) and the CDC run polls it "
-        "(inserts and updates; deletes are not captured), or declare the table "
-        "insert_only."
+        f"To run CDC, do one of: (1) {_enable_log_steps(dialect)} "
+        "(2) add a column the source sets on every insert and update (for "
+        "example updated_at, kept current by a trigger or the application), or "
+        "pick an existing one, and declare it as the poll cursor with "
+        "cursor_semantics=modification_timestamp — the CDC run then polls it "
+        "(inserts and updates; deletes are not captured); or (3) declare the "
+        "table insert_only if its rows are never updated."
     )
+
+
+#: Plain words for a downgrade cause (never the internal code on screen).
+_CAUSE_TEXT = {
+    CAUSE_SERVER_NOT_CONFIGURED: " because the server's change log is off",
+}
+
+
+def _dialect_label(dialect: str) -> str:
+    d = (dialect or "").strip().lower()
+    if d.startswith("postgres"):
+        return "PostgreSQL"
+    labels = {"mysql": "MySQL", "mariadb": "MariaDB", "sqlserver": "SQL Server",
+              "oracle": "Oracle", "mongodb": "MongoDB"}
+    return labels.get(d, dialect or "source")
+
+
+def _enable_log_steps(dialect: str) -> str:
+    """Exact steps to turn the source change log on, per engine."""
+    d = (dialect or "").strip().lower()
+    if d.startswith("postgres"):
+        return (
+            "enable logical decoding: set wal_level = logical (ALTER SYSTEM SET "
+            "wal_level = 'logical'), restart PostgreSQL, and grant the connection "
+            "user REPLICATION (ALTER ROLE <user> REPLICATION);"
+        )
+    if d.startswith("mysql") or d.startswith("maria"):
+        return (
+            "enable the binary log: log_bin=ON, binlog_format=ROW, "
+            "binlog_row_image=FULL, and grant REPLICATION SLAVE, REPLICATION CLIENT;"
+        )
+    if d.startswith("sqlserver"):
+        return (
+            "enable change data capture: EXEC sys.sp_cdc_enable_db, then "
+            "sys.sp_cdc_enable_table for this table;"
+        )
+    if d.startswith("oracle"):
+        return (
+            "enable supplemental logging (ALTER DATABASE ADD SUPPLEMENTAL LOG DATA "
+            "(ALL) COLUMNS) with ARCHIVELOG mode, and grant LogMiner access;"
+        )
+    if d.startswith("mongo"):
+        return "run MongoDB as a replica set so change streams are available;"
+    return "enable the source's change log;"
 
 
 def mongo_delete_key_refusal(

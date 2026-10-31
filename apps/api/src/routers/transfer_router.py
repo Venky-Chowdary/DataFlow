@@ -566,6 +566,15 @@ async def map_columns_route(body: MapColumnsRequest):
             prior_mappings=list(body.prior_mappings or []),
             job_id=str(body.job_id or "").strip(),
         )
+    from services.schema_drift_map_review import flag_rename_suggestions
+
+    flag_rename_suggestions(
+        result["mappings"],
+        source_columns=list(body.source_columns or []),
+        target_columns=list(body.target_columns or []),
+        schema_policy=body.schema_policy or "manual_review",
+        table_exists=body.destination_table_exists,
+    )
     nested_fields: list[dict[str, str]] = []
     try:
         from services.json_intelligence import flatten_column_recommendations
@@ -1923,7 +1932,6 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
     from services.migration_rollback import (
         RollbackContractError,
         RollbackRefuseError,
-        discard_staging_table,
         execute_rollback,
     )
 
@@ -1975,19 +1983,29 @@ async def execute_job_rollback(job_id: str, body: RollbackExecuteBody, request: 
         )
 
     dest_ep = None
-    req = job.get("request") if isinstance(job.get("request"), dict) else {}
-    raw_dest = req.get("destination") if isinstance(req.get("destination"), dict) else {}
-    if not raw_dest:
-        raw_dest = job.get("destination") if isinstance(job.get("destination"), dict) else {}
+    # The run is stored under ``transfer_request`` (job_submission). Reading
+    # only ``request`` rebuilt an endpoint with no engine or connector, so the
+    # drop failed closed on every job (QA: 409 "Failed to discard staging").
+    from services.staging_discard import job_destination_config
+
+    raw_dest = job_destination_config(job)
 
     def _drop(staging: str) -> bool:
         nonlocal dest_ep
+        from services.staging_discard import StagingDiscardError, drop_staging_table
+
         if dest_ep is None:
             dest_ep = EndpointConfig.from_dict(
                 str(raw_dest.get("kind") or "database"),
                 {**raw_dest, "table": staging},
             )
-        return bool(discard_staging_table(dest_ep, staging))
+        try:
+            drop_staging_table(dest_ep, staging)
+        except StagingDiscardError as exc:
+            raise RollbackRefuseError(
+                f"Failed to discard staging table `{staging}` — {exc}"
+            ) from exc
+        return True
 
     try:
         result = execute_rollback(
@@ -2159,10 +2177,9 @@ async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request)
     if sig is None:
         raise HTTPException(status_code=404, detail="Snapshot signal not found")
     if sig.source_key not in ctx["source_keys"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Signal source_key does not match this job's CDC fingerprint",
-        )
+        # Another job's (possibly another workspace's) signal answers exactly
+        # like one that does not exist; a 403 here confirmed the id (D222).
+        raise HTTPException(status_code=404, detail="Snapshot signal not found")
     cancelled = cancel_signal(signal_id)
     if cancelled is None:
         raise HTTPException(status_code=404, detail="Snapshot signal not found")

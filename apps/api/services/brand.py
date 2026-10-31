@@ -71,6 +71,8 @@ ARTIFACTS: dict[str, Artifact] = dict([
        "exactly-once CDC watermark table (SQLAlchemy destinations)", True),
     _a("cdc_eos_watermark_table_oracle", "df_cdc_eos_watermarks", "dw_cdc_eos_watermarks", "table",
        "exactly-once CDC watermark table on Oracle", True),
+    _a("api_key_prefix", "dfk_", "dwk_", "external",
+       "prefix of a newly minted workspace API key (both prefixes authenticate)", True),
     # -- recognised, listed by the dry run, NOT switched yet --------------------
     _a("cdc_lsn_column", "_df_lsn", "_dw_lsn", "column",
        "CDC monotonic-apply column on every CDC destination table"),
@@ -137,6 +139,58 @@ ARTIFACTS: dict[str, Artifact] = dict([
     _a("snowflake_default_schema", "DATAFLOW", "DATAWRAP", "external",
        "Snowflake schema used by the COPY route when none is configured"),
 ])
+
+
+#: Shapes of ARTIFACTS that are objects in a customer database (tables,
+#: collections, staging spools) — the ones an object listing would show.
+_OBJECT_SHAPES = frozenset({"table", "table_prefix", "table_suffix"})
+
+
+def _internal_object_rules() -> tuple[frozenset[str], tuple[str, ...], tuple[str, ...]]:
+    names: set[str] = set()
+    prefixes: list[str] = []
+    suffixes: list[str] = []
+    for art in ARTIFACTS.values():
+        if art.shape not in _OBJECT_SHAPES:
+            continue
+        for spelling in (art.legacy, art.new):
+            low = spelling.lower()
+            if art.shape == "table":
+                names.add(low)
+            elif art.shape == "table_prefix":
+                prefixes.append(low)
+            else:
+                suffixes.append(low)
+    return frozenset(names), tuple(prefixes), tuple(suffixes)
+
+
+def is_internal_object_name(name: object) -> bool:
+    """Is ``name`` a table/collection this product writes (either brand name)?
+
+    Matches the ARTIFACTS inventory: exact internal tables (``dataflow_signal``),
+    internal prefixes (``_df_stg_…``) and suffixes (``orders_df_quarantine``,
+    ``orders__df_bak_ab12cd``). Case-insensitive and schema-qualifier blind,
+    because Oracle/Snowflake fold identifiers upper-case and listings may carry
+    ``schema.table``. User-facing listings hide these objects.
+    """
+    text = "" if name is None else str(name).strip().strip('"`[]')
+    if not text:
+        return False
+    leaf = text.rsplit(".", 1)[-1].strip('"`[]').lower()
+    exact, prefixes, suffixes = _internal_object_rules()
+    if leaf in exact or leaf.startswith(prefixes):
+        return True
+    for suffix in suffixes:
+        at = leaf.rfind(suffix)
+        if at <= 0:
+            continue
+        tail = leaf[at + len(suffix):]
+        # ``<table>__df_bak`` may carry a ``_<token>`` run suffix.
+        if not tail or (
+            suffix.endswith("_bak") and tail.startswith("_") and tail[1:].isalnum()
+        ):
+            return True
+    return False
 
 
 def object_names_flag_on() -> bool:

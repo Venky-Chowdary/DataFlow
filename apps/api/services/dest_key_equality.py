@@ -172,6 +172,14 @@ def destination_equality_message(
         for c in (probe.get("collisions") or [])[:5]
     )
     via = f" after the key's transform ({transforms})" if transforms else ""
+    if any(c.get("destination_collation") for c in (probe.get("collisions") or [])):
+        # The destination's own GROUP BY said so (zero-weight characters,
+        # expansions): its collation is the rule, not only the modelled ones.
+        rules = (f"{rules}; " if rules else "") + (
+            "the destination's collation compares them equal (checked on the "
+            "destination; e.g. SQL Server version-80 collations give "
+            "supplementary characters no weight)"
+        )
     return (
         f"{label}: {count:,} source key(s) are distinct in the source but equal "
         f"under the destination's comparison{via} ({rules}) - colliding keys: "

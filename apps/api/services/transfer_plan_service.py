@@ -113,6 +113,15 @@ def run_plan_mapping(
         job_id=str(plan_id or "").strip(),
     )
 
+    from services.schema_drift_map_review import flag_rename_suggestions
+
+    flag_rename_suggestions(
+        list(result.get("mappings") or []),
+        source_columns=list(plan.source_columns),
+        target_columns=list(plan.target_columns),
+        schema_policy=str(policies.get("schema_policy", "manual_review")),
+        table_exists=table_exists,
+    )
     updated = add_mapping_revision(plan_id, result)
     append_audit_event(
         action="transfer_plan.mapped",
@@ -353,6 +362,7 @@ def run_plan_preflight(
             source_collection=str(source.get("collection") or ""),
             source_schema=str(source.get("schema") or ""),
             source_database=str(source.get("database") or ""),
+            source_config=source,
         ),
     )
 
@@ -470,6 +480,9 @@ def run_plan_preflight(
         fit_scan_seconds=STUDIO_FIT_SCAN_SECONDS,
         on_fit_progress=_plan_fit_progress(plan_id, int(plan.row_count_estimate or 0)),
     )
+    from services.mirror_delete_notice import attach_mirror_delete_notice
+
+    attach_mirror_delete_notice(pf, str(policies.get("sync_mode") or ""), stream_contracts)
     pf = apply_policy_gates(
         pf,
         run_transfer_policy_gates(

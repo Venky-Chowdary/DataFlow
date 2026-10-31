@@ -104,14 +104,21 @@ def test_deny_audits_no_rule_and_deduplicates(rbac_client, monkeypatch):
     assert events[1]["details"]["suppressed_since_last"] == 4
 
 
-def test_unknown_path_is_denied_as_no_rule(rbac_client, monkeypatch):
+def test_unknown_path_is_404_not_no_rule(rbac_client, monkeypatch):
+    """A route the app does not serve is the router's 404 (405 for a known path
+    with another method), never 403 "No RBAC rule" (QA round 9)."""
     from services import audit_coverage, rbac
 
     monkeypatch.setattr(rbac, "UNRULED_ROUTE_MODE", "deny", raising=False)
-    monkeypatch.setattr(audit_coverage.audit_log, "append_audit_event", lambda **_event: None)
+    events = []
+    monkeypatch.setattr(audit_coverage.audit_log, "append_audit_event", lambda **event: events.append(event))
     response = rbac_client.get("/not-a-real-route", headers=_headers())
-    assert response.status_code == 403
-    assert response.json()["reason"] == "no_rule"
+    assert response.status_code == 404
+    assert "no_rule" not in response.text
+    assert rbac_client.delete("/unruled-probe", headers=_headers()).status_code == 405
+    assert not [e for e in events if (e.get("details") or {}).get("reason") == "no_rule"]
+    # Authentication still comes first.
+    assert rbac_client.get("/not-a-real-route").status_code == 401
 
 
 @pytest.mark.parametrize(

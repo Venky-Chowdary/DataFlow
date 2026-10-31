@@ -321,6 +321,7 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("*", "/api/v1/workspace/", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/resource-acls", Permission.WORKSPACE_MANAGE),
     ("POST", "/api/v1/audit/retention/purge", Permission.WORKSPACE_MANAGE),
+    ("POST", "/api/v1/audit/chain/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/audit/", Permission.AUDIT_READ),
     ("POST", "/api/v1/audit/tip/", Permission.WORKSPACE_MANAGE),
     ("GET", "/api/v1/cdc/mapping-reviews", Permission.JOB_READ),
@@ -367,6 +368,8 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/mcp/logs", Permission.AI_USE),
     ("*", "/api/v1/mcp/policy", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/mcp/", Permission.AI_USE),
+    # Job history under its own name (QA enterprise #50): a read every role holds.
+    ("GET", "/api/v1/jobs/", Permission.JOB_READ),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
@@ -444,6 +447,7 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("GET", "/", Permission.JOB_READ),
     ("GET", "/api/v1", Permission.JOB_READ),
     ("GET", "/api/v1/health", Permission.JOB_READ),
+    ("GET", "/api/v1/jobs", Permission.JOB_READ),
     ("GET", "/api/v1/contracts", Permission.JOB_READ),
     ("POST", "/api/v1/contracts", Permission.CONNECTOR_WRITE),
 )
@@ -767,10 +771,15 @@ class RBACMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         route_method = "GET" if method == "HEAD" else method
-        if _request_matches_real_route(request.app, route_method, path):
-            permission = _required_permission(route_method, path)
-        else:
-            permission = NO_RULE
+        if not _request_matches_real_route(request.app, route_method, path):
+            # A route the API does not serve has no permission to check: let the
+            # router answer it (404, or 405 for a known path with another
+            # method). Answering 403 "No RBAC rule" read as a missing grant and
+            # was what the web's dead fallbacks surfaced (QA round 9). Only an
+            # authenticated caller gets here — AuthMiddleware runs first, so a
+            # stranger still learns nothing about the route map.
+            return await call_next(request)
+        permission = _required_permission(route_method, path)
         user = getattr(request.state, "user", None)
 
         if permission is NO_RULE:

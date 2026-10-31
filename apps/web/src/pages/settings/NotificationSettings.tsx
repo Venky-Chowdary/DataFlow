@@ -6,6 +6,7 @@ import { useToast } from "../../components/Toast";
 import { useConfirm } from "../../components/ui/ConfirmDialog";
 import {
   createNotificationChannel,
+  rotateNotificationSigningSecret,
   deleteNotificationChannel,
   fetchNotificationChannels,
   fetchWorkspaces,
@@ -17,7 +18,8 @@ import {
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { Button } from "../../components/ui/Button";
-import { setActiveWorkspaceId, useActiveWorkspaceId } from "../../lib/workspace";
+import { SigningSecretNotice } from "../../components/team/SigningSecretNotice";
+import { landingWorkspaceId, setActiveWorkspaceId, useActiveWorkspaceId } from "../../lib/workspace";
 import { useVisibleRefresh } from "../../lib/visibleRefresh";
 
 type ChannelKind = "slack" | "teams" | "email" | "servicenow" | "webhook";
@@ -35,6 +37,7 @@ export function NotificationSettings() {
   const { confirm } = useConfirm();
   const manage = useWriteGate(PERMISSIONS.workspaceManage);
   const [channels, setChannels] = useState<NotificationChannel[]>([]);
+  const [issuedSecret, setIssuedSecret] = useState<{ label: string; secret: string } | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [loading, setLoading] = useState(false);
   const [loadError, setLoadError] = useState("");
@@ -67,9 +70,9 @@ export function NotificationSettings() {
 
   useEffect(() => {
     fetchWorkspaces()
-      .then(({ workspaces: w }) => {
+      .then(({ workspaces: w, defaultWorkspaceId }) => {
         setWorkspaces(w);
-        if (w.length && !selectedWorkspace) setActiveWorkspaceId(w[0].id);
+        if (w.length && !selectedWorkspace) setActiveWorkspaceId(landingWorkspaceId(w, defaultWorkspaceId));
       })
       .catch(() => setWorkspaces([]));
   }, [selectedWorkspace]);
@@ -166,13 +169,14 @@ export function NotificationSettings() {
     if (!mayManage()) return;
     setSaving(true);
     try {
-      await createNotificationChannel({
+      const created = await createNotificationChannel({
         workspace_id: selectedWorkspace,
         kind,
         label: label.trim() || KIND_META[kind].label,
         enabled: true,
         config: buildConfig,
       });
+      if (created.signing_secret) setIssuedSecret({ label: created.label, secret: created.signing_secret });
       toast({ title: "Channel added", tone: "success" });
       resetForm();
       loadChannels();
@@ -208,6 +212,25 @@ export function NotificationSettings() {
       setChannels((prev) => prev.filter((c) => c.id !== id));
     } catch (err) {
       toast({ title: "Delete failed", message: err instanceof Error ? err.message : "", tone: "error" });
+    }
+  };
+
+  const rotateSecret = async (channel: NotificationChannel) => {
+    if (!mayManage()) return;
+    const ok = await confirm({
+      title: "Rotate the signing secret?",
+      message: "The current secret stops signing immediately. Update the receiver with the new one.",
+      confirmLabel: "Rotate secret",
+      cancelLabel: "Keep current",
+      tone: "danger",
+    });
+    if (!ok) return;
+    try {
+      const rotated = await rotateNotificationSigningSecret(channel.id);
+      if (rotated.signing_secret) setIssuedSecret({ label: rotated.label, secret: rotated.signing_secret });
+      setChannels((prev) => prev.map((c) => (c.id === channel.id ? { ...c, signing_secret_set: true } : c)));
+    } catch (err) {
+      toast({ title: "Rotation failed", message: err instanceof Error ? err.message : "", tone: "error" });
     }
   };
 
@@ -249,6 +272,13 @@ export function NotificationSettings() {
           reason={manage.reason}
           what="Notification channels are read-only for you."
         />
+        {issuedSecret && (
+          <SigningSecretNotice
+            label={issuedSecret.label}
+            secret={issuedSecret.secret}
+            onDone={() => setIssuedSecret(null)}
+          />
+        )}
 
         {workspaces.length > 1 && (
           <div className="df2-settings-field df2-mb-md">
@@ -446,6 +476,16 @@ export function NotificationSettings() {
                   >
                     Test
                   </Button>
+                  {c.kind === "webhook" && (
+                    <Button
+                      size="sm"
+                      disabled={!manage.allowed}
+                      title={manage.reason || undefined}
+                      onClick={() => void rotateSecret(c)}
+                    >
+                      {c.signing_secret_set ? "Rotate secret" : "Create signing secret"}
+                    </Button>
+                  )}
                   <Button
                     size="sm"
                     variant="danger"

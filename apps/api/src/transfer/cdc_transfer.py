@@ -3219,7 +3219,7 @@ def _run_cdc_single_stream(
                 if not cdc.is_available():
                     raise RuntimeError(
                         f"SQL Server change data capture is not enabled for "
-                        f"{ss_schema}.{table_name} and Change Tracking is off"
+                        f"{cdc.schema}.{cdc.table} and Change Tracking is off"
                     )
                 ddl_log = [
                     f"CDC(change_tracking) {src_type}.{table_name} → {dest_type}.{dest_table} "
@@ -3298,7 +3298,7 @@ def _run_cdc_single_stream(
                 if not cdc.is_available():
                     raise RuntimeError(
                         "Oracle LogMiner and flashback are not available: supplemental "
-                        f"logging is not enabled for {ora_schema}.{table_name}"
+                        f"logging is not enabled for {cdc.schema}.{cdc.table}"
                     )
                 ddl_log = [
                     f"CDC(flashback) {src_type}.{table_name} → {dest_type}.{dest_table} "

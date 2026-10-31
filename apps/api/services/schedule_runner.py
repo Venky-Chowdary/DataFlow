@@ -1589,8 +1589,18 @@ def _dispatch_transfer(
         emit_event(logger, "schedule.run.fire", outcome="held", reason_code="preflight_refused", schedule_id=schedule_id, attempt=attempt + 1, error=exc)
         _park_on_decision(schedule_id, exc, attempt=attempt)
         return None
+    from services.full_pass_rerun import apply_schedule_full_pass, full_pass_decision
+
+    read_scope = apply_schedule_full_pass(request, sched, attempt=attempt)
     engine = get_transfer_engine()
     job_id = engine._create_pending_job(request)
+    if read_scope:
+        from services.mongodb_service import get_mongodb_service
+
+        get_mongodb_service().update_job_status(
+            job_id, "pending", read_scope=read_scope,
+            retry_decision=full_pass_decision({"kind": "schedule_retry"}, read_scope),
+        )
     started_at = datetime.now(timezone.utc)
     from services.schedule_store import (
         _CLAIM_LOCK,

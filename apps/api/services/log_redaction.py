@@ -102,7 +102,7 @@ _BEARER_OR_BASIC = re.compile(
 _JWT = re.compile(
     r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}"
 )
-_DATAFLOW_KEY = re.compile(r"\bdfk_[A-Za-z0-9_-]{16,}")
+_DATAFLOW_KEY = re.compile(r"\b(dfk|dwk)_[A-Za-z0-9_-]{16,}")
 _WEBHOOK_URLS = (
     re.compile(
         r"""(?i)(https://hooks\.slack\.com)/(?:services|workflows|triggers)/[^\s"'<>]+"""
@@ -240,7 +240,7 @@ def redact_secret_shapes(value: str) -> str:
         redacted = value if isinstance(value, str) else str(value)
         redacted = _BEARER_OR_BASIC.sub(r"\1 ***", redacted)
         redacted = _JWT.sub(REDACTED, redacted)
-        redacted = _DATAFLOW_KEY.sub("dfk_" + REDACTED, redacted)
+        redacted = _DATAFLOW_KEY.sub(lambda m: m.group(1) + "_" + REDACTED, redacted)
         for pattern in _WEBHOOK_URLS:
             redacted = pattern.sub(r"\1/***", redacted)
         redacted = _URI_USERINFO.sub(r"\1***\2", redacted)

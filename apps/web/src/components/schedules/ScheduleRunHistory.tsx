@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { CopyIdChip } from "../ui/CopyIdChip";
@@ -8,9 +8,12 @@ import { jobStatusBadgeClass, jobStatusLabel } from "../../lib/uiUtils";
 import type { ScheduleRun } from "../../lib/types";
 import { formatJobRowMetric } from "../../lib/conservationLedger";
 import { historyPollMs, isOpenRun, runLabel, runReason } from "../../lib/scheduleRunStatus";
+import { createPoller, type Poller } from "../../lib/poller";
 
 interface ScheduleRunHistoryProps {
   scheduleId: string;
+  /** Re-read now when this changes (the schedule started/finished a run). */
+  refreshKey?: string;
   onOpenJob?: (jobId: string) => void;
   /** Open this schedule's mapping so a drift finding can be acted on. */
   onEditMapping?: () => void;
@@ -47,7 +50,7 @@ function formatDuration(seconds: number | undefined): string {
   return `${mins}m ${secs}s`;
 }
 
-export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: ScheduleRunHistoryProps) {
+export function ScheduleRunHistory({ scheduleId, refreshKey, onOpenJob, onEditMapping }: ScheduleRunHistoryProps) {
   const [accepting, setAccepting] = useState(false);
   const [accepted, setAccepted] = useState<string | null>(null);
   const [acceptError, setAcceptError] = useState<string | null>(null);
@@ -75,12 +78,29 @@ export function ScheduleRunHistory({ scheduleId, onOpenJob, onEditMapping }: Sch
   }, [load]);
 
   // Loaded once, the panel kept showing a run as it was when opened — a run
-  // that finished, failed or was declared "worker lost" never appeared.
+  // that finished, failed or was declared "worker lost" never appeared. The
+  // poller re-arms after a failed read too, so one blip does not end refresh.
+  const runsRef = useRef<ScheduleRun[] | null>(null);
+  runsRef.current = runs;
+  const pollerRef = useRef<Poller | null>(null);
   useEffect(() => {
     if (loading || error) return;
-    const timer = window.setTimeout(() => void load(true), historyPollMs(runs));
-    return () => window.clearTimeout(timer);
-  }, [load, loading, error, runs]);
+    const poller = createPoller<ScheduleRun[]>({
+      read: async () => (await fetchScheduleHistory(scheduleId, 25)).runs ?? [],
+      delayMs: (last) => historyPollMs(last ?? runsRef.current),
+      onResult: setRuns,
+    });
+    pollerRef.current = poller;
+    return () => {
+      poller.stop();
+      pollerRef.current = null;
+    };
+  }, [scheduleId, loading, error]);
+
+  // The schedule started or finished a run: read History now.
+  useEffect(() => {
+    pollerRef.current?.poke();
+  }, [refreshKey]);
 
   if (loading) {
     return (

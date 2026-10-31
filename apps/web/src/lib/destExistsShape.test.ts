@@ -84,4 +84,11 @@ describe("destExistsShape", () => {
       /Result-set snapshot/,
     );
   });
+
+  it("words the callable note for the mode the operator picked", () => {
+    const query = callableExtractNote({}, { source_read_mode: "query" });
+    assert.doesNotMatch(query, /procedure/i);
+    assert.match(query, /tables the query reads/);
+    assert.match(callableExtractNote({}, { source_read_mode: "procedure" }), /procedure name/);
+  });
 });

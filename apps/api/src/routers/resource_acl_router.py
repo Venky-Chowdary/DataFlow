@@ -15,7 +15,7 @@ from services.resource_acl import (
     revoke_grant,
     upsert_grant,
 )
-from services.team_store import can_write_workspace
+from services.effective_principal import request_principal
 
 router = APIRouter(prefix="/resource-acls", tags=["Resource ACLs"])
 
@@ -29,14 +29,15 @@ def _actor_email(request: Request) -> str:
 
 def _require_admin_or_workspace_write(request: Request, workspace_id: str) -> str:
     ws = (workspace_id or "").strip()
-    user = getattr(request.state, "user", None) or {}
-    role = str(user.get("role") or "").lower()
-    if role == "admin":
+    # One resolver for every route: a key's own role capped at its creator's,
+    # never the role label on the token alone (services.effective_principal).
+    principal = request_principal(request, ws)
+    if principal.platform_admin:
         return ws
-    if ws and not can_write_workspace(ws, _actor_email(request)):
-        raise HTTPException(status_code=403, detail="Workspace write access required to manage ACLs")
     if not ws:
         raise HTTPException(status_code=400, detail="X-Workspace-Id required")
+    if principal.member_role not in ("editor", "admin"):
+        raise HTTPException(status_code=403, detail="Workspace write access required to manage ACLs")
     return ws
 
 

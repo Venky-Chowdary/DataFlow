@@ -995,7 +995,12 @@ def assert_signed_contract(contract_id: str, *, require_signed: bool) -> None:
         from src.services.contract_store import get_contract_store
         from src.services.data_contract import ContractStatus
 
-    contract = get_contract_store().get_contract(contract_id)
+    # The run gate reads the same store row as the list, drawer and briefing.
+    try:
+        from services.contract_read_model import load_contract
+    except ImportError:  # pragma: no cover
+        load_contract = lambda cid: get_contract_store().get_contract(cid)  # noqa: E731
+    contract = load_contract(contract_id)
     if contract is None:
         raise ValueError(f"Contract {contract_id} not found")
     if require_signed and contract.status != ContractStatus.SIGNED:

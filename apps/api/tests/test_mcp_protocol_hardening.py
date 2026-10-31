@@ -43,6 +43,10 @@ def mcp_api(tmp_path, monkeypatch):
 
     from src.main import app
 
+    from r8_key_owner import ensure_key_owners
+
+    # Round 8: a key needs an accountable creator.
+    ensure_key_owners('editor@example.test', 'viewer@example.test')
     editor = integrations_store.create_api_key(
         "MCP hardening editor",
         "editor@example.test",

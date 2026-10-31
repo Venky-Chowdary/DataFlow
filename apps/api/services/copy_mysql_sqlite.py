@@ -36,6 +36,7 @@ from services.copy_mysql_pg import (
 )
 from services.copy_pg_mysql import mapping_is_plain_carry
 from services.copy_sqlite_common import (
+    sqlite_temporal_text,
     sqlite_connect,
     sqlite_create_sql,
     sqlite_ident,
@@ -65,29 +66,25 @@ def mysql_sqlite_type_is_copy_safe(declared: str) -> bool:
     return mysql_type_is_copy_safe(declared)
 
 
-def mysql_value_to_sqlite(value: Any) -> Any:
-    """Bind a MySQL Python value. DATE/DATETIME land as ISO TEXT."""
+def mysql_value_to_sqlite(value: Any, *, time_fsp: int | None = None) -> Any:
+    """Bind a MySQL Python value. DATE/DATETIME land as ISO TEXT.
+
+    ``time_fsp`` is the source column's declared ``TIME(n)`` precision.
+    """
     if value is None:
         return None
     if isinstance(value, bool):
         return int(value)
     if isinstance(value, timedelta):
-        # pymysql returns TIME as timedelta — sqlite3 cannot bind it (X-38:
-        # 'Error binding parameter 1 - probably unsupported type'). Store the
-        # canonical clock text Gate-8 fingerprints, so read-back digests match.
-        from services.reconciliation import normalize_cell
+        # pymysql returns TIME as timedelta — sqlite3 cannot bind it (X-38).
+        # MySQL TIME is a signed interval (-838:59:59 .. 838:59:59); the TEXT
+        # cell holds MySQL's own spelling of it, fraction at the declared FSP.
+        from services.mysql_time_text import mysql_time_text
 
-        return normalize_cell(value, ddl_type="", engine="sqlite")
-    if isinstance(value, datetime):
-        if value.tzinfo is not None:
-            raise FastPathUnavailable(
-                "timestamptz MySQL value is not SQLite COPY-safe"
-            )
-        if value.hour or value.minute or value.second or value.microsecond:
-            return value.replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
-        return date(value.year, value.month, value.day).isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
+        return mysql_time_text(value, time_fsp)
+    if isinstance(value, (datetime, date)):
+        # D224: full precision, and a midnight DATETIME keeps its clock.
+        return sqlite_temporal_text(value, source_label="MySQL")
     if isinstance(value, Decimal):
         # dest-canonical text, never str()/float — str(Decimal) renders
         # small magnitudes in scientific notation (-1E-10), which a
@@ -163,6 +160,9 @@ def copy_mysql_to_sqlite(
                     raise FastPathUnavailable(
                         f"source column {col!r} type {declared} is not SQLite COPY-safe"
                     )
+            from services.mysql_time_text import mysql_time_fsp
+
+            time_fsps = [mysql_time_fsp(live_l.get(c.lower())) for c in source_cols]
             where_sql = f" WHERE {cursor_where}" if cursor_where else ""
             src_cur.execute(f"SELECT COUNT(*) FROM {table_q}{where_sql}")  # nosec B608
             source_count = int(src_cur.fetchone()[0])
@@ -221,7 +221,10 @@ def copy_mysql_to_sqlite(
                 if not rows:
                     break
                 for row in rows:
-                    pending.append(tuple(mysql_value_to_sqlite(v) for v in row))
+                    pending.append(tuple(
+                        mysql_value_to_sqlite(v, time_fsp=fsp)
+                        for v, fsp in zip(row, time_fsps)
+                    ))
                     if len(pending) >= batch_size:
                         dest_conn.executemany(insert_sql, pending)
                         inserted += len(pending)

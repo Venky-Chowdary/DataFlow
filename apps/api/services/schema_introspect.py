@@ -23,6 +23,7 @@ from services.foreign_key_metadata import probe_foreign_keys
 from services.identity_carry import apply_identity_probe
 from services.physical_storage_metadata import probe_physical_storage
 from services.secondary_indexes import probe_secondary_indexes
+from services.text_temporal_readback import time_of_day_over_date
 from services.value_serializer import cell_to_string, evidence_text, json_default
 
 logger = logging.getLogger(__name__)
@@ -132,7 +133,7 @@ def _infer_logical_from_strings(samples: list[str], field_name: str = "") -> str
             "TEXT": "TEXT",
         }
         intel = infer_column(samples, field_name=field_name)
-        return mapped.get(str(intel["logical_type"]))
+        return mapped.get(time_of_day_over_date(str(intel["logical_type"]), samples))
     except Exception:
         logger.debug("schema infer_column failed for %s", field_name, exc_info=True)
         return None
@@ -3550,7 +3551,7 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                     mapped = declared_carrier
                 elif es_type == "date" or (es_type in ("text", "keyword") and samples):
                     intel = infer_column(samples, field_name=name)
-                    inferred = str(intel["logical_type"])
+                    inferred = time_of_day_over_date(str(intel["logical_type"]), samples)
                     semantic_role = intel.get("semantic_role")
                     if inferred in ("VARCHAR", "TEXT"):
                         inferred = mapped if mapped != "VARCHAR" else inferred
@@ -3574,7 +3575,7 @@ def _introspect_elasticsearch(**kwargs) -> dict[str, Any]:
                 intel = infer_column(samples, field_name=name) if samples else {"logical_type": "TEXT"}
                 columns.append({
                     "name": name,
-                    "inferred_type": str(intel.get("logical_type") or "TEXT"),
+                    "inferred_type": time_of_day_over_date(str(intel.get("logical_type") or "TEXT"), samples),
                     "nullable": True,
                     "semantic_role": intel.get("semantic_role"),
                 })
@@ -3721,7 +3722,10 @@ def _sqlite_temporal_precision_over_text(inferred: str, values: Sequence[Any]) -
         match = re.search(r"\d{2}:\d{2}:\d{2}\.(\d{1,9})", str(value))
         if match:
             digits = max(digits, len(match.group(1)))
-    return f"{token}({digits})" if digits else inferred
+    # The text keeps every digit the writer bound, up to a DATETIME2(7)
+    # seventh: sampled rows that happen to stop at six digits are not a
+    # six-digit carrier (run 2 graded DATETIME2(7) -> TIMESTAMP(6) lossy).
+    return f"{token}({max(digits, 7)})" if digits else inferred
 
 
 def _introspect_sqlite(
@@ -3861,10 +3865,9 @@ def _introspect_sqlite(
                             inferred = "DOUBLE PRECISION"
                     elif declared_base in {"TEXT", "VARCHAR", "CHAR", "CLOB", "STRING"}:
                         inferred = _sqlite_temporal_precision_over_text(
-                            _sqlite_text_over_numeric_samples(
-                                declared,
-                                _sqlite_declared_over_samples(declared, inferred),
-                            ),
+                            time_of_day_over_date(_sqlite_text_over_numeric_samples(
+                                declared, _sqlite_declared_over_samples(declared, inferred),
+                            ), str_values),
                             str_values,
                         )
                     else:

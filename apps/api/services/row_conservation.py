@@ -1091,6 +1091,9 @@ class ConservationLedger:
     # Spreadsheet blanks stored as SQL NULL. Absence, not a present value
     # destroyed — kept off ``rows_coerced_null``, which means lossy coerce.
     blank_cells_as_null: int = 0
+    # Mirror only: ``soft`` (``_deleted`` flags, physical COUNT(*) stays) or a
+    # declared ``hard`` DELETE. The UI words the ledger from this, not a guess.
+    mirror_delete_mode: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
@@ -1140,6 +1143,8 @@ class ConservationLedger:
             payload["summable"] = self.summable
         if self.per_stream is not None:
             payload["per_stream"] = [dict(item) for item in self.per_stream]
+        if self.mirror_delete_mode:
+            payload["mirror_delete_mode"] = self.mirror_delete_mode
         return payload
 
 
@@ -1336,6 +1341,7 @@ def _account_mirror(
 ) -> ConservationLedger:
     """Close active dest population, not physical COUNT(*) (which does not drop)."""
     payload = dict(mirror or {})
+    _mode = str(payload.get("mirror_delete_mode") or "").strip().lower()
     active = _as_optional_int(payload.get("active_rows"))
     # Inferred deletes count keys removed from the live view under either
     # delete mode — D38: a hard-delete mirror reports hard_deleted.
@@ -1370,6 +1376,7 @@ def _account_mirror(
         active_count=active,
         inferred_deletes=inferred,
         reactivated=reactivated,
+        mirror_delete_mode=_mode,
         deletes=inferred,
     )
     if active is None:
@@ -1393,14 +1400,21 @@ def _account_mirror(
     leftover = None
     if physical is not None:
         leftover = max(int(physical) - int(active), 0)
-    if unaccounted == 0:
+    from services.mirror_delete_notice import MIRROR_LEDGER_HARD_TEXT, MIRROR_LEDGER_SOFT_TEXT
+
+    if unaccounted == 0 and _mode == "hard":
+        note = (
+            f"Mirror population closed: dest-engine COUNT(*) = {active} equals "
+            f"rows read minus hold-outs and skips. {MIRROR_LEDGER_HARD_TEXT}"
+        )
+        if inferred:
+            note += f" This run deleted {inferred} row(s)."
+    elif unaccounted == 0:
         note = (
             f"Mirror active population closed: dest-engine COUNT(*) WHERE NOT "
             f"_deleted = {active} equals rows read minus hold-outs and skips. "
-            "Physical COUNT(*) does not drop — leftover dest keys stay as "
-            f"soft-deletes"
-            + (f" ({leftover} leftover row(s))" if leftover else "")
-            + "."
+            f"{MIRROR_LEDGER_SOFT_TEXT}"
+            + (f" ({leftover} leftover row(s) flagged _deleted.)" if leftover else "")
         )
         if inferred:
             note += f" This run inferred {inferred} delete(s)."
