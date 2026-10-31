@@ -185,19 +185,25 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
     runner = ShapeRunner(recipe, typed_values=typed)
     engine = runner._engine
     shaped: list[dict[str, Any]] = []
-    refusal: dict[str, Any] | None = None
+    refusals: list[dict[str, Any]] = []
+    refused_rows = 0
     for row in rows:
         try:
             shaped.extend(runner.records([row]))
         except ShapeRowError as exc:
             # A refusal is the recipe's answer for this row, and the preview's job
-            # is to show it now rather than let Execute discover it at scale.
-            refusal = exc.as_dict()
-            break
+            # is to show it now rather than let Execute discover it at scale. It
+            # used to stop here, so one bad cell hid every good row and the
+            # preview read "0 rows" with no note (QA round 11, T2).
+            refused_rows += 1
+            if len(refusals) < _MAX_PREVIEW_REFUSALS:
+                refusals.append(exc.as_dict())
+    refusal = refusals[0] if refusals else None
     # The sample's end is the stream's end: buffering steps (dedupe keep-last,
     # aggregate, sort, rank) emit now, same as the transfer's drain.
-    if refusal is None:
-        shaped.extend(runner.drain())
+    shaped.extend(runner.drain())
+    if refusal is not None:
+        preview_note = _join_notes(preview_note, _refusal_note(refusal, refused_rows, len(rows)))
 
     out_columns = list(engine.output_columns) or list(recipe.output_columns) or _columns_of(shaped or rows)
     profiles = (
@@ -228,6 +234,9 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
         "effect": _wire(engine.effect.to_dict()),
         "changed_cells": _changed_cells(rows, shaped, recipe),
         "refusal": refusal,
+        "refused": refusal is not None,
+        "refused_rows": refused_rows,
+        "refusals": refusals,
         "shaped_profile": [p.to_dict() for p in profiles],
         "suggestions": suggest_steps(profiles, target_schema=body.target_schema)
         if body.include_profile
@@ -241,6 +250,24 @@ async def preview_recipe(body: _PreviewBody) -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+#: Refused rows cited one by one in a preview; the count covers the rest.
+_MAX_PREVIEW_REFUSALS = 20
+
+
+def _refusal_note(first: dict[str, Any], refused: int, sampled: int) -> str:
+    """What the operator must read when rows are missing from the preview."""
+    return (
+        f"{refused} of {sampled} sampled row(s) were refused by the recipe and "
+        f"are not shown (first: {first.get('message')}). The rows that shaped are "
+        "shown. Execute refuses the run while any row is refused: fix the value, "
+        "or set that step's on_error to divert (quarantine the row) or null."
+    )
+
+
+def _join_notes(*notes: str) -> str:
+    return " ".join(n.strip() for n in notes if n and n.strip())
+
 
 
 def _dedupe_step_preview(recipe, engine, shaped) -> dict[int, dict[str, Any]]:

@@ -12,7 +12,7 @@ from __future__ import annotations
 from typing import Any, Literal, Optional
 
 from fastapi import APIRouter, Header, HTTPException, Request, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from services.transform_engine import KNOWN_TRANSFORMS
 from services.transform_library import get_transform_library
@@ -42,6 +42,13 @@ class StepPayload(BaseModel):
     op: str = Field(..., min_length=1)
     on_error: OnError = "fail"
     enabled: bool = True
+
+    @field_validator("on_error", mode="before")
+    @classmethod
+    def _engine_word_is_fail(cls, value: Any) -> Any:
+        """``refuse`` is the transfer engine's word for ``fail`` (QA round 11, T9)."""
+        text = str(value or "").strip().lower()
+        return "fail" if text in ("", "refuse") else text
     options: dict[str, Any] = Field(default_factory=dict)
     output_column: str = ""
 
