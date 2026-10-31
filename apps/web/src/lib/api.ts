@@ -3642,6 +3642,10 @@ export type SsoConfig = {
   redirect_uri?: string;
   scopes?: string;
   tenant_id?: string;
+  /** Sign-ins from these domains route to this IdP (`/auth/sso/route`). */
+  email_domains?: string[];
+  /** Write-only: remove the stored client secret (blank keeps it). */
+  clear_client_secret?: boolean;
 };
 
 export function resolveApiBase(): string {

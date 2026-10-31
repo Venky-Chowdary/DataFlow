@@ -93,6 +93,10 @@ class SsoConfigBody(BaseModel):
     redirect_uri: str | None = None
     scopes: str | None = None
     tenant_id: str | None = None
+    # Domains whose sign-ins route to this IdP (``POST /auth/sso/route``).
+    email_domains: list[str] | None = Field(default=None, max_length=100)
+    # ``client_secret`` blank keeps the stored secret; this removes it.
+    clear_client_secret: bool | None = None
 
 
 class AiProviderBody(BaseModel):
@@ -219,8 +223,15 @@ async def patch_sso(sso_type: str, body: SsoConfigBody, request: Request):
     from services.audit_log import append_audit_event
     from services.integrations_store import update_sso_config, validate_sso_config
 
+    from services.integrations_store import SsoConfigRefused
+
     try:
         updated = update_sso_config(sso_type, body.model_dump(exclude_none=True))
+    except SsoConfigRefused as exc:
+        raise HTTPException(
+            status_code=400,
+            detail={"message": str(exc), "missing_fields": exc.missing},
+        ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
