@@ -40,6 +40,7 @@ import type {
   ScheduleIntervals,
 } from "../../lib/types";
 import { storedSchedulePreset } from "../../lib/scheduleCadence";
+import { contractsDeleteMode, mirrorDeleteText } from "../../lib/mirrorDeleteMode";
 import {
   CDC_DELIVERY_AT_LEAST_ONCE,
   exactlyOnceWiredDest,
@@ -645,7 +646,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
                   {syncMode === "scd2"
                     ? "Required for SCD2 versioning — identifies which business key to expire and reopen."
                     : syncMode === "mirror"
-                      ? "Required for mirror sync — dest keys missing from the source are flagged _deleted. Physical COUNT(*) stays; active population is COUNT(*) WHERE NOT _deleted."
+                      ? `Required for mirror sync. ${mirrorDeleteText(contractsDeleteMode(initial?.stream_contracts))}`
                       : "Enables dedupe / upsert into the destination."}
                 </span>
               </div>

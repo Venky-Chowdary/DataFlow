@@ -153,6 +153,16 @@ def _write_batch(
         or (cfg.get("extra") or {}).get("destination_column_types")
         or {}
     )
+    if dest_type == "postgresql" and cfg.get("vector_layout") == "table":
+        from services.pgvector_typed_embedding import augment_typed_batch, materialize_batch
+
+        # pgvector typed table: the embedding cells ride the same INSERT (D209).
+        headers, data_rows = materialize_batch(headers, data_rows, records, source_spool)
+        records = source_spool = None
+        headers, data_rows, mappings, column_types = augment_typed_batch(
+            cfg, headers, data_rows, mappings, column_types,
+            create_table=create_table, dest_column_types=dest_column_types,
+        )
     source_handoff: dict[str, Any] = {}
     if source_spool is not None:
         source_handoff["source_spool"] = source_spool

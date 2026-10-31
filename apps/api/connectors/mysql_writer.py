@@ -14,6 +14,7 @@ from services.decision_kernel import materialize_dest_ddl
 
 from connectors.mysql_conn import get_connection
 from connectors.schema_drift import widen_existing_columns_native
+from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
     extract_column_from_sql_error,
     is_sql_data_error,
@@ -1725,7 +1726,9 @@ def write_mapped_rows(
                         # Incorrect datetime cannot abort a 100k-row transfer.
                         # write_batch is empty-PK partitioned (pre-loop); never retry
                         # raw batch conflict keys that would ON DUPLICATE mass-touch.
-                        if is_sql_data_error(chunk_exc) and policy in {"quarantine", "coerce_null"}:
+                        if is_sql_data_error(chunk_exc) and salvage_policy(
+                            policy, mappings
+                        ) in SALVAGE_POLICIES:
                             for row_i, row in enumerate(write_batch):
                                 try:
                                     cur.execute(insert_sql, row)

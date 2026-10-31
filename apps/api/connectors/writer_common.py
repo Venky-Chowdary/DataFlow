@@ -381,7 +381,12 @@ def append_write_quarantine_detail(
 
     Module 9: stamp first-class quarantine contract fields before append.
     """
-    d = dict(detail)
+    maps = mappings if mappings is not None else _active_quarantine_mappings.get()
+    from connectors.contract_salvage import contract_row_detail
+
+    # A row the database refused under a strict posture: its column's signed
+    # continue contract decides, as the matrix decides for Python-side holdouts.
+    d = contract_row_detail(dict(detail), maps)
     # The NULL wire token is not a rejected cell. Upsert quarantine was
     # recording one ``__DF_SQL_NULL__`` row on every load after the nullable
     # blank fix. A NOT NULL refusal still names nullability and is kept.
@@ -400,7 +405,6 @@ def append_write_quarantine_detail(
         d["values"] = {**base_values, **wired}
     else:
         d["values"] = base_values
-    maps = mappings if mappings is not None else _active_quarantine_mappings.get()
     # The column's signed contract — not the job posture alone — decides whether
     # this holdout aborts the load. Stamped here so every writer family inherits
     # the same answer the preflight population scan gave.

@@ -1120,6 +1120,13 @@ export interface PreflightResult {
    * (pre-load) recipe ran before them. Sample-scoped: counts describe the
    * rows Validate held, never the population.
    */
+  /** Mirror runs: what happens to destination rows whose key left the source. */
+  mirror_delete?: {
+    mode?: "soft" | "hard";
+    physical_delete?: boolean;
+    message?: string;
+    streams?: string[];
+  };
   transform_image?: {
     recipe_hash?: string;
     columns?: string[];
@@ -1577,6 +1584,8 @@ export interface ScheduleApprovalInboxItem {
 export interface PipelineSchedule {
   id: string;
   name: string;
+  /** Stored per-stream contracts (a mirror stream may declare delete_mode). */
+  stream_contracts?: Record<string, unknown>[];
   source_connector_id: string;
   source_table: string;
   dest_connector_id: string;

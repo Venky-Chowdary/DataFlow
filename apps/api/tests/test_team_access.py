@@ -457,6 +457,13 @@ def test_sole_admin_cannot_be_demoted_or_removed(stores):
     team_store.add_workspace_member(
         workspace_id=ws.id, email="second@example.com", role="admin", added_by="admin@example.com"
     )
+    # An invited admin with no login is no spare admin (QA enterprise #25)…
+    with pytest.raises(team_store.LastAdminProtected):
+        team_store.remove_workspace_member(
+            workspace_id=ws.id, email="admin@example.com", removed_by="admin@example.com"
+        )
+    # …one who can sign in is.
+    user_store.create_user(email="second@example.com", password="Second-Admin-2026!")
     team_store.remove_workspace_member(
         workspace_id=ws.id, email="admin@example.com", removed_by="admin@example.com"
     )

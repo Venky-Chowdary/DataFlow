@@ -22,11 +22,15 @@ answer:
 
 1. an explicit ``vector_layout`` on the run or the saved connector wins;
 2. otherwise an existing table keeps the shape it already has (run 2 into a
-   table DataFlow created keeps working);
-3. otherwise a new table gets the document layout — production behaviour —
-   unless ``DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT=1`` makes it a typed table.
-   With the flag off, each new table that would have been typed is recorded
-   once an hour as ``pgvector.would_create_typed_table``.
+   document table DataFlow created stays a document table);
+3. otherwise a new table is a typed table (owner decision, round 8): every
+   mapped column with its real type plus ``embedding vector(n)`` (see
+   :mod:`services.pgvector_typed_embedding`). The vector-document layout is
+   opt-in with ``vector_layout=document``.
+
+Round 6 shipped the typed default behind ``DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT``
+(off). The owner made it the product default, so the flag is gone; a
+connector or run that wants the old shape declares ``vector_layout=document``.
 """
 
 from __future__ import annotations
@@ -40,7 +44,6 @@ logger = logging.getLogger(__name__)
 
 LAYOUT_TABLE = "table"
 LAYOUT_DOCUMENT = "document"
-TYPED_DEFAULT_FLAG = "DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT"
 
 _ALIASES = {
     "table": LAYOUT_TABLE,
@@ -92,12 +95,6 @@ def is_document_shaped(columns: Iterable[Any]) -> bool:
     return _DOCUMENT_SIGNATURE <= names
 
 
-def typed_default_enabled() -> bool:
-    from services.brand_env import getenv_brand_bool
-
-    return getenv_brand_bool(TYPED_DEFAULT_FLAG, False)
-
-
 def decide_layout(
     cfg: Mapping[str, Any] | None,
     *,
@@ -118,23 +115,7 @@ def decide_layout(
             if is_document_shaped(cols):
                 return LAYOUT_DOCUMENT, "existing_document_table"
             return LAYOUT_TABLE, "existing_typed_table"
-    if typed_default_enabled():
-        return LAYOUT_TABLE, "typed_default_flag"
-    from services.would_apply_audit import audit_would_apply
-
-    audit_would_apply(
-        "pgvector.would_create_typed_table",
-        resource=f"pgvector:{table}",
-        dedupe_key=(str((cfg or {}).get("host") or ""), str((cfg or {}).get("database") or ""), table),
-        details={
-            "table": table,
-            "today": "vector-document table (id, content, embedding, metadata)",
-            "with_flag": "typed table with the mapped columns",
-        },
-        flag=TYPED_DEFAULT_FLAG,
-        workspace_id=workspace_id,
-    )
-    return LAYOUT_DOCUMENT, "default_document"
+    return LAYOUT_TABLE, "typed_default"
 
 
 def is_pgvector_cfg(cfg: Mapping[str, Any] | None) -> bool:
@@ -252,8 +233,13 @@ def destination_contract(
     mappings: list[dict[str, Any]],
     column_types: Mapping[str, str] | None,
     options: Mapping[str, Any] | None,
+    existing_columns: list[str] | None = None,
 ) -> dict[str, Any]:
-    """The physical shape the job will create, column by column."""
+    """The physical shape the job will create, column by column.
+
+    ``existing_columns`` (an existing typed table) limits the embedding
+    columns to the ones the table already has: its shape is kept.
+    """
     rows = [
         (
             str(m.get("target_column") or m.get("target") or m.get("source") or ""),
@@ -262,7 +248,11 @@ def destination_contract(
         )
         for m in mappings or []
     ]
+    opts = dict(options or {})
     if layout == LAYOUT_TABLE:
+        from services.pgvector_typed_embedding import contract_columns
+
+        embedding = contract_columns(mappings, opts, existing_columns)
         return {
             "layout": LAYOUT_TABLE,
             "layout_reason": reason,
@@ -270,10 +260,12 @@ def destination_contract(
                 {"name": target, "type": ttype, "source": source}
                 for target, source, ttype in rows
                 if target
-            ],
+            ]
+            + embedding,
+            "embedding_columns": embedding,
+            "embedded_text_rule": embedded_text_rule(opts),
             "null_policy": "SQL NULL stays NULL",
         }
-    opts = dict(options or {})
     from connectors.pgvector_writer import _pgvector_typed_extras
     from services.vector_sync import vector_dimension_hint
 
@@ -379,16 +371,24 @@ def plan_destination_contract(
     dst_conn: Mapping[str, Any] | None,
     mappings: list[dict[str, Any]],
     column_types: Mapping[str, str] | None,
+    dst_info: Mapping[str, Any] | None = None,
 ) -> dict[str, Any] | None:
     if not decided:
         return None
     layout, reason = decided
+    existing = None
+    if reason == "existing_typed_table":
+        existing = [
+            str(c.get("name") if isinstance(c, Mapping) else c)
+            for c in ((dst_info or {}).get("columns") or [])
+        ]
     return destination_contract(
         layout,
         reason,
         mappings=mappings,
         column_types=column_types,
         options=document_options(dst_conn),
+        existing_columns=existing,
     )
 
 
@@ -411,7 +411,19 @@ def attach_contract_to_preflight(
             f"embedded text comes from {rule_text} for every row."
         )
     else:
-        message = f"pgvector typed table ({contract.get('layout_reason')}): {cols}."
+        emb = contract.get("embedding_columns") or []
+        rule = contract.get("embedded_text_rule") or {}
+        rule_text = {
+            "column": f"column {rule.get('column')} (NULL or '' leaves the embedding NULL)",
+            "template": "the declared template (stored in embedding_text)",
+            "embedding_column": f"precomputed vectors in {rule.get('column')}",
+        }.get(str(rule.get("kind")), "every mapped field of the row as JSON")
+        tail = (
+            f" {emb[0]['name']} {emb[0]['type']} holds the embedding of {rule_text}."
+            if emb
+            else " The existing table has no embedding column; it keeps its shape."
+        )
+        message = f"pgvector typed table ({contract.get('layout_reason')}): {cols}.{tail}"
     out["warnings"] = [
         *list(out.get("warnings") or []),
         {"id": "pgvector_destination_layout", "message": message},
