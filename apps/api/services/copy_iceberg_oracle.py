@@ -163,6 +163,10 @@ def copy_iceberg_to_oracle(
             stage_table = staged_overwrite_name(dest_table)
             swap_trash_table = overwrite_trash_name(dest_table)
             dest_ref = _ora_table_ref(swap_schema, stage_table)
+            # Load the staged table, not the live one (D210 sibling).
+            insert_sql = (
+                f"INSERT INTO {dest_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+            )
             dest_table = stage_table
             swap_at_end = True
             exists = False
