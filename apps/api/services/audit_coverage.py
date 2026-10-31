@@ -24,7 +24,10 @@ SECURITY_EVENTS: dict[str, str] = {
     "authz.tenant_bind.denied": "Authenticated access was denied by tenant binding.",
     "authz.denied": "An authenticated request lacked the required permission.",
     "authz.workspace_admin_iam.would_deny": "A workspace admin without the platform admin role was admitted to IAM/SCIM administration because DATAFLOW_WORKSPACE_ADMIN_IAM is on.",
-    "tenant.ip_allowlist.would_block": "A request outside the tenant IP allowlist was admitted because enforcement is off.",
+    "tenant.ip_allowlist.would_block": "A request outside a workspace IP allowlist was admitted because the platform switched allowlist enforcement off.",
+    "workspace.ip_allowlist.blocked": "A request from outside a workspace IP allowlist was refused.",
+    "workspace.ip_allowlist.break_glass": "A platform administrator reached an IP-allowlisted workspace from outside its list through the break-glass header.",
+    "workspace.ip_allowlist.lockout_refused": "An IP allowlist that excludes the saving administrator's own address was refused.",
     "auth.login": "A password authentication attempt completed.",
     "auth.login.locked": "A password login attempt triggered an account lockout.",
     "auth.logout": "An authenticated session was revoked.",
@@ -235,8 +238,15 @@ def record_security_event(
     level: str | None = None,
     details: dict[str, Any] | None = None,
     principal: dict[str, str] | None = None,
+    workspace_id: str | None = None,
 ) -> None:
-    """Write one named, redacted audit event and its operational log line."""
+    """Write one named, redacted audit event and its operational log line.
+
+    ``workspace_id`` stamps the event on a workspace the caller already
+    resolved (an allowlist refusal belongs to the refused workspace even when
+    the request named none); otherwise the request's authorized header is used.
+    """
+    stamped_workspace_id = workspace_id
     def context_value(field: str, getter, default):
         try:
             return getter()
@@ -302,7 +312,7 @@ def record_security_event(
 
             return authorized_workspace_id(request)
 
-        workspace_id = context_value("workspace_id", request_workspace_id, "") or ""
+        workspace_id = stamped_workspace_id or context_value("workspace_id", request_workspace_id, "") or ""
         tracker = context_value("request_audit", current_request_audit, None)
         if tracker is not None:
             rejected = bool(
@@ -350,7 +360,7 @@ def record_security_event(
             )
             return workspace_var.get() if workspace_var is not None else ""
 
-        workspace_id = context_value(
+        workspace_id = stamped_workspace_id or context_value(
             "workspace_id",
             context_workspace_id,
             "",

@@ -1,24 +1,19 @@
-"""Tenant/custom-domain resolution and IP allowlist middleware.
+"""Tenant/custom-domain resolution, and the public paths no allowlist covers.
 
 Reads the ``Host`` header and, when it matches a configured tenant custom
 domain, attaches ``tenant_id`` and the tenant's workspace/data region to the
-request state.  Also enforces the tenant IP allowlist before the request reaches
-authentication or business logic.
+request state. The workspace IP allowlist is enforced after authentication
+(src/middleware/workspace_ip_allowlist_middleware.py); the public-path list
+below is what it exempts.
 """
 
 from __future__ import annotations
 
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse
 
-from services.audit_coverage import record_security_event
-from services.brand_env import getenv_brand_bool
 from services.platform_config import docs_enabled
-from services.tenant_store import (
-    is_request_ip_allowed,
-    resolve_tenant_from_host,
-)
+from services.tenant_store import resolve_tenant_from_host
 
 # The bare root is public only as an exact match: as a prefix it would cover
 # every path and switch the tenant IP allowlist off.
@@ -96,61 +91,31 @@ def _is_public_path(path: str) -> bool:
 
 
 def _allowlist_enforced() -> bool:
-    """``DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE`` (default off).
+    """Kill switch for workspace IP allowlists (services.ip_allowlist_policy).
 
-    Before the segment-boundary fix a bare ``"/"`` prefix made every path
-    public, so the per-tenant allowlist was never enforced in production.
-    Turning it on is an operator decision; until then a request that the
-    allowlist would block is audited and allowed.
+    On by default once a workspace saves a list; the platform can switch it
+    off deployment-wide, which turns refusals into audited admissions.
     """
-    return getenv_brand_bool("TENANT_IP_ALLOWLIST_ENFORCE", False)
+    from services.ip_allowlist_policy import enforcement_on
 
-
-def _client_ip(request: Request) -> str:
-    """Phase D1 — trust-boundary aware (never left-most XFF by default)."""
-    from services.client_ip import client_ip_from_request
-
-    return client_ip_from_request(request)
+    return enforcement_on()
 
 
 class TenantMiddleware(BaseHTTPMiddleware):
+    """Attach the custom-domain tenant to the request.
+
+    The IP allowlist is no longer decided here: before auth there is no
+    actor, and the shared app host never resolved a tenant, so the list was
+    never applied there (QA round 11, S7). It is enforced after auth by
+    ``WorkspaceIpAllowlistMiddleware`` for every host, which also reads the
+    workspace this middleware resolves from the Host header.
+    """
+
     async def dispatch(self, request: Request, call_next):
         host = (request.headers.get("host") or "").split(":")[0].strip().lower()
-        tenant = None
-        if host:
-            tenant = resolve_tenant_from_host(host)
-
+        tenant = resolve_tenant_from_host(host) if host else None
         if tenant:
             request.state.tenant_id = tenant.id
             request.state.tenant_workspace_id = tenant.workspace_id
             request.state.data_region = tenant.data_region or "us-east-1"
-
-            if tenant.ip_allowlist and not _is_public_path(request.url.path):
-                client_ip = _client_ip(request)
-                if not is_request_ip_allowed(client_ip, tenant):
-                    if not _allowlist_enforced():
-                        record_security_event(
-                            "tenant.ip_allowlist.would_block",
-                            outcome="skipped",
-                            request=request,
-                            resource=request.url.path,
-                            reason_code="ip_not_in_tenant_allowlist",
-                            level="warn",
-                            details={
-                                "tenant_id": tenant.id,
-                                "workspace_id": tenant.workspace_id,
-                                "path": request.url.path,
-                                "client_ip": client_ip,
-                                "enforce_flag": "DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE",
-                            },
-                        )
-                        return await call_next(request)
-                    return JSONResponse(
-                        status_code=403,
-                        content={
-                            "detail": "Access denied by tenant IP allowlist",
-                            "ip": client_ip,
-                        },
-                    )
-
         return await call_next(request)

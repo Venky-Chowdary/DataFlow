@@ -3,6 +3,13 @@
 Tokens carry a ``jti``; Verify requires the session row to exist and not be
 revoked. Logout and password-rotation helpers delete or mark sessions so stolen
 tokens die server-side (SOC 2 access-control expectation).
+
+Durability (QA round 11, S7): rows live in MongoDB (collection
+``auth_sessions``) when a real client is connected, and are mirrored to the
+local JSON file, which is the store on its own when Mongo is absent. A
+redeploy that loses the file therefore keeps every session, its revocation
+and its idle clock. Reads merge both: a session is revoked when either store
+says so, and its last activity is the latest either store saw.
 """
 
 from __future__ import annotations
@@ -12,6 +19,7 @@ import logging
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any
 
 from services.platform_config import data_dir
@@ -21,10 +29,15 @@ logger = logging.getLogger(__name__)
 
 _LOCK = threading.RLock()
 _STORE_NAME = "auth_sessions.json"
+COLLECTION = "auth_sessions"
+_INDEXED: set[str] = set()
 
 
 def _path():
     return data_dir() / _STORE_NAME
+
+
+# ── file store ────────────────────────────────────────────────────────────
 
 
 def _load() -> dict[str, Any]:
@@ -52,55 +65,110 @@ def _save(data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _file_put(jti: str, fields: dict[str, Any]) -> None:
+    with _LOCK:
+        data = _load()
+        row = data["sessions"].get(jti)
+        row = dict(row) if isinstance(row, dict) else {}
+        row.update(fields)
+        data["sessions"][jti] = row
+        _save(data)
+
+
+# ── Mongo store ───────────────────────────────────────────────────────────
+
+
+def _collection():
+    try:
+        from services.metadata_backend import mongo_database
+
+        db = mongo_database()
+    except Exception:  # noqa: BLE001 — durability degrade must not 500 auth
+        return None
+    if db is None:
+        return None
+    coll = db[COLLECTION]
+    if db.name not in _INDEXED:
+        try:
+            coll.create_index([("email", 1)], name="email")
+            # Housekeeping: Mongo drops a row a week after it expires.
+            coll.create_index([("expires_dt", 1)], name="expires_ttl", expireAfterSeconds=7 * 86400)
+        except Exception:  # noqa: BLE001
+            logger.warning("auth_sessions index ensure failed", exc_info=True)
+        _INDEXED.add(db.name)
+    return coll
+
+
+def _mongo(fn, default=None):
+    coll = _collection()
+    if coll is None:
+        return default
+    try:
+        return fn(coll)
+    except Exception as exc:  # noqa: BLE001 — the file store still answers
+        logger.warning("auth_sessions mongo call failed (%s)", type(exc).__name__)
+        return default
+
+
+def _session_row(jti: str) -> dict[str, Any] | None:
+    """The merged row: revoked if either store says so, latest activity wins."""
+    if not jti:
+        return None
+    doc = _mongo(lambda c: c.find_one({"_id": jti}, {"_id": False, "expires_dt": False}))
+    with _LOCK:
+        local = _load()["sessions"].get(jti)
+    rows = [r for r in (doc, local) if isinstance(r, dict) and r]
+    if not rows:
+        return None
+    merged: dict[str, Any] = {}
+    for row in reversed(rows):  # Mongo's fields win over the file's
+        merged.update(row)
+    revoked = [int(r["revoked_at"]) for r in rows if r.get("revoked_at") is not None]
+    merged["revoked_at"] = min(revoked) if revoked else None
+    seen = max(int(r.get("last_seen_at") or r.get("created_at") or 0) for r in rows)
+    merged["last_seen_at"] = seen or None
+    return merged
+
+
+# ── API ───────────────────────────────────────────────────────────────────
+
+
 def create_session(email: str, *, expires_at: int) -> str:
     """Persist a new session and return its jti."""
     jti = uuid.uuid4().hex
-    now = int(time.time())
-    with _LOCK:
-        data = _load()
-        data["sessions"][jti] = {
-            "email": email.strip().lower(),
-            "created_at": now,
-            "expires_at": int(expires_at),
-            "revoked_at": None,
-        }
-        _save(data)
+    row = {
+        "email": email.strip().lower(),
+        "created_at": int(time.time()),
+        "expires_at": int(expires_at),
+        "revoked_at": None,
+    }
+    expires_dt = datetime.fromtimestamp(int(expires_at), tz=timezone.utc)
+    _mongo(lambda c: c.insert_one({"_id": jti, **row, "expires_dt": expires_dt}))
+    _file_put(jti, row)
     return jti
 
 
 def session_active(jti: str, email: str) -> bool:
-    if not jti:
+    row = _session_row(jti)
+    if not row:
         return False
-    now = int(time.time())
-    with _LOCK:
-        data = _load()
-        row = data["sessions"].get(jti)
-        if not isinstance(row, dict):
-            return False
-        if row.get("revoked_at") is not None:
-            return False
-        if int(row.get("expires_at") or 0) < now:
-            return False
-        if str(row.get("email") or "").strip().lower() != email.strip().lower():
-            return False
-        return True
+    if row.get("revoked_at") is not None:
+        return False
+    if int(row.get("expires_at") or 0) < int(time.time()):
+        return False
+    return str(row.get("email") or "").strip().lower() == email.strip().lower()
 
 
 def revoke_session(jti: str) -> bool:
     """Revoke one session by jti. Returns True when a row was updated."""
-    if not jti:
+    row = _session_row(jti)
+    if not row:
         return False
+    if row.get("revoked_at") is not None:
+        return True
     now = int(time.time())
-    with _LOCK:
-        data = _load()
-        row = data["sessions"].get(jti)
-        if not isinstance(row, dict):
-            return False
-        if row.get("revoked_at") is not None:
-            return True
-        row["revoked_at"] = now
-        data["sessions"][jti] = row
-        _save(data)
+    _mongo(lambda c: c.update_one({"_id": jti}, {"$set": {"revoked_at": now}}))
+    _file_put(jti, {**row, "revoked_at": now})
     return True
 
 
@@ -108,67 +176,76 @@ def revoke_all_for_email(email: str) -> int:
     """Revoke every active session for ``email`` (password rotate / force logout)."""
     normalized = email.strip().lower()
     now = int(time.time())
-    count = 0
+    ids = _mongo(
+        lambda c: [d["_id"] for d in c.find({"email": normalized, "revoked_at": None}, {"_id": 1})],
+        default=[],
+    ) or []
+    if ids:
+        _mongo(lambda c: c.update_many({"_id": {"$in": ids}}, {"$set": {"revoked_at": now}}))
+    revoked = set(ids)
     with _LOCK:
         data = _load()
+        changed = False
         for jti, row in list(data["sessions"].items()):
-            if not isinstance(row, dict):
+            if not isinstance(row, dict) or row.get("revoked_at") is not None:
                 continue
             if str(row.get("email") or "").strip().lower() != normalized:
                 continue
-            if row.get("revoked_at") is not None:
-                continue
             row["revoked_at"] = now
             data["sessions"][jti] = row
-            count += 1
-        if count:
+            revoked.add(jti)
+            changed = True
+        if changed:
             _save(data)
-    return count
+    return len(revoked)
 
 
 def purge_expired(*, now: int | None = None) -> int:
-    """Drop expired/revoked rows older than 7 days — housekeeping for local JSON store."""
+    """Drop expired/revoked rows older than 7 days (Mongo also has a TTL index)."""
     ts = int(now if now is not None else time.time())
     cutoff = ts - 7 * 86400
-    removed = 0
+    stale = {"$or": [{"expires_at": {"$lt": cutoff}}, {"revoked_at": {"$ne": None, "$lt": cutoff}}]}
+    removed = int(_mongo(lambda c: c.delete_many(stale).deleted_count, default=0) or 0)
     with _LOCK:
         data = _load()
         keep: dict[str, Any] = {}
+        dropped = 0
         for jti, row in data["sessions"].items():
             if not isinstance(row, dict):
-                removed += 1
+                dropped += 1
                 continue
             expires = int(row.get("expires_at") or 0)
             revoked = row.get("revoked_at")
             if expires < cutoff or (revoked is not None and int(revoked) < cutoff):
-                removed += 1
+                dropped += 1
                 continue
             keep[jti] = row
-        if removed:
+        if dropped:
             data["sessions"] = keep
             _save(data)
-    return removed
+    return max(removed, dropped)
 
 
 def session_last_seen(jti: str) -> int | None:
     """When this session last made a request (``created_at`` before any touch)."""
-    with _LOCK:
-        row = _load()["sessions"].get(jti)
-    if not isinstance(row, dict):
+    row = _session_row(jti)
+    if not row:
         return None
-    return int(row.get("last_seen_at") or row.get("created_at") or 0) or None
+    return int(row.get("last_seen_at") or 0) or None
 
 
 def touch_session(jti: str, *, min_interval: int = 60, now: int | None = None) -> None:
-    """Record activity; writes at most once per ``min_interval`` seconds."""
+    """Record activity; writes at most once per ``min_interval`` seconds.
+
+    A session with no activity on record is recorded as seen now, so its idle
+    clock starts instead of never running.
+    """
+    if not jti:
+        return
     current = int(now if now is not None else time.time())
-    with _LOCK:
-        data = _load()
-        row = data["sessions"].get(jti)
-        if not isinstance(row, dict):
-            return
-        last = int(row.get("last_seen_at") or row.get("created_at") or 0)
-        if current - last < min_interval:
-            return
-        row["last_seen_at"] = current
-        _save(data)
+    row = _session_row(jti)
+    last = int((row or {}).get("last_seen_at") or 0)
+    if last and current - last < min_interval:
+        return
+    _mongo(lambda c: c.update_one({"_id": jti}, {"$set": {"last_seen_at": current}}, upsert=True))
+    _file_put(jti, {"last_seen_at": current})

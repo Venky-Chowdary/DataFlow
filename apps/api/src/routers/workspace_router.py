@@ -54,7 +54,8 @@ class TenantCreateBody(BaseModel):
     security_contact_email: str = Field(default="", max_length=128)
     mfa_required: bool = Field(default=False)
     session_timeout_hours: int = Field(default=8, ge=1, le=24)
-    enforce_session_timeout: bool = Field(default=False)
+    # A saved timeout is enforced unless the admin records it as policy only.
+    enforce_session_timeout: bool = Field(default=True)
     ip_allowlist: list[str] = Field(default_factory=list)
     egress_allowlist: list[str] = Field(default_factory=list)
 
@@ -66,8 +67,9 @@ class TenantUpdateBody(BaseModel):
     byok_key_id: str | None = Field(default=None, max_length=128)
     security_contact_email: str | None = Field(default=None, max_length=128)
     mfa_required: bool | None = Field(default=None)
+    # Saving the hours also turns enforcement on unless the same request sends
+    # enforce_session_timeout=false (record the hours as policy only).
     session_timeout_hours: int | None = Field(default=None, ge=1, le=24)
-    # Turns session_timeout_hours from recorded policy into an enforced idle timeout.
     enforce_session_timeout: bool | None = Field(default=None)
     ip_allowlist: list[str] | None = Field(default=None)
     egress_allowlist: list[str] | None = Field(default=None)
@@ -873,12 +875,38 @@ def _authorized_request_tenant(request: Request):
     return tenant
 
 
+def _tenant_with_enforcement(tenant: Tenant, request: Request) -> dict[str, Any]:
+    """The saved tenant plus what is enforced now (same source as the posture)."""
+    from services.security_enforcement import enforcement_status
+
+    return {**tenant.to_dict(), "enforcement": enforcement_status(tenant, request)}
+
+
+def _refuse_self_lockout(request: Request, entries: list[str], workspace_id: str) -> None:
+    """400 when the list would shut out the admin saving it (audited)."""
+    from services.audit_coverage import record_security_event
+    from services.client_ip import client_ip_from_request
+    from services.ip_allowlist_policy import lockout_refusal
+
+    message = lockout_refusal(request, entries)
+    if not message:
+        return
+    record_security_event(
+        "workspace.ip_allowlist.lockout_refused", outcome="failed", request=request,
+        resource="/workspace/tenant", reason_code="allowlist_excludes_caller", level="warn",
+        details={"workspace_id": workspace_id, "client_ip": client_ip_from_request(request),
+                 "entries": len(entries or [])},
+        workspace_id=workspace_id,
+    )
+    raise HTTPException(status_code=400, detail=message)
+
+
 @router.get("/tenant")
 async def get_current_tenant(request: Request):
     tenant = _authorized_request_tenant(request)
     if not tenant:
         raise HTTPException(status_code=404, detail="No tenant configured for this workspace or domain")
-    return tenant.to_dict()
+    return _tenant_with_enforcement(tenant, request)
 
 
 @router.get("/tenants")
@@ -928,6 +956,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             status_code=403,
             detail="workspace_id does not match X-Workspace-Id",
         )
+    _refuse_self_lockout(request, body.ip_allowlist, workspace_id)
     try:
         tenant = create_tenant(
             workspace_id=workspace_id,
@@ -956,7 +985,7 @@ async def post_tenant(body: TenantCreateBody, request: Request):
             "data_region": tenant.data_region,
         },
     )
-    return tenant.to_dict()
+    return _tenant_with_enforcement(tenant, request)
 
 
 @router.patch("/tenant/{tenant_id}")
@@ -968,6 +997,8 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
         raise HTTPException(status_code=404, detail="Tenant not found")
     actor = _actor(request)
     _require_tenant_admin(request, tenant.workspace_id)
+    if body.ip_allowlist is not None:
+        _refuse_self_lockout(request, body.ip_allowlist, tenant.workspace_id)
     try:
         updated = update_tenant(tenant_id, **body.model_dump(exclude_none=True))
     except ValueError as exc:
@@ -984,7 +1015,7 @@ async def patch_tenant(tenant_id: str, body: TenantUpdateBody, request: Request)
             "fields": sorted(body.model_dump(exclude_none=True).keys()),
         },
     )
-    return updated.to_dict()
+    return _tenant_with_enforcement(updated, request)
 
 
 @router.delete("/tenant/{tenant_id}")
@@ -1076,7 +1107,7 @@ async def rotate_tenant_byok_key(key_id: str, request: Request):
 # ═══════════════════════════════════════════════════════════════════════════════
 
 
-def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
+def _security_posture(tenant: Tenant | None = None, request: Request | None = None) -> dict[str, Any]:
     from services.byok_key_manager import key_status_summary
     from services.cdc_effectively_once import (
         DELIVERY_DEFAULT,
@@ -1086,15 +1117,13 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
     from services.platform_config import is_production, validate_production_config
     from services.recovery_honesty import honesty_dict as recovery_honesty_dict
     from services.secret_vault import secrets_encryption_ready
-
-    from src.middleware.tenant_middleware import _allowlist_enforced
+    from services.security_enforcement import enforcement_status
 
     region = tenant.data_region if tenant else "us-east-1"
-    ip_flag = bool(_allowlist_enforced())
-    ip_enforced = bool(
-        tenant and tenant.ip_allowlist and (tenant.custom_domain or "").strip() and ip_flag
-    )
-    session_enforced = bool(tenant and getattr(tenant, "enforce_session_timeout", False))
+    # The same function the tenant save responses use (QA round 11).
+    enforcement = enforcement_status(tenant, request)
+    ip_enforced = bool(enforcement["ip_allowlist"]["enforced"])
+    session_enforced = bool(enforcement["session_timeout"]["enforced"])
     byok = key_status_summary(tenant.id) if tenant else {"configured": False}
     encryption_ready = bool(secrets_encryption_ready())
     prod = is_production()
@@ -1114,10 +1143,9 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
                 else None
             ),
             "hint": (
-                "Set tenant.custom_domain (e.g. data.customer.com) and point DNS to the "
-                "Datawrap web host. API CORS accepts the tenant origin live via "
-                "TenantAwareCORSMiddleware. Also set DATAWRAP_WEB_DOMAIN / CORS_EXTRA_ORIGINS "
-                "for the primary SPA origin."
+                "Set the custom domain (e.g. data.customer.com) and point its DNS to the "
+                "Datawrap web host; the API accepts that origin as soon as it is saved. "
+                "The primary app origin is configured by your platform administrator."
             ),
         },
         "data_region": region,
@@ -1131,41 +1159,18 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "pii_detection": False,  # detector hooks exist; not attested as always-on
         "ip_allowlist_enabled": bool(tenant and tenant.ip_allowlist),
         "egress_allowlist_enabled": bool(tenant and tenant.egress_allowlist),
-        # Enforced only when Host resolves this tenant (custom domain) AND the
-        # operator turned DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE on; otherwise a
-        # request it would block is audited (tenant.ip_allowlist.would_block)
-        # and allowed. The shared app host never evaluates the CIDR list.
+        # Enforced on every authenticated request to the workspace once a list
+        # is saved (WorkspaceIpAllowlistMiddleware), unless the platform kill
+        # switch turned it into audit-only (tenant.ip_allowlist.would_block).
         "ip_allowlist_enforced": ip_enforced,
         "mfa_required": tenant.mfa_required if tenant else False,
         # Login MFA is not wired; the flag is policy memory only.
         "mfa_enforced": False,
         "session_timeout_hours": tenant.session_timeout_hours if tenant else 8,
-        # Idle timeout enforced on sign-in sessions when the tenant turns
-        # enforce_session_timeout on (services.session_policy). API keys and
-        # the absolute token TTL (DATAFLOW_TOKEN_TTL_SEC) are separate.
+        # Idle timeout on sign-in sessions (services.session_policy); API keys
+        # and the absolute token lifetime are separate.
         "session_timeout_enforced": session_enforced,
-        "enforcement": {
-            "ip_allowlist": {
-                "enforced": ip_enforced,
-                "scope": "requests whose Host is the tenant custom domain",
-                "requires": ["tenant.ip_allowlist", "tenant.custom_domain",
-                             "DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1"],
-                "missing": [m for m, ok in (
-                    ("tenant.ip_allowlist", bool(tenant and tenant.ip_allowlist)),
-                    ("tenant.custom_domain", bool(tenant and (tenant.custom_domain or "").strip())),
-                    ("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1", ip_flag),
-                ) if not ok],
-                "not_covered": "the shared app host and API keys used against it",
-            },
-            "session_timeout": {
-                "enforced": session_enforced,
-                "kind": "idle",
-                "hours": tenant.session_timeout_hours if tenant else None,
-                "scope": "sign-in sessions of members of this workspace (strictest workspace wins)",
-                "not_covered": "API keys; absolute token lifetime is DATAFLOW_TOKEN_TTL_SEC",
-            },
-            "mfa": {"enforced": False, "status": "design_only", "design": "docs/MFA_ENFORCEMENT_DESIGN.md"},
-        },
+        "enforcement": enforcement,
         # True when this tenant has an active BYOK key. New connector secrets
         # are wrapped with that key; enc:v1 leftovers stay readable until re-saved.
         "byok_encrypts_secrets": bool(tenant and byok.get("active_count")),
@@ -1182,7 +1187,7 @@ def _security_posture(tenant: Tenant | None = None) -> dict[str, Any]:
         "recovery_honesty": recovery_honesty,
         "deployment": {
             "models": ["saas_multi_tenant", "customer_vpc_self_host", "air_gapped_compose"],
-            "saas_multi_tenant": "Workspace isolation + optional DATAFLOW_REQUIRE_WORKSPACE hard gate",
+            "saas_multi_tenant": "Workspace isolation, with an optional deployment-wide hard workspace gate",
             "customer_vpc_self_host": "Docker Compose / container deploy in customer VPC — same Transfer Studio engine",
             "air_gapped": "Supported via offline image load; customer supplies Postgres/object store; no Datawrap SaaS egress required",
             "private_link": "not_first_class",
@@ -1259,7 +1264,7 @@ async def get_security_posture(request: Request):
     from fastapi.encoders import jsonable_encoder
 
     tenant = _authorized_request_tenant(request)
-    body = _security_posture(tenant)
+    body = _security_posture(tenant, request)
     body["scope_workspace_id"] = _posture_scope_workspace(request, tenant) or None
     return JSONResponse(
         content=jsonable_encoder(body),
@@ -1271,7 +1276,7 @@ async def get_security_posture(request: Request):
 async def get_security_report(request: Request):
     """Return a downloadable, human-readable compliance report for the tenant."""
     tenant = _authorized_request_tenant(request)
-    posture = _security_posture(tenant)
+    posture = _security_posture(tenant, request)
     # The report is about the workspace the request is scoped to, tenant or not.
     # "none — request carried no workspace scope" was printed whenever the
     # workspace had no tenant profile, even though the request named it.
@@ -1301,10 +1306,10 @@ async def get_security_report(request: Request):
         f"- TLS minimum version: {posture['tls_version']}",
         f"- Audit logging: {'enabled' if posture['audit_logging'] else 'disabled'}",
         f"- PII detection: {'enabled' if posture['pii_detection'] else 'disabled'}",
-        f"- IP allowlisting: {'enforced on custom domain' if posture.get('ip_allowlist_enforced') else ('stored, not enforced (missing: ' + ', '.join(posture['enforcement']['ip_allowlist']['missing']) + ')' if posture['ip_allowlist_enabled'] else 'disabled')}",
+        f"- IP allowlisting: {'enforced on every signed-in request and API key call to this workspace' if posture.get('ip_allowlist_enforced') else ('saved, not enforced (missing: ' + ', '.join(posture['enforcement']['ip_allowlist']['missing']) + '; ask your platform administrator to enable it)' if posture['ip_allowlist_enabled'] else 'disabled')}",
         f"- Connector egress allowlist: {'on' if posture.get('egress_allowlist_enabled') else 'off (private ranges refused; metadata and link-local cannot be listed)'}",
         f"- MFA required for admins: recorded={('yes' if posture['mfa_required'] else 'no')}; enforced=no (login MFA is not wired; design: docs/MFA_ENFORCEMENT_DESIGN.md)",
-        f"- Session timeout: {posture['session_timeout_hours']}h idle; enforced={'yes (sign-in sessions; API keys excluded)' if posture['session_timeout_enforced'] else 'no (recorded only; turn on enforce_session_timeout)'}",
+        f"- Session timeout: {posture['session_timeout_hours']}h idle; enforced={'yes (sign-in sessions; API keys excluded)' if posture['session_timeout_enforced'] else 'no (recorded only; turn on Enforce as idle timeout in Enterprise settings)'}",
         "",
         "## Deployment & data path",
         f"- Models: {', '.join((posture.get('deployment') or {}).get('models') or [])}",

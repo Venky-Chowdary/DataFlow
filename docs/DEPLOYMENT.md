@@ -108,6 +108,73 @@ Full guide: **[docs/RAILWAY.md](docs/RAILWAY.md)**
 4. Deploy **Web** service — config `deploy/railway/web.toml`, set `VITE_API_BASE`
 5. Mount **Volume** at `/data` on API service
 
+### Client IP and https behind proxies (`DATAWRAP_TRUSTED_PROXY_COUNT`)
+
+The API derives the client address with Werkzeug ProxyFix semantics: every
+proxy appends the address of the peer it received the request from to
+`X-Forwarded-For`, so with N trusted proxies the client is `hops[-N]`
+(`services/client_ip.py`, applied for the whole app by `ProxyFixMiddleware`,
+which also takes the scheme from `X-Forwarded-Proto`). uvicorn runs with
+`--no-proxy-headers` so it cannot substitute its own, left-most choice.
+
+| Deployment | Chain | `DATAWRAP_TRUSTED_PROXY_COUNT` |
+|---|---|---|
+| Railway, web nginx proxying to the API's public domain (default `deploy/nginx.conf.template`) | browser -> Railway edge -> nginx -> Railway edge -> API | `3` |
+| Railway, nginx proxying over private networking (`http://<api>.railway.internal:<port>`) | browser -> edge -> nginx -> API | `2` |
+| Docker Compose (`deploy/nginx.conf`, nginx is the edge) | browser -> nginx -> API | `1` |
+| API reached directly, no proxy | browser -> API | `0` (default) |
+
+- **Default `0` is the safe default**: forwarded headers are ignored and the
+  socket peer is used, which cannot be spoofed. Behind a proxy that peer is
+  the proxy, so every user looks the same; the lock-out guard then refuses
+  lists (the message names the private address the server sees) until the
+  count is set.
+- Too high a count lets a client choose its address by prepending entries;
+  too low a count makes every user look like a proxy. A chain shorter than
+  the count falls back to the socket peer.
+- On Railway with the API's public domain enabled, a client can call that
+  domain directly and skip nginx (one fewer hop, so it controls `hops[-3]`).
+  Prefer private networking (count `2`) and remove the API's public domain,
+  or restrict it, when IP allowlists matter.
+- Check after deploying: sign in, open Settings -> Enterprise and save; the
+  response's `enforcement.caller_ip` (and any allowlist refusal) must show
+  your public address, not a `10.x`/`100.64.x` one.
+
+### Public origin for links (`DATAWRAP_PUBLIC_API_ORIGIN`)
+
+MCP manifest/status URLs and the SAML SP entity id / ACS URL are built from
+the public origin, never from the request's Host (behind nginx that is the
+Railway backend over http). Order: a forwarded host on the allow-list (the
+configured origins, `DATAWRAP_PUBLIC_ORIGIN_ALLOWED_HOSTS`, saved tenant custom
+domains), then `DATAWRAP_PUBLIC_API_ORIGIN`, then `DATAWRAP_WEB_URL` /
+`DATAWRAP_WEB_DOMAIN`. https is forced in production. On Railway set
+`DATAWRAP_WEB_DOMAIN` (or `DATAWRAP_PUBLIC_API_ORIGIN=https://www.datawrap.io`)
+on the **API** service.
+
+### Session timeout (backfill note)
+
+A workspace's saved `session_timeout_hours` is enforced as an idle timeout on
+sign-in sessions (`enforce_session_timeout`, default on; saving the hours turns
+it on unless the same save sends `enforce_session_timeout: false`). Sessions
+are stored in MongoDB (`auth_sessions`) with the local file as a mirror and
+fallback, so a redeploy no longer drops them or their idle clock.
+
+Tenants saved before this change keep the `false` they were stored with; the
+Enterprise page, the posture and the report show "recorded, not enforced"
+for them. To enforce, the workspace admin saves the Enterprise form (the
+checkbox defaults on), or an operator runs once on the API host:
+
+```bash
+python -c "from services.tenant_store import list_tenants, update_tenant; \
+[update_tenant(t.id, session_timeout_hours=t.session_timeout_hours) for t in list_tenants() if not t.enforce_session_timeout]"
+```
+
+(from `apps/api`; it re-saves each tenant's hours, which turns enforcement on,
+and leaves every other field unchanged). It also enforces a tenant whose admin
+meant "policy only": before round 11 that was the default and cannot be told
+apart, so tell workspace admins before running it. Existing sign-in sessions keep
+working; they start being idle-checked on their next request.
+
 ### Recommended split (other hosts)
 
 1. **Web** — static host or Varity static (build `apps/web` with `VITE_API_BASE=https://api.yourdomain.com/api/v1`)
@@ -486,26 +553,39 @@ defect brief. Each defaults to the behaviour production had before the change,
 and logs an audit entry when the new rule *would* have applied. Read with the
 `DATAWRAP_` prefix first, then `DATAFLOW_`.
 
-### `DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE` (default `0`)
+### `DATAWRAP_TENANT_IP_ALLOWLIST_ENFORCE` (kill switch, default on)
 
-Per-tenant `ip_allowlist` (tenant custom domains, `TenantMiddleware`).
+Workspace `ip_allowlist` (Settings -> Enterprise). Since QA round 11 (S7) the
+list is **enforced as soon as a workspace saves one**: every authenticated
+request to that workspace, on the shared app host and on a custom domain, for
+sign-in sessions and API keys alike (`WorkspaceIpAllowlistMiddleware`, after
+auth, before RBAC). Before, it was evaluated only when the Host header was the
+tenant custom domain, which nginx never forwards, so it never applied.
 
-- Before: the bare `"/"` entry in the public-path list matched every path as a
-  prefix, so the allowlist was **never enforced** on any route.
-- Now: public paths are matched on segment boundaries (`/` only exactly), so
-  the allowlist can actually block. That is only active with
-  `DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE=1`.
-- With the flag off (default) a request from an IP outside the tenant's
-  allowlist is **allowed** and an audit event
-  `tenant.ip_allowlist.would_block` (outcome `skipped`, level `warn`) is
-  written with `tenant_id`, `workspace_id`, `path` and `client_ip`.
+- Outside the list: `403` with `reason: ip_not_in_workspace_allowlist`, and an
+  audit event `workspace.ip_allowlist.blocked` (workspace, client IP, path,
+  session or API key).
+- Which workspace: the `X-Workspace-Id` header; without it every workspace the
+  caller can read (an API key: its own; a member: all memberships). A platform
+  admin with no header acts deployment-wide and is not evaluated.
+- Exempt: the unauthenticated paths (login, signup, SSO, webhooks, health,
+  MCP discovery, contact-sales) — the same list as before.
+- **Break-glass**: a platform admin outside the list can send
+  `X-Datawrap-Break-Glass: <reason, 8+ characters>`; the request is admitted
+  and audited as `workspace.ip_allowlist.break_glass` every time. Workspace
+  admins cannot use it.
+- **Lock-out guard**: saving a list that does not contain the saving admin's
+  own address is refused with `400` ("... does not include your current IP
+  address (x.x.x.x) ...") and audited as `workspace.ip_allowlist.lockout_refused`.
+- **Kill switch**: `DATAWRAP_TENANT_IP_ALLOWLIST_ENFORCE=0` (or `false`/`off`)
+  turns every refusal into an admitted request plus a
+  `tenant.ip_allowlist.would_block` audit event, for the whole deployment. The
+  posture, the compliance report and the save response then say "saved, not
+  enforced — ask your platform administrator to enable it".
 
-Owner how-to: leave off, then search the audit log for
-`tenant.ip_allowlist.would_block` for a few days. Every entry is a client that
-would be locked out; add their IPs to the tenant allowlist (or fix the proxy
-/ `X-Forwarded-For` trust settings so the real client IP is seen), then set
-the flag to `1`. Unauthenticated routes (login, signup, webhooks, health, SSO,
-contact-sales) stay outside the allowlist regardless of the flag.
+The allowlist is only as good as the client address the API sees: set the
+trusted proxy hop count below **before** customers save lists. The save
+response's `enforcement.caller_ip` shows the address the server sees.
 
 ### `DATAFLOW_WORKSPACE_ADMIN_IAM` (default `1`)
 

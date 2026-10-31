@@ -5,6 +5,7 @@ import { PermissionNotice } from "../../components/PermissionNotice";
 import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { TENANT_SAVED_EVENT, WORKSPACE_CHANGED_EVENT, getActiveWorkspaceId, setActiveWorkspaceId } from "../../lib/workspace";
 import { Button } from "../../components/ui/Button";
+import { tenantSaveFeedback, type SaveFeedback } from "../../lib/postureCopy";
 
 const REGIONS = [
   "us-east-1", "us-east-2", "us-west-1", "us-west-2",
@@ -39,7 +40,10 @@ export function TenantSettings() {
   const [securityContact, setSecurityContact] = useState("");
   const [mfaRequired, setMfaRequired] = useState(false);
   const [sessionTimeout, setSessionTimeout] = useState(8);
-  const [enforceTimeout, setEnforceTimeout] = useState(false);
+  // A saved timeout is enforced unless the admin unticks this (QA round 11).
+  const [enforceTimeout, setEnforceTimeout] = useState(true);
+  // What the last save reported as enforced (from the API, not assumed).
+  const [saveFeedback, setSaveFeedback] = useState<SaveFeedback | null>(null);
   const [ipAllowlist, setIpAllowlist] = useState("");
   const [egressAllowlist, setEgressAllowlist] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
@@ -151,11 +155,15 @@ export function TenantSettings() {
         next = await createTenant({ workspace_id: scope, ...payload });
       }
       setTenant(next);
+      setEnforceTimeout(Boolean(next.enforce_session_timeout));
       setEgressAllowlist((next.egress_allowlist || []).join("\n"));
       const p = await fetchSecurityPosture(scope || undefined).catch(() => null);
       if (p) setPosture(p);
       window.dispatchEvent(new CustomEvent(TENANT_SAVED_EVENT));
-      toast({ title: "Tenant saved", message: "Enterprise SaaS settings applied.", tone: "success" });
+      // Report what the API says is enforced now, never a blanket "applied".
+      const feedback = tenantSaveFeedback(next.enforcement ?? p?.enforcement);
+      setSaveFeedback(feedback);
+      toast({ title: feedback.title, message: feedback.message, tone: feedback.tone });
     } catch (err) {
       toast({ title: "Save failed", message: err instanceof Error ? err.message : "Could not save tenant settings", tone: "error" });
     } finally {
@@ -279,7 +287,7 @@ export function TenantSettings() {
           </div>
 
           <div className="df2-settings-field df2-team-spaced">
-            <label htmlFor="tenant-allowlist">IP allowlist (enforced only on a custom domain)</label>
+            <label htmlFor="tenant-allowlist">IP allowlist</label>
             <textarea
               id="tenant-allowlist"
               className="df2-input"
@@ -288,7 +296,10 @@ export function TenantSettings() {
               onChange={(e) => setIpAllowlist(e.target.value)}
               placeholder={"one CIDR or IPv4 per line\n203.0.113.0/24"}
             />
-            <p className="df2-settings-hint">Evaluated only when Host resolves this tenant via custom domain. The default app host never applies the list.</p>
+            <p className="df2-settings-hint">
+              When set, every sign-in session and API key using this workspace must come from an address on this list, on any host.
+              A list that leaves out your current address is refused so you cannot lock yourself out.
+            </p>
           </div>
 
           <div className="df2-settings-field df2-team-spaced">
@@ -307,6 +318,20 @@ export function TenantSettings() {
             </p>
           </div>
         </div>
+
+        {saveFeedback && (
+          <div
+            className={`df2-alert ${saveFeedback.tone === "warning" ? "df2-alert-warn" : "df2-alert-success"} df2-team-spaced`}
+            role="status"
+            data-testid="tenant-save-enforcement"
+          >
+            <strong>{saveFeedback.title}</strong>
+            <ul>
+              {saveFeedback.lines.map((line) => <li key={line}>{line}</li>)}
+            </ul>
+            {saveFeedback.warnings.map((w) => <p key={w} className="df2-settings-hint">{w}</p>)}
+          </div>
+        )}
 
         <div className="df2-settings-section-footer">
           <Button

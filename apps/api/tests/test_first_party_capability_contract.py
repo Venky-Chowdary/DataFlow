@@ -356,7 +356,8 @@ def test_enforcing_modules_back_the_silent_wrong_cluster() -> None:
 
     assert viewer_has_audit_read() is True
     assert login_mfa_enforced() is False
-    assert ip_allowlist_enforced_without_custom_domain() is False
+    # QA round 11: enforced on every host, not only a custom domain.
+    assert ip_allowlist_enforced_without_custom_domain() is True
     assert bigquery_is_transfer_ready() is True
     assert adls_service_principal_shipped() is True
     assert incremental_modes_are_canonical() is True
@@ -379,7 +380,7 @@ def test_enforcing_modules_back_the_silent_wrong_cluster() -> None:
         / "workspace_router.py"
     ).read_text(encoding="utf-8")
     assert '"mfa_enforced": False' in router
-    assert "ip_allowlist and (tenant.custom_domain" in router
+    assert "enforcement_status(tenant, request)" in router
 
 
 def test_loss_upsert_and_airbyte_pack_leads_do_not_steal_neighbors() -> None:

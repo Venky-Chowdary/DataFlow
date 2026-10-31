@@ -23,7 +23,9 @@ def _isolate(monkeypatch, tmp_path):
     monkeypatch.setenv("DATAWRAP_EMAIL_PROVIDER", "console")
     monkeypatch.setenv("DATAWRAP_ENV", "test")
     monkeypatch.setenv("DATAWRAP_OTP_PEPPER", "test-pepper")
-    monkeypatch.setenv("DATAWRAP_TRUSTED_PROXY_COUNT", "1")
+    # Two proxies: the edge appends the client, the next hop appends the edge
+    # (10.255.0.1), so the client is hops[-2] (ProxyFix semantics).
+    monkeypatch.setenv("DATAWRAP_TRUSTED_PROXY_COUNT", "2")
     monkeypatch.setenv("DATAWRAP_SIGNUP_IP_HOURLY", "3")
     monkeypatch.setenv("DATAWRAP_SIGNUP_SUBNET_HOURLY", "5")
     monkeypatch.setenv("DATAWRAP_SIGNUP_DEVICE_DAILY", "50")

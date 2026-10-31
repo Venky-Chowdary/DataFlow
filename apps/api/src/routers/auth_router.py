@@ -76,11 +76,15 @@ def _web_origin() -> str:
 
 
 def _saml_base_url(request: Request) -> str:
-    scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-    host = request.headers.get("x-forwarded-host", request.url.hostname)
-    port = request.headers.get("x-forwarded-port", str(request.url.port or (443 if scheme == "https" else 80)))
-    port_str = f":{port}" if port not in ("443", "80") and (scheme != "https" or port != "443") else ""
-    return f"{scheme}://{host}{port_str}"
+    """Public origin for the SP entity id and ACS URL.
+
+    Forwarded host/proto are honoured only against the public-origin
+    allow-list (services.public_origin): echoing any ``X-Forwarded-Host`` let
+    a caller point the AuthnRequest's ACS URL at a host of their choosing.
+    """
+    from services.public_origin import public_origin
+
+    return public_origin(request)
 
 
 def _saml_sp_entity_id(request: Request) -> str:

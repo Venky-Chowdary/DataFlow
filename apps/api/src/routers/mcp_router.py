@@ -248,7 +248,10 @@ async def mcp_manifest(http_request: Request):
     from ..ai.copilot.tools import TOOL_DEFINITIONS
     from services.mcp_policy import filter_tools
 
-    base = f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp"
+    from services.public_origin import public_origin
+
+    # Never request.base_url: behind nginx it is the internal backend over http.
+    base = f"{public_origin(http_request)}/api/v1/mcp"
     return {
         "name": SERVER_INFO["name"],
         "title": SERVER_INFO["title"],
@@ -458,6 +461,7 @@ async def mcp_request_logs(http_request: Request, limit: int = 50):
 async def mcp_status(http_request: Request):
     from services.connector_store import list_connectors
     from services.mcp_invocation_log import list_mcp_invocations
+    from services.public_origin import public_origin
     from services.workspace_access import tenant_scope
 
     from ..ai.copilot.pilot_agent import get_pilot_agent
@@ -502,5 +506,5 @@ async def mcp_status(http_request: Request):
         "jobs": jobs,
         "tools_registered": len(TOOL_DEFINITIONS),
         "last_invocation_ms": recent[0]["ms"] if recent else None,
-        "manifest_url": f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp/manifest",
+        "manifest_url": f"{public_origin(http_request)}/api/v1/mcp/manifest",
     }
