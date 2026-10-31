@@ -179,7 +179,16 @@ def _named_workspace_id(request: Request) -> str:
 async def get_settings():
     from services.workspace_store import get_workspace_settings
 
-    return get_workspace_settings()
+    return {
+        **get_workspace_settings(),
+        # What retention_days does, stated by the API itself (QA enterprise #4).
+        "retention_enforcement": {
+            "applies_to": "finished jobs (completed, failed, cancelled) in the requesting workspace",
+            "mode": "admin_purge",
+            "scheduled": False,
+            "purge_route": "POST /api/v1/workspace/jobs/retention/purge (dry run first)",
+        },
+    }
 
 
 @router.patch("/settings")
@@ -495,6 +504,47 @@ async def delete_api_key(key_id: str, request: Request):
         details={"id": key_id},
     )
     return {"ok": True}
+
+
+class JobRetentionPurgeBody(BaseModel):
+    dry_run: bool = True
+    confirm_token: str = Field(default="", max_length=128)
+
+
+@router.post("/jobs/retention/purge")
+def purge_job_retention(body: JobRetentionPurgeBody, request: Request):
+    """Delete this workspace's finished jobs older than ``retention_days``.
+
+    Dry run first (default): returns the count and a ``confirm_token``; apply
+    with ``dry_run: false`` and that token. Never touches unfinished jobs or
+    another workspace. Nothing runs on a schedule. See services.job_retention.
+    """
+    from services.job_retention import RetentionTokenInvalid, purge_expired_jobs
+    from services.workspace_store import get_workspace_settings
+
+    scope = tenant_scope(request)
+    workspace_id = str(scope.workspace_id or "")
+    if not workspace_id:
+        raise HTTPException(status_code=400, detail="Name the workspace (X-Workspace-Id) to purge its jobs")
+    if not _can_admin_workspace(request, workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace admin required")
+    retention_days = int(get_workspace_settings()["retention_days"])
+    try:
+        result = purge_expired_jobs(
+            workspace_id=workspace_id,
+            retention_days=retention_days,
+            dry_run=body.dry_run,
+            confirm_token=body.confirm_token,
+        )
+    except RetentionTokenInvalid as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    record_admin_change(
+        request,
+        "workspace.jobs.retention.purge",
+        target=workspace_id,
+        details={k: v for k, v in result.items() if k not in {"confirm_token", "sample_job_ids"}},
+    )
+    return result
 
 
 # Workspace creation, membership and accounts live in ``src.routers.team_router``.

@@ -10,7 +10,7 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, purgeJobRetention, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
   fetchSignupMetrics,
   type SignupMetrics,
 } from "../lib/api";
@@ -24,6 +24,7 @@ import { auditActorLabel } from "../lib/auditActor";
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
 import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
 import { ipAllowlistRow, mfaRow, sessionTimeoutRow } from "../lib/postureCopy";
+import { purgeConfirmCopy, RETENTION_HINT } from "../lib/jobRetention";
 import { connectorEgressState } from "../lib/egressPosture";
 import { TENANT_SAVED_EVENT, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
@@ -318,6 +319,28 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     if (workspaceManage.allowed) return true;
     toast({ title: "No write permission", message: workspaceManage.reason, tone: "warning" });
     return false;
+  };
+
+  const [retentionBusy, setRetentionBusy] = useState(false);
+  const runRetentionPurge = async () => {
+    if (!mayAdminister()) return;
+    setRetentionBusy(true);
+    try {
+      const dry = await purgeJobRetention({ dry_run: true });
+      const copy = purgeConfirmCopy({ ...dry, would_remove: dry.would_remove ?? 0 });
+      if (copy.nothing) {
+        toast({ title: copy.title, message: copy.message, tone: "success" });
+        return;
+      }
+      const ok = await confirm({ title: copy.title, message: copy.message, confirmLabel: "Delete jobs", cancelLabel: "Keep them", tone: "danger" });
+      if (!ok) return;
+      const done = await purgeJobRetention({ dry_run: false, confirm_token: dry.confirm_token });
+      toast({ title: "Old jobs purged", message: `${done.removed ?? 0} finished jobs deleted.`, tone: "success" });
+    } catch (err) {
+      toast({ title: "Purge failed", message: err instanceof Error ? err.message : "", tone: "error" });
+    } finally {
+      setRetentionBusy(false);
+    }
   };
 
   const saveSsoConfig = async () => {
@@ -860,7 +883,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         )}
                       </div>
                     </div>
-                    <p className="df2-settings-hint">Retention is stored on the workspace profile. Job archival is not wired — completed jobs are not deleted by this value. Write targets stay on each connector.</p>
+                    <p className="df2-settings-hint">{RETENTION_HINT} Write targets stay on each connector.</p>
+                    {generalEditable && (
+                      <button type="button" className="df2-btn df2-btn-ghost" data-testid="job-retention-purge" disabled={retentionBusy} onClick={() => void runRetentionPurge()}>
+                        {retentionBusy ? "Checking…" : "Purge old jobs…"}
+                      </button>
+                    )}
                   </div>
                   <div className="df2-settings-section-footer">
                     <Button

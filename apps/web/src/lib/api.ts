@@ -3493,6 +3493,18 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   return data.logs ?? [];
 }
 
+export async function purgeJobRetention(body: { dry_run: boolean; confirm_token?: string }): Promise<{
+  would_remove?: number;
+  removed?: number;
+  cutoff: string;
+  retention_days: number;
+  confirm_token: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/jobs/retention/purge`, { method: "POST", body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not purge old jobs"));
+  return res.json();
+}
+
 export async function fetchWorkspaceSettings(): Promise<{
   org_name: string;
   timezone: string;
