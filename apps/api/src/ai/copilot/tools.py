@@ -691,13 +691,27 @@ TOOL_DEFINITIONS: list[dict] = [
                     "type": "object",
                     "description": (
                         "Per-column transforms keyed by source or target column. "
-                        "Applied on the planned mapping as an operator override."
+                        "Applied on the planned mapping as an operator override. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
                     ),
                 },
                 "schema_drift_acknowledged": {
                     "type": "boolean",
                     "description": (
                         "Acknowledge a schema_drift review block so the plan can clear."
+                    ),
+                },
+                "vector_layout": {
+                    "type": "string",
+                    "enum": ["table", "document"],
+                    "description": (
+                        "pgvector destinations only (D209): 'table' creates the "
+                        "typed table the Map shows; 'document' is an embedding/RAG "
+                        "load (id, content, embedding, metadata). Omitted: the "
+                        "saved connector's choice, else the existing table's shape."
                     ),
                 },
                 "ddl_acknowledgement": {
@@ -823,7 +837,11 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "Per-column transforms applied on the load, keyed by "
                         "source or target column name. Example: {\"email\": \"hash_pii\"}. "
-                        "Stamped as an operator override, not only on quarantine replay."
+                        "Stamped as an operator override, not only on quarantine replay. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
                     ),
                 },
                 "schema_drift_acknowledged": {
@@ -848,6 +866,16 @@ TOOL_DEFINITIONS: list[dict] = [
                         "approved_by": {"type": "string"},
                         "reason": {"type": "string"},
                     },
+                },
+                "vector_layout": {
+                    "type": "string",
+                    "enum": ["table", "document"],
+                    "description": (
+                        "pgvector destinations only (D209): 'table' creates the "
+                        "typed table the Map shows; 'document' is an embedding/RAG "
+                        "load (id, content, embedding, metadata). Omitted: the "
+                        "saved connector's choice, else the existing table's shape."
+                    ),
                 },
             },
             "required": [],
@@ -1084,7 +1112,11 @@ TOOL_DEFINITIONS: list[dict] = [
                     "description": (
                         "Per-column transforms stored on the schedule mapping, "
                         "keyed by source or target column. Applied on every run, "
-                        "not only on quarantine replay."
+                        "not only on quarantine replay. "
+                        "A list (or 'a, b, c') is an ordered multi-step pipeline keyed by "
+                        "SOURCE column, e.g. {\"name\": [\"trim\", \"upper\"], "
+                        "\"ts\": [\"datetime\", \"assume_timezone:UTC\"]}; it runs as one "
+                        "transform recipe through Validate, Execute and verification."
                     ),
                 },
                 "schema_drift_acknowledged": {
@@ -2130,6 +2162,10 @@ class DataPilotTools:
             connection_string=draft.get("connection_string"),
             require_name=True,
         )
+        if not bound_err and str(draft.get("type") or "").lower() in {"sftp", "ssh"}:
+            from connectors.sftp_common import sftp_port_conflict
+
+            bound_err = sftp_port_conflict(host, port)  # D208
         if bound_err:
             from .ack_ledger import redact_payload
 
@@ -2421,11 +2457,17 @@ class DataPilotTools:
         if stored_details and not drop_phantom_identity_rows(stored_details) and not quarantine:
             stored_rejected = 0
         reported_rejected = stored_rejected or quarantine_row_count
+        from services.dest_quarantine import operator_quarantine_json_cell
+
         samples = [
             {
                 "row": d.get("row"),
                 "column": d.get("column"),
-                "value": str(d.get("value") or "")[:120],
+                # SQL NULL shows as null, a literal as itself; never the wire token.
+                "value": (
+                    None if (shown := operator_quarantine_json_cell(d.get("value"))) is None
+                    else str(shown)[:120]
+                ),
                 "reason": str(d.get("reason") or "")[:200],
                 # Which signed policy held the row out (cast_failure vs quarantined).
                 **{
@@ -3649,12 +3691,14 @@ class DataPilotTools:
         return None, None
 
     def _schedule_summary(self, s) -> dict:
+        from services.schedule_run_lifecycle import derive_status, recent_runs
         from services.schedule_store import (
             has_open_approval,
             schedule_bind_summary,
             visible_next_run_at,
         )
 
+        derived = derive_status(s)
         row = {
             "id": s.id,
             "name": s.name,
@@ -3667,7 +3711,12 @@ class DataPilotTools:
             "sync_mode": getattr(s, "sync_mode", "") or "",
             "next_run_at": visible_next_run_at(s),
             "last_run_at": s.last_run_at,
-            "last_status": s.last_status,
+            # Derived from the latest run record, with its reason (QA round 5).
+            "last_status": derived["last_status"],
+            "last_status_reason": derived["last_status_reason"],
+            "current_run": derived["current_run"],
+            "last_skip": derived["last_skip"],
+            "recent_runs": recent_runs(s, 5),
             "run_count": s.run_count,
             "missed_window_count": int(getattr(s, "missed_window_count", 0) or 0),
             "last_missed_windows": int(getattr(s, "last_missed_windows", 0) or 0),
@@ -4168,6 +4217,7 @@ class DataPilotTools:
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
+        vector_layout: str = "",
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
 
@@ -4204,6 +4254,7 @@ class DataPilotTools:
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
+            vector_layout=vector_layout,
         )
 
     def _start_transfer(
@@ -4241,6 +4292,7 @@ class DataPilotTools:
         column_transforms: dict | None = None,
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
+        vector_layout: str = "",
     ) -> ToolResult:
         from .transfer_tools import start_transfer
 
@@ -4278,6 +4330,7 @@ class DataPilotTools:
             column_transforms=column_transforms,
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
+            vector_layout=vector_layout,
         )
 
     def _start_dataset_transfer(

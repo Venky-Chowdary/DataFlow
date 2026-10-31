@@ -60,6 +60,15 @@ def _temporal_unfit_reason(
             f"empty string into temporal destination {typ} "
             "— quarantined (refuse silent NULL invent)"
         )
+    from connectors.sql_temporal import invalid_calendar_reason
+
+    calendar_reason = invalid_calendar_reason(raw)
+    if not calendar_reason and isinstance(raw, str):
+        from services.transform_engine import mixed_date_format_reason
+
+        calendar_reason = mixed_date_format_reason(raw)
+    if calendar_reason:
+        return f"{calendar_reason} (destination {typ})"
     if check_fsp and temporal_value_exceeds_precision(raw, typ):
         return (
             f"fractional seconds exceed destination {typ} "

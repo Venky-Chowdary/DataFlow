@@ -1753,24 +1753,53 @@ def own_json_carrier_spellings(dest_db: str) -> frozenset[str]:
     "collapse" on run 2 (D198; D158 was the SQL Server instance of the same gap).
     """
     db = (dest_db or "").strip().lower()
-    try:
-        native = ddl_type(db, "JSON")
-    except Exception:
-        return frozenset()
-    spellings = {native}
-    try:
-        from services.schema_introspect import catalog_read_back
-    except ImportError:  # pragma: no cover - introspection drivers not installed
-        catalog_read_back = None
-    if catalog_read_back is not None:
-        spellings.add(catalog_read_back(db, native))
     out: set[str] = set()
-    for spelling in spellings:
+    for spelling in _own_json_carrier_read_backs(db):
         u = strip_identity_qualifier(spelling).upper().strip()
         if u:
             out.add(u)
             out.add(re.sub(r"\s*\(\s*\d+\s*\)", "", u).strip())
     return frozenset(out)
+
+
+def _own_json_carrier_read_backs(db: str) -> tuple[str, ...]:
+    """The CREATE spelling of DataFlow's JSON column on ``db`` and its read-backs."""
+    try:
+        native = ddl_type(db, "JSON")
+    except Exception:
+        return ()
+    try:
+        from services.schema_introspect import catalog_read_backs
+    except ImportError:  # pragma: no cover - introspection drivers not installed
+        return (native,)
+    return (native, *catalog_read_backs(db, native))
+
+
+def _carrier_key(spelling: str | None) -> str:
+    """Case/space-folded spelling with identity and charset tails off, COLLATE kept."""
+    text = re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", str(spelling or ""), flags=re.I)
+    collation = parse_collation(text)
+    head = strip_identity_qualifier(text)
+    if collation:
+        head = f"{head} COLLATE {collation}"
+    return re.sub(r"\s+", " ", head).strip().upper()
+
+
+@lru_cache(maxsize=256)
+def _own_json_carrier_keys(db: str) -> frozenset[str]:
+    return frozenset(k for k in map(_carrier_key, _own_json_carrier_read_backs(db)) if k)
+
+
+def is_own_json_carrier(target_type: str | None, *, dest_db: str = "") -> bool:
+    """True when ``target_type`` is the JSON column DataFlow creates on ``dest_db``.
+
+    Matched on the read-back spelling *with* its collation: MariaDB's JSON reads
+    back as ``LONGTEXT COLLATE utf8mb4_bin``, while a user's plain ``LONGTEXT``
+    (default collation) is not DataFlow's JSON column.
+    """
+    db = (dest_db or "").strip().lower()
+    key = _carrier_key(target_type)
+    return bool(db and key) and key in _own_json_carrier_keys(db)
 
 
 # Document-store ``date`` is an instant carrier, not a calendar date. The rules
@@ -1872,7 +1901,9 @@ def nested_to_native_document_wire_preserved(
         return False
     t_log = normalize_logical_type(target_type)
     if stamped_l == LOGICAL_JSON:
-        return t_log == LOGICAL_JSON
+        # Run 2 grades against the read-back of the column run 1 created: on
+        # MariaDB that JSON column reads back as LONGTEXT utf8mb4_bin (D211).
+        return t_log == LOGICAL_JSON or is_own_json_carrier(target_type, dest_db=db)
     # Text LOB document wires (SQL Server NVARCHAR(MAX), Oracle CLOB, …).
     return t_log in {LOGICAL_STRING, LOGICAL_TEXT}
 
@@ -5882,8 +5913,13 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
     24-char hex *value* (Fivetran/Airbyte-class Mongo→SQL path) — domain is
     not enforced at dest, but this is not silent numeric collapse. Narrow
     ``VARCHAR(n<24)`` still collapses. IP families → ``VARCHAR(45)`` (IPv6).
+
+    A ``CHARACTER SET`` / ``COLLATE`` tail is equality, not width: DataFlow's
+    own MySQL/MariaDB ObjectId column is ``CHAR(24) CHARACTER SET utf8mb4
+    COLLATE utf8mb4_bin``, and grading that spelling as a collapse blocked
+    every Mongo -> MySQL/MariaDB load carrying ``_id`` (D211).
     """
-    raw = strip_identity_qualifier(target_type).strip()
+    raw = charset_free_wire_token(target_type)
     if not raw:
         return False
     upper = raw.upper()
@@ -5909,7 +5945,7 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
         }:
             return True
         m = re.match(
-            r"^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$",
+            r"^N?(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*(?:CHAR|BYTE)?\s*\)$",
             upper,
         )
         if m and int(m.group(1)) >= 24:
@@ -5921,7 +5957,7 @@ def specialty_wire_preserves_value(source_specialty: str, target_type: str) -> b
         m = re.match(r"^STRING\s*\(\s*(\d+)\s*\)$", upper)
         return bool(m and int(m.group(1)) >= 24)
     if spec in {"INET", "CIDR", "IPV4", "IPV6", "IP", "MACADDR", "MACADDR8"}:
-        m = re.match(r"^(?:N?VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*\)$", upper)
+        m = re.match(r"^N?(?:VAR)?CHAR(?:ACTER)?(?:\s+VARYING)?\s*\(\s*(\d+)\s*(?:CHAR|BYTE)?\s*\)$", upper)
         if m and int(m.group(1)) >= 45:
             return True
         m = re.match(r"^VARCHAR2\s*\(\s*(\d+)\s*(?:BYTE|CHAR)?\s*\)$", upper)
@@ -6168,20 +6204,22 @@ def _uuid_carrier_width(upper: str) -> int | None:
     return int(m.group(1)) if m else None
 
 
-def _uuid_wire_token(target_type: str | None) -> str:
-    """UUID wire spelling without identity, COLLATE, or CHARACTER SET tails.
+def charset_free_wire_token(target_type: str | None) -> str:
+    """Wire spelling without identity, COLLATE, or CHARACTER SET tails.
 
     Create-new may stamp ``CHAR(36) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin``
-    so a CS source UUID does not land in MySQL's default CI equality. The 36-char
-    contract is the head token; charset/collation are equality, not width.
+    (UUID) or ``CHAR(24) …`` (ObjectId) so a CS source key does not land in
+    MySQL's default CI equality. The width contract is the head token;
+    charset/collation are equality, not width.
     """
     raw = strip_identity_qualifier(target_type).strip()
     return re.sub(r"\s+(?:CHARACTER\s+SET|CHARSET)\s+\S+", "", raw, flags=re.I).strip()
 
 
+
 def uuid_exact_wire_carrier(target_type: str | None) -> bool:
     """True only for exact 36-char UUID string wires (not VARCHAR(50)+)."""
-    raw = _uuid_wire_token(target_type)
+    raw = charset_free_wire_token(target_type)
     if not raw:
         return False
     upper = raw.upper()
@@ -6204,7 +6242,7 @@ def uuid_capacity_string_carrier(target_type: str | None) -> bool:
     """
     if uuid_exact_wire_carrier(target_type):
         return True
-    raw = _uuid_wire_token(target_type)
+    raw = charset_free_wire_token(target_type)
     if not raw:
         return False
     width = _uuid_carrier_width(raw.upper())
@@ -6734,6 +6772,12 @@ def trailing_spaces_insignificant_for_unique(
         "oracle_db",
         "amazon_rds_oracle",
     }:
+        return False
+    if kind in {"mysql", "mariadb"} and re.search(
+        r"_0900_|NOPAD", (parse_collation(ddl_type) or "").upper()
+    ):
+        # MySQL 8's UCA 9.0.0 collations (utf8mb4_0900_bin / _ai_ci) and
+        # MariaDB's *_nopad_* are NO PAD: 'a' and 'a ' are two keys (D205).
         return False
     if kind in {
         "mysql",

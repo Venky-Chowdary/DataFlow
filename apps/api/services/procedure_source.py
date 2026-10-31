@@ -45,6 +45,7 @@ from services.value_serializer import (
     json_default,
     json_loads_exact,
 )
+from services.brand import PRODUCT_NAME
 
 logger = logging.getLogger(__name__)
 
@@ -243,7 +244,7 @@ def definition_pasted_refusal(stripped: str, dialect: str, mode: str) -> str | N
             "with binds set below."
         )
     return (
-        f"This is a CREATE {kind} statement — DataFlow only reads here. "
+        f"This is a CREATE {kind} statement — {PRODUCT_NAME} only reads here. "
         "Use Table, one read-only SELECT / WITH, or a stored procedure CALL."
     )
 

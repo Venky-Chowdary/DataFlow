@@ -403,6 +403,12 @@ _CATALOG_LIST: tuple[_StepDef, ...] = (
 # route's destination table.
 ROUTE_COLUMN = "_df_route"
 
+#: Step options that name input columns (see ``ShapeRecipe.read_columns``).
+_READ_OPTION_KEYS = (
+    "columns", "keys", "order_by", "then_by", "group_by", "partition_by",
+    "fields", "lookup_key", "on", "tracked", "type1", "order",
+)
+
 STEP_CATALOG: dict[str, _StepDef] = {d.op: d for d in _CATALOG_LIST}
 
 _CAST_TYPES = ("text", "integer", "decimal", "boolean", "date", "timestamp")
@@ -682,6 +688,46 @@ class ShapeRecipe:
         if self.set_graph is None:
             return ()
         return self.set_graph.errors
+
+    @property
+    def read_columns(self) -> tuple[str, ...]:
+        """Columns the recipe reads from its INPUT, in first-read order.
+
+        What a reader must project for this recipe to run: every column a step
+        reads that no earlier step produced. A population walk that projected
+        only its own fit columns handed a ``trim`` on ``name`` rows without
+        ``name`` and the recipe refused ("column 'name' is not available").
+        """
+        produced: set[str] = set()
+        reads: list[str] = []
+
+        def _add(value: Any) -> None:
+            if isinstance(value, Mapping):
+                _add(value.get("column"))
+                return
+            name = str(value or "").strip() if isinstance(value, str) else ""
+            if name and name not in produced and name not in reads:
+                reads.append(name)
+
+        for step in self.enabled_steps:
+            _add(step.column)
+            if step.expression is not None:
+                for name in sorted(step.expression.columns):
+                    _add(name)
+            for key in _READ_OPTION_KEYS:
+                value = step.options.get(key)
+                if isinstance(value, Mapping):
+                    for name in value:
+                        _add(name)
+                elif isinstance(value, (list, tuple)):
+                    for item in value:
+                        _add(item)
+                else:
+                    _add(value)
+            for measure in step.options.get("measures") or []:
+                _add(measure)
+            produced.update(step.writes)
+        return tuple(reads)
 
     @property
     def touched_columns(self) -> frozenset[str]:

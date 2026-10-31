@@ -69,6 +69,10 @@ def _sample_is_datetime_watermark(text: str) -> bool:
     raw = (text or "").strip()
     if not raw:
         return False
+    from connectors.cursor_bind import cursor_instant_key
+
+    if cursor_instant_key(raw) is not None:
+        return True
     if _ISO_DT_RE.match(raw) or _EPOCH_MS_RE.match(raw) or _EPOCH_S_RE.match(raw):
         return True
     from services.transform_engine import apply_transform, integer_wire_value
@@ -132,6 +136,12 @@ def compare_watermarks(a: str, b: str, wm_type: WatermarkType) -> int:
             return (fa > fb) - (fa < fb)
         return (a > b) - (a < b)
     if wm_type == WatermarkType.DATETIME:
+        from connectors.cursor_bind import cursor_instant_key
+
+        ia, ib = cursor_instant_key(a), cursor_instant_key(b)
+        if ia is not None and ib is not None:
+            # Offset-bearing on both sides: exact instant order.
+            return (ia > ib) - (ia < ib)
         da, db = _parse_datetime_key(a), _parse_datetime_key(b)
         if da is not None and db is not None:
             return (da > db) - (da < db)

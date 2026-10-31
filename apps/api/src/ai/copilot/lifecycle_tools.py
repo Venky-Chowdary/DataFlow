@@ -278,7 +278,7 @@ LIFECYCLE_TOOL_DEFINITIONS: list[dict] = [
                 },
                 "warehouse": {
                     "type": "string",
-                    "description": "Engine warehouse (Snowflake warehouse, e.g. DATAFLOW_WH).",
+                    "description": "Engine warehouse (Snowflake warehouse, e.g. COMPUTE_WH).",
                 },
                 "auth_role": {
                     "type": "string",
@@ -1342,6 +1342,15 @@ def update_connector(  # nosec B107
                 output=None,
                 error=f"A connector named “{changes['name']}” already exists. Pick another name.",
             )
+    conn_type = str(conn.get("type") or conn.get("db_type") or "")
+    if conn_type.lower() in {"sftp", "ssh"} and "host" in changes:
+        # D208: the URL's port is the dial port; an explicit port that
+        # disagrees is refused instead of one of them silently winning.
+        from connectors.sftp_common import sftp_port_conflict
+
+        conflict = sftp_port_conflict(changes["host"], port)
+        if conflict:
+            return _tool_result("update_connector", success=False, output=None, error=conflict)
     if "port" in changes:
         from services.connector_request_limits import connector_port_error
 

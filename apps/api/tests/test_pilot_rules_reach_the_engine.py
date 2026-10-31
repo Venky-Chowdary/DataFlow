@@ -94,7 +94,8 @@ def test_upsert_key_becomes_a_stream_contract_and_switches_the_mode():
             "name": "users",
             "selected": True,
             "primary_key": ["id"],
-            "sync_mode": "incremental_deduped",
+            # D208: a key with no mode is a full-source upsert, not incremental.
+            "sync_mode": "upsert",
         }
     ]
 

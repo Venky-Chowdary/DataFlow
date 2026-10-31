@@ -22,6 +22,7 @@ from datetime import date, datetime, time
 from typing import Any, Final
 
 from connectors.base import ReadBatch
+from connectors.cursor_bind import count_cursor_window, sa_cursor_bind
 from connectors.oracle_tstz import (
     ORACLE_LTZ_READ_FORMAT,
     ORACLE_TSTZ_READ_FORMAT,
@@ -543,13 +544,14 @@ def _mssql_connect_query(cfg: dict[str, Any], drivername: str) -> dict[str, str]
         # for the whole session per connection, and it never verifies the chain.
         unsupported.append("Encrypt")
     if unsupported:
+        from services.brand import PRODUCT_NAME
         raise ValueError(
             "SQL Server options "
             + ", ".join(unsupported)
             + " need the Microsoft ODBC driver; this host only has pymssql "
             "(FreeTDS), which cannot honour them. Install \"ODBC Driver 18 for "
-            "SQL Server\" (or 17) on the DataFlow host, or remove the option "
-            "from the connector — DataFlow refuses to connect as if it were "
+            f"SQL Server\" (or 17) on the {PRODUCT_NAME} host, or remove the option "
+            f"from the connector — {PRODUCT_NAME} refuses to connect as if it were "
             "honoured."
         )
     # ``trust_server_certificate`` and ``multi_subnet_failover`` need no keyword:
@@ -3452,26 +3454,12 @@ def _count_table_raw(
     schema: str | None,
     *,
     dialect: str = "ansi",
-    filter_column: str = "",
-    filter_value: str | None = None,
 ) -> int | None:
     from connectors.sql_identifiers import quote_table_ref
-    from services.dialect_profiles import quote_char_for
 
     qualified = quote_table_ref(table, schema, dialect=dialect)
-    where = ""
-    params: dict[str, Any] = {}
-    if filter_column and filter_value is not None:
-        q = quote_char_for(dialect)
-        from connectors.sql_identifiers import require_safe_identifier
-
-        col = quote_sql_identifier(require_safe_identifier(filter_column, preserve_case=True), q)
-        where = f" WHERE {col} >= :df_after"
-        params = {"df_after": filter_value}
     try:
-        return conn.execute(
-            sa.text(f"SELECT COUNT(*) FROM {qualified}{where}"), params  # nosec B608
-        ).scalar()
+        return conn.execute(sa.text(f"SELECT COUNT(*) FROM {qualified}")).scalar()  # nosec B608
     except Exception:
         # Never fabricate len(rows) as cardinality — that stops streaming after page one.
         return None
@@ -3707,17 +3695,10 @@ def read_table_scan_batch(
             # engines with one active result per connection) drop the scan
             # cursor if COUNT(*) runs on the same conn after execute — the
             # first fetchmany then returns a short page and the load truncates.
-            if known_total_rows is not None:
-                total = known_total_rows
-            else:
-                total = _count_table_raw(
-                    conn,
-                    table,
-                    schema_name,
-                    dialect=dialect,
-                    filter_column=filter_column if filter_value is not None else "",
-                    filter_value=filter_value,
-                )
+            # A filtered scan counts on the typed cursor bind below (D207).
+            total = known_total_rows
+            if total is None and filter_value is None:
+                total = _count_table_raw(conn, table, schema_name, dialect=dialect)
             try:
                 table_obj = _reflect_table(engine, table, schema_name, columns)
                 selected_cols = list(table_obj.c)
@@ -3744,9 +3725,9 @@ def read_table_scan_batch(
                         )
                     filter_col_obj = table_obj.c[_fname]
                     # D60/D98: run seed re-reads the boundary tie group.
-                    stmt = stmt.where(
-                        filter_col_obj >= sa.cast(sa.literal(filter_value), filter_col_obj.type)
-                    )
+                    stmt = stmt.where(filter_col_obj >= sa_cursor_bind(filter_col_obj, filter_value))
+                    if known_total_rows is None:
+                        total = count_cursor_window(conn, table_obj, filter_col_obj, filter_value)
                     order_cols = [filter_col_obj] + [
                         c for c in order_cols if c is not filter_col_obj
                     ]
@@ -3955,9 +3936,7 @@ def read_table_cursor_batch(
                 from services.keyset_pagination import split_cursor_bookmark
 
                 cur_val, _ = split_cursor_bookmark(bookmark, has_tiebreak=True)
-                stmt = stmt.where(
-                    key_cols[0] >= sa.cast(sa.literal(cur_val), key_cols[0].type)
-                )
+                stmt = stmt.where(key_cols[0] >= sa_cursor_bind(key_cols[0], cur_val))
             elif bookmark is not None:
                 seek_cols = key_cols
                 if (
@@ -4579,6 +4558,7 @@ def _generic_sql_map_kwargs(
         "source_spool": source_spool,
         "extra": extra,
         "batch_size": materialize_batch,
+        "empty_cells_as_null": bool((extra or {}).get("empty_cells_as_null")),
     }
 
 
@@ -5599,11 +5579,8 @@ def write_mapped_rows(
         sql_source_from_writer,
     )
 
-    extra = (
-        _kwargs.get("dest_extra")
-        if isinstance(_kwargs.get("dest_extra"), dict)
-        else {}
-    )
+    extra = dict(_kwargs.get("dest_extra") if isinstance(_kwargs.get("dest_extra"), dict) else {})
+    extra["empty_cells_as_null"] = bool(_kwargs.get("empty_cells_as_null"))  # route fact (blank cell)
     _sql_src = sql_source_from_writer(_kwargs, extra)
     spool, close_spool = ensure_sql_source_spool(
         headers=headers,

@@ -6,10 +6,8 @@ import copy
 import logging
 import re
 import os
-import contextvars
 import hashlib
 import json
-import shutil
 import sqlite3
 import tempfile
 import time
@@ -407,26 +405,16 @@ _TRANSFORM_PROOF_PROVABLE_POPULATION_OPS = frozenset(
 
 # --- run-scoped proof scratch (leak fix) ------------------------------------
 # The proof stores are sqlite files that grow to hundreds of MB on large runs.
-# They used to be mkstemp()ed straight into the shared temp dir and removed only
-# by __del__, so an exception, a cancel or a killed run left them behind until
-# the disk filled. Each proof now runs inside a private directory that is
-# removed - stores closed first - however the run ends.
-_PROOF_SCRATCH: contextvars.ContextVar[str | None] = contextvars.ContextVar(
-    "df_proof_scratch", default=None
+# Every store file lives in a directory something owns: the proof's scope, or
+# the store's own private dir removed on close / collection / exit. See
+# ``proof_scratch``: a store opened outside the wrapper used to land in the
+# shared temp dir, where no cleanup ever looked.
+from .proof_scratch import (  # noqa: E402
+    _PROOF_SCRATCH,  # noqa: F401 - re-exported for callers that bind a scope
+    in_proof_scratch,
+    own_scratch,
+    proof_scratch_scope,
 )
-_PROOF_STORES: contextvars.ContextVar[list | None] = contextvars.ContextVar(
-    "df_proof_stores", default=None
-)
-
-
-def _scratch_file(prefix: str, suffix: str) -> tuple[int, str]:
-    return tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=_PROOF_SCRATCH.get())
-
-
-def _track_store(store: Any) -> None:
-    tracked = _PROOF_STORES.get()
-    if tracked is not None:
-        tracked.append(store)
 
 
 class _PinStore:
@@ -441,10 +429,8 @@ class _PinStore:
     """
 
     def __init__(self) -> None:
-        fd, self.path = _scratch_file("df_pinmap_", ".db")
-        os.close(fd)
-        _track_store(self)
-        self.db = sqlite3.connect(self.path)
+        self.path, holder = own_scratch(self, "df_pinmap_", ".db")
+        self.db = holder[0] = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=OFF")
         self.db.execute("PRAGMA synchronous=OFF")
         for ddl in (
@@ -649,17 +635,8 @@ class _PinStore:
         return out
 
     def close(self) -> None:
-        try:
-            self.db.close()
-        except Exception:
-            pass
-        try:
-            os.unlink(self.path)
-        except OSError:
-            pass
-
-    def __del__(self) -> None:  # noqa: D105
-        self.close()
+        # Closes the db, removes the file and any private dir — once.
+        self._scratch_release()
 
 
 class _DiskKeySet:
@@ -671,10 +648,8 @@ class _DiskKeySet:
     """
 
     def __init__(self) -> None:
-        fd, self.path = _scratch_file("df_scope_", ".db")
-        os.close(fd)
-        _track_store(self)
-        self.db = sqlite3.connect(self.path)
+        self.path, holder = own_scratch(self, "df_scope_", ".db")
+        self.db = holder[0] = sqlite3.connect(self.path)
         self.db.execute("PRAGMA journal_mode=OFF")
         self.db.execute("PRAGMA synchronous=OFF")
         self.db.execute("CREATE TABLE scopek (k TEXT PRIMARY KEY)")
@@ -702,17 +677,8 @@ class _DiskKeySet:
         )
 
     def close(self) -> None:
-        try:
-            self.db.close()
-        except Exception:
-            pass
-        try:
-            os.unlink(self.path)
-        except OSError:
-            pass
-
-    def __del__(self) -> None:  # noqa: D105
-        self.close()
+        # Closes the db, removes the file and any private dir — once.
+        self._scratch_release()
 
 
 _RECIPE_ORACLE_DIALECTS = {
@@ -729,6 +695,10 @@ _RECIPE_ORACLE_DIALECTS = {
 _TSQL_DIALECTS = {"sqlserver", "mssql", "azure_sql"}
 
 
+#: Exactly the characters ``str.strip()`` removes — the engine's ``trim``.
+_PY_WHITESPACE = "".join(chr(c) for c in range(0x3001) if chr(c).isspace())
+
+
 def _recipe_step_sql(
     op: str,
     opts: dict[str, Any],
@@ -737,12 +707,20 @@ def _recipe_step_sql(
     *,
     src_type: str,
     dest_ddl: str = "",
+    nan_is_null: bool = False,
 ) -> str | None:
     """Faithful SQL equivalent of one recipe step, or None when the dialect
     has none. The G-1d independent oracle recomputes declared columns in the
     source database and compares multisets — an op without a faithful
-    mapping stays "recipe re-applied" (honest), never fake SQL."""
+    mapping stays "recipe re-applied" (honest), never fake SQL.
+
+    The oracle only runs on database sources, so every fragment states the
+    engine's *typed* value model (``ShapeRunner(typed_values=True)``): '' and
+    whitespace are stored values, only SQL NULL (or a reader's NULL wire
+    sentinel) is null. ``nan_is_null``: the column is a float carrier whose
+    NaN the engine reads as null."""
     tsql = src_type in _TSQL_DIALECTS
+    mysql = src_type in {"mysql", "mariadb"}
 
     def _lit(v: Any) -> str:
         key = f"ov{len(params)}"
@@ -759,6 +737,8 @@ def _recipe_step_sql(
     def _btrim(expr: str) -> str:
         if tsql:
             return f"LTRIM(RTRIM({expr}))"
+        if mysql:
+            return f"TRIM({expr})"
         return f"BTRIM({expr})"
 
     if op == "case":
@@ -769,9 +749,16 @@ def _recipe_step_sql(
             return f"LOWER({col_expr})"
         return None
     if op == "trim":
+        # The engine's trim is str.strip(): every Unicode whitespace character,
+        # not only the space SQL TRIM removes — a '\tbob' cell read as a broken
+        # step and failed the run.
         if tsql:
-            return f"LTRIM(RTRIM({col_expr}))"
-        return f"TRIM({col_expr})"
+            return f"TRIM({_lit(_PY_WHITESPACE)} FROM {col_expr})"
+        if mysql:
+            # Whitespace has no meaning inside an ICU class: no escaping.
+            ws = _PY_WHITESPACE
+            return f"REGEXP_REPLACE({col_expr}, {_lit(f'^[{ws}]+|[{ws}]+$')}, '')"
+        return f"BTRIM({col_expr}, {_lit(_PY_WHITESPACE)})"
     if op == "collapse_whitespace":
         # _fn_collapse_whitespace = re.sub(r"\s+", " ", t).strip()
         if tsql:
@@ -812,13 +799,15 @@ def _recipe_step_sql(
             f"{_lit(opts.get('replacement', ''))})"
         )
     if op == "default_if_null":
-        # is_blank: NULL, empty/whitespace text, wire sentinels, NaN.
+        # Typed is_blank: NULL or a NULL wire sentinel. '' and '   ' are values
+        # on a database source — defaulting them here failed every run whose
+        # trim step produced '' (trim -> default_if_null -> upper).
         txt = _text_cast(col_expr)
+        nan = f"OR {txt} = 'NaN' " if nan_is_null else ""
         return (
             f"CASE WHEN {col_expr} IS NULL "
-            f"OR {_btrim(txt)} = '' "
-            f"OR {txt} = 'NaN' "
-            f"OR {txt} IN ({_lit('__df_sql_null__')}, "
+            f"{nan}"
+            f"OR {_btrim(txt)} IN ({_lit('__df_sql_null__')}, "
             f"{_lit('__df_missing__')}, {_lit('__df_ddb_null__')}) "
             f"THEN {_lit(opts.get('value'))} "
             f"ELSE {txt} END"
@@ -883,6 +872,7 @@ def _recipe_step_sql(
     return None
 
 
+@in_proof_scratch
 def _transform_applied_proof_impl(
     *,
     shape_recipe: dict[str, Any] | None,
@@ -1342,7 +1332,14 @@ def _transform_applied_proof_impl(
         _flush_ms()
 
     try:
-        parsed = ShapeRecipe.parse(shape_recipe, source_columns=list(columns))
+        # The recipe reads the SOURCE columns; ``columns`` is the shaped image.
+        # Parsing against the image refused every rename/derive recipe ("column
+        # 'name' is not available") and the proof never ran. The runner that
+        # shaped the write stamped the columns it read (shape_proof).
+        _read_cols = list(
+            (dest_summary.get("shape_proof") or {}).get("input_columns") or columns
+        )
+        parsed = ShapeRecipe.parse(shape_recipe, source_columns=_read_cols)
         src_type = resolve_driver_type(source_endpoint.format or "")
         from services.shape_apply import is_typed_value_source as _itvs
 
@@ -1448,6 +1445,11 @@ def _transform_applied_proof_impl(
                 expr = _recipe_step_sql(
                     op, opts, expr, oracle_params,
                     src_type=src_type, dest_ddl=_step_ddl,
+                    # NaN is null to the engine only on a raw float cell.
+                    nan_is_null=(
+                        scol not in oracle_exprs
+                        and bool(re.match(r"(?i)\s*(float|double|real)", _src_ddl(scol)))
+                    ),
                 )
                 if expr is None:
                     oracle_ok = False
@@ -1513,7 +1515,9 @@ def _transform_applied_proof_impl(
     if oracle_bad:
         bad_steps = sorted(
             {
-                f"step {i + 1} ({s.get('op')} on "
+                # steps[i], not the loop variable left over from building
+                # declared_map — that named every culprit after the last step.
+                f"step {i + 1} ({steps[i].get('op')} on "
                 f"'{map_source_to_target(c, mappings)}')"
                 for i, cols in declared_map.items()
                 for c in cols
@@ -2252,21 +2256,8 @@ def _transform_applied_proof_impl(
 
 def _transform_applied_proof(**kwargs: Any) -> Any:
     """Run the transform proof with its scratch stores bound to this call."""
-    scratch = tempfile.mkdtemp(prefix="df_proof_")
-    stores: list = []
-    scratch_token = _PROOF_SCRATCH.set(scratch)
-    stores_token = _PROOF_STORES.set(stores)
-    try:
+    with proof_scratch_scope():
         return _transform_applied_proof_impl(**kwargs)
-    finally:
-        _PROOF_STORES.reset(stores_token)
-        _PROOF_SCRATCH.reset(scratch_token)
-        for store in stores:
-            try:
-                store.close()
-            except Exception:  # noqa: BLE001 - cleanup must not mask the result
-                pass
-        shutil.rmtree(scratch, ignore_errors=True)
 
 
 def _compute_source_checksum_from_spool(
@@ -3305,6 +3296,22 @@ def _maybe_attach_verification_ladder(
                 if not isinstance(r, dict)
                 or str(r.get(pk_column)) not in _rej_keys
             ]
+    # D205 — an append into an occupied table: grade the written batch, not
+    # the rows earlier runs wrote (see ladder_batch_scope).
+    ladder_scope = str(report.get("checksum_scope") or "")
+    if allow_extra and dest_before and not keyed and not (batch_scoped or window_scoped_target):
+        from .ladder_batch_scope import scope_append_target_to_batch
+
+        _scoped, ladder_scope = scope_append_target_to_batch(
+            checksum_scope=ladder_scope, quarantined=bool(_rej_keys),
+            target_rows=target_rows, source_rows=source_rows,
+            pk_cols=pk_cols or [pk_column], dest_type=dest_type, dest_cfg=dest_cfg,
+            schema=str(endpoint.schema or dest_cfg.get("schema") or ""),
+            table_name=str(endpoint.table or dest_cfg.get("table") or ""),
+            columns=target_cols, dest_types=dest_types,
+        )
+        if _scoped is not None:
+            target_rows = _scoped
     ladder = run_five_layer_verification(
         source_rows=source_rows,
         target_rows=target_rows,
@@ -3339,7 +3346,7 @@ def _maybe_attach_verification_ladder(
         dest_db_type=dest_type,
         dest_types=dest_types,
         allow_extra_rows=allow_extra,
-        checksum_scope=str(report.get("checksum_scope") or ""),
+        checksum_scope=ladder_scope,
         target_rows_before=dest_before,
         keyed_cardinality=keyed,
         keyed_expected_delta=census.expected_delta if keyed and census else None,
@@ -3352,6 +3359,24 @@ def _maybe_attach_verification_ladder(
         ),
     )
     out = attach_ladder_to_reconcile_report(report, ladder)
+    if window_scoped_target:
+        # Round 5 (D203 prov.) — the ladder allows the extra rows an append
+        # table holds, so a window appended twice passed. Exactly-once is
+        # this run's own verdict, inside the window (D188).
+        from services.incremental_drift import (
+            fail_on_window_duplicates,
+            measure_window_duplicates,
+        )
+
+        _ident_keys = list(pk_cols) or ([_t_window.pk] if _t_window.pk else [])
+        out = fail_on_window_duplicates(out, measure_window_duplicates(
+            source_rows=source_rows, target_rows=target_rows,
+            match_cols=(
+                list(dict.fromkeys([_t_window.cursor, *_ident_keys]))
+                if _ident_keys else list(target_cols)
+            ),
+            dest_db_type=dest_type, dest_types=dest_types,
+        ))
     if window is not None and source_reread and keyed and (pk_cols or pk_column):
         # D188 — rows the cursor did not select are not this run's verdict,
         # but a disagreement there is reported, never silently dropped.
@@ -6917,8 +6942,35 @@ def _run_reconciliation_impl(
         # conservation. Do not run Gate-8 as reader == vector COUNT(*) —
         # 2 documents / 5 chunks would fail (or invent a surplus if stuffed
         # as dest population). Identity COUNT(DISTINCT source_id) is stamped
-        # in _finalize. Embeddings are opaque: cell fidelity stays unproven.
+        # in _finalize. Embeddings are opaque; the metadata is not (D209):
+        # every carried source value is re-read and compared.
         measured = isinstance(target_rows, int) and target_rows >= 0
+        from services.pgvector_document_verify import gate8_document_report
+
+        doc_report = gate8_document_report(
+            cfg=cfg,
+            schema=schema,
+            table_name=table_name,
+            mappings=mapping_dicts,
+            source_rows=source_rows,
+            source_endpoint=source_endpoint,
+            read_sample=_read_target_sample_retrying,
+            run_records=records,
+            source_schema=source_schema,
+            base={
+                "source_rows": source_rows,
+                "source_checksum": source_checksum,
+                "rejected_rows": rejected_rows,
+                "coerced_null_rows": coerced_null_rows,
+                "rows_skipped": rows_skipped,
+            },
+            target_rows=target_rows if measured else None,
+            # A row digest over id/content/embedding/metadata is not
+            # comparable with the source's; the value proof replaces it.
+            target_checksum="",
+        )
+        if doc_report is not None:
+            return _finalize(doc_report)
         return _finalize({
             "passed": measured,
             "unproven": True,

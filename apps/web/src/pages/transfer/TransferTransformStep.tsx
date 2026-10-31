@@ -98,6 +98,8 @@ interface TransferTransformStepProps {
   onProgramHash?: (hash: string) => void;
   /** Ordered canvas. Off keeps the step list. */
   canvasEnabled?: boolean;
+  /** Source format for the preview's value model (database '' is a value). */
+  sourceType?: string;
   /** Return to the source step so the operator can open the schema tree. */
   onOpenSchema?: () => void;
   /** Workspace settings could not be read. Empty when the read succeeded. */
@@ -159,6 +161,7 @@ export function TransferTransformStep({
   destCatalog = {},
   onProgramHash,
   canvasEnabled = false,
+  sourceType = "",
   onOpenSchema,
   studioFlagsError = "",
   canvasOptIn = false,
@@ -308,6 +311,7 @@ export function TransferTransformStep({
         focus_table: tables.length > 1 ? activeTable : undefined,
         source_tables: tables.length > 1 ? tables : undefined,
         source_catalog: tables.length > 1 ? sourceCatalog : undefined,
+        source_type: sourceType || undefined,
       })
         .then((next) => {
           if (cancelled) return;
@@ -722,6 +726,7 @@ export function TransferTransformStep({
             syncRefused={preloadRefused}
             refusalReason={preloadTransformRefusalReason(syncMode)}
             activeTable={activeTable}
+            sourceType={sourceType}
             previewBanner={samplePopulationBanner(
               Math.min(PREVIEW_ROWS, beforeRows.length),
               rowCount,

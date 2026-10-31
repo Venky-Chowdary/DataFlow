@@ -14,6 +14,9 @@ from fastapi import APIRouter, HTTPException, Request, Response
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
+from services.brand import PRODUCT_SLUG
+from services.mcp_protocol import SERVER_INFO
+
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])
 oauth_resource_router = APIRouter(tags=["MCP OAuth"])
 logger = logging.getLogger(__name__)
@@ -87,7 +90,7 @@ async def mcp_streamable(http_request: Request):
     if http_request.method == "GET":
         # Optional SSE stream — keep-alive so clients that open GET succeed.
         async def _sse():
-            yield ": dataflow-mcp ready\n\n"
+            yield f": {PRODUCT_SLUG}-mcp ready\n\n"
 
         return StreamingResponse(
             _sse(),
@@ -247,8 +250,8 @@ async def mcp_manifest(http_request: Request):
 
     base = f"{str(http_request.base_url).rstrip('/')}/api/v1/mcp"
     return {
-        "name": "dataflow",
-        "title": "Datawrap MCP Server",
+        "name": SERVER_INFO["name"],
+        "title": SERVER_INFO["title"],
         "version": "2.0.0",
         "description": "Universal data movement — analyze, transfer, and query any dataset via AI agents.",
         "protocol": "streamable-http",

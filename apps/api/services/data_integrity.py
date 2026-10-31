@@ -2069,6 +2069,11 @@ def _check_transformed_key_collisions(
         "row and keep one of them. Drop the transform from the key, dedupe the "
         "source, or choose a key the transform leaves distinct."
     )
+    if probe.get("destination_equality"):
+        from services.dest_key_equality import destination_equality_message
+
+        message = destination_equality_message(probe, count=count, label=label,
+                                               transforms=transforms, dest_kind=dest_kind)
     # An overwrite recreates the table with the declared key as its PK, so the
     # same collision is a unique violation there.
     keyed = (

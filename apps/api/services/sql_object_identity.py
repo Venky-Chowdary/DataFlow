@@ -35,6 +35,9 @@ class ObjectIdentity:
     resolved: bool = True
     #: Requested column name -> stored column name (only for existing objects).
     columns: dict[str, str] = field(default_factory=dict)
+    #: Stored column name -> the dialect's reflected type (SQLAlchemy reflection
+    #: only; empty where the catalog read did not return types).
+    column_types: dict[str, Any] = field(default_factory=dict)
 
 
 def _pick(candidates: list[str], wanted: str) -> str | None:
@@ -161,17 +164,23 @@ def resolve_object_identity(
         return ObjectIdentity(stored_schema, want_table, False)
 
     col_map: dict[str, str] = {}
+    col_types: dict[str, Any] = {}
     if columns:
         try:
-            stored_cols = [
-                str(c.get("name"))
-                for c in insp.get_columns(stored_table, schema=stored_schema)
-            ]
+            reflected = list(insp.get_columns(stored_table, schema=stored_schema))
         except Exception:
-            stored_cols = []
+            reflected = []
+        stored_cols = [str(c.get("name")) for c in reflected]
         for want in columns:
             hit = _pick(stored_cols, str(want or ""))
             if hit:
                 col_map[str(want)] = hit
+        col_types = {
+            str(c.get("name")): c.get("type")
+            for c in reflected
+            if str(c.get("name")) in col_map.values() and c.get("type") is not None
+        }
 
-    return ObjectIdentity(stored_schema, stored_table, True, columns=col_map)
+    return ObjectIdentity(
+        stored_schema, stored_table, True, columns=col_map, column_types=col_types
+    )

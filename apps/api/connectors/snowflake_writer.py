@@ -1609,7 +1609,7 @@ def write_mapped_rows(
                     if database.upper() == "SNOWFLAKE":
                         raise RuntimeError(
                             "The SNOWFLAKE database is read-only system data. "
-                            "Please specify a user database (for example, DATAFLOW) in the connector."
+                            "Please specify a user database (for example, ANALYTICS) in the connector."
                         )
                     db_q = quote_sql_identifier(
                         sanitize_identifier(database, preserve_case=True)

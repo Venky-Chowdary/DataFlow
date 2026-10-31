@@ -53,7 +53,14 @@ def test_scope_drops_unusable_ids_and_caps():
 )
 def test_where_casts_and_quotes_per_dialect(dialect, expected_quote, expected_cast):
     where = keyed_readback_where("id", ["1", "2"], dialect=dialect, placeholders=["%s", "%s"])
-    assert where == f"WHERE CAST({expected_quote} AS {expected_cast}) IN (%s,%s)"
+    cast = f"CAST({expected_quote} AS {expected_cast})"
+    # MySQL / SQL Server compare the written keys exactly, not under the
+    # session's default _ci collation ('A' must not fetch 'a').
+    exact = {
+        "mysql": f"CAST({cast} AS BINARY)",
+        "sqlserver": f"{cast} COLLATE Latin1_General_100_BIN2",
+    }.get(dialect, cast)
+    assert where == f"WHERE {exact} IN (%s,%s)"
 
 
 def test_where_never_inlines_key_values():

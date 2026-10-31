@@ -207,7 +207,9 @@ def _collation_for_charset(charset: str, eq: EqualityClass, dialect: str = "mysq
     if cs not in {"utf8mb3", "utf8mb4", "latin1", "ascii"}:
         return ""
     if eq.case == "sensitive":
-        return f"{cs}_bin"
+        from services.dest_key_equality import created_case_sensitive_collation
+
+        return created_case_sensitive_collation(cs, dialect)
     if eq.case == "insensitive" and eq.accent == "insensitive":
         return f"{cs}_unicode_ci" if cs.startswith("utf8") else f"{cs}_general_ci"
     if (
@@ -290,7 +292,9 @@ def _mysql_dest_spelling(eq: EqualityClass, dialect: str = "mysql") -> tuple[str
     if charset in {"utf8", "utf8mb3"}:
         charset = "utf8mb4"
     if eq.case == "sensitive":
-        return charset, f"{charset}_bin", ""
+        from services.dest_key_equality import created_case_sensitive_collation
+
+        return charset, created_case_sensitive_collation(charset, dialect), ""
     if eq.case == "insensitive" and eq.accent == "insensitive":
         native = eq.native_name
         if native and re.match(r"^[A-Za-z0-9_]+$", native) and "UTF8" in native.upper():

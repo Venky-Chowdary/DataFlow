@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field, field_validator
 from services.acknowledgment_contract import MIN_ACTOR_LEN
 from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
+from services.brand import PRODUCT_SLUG
 from services.cdc_capture_release import release_schedule_cdc_capture
 from services.schedule_approvals import STATUS_OPEN
 from services.schedule_store import (
@@ -283,10 +284,20 @@ class ScheduleResponse(BaseModel):
     # authority (if any) that lets later identical runs proceed unattended.
     approval_request: dict[str, Any] = Field(default_factory=dict)
     standing_authorization: dict[str, Any] = Field(default_factory=dict)
+    # Derived from the run records (``last_status`` too): the latest run's
+    # reason, the run in flight, and the newest beat that was skipped and why.
+    last_status_reason: str = ""
+    last_status_code: str = ""
+    last_run_id: str = ""
+    current_run: Optional[dict[str, Any]] = None
+    last_skip: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleResponse:
+        from services.schedule_run_lifecycle import derive_status
+
         data = project_operator_cadence(s.to_dict())
+        data.update(derive_status(s))
         mappings = list(data.get("mappings") or [])
         data["mappings"] = mappings
         data["mapping_count"] = len(mappings)
@@ -373,6 +384,11 @@ class ScheduleSummaryResponse(BaseModel):
     overdue_seconds: int = 0
     blocked_by: dict[str, Any] = Field(default_factory=dict)
     blocked_reason: str = ""
+    last_status_reason: str = ""
+    last_status_code: str = ""
+    last_run_id: str = ""
+    current_run: Optional[dict[str, Any]] = None
+    last_skip: Optional[dict[str, Any]] = None
 
     @classmethod
     def from_schedule(cls, s: PipelineSchedule) -> ScheduleSummaryResponse:
@@ -439,7 +455,7 @@ def export_dataflow_manifest(
         return Response(
             content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
             media_type="application/x-yaml",
-            headers={"Content-Disposition": "attachment; filename=dataflow.yaml"},
+            headers={"Content-Disposition": f"attachment; filename={PRODUCT_SLUG}.yaml"},
         )
     return artifact
 
@@ -770,11 +786,18 @@ async def get_pipeline_history(
     limit: int = 25,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """Return the persisted run history (most recent first)."""
+    """Return the run records, most recent first: open, finished and skipped.
+
+    Each record carries ``run_id``, ``status``, ``reason``, ``reason_code`` and
+    its persisted ``transitions``. Legacy rows are filled on read.
+    """
+    from services.schedule_run_lifecycle import derive_status, run_view
+
     resolve_read_workspace(request, workspace_id)
     sched = _bound_schedule(request, schedule_id)
-    history = list(reversed(sched.run_history))[: max(1, min(limit, 100))]
-    return {"schedule_id": schedule_id, "runs": history}
+    rows = [run_view(r, i) for i, r in enumerate(sched.run_history or [])]
+    history = list(reversed(rows))[: max(1, min(limit, 100))]
+    return {"schedule_id": schedule_id, "runs": history, "status": derive_status(sched)}
 
 
 def _flat_schema_map(raw: Any) -> dict[str, str]:

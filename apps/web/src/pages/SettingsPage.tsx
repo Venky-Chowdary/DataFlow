@@ -979,7 +979,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           const url = URL.createObjectURL(blob);
                           const a = document.createElement("a");
                           a.href = url;
-                          a.download = "dataflow-compliance-report.md";
+                          a.download = "datawrap-compliance-report.md";
                           a.click();
                           URL.revokeObjectURL(url);
                         }).catch((err) => toast({ title: "Download failed", message: err instanceof Error ? err.message : "Could not download report", tone: "error" }))}

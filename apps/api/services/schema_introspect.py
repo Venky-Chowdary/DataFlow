@@ -8,6 +8,7 @@ import logging
 import re
 import sys
 from collections.abc import Sequence
+from decimal import Decimal
 from typing import Any
 
 from services.unique_key_introspect import (
@@ -4444,9 +4445,15 @@ def _kafka_value_to_logical(value: Any) -> str:
     if isinstance(value, bool):
         return "BOOLEAN"
     if isinstance(value, int) and not isinstance(value, bool):
-        return "BIGINT" if abs(value) > 2_147_483_647 else "INTEGER"
+        if abs(value) <= 2_147_483_647:
+            return "INTEGER"
+        return "BIGINT" if -(2**63) <= value < 2**63 else "DECIMAL"
     if isinstance(value, float):
         return "DOUBLE"
+    # The exact JSON decoder keeps a number binary64 would round as Decimal;
+    # typing it TEXT flipped the whole column to text (D203).
+    if isinstance(value, Decimal):
+        return "DECIMAL" if value.is_finite() else "DOUBLE"
     if isinstance(value, dict):
         return "JSON"
     if isinstance(value, list):
@@ -4848,6 +4855,22 @@ def catalog_read_back(dest_db: str, physical: str) -> str:
         "snowflake": _sf_to_logical,
     }.get(db)
     return mapper(raw) if mapper else raw
+
+
+def catalog_read_backs(dest_db: str, physical: str) -> tuple[str, ...]:
+    """Every ``inferred_type`` :func:`catalog_read_back` may report across the wire family.
+
+    MariaDB speaks the MySQL dialect (``mariadb`` normalises to ``mysql``) but
+    its ``JSON`` is an alias the catalog reports as ``LONGTEXT`` with
+    ``utf8mb4_bin``. DataFlow's own JSON column on that family reads back as
+    either spelling (D211).
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+
+    first = catalog_read_back(dest_db, physical)
+    if _normalize_dest_db(dest_db) == "mysql" and first.upper() == "JSON":
+        return (first, "LONGTEXT COLLATE utf8mb4_bin")
+    return (first,)
 
 
 _ENTERPRISE_INTROSPECT_EXPORTS = frozenset(

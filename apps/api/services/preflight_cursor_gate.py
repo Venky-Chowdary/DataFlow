@@ -197,6 +197,32 @@ def _transfer_destination_config(
         return raw
 
 
+def _source_identity_config(
+    source_config: Mapping[str, Any] | None, source_connector_id: str
+) -> Mapping[str, Any]:
+    """Source config with the database the run will key its bookmark on.
+
+    Validate may name the source by connector id alone; the run resolves the
+    saved connector's database, so the bookmark key must be built from it too
+    (round 5, D203 prov.: REST Validate read ``postgresql::t`` and saw none).
+    """
+    cfg = dict(source_config or {})
+    cid = (source_connector_id or "").strip()
+    if cfg.get("database") or not cid:
+        return cfg
+    try:
+        from services.connector_store import get_connector
+
+        conn = get_connector(cid)
+        database = str(getattr(conn, "database", "") or "") if conn is not None else ""
+    except Exception as exc:  # noqa: BLE001 - unresolved stays the whole-sample view
+        logger.warning("source identity for the read scope unresolved (%s): %s", cid, exc)
+        database = ""
+    if database:
+        cfg["database"] = database
+    return cfg
+
+
 def resolve_read_scope(
     *,
     sync_mode: str,
@@ -207,6 +233,7 @@ def resolve_read_scope(
     destination_db_type: str,
     destination_config: Mapping[str, Any] | None,
     destination_table: str,
+    source_connector_id: str = "",
 ) -> IncrementalReadScope:
     """The cursor state of this route, as the transfer's read side sees it.
 
@@ -221,7 +248,7 @@ def resolve_read_scope(
         source_type = resolve_driver_type(source_format or "")
     except Exception:
         source_type = (source_format or "").strip().lower()
-    src_cfg = source_config or {}
+    src_cfg = _source_identity_config(source_config, source_connector_id)
     dst_cfg = _transfer_destination_config(destination_db_type, destination_config)
     try:
         return resolve_incremental_read_scope(
@@ -574,6 +601,16 @@ def build_sync_contract_gate(
     }
 
 
+def _endpoint_identity(endpoint: Any) -> dict[str, Any]:
+    """Connector id / host / port of an endpoint — what keys its bookmark."""
+    out: dict[str, Any] = {}
+    for field in ("connector_id", "host", "port"):
+        value = getattr(endpoint, field, None)
+        if value not in (None, "", 0):
+            out[field] = value
+    return out
+
+
 def read_scope_for_transfer_request(request: Any) -> IncrementalReadScope:
     """:func:`resolve_read_scope` addressed by a ``TransferRequest``.
 
@@ -595,6 +632,10 @@ def read_scope_for_transfer_request(request: Any) -> IncrementalReadScope:
         destination_config={
             "database": str(getattr(dest, "database", "") or ""),
             **dest_extra,
+            # The route identity the run writes its watermark under. Without
+            # it the endpoint defaulted to host=localhost and Execute's gates
+            # read a third, empty bookmark (round 5, D203 prov.).
+            **_endpoint_identity(dest),
         },
         destination_table=str(
             getattr(dest, "table", "") or getattr(dest, "collection", "") or ""

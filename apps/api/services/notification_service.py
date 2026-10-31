@@ -48,7 +48,7 @@ def _env_smtp() -> dict[str, Any]:
         "user": getenv_brand("SMTP_USER", ""),
         "password": getenv_brand("SMTP_PASSWORD", ""),
         "use_tls": getenv_brand("SMTP_USE_TLS", "true").lower() in ("1", "true", "yes"),
-        "from": getenv_brand("SMTP_FROM", "dataflow@localhost"),
+        "from": getenv_brand("SMTP_FROM", "datawrap@localhost"),
     }
 
 

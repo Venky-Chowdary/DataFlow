@@ -130,3 +130,121 @@ def slow_snowflake(
     monkeypatch.setattr(sc, "_open_connection", open_)
     monkeypatch.setattr(FakeSnowflakeCursor, "execute", execute)
     return calls
+
+
+def slow_destination_scans(
+    monkeypatch,
+    *,
+    table: str,
+    seconds_per_row: float,
+    connect: float = 0.0,
+) -> Calls:
+    """A PostgreSQL destination whose full-table reads cost what a big one's do.
+
+    A local table answers a sequential scan of 100k rows in milliseconds; a
+    production destination holding hundreds of millions of rows, or a cold
+    cloud volume, does not. Every statement that reads ``table`` is EXPLAINed
+    on its own session first: when the plan reads the whole table (a Seq Scan
+    on it that no LIMIT stops early), ``reltuples * seconds_per_row`` of server-side ``pg_sleep``
+    precede it, so the statement timeout cancels it the way it would cancel a
+    real long scan. An index lookup costs nothing extra. ``calls`` counts
+    ``dest_seq_scan`` and ``dest_index_read``.
+    """
+    import json
+
+    import psycopg2
+    import psycopg2.extensions as ext
+
+    calls = Calls()
+    real_connect = psycopg2.connect
+    needle = table.lower()
+    cursor_classes: dict[type, type] = {}
+    conn_classes: dict[type, type] = {}
+
+    def _seq_scans(plan: dict, under_limit: bool = False) -> bool:
+        # ``SELECT ... LIMIT n`` stops after n rows; with a filter it may read
+        # the whole table looking for them, so that one still counts.
+        if plan.get("Node Type") == "Seq Scan" and str(plan.get("Relation Name", "")).lower() == needle:
+            return not under_limit or bool(plan.get("Filter"))
+        limited = under_limit or plan.get("Node Type") == "Limit"
+        return any(_seq_scans(child, limited) for child in plan.get("Plans") or [])
+
+    def counted_cursor(base: type) -> type:
+        if base not in cursor_classes:
+
+            def execute(self, sql, *a, **k):
+                text = sql.decode() if isinstance(sql, bytes) else str(sql)
+                low = text.lower()
+                if (
+                    calls.active.is_set()
+                    and needle in low
+                    and low.lstrip().startswith("select")
+                    and "pg_catalog" not in low
+                    and "information_schema" not in low
+                ):
+                    base.execute(self, "EXPLAIN (FORMAT JSON) " + text, *a, **k)
+                    raw = self.fetchone()[0]
+                    plan = (json.loads(raw) if isinstance(raw, str) else raw)[0]["Plan"]
+                    if _seq_scans(plan):
+                        calls.add("dest_seq_scan")
+                        base.execute(
+                            self,
+                            "SELECT GREATEST(reltuples, 0)::bigint FROM pg_class WHERE oid = %s::regclass",
+                            (table,),
+                        )
+                        rows = int(self.fetchone()[0] or 0)
+                        if rows * seconds_per_row:
+                            base.execute(self, f"SELECT pg_sleep({rows * seconds_per_row:.3f})")
+                    else:
+                        calls.add("dest_index_read")
+                return base.execute(self, sql, *a, **k)
+
+            cursor_classes[base] = type("Scan" + base.__name__, (base,), {"execute": execute})
+        return cursor_classes[base]
+
+    def conn_class(base: type) -> type:
+        if base not in conn_classes:
+
+            def cursor(self, *a, **k):
+                factory = k.pop("cursor_factory", None) or self.cursor_factory or ext.cursor
+                return base.cursor(self, *a, cursor_factory=counted_cursor(factory), **k)
+
+            conn_classes[base] = type("Scan" + base.__name__, (base,), {"cursor": cursor})
+        return conn_classes[base]
+
+    def slow_connect(*args, **kwargs):
+        calls.add("pg_connect")
+        if connect and calls.active.is_set():
+            time.sleep(connect)
+        kwargs["connection_factory"] = conn_class(kwargs.get("connection_factory") or ext.connection)
+        return real_connect(*args, **kwargs)
+
+    monkeypatch.setattr(psycopg2, "connect", slow_connect)
+    return calls
+
+
+def slow_mysql(monkeypatch, *, connect: float = 0.0, statement: float = 0.0) -> Calls:
+    """Every pymysql connect sleeps ``connect`` and every statement ``statement``
+    (a remote MySQL's TLS handshake and round trip)."""
+    import pymysql.connections as pc
+    import pymysql.cursors as pcur
+
+    calls = Calls()
+    real_connect = pc.Connection.connect
+    real_execute = pcur.Cursor.execute
+
+    def slow_connect(self, *a, **k):
+        calls.add("my_connect")
+        if connect and calls.active.is_set():
+            time.sleep(connect)
+        return real_connect(self, *a, **k)
+
+    def slow_execute(self, query, args=None):
+        calls.add("my_statement")
+        if statement and calls.active.is_set():
+            time.sleep(statement)
+        return real_execute(self, query, args)
+
+    monkeypatch.setattr(pc.Connection, "connect", slow_connect)
+    monkeypatch.setattr(pcur.Cursor, "execute", slow_execute)
+    return calls

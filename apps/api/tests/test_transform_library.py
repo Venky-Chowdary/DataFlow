@@ -8,7 +8,6 @@ from services.transform_library import FileTransformLibraryStore
 from services.transform_recipe import (
     RecipeStep,
     TransformRecipe,
-    apply_recipe_row,
     preview_recipe,
 )
 
@@ -45,36 +44,38 @@ def test_alias_ops_validate():
     r.validate()
 
 
-def test_apply_recipe_row_orders_and_transforms():
+def test_recipe_runs_its_steps_in_order_through_the_shape_engine():
+    """One composition model: the preview is the engine the transfer runs."""
     row = {"email": "  Ann@EXAMPLE.COM ", "amount": "12.5", "name": "Ann"}
-    out, errors = apply_recipe_row(row, _recipe())
-    assert errors == []
-    assert out["email"] == "ann@example.com"
-    assert str(out["amount"]) == "12.5"
-    assert out["name"] == "Ann"
+    result = preview_recipe(_recipe(), [row])
+    assert result["compiled"] is True
+    out = result["results"][0]
+    assert out["errors"] == []
+    assert out["after"]["email"] == "ann@example.com"
+    assert str(out["after"]["amount"]) == "12.5"
+    assert out["after"]["name"] == "Ann"
 
 
-def test_apply_recipe_fail_step_reports_error():
-    row = {"amount": "NOT_A_NUMBER"}
+def test_recipe_fail_step_refuses_the_row():
     recipe = TransformRecipe(
         name="r", steps=[RecipeStep(column="amount", op="decimal")]
     )
-    out, errors = apply_recipe_row(row, recipe)
-    assert len(errors) == 1
-    assert errors[0]["column"] == "amount"
-    assert errors[0]["on_error"] == "fail"
-    assert out["amount"] == "NOT_A_NUMBER"
+    result = preview_recipe(recipe, [{"amount": "NOT_A_NUMBER"}])
+    assert result["rows_with_errors"] == 1
+    assert "amount" in result["results"][0]["errors"][0]["error"]
 
 
-def test_apply_recipe_keep_original_records_but_writes_raw():
-    row = {"amount": "junk"}
+def test_keep_original_recipe_cannot_run_so_it_previews_nothing():
+    """keep_original never compiles, so no transfer can bind it — the preview
+    used to show its output anyway through a second, per-cell engine."""
     recipe = TransformRecipe(
         name="r",
         steps=[RecipeStep(column="amount", op="decimal", on_error="keep_original")],
     )
-    out, errors = apply_recipe_row(row, recipe)
-    assert errors[0]["on_error"] == "keep_original"
-    assert out["amount"] == "junk"
+    result = preview_recipe(recipe, [{"amount": "junk"}])
+    assert result["compiled"] is False
+    assert result["results"] == []
+    assert "keep_original" in result["error"]
 
 
 def test_preview_counts_error_rows():

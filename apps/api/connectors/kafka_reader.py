@@ -102,6 +102,10 @@ def _bootstrap(cfg: dict[str, Any]) -> str:
             return cs.replace("bootstrap.servers=", "").strip()
     host = str(cfg.get("host") or cfg.get("bootstrap_servers") or "localhost").strip()
     port = int(cfg.get("port") or 9092)
+    # D208 sibling: ``PLAINTEXT://h:9092`` / ``kafka://h:9092`` name their own
+    # port; the scheme is not part of a bootstrap address.
+    host = ",".join(re.sub(r"^[A-Za-z][A-Za-z0-9+._-]*://", "", h.strip()).rstrip("/")
+                    for h in host.split(","))
     if "," in host or re.search(r"(^[^:]+|\])(:\d+)$", host):
         return host
     return f"{host}:{port}"
@@ -357,16 +361,21 @@ def read_topic_batch(
 
 
 _KAFKA_NUMERIC_LOGICALS = frozenset({"INTEGER", "BIGINT", "DECIMAL", "FLOAT", "DOUBLE"})
+_INT_RANK = {"INTEGER": 0, "BIGINT": 1}
+
+#: A string an exact numeric column holds without changing its text: no sign
+#: but ``-``, no leading zeros, no exponent, no padding ("2.50", "-0.5").
+_PLAIN_DECIMAL = re.compile(r"-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?")
 
 
 def merge_kafka_logicals(prev: str | None, logical: str) -> str:
-    """One column's type across messages: widen within numbers, else TEXT.
+    """One column's type across messages: the widest number that holds them all.
 
-    The decoder types a JSON float DOUBLE and a large int BIGINT, but the
-    merge only knew INTEGER/FLOAT/DECIMAL, so ``"price": 3`` in one message
-    and ``2.5`` in the next typed the column TEXT (D161 on the Kafka path).
-    A JSON number is IEEE on the wire: an integer meeting a double is the
-    double, and DECIMAL (a decimal string) stays DECIMAL.
+    INTEGER < BIGINT < DOUBLE < DECIMAL, else TEXT. A JSON fraction is DOUBLE
+    only when binary64 holds it exactly (the exact decoder returns ``Decimal``
+    otherwise), so one such value widens the column to DECIMAL instead of
+    turning it into text (D203). An integer meeting a double is the double
+    (D161) unless it is past 2**53 — :func:`_kafka_column_types` sees that.
     """
     if not prev or prev == logical:
         return logical
@@ -379,7 +388,59 @@ def merge_kafka_logicals(prev: str | None, logical: str) -> str:
         return "DOUBLE"
     if "FLOAT" in pair:
         return "FLOAT"
-    return "BIGINT"
+    return max(pair, key=lambda t: _INT_RANK.get(t, 0))
+
+
+def _kafka_column_types(records: list[dict[str, Any]]) -> tuple[dict[str, str], dict[str, str]]:
+    """``(native type per column, stated decision per mixed column)``.
+
+    Decided over every record given, so the plan and the run agree when they
+    read the same messages. A column mixing JSON numbers with strings gets one
+    declared decision: DECIMAL when every string is a plain decimal literal the
+    exact column holds unchanged, else TEXT. Strings alone keep the declared
+    string type (D190/D194): a JSON string is never re-typed by itself.
+    """
+    from services.schema_introspect import _kafka_value_to_logical
+
+    native: dict[str, str] = {}
+    numbers: dict[str, str] = {}
+    strings: dict[str, bool] = {}
+    other: set[str] = set()
+    past_double: set[str] = set()
+    for rec in records:
+        for key, value in rec.items():
+            logical = _kafka_value_to_logical(value)
+            if not logical:
+                continue
+            native[key] = merge_kafka_logicals(native.get(key), logical)
+            if isinstance(value, str):
+                strings[key] = strings.get(key, True) and bool(_PLAIN_DECIMAL.fullmatch(value))
+            elif logical in _KAFKA_NUMERIC_LOGICALS and not isinstance(value, bool):
+                numbers[key] = merge_kafka_logicals(numbers.get(key), logical)
+                if isinstance(value, int) and abs(value) > 2**53:
+                    past_double.add(key)
+            else:
+                other.add(key)
+    for key in past_double:
+        # An integer binary64 cannot hold beside a fraction: DOUBLE would round it.
+        for types in (native, numbers):
+            if types.get(key) in {"DOUBLE", "FLOAT"}:
+                types[key] = "DECIMAL"
+    decisions: dict[str, str] = {}
+    for key in set(numbers) & set(strings) - other:
+        if strings[key]:
+            native[key] = "DECIMAL"
+            decisions[key] = (
+                f"{key}: JSON numbers and numeric strings in one column - typed DECIMAL; "
+                "each string lands as the exact number it spells"
+            )
+        else:
+            native[key] = "TEXT"
+            decisions[key] = (
+                f"{key}: JSON numbers and non-numeric strings in one column - typed TEXT; "
+                "each number lands as its JSON text"
+            )
+    return native, decisions
 
 
 def _records_to_batch(
@@ -402,21 +463,16 @@ def _records_to_batch(
     ]
     total = known_total_rows if known_total_rows is not None else None
     batch = ReadBatch(headers=headers, rows=rows, offset=0, total_rows=total)
-    native_types: dict[str, str] = {}
     try:
-        from services.schema_introspect import _kafka_value_to_logical
-
-        for rec in records:
-            for key, value in rec.items():
-                logical = _kafka_value_to_logical(value)
-                if logical:
-                    native_types[key] = merge_kafka_logicals(native_types.get(key), logical)
+        native_types, decisions = _kafka_column_types(records)
         native_types.update(
             (col, logical)
             for col, logical in KAFKA_ENVELOPE_TYPES.items()
             if col in headers
         )
         batch.meta = {"native_types": native_types}
+        if decisions:
+            batch.meta["type_decisions"] = decisions
     except Exception as exc:
         logger.warning("Exception suppressed: %s", exc, exc_info=exc)
     return batch
@@ -587,6 +643,10 @@ def sample_topic_batch(
         consumer.close()
 
 
+#: Messages the plan reads to decide each field's type over the whole topic.
+_TYPE_CENSUS_LIMIT = 20_000
+
+
 def infer_topic_schema(
     cfg: dict[str, Any],
     topic: str,
@@ -641,6 +701,26 @@ def infer_topic_schema(
     # at the end, or the empty poll during rebalance, made this look like
     # a topic with no fields.
     batch = sample_topic_batch(cfg=cfg, topic=topic, limit=sample_limit)
+    # The types are the run's, not the tail sample's: one decision per column
+    # over every message a full read covers (D203). A topic past the census
+    # bound keeps the sample's types and says so.
+    census_note = ""
+    try:
+        census, complete = read_topic_to_end(cfg=cfg, topic=topic, limit=_TYPE_CENSUS_LIMIT)
+    except Exception as exc:
+        census, complete = None, False
+        logger.debug("Kafka type census failed: %s", exc)
+    if census is not None and complete and census.headers:
+        batch = census
+    elif census is not None and batch.headers:
+        census_note = (
+            f"Field types come from the last {sample_limit} message(s): the topic holds "
+            f"more than {_TYPE_CENSUS_LIMIT:,} to type exactly."
+        )
+    decisions = dict((batch.meta or {}).get("type_decisions") or {})
+    registry_warning = " ".join(
+        part for part in [registry_warning, census_note, *decisions.values()] if part
+    )
     native = dict((batch.meta or {}).get("native_types") or {})
     if not batch.headers:
         warning = registry_warning or (

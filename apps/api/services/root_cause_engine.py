@@ -15,6 +15,7 @@ import logging
 import re
 from dataclasses import asdict, dataclass, field
 from typing import Any
+from services.brand import PRODUCT_NAME
 
 _logger = logging.getLogger(__name__)
 
@@ -1851,7 +1852,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             summary = (
                 f"Upsert into this existing table keys on "
                 f"({', '.join(cols)}) but the destination has no unique "
-                f"constraint on those columns — DataFlow would need to run: "
+                f"constraint on those columns — {PRODUCT_NAME} would need to run: "
                 f"{planned_ddl}"
             )
         roots.append(
@@ -2047,12 +2048,27 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
                 [b.get("id") for b in dup_blockers],
                 cols,
             )
+            # D205: name the colliding keys and the destination rule, not a
+            # generic "failed on the sample" (the probe walked the population).
+            _eq_msg = next(
+                (
+                    str(x.get("message") or "").split("Data integrity failed: ", 1)[-1]
+                    for x in [*dup_gates, *dup_blockers]
+                    if "equal under the destination's comparison" in str(x.get("message") or "")
+                ),
+                "",
+            )
             roots.append(
                 MigrationRootCause(
                     root_id=_root_id("duplicate_identity", cols, absorbed),
                     kind="duplicate_identity",
-                    title="Duplicate identity keys",
-                    summary=(
+                    title=(
+                        "Duplicate identity keys: distinct source keys collide "
+                        "on the destination key"
+                        if _eq_msg
+                        else "Duplicate identity keys"
+                    ),
+                    summary=_eq_msg or (
                         "Identity / uniqueness checks failed on the Validate sample "
                         f"— impacts {len(absorbed)} gate check(s)"
                     ),

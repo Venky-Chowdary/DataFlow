@@ -590,7 +590,9 @@ def sample_connector_object(
                 query=_sample_sql(table, ctype, limit),
                 limit=limit,
             )
-        rows, columns, schema, truncated = _run_query(saved, body)
+        # The sample feeds Map and the preflight gates: JSON cells as their
+        # document text, as the Execute reader carries them (D207).
+        rows, columns, schema, truncated = _run_query(saved, body, json_engine_text=True)
         preview_rows = rows if full_rows else rows[: min(limit, 25)]
         meta = {
             "connector_id": cid,

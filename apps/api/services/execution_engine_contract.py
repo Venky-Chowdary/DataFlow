@@ -246,6 +246,31 @@ def decide_retry_from_start(
             ),
             "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
         }
+    # D208: say what the new attempt reads. An incremental append or SCD2 with a
+    # cursor continues from the watermark (a full pass would re-append rows or
+    # reopen history), and so does an unattended retry of an incremental
+    # upsert. Only an operator re-run/retry of an upsert is a full second pass
+    # (services.full_pass_rerun makes the job one).
+    from services.sync_cursor import normalize_sync_mode, requires_incremental
+
+    canonical = normalize_sync_mode(sync_mode or "", default="")
+    if requires_incremental(canonical) and canonical != "cdc" and (
+        (canonical == "incremental_deduped" and not operator_requested)
+        or (canonical != "incremental_deduped" and has_cursor_contract)
+    ):
+        return {
+            "kind": ResumeKind.FROM_CURSOR.value,
+            "allowed": True,
+            "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "read_scope": "from_watermark",
+            "reason": (
+                f"sync_mode={sync_mode} carries a cursor contract — the new "
+                "attempt continues from the persisted watermark and reads only "
+                "rows after it (the tie group at the watermark is re-read and "
+                "collapsed). It is not a full second pass."
+            ),
+            "contract_version": EXECUTION_ENGINE_CONTRACT_VERSION,
+        }
     # C20/D5: the gate must check the contract, not the mode family. A declared
     # merge/upsert key collapses a second copy onto the same rows.
     if has_key_contract or is_idempotent_sync(sync_mode):
@@ -253,6 +278,7 @@ def decide_retry_from_start(
             "kind": ResumeKind.FROM_ZERO_IDEMPOTENT.value,
             "allowed": True,
             "delivery": DEFAULT_DELIVERY_SEMANTICS,
+            "read_scope": "full_source",
             "reason": (
                 f"sync_mode={sync_mode} converges — a second full pass merges "
                 "onto the declared key rather than adding a second copy."

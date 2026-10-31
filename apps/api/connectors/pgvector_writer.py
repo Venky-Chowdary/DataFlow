@@ -786,6 +786,7 @@ def write_mapped_rows(
         label="pgvector",
         destination_column_nullability=_kwargs.get("destination_column_nullability"),
         destination_column_types=gated_types,
+        keep_null=True,
     )
     if map_abort:
         from services.vector_sync import _rejected_doc_keys
@@ -921,6 +922,9 @@ def write_mapped_rows(
                 skip_fingerprint.digest if skip_fingerprint is not None else None
             ),
             skip_unchanged=vector_skip_unchanged,
+            # D209: one embedded-text rule per table, NULL kept in metadata.
+            document_contract=True,
+            document_fields=mapped_targets,
         )
     except EmbeddingProviderError as exc:
         return WriteResult(
@@ -1332,6 +1336,10 @@ def write_mapped_rows(
             # Filter to rows with valid embeddings matching dimension.
             valid_rows = []
             for row in vector_rows:
+                if row.get("_df_empty_text") and row.get("embedding") is None:
+                    # D209: the declared text rule gave no text — NULL vector.
+                    valid_rows.append(dict(row))
+                    continue
                 emb, err = coerce_embedding(row.get("embedding"), expected_dimension=dimension)
                 if err or emb is None:
                     from services.vector_embedding import (
@@ -1516,7 +1524,7 @@ def write_mapped_rows(
                     vector = _vector_literal(row.get("embedding"))
                     from connectors.writer_common import vector_prepare_metadata
 
-                    metadata = vector_prepare_metadata(row.get("metadata") or {})
+                    metadata = vector_prepare_metadata(row.get("metadata") or {}, keep_null=True)
                     try:
                         chunk_idx = coerce_chunk_index(row.get("chunk_index"))
                     except ValueError as exc:
@@ -1706,7 +1714,7 @@ def _pgvector_gate8_meta(valid_rows: list[dict[str, Any]]) -> dict[str, Any]:
     for row in valid_rows:
         from connectors.writer_common import vector_prepare_metadata
 
-        meta = vector_prepare_metadata(row.get("metadata") or {})
+        meta = vector_prepare_metadata(row.get("metadata") or {}, keep_null=True)
         rows.append({
             "id": row.get("id"),
             "source_id": row.get("source_id"),

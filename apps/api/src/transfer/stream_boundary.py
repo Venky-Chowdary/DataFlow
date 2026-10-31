@@ -21,6 +21,8 @@ def _boundary_append_dedupe(
     stream_error_policy: str | None,
     digest_dest_types: dict | None,
     dest_bind_dialect: str,
+    remap_dest_types: dict | None = None,
+    destination_pk_columns: list[str] | None = None,
 ) -> set[int]:
     """Indices of re-read boundary rows whose ``match_cols`` the destination holds.
 
@@ -33,27 +35,45 @@ def _boundary_append_dedupe(
     ``new_cols`` are columns this run adds: the destination has no history for
     them, so a peer that carries a value there is new information and is kept.
 
-    Fail-open by construction: a quarantine mapping that changes row count, a
-    fingerprint that does not match, or any missing fingerprint keeps the row —
-    a duplicate is recoverable, a silently dropped row is not.
+    The peers are remapped exactly as the writer maps them — ``remap_dest_types``
+    is the write path's type basis (``fingerprint_dest_types``) — and hashed on
+    ``digest_dest_types``, the carrier the destination read-back hashes on.
+    Remapping on the carrier types quarantined every tz-aware peer bound for an
+    NTZ column in this remap alone (the writer converts it), so the drop failed
+    open and every peer was appended again on each run (round 5, D203 prov.).
+
+    Fail-open by construction: a fingerprint that does not match, or any
+    missing fingerprint keeps the row — a duplicate is caught by Gate-8's
+    window check, a silently dropped row is not. A peer the remap itself holds
+    out is kept (the writer quarantines it again); it no longer switches the
+    drop off for its landed neighbours.
     """
-    mapped, _rejected = map_rows_for_fingerprint(
-        headers=list(headers or []),
-        data_rows=boundary_rows,
+    remap_kw = dict(
         mappings=mappings,
         target_cols=target_cols,
         column_types=column_types,
         error_policy=stream_error_policy,
-        dest_types=digest_dest_types,
+        dest_types=remap_dest_types if remap_dest_types is not None else digest_dest_types,
         dest_kind=dest_bind_dialect,
+        destination_pk_columns=destination_pk_columns or None,
+    )
+    mapped, _rejected = map_rows_for_fingerprint(
+        headers=list(headers or []), data_rows=boundary_rows, **remap_kw
     )
     if len(mapped) != len(boundary_rows):
-        return set()
+        aligned: list = []
+        for row in boundary_rows:
+            one, _held = map_rows_for_fingerprint(
+                headers=list(headers or []), data_rows=[row], **remap_kw
+            )
+            aligned.append(one[0] if len(one) == 1 else None)
+        mapped = aligned
     try:
         positions = [target_cols.index(c) for c in match_cols]
     except ValueError:
         return set()
-    projected = [tuple(row[i] for i in positions) for row in mapped]
+    live = [i for i, row in enumerate(mapped) if row is not None]
+    projected = [tuple(mapped[i][p] for p in positions) for i in live]
     fps = [
         fp
         for _k, fp in row_fingerprints(
@@ -63,7 +83,9 @@ def _boundary_append_dedupe(
             dest_types=digest_dest_types,
         )
     ]
-    landed = {i for i, fp in enumerate(fps) if fp in dest_fps}
+    if len(fps) != len(live):
+        return set()
+    landed = {live[j] for j, fp in enumerate(fps) if fp in dest_fps}
     if new_cols:
         from services.value_serializer import is_missing_sentinel, is_reader_null_cell
 

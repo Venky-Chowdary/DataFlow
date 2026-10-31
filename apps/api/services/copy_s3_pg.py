@@ -45,6 +45,43 @@ def _pg_ident(name: str) -> str:
     return _quote(name)
 
 
+def _census_csv_cells(path: str, ext: str, key: str, pg_ddls: list[str]) -> None:
+    """Decline before COPY when any cell is one the row path would not load as-is.
+
+    ``COPY`` parses the file all-or-nothing, so one ``2024-02-30`` (or a quoted
+    ``""`` in a DATE column) failed the whole run with nothing quarantined. The
+    local-file COPY already grades every cell (``_write_mapped_csv``); this is
+    the same rule - the shared blank-cell bind, then ``text_cell_copy_safe`` -
+    on the object GET. A decline hands the file to the row path, which holds
+    out exactly the unfit rows.
+    """
+    from services.copy_fast_path import text_cell_copy_safe
+    from services.csv_codec import iter_csv_records
+    try:
+        from transfer.file_stream import file_empty_cell_bind
+    except ImportError:  # pragma: no cover - api root on PYTHONPATH
+        from src.transfer.file_stream import file_empty_cell_bind
+
+    with open(path, "r", encoding="utf-8", newline="") as handle:
+        rows = iter_csv_records(handle, "\t" if ext == "tsv" else ",")
+        next(rows, None)  # HEADER true
+        for row_no, row in enumerate(rows, start=1):
+            for col, ddl in enumerate(pg_ddls):
+                cell = row[col] if col < len(row) else None
+                # A quoted "" is '' to COPY but NULL to the row path on a
+                # typed carrier (the shared blank-cell bind): COPY would
+                # store or reject a value the row path never writes.
+                blank_differs = cell == "" and file_empty_cell_bind("", ddl) is None
+                if blank_differs or not text_cell_copy_safe(
+                    cell, ddl, physical=ddl, dest_db="postgresql"
+                ):
+                    raise FastPathUnavailable(
+                        f"{key!r} column {col + 1} cell {row[col]!r} (data row {row_no}) "
+                        f"is not {ddl} COPY-safe; the row path owns its validation "
+                        "and quarantine"
+                    )
+
+
 def copy_s3_to_postgres(
     *,
     source_cfg: dict[str, Any],
@@ -150,6 +187,7 @@ def copy_s3_to_postgres(
                     f"source object {src_key!r} spells NULL as \\N; the row "
                     "path's CSV codec reads it (COPY's CSV NULL is the empty field)"
                 )
+            _census_csv_cells(tmp_path, ext, src_key, pg_ddls)
             # C04 is PostgreSQL's own CSV rule: NULL '' makes an unquoted empty
             # field NULL and a quoted "" the empty string. NULL '\N' landed
             # every NULL as '' under a dest_count-only proof (CR-D125).

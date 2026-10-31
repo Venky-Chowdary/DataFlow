@@ -2022,6 +2022,7 @@ def build_transfer_plan(source: EndpointConfig, destination: EndpointConfig, sou
                     for c in dest_cols
                 ] if dest_cols else None,
                 file_format=src_fmt if source.kind == "file" else None,
+                source_db_type=str(src_fmt or ""),  # D204: bind the source engine
                 confidence_threshold=0.75,
                 source_types_authoritative=source_types_are_authoritative(
                     source.kind or "", src_fmt or ""

@@ -19,6 +19,7 @@ from typing import Any
 from services.atomic_file import write_json_atomic
 from services.keyset_pagination import (
     KEYSET_SEP,
+    canonical_cursor_bookmark,
     encode_keyset_bookmark,
     incremental_tiebreak_column,
     split_cursor_bookmark,
@@ -863,6 +864,14 @@ def set_watermark(cursor_key: str, watermark: str, *, metadata: dict[str, Any] |
     ``metadata["job_id"]`` names the run that proved the delta at rest; the
     watermark is then also stamped on that job document as ``cursor_value``.
     """
+    # One spelling per instant: a zone-bearing cursor (``metadata["cursor_type"]``
+    # is its declared source type) is stored in UTC, never in whichever offset
+    # the row that set it was written with. A text column keeps its own text —
+    # its seek compares text.
+    from connectors.cursor_bind import declared_type_is_zone_bearing
+
+    if declared_type_is_zone_bearing((metadata or {}).get("cursor_type")):
+        watermark = canonical_cursor_bookmark(watermark)
     job_id = str((metadata or {}).get("job_id") or "").strip()
     if job_id:
         _stamp_job_watermark(job_id, cursor_key, watermark, str((metadata or {}).get("cursor_column") or ""))
@@ -1216,6 +1225,11 @@ def max_cursor_value(
                 values.append(text)
         if not values:
             return None
+        from connectors.cursor_bind import cursor_instant_key
+
+        instants = [cursor_instant_key(v) for v in values]
+        if all(k is not None for k in instants):
+            return values[max(range(len(values)), key=lambda i: instants[i])]
         from services.cdc_engine import infer_watermark_type, max_watermark
 
         wm_type = infer_watermark_type(values)
@@ -1545,6 +1559,13 @@ def compare_cursor_values(a: str | None, b: str | None) -> int:
         # ranks pk 999 above pk 2000, so a batch's high mark stopped at the
         # lexically largest key and the next run re-read every key above it.
         return compare_cursor_values(a_pk, b_pk)
+    # Offset-bearing timestamps compare by instant, exactly (no float epoch,
+    # no format the generic datetime parser happens to reject).
+    from connectors.cursor_bind import cursor_instant_key
+
+    ka, kb = cursor_instant_key(sa), cursor_instant_key(sb)
+    if ka is not None and kb is not None:
+        return (ka > kb) - (ka < kb)
     from services.cdc_engine import compare_watermarks, infer_watermark_type
 
     wm_type = infer_watermark_type([sa, sb])

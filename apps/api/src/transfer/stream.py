@@ -849,6 +849,12 @@ def _stream_database_transfer_impl(
             run.tally.dest_summary.setdefault(PRECOUNT_KEY, int(pre_write_rows_before))
         if run.cfg.incremental:
             run.tally.dest_summary["sync_mode"] = run.cfg.effective_sync
+            from services.incremental_drift import stamp_watermark_origin
+
+            stamp_watermark_origin(
+                run.tally.dest_summary, cursor_key=pre_copy_cursor_key,
+                cursor_column=run.cfg.cursor_source_col, before=pre_copy_watermark,
+            )
             wm = str(run.tally.dest_summary.get("incremental_watermark") or "").strip()
             if int(rows_copied or 0) == 0:
                 stamp_incremental_no_op(run.tally.dest_summary)
@@ -863,6 +869,7 @@ def _stream_database_transfer_impl(
                         "cursor_column": run.cfg.cursor_source_col,
                         # The column a composite watermark is decodable on (QA ACC-02).
                         "tiebreak_column": run.cfg.cursor_pk_source,
+                        "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
                     },
                 )
                 run.tally.dest_summary["watermark"] = wm
@@ -2566,6 +2573,7 @@ def _stream_database_transfer_impl(
                         "cursor_column": run.cfg.cursor_source_col,
                         # The column a composite watermark is decodable on (QA ACC-02).
                         "tiebreak_column": run.cfg.cursor_pk_source,
+                        "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
                     },
                 )
                 # D110 — batch undo restores the watermark to this pre-run
@@ -2812,6 +2820,12 @@ def _stream_database_transfer_impl(
             run.tally.dest_summary["delivery_semantics"] = "at_least_once_idempotent_apply"
             run.tally.dest_summary["resume_write_mode"] = run.cfg.write_mode
         run.tally.dest_summary["watermark"] = run.cfg.watermark
+        from services.incremental_drift import stamp_watermark_origin
+
+        stamp_watermark_origin(
+            run.tally.dest_summary, cursor_key=cursor_key,
+            cursor_column=run.cfg.cursor_source_col, before=job_start_watermark,
+        )
         try:
             from services.source_snapshot import get_source_snapshot_meta
 
@@ -2892,6 +2906,7 @@ def _stream_database_transfer_impl(
                 "cursor_column": run.cfg.cursor_source_col,
                 # The column a composite watermark is decodable on (QA ACC-02).
                 "tiebreak_column": run.cfg.cursor_pk_source,
+                "cursor_type": str((run.cfg.schema or {}).get(run.cfg.cursor_source_col) or ""),
             },
         )
         # D110 — batch undo restores the watermark to this pre-run value
@@ -2961,6 +2976,12 @@ def _stream_database_transfer_impl(
             seed_inclusive=window_seed_inclusive,
             high=running_cursor,
         )
+        from services.incremental_drift import stamp_watermark_origin
+
+        stamp_watermark_origin(
+            run.tally.dest_summary, cursor_key=cursor_key,
+            cursor_column=run.cfg.cursor_source_col, before=job_start_watermark,
+        )
     if write_pass_fp.total > 0 and not _reread:
         checksum_started = time.perf_counter()
         final_checksum = write_pass_fp.digest()
@@ -3029,7 +3050,7 @@ def _stream_database_transfer_impl(
         # replays the same approved recipe. Its own runner: the run's shaping
         # effects were counted on the write pass and must not be counted twice.
         reread_shaper = (
-            ShapeRunner(run.cfg.shape_runner.recipe, typed_values=run.cfg.shape_runner.typed_values) if run.cfg.shape_runner is not None else None
+            run.cfg.shape_runner.fork() if run.cfg.shape_runner is not None else None
         )
         reread_holdouts: list[dict[str, Any]] = []
         reread_tombstones_excluded = 0

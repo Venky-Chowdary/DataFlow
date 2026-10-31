@@ -124,6 +124,12 @@ def inspect_destination_for_preflight(
         from services.destination_identity import stamp_destination_identity
 
         ok, msg, cfg = probe_saved_connector(connector_id)
+        if cfg:
+            # The run keys this route's watermark by connector id (Execute's
+            # resolve_connector_config stamps it). Without it Validate looked
+            # the watermark up under host:port, found none, and judged an
+            # incremental run 2 as the whole table (round 5, D203 prov.).
+            cfg = {**cfg, "connector_id": str(connector_id)}
         db_type = (cfg.get("type") or dest_type or "").lower()
         out["db_type"] = db_type
         # Credentials travel to the collision probe / engine inside a general
@@ -306,6 +312,13 @@ def inspect_destination_for_preflight(
                     connection_string=str(fk_cfg.get("connection_string") or ""),
                     ssl=bool(fk_cfg.get("ssl")),
                     table=str(stream),
+                    # The login's own identity (warehouse, role, key): without it
+                    # this catalog read opened a second Snowflake login (D187).
+                    **{
+                        k: str(fk_cfg.get(k))
+                        for k in ("warehouse", "role", "auth_role", "private_key")
+                        if fk_cfg.get(k)
+                    },
                 )
                 out["foreign_keys"] = list(live.get("foreign_keys") or [])
                 out["foreign_keys_meta"] = dict(
@@ -525,4 +538,6 @@ def inspect_destination_for_preflight(
         probe_extra.update(dict(getattr(endpoint, "extra", None) or {}))
         probe_extra.update(dict(dest_extra or {}))
         out["redshift_staging_probe"] = probe_redshift_staging(probe_extra)
-    return out
+    from services.pgvector_layout import document_table_preflight_view
+
+    return document_table_preflight_view(out)

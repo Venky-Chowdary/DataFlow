@@ -739,9 +739,9 @@ def connector_owner_workspace(connector_id: str) -> tuple[bool, str]:
 
 
 def create_connector(data: dict[str, Any]) -> SavedConnector:
-    from connectors.sftp_common import apply_sftp_uri_endpoint
+    from connectors.sftp_common import apply_sftp_uri_endpoint, split_sftp_host_edit
 
-    data = apply_sftp_uri_endpoint(data)
+    data = apply_sftp_uri_endpoint(split_sftp_host_edit(data, data.get("type")))
     conn_type = data["type"]
     ssl, ssl_mode = resolve_tls(conn_type, stamp_ssl_mode(dict(data), data))
     conn = SavedConnector(
@@ -837,6 +837,14 @@ def update_connector(connector_id: str, data: dict[str, Any], workspace_id: str 
     workspace_id = _workspace_scope(workspace_id)
     if current_workspace_filter() is not None and get_connector(connector_id, workspace_id) is None:
         return None
+    if str(data.get("host") or "").strip():
+        # D208: a URL-shaped SFTP host carries the dial port; split it here so
+        # the stored port is the URL's, never the one the record had before.
+        from connectors.sftp_common import split_sftp_host_edit
+
+        before = get_connector(connector_id, workspace_id)
+        if before is not None:
+            data = split_sftp_host_edit(data, data.get("type") or before.type, before.port)
     def _merge(existing: SavedConnector) -> SavedConnector:
         merged = stamp_ssl_mode({**existing.to_dict(), **data, "id": connector_id}, data)
         # Never let a masked UI payload overwrite a saved secret / connection string.

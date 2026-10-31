@@ -13,6 +13,8 @@ import yaml
 from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field
 
+from services.brand import PRODUCT_SLUG
+
 from ..services.contract_store import get_contract_store
 from ..services.data_contract import (
     BreakerState,
@@ -375,7 +377,9 @@ def export_contract(
         return Response(
             content=yaml.safe_dump(artifact, sort_keys=False, default_flow_style=False),
             media_type="application/x-yaml",
-            headers={"Content-Disposition": f"attachment; filename=dataflow-contract-{contract_id}.yaml"},
+            headers={
+                "Content-Disposition": f"attachment; filename={PRODUCT_SLUG}-contract-{contract_id}.yaml"
+            },
         )
     return artifact
 

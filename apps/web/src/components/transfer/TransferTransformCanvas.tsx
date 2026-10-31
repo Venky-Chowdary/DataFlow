@@ -68,6 +68,8 @@ interface TransferTransformCanvasProps {
   syncRefused: boolean;
   refusalReason: string;
   activeTable: string;
+  /** Source format for the step preview's value model. */
+  sourceType?: string;
   previewBanner: string;
   effectSummary: string;
   onRunPreview: () => void;
@@ -141,6 +143,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
     syncRefused,
     refusalReason,
     activeTable,
+    sourceType = "",
     previewBanner,
     effectSummary,
     onRunPreview,
@@ -638,6 +641,7 @@ export function TransferTransformCanvas(props: TransferTransformCanvasProps) {
         sample_rows: sampleRows.slice(0, 50),
         source_columns: sourceNames,
         focus_table: activeTable,
+        source_type: sourceType || undefined,
       });
       const rows = Array.isArray(body.after) ? body.after : [];
       const before = Array.isArray(body.before) ? body.before : [];

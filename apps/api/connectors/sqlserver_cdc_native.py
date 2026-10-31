@@ -33,7 +33,7 @@ from connectors.write_resilience import (
 )
 from services.cdc_cursor_gap import CdcLsnGapError
 from services.cdc_engine import ChangeBatch
-from services.value_serializer import cell_to_string
+from services.value_serializer import wire_cell
 
 # Re-export for existing ``from connectors.sqlserver_cdc_native import CdcLsnGapError``.
 __all_gap__ = ("CdcLsnGapError",)
@@ -348,9 +348,17 @@ def normalize_mssql_row_filter(value: str | None) -> str:
 
 
 def _sqlserver_native_wire_value(value: Any) -> str:
-    if isinstance(value, (bytes, bytearray, memoryview)):
-        return cell_to_string(value, preserve_sql_null=True)
-    return "" if value is None else str(value)
+    """Encode one native-CDC cell for the shared CDC matrix.
+
+    SQL NULL is the wire NULL sentinel, never ``""`` (D203: a NULL landed as
+    an empty string, and failed every typed column). Text is wire-escaped, so
+    a source string spelling the sentinel stays text; bytes are base64 wire.
+    Typed scalars keep their established ``str()`` spelling, which committed
+    exactly-once payloads were fingerprinted with.
+    """
+    if value is None or isinstance(value, (str, bytes, bytearray, memoryview)):
+        return wire_cell(value)
+    return str(value)
 
 
 def classify_mssql_cdc_rows(

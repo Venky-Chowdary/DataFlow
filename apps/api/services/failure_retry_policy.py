@@ -65,8 +65,15 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
      r"neither mapped nor declared omitted",
      "Map the unaccounted source column or declare it omitted, then "
      "acknowledge the drift before the next run."),
+    # One login rejection, however the server words it. PostgreSQL says
+    # 'password authentication failed for user "x"' under password auth and
+    # 'role "x" does not exist' under trust/peer auth for the same unknown
+    # login; SQL Server says 'Login failed for user'; Oracle ORA-01017.
+    # Classifying them differently made an unattended retry depend on the
+    # server's pg_hba.conf, not on the failure.
     (r"authentication failed|invalid credentials|access denied|permission "
-     r"denied|not authorized|403",
+     r"denied|not authorized|403|role \"[^\"]*\" does not exist|"
+     r"login failed for user|ora-01017|invalid username/password",
      "Credentials or grants are rejected — fix them on the connector."),
     (r"strict error policy blocks partial write",
      "Quarantined cells blocked the write under the strict error policy — fix "

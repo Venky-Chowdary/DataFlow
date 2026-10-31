@@ -7908,6 +7908,7 @@ export function TransferPage({
         <div className="df2-transfer-step-panel df2-transfer-step-viewport df2-xform-step">
         <TransferTransformStep
           sampleRows={shapeSampleRows}
+          sourceType={sourceKind === "file" ? "" : resolveDriverType(sourceConnector?.type || "")}
           sourceColumns={currentSourceColumns}
           sourceSchema={currentSourceSchema}
           targetSchema={destSchemaMap}

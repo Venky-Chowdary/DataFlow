@@ -303,7 +303,7 @@ export function NotificationSettings() {
           {(kind === "servicenow" || kind === "webhook") && (
             <div className="df2-settings-field df2-settings-field--full">
               <label>Endpoint URL</label>
-              <input className="df2-input" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder={kind === "servicenow" ? "https://company.service-now.com/api/now/table/incident" : "https://company.com/webhook/dataflow"} />
+              <input className="df2-input" value={endpointUrl} onChange={(e) => setEndpointUrl(e.target.value)} placeholder={kind === "servicenow" ? "https://company.service-now.com/api/now/table/incident" : "https://company.com/webhook/datawrap"} />
             </div>
           )}
 
@@ -375,7 +375,7 @@ export function NotificationSettings() {
               </div>
               <div className="df2-settings-field df2-settings-field--full">
                 <label>From address</label>
-                <input className="df2-input" value={fromAddress} onChange={(e) => setFromAddress(e.target.value)} placeholder="dataflow@company.com" />
+                <input className="df2-input" value={fromAddress} onChange={(e) => setFromAddress(e.target.value)} placeholder="datawrap@company.com" />
               </div>
               </div>
             </div>

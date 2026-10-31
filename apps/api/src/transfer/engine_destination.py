@@ -122,6 +122,9 @@ def _destination_schema_probe(
             "introspect_purpose": "destination",
         }
         info = introspect_endpoint(destination)
+        from services.pgvector_layout import document_table_engine_view
+
+        info = document_table_engine_view(destination, info)
         schema = dict(info.get("schema") or {})
         nullability = {
             str(k): bool(v)

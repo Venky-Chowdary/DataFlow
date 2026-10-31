@@ -55,12 +55,26 @@ def test_unknown_committed_count_is_not_zero():
 
 
 def test_convergent_sync_mode_allows_retry():
-    for mode in ("full_refresh_overwrite", "incremental_upsert", "mirror"):
+    for mode in ("full_refresh_overwrite", "mirror"):
         decision = decide_retry_from_start(
             status="failed", sync_mode=mode, rows_committed=10_000
         )
         assert decision["allowed"] is True, mode
         assert decision["kind"] == "from_zero_idempotent_sync"
+    # D208: an unattended retry of an incremental upsert continues from the
+    # watermark and says so; an operator retry is the full second pass.
+    unattended = decide_retry_from_start(
+        status="failed", sync_mode="incremental_upsert", rows_committed=10_000
+    )
+    assert unattended["allowed"] is True
+    assert unattended["kind"] == "from_cursor_contract"
+    assert unattended["read_scope"] == "from_watermark"
+    operator = decide_retry_from_start(
+        status="failed", sync_mode="incremental_upsert", rows_committed=10_000,
+        operator_requested=True,
+    )
+    assert operator["kind"] == "from_zero_idempotent_sync"
+    assert operator["read_scope"] == "full_source"
 
 
 def test_cancelled_run_is_not_restarted_even_when_convergent():
@@ -149,10 +163,13 @@ def test_missed_cron_windows_are_counted():
 
 
 def test_on_time_beat_counts_no_missed_window():
-    due = datetime.now(timezone.utc) - timedelta(seconds=5)
+    # A fixed clock: against the wall clock this read 1 whenever the 5 seconds
+    # before "now" crossed a :00 / :30 slot of the */30 cron (CI, run 41058582812).
+    now = datetime(2026, 10, 30, 15, 10, 5, tzinfo=timezone.utc)
+    due = now - timedelta(seconds=5)
     assert (
         count_missed_windows(
-            cron="*/30 * * * *", interval="hourly", tz="UTC", next_run_at=due.isoformat()
+            cron="*/30 * * * *", interval="hourly", tz="UTC", next_run_at=due.isoformat(), now=now
         )
         == 0
     )

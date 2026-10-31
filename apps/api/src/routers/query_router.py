@@ -746,6 +746,7 @@ async def query_export(
             connector,
             body,
             surface="query_export",
+            json_engine_text=True,
         )
     except HTTPException:
         raise
@@ -1104,6 +1105,7 @@ def _run_query(
     body: QueryExecuteRequest,
     *,
     surface: str = "query",
+    json_engine_text: bool = False,
 ):
     ctype = (connector.type or "").lower().strip()
     with connector_operation(
@@ -1120,7 +1122,7 @@ def _run_query(
                 result = _run_snowflake_query(connector, body)
             else:
                 # MySQL-wire family must use pymysql dialect (handled in generic_sql._DRIVERNAME_MAP).
-                result = _run_sql_query(connector, body)
+                result = _run_sql_query(connector, body, json_engine_text=json_engine_text)
         except HTTPException as exc:
             if exc.status_code < 500:
                 op.failed(category="invalid_request", error=exc)
@@ -1435,7 +1437,7 @@ def _is_oracle_connector(connector_type: object) -> bool:
     return _is_oracle_wire("", str(connector_type or ""))
 
 
-def _run_sql_query(connector, body):
+def _run_sql_query(connector, body, *, json_engine_text: bool = False):
     raw_query = body.query.strip()
     if not raw_query:
         raise HTTPException(status_code=400, detail="SQL query is required")
@@ -1488,6 +1490,7 @@ def _run_sql_query(connector, body):
     # a LIMIT at exactly `limit` can never distinguish "capped" from "short".
     clean_query = append_result_limit(connector.type, raw_query, body.limit + 1)
 
+    restore_json = lambda: None  # noqa: E731
     try:
         from sqlalchemy import text
 
@@ -1495,6 +1498,13 @@ def _run_sql_query(connector, body):
             _apply_read_only_session(conn, connector.type)
             _apply_statement_timeout(conn, connector.type)
             from services.sql_literals import escape_sqlalchemy_literal_colons
+
+            if json_engine_text:
+                # Samples and exports carry a JSON cell as its document text
+                # (D207: a jsonb "hello" arrived as bare hello, null as NULL).
+                from services.json_polarity import keep_pg_json_engine_text
+
+                restore_json = keep_pg_json_engine_text(conn)
 
             tz_positions: frozenset[int] = frozenset()
             if _is_oracle_connector(connector.type):
@@ -1541,6 +1551,7 @@ def _run_sql_query(connector, body):
                 result.close()
             except Exception:
                 pass
+            restore_json()
             # Name custom enums after the result is closed. A pg_type
             # lookup on the open cursor cancels the extract.
             from services.decimal_observe import annotate_unresolved_pg_types
@@ -1569,6 +1580,8 @@ def _run_sql_query(connector, body):
             public_message="Query failed",
             status_code=400,
         ) from exc
+    finally:
+        restore_json()  # idempotent; the pooled connection decodes again
 
 
 def _run_snowflake_query(connector, body):

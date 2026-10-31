@@ -1898,12 +1898,13 @@ def _cast(
         return _fit_decimal(_call("to_number", value), precision, scale)
     if to_type == "boolean":
         return _call("to_boolean", value)
-    if to_type in ("date", "timestamp"):
+    if to_type == "date":
         parsed = _call("to_date", value, fmt)
+        return None if parsed is None else parsed.date()
+    if to_type == "timestamp":
+        parsed = _to_timestamp(value, fmt)
         if parsed is None:
             return None
-        if to_type == "date":
-            return parsed.date()
         return _with_timezone(parsed, timezone) if timezone else parsed
     raise EvalError(f"'{to_type}' is not a logical type")
 
@@ -1942,6 +1943,40 @@ def _fit_decimal(number: Any, precision: Any, scale: Any) -> Any:
     return number
 
 
+def _to_timestamp(value: Any, fmt: Any) -> Any:
+    """A timestamp keeps its clock and any offset it states.
+
+    ``to_date`` is the calendar-date parser: routing a timestamp cast through it
+    landed every row at midnight, so ``cast -> assume_timezone`` shifted a
+    midnight that never existed. Unformatted text is read by the write path's
+    own ``datetime`` parser, the one a Map ``datetime`` transform uses.
+    """
+    from datetime import date as _date
+    from datetime import datetime as _datetime
+
+    if is_blank(value):
+        return None
+    if isinstance(value, _datetime):
+        return value
+    if isinstance(value, _date):
+        return _datetime(value.year, value.month, value.day)  # noqa: DTZ001
+    if fmt is not None and _as_text(fmt):
+        return _call("to_date", value, fmt)
+    text = (_as_text(value) or "").strip()
+    from services.transform_engine import apply_transform
+
+    iso, err = apply_transform(text, "datetime")
+    if err or iso is None:
+        raise EvalError(
+            f"'{text}' is not a timestamp; pass an explicit format "
+            "(day/month order is never guessed)"
+        )
+    try:
+        return _datetime.fromisoformat(str(iso).replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EvalError(f"'{text}' is not a timestamp") from exc
+
+
 def _with_timezone(moment: Any, zone_name: Any) -> Any:
     """Read a naive clock in the named zone and store the UTC instant.
 
@@ -1957,10 +1992,13 @@ def _with_timezone(moment: Any, zone_name: Any) -> Any:
         zone = ZoneInfo(name)
     except ZoneInfoNotFoundError as exc:
         raise EvalError(f"'{name}' is not a known time zone") from exc
-    if moment.tzinfo is None:
-        local = moment.replace(tzinfo=zone)
-    else:
-        local = moment.astimezone(zone)
+    # One rule with Map's ``assume_timezone:`` — a wall clock in a DST gap is
+    # refused and an ambiguous fall-back hour takes PostgreSQL's fold.
+    from services.transform_engine import attach_timezone
+
+    local, err = attach_timezone(moment, zone, zone_name=name)
+    if err:
+        raise EvalError(err)
     return local.astimezone(ZoneInfo("UTC"))
 
 

@@ -100,6 +100,9 @@ def run_plan_mapping(
         source_samples=source_samples,
         validation_mode=validation_mode,
         destination_db_type=(plan.destination.get("format") or plan.destination.get("type") or "").lower(),
+        # The source engine decides whether a text carrier promotion invents a
+        # repertoire (code-page VARCHAR) or keeps one (UTF-8 file text) - D204.
+        source_db_type=str(src.get("format") or src.get("type") or "").lower(),
         schema_policy=policies.get("schema_policy", "manual_review"),
         sync_mode=str(policies.get("sync_mode") or ""),
         destination_table_exists=table_exists,

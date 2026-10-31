@@ -363,6 +363,53 @@ Saving a connector sets `require` when the payload has `ssl: true`, and clears i
 
 **Existing connectors.** Documents saved before `ssl_mode` existed hold only the boolean `ssl`, and the old store defaulted it to true when a caller omitted it, so a stored `ssl=true` cannot be told apart from an injected default. These documents are read as unset: their behaviour is unchanged (negotiate, plaintext allowed). To make an existing connector strictly TLS, open it in Studio and save it with SSL/TLS ticked (or `PUT` it with `ssl: true`). Check production connectors that must be encrypted and re-save them once.
 
+## Text key collation on tables DataFlow creates (MySQL / MariaDB, D205)
+
+MySQL, MariaDB and SQL Server compare `VARCHAR` keys under PAD SPACE
+(`''` = `' '`, `'a'` = `'a '`), and a `_ci` / `CI_AS` collation also equates
+`'a'` and `'A'`. Two such source keys are one key to the destination's unique
+index.
+
+| Rule | Applies | Flag |
+|------|---------|------|
+| Validate walks the source key population under the destination key column's comparison rules and refuses a keyed load (upsert / merge / overwrite with a declared key) whose distinct source keys the destination would merge. The message names the colliding keys and the remedy: a binary NO PAD collation (MySQL `utf8mb4_0900_bin`, MariaDB `utf8mb4_nopad_bin`), a `_BIN2` collation on SQL Server for case, or a key transform. SQL Server has no NO PAD collation, so keys that differ only by trailing spaces are always refused there. | Always | none |
+| Gate-8's keyed read-back selects the written keys exactly (binary / `BIN2`), so run 2 updating `'A'` beside `'a'` is not mistaken for a mismatch. | Always | none |
+| A case-sensitive source text column on a table DataFlow **creates** on MySQL / MariaDB gets the NO PAD binary collation `utf8mb4_0900_bin` (MariaDB 11.4+ accepts it; older MariaDB: `utf8mb4_nopad_bin`) instead of `utf8mb4_bin` (PAD SPACE), so `'a'` and `'a '` load as two keys. Tables created earlier keep `utf8mb4_bin`; run 2 into them is unchanged. | New tables only | `DATAFLOW_KEY_COLLATION_NO_PAD=1` (default off) |
+
+With the flag off, each create that would have used the NO PAD collation is
+recorded once an hour as an audit event `create_ddl.would_use_no_pad_collation`
+(`dialect`, `today`, `with_flag`).
+
+## pgvector destination layout (D209)
+
+A pgvector destination is PostgreSQL with the `vector` extension. It holds one
+of two shapes, and the plan (`destination_contract`), the preflight warning
+`pgvector_destination_layout` and the job all use the same one:
+
+| Layout | Physical table | Gate-8 |
+|--------|----------------|--------|
+| `table` | The typed table the Map shows: one column per mapped field with its type, SQL NULL as NULL. Written and verified as PostgreSQL. | Full PostgreSQL read-back |
+| `document` | `id TEXT` (the source key), `content TEXT` (embedded text), `embedding vector(n)`, `metadata JSONB` (every mapped value, SQL NULL as JSON null), `source_id`, `chunk_index`, `created_at`. The embedded text follows one rule for every row: `text_template`, else `content_column` (NULL / '' gives empty content and a NULL vector), else the whole row as JSON. | Every source value re-read and found in `metadata` |
+
+How the layout is chosen, first match wins:
+
+1. `vector_layout` (`table` / `document`) on the run (`plan_transfer` /
+   `start_transfer` argument) or in the saved connector's `extra`.
+2. An existing table keeps its shape: a table with `id, content, embedding,
+   metadata, source_id, chunk_index` stays a document table; any other existing
+   table is typed. Tables DataFlow created before this change keep working on
+   run 2.
+3. A new table: `document` (production behaviour), or `table` when
+   `DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT=1` (default off).
+
+With the flag off, each new table that would have been typed is recorded once
+an hour as the audit event `pgvector.would_create_typed_table` (`table`,
+`today`, `with_flag`).
+
+Document tables created before this change: run 2 re-embeds documents whose
+text changes under the single rule (the old per-row pick of the longest text
+column is gone) and adds NULL fields to `metadata` as JSON null.
+
 ## Health checks
 
 | Endpoint | Use |
@@ -608,3 +655,75 @@ as `(new workspace for <email>)`). Verified on throwaway stores by
 `tests/test_backfill_legacy_workspaces_cli.py` (file-tree hash unchanged after a
 dry run and after a second apply). Take a backup of the Mongo database and the
 data directory before the first `--apply`.
+
+## Brand: names the product leaves in customer systems (`DATAWRAP_BRAND_OBJECT_NAMES`)
+
+The product is Datawrap. Text people read (API and MCP messages, the web app,
+download file names, e-mail sender defaults, the certificate PDF, the MCP
+server name `datawrap`) says Datawrap unconditionally; the product name comes
+from `services/brand.py` (`PRODUCT_NAME`, `PRODUCT_SLUG`) and, in the web app,
+`apps/web/src/lib/brand.ts`.
+
+Objects the product writes into a customer's systems are different: existing
+customers already hold them under the old `dataflow` / `_df_` names and the
+next run has to keep working against them. `services/brand.ARTIFACTS` lists
+every such name. The rules:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `DATAWRAP_BRAND_OBJECT_NAMES` (`DATAFLOW_BRAND_OBJECT_NAMES` also read) | `0` | `1`: a **new** artifact of a switchable kind gets the new name. |
+
+* An artifact that already exists is used under the name it has, old name
+  first. Nothing is ever renamed. Both names are recognised as the product's
+  own (for example a table commented `dataflow:managed` **or**
+  `datawrap:managed` may get the upsert index without the operator-table DDL
+  gate; any other comment still needs approval).
+* Turning the flag off again keeps using artifacts created under the new name
+  (the CDC watermark table is resolved per destination, so state never forks).
+* Every artifact created under a new name writes an audit event
+  `brand.object_name.created` (`details.kind`, `name`, `legacy_name`).
+
+Switched by the flag in this build:
+
+| Kind | Old name | New name |
+|---|---|---|
+| PostgreSQL `application_name` | `dataflow` | `datawrap` |
+| Table ownership comment (PostgreSQL, MySQL; row writers and the MySQL COPY routes) | `dataflow:managed` | `datawrap:managed` |
+| Exactly-once CDC watermark table (SQLAlchemy destinations: PostgreSQL, MySQL, SQL Server, Snowflake, …) | `_df_cdc_eos_watermarks` (Oracle `df_cdc_eos_watermarks`) | `_dw_cdc_eos_watermarks` (Oracle `dw_cdc_eos_watermarks`) |
+
+Recognised and listed, but still created under the old name even with the flag
+on (their run-to-run identity is not yet resolved per destination; switching
+them is a separate change): the CDC `_df_lsn` column and other `_df_*`
+bookkeeping columns, `_dataflow_write_ledger`, `<table>_df_quarantine`,
+`dataflow_file_manifest`, `_df_vector_collections`, the MySQL row-backup
+comment `dataflow:overwrite-row-backup`,
+`dataflow_signal` (source database), `<table>__df_bak*` backups, staging
+prefixes (`_df_stg_`, `_dataflow_stg_`, `_df_mirrorkeys_`, `_df_merge_stage_`,
+`_df_upsert_stage_`, `_df_copy_ups_`, `_DF_UPSERT_`, `df_mrg_`), `df_enum_*`
+types, `df_*` replication slots / publications, Kafka group ids
+`dataflow-kafka-*`, object-store staging keys, the Redshift stage prefix,
+Iceberg `dataflow.*` snapshot properties, default vector collections, the
+SQLite-native watermark table, temporary `.dataflow-*` files on SFTP/local
+destinations, SaaS idempotency keys `dataflow-*`, and the defaults used when a
+connector names none: BigQuery dataset `dataflow`, Snowflake schema
+`DATAFLOW`, Kafka topic `dataflow.events`, object-store key
+`exports/dataflow_export.json`, Redis prefix `dataflow`.
+
+### Before turning the flag on
+
+1. List what a destination already holds (read-only, renames nothing):
+
+   ```bash
+   cd apps/api
+   python scripts/brand_artifacts_dry_run.py --type postgresql \
+     --config '{"host":"…","port":5432,"database":"…","username":"…","password":"…","schema":"public"}'
+   ```
+
+   Each entry has `kind`, `object`, `named` (`legacy`/`new`), `new_name` and
+   `action: keep`.
+2. Set `DATAWRAP_BRAND_OBJECT_NAMES=1` on every API, worker and scheduler
+   process (a mixed fleet would name new artifacts inconsistently; existing
+   ones are unaffected either way).
+3. Do not rename old artifacts by hand while pipelines run against them. A
+   renamed watermark table makes the next CDC run start a new one and
+   re-snapshot; a renamed `_df_lsn` column breaks the monotonic-apply guard.

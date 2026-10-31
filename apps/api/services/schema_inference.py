@@ -1040,9 +1040,22 @@ def infer_column(
         inferred = str(obs.get("carrier") or ("DECIMAL" if "DECIMAL" in types else "INTEGER"))
         role = "numeric"
         if obs.get("kind") == "ieee_float":
-            notes.append(
-                "IEEE/Excel float residue — invent FLOAT (not fake money DECIMAL)"
-            )
+            from services.decimal_observe import exact_residue_carrier
+
+            exact = exact_residue_carrier(obs)
+            if exact:
+                # The cells are text: ``0.30000000000000004`` is that decimal.
+                # An exact DECIMAL sized from the written scale holds it as is;
+                # FLOAT would re-round the ordinary cells beside it (D161).
+                inferred = exact
+                notes.append(
+                    f"IEEE/Excel-looking residue kept exact as {exact} "
+                    "(text cells are the value)"
+                )
+            else:
+                notes.append(
+                    "IEEE/Excel float residue — invent FLOAT (not fake money DECIMAL)"
+                )
         elif obs.get("kind") == "fixed_decimal":
             notes.append(
                 f"observed DECIMAL({obs.get('precision')},{obs.get('scale')}) "

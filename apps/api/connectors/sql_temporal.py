@@ -42,6 +42,102 @@ def _strip_era(text: str) -> str:
     return _BC_SUFFIX_RE.sub("", text).rstrip()
 
 
+# A year-first date, optionally with a clock and a zone: the shape every bulk
+# loader and every SQL engine parses on its own. Shape is not the calendar.
+_ISO_CIVIL_RE = re.compile(
+    r"^(?P<y>\d{4})-(?P<m>\d{1,2})-(?P<d>\d{1,2})"
+    r"(?:[T ](?P<clock>\d{1,2}:\d{1,2}(?::\d{1,2}(?:[.,]\d+)?)?))?"
+    r"\s*(?:[Zz]|UTC|[+-]\d{2}(?::?\d{2})?)?$"
+)
+_CLOCK_RE = re.compile(r"^(?P<h>\d{1,2}):(?P<mi>\d{1,2})(?::(?P<s>\d{1,2})(?:[.,]\d+)?)?$")
+
+
+def _clock_reason(text: str, clock: str) -> str:
+    m = _CLOCK_RE.match(clock)
+    if m is None:
+        return ""
+    hour, minute = int(m.group("h")), int(m.group("mi"))
+    second = int(m.group("s") or 0)
+    # 24:00:00 is ISO-8601 end of day, and 23:59:60 a leap second; engines that
+    # take them do, engines that do not refuse them by name. Anything past that
+    # names no clock at all.
+    if minute > 59 or second > 60 or hour > 24 or (hour == 24 and (minute or second)):
+        return (
+            f"Invalid time: {text!r} is not a real time of day ({clock}); it is never "
+            "written as NULL or a shifted time"
+        )
+    return ""
+
+
+def invalid_calendar_reason(value: Any) -> str:
+    """Why a date-shaped string names no real calendar day / clock, else ``""``.
+
+    ``2024-02-30``, ``2024-13-01``, ``0000-00-00`` and ``2024-01-01 25:61``
+    look like ISO dates, so every shape check (the bulk-load census, Validate's
+    peek) used to wave them through. No engine stores them as written: the
+    PostgreSQL COPY / MySQL LOAD DATA abort the whole load on them, SQL Server
+    refuses the batch, and a lenient MySQL session stores a zero date. One rule
+    here lets the bind, the writer's quarantine pass and the COPY census refuse
+    exactly that cell. BC / five-digit years and PostgreSQL's ``infinity`` keep
+    their own rules (``coerce_sql_temporal``); free text is not this rule's.
+    """
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text or beyond_python_calendar(text):
+        return ""
+    if _CLOCK_RE.match(text) is not None:
+        return _clock_reason(text, text)
+    m = _ISO_CIVIL_RE.match(text)
+    if m is None:
+        return ""
+    import calendar
+
+    year, month, day = int(m.group("y")), int(m.group("m")), int(m.group("d"))
+    if year == 0:
+        return (
+            f"Invalid date: {text!r} is not a real calendar date (there is no year 0000); "
+            "it is never written as NULL or a zero date"
+        )
+    if not 1 <= month <= 12:
+        return (
+            f"Invalid date: {text!r} is not a real calendar date (month {month:02d}); "
+            "it is never written as NULL or a shifted date"
+        )
+    last = calendar.monthrange(year, month)[1]
+    if not 1 <= day <= last:
+        return (
+            f"Invalid date: {text!r} is not a real calendar date ({year:04d}-{month:02d} has "
+            f"{last} days); it is never written as NULL or a shifted date"
+        )
+    clock = m.group("clock")
+    return _clock_reason(text, clock) if clock else ""
+
+
+def temporal_text_unfit_reason(value: Any, ddl_type: str, *, engine: str = "") -> str:
+    """The bind's own verdict on one temporal text cell, without binding it.
+
+    Calendar validity, then the destination carrier's civil range (MySQL DATE
+    1000..9999, SQL Server DATETIME >= 1753, ...). The bulk-load census asks
+    this so a COPY / LOAD DATA never sees a cell the row path would hold out.
+    """
+    reason = invalid_calendar_reason(value)
+    if reason or not isinstance(value, str):
+        return reason
+    base = sql_base_type(ddl_type)
+    bounds = dest_temporal_bounds(engine, base)
+    if bounds is None:
+        return ""
+    lo, hi = bounds
+    year = _temporal_year_beyond(value, lo=lo.year, hi=hi.year)
+    if year is not None:
+        return f"year {year} is outside {engine} {base} range {lo.date()} .. {hi.date()}"
+    parsed = parse_sql_datetime(value, wall_clock=True)
+    if parsed is not None and not lo <= parsed.replace(tzinfo=None) <= hi:
+        return f"{value.strip()!r} is outside {engine} {base} range {lo.date()} .. {hi.date()}"
+    return ""
+
+
 def round_to_smalldatetime(value: datetime) -> datetime:
     """Round to SQL Server ``SMALLDATETIME`` minute accuracy (Microsoft docs).
 
@@ -379,6 +475,17 @@ def coerce_sql_temporal(
             f"empty string cannot coerce to {base} — "
             "refuse silent NULL invent (quarantine or remap upstream)"
         )
+    if base in _TEMPORAL_BASES:
+        # A date-shaped string naming no real day was handed to the engine
+        # verbatim (the parses below return it when they cannot read it): the
+        # engine then failed the whole batch, or zeroed it on lenient MySQL.
+        calendar_reason = invalid_calendar_reason(value)
+        if not calendar_reason and isinstance(value, str):
+            from services.transform_engine import mixed_date_format_reason
+
+            calendar_reason = mixed_date_format_reason(value)
+        if calendar_reason:
+            raise ValueError(calendar_reason)
     if base in _TEMPORAL_BASES and base not in {
         "TIME",
         "TIME WITH TIME ZONE",

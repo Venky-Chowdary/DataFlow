@@ -1387,10 +1387,23 @@ def reconcile(
         # landed cells match; failing here used to roll the good rows back and
         # leave the table empty (R5-003). A digest already scoped to the
         # written keys is a real cell disagreement and still fails.
+        # Occupied tables compare by delta. A written-key or CDC value digest stays strict.
+        occupied_table = (
+            allow_extra_rows
+            and target_rows_before is not None
+            and int(target_rows_before) > 0
+            and checksum_scope not in {
+                WRITTEN_BATCH_KEYS, CDC_SOURCE_IMAGE_VALUES, CDC_SOURCE_IMAGE_COUNT,
+            }
+        )
+        # An occupied table's digest covers rows earlier runs wrote: the
+        # quarantine basis would leave that digest "comparable" and skip the
+        # delta, so the ladder graded every old row against the batch (D205).
         if (
             dropped_rows > 0
             and sample_ok
             and checksum_scope != WRITTEN_BATCH_KEYS
+            and not occupied_table
         ):
             return ReconciliationReport(
                 passed=True,
@@ -1413,15 +1426,6 @@ def reconcile(
                 population_proof=False,
                 assurance_level="quarantine_excluded",
             )
-        # Occupied tables compare by delta. A written-key or CDC value digest stays strict.
-        occupied_table = (
-            allow_extra_rows
-            and target_rows_before is not None
-            and int(target_rows_before) > 0
-            and checksum_scope not in {
-                WRITTEN_BATCH_KEYS, CDC_SOURCE_IMAGE_VALUES, CDC_SOURCE_IMAGE_COUNT,
-            }
-        )
         if occupied_table or (has_extra and checksum_scope != WRITTEN_BATCH_KEYS):
             if occupied_table:
                 delta = int(keyed_expected_delta) if keyed_expected_delta is not None else None
@@ -1794,7 +1798,20 @@ def keyed_readback_where(
     dial = (dialect or "").strip().lower()
     pk_q = quote_sql_identifier(pk, _KEYED_QUOTE_CHAR.get(dial, '"'))
     cast = _KEYED_TEXT_CAST.get(dial, "VARCHAR(4000)")
-    return f"WHERE CAST({pk_q} AS {cast}) IN ({','.join(placeholders[: len(ids)])})"
+    expr = _KEYED_EXACT_COMPARE.get(dial, "{0}").format(f"CAST({pk_q} AS {cast})")
+    return f"WHERE {expr} IN ({','.join(placeholders[: len(ids)])})"
+
+
+# The read-back must select the written keys exactly. A bare CAST takes the
+# session's default collation (MySQL 8 utf8mb4_0900_ai_ci, SQL Server CI_AS),
+# so batch key 'A' also fetched the untouched row 'a' and a correct upsert into
+# a binary-collated key failed Gate-8 (D205 family: distinct keys merged).
+_KEYED_EXACT_COMPARE: Final[dict[str, str]] = {
+    "mysql": "CAST({0} AS BINARY)",
+    "mariadb": "CAST({0} AS BINARY)",
+    "sqlserver": "{0} COLLATE Latin1_General_100_BIN2",
+    "mssql": "{0} COLLATE Latin1_General_100_BIN2",
+}
 
 
 def keyed_readback_sa_clause(

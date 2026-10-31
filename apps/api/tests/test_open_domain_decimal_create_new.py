@@ -130,3 +130,24 @@ def test_ieee_residue_keeps_float_carrier():
         source_db="csv",
     )
     assert "DOUBLE" in stamp.upper() or "FLOAT" in stamp.upper()
+
+
+def test_ieee_residue_text_an_exact_decimal_holds_keeps_every_digit():
+    """D161: a CSV's 0.30000000000000004 is that decimal; FLOAT would re-round 0.1."""
+    from services.decimal_observe import ieee_float_create_new_risk, observe_numeric_samples
+    from services.schema_inference import infer_column
+
+    samples = ["0.30000000000000004", "0.1", "1.0000000000000002", "1.10"]
+    assert infer_column(samples, field_name="ratio")["logical_type"] == "DECIMAL(18,17)"
+    for dest, want in (("mysql", "DECIMAL(38,17)"), ("sqlserver", "DECIMAL(38,17)"),
+                       ("postgresql", "NUMERIC")):
+        stamp = create_new_mapping_target_type(
+            "DECIMAL(18,17)", dest, samples=samples, source_db="sftp")
+        assert stamp.upper() == want, (dest, stamp)
+        chip = ieee_float_create_new_risk(
+            observe_numeric_samples(samples), target_type=stamp, dest_db=dest)
+        assert chip and chip["kind"] == "ieee_float_residue_kept_exact", chip
+    # A carrier too narrow for the written scale keeps the holding chip.
+    chip = ieee_float_create_new_risk(
+        observe_numeric_samples(samples), target_type="DECIMAL(18,2)", dest_db="mysql")
+    assert chip and chip["kind"] == "ieee_float_artifact"

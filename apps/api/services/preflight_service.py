@@ -75,6 +75,7 @@ from services.transform_engine import (
 )
 from services.validation_plan import build_validation_plan
 from services.value_serializer import wire_cell_text
+from services.brand import PRODUCT_NAME
 
 
 def _hydrate_risk_contract(
@@ -1007,6 +1008,7 @@ def run_file_preflight(
         stream_contracts=stream_contracts,
         source_format=source_format,
         source_config=source_config,
+        source_connector_id=source_connector_id,
         source_table=source_table,
         destination_db_type=destination_db_type,
         destination_config=destination_config,
@@ -1367,7 +1369,15 @@ def run_file_preflight(
                 )
 
                 _key_xforms = key_transforms(mappings, source_pk_cols)
-                if _key_xforms:
+                # D205: the destination's comparison (PAD SPACE, _ci) can merge
+                # distinct source keys too; the same walk names them.
+                from services.dest_key_equality import key_equalizers
+
+                _key_eq = key_equalizers(
+                    mappings, source_pk_cols, destination_column_types, dest_kind,
+                    source_db=source_format,
+                )
+                if _key_xforms or _key_eq:
                     _key_rows = _ps._iter_table_population_for_preflight(
                         source_columns=list(source_pk_cols),
                         source_kind=source_kind,
@@ -1385,6 +1395,7 @@ def run_file_preflight(
                         _key_rows if _key_rows is not None else (sample_rows or []),
                         key_sources=list(source_pk_cols),
                         transforms=_key_xforms,
+                        equalizers=_key_eq,
                     )
             else:
                 source_duplicate_probe_status = "skipped_no_pk"
@@ -1653,7 +1664,7 @@ def run_file_preflight(
                         "message": (
                             f"Upsert into existing '{destination_table}' needs "
                             f"a unique constraint on ({', '.join(_uk_cols)}). "
-                            f"DataFlow would run: {_planned_ddl} — disclose "
+                            f"{PRODUCT_NAME} would run: {_planned_ddl} — disclose "
                             "and approve destination DDL before executing."
                         ),
                         "duration_ms": 0,

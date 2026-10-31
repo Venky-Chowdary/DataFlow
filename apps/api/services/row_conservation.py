@@ -1438,18 +1438,25 @@ def _account_mirror(
 def extract_vector_payload(dest: Mapping[str, Any] | None) -> dict[str, Any]:
     """Nested ``vector`` census or top-level identity/vector row fields."""
     data = dict(dest or {})
+    proof = data.get("document_value_proof")
+    proven = (
+        {"value_proven_rows": int(proof.get("source_rows") or 0)}
+        if isinstance(proof, dict) and proof.get("passed") is True
+        else {}
+    )
     nested = data.get("vector")
     if isinstance(nested, dict) and (
         nested.get("identity_rows") is not None
         or nested.get("vector_rows") is not None
     ):
-        return dict(nested)
+        return {**dict(nested), **proven}
     identity = data.get(IDENTITY_COUNT_KEY)
     physical = data.get(VECTOR_ROWS_KEY)
     if identity is not None or physical is not None:
         return {
             "identity_rows": identity,
             "vector_rows": physical,
+            **proven,
         }
     return {}
 
@@ -1546,6 +1553,26 @@ def _account_vector(
                 f"COUNT(DISTINCT source_id)={identity} cannot prove this "
                 "run's documents landed versus pre-existing identities. "
                 "Physical vector COUNT(*) is diagnostic."
+            ),
+            writer_ack_delta=(int(identity) - ack) if ack is not None else None,
+        )
+    proven = _as_optional_int(payload.get("value_proven_rows"))
+    if dest_count_before > 0 and proven is not None and proven > 0:
+        # pgvector document layout (D209): every row read was found in the
+        # destination by its values (metadata read-back), so the run's rows
+        # are accounted for even though the index already held identities.
+        unaccounted = read - (proven + quarantined + skipped + removed)
+        return ConservationLedger(
+            **base,
+            rows_written=proven,
+            unaccounted=unaccounted,
+            balanced=unaccounted == 0,
+            rows_written_source=DEST_IDENTITY_READBACK,
+            note=(
+                f"{proven} of {read} row(s) read were found in the destination "
+                "value for value (document metadata read-back); "
+                f"{dest_count_before} identit(ies) were there before this run."
+                + removal_note
             ),
             writer_ack_delta=(int(identity) - ack) if ack is not None else None,
         )
@@ -2449,6 +2476,8 @@ def account_job(job: Mapping[str, Any]) -> ConservationLedger:
     vector = extract_vector_payload(dest)
     if not vector:
         vector = extract_vector_payload(recon)
+    elif "value_proven_rows" in (recon_vector := extract_vector_payload(recon)):
+        vector = {**vector, "value_proven_rows": recon_vector["value_proven_rows"]}
     keyset = dict(extract_keyset_payload(dest))
     for field, value in extract_keyset_payload(recon).items():
         if value is not None or field not in keyset:

@@ -26,7 +26,7 @@ def test_mcp_manifest_is_reachable(client: TestClient):
     response = client.get("/api/v1/mcp/manifest")
     assert response.status_code == 200
     data = response.json()
-    assert data["name"] == "dataflow"
+    assert data["name"] == "datawrap"  # presentation: the product is Datawrap
     assert data["protocol"] == "streamable-http"
     assert data["endpoints"]["manifest"].startswith("http://testserver/api/v1/mcp")
     assert data["tools"]

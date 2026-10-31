@@ -1272,7 +1272,7 @@ def _open_domain_decimal_stamp(
     """Create-new stamp for a decimal inferred from an untyped source's sample.
 
     ``""`` when the rule does not apply (declared source domain, not a decimal,
-    IEEE residue that must stay FLOAT, or unknown scale on a bounded engine).
+    IEEE residue no exact DECIMAL can hold, or unknown scale on a bounded engine).
     """
     from services.decimal_observe import (
         observe_numeric_samples,
@@ -1289,7 +1289,13 @@ def _open_domain_decimal_stamp(
         obs = observe_numeric_samples(samples)
         kind = obs.get("kind")
         if kind == "ieee_float":
-            return ""
+            from services.decimal_observe import exact_residue_carrier
+
+            # Residue-shaped text an exact DECIMAL holds keeps its written
+            # scale; one no bounded engine can declare stays FLOAT (D161).
+            if not exact_residue_carrier(obs):
+                return ""
+            scale = int(obs.get("exact_scale") or 0)
         if kind in {"fixed_decimal", "integer"}:
             scale = int(obs.get("scale") or 0)
     if scale is None:

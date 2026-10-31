@@ -18,6 +18,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
+from services.atomic_file import write_json_atomic
 from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
@@ -46,6 +47,9 @@ SYNC_MODES = {
     "incremental",
     "incremental_append",
     "incremental_deduped",
+    # D208: full-source upsert on every beat (no watermark). Before this a
+    # schedule could only say upsert as incremental_deduped.
+    "upsert",
     "cdc",
     "scd2",
     "mirror",
@@ -104,10 +108,15 @@ _file_import_attempted = False
 # Re-entrant: Run now holds this lock from the claim through the job bind, and
 # the bind writes the same schedule. A second Run now waits, then sees the job
 # id, instead of observing a claim that says "no job bound yet" (R14-001).
+#
+# One lock for every read-modify-write of the store. The claim writers and the
+# name writers (create/update) used two locks, so an edit and a run finishing at
+# the same moment each saved its own snapshot of the whole file store and the
+# later save dropped the other's change - a schedule created while a run was
+# recorded was lost. Re-entrant because create can replay onto update and the
+# claim section binds the job.
 _CLAIM_LOCK = threading.RLock()
-# Check-then-insert of a pipeline name. Re-entrant because create can replay
-# onto update while the name is already reserved.
-_NAME_LOCK = threading.RLock()
+_NAME_LOCK = _CLAIM_LOCK
 _NAME_INDEX_READY = False
 
 
@@ -890,11 +899,10 @@ def _save_all(schedules: list[PipelineSchedule], *, removed_ids: Sequence[str] =
     if svc:
         _save_mongo(svc, schedules, removed_ids=removed_ids)
         return
-    STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STORE_PATH.write_text(
-        json.dumps({"schedules": [s.to_dict() for s in schedules]}, indent=2, default=json_default),
-        encoding="utf-8",
-    )
+    # Atomic replace: ``write_text`` truncated the file first, and a reader in
+    # that window parsed nothing and saw no schedules at all (get_schedule ->
+    # None; a run's result recorded against "no such schedule" was dropped).
+    write_json_atomic(STORE_PATH, {"schedules": [s.to_dict() for s in schedules]})
 
 
 def schedule_overdue_seconds(
@@ -1756,11 +1764,12 @@ def _release_empty_mapping_if_mapped(sched: PipelineSchedule) -> PipelineSchedul
 
 
 def delete_schedule(schedule_id: str) -> bool:
-    schedules = _load_all()
-    filtered = [s for s in schedules if s.id != schedule_id]
-    if len(filtered) == len(schedules):
-        return False
-    _save_all(filtered, removed_ids=(schedule_id,))
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        filtered = [s for s in schedules if s.id != schedule_id]
+        if len(filtered) == len(schedules):
+            return False
+        _save_all(filtered, removed_ids=(schedule_id,))
     return True
 
 
@@ -2172,6 +2181,11 @@ def mark_schedule_running(
 
 def clear_schedule_running(schedule_id: str) -> PipelineSchedule | None:
     """Clear the running flag after the transfer finishes or fails."""
+    with _CLAIM_LOCK:
+        return _clear_schedule_running_locked(schedule_id)
+
+
+def _clear_schedule_running_locked(schedule_id: str) -> PipelineSchedule | None:
     schedules = _load_all()
     for i, s in enumerate(schedules):
         if s.id != schedule_id:
@@ -2231,6 +2245,22 @@ def mark_schedule_run(
     appended to the capped ``run_history``. ``cursor_value`` advances the
     incremental watermark so the next run only reads new rows.
     """
+    with _CLAIM_LOCK:
+        return _mark_schedule_run_locked(
+            schedule_id, job_id, status=status, run_entry=run_entry, cursor_value=cursor_value
+        )
+
+
+def _mark_schedule_run_locked(
+    schedule_id: str,
+    job_id: str,
+    *,
+    status: str | None,
+    run_entry: dict[str, Any] | None,
+    cursor_value: str | None,
+) -> PipelineSchedule | None:
+    from services.schedule_run_lifecycle import merge_run_entry, trim_history
+
     schedules = _load_all()
     now = _now()
     for i, s in enumerate(schedules):
@@ -2256,8 +2286,8 @@ def mark_schedule_run(
             if missed:
                 entry["missed_windows"] = missed
                 entry["scheduled_for"] = s.next_run_at
-            history.append(entry)
-            history = history[-RUN_HISTORY_LIMIT:]
+            # The run's own record moves to its terminal state (one record per run).
+            history = trim_history(merge_run_entry(history, entry), RUN_HISTORY_LIMIT)
         payload = {
             **s.to_dict(),
             "last_run_at": now,
@@ -2326,6 +2356,21 @@ def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
     windows are added to the existing miss count.
     """
     current = now or datetime.now(timezone.utc)
+    with _CLAIM_LOCK:
+        changed, missed_schedules = _unstick_pinned_locked(current)
+    for schedule_id, missed in missed_schedules:
+        emit_event(
+            logger,
+            "schedule.run.skip",
+            outcome="skipped",
+            reason_code="misfire",
+            schedule_id=schedule_id,
+            missed_count=missed,
+        )
+    return changed
+
+
+def _unstick_pinned_locked(current: datetime) -> tuple[int, list[tuple[str, int]]]:
     schedules = _load_all()
     changed = 0
     missed_schedules: list[tuple[str, int]] = []
@@ -2353,16 +2398,7 @@ def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:
         changed += 1
     if changed:
         _save_all(schedules)
-    for schedule_id, missed in missed_schedules:
-        emit_event(
-            logger,
-            "schedule.run.skip",
-            outcome="skipped",
-            reason_code="misfire",
-            schedule_id=schedule_id,
-            missed_count=missed,
-        )
-    return changed
+    return changed, missed_schedules
 
 
 def schedule_retry(
@@ -2380,26 +2416,29 @@ def schedule_retry(
     service restarts — routine on a rolling deploy — and leaves the schedule
     flagged running until the staleness window expires hours later.
     """
-    schedules = _load_all()
-    for i, s in enumerate(schedules):
-        if s.id != schedule_id:
-            continue
-        history = list(s.run_history)
-        if run_entry:
-            history = (history + [run_entry])[-RUN_HISTORY_LIMIT:]
-        updated = PipelineSchedule.from_dict({
-            **s.to_dict(),
-            "retry_at": retry_at.astimezone(timezone.utc).isoformat(),
-            "retry_attempt": max(0, int(attempt)),
-            "running": False,
-            "running_instance": "",
-            "running_started_at": None,
-            "running_job_id": "",
-            "run_history": history,
-        })
-        schedules[i] = updated
-        _save_all(schedules)
-        return updated
+    from services.schedule_run_lifecycle import merge_run_entry, trim_history
+
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        for i, s in enumerate(schedules):
+            if s.id != schedule_id:
+                continue
+            history = list(s.run_history)
+            if run_entry:
+                history = trim_history(merge_run_entry(history, run_entry), RUN_HISTORY_LIMIT)
+            updated = PipelineSchedule.from_dict({
+                **s.to_dict(),
+                "retry_at": retry_at.astimezone(timezone.utc).isoformat(),
+                "retry_attempt": max(0, int(attempt)),
+                "running": False,
+                "running_instance": "",
+                "running_started_at": None,
+                "running_job_id": "",
+                "run_history": history,
+            })
+            schedules[i] = updated
+            _save_all(schedules)
+            return updated
     return None
 
 
@@ -2408,15 +2447,18 @@ def record_run_history(schedule_id: str, run_entry: dict[str, Any]) -> PipelineS
 
     Used to log intermediate retry attempts before the terminal ``mark_schedule_run``.
     """
-    schedules = _load_all()
-    for i, s in enumerate(schedules):
-        if s.id != schedule_id:
-            continue
-        history = (list(s.run_history) + [run_entry])[-RUN_HISTORY_LIMIT:]
-        updated = PipelineSchedule.from_dict({**s.to_dict(), "run_history": history})
-        schedules[i] = updated
-        _save_all(schedules)
-        return updated
+    from services.schedule_run_lifecycle import merge_run_entry, trim_history
+
+    with _CLAIM_LOCK:
+        schedules = _load_all()
+        for i, s in enumerate(schedules):
+            if s.id != schedule_id:
+                continue
+            history = trim_history(merge_run_entry(list(s.run_history), run_entry), RUN_HISTORY_LIMIT)
+            updated = PipelineSchedule.from_dict({**s.to_dict(), "run_history": history})
+            schedules[i] = updated
+            _save_all(schedules)
+            return updated
     return None
 
 
@@ -2509,6 +2551,45 @@ def visible_next_run_at(sched: Any) -> str | None:
     return getattr(sched, "next_run_at", None) or None
 
 
+def _slot_due(sched: PipelineSchedule, current: datetime) -> bool:
+    retry_at = _parse_ts(sched.retry_at)
+    if retry_at is not None:
+        return retry_at <= current
+    nxt = _parse_ts(sched.next_run_at)
+    return nxt is None or nxt <= current
+
+
+def _record_overlap_skip(sched: PipelineSchedule) -> None:
+    """A due beat while this schedule's previous run is still live."""
+    from services.schedule_run_lifecycle import record_skip
+
+    holder = {
+        "kind": "this_schedule",
+        "schedule_id": sched.id,
+        "job_id": str(sched.running_job_id or ""),
+        "running_since": sched.running_started_at,
+    }
+    record_skip(sched.id, "already_running", describe_claim_holder(holder), sched=sched,
+                blocked_job_id=holder["job_id"])
+
+
+def _record_approval_skip(sched: PipelineSchedule) -> None:
+    """A due beat held by an open finding is a recorded skip, with the finding."""
+    from services.schedule_run_lifecycle import record_skip
+
+    req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    finding = str(req.get("finding") or req.get("corrective_action") or "").strip()
+    record_skip(
+        sched.id,
+        "approval_pending",
+        "Waiting on an approval"
+        + (f" ({req.get('code')})" if req.get("code") else "")
+        + (f": {finding}" if finding else "."),
+        sched=sched,
+        approval_id=str(req.get("id") or ""),
+    )
+
+
 def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
     from services.schedule_mapping_contract import persisted_mapping_rows
 
@@ -2523,6 +2604,8 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
             if not persisted_mapping_rows(s.mappings):
                 continue
             if s.running and not _is_running_stale(s):
+                if _slot_due(s, current):
+                    _record_overlap_skip(s)
                 continue
             if has_open_approval(s):
                 # A deterministic refusal waiting on a decision is not a cadence
@@ -2543,6 +2626,7 @@ def due_schedules(now: datetime | None = None) -> list[PipelineSchedule]:
                         reason_code="gate_blocked",
                         schedule_id=s.id,
                     )
+                    _record_approval_skip(s)
                 continue
             retry_at = _parse_ts(s.retry_at)
             if retry_at is not None:

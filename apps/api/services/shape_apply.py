@@ -27,6 +27,7 @@ __all__ = [
     "ShapeRunner",
     "apply_shape_type_ceilings",
     "build_shape_runner",
+    "recipe_output_schema",
     "shape_ledger_terms",
     "shaped_schema",
 ]
@@ -52,8 +53,26 @@ class ShapeRunner:
         # typed_values: source is a database — '' and whitespace-only text
         # are stored values, not spreadsheet-empty cells (X-1).
         self.typed_values = typed_values
+        self._sample_limit = sample_limit
         self._engine = ShapeEngine(
             recipe, sample_limit=sample_limit, workspace_id=workspace_id
+        )
+
+    def fork(self) -> "ShapeRunner":
+        """A fresh runner for the same recipe under the same value model.
+
+        Design-time probes (the sample Map is built from, the population fit
+        scan, Validate) must not add to this runner's accounting, but they
+        must evaluate every step exactly as the write does. Re-building a
+        runner from ``.recipe`` alone dropped ``typed_values``, so a database
+        source was probed with spreadsheet semantics ('' read as NULL) and the
+        prediction disagreed with what was written.
+        """
+        return ShapeRunner(
+            self.recipe,
+            sample_limit=self._sample_limit,
+            workspace_id=self.workspace_id,
+            typed_values=self.typed_values,
         )
 
     def _apply(self, fn):
@@ -127,7 +146,21 @@ class ShapeRunner:
 
     def drain(self) -> list[dict[str, Any]]:
         """Rows buffering steps held until end-of-stream (see ShapeEngine.drain)."""
-        return self._engine.drain()
+        return self._apply(self._engine.drain)
+
+    def population(
+        self, rows: Iterable[Mapping[str, Any]]
+    ) -> Iterator[dict[str, Any]]:
+        """Every row the recipe emits for ``rows``, buffered steps drained last.
+
+        One row in may be zero (filter), one, or several (unnest) rows out, and
+        dedupe/aggregate/sort emit only at the end of the stream — a scan that
+        kept ``shaped[0]`` per row judged a different population than the
+        writer receives.
+        """
+        for row in rows:
+            yield from self.records([dict(row)])
+        yield from self.drain()
 
     def take_diverted(self):
         """Rows shape steps diverted since the last call — quarantine matter.
@@ -145,7 +178,7 @@ class ShapeRunner:
         population was read; the transfer calls this after the last batch so
         their winners still reach the writer. Empty when nothing was held.
         """
-        rows = self._engine.drain()
+        rows = self.drain()
         headers = list(self.output_columns)
         return headers, [[r.get(h) for h in headers] for r in rows]
 
@@ -322,7 +355,29 @@ def shaped_schema(
     shaped_rows: Sequence[Mapping[str, Any]],
     prior_schema: Mapping[str, str] | None = None,
 ) -> dict[str, str]:
-    """Declared types for the shaped columns.
+    """Declared types for the shaped columns (see :func:`recipe_output_schema`)."""
+    columns = list(runner.output_columns) or list(shaped_rows[0].keys() if shaped_rows else [])
+    return recipe_output_schema(
+        runner.recipe,
+        columns,
+        shaped_rows,
+        prior_schema,
+        typed_values=runner.typed_values,
+    )
+
+
+def recipe_output_schema(
+    recipe: ShapeRecipe,
+    columns: Sequence[str],
+    shaped_rows: Sequence[Mapping[str, Any]],
+    prior_schema: Mapping[str, str] | None = None,
+    *,
+    typed_values: bool = False,
+) -> dict[str, str]:
+    """The typed schema a recipe hands the writer — one rule for every phase.
+
+    Execute, Validate and the Transform preview all ask this; the carrier Map is
+    shown is therefore the carrier the writer creates.
 
     A column no step writes keeps the type the source declared — shaping must not
     re-open a carrier decision it never touched. A column a step writes (or
@@ -332,12 +387,12 @@ def shaped_schema(
     from services.schema_inference import infer_schema_map
 
     prior = dict(prior_schema or {})
-    ceilings = _scale_ceilings(runner.recipe)
-    columns = list(runner.output_columns) or list(shaped_rows[0].keys() if shaped_rows else [])
-    touched = runner.recipe.touched_columns
+    ceilings = _scale_ceilings(recipe)
+    columns = list(columns)
+    touched = recipe.touched_columns
     rename_source = {
         str(step.options.get("to") or ""): step.column
-        for step in runner.recipe.enabled_steps
+        for step in recipe.enabled_steps
         if step.op == "rename_column"
     }
 
@@ -355,6 +410,16 @@ def shaped_schema(
             for column in unknown
         }
         inferred, _ = infer_schema_map(samples)
+        if typed_values:
+            # A database's '' / '   ' is a stored value, and it is not a number
+            # or a date. Inference reads it as an empty cell, so a trimmed text
+            # column holding '' came back DECIMAL and the write refused ''.
+            for column in unknown:
+                if any(
+                    isinstance(row.get(column), str) and not row.get(column).strip()
+                    for row in shaped_rows[:500]
+                ):
+                    inferred[column] = _text_carrier(prior.get(column, ""))
 
     out: dict[str, str] = {}
     for column in columns:
@@ -372,6 +437,14 @@ def shaped_schema(
             declared = _capped_decimal(declared, ceiling)
         out[column] = declared
     return out
+
+
+def _text_carrier(prior: str) -> str:
+    """The prior carrier when it is already text, else VARCHAR."""
+    head = str(prior or "").strip().upper()
+    if head.startswith(("TEXT", "VARCHAR", "CHAR", "NVARCHAR", "NCHAR", "STRING", "CLOB")):
+        return str(prior)
+    return "VARCHAR"
 
 
 def shape_ledger_terms(runner: ShapeRunner | None) -> dict[str, Any]:

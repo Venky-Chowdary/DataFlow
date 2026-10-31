@@ -411,9 +411,11 @@ def _mysql_create_sql(
     # DataFlow-created table — where index DDL is already disclosed — from an
     # operator-owned one. COPY-path creates must stamp it too or a later
     # keyed upsert/quarantine replay on a table we made fails the gate.
+    from services.brand import new_marker_comment
+
     return (
         f"CREATE TABLE {_mysql_ident(table)} ({', '.join(cols)}){suffix} "
-        "COMMENT='dataflow:managed'"
+        f"COMMENT='{new_marker_comment(table)}'"
     )
 
 

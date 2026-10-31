@@ -10,6 +10,8 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
+from services.brand import PRODUCT_SLUG
+
 from services.byok_key_manager import (
     create_key,
     get_key,
@@ -1020,7 +1022,7 @@ async def get_security_report(request: Request):
     return PlainTextResponse(
         report,
         media_type="text/markdown",
-        headers={"Content-Disposition": 'attachment; filename="dataflow-compliance-report.md"'},
+        headers={"Content-Disposition": f'attachment; filename="{PRODUCT_SLUG}-compliance-report.md"'},
     )
 
 
@@ -1216,6 +1218,6 @@ async def run_workspace_benchmark(body: BenchmarkRequest):
         return PlainTextResponse(
             _markdown_benchmark_report(report),
             media_type="text/markdown",
-            headers={"Content-Disposition": 'attachment; filename="dataflow-benchmark-report.md"'},
+            headers={"Content-Disposition": f'attachment; filename="{PRODUCT_SLUG}-benchmark-report.md"'},
         )
     return JSONResponse(report)
