@@ -7,8 +7,8 @@ is SQL Server's default of 7.
 
 Precision 3 and below stay a ``datetime``: the millisecond struct is exact,
 and the write path already quarantines a fraction those digits cannot store.
-Precision above 6 can only add trailing zeros — Python has six digits, so
-this is not a claim of 100-nanosecond fidelity.
+Precision 7 sends the seventh digit a ``connectors.sqlserver_tick.Datetime2Tick``
+carries (a DATETIME2(7) source read at full precision), else a zero.
 """
 
 from __future__ import annotations
@@ -75,7 +75,7 @@ def sqlserver_datetime2_bind_text(value: Any, *, precision: int | None) -> Any:
 
     ``None`` and ``str`` pass through. Precision of 3 or less returns the
     datetime object. Precision 4 and 5 keep that many fractional digits.
-    Precision above 6 appends zeros for the digits Python cannot supply.
+    Precision 7 takes the 100 ns digit a ``Datetime2Tick`` carries (else 0).
     """
     if value is None or isinstance(value, str):
         return value
@@ -90,12 +90,10 @@ def sqlserver_datetime2_bind_text(value: Any, *, precision: int | None) -> Any:
         return clock if not isinstance(value, datetime) else value
     if clock.tzinfo is not None:
         clock = clock.replace(tzinfo=None)
-    text = clock.strftime("%Y-%m-%d %H:%M:%S.%f")
-    if digits < 6:
-        text = text[: -(6 - digits)]
-    elif digits > 6:
-        text = text + ("0" * (digits - 6))
-    return text
+    from connectors.sqlserver_tick import fraction_text
+
+    # DATETIME2(7) takes the seventh digit a Datetime2Tick carries (zero else).
+    return clock.strftime("%Y-%m-%d %H:%M:%S.") + fraction_text(value, digits)
 
 
 def bind_sqlserver_datetime2(

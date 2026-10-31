@@ -674,12 +674,15 @@ def _format_datetime(dt: datetime) -> str:
     every row, with no finding raised. ``isoformat`` omits the fractional part
     when it is zero, so whole-second values render exactly as they did.
     """
+    from connectors.sqlserver_tick import temporal_iso_text
+
+    # temporal_iso_text keeps a SQL Server DATETIME2(7) seventh digit.
     if dt.tzinfo is None:
-        return dt.isoformat()
+        return temporal_iso_text(dt)
     offset = dt.utcoffset()
     if offset is not None and offset.total_seconds() == 0:
-        return dt.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
-    return dt.isoformat()
+        return temporal_iso_text(dt).replace("+00:00", "Z")
+    return temporal_iso_text(dt)
 
 
 def _to_utc_z(dt: datetime) -> str:
@@ -988,7 +991,11 @@ def _parse_datetime_worker(value: str, date_locale: str) -> str | None:
         # like "2026-01-01" must not read its day as an offset.
         if re.search(r"\d{2}:\d{2}", iso):
             iso = re.sub(r"([+-]\d{2})$", r"\1:00", iso)
-        return _to_utc_z(datetime.fromisoformat(iso))
+        from connectors.sqlserver_tick import tick_from_text, with_tick
+
+        # fromisoformat keeps six fractional digits; a seventh (SQL Server
+        # DATETIME2(7)'s 100 ns tick) rides along instead of being cut.
+        return _to_utc_z(with_tick(datetime.fromisoformat(iso), tick_from_text(iso)))
     except ValueError:
         pass
     for fmt in _reorder_date_patterns(text, DATETIME_PATTERNS, date_locale):
@@ -2769,6 +2776,15 @@ def apply_transform(
         return _apply_assume_timezone(text, transform)
 
     if transform == "time":
+        from services.mysql_time_text import MYSQL_TIME_TEXT_RE
+
+        if MYSQL_TIME_TEXT_RE.match(text):
+            # MySQL TIME text, kept as spelled: a signed interval
+            # (-838:59:59 .. 838:59:59) is a valid TIME no wall-clock parser
+            # reads, and re-rendering an in-range clock dropped TIME(6)'s
+            # trailing zeros on a text carrier. A wall-clock destination
+            # still refuses an out-of-range value by name at the bind.
+            return text, None
         parsed = _parse_time(text)
         if parsed is None:
             return None, f"Invalid time: {text!r}"

@@ -18,7 +18,7 @@ import re
 import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Any, Final
 
 from connectors.base import ReadBatch
@@ -26,6 +26,7 @@ from connectors.cursor_bind import count_cursor_window, sa_cursor_bind
 from connectors.oracle_tstz import (
     ORACLE_LTZ_READ_FORMAT,
     ORACLE_TSTZ_READ_FORMAT,
+    oracle_physical_with_scale,
     oracle_tz_kind,
     oracle_tz_positions,
     oracle_tz_select_list,
@@ -1230,6 +1231,13 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             def _mysql_utc_session(dbapi_conn, _connection_record):  # noqa: ANN001
                 pin_mysql_session_utc(dbapi_conn)
 
+        if _is_oracle_wire(driver.split("+", 1)[0], db_type):
+            from connectors.oracle_tstz import pin_oracle_timestamp_format
+
+            @event.listens_for(engine, "connect")
+            def _oracle_ts_format(dbapi_conn, _connection_record):  # noqa: ANN001
+                pin_oracle_timestamp_format(dbapi_conn)
+
         return engine
     except (NoSuchModuleError, ImportError) as exc:
         raise _dialect_unavailable(url, db_type) from exc
@@ -2063,6 +2071,11 @@ def _to_sa_value(
         if isinstance(coerced, datetime):
             if coerced.tzinfo is not None:
                 coerced = coerced.replace(tzinfo=None)
+            from connectors.sql_temporal import oracle_tick_bind
+
+            tick_text = oracle_tick_bind(value, coerced, carrier=raw_carrier, engine=eng)
+            if tick_text is not None:
+                return tick_text
             _refuse_sqlserver_datetime_rounding(
                 coerced,
                 logical=str(logical or ""),
@@ -3320,6 +3333,11 @@ def _serialize_source_cell(value: Any, col: Any, dialect: str) -> str:
 
     if _normalize_dest_db(dialect) == "mysql" and _is_mysql_timestamp_sa(col):
         value = mysql_timestamp_instant_wire(value)
+    if isinstance(value, timedelta) and _normalize_dest_db(dialect) == "mysql":
+        from services.mysql_time_text import mysql_time_text
+
+        # MySQL TIME is a signed interval: its own text at the declared FSP.
+        return mysql_time_text(value, getattr(getattr(col, "type", None), "fsp", None))
     if _is_json_sa(col):
         from services.json_polarity import json_document_wire
 
@@ -5259,6 +5277,8 @@ def write_mapped_rows(
             ddl = _gsql._logical_type_from_sa(typ) if typ is not None else ""
             if not str(ddl or "").strip():
                 ddl = str(typ) if typ is not None else ""
+            if _is_oracle_wire(dialect_name, dest_db or ""):
+                ddl = oracle_physical_with_scale(ddl, live_fold.get(name.lower()))
             physical[name] = ddl
             physical[name.lower()] = ddl
             physical[name.upper()] = ddl

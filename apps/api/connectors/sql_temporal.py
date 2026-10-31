@@ -666,6 +666,16 @@ def coerce_sql_temporal(
             return value
         if base == "SMALLDATETIME":
             return round_to_smalldatetime(parsed)
+        if base == "DATETIME2" and _datetime2_digits(source_type) > 6:
+            # The seventh digit a DATETIME2(7) source spelled (Python's parse
+            # keeps six); sqlserver_datetime2 binds it.
+            from connectors.sqlserver_tick import tick_from_text, tick_of, with_tick
+
+            return with_tick(parsed, tick_of(value) or tick_from_text(value))
+        if base == "TIMESTAMP":
+            text = oracle_tick_bind(value, parsed, carrier=source_type, engine=engine)
+            if text is not None:
+                return text
         return parsed
     if base == "DATE":
         parsed = parse_sql_date(value)
@@ -729,6 +739,39 @@ def coerce_sql_temporal(
             return value
         return _timetz_or_refuse(tm)
     return value
+
+
+def oracle_tick_bind(value: Any, parsed: Any, *, carrier: str, engine: str) -> str | None:
+    """ISO text keeping a seventh digit for an Oracle TIMESTAMP(7..9) column.
+
+    python-oracledb binds a ``datetime`` with six digits; the text is converted
+    with the session's ISO ``NLS_TIMESTAMP_FORMAT`` (connectors.oracle_tstz).
+    Every value of such a column binds as text: one executemany batch types a
+    bind variable from its first row, so text and ``datetime`` cannot mix.
+    ``None`` when the column is not one.
+    """
+    if not isinstance(parsed, datetime) or parsed.tzinfo is not None:
+        return None
+    if not _oracle_beyond_micro(engine, carrier):
+        return None
+    from connectors.sqlserver_tick import temporal_iso_text, tick_from_text, tick_of, with_tick
+
+    tick = tick_of(value) or tick_of(parsed) or tick_from_text(value)
+    return temporal_iso_text(with_tick(parsed, tick), " ")
+
+
+def _oracle_beyond_micro(engine: str, source_type: str) -> bool:
+    """An Oracle TIMESTAMP(7..9) destination column."""
+    if (engine or "").strip().lower() not in {"oracle", "oracledb", "oracle_db"}:
+        return False
+    match = re.search(r"\(\s*(\d+)\s*\)", source_type or "")
+    return bool(match) and int(match.group(1)) > 6
+
+
+def _datetime2_digits(source_type: str) -> int:
+    """Declared DATETIME2 precision; bare is SQL Server's default of 7."""
+    match = re.search(r"\(\s*(\d+)\s*\)", source_type or "")
+    return int(match.group(1)) if match else 7
 
 
 def bind_time_clock(value: Any) -> time | None:
@@ -1067,6 +1110,9 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
         if pg_temporal_special(text) is not None and _is_postgres_family(engine):
             # D63 — the PG family stores 'infinity' / '-infinity' literally;
             # coerce_sql_temporal carried it, so it binds as itself.
+            return {"ok": True, "wire_value": text, "reason": "", "needs_normalize": False}
+        if _oracle_beyond_micro(engine, ddl_type) and parse_sql_datetime(text) is not None:
+            # Oracle TIMESTAMP(7..9) binds ISO text (session NLS format).
             return {"ok": True, "wire_value": text, "reason": "", "needs_normalize": False}
         return {
             "ok": False,

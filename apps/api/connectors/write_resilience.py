@@ -519,6 +519,10 @@ def apply_mssql_session_guards(
     try:
         cur = getattr(conn, "cursor", None)
         if callable(cur):
+            # DATETIME2(7): read the seventh fractional digit pyodbc drops.
+            from connectors.sqlserver_tick import install_tick_converter
+
+            install_tick_converter(conn)
             with conn.cursor() as c:
                 c.execute("SET ANSI_WARNINGS ON")
                 c.execute("SET ANSI_PADDING ON")

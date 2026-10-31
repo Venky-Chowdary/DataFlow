@@ -115,7 +115,7 @@ def carrier_rounded_columns(
             continue
         if not temporal_precision_would_narrow(
             source_type, target_type, dest_db=dest_engine
-        ):
+        ) and not _tick_dropped_at_cap(source_type, target_type, dest_engine):
             continue
         seen.add(target)
         out.append({
@@ -131,6 +131,25 @@ def carrier_rounded_columns(
             ),
         })
     return out
+
+
+def _tick_dropped_at_cap(source_type: str, target_type: str, dest_engine: str) -> bool:
+    """A declared source fraction (DATETIME2(7) / TIMESTAMP_NTZ(7)) into a
+    carrier that keeps fewer digits.
+
+    Validate lets this pair through when the destination is already at its
+    own maximum (PostgreSQL / MySQL microseconds cannot be widened), so it is
+    no G3 narrowing. The seventh digit is still not stored, and Gate-8 compares
+    at the carrier's six digits: the report names the column rather than
+    claiming the 100 ns digit was proven.
+    """
+    from services.type_system import parse_temporal_fractional_precision
+
+    src_digits = parse_temporal_fractional_precision(source_type)
+    if src_digits is None and (source_type or "").strip().upper() == "DATETIME2":
+        src_digits = 7  # SQL Server's default precision
+    kept = carrier_instant_digits(target_type, engine=dest_engine)
+    return src_digits is not None and kept is not None and kept < src_digits
 
 
 def _round_microseconds(value: datetime | time, digits: int) -> datetime | time:
@@ -216,6 +235,13 @@ def quantize_instant_for_carrier(
     digits = carrier_instant_digits(ddl_type, engine=eng)
     if digits is None:
         return value
+    if digits <= 6:
+        # A DATETIME2(7) seventh digit: a microsecond carrier is bound the
+        # six-digit datetime (sql_temporal attaches the digit only for a
+        # DATETIME2(7) destination), so it never stores it.
+        from connectors.sqlserver_tick import drop_tick
+
+        value = drop_tick(value)
     if isinstance(value, timedelta):
         # MySQL TIME comes back from the driver as a timedelta.
         step_us = 10 ** (6 - digits) if digits < 6 else 1

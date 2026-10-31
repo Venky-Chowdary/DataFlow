@@ -198,7 +198,10 @@ def sqlite_temporal_text(value: Any, *, source_label: str) -> Any:
             raise FastPathUnavailable(
                 f"timestamptz {source_label} value is not SQLite COPY-safe"
             )
-        return value.isoformat(sep=" ")
+        # SQL Server DATETIME2(7) keeps its seventh digit in the text.
+        from connectors.sqlserver_tick import temporal_iso_text
+
+        return temporal_iso_text(value, " ")
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, time):
@@ -208,14 +211,9 @@ def sqlite_temporal_text(value: Any, *, source_label: str) -> Any:
             )
         return value.isoformat()
     if isinstance(value, timedelta):
-        total_us = value // timedelta(microseconds=1)
-        sign = "-" if total_us < 0 else ""
-        total_us = abs(total_us)
-        secs, micros = divmod(total_us, 1_000_000)
-        hh, rem = divmod(secs, 3600)
-        mm, ss = divmod(rem, 60)
-        clock = f"{sign}{hh:02d}:{mm:02d}:{ss:02d}"
-        return f"{clock}.{micros:06d}" if micros else clock
+        from services.mysql_time_text import mysql_time_text
+
+        return mysql_time_text(value, None)
     return value
 
 

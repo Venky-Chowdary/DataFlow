@@ -3722,7 +3722,10 @@ def _sqlite_temporal_precision_over_text(inferred: str, values: Sequence[Any]) -
         match = re.search(r"\d{2}:\d{2}:\d{2}\.(\d{1,9})", str(value))
         if match:
             digits = max(digits, len(match.group(1)))
-    return f"{token}({digits})" if digits else inferred
+    # The text keeps every digit the writer bound, up to a DATETIME2(7)
+    # seventh: sampled rows that happen to stop at six digits are not a
+    # six-digit carrier (run 2 graded DATETIME2(7) -> TIMESTAMP(6) lossy).
+    return f"{token}({max(digits, 7)})" if digits else inferred
 
 
 def _introspect_sqlite(

@@ -119,6 +119,29 @@ class ProgressMeter:
         self._lock = threading.Lock()
         self._rows = 0
         self._last_flush = 0.0
+        #: Set by :meth:`rewind`: the next flush may lower the shown count.
+        self._rewound = False
+
+    def mark(self) -> int:
+        """Rows counted so far, for :meth:`rewind`."""
+        with self._lock:
+            return self._rows
+
+    def rewind(self, mark: int) -> None:
+        """Forget rows counted after ``mark``: that write was rolled back.
+
+        A COPY reports the rows it reads; when it declines to the row path
+        (or fails) its transaction is rolled back and the row path re-reads
+        the same rows from the start. Without this the job showed both
+        passes: a failed 40,000-row attempt reached 62,528.
+        """
+        with self._lock:
+            if self._rows <= mark:
+                return
+            self._rows = max(0, int(mark))
+            self._rewound = True
+            self._last_flush = 0.0
+        self.beat()
 
     def observe_cumulative(self, written: int) -> None:
         """``written`` is cumulative within one writer call; a smaller value
@@ -142,22 +165,23 @@ class ProgressMeter:
                 return
             self._last_flush = now
             rows = self._rows
-        self._flush(rows)
+            rewound, self._rewound = self._rewound, False
+        self._flush(rows, rewound=rewound)
 
-    def _flush(self, rows: int) -> None:
+    def _flush(self, rows: int, *, rewound: bool = False) -> None:
         try:
             job = _read_job(self._mongo, self._job_id) or {}
             if str(job.get("status") or "") != "running" or _is_superseded(job):
                 return
             fields: dict[str, Any] = {}
             shown = int(job.get("records_processed") or 0)
-            # A failed 40k-row MySQL -> SQL Server attempt showed 62,528 rows
-            # processed (D168). A job never processes more rows than its
-            # source holds, whatever else fed the meter.
+            # Safety net only: the count itself is rewound when a COPY's rows
+            # are rolled back (rewind). A job never processes more rows than
+            # its source holds, whatever else fed the meter.
             known_total = int(job.get("total_rows") or 0)
             if known_total > 0:
                 rows = min(rows, known_total)
-            if rows > shown:
+            if rows > shown or (rewound and rows < shown):
                 from services.batch_progress import compute_transfer_progress_pct
 
                 fields["records_processed"] = rows
@@ -183,6 +207,20 @@ class ProgressMeter:
 def set_progress_meter(meter: "ProgressMeter | None") -> None:
     _meter.set(meter)
     _last_written.set(0)
+
+
+def progress_mark() -> int | None:
+    """The current context's committed-row count, for :func:`progress_rewind`."""
+    meter = _meter.get()
+    return meter.mark() if meter is not None else None
+
+
+def progress_rewind(mark: int | None) -> None:
+    """Roll the progress count back to ``mark`` (a rolled-back write)."""
+    meter = _meter.get()
+    if meter is not None and mark is not None:
+        meter.rewind(mark)
+        _last_written.set(0)
 
 
 def report_rows(rows: int) -> None:
