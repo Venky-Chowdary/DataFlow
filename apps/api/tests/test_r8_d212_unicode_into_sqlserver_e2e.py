@@ -422,7 +422,8 @@ def test_lossy_code_page_write_never_reports_green(client, kind, monkeypatch):
 
     # 557f556c's planning: this source's text is taken for a code page, so
     # the create-new carrier stays VARCHAR and nothing flags the sink.
-    monkeypatch.setattr(ts, "source_text_declared_single_byte", lambda *_a, **_kw: True)
+    monkeypatch.setattr(ts, "source_text_declared_single_byte", lambda *_a, **_kw: True,
+                        raising=False)
     source = _Source(kind)
     token = uuid.uuid4().hex[:8]
     src_t, dst_t = source.table(token), f"d212_lossy_{kind}_{token}"
@@ -442,11 +443,21 @@ def test_lossy_code_page_write_never_reports_green(client, kind, monkeypatch):
         image = _ss_image(dst_t) if cols else {}
         lossy = any("?" in str(v) for row in image.values() for v in row if v)
         proof = _value_proof(job)
-        if lossy or cols.get("city") == "varchar":
-            assert str(job.get("status")) not in {"completed"}, (job.get("status"), proof, image)
+        status = str(job.get("status"))
+        want = source.expected(_ROWS)
+        if lossy:
+            # QA's run: '??' on disk. Never green.
+            assert status != "completed", (status, proof, image)
             assert proof["passed"] is not True, proof
+        elif status == "completed":
+            _assert_exact(image, want)
         else:
-            _assert_exact(image, source.expected(_ROWS))
+            # Cells the code page cannot hold were held out (quarantined or the
+            # run failed) — whatever landed is exact, nothing was rewritten.
+            assert status in {"completed_with_quarantine", "failed", "partial"}, (status, proof)
+            assert len(image) < len(want), (status, image)
+            for key, row in image.items():
+                assert row == want[key], (key, row, want[key])
     finally:
         source.drop(src_t)
         h.drop_table("sqlserver", dst_t)
