@@ -215,6 +215,17 @@ class SharedAuthState:
         ttl = int(doc["absolute_expires_at"]) - now + 3600
         self._b.set(f"{_SESSION_PREFIX}{jti}", json.dumps(doc), max(1, ttl))
 
+    def add_amr(self, jti: str, *methods: str) -> bool:
+        """Record a second factor passed inside this cookie session (MFA step-up)."""
+        doc = self.get_session(jti)
+        if not doc or doc.get("revoked_at"):
+            return False
+        doc["amr"] = sorted({*(str(m) for m in doc.get("amr") or []), *methods})
+        ttl = int(doc["absolute_expires_at"]) - int(time.time()) + 3600
+        self._b.set(f"{_SESSION_PREFIX}{jti}", json.dumps(doc), max(1, ttl))
+        self._mongo_mirror(doc)
+        return True
+
     def revoke_session(self, jti: str) -> None:
         raw = self._b.get(f"{_SESSION_PREFIX}{jti}")
         if not raw:

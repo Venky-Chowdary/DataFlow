@@ -52,6 +52,7 @@ ADMIN_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("DELETE", "/api/v1/workspace/tenant/{tenant_id}", "workspace.tenant.delete"),
     ("POST", "/api/v1/workspace/jobs/retention/purge", "workspace.jobs.retention.purge"),
     ("POST", "/api/v1/workspace/pii-hash-key/rotate", "workspace.pii_hash_key.rotate"),
+    ("POST", "/api/v1/iam/mfa/reset", "auth.mfa.reset"),
 )
 
 #: Registered descriptions (merged into ``audit_coverage.SECURITY_EVENTS``).
@@ -59,6 +60,20 @@ ADMIN_EVENTS: dict[str, str] = {
     action: f"Workspace administration: {action.split('.', 1)[1].replace('.', ' ').replace('_', ' ')}."
     for _m, _t, action in ADMIN_ROUTES
 }
+# Two-factor authentication (services.mfa / src.routers.mfa_router, QA S7).
+MFA_EVENTS: dict[str, str] = {
+    "auth.mfa.enrollment.started": "A person started two-factor (TOTP) enrolment; a new secret is pending confirmation.",
+    "auth.mfa.enrolled": "A person confirmed two-factor (TOTP) enrolment with a valid code; recovery codes were issued.",
+    "auth.mfa.challenge.passed": "A two-factor code was accepted (sign-in or session step-up).",
+    "auth.mfa.challenge.failed": "A two-factor code was refused (wrong or replayed).",
+    "auth.mfa.locked": "Repeated wrong two-factor codes locked the account's two-factor sign-in.",
+    "auth.mfa.recovery_code.used": "A one-time recovery code was used in place of a TOTP code.",
+    "auth.mfa.recovery_codes.regenerated": "A person replaced their recovery codes.",
+    "auth.mfa.removed": "A person turned off their own two-factor authentication.",
+    "auth.mfa.reset": "A platform admin reset another account's two-factor authentication (reason recorded).",
+    "auth.mfa.enforcement.held": "A session without a second factor was held at two-factor setup by the workspace policy.",
+}
+ADMIN_EVENTS.update(MFA_EVENTS)
 # Refusals of deployment-wide settings writes (services.platform_settings):
 # one name for every route in the general / SSO / AI-provider groups, with the
 # route's own action in the details.

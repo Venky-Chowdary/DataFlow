@@ -52,20 +52,48 @@ def _save(data: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def create_session(email: str, *, expires_at: int) -> str:
-    """Persist a new session and return its jti."""
+def create_session(email: str, *, expires_at: int, amr: list[str] | None = None) -> str:
+    """Persist a new session and return its jti.
+
+    ``amr`` records how the session was authenticated (``pwd``, ``otp``,
+    ``recovery``, ``sso``) for the workspace MFA policy (services.mfa_enforcement).
+    """
     jti = uuid.uuid4().hex
     now = int(time.time())
     with _LOCK:
         data = _load()
-        data["sessions"][jti] = {
+        row: dict[str, Any] = {
             "email": email.strip().lower(),
             "created_at": now,
             "expires_at": int(expires_at),
             "revoked_at": None,
         }
+        if amr:
+            row["amr"] = sorted({str(m) for m in amr})
+        data["sessions"][jti] = row
         _save(data)
     return jti
+
+
+def session_amr(jti: str) -> list[str]:
+    """Authentication methods recorded on a session ([] for rows that predate them)."""
+    with _LOCK:
+        row = _load()["sessions"].get(jti)
+    if not isinstance(row, dict):
+        return []
+    return [str(m) for m in row.get("amr") or []]
+
+
+def add_session_amr(jti: str, *methods: str) -> bool:
+    """Record a second factor passed inside an existing session (step-up)."""
+    with _LOCK:
+        data = _load()
+        row = data["sessions"].get(jti)
+        if not isinstance(row, dict) or row.get("revoked_at") is not None:
+            return False
+        row["amr"] = sorted({*(str(m) for m in row.get("amr") or []), *methods})
+        _save(data)
+    return True
 
 
 def session_active(jti: str, email: str) -> bool:
