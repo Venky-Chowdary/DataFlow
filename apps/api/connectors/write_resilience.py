@@ -377,7 +377,7 @@ def apply_postgres_session_guards(conn: Any) -> None:
             # its budget) is ended by the server at the call's deadline, so it
             # cannot hold locks on the customer's table afterwards.
             cur.execute(f"SET idle_in_transaction_session_timeout = {statement_ms}")
-            cur.execute("SET lock_timeout = 120000")
+            cur.execute(f"SET lock_timeout = {destination_lock_wait_seconds() * 1000}")
             from services.brand import session_application_name
 
             # A constant from services.brand ("dataflow" / "datawrap"), never input.
@@ -393,7 +393,7 @@ def apply_postgres_session_guards(conn: Any) -> None:
 def apply_mysql_session_guards(
     conn: Any,
     *,
-    lock_wait_seconds: int = 120,
+    lock_wait_seconds: int = 0,
     require_strict_sql_mode: bool = True,
 ) -> None:
     """Raise MySQL session I/O / wait timeouts and enable fail-closed sql_mode.
@@ -409,7 +409,7 @@ def apply_mysql_session_guards(
     When ``require_strict_sql_mode`` is True (default), failure to enable STRICT
     modes raises — never continue a transfer that can silently truncate.
     """
-    lock_s = max(5, min(int(lock_wait_seconds or 120), 600))
+    lock_s = max(5, min(int(lock_wait_seconds or destination_lock_wait_seconds()), 600))
     try:
         with conn.cursor() as cur:
             cur.execute("SET SESSION wait_timeout = 28800")
@@ -484,6 +484,25 @@ def _ensure_mysql_strict_sql_mode(cur: Any, *, require: bool = True) -> None:
         )
 
 
+#: How long a session waits on another session's table/row lock (seconds).
+DEFAULT_LOCK_WAIT_SECONDS = 120
+
+
+def destination_lock_wait_seconds() -> int:
+    """The lock-wait bound every write session uses (``*_LOCK_WAIT_SECONDS``).
+
+    PostgreSQL and MySQL sessions already waited at most 120 s; SQL Server's
+    pooled sessions waited forever (``LOCK_TIMEOUT -1``), so a retry whose
+    DELETE/TRUNCATE queued behind a lock the failed attempt's session still
+    held froze at "Connecting to destination and creating table..." (D19).
+    """
+    try:
+        value = int(float(getenv_brand("DEST_LOCK_WAIT_SECONDS", str(DEFAULT_LOCK_WAIT_SECONDS))))
+    except ValueError:
+        value = DEFAULT_LOCK_WAIT_SECONDS
+    return max(1, min(value, 600))
+
+
 def apply_mssql_session_guards(
     conn: Any,
     *,
@@ -503,6 +522,7 @@ def apply_mssql_session_guards(
             with conn.cursor() as c:
                 c.execute("SET ANSI_WARNINGS ON")
                 c.execute("SET ANSI_PADDING ON")
+                c.execute(f"SET LOCK_TIMEOUT {destination_lock_wait_seconds() * 1000}")
                 try:
                     c.execute("SET CONCAT_NULL_YIELDS_NULL ON")
                 except Exception:
@@ -515,6 +535,7 @@ def apply_mssql_session_guards(
 
             conn.execute(sa.text("SET ANSI_WARNINGS ON"))
             conn.execute(sa.text("SET ANSI_PADDING ON"))
+            conn.execute(sa.text(f"SET LOCK_TIMEOUT {destination_lock_wait_seconds() * 1000}"))
             try:
                 conn.execute(sa.text("SET CONCAT_NULL_YIELDS_NULL ON"))
             except Exception:

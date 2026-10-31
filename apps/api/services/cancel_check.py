@@ -151,6 +151,12 @@ class ProgressMeter:
                 return
             fields: dict[str, Any] = {}
             shown = int(job.get("records_processed") or 0)
+            # A failed 40k-row MySQL -> SQL Server attempt showed 62,528 rows
+            # processed (D168). A job never processes more rows than its
+            # source holds, whatever else fed the meter.
+            known_total = int(job.get("total_rows") or 0)
+            if known_total > 0:
+                rows = min(rows, known_total)
             if rows > shown:
                 from services.batch_progress import compute_transfer_progress_pct
 
