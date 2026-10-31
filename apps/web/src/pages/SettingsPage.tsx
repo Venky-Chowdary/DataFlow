@@ -1684,7 +1684,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 {ssoEditor !== "saml" && ssoConfigs?.[ssoEditor]?.client_secret && (
                   <label className="df2-settings-field df2-mt-md" data-testid="sso-clear-secret">
                     <span>
-                      <input type="checkbox" checked={ssoClearSecret} onChange={(e) => setSsoClearSecret(e.target.checked)} />{" "}
+                      <input id="sso-clear-secret" type="checkbox" checked={ssoClearSecret} onChange={(e) => setSsoClearSecret(e.target.checked)} />{" "}
                       Remove the stored client secret
                     </span>
                   </label>

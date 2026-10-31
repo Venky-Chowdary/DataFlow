@@ -2208,6 +2208,8 @@ def _run_preflight(
         ][:10],
         "warnings": (result.get("warnings") or [])[:10],
         **({"mirror_delete": result["mirror_delete"]} if result.get("mirror_delete") else {}),
+        # A guessed file encoding travels so staging can show it (round 10).
+        **({"source_encoding": result["source_encoding"]} if result.get("source_encoding") else {}),
         "proof_bundle": {
             **({"transfer_decision": decision} if isinstance(decision, dict) else {}),
             **(
