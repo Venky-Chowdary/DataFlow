@@ -39,6 +39,7 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
 
     if cfg.src_type not in SCHEMALESS_SOURCE_TYPES or not batch or not getattr(batch, "headers", None):
         return
+    _pad_schemaless_absent_attrs(cfg, batch)
 
     with cfg._schema_absorb_lock:
         known = set(cfg.columns)
@@ -72,6 +73,48 @@ def _absorb_schemaless_discovered_attrs(run, batch) -> None:
         if new_headers:
             cfg.backfill_new_fields = True
             cfg.target_cols, _ = resolve_target_columns(cfg.mappings, cfg.column_types, preserve_case=True)
+
+
+def _pad_schemaless_absent_attrs(cfg, batch) -> None:
+    """A mapped attribute no document on this page carries is *absent*, not unknown.
+
+    A schemaless reader names a page's columns from the documents it returned,
+    so an incremental page whose changed documents all lack ``maybe`` has no
+    ``maybe`` header, and the writer refused every row ("mapped source column
+    not found in batch headers"): run 2 of a Mongo sync wrote 0 rows (D211).
+    The reader already spells a field missing from one document as the missing
+    sentinel (NULL on insert, left alone on update); a field missing from the
+    whole page is the same fact.
+    """
+    from services.value_serializer import DF_MISSING_SENTINEL
+
+    present = set(batch.headers)
+    absent = [
+        src
+        for src in dict.fromkeys(str(m.get("source") or "") for m in cfg.mappings or [])
+        if src and src not in present and src in (cfg.schema or {})
+    ]
+    if not absent or not all(isinstance(r, (list, tuple)) for r in batch.rows):
+        return
+    from services.value_serializer import SQL_NULL_SENTINEL
+
+    # A flattened child (``maybe_v``) of a parent the row *has* (null, or an
+    # object without that key) is null, not missing: missing would keep the
+    # previous run's value on upsert. Same rule as the Mongo reader's projection.
+    parents = {
+        col: [i for i, h in enumerate(batch.headers) if h and col.startswith(f"{h}_")]
+        for col in absent
+    }
+
+    def _cell(row, col):
+        for i in parents[col]:
+            cell = row[i] if i < len(row) else DF_MISSING_SENTINEL
+            if cell == SQL_NULL_SENTINEL or str(cell).lstrip().startswith("{"):
+                return SQL_NULL_SENTINEL
+        return DF_MISSING_SENTINEL
+
+    batch.headers = [*batch.headers, *absent]
+    batch.rows = [[*row, *(_cell(row, c) for c in absent)] for row in batch.rows]
 
 
 def _ensure_snowflake_conn(run) -> Any:
