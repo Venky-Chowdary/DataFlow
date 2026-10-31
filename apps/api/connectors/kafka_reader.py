@@ -246,6 +246,55 @@ def commit_kafka_offsets(cfg: dict[str, Any], cursor: dict[str, Any] | None) -> 
 _JOIN_WAIT_S = 15.0
 
 
+class KafkaFirstFetchTimeout(TimeoutError):
+    """The group join assigned partitions but no message arrived in time (D151)."""
+
+
+def _poll_until_caught_up(consumer: Any, topic_name: str, limit: int) -> list[dict[str, Any]]:
+    """Up to ``limit`` rows, polling until the batch is full or the log is read.
+
+    Until the group join assigns partitions, an empty poll is not "caught up":
+    the broker delays a new group's first join (3 s default). Nor is the first
+    empty poll after the join: it can land at the end of a poll, before the
+    consumer looked up its start offsets or fetched. Stopping there loaded 0
+    rows on the first run of a fresh route whenever the broker was more than
+    a LAN hop away, and "passed on retry" (D151). An empty poll ends the batch
+    only once every assigned partition is read up to the run's frozen end.
+    """
+    records: list[dict[str, Any]] = []
+    polls = 0
+    deadline = time.monotonic() + _JOIN_WAIT_S
+    # Fakes without a position probe keep the old rule: assigned + empty = done.
+    caught_up = getattr(consumer, "caught_up", None) or (lambda: True)
+    while len(records) < limit and polls < 5:
+        got = 0
+        for row in consumer.poll_rows(
+            max_records=min(limit - len(records), 500),
+            timeout_ms=800,
+        ):
+            records.append(row)
+            got += 1
+            if len(records) >= limit:
+                break
+        if got:
+            polls += 1
+            continue
+        assigned = consumer.has_assignment()
+        if assigned and caught_up():
+            break
+        if time.monotonic() < deadline:
+            continue
+        if assigned and not records:
+            raise KafkaFirstFetchTimeout(
+                f"Kafka topic {topic_name!r}: the consumer group was assigned its "
+                f"partitions but no message arrived within {_JOIN_WAIT_S:g}s although "
+                "the log holds unread messages. Nothing was written. Check the "
+                "broker's load and the network path to it, then run it again."
+            )
+        break
+    return records
+
+
 def read_topic_batch(
     *,
     cfg: dict[str, Any],
@@ -290,27 +339,7 @@ def read_topic_batch(
         ).strip(),
     })
     try:
-        records: list[dict[str, Any]] = []
-        polls = 0
-        # Until the group join assigns partitions, an empty poll is not
-        # "caught up": the broker delays a new group's first join (3 s default).
-        join_deadline = time.monotonic() + _JOIN_WAIT_S
-        while len(records) < limit and polls < 5:
-            got = 0
-            for row in consumer.poll_rows(
-                max_records=min(limit - len(records), 500),
-                timeout_ms=800,
-            ):
-                records.append(row)
-                got += 1
-                if len(records) >= limit:
-                    break
-            if consumer.has_assignment():
-                polls += 1
-            elif time.monotonic() < join_deadline:
-                continue
-            if got == 0:
-                break
+        records = _poll_until_caught_up(consumer, topic_name, limit)
 
         # Poison (undecodable) messages go to the rejected-rows channel with
         # their broker coordinates — never land as all-NULL destination rows.

@@ -32,7 +32,7 @@ def parse_debezium_envelope(payload: dict[str, Any] | str) -> DebeziumChange | N
     """Parse a Debezium JSON envelope (payload or full message)."""
     if isinstance(payload, str):
         try:
-            payload = json_loads_exact(payload)
+            payload = json_loads_exact(payload, keep_literals=True)
         except json.JSONDecodeError:
             return None
     if not isinstance(payload, dict):
@@ -98,7 +98,7 @@ def kafka_value_to_row(
         return _kafka_row(parsed, meta=meta)
     if isinstance(parsed, str):
         try:
-            obj = json_loads_exact(parsed)
+            obj = json_loads_exact(parsed, keep_literals=True)
         except json.JSONDecodeError:
             return _kafka_row({"_kafka_value": parsed}, meta=meta, poison="non-JSON Kafka message")
         if isinstance(obj, dict):
@@ -359,6 +359,30 @@ class KafkaDebeziumConsumer:
             self._pending_offsets.get(key, self._start.get(key, 0)) >= stop
             for key, stop in self._end.items()
         )
+
+    def caught_up(self) -> bool:
+        """True once every assigned partition is read up to the run's frozen end.
+
+        An empty poll right after the group join is not the end of the log:
+        the join can land at the end of a poll, before the consumer looked up
+        its start offsets or fetched anything (D151). The fetch position is
+        the authority, so control records and compacted gaps past the last
+        delivered message do not keep a finished read polling.
+        """
+        if self._consumer is None or not self._end:
+            return False
+        from kafka import TopicPartition  # type: ignore
+
+        for key, stop in self._end.items():
+            if self._pending_offsets.get(key, self._start.get(key, 0)) >= stop:
+                continue
+            try:
+                position = self._consumer.position(TopicPartition(*key), timeout_ms=250)
+            except Exception:  # noqa: BLE001 - an unknown position is "not yet"
+                return False
+            if position is None or int(position) < stop:
+                return False
+        return True
 
     def poll_rows(self, *, max_records: int = 500, timeout_ms: int = 1000) -> Iterator[dict[str, Any]]:
         """Yield destination rows — Debezium envelopes preferred, else JSON passthrough."""
