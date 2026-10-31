@@ -18,14 +18,17 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
+from services.audit_chain_keys import hmac_hex, keyring, legacy_login_secret, signing_key
 from services.audit_chain_link import (
     append_with_retry,
     canonical_record,
     ensure_chain_indexes,
+    file_store_lock,
     file_workspace_tip,
     is_duplicate_position,
     link_fields,
     mongo_workspace_tip,
+    position_id,
     workspace_key,
 )
 from services.log_redaction import (
@@ -120,24 +123,17 @@ def _mongo_collection():
 
 
 def _hmac_event_hash(event: dict[str, Any], secret: bytes) -> str:
-    import hashlib
-    import hmac as hmac_mod
-
-    body_for_hash = {k: v for k, v in event.items() if k not in ("_id", "event_hash")}
-    canon = json.dumps(body_for_hash, sort_keys=True, separators=(",", ":"), default=json_default)
-    return hmac_mod.new(secret, canon.encode("utf-8"), hashlib.sha256).hexdigest()
+    return hmac_hex(event, secret)
 
 
 def _platform_hmac_secret() -> bytes:
-    try:
-        from services.auth_service import _token_secret
+    """The login secret. Chain records written before D221 were signed with it.
 
-        raw = _token_secret()
-        return raw if isinstance(raw, bytes) else str(raw or "").encode("utf-8")
-    except Exception:
-        from services.brand_env import getenv_brand
-
-        return (getenv_brand("AUTH_SECRET", "") or "dev-only-not-for-production").encode("utf-8")
+    New chain records are signed with the chain's own key
+    (``services.audit_chain_keys.signing_key``); this stays for verifying
+    those older records and for callers outside the chain.
+    """
+    return legacy_login_secret()
 
 
 def _latest_record_from_file() -> dict[str, Any] | None:
@@ -236,12 +232,17 @@ def append_audit_event(
 ) -> dict[str, Any]:
     """Record a redacted audit event to MongoDB (preferred) or a local JSONL file.
 
-    Events are hash-chained with HMAC-SHA256 (keyed by the platform auth secret):
-    ``prev_hash`` + ``event_hash`` over a canonical payload. Plain SHA-256 chains
-    can be reforged by anyone with store write access; HMAC requires the secret.
+    Events are hash-chained with HMAC-SHA256 under the chain's own key
+    (``DATAFLOW_AUDIT_HMAC_KEY``; each record names it in ``key_id``), never the
+    login secret: ``prev_hash`` + ``event_hash`` over a canonical payload. Plain
+    SHA-256 chains can be reforged by anyone with store write access; HMAC
+    requires the key.
 
-    Process-local ``_APPEND_LOCK`` serializes writers to reduce chain forks. Cross-
-    process/replica races still need a single authoritative store (Mongo preferred).
+    Writers in separate processes are serialized by the store, not by
+    ``_APPEND_LOCK`` (which only covers this process's threads): in Mongo the
+    record's ``_id`` is its chain position, so a second writer to the same
+    position gets a duplicate-key error and re-links; the file store holds an
+    ``flock`` across read-tip-and-append (D221).
     """
     from services.audit_coverage import current_request_audit
 
@@ -293,7 +294,7 @@ def append_audit_event(
     with _APPEND_LOCK:
         state: dict[str, Any] = {"stage": "chain_read", "event": None}
         try:
-            secret = _platform_hmac_secret()
+            key_id, secret, _key_source = signing_key()
 
             state["stage"] = "redact"
             redacted = _redact(details or {})
@@ -336,8 +337,12 @@ def append_audit_event(
                         if value is not None
                     },
                     **link_fields(tip=tip, workspace_tip=ws_tip),
+                    "key_id": key_id,
                     "hash_alg": "HMAC-SHA256",
                 }
+                # The position is the _id: unique in every Mongo collection, so
+                # two processes can never both take it (D221).
+                event["_id"] = position_id(event["chain_seq"])
                 state["event"] = event
                 # Hash exactly what the store will hand back (R7).
                 event = canonical_record(event)
@@ -346,7 +351,11 @@ def append_audit_event(
                 state["stage"] = "persist"
                 return event
 
-            persisted = append_with_retry(build, _persist_event)
+            if coll is None:
+                with file_store_lock(STORE_PATH):
+                    persisted = append_with_retry(build, _persist_event)
+            else:
+                persisted = append_with_retry(build, _persist_event)
         except Exception as exc:
             event = state["event"]
             try:
@@ -406,13 +415,14 @@ def _persist_event(event: dict[str, Any]) -> dict[str, Any]:
                 fallback="file",
                 error=exc,
             )
-            file_tip, file_ws_tip = _file_tips(workspace_key(event))
-            event.update(link_fields(tip=file_tip, workspace_tip=file_ws_tip))
-            event["event_hash"] = _hmac_event_hash(
-                event,
-                _platform_hmac_secret(),
-            )
-            return persist_to_file()
+            with file_store_lock(STORE_PATH):
+                file_tip, file_ws_tip = _file_tips(workspace_key(event))
+                event.update(link_fields(tip=file_tip, workspace_tip=file_ws_tip))
+                key = keyring().get(str(event.get("key_id") or ""))
+                if key is None:
+                    event["key_id"], key, _source = signing_key()
+                event["event_hash"] = _hmac_event_hash(event, key)
+                return persist_to_file()
 
     return persist_to_file()
 
@@ -865,16 +875,17 @@ def purge_expired_audit_events(
                 legal_hold=legal_hold,
                 dry_run=dry_run,
             )
-        return _purge_file_events(
-            cutoff=(
-                now_utc - timedelta(days=retention_days)
-                if cutoff is not None and not legal_hold
-                else None
-            ),
-            retention_days=retention_days,
-            legal_hold=legal_hold,
-            dry_run=dry_run,
-        )
+        with file_store_lock(STORE_PATH):
+            return _purge_file_events(
+                cutoff=(
+                    now_utc - timedelta(days=retention_days)
+                    if cutoff is not None and not legal_hold
+                    else None
+                ),
+                retention_days=retention_days,
+                legal_hold=legal_hold,
+                dry_run=dry_run,
+            )
 
 
 def _purge_file_events(

@@ -44,22 +44,20 @@ class ReanchorError(ValueError):
     """The re-anchor request cannot be carried out as asked."""
 
 
-def _secret() -> bytes:
-    from services.audit_log import _platform_hmac_secret
+def _hmac(payload: dict[str, Any], key: bytes) -> str:
+    from services.audit_chain_keys import hmac_hex
 
-    return _platform_hmac_secret()
-
-
-def _hmac(payload: dict[str, Any]) -> str:
-    from services.audit_log import _hmac_event_hash
-
-    return _hmac_event_hash(payload, _secret())
+    return hmac_hex(payload, key)
 
 
-def content_seal(event: dict[str, Any]) -> str:
-    """HMAC over the record's whole current content, its stored hash included."""
+def content_seal(event: dict[str, Any], key: bytes) -> str:
+    """HMAC over the record's whole current content, its stored hash included.
+
+    Sealed under the manifest's key: the chain key (and its ``key_id``) for
+    manifests written since D221, the login secret for older ones.
+    """
     body = {k: v for k, v in event.items() if k not in ("_id", "event_hash")}
-    return _hmac({"record": body, "sealed_event_hash": event.get("event_hash")})
+    return _hmac({"record": body, "sealed_event_hash": event.get("event_hash")}, key)
 
 
 def _collection() -> Any | None:
@@ -80,14 +78,18 @@ def _file_path():
     return data_dir() / _STORE
 
 
-def _signed(manifest: dict[str, Any]) -> bool:
-    claimed = str(manifest.get("manifest_hmac") or "")
-    body = {k: v for k, v in manifest.items() if k not in ("manifest_hmac", "_id")}
-    return bool(claimed) and claimed == _hmac(body)
+def _signing_key_of(manifest: dict[str, Any]) -> bytes | None:
+    from services.audit_chain_keys import verify_side_record
+
+    return verify_side_record(manifest, field="manifest_hmac")
 
 
 def list_manifests() -> list[dict[str, Any]]:
-    """Signed re-anchor manifests. An unsigned or edited one excuses nothing."""
+    """Signed re-anchor manifests, each with the key that verified it (``_key``).
+
+    An unsigned or edited one, or one signed under a key no longer held, excuses
+    nothing.
+    """
     raw: list[dict[str, Any]] = []
     coll = _collection()
     if coll is not None:
@@ -105,7 +107,12 @@ def list_manifests() -> list[dict[str, Any]]:
                     continue
                 if isinstance(entry, dict):
                     raw.append(entry)
-    return [m for m in raw if _signed(m)]
+    out: list[dict[str, Any]] = []
+    for manifest in raw:
+        key = _signing_key_of(manifest)
+        if key is not None:
+            out.append({**manifest, "_key": key})
+    return out
 
 
 def _prev_of(events: list[dict[str, Any]], index: int) -> str | None:
@@ -131,7 +138,7 @@ def split_reanchored(
         event = events[index] if 0 <= index < len(events) else None
         if hit and event is not None:
             entry, manifest = hit
-            same = content_seal(event) == entry.get("content_seal")
+            same = content_seal(event, manifest["_key"]) == entry.get("content_seal")
             if same and finding["kind"] in _LINK_KINDS:
                 same = _prev_of(events, index) == entry.get("prev_seen")
             if same:
@@ -169,8 +176,11 @@ def reanchor_chain(
     if unknown or not causes:
         raise ReanchorError(f"accept_causes must be drawn from {', '.join(CAUSES)}")
 
+    from services.audit_chain_keys import sign, signing_key
+
     report = verify_chain(limit=MAX_VERIFY_EVENTS)
     events = read_chain(limit=MAX_VERIFY_EVENTS)
+    key_id, key, _source = signing_key()
     accepted = [f for f in report["findings"] if f.get("cause") in causes]
     skipped = len(report["findings"]) - len(accepted)
     entries = [
@@ -179,7 +189,7 @@ def reanchor_chain(
             "kind": f["kind"],
             "cause": f["cause"],
             "workspace_id": f.get("workspace_id"),
-            "content_seal": content_seal(events[f["index"]]),
+            "content_seal": content_seal(events[f["index"]], key),
             "prev_seen": _prev_of(events, f["index"]),
         }
         for f in accepted
@@ -231,8 +241,11 @@ def reanchor_chain(
     )
     manifest["manifest_sha256"] = digest
     manifest["receipt_event_id"] = str(receipt.get("id") or "")
-    manifest["manifest_hmac"] = _hmac(manifest)
-    _store(manifest)
+    manifest["key_id"] = key_id
+    signed = sign(manifest, field="manifest_hmac")
+    if signed["key_id"] != key_id:  # the key changed mid-call: seals would not match
+        raise ReanchorError("The audit chain key changed during the re-anchor; retry.")
+    _store(signed)
     return {**plan, "receipt_event_id": manifest["receipt_event_id"], "manifest_sha256": digest}
 
 
