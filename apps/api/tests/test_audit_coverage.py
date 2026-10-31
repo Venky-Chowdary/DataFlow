@@ -127,7 +127,20 @@ def test_sensitive_routes_record_actor_status_and_correlation_without_secrets(
     )
 
 
-def test_failed_sensitive_handler_is_recorded_with_its_status(audit_app):
+def test_failed_sensitive_handler_is_recorded_with_its_status(audit_app, monkeypatch):
+    # SSO is deployment-wide: only a platform admin's request reaches the
+    # handler (round 10). The key's creator is made one so the handler's own
+    # 400 is what gets recorded.
+    from src.services import auth_service
+
+    real_lookup = auth_service.lookup_user
+    monkeypatch.setattr(
+        auth_service,
+        "lookup_user",
+        lambda email: {"email": email, "role": "admin"}
+        if email == audit_app["actor"]
+        else real_lookup(email),
+    )
     response = audit_app["client"].patch(
         "/api/v1/workspace/sso/not-a-provider",
         headers=_headers(audit_app),

@@ -29,7 +29,12 @@ def test_dry_run_then_purge_removes_only_old_finished_jobs_in_this_workspace(ent
     ws = ent.workspace("Retention")
     other = ent.workspace("Retention other")
     admin = ent.member(email="retention-admin-r8@example.com", workspace_id=ws, role="admin")
-    assert admin.patch("/api/v1/workspace/settings", json={"retention_days": 30}).status_code == 200
+    # retention_days lives in the deployment-wide General document: the
+    # platform admin sets it (round 10); the workspace admin purges its jobs.
+    assert admin.patch("/api/v1/workspace/settings", json={"retention_days": 30}).status_code == 403
+    assert ent.admin.patch(
+        "/api/v1/workspace/settings", json={"retention_days": 30}, headers={"X-Workspace-Id": ws}
+    ).status_code == 200
     settings = admin.get("/api/v1/workspace/settings").json()
     assert settings["retention_enforcement"]["scheduled"] is False
 
