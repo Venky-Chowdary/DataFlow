@@ -255,6 +255,7 @@
   "POST /api/v1/copilot/confirm": "ai.use",
   "POST /api/v1/copilot/train": "workspace.manage",
   "POST /api/v1/fidelity/check": "job.run",
+  "POST /api/v1/iam/api-keys/repair-rotated": "iam.manage",
   "POST /api/v1/iam/api-keys/{key_id}/rotate": "iam.manage",
   "POST /api/v1/iam/scim-token": "iam.manage",
   "POST /api/v1/iam/service-accounts": "iam.manage",
