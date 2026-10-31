@@ -1539,9 +1539,12 @@ def update_schedule(
         # "every 15 minutes" on an America/New_York schedule did that
         # (QA TC50 / RT5-09). Name a zone to change it.
         zone_after = current_tz if spec.timezone_assumed else spec.timezone
-        same_clock = (spec.interval, spec.cron, zone_after) == (
-            current_interval,
-            current_cron,
+        from services.schedule_store import canonicalize_cadence
+
+        # Compare the stored form: a cron is stored as interval "cron", so the
+        # spoken spec's preset beside the same cron is the same cadence.
+        same_clock = (*canonicalize_cadence(spec.interval, spec.cron), zone_after) == (
+            *canonicalize_cadence(current_interval, current_cron),
             current_tz,
         )
         if not same_clock:

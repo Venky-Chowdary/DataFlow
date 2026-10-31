@@ -33,6 +33,9 @@ CAUSE_SLOT_QUOTA = "replication_slot_quota"
 CAUSE_PRIVILEGE = "insufficient_privilege"
 CAUSE_DRIVER_MISSING = "driver_missing"
 CAUSE_SOURCE_UNREACHABLE = "source_unreachable"
+# The source answered but a statement waited past its timeout — creating a
+# logical slot waits for every transaction open at that moment.
+CAUSE_SOURCE_BUSY = "source_busy"
 # A MongoDB delete event carries only ``documentKey`` (``_id``). When the
 # pipeline's identity is a business key, the deleted row cannot be named without
 # the collection's pre-image, so the delete is unappliable — never droppable.
@@ -119,6 +122,12 @@ _UNREACHABLE_MARKERS = (
     "no route to host",
     "server closed the connection unexpectedly",
 )
+_BUSY_MARKERS = (
+    "statement timeout",
+    "lock timeout",
+    "lock_timeout",
+    "lock wait timeout exceeded",
+)
 _NOT_CONFIGURED_MARKERS = (
     "wal_level",
     "logical decoding",
@@ -156,6 +165,8 @@ def classify_log_capture_failure(
         cause = CAUSE_SLOT_QUOTA
     elif any(m in low for m in _PRIVILEGE_MARKERS):
         cause = CAUSE_PRIVILEGE
+    elif any(m in low for m in _BUSY_MARKERS):
+        cause = CAUSE_SOURCE_BUSY
     elif any(m in low for m in _UNREACHABLE_MARKERS):
         cause = CAUSE_SOURCE_UNREACHABLE
     elif "no module named" in low or "importerror" in low:
@@ -323,6 +334,20 @@ def _remedy(dialect: str, cause: str, *, collection: str = "") -> str:
         return (
             "Enable the source's change log to capture DELETEs; until then this "
             "stream carries inserts/updates by cursor only."
+        )
+    if cause == CAUSE_SOURCE_BUSY:
+        if d.startswith("postgres"):
+            return (
+                "The source was busy: attaching a logical slot waits for every "
+                "transaction open at that moment. Find long-running ones with "
+                "SELECT pid, xact_start, state, query FROM pg_stat_activity "
+                "WHERE backend_xid IS NOT NULL ORDER BY xact_start; let them "
+                "finish (or end idle ones), then re-run — nothing was degraded."
+            )
+        return (
+            "The source was busy and a statement timed out waiting for other "
+            "sessions (see pg_stat_activity / the processlist); re-run once they "
+            "finish — nothing was degraded."
         )
     if cause == CAUSE_SOURCE_UNREACHABLE:
         return "Restore connectivity to the source, then re-run — the stream is not degraded, it is unread."

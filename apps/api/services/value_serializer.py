@@ -1440,6 +1440,11 @@ def python_document_from_bson(value: Any) -> Any:
         return [python_document_from_bson(v) for v in value]
     if _is_decimal128(value):
         return value.to_decimal()
+    if isinstance(value, int) and not isinstance(value, bool) and type(value) is not int:
+        # ``bson.int64.Int64`` (every integer above 2**31 read back) is an int
+        # subclass. JSON accepts it, but representers keyed on the exact type
+        # (YAML's safe dumper) do not, and the export was lost to a 500 (SC11).
+        return int(value)
     if value is None or isinstance(value, _BSON_NATIVE_SCALARS):
         return value
     if type(value).__module__.split(".")[0] == "bson":

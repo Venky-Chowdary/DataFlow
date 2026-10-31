@@ -23,7 +23,11 @@ from services.cron_schedule import CronError, validate_cron
 from services.cron_schedule import next_run as _cron_next_run
 from services.ops_events import emit_event
 from services.platform_config import data_dir
-from services.value_serializer import json_default
+from services.value_serializer import (
+    bson_safe_document,
+    json_default,
+    python_document_from_bson,
+)
 from services.workspace_filter import WorkspaceFilter
 
 logger = logging.getLogger(__name__)
@@ -572,7 +576,13 @@ def canonicalize_cadence(interval: str, cron: str) -> tuple[str, str]:
     step = uneven_minute_step(cron)
     if step is not None:
         return f"every_{step}m", ""
-    return (interval or "").strip(), (cron or "").strip()
+    cron = (cron or "").strip()
+    if cron:
+        # The expression *is* the cadence. Keeping a preset beside it (the
+        # create default ``daily``) showed ``interval_preset: daily`` for a
+        # ``*/2`` cron (QA SC8 / D11).
+        return "cron", cron
+    return (interval or "").strip(), cron
 
 
 def compute_next_run(
@@ -679,11 +689,21 @@ def _load_mongo(svc) -> list[PipelineSchedule]:
     # resurrects every schedule the blob still holds.
     if doc.get("superseded_by"):
         return []
-    return [PipelineSchedule.from_dict(s) for s in doc.get("schedules", [])]
+    return [
+        PipelineSchedule.from_dict(python_document_from_bson(s))
+        for s in doc.get("schedules", [])
+    ]
 
 
 def _schedule_from_doc(doc: Mapping[str, Any]) -> PipelineSchedule:
-    return PipelineSchedule.from_dict({**doc, "id": doc.get("id") or str(doc.get("_id"))})
+    """A schedule in plain Python values, whatever BSON carrier stored it.
+
+    MongoDB hands back ``Int64`` for any integer above 2**31 and ``Decimal128``
+    for an exact decimal. Leaving them on the schedule reached every surface
+    that renders it; the GitOps YAML export failed with a 500 (QA SC11).
+    """
+    plain = python_document_from_bson(dict(doc))
+    return PipelineSchedule.from_dict({**plain, "id": plain.get("id") or str(doc.get("_id"))})
 
 
 # Three-way merge base. Every caller does load → mutate one schedule → save the
@@ -785,7 +805,7 @@ def _save_one_mongo(coll: Any, sched: PipelineSchedule) -> None:
             try:
                 result = coll.find_one_and_update(
                     {"_id": sched.id},
-                    {"$set": {**payload, "version": 1}},
+                    {"$set": {**bson_safe_document(payload), "version": 1}},
                     upsert=True,
                     return_document=True,
                 )
@@ -836,7 +856,8 @@ def _save_one_mongo(coll: Any, sched: PipelineSchedule) -> None:
         )
         result = coll.find_one_and_update(
             filt,
-            {"$set": {**delta, "version": current_version + 1}},
+            # A Decimal read back from Decimal128 goes back as Decimal128.
+            {"$set": {**bson_safe_document(delta), "version": current_version + 1}},
             return_document=True,
         )
         if result is not None:
@@ -845,7 +866,9 @@ def _save_one_mongo(coll: Any, sched: PipelineSchedule) -> None:
     # Contended past every retry: apply only this caller's fields, never the
     # whole stale snapshot, and never resurrect a deleted document.
     if delta:
-        coll.update_one({"_id": sched.id}, {"$set": delta, "$inc": {"version": 1}})
+        coll.update_one(
+            {"_id": sched.id}, {"$set": bson_safe_document(delta), "$inc": {"version": 1}}
+        )
 
 
 def _save_mongo(
@@ -939,6 +962,19 @@ def list_schedules(workspace_filter: WorkspaceFilter | None = None) -> list[Pipe
 def get_schedule(schedule_id: str) -> PipelineSchedule | None:
     for s in _load_all():
         if s.id == schedule_id:
+            return s
+    return None
+
+
+def schedule_for_job(job_id: str) -> PipelineSchedule | None:
+    """The schedule that dispatched ``job_id`` (its claim, last job or history)."""
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    for s in _load_all():
+        if jid in (str(s.running_job_id or ""), str(s.last_job_id or "")):
+            return s
+        if any(str(r.get("job_id") or "") == jid for r in (s.run_history or []) if isinstance(r, dict)):
             return s
     return None
 
@@ -1175,18 +1211,21 @@ def find_studio_replay_target(
     dest_connector_id: str,
     source_table: str,
     dest_table: str,
+    *,
+    workspace_id: str = "",
 ) -> PipelineSchedule | None:
     """The parked draft Studio must persist mappings onto — not a new pipeline.
 
-    Prefer an explicit schedule id (inbox → Studio). Otherwise a unique
-    empty-mapping draft on the same route, then a unique empty draft on the
-    same connector pair (operator changed ``sample`` to a real table).
-    Ambiguous matches return None so we do not hijack a sibling draft.
+    An explicit schedule id (inbox → Studio) wins. Otherwise only a unique
+    empty-mapping draft on the *same route* (same connectors, same source and
+    destination tables, same workspace) is the same pipeline.
+
+    A "same connector pair, any tables" fallback used to stand in as well, so
+    a plain API create could silently rewrite an unrelated draft on the same
+    connectors and answer 201 with that draft's id (QA round 11, SC5 side
+    bug). Ambiguous matches return None so a sibling draft is never hijacked.
     """
-    from services.schedule_mapping_contract import (
-        is_empty_mapping_finding,
-        persisted_mapping_rows,
-    )
+    from services.schedule_mapping_contract import persisted_mapping_rows
 
     sid = str(schedule_id or "").strip()
     if sid:
@@ -1197,39 +1236,18 @@ def find_studio_replay_target(
     dst = str(dest_connector_id or "").strip()
     if not src or not dst:
         return None
-    all_schedules = list_schedules()
+    ws = str(workspace_id or "")
     same_route = [
         s
-        for s in all_schedules
+        for s in list_schedules()
         if str(s.source_connector_id or "") == src
         and str(s.dest_connector_id or "") == dst
         and str(s.source_table or "") == str(source_table or "")
         and str(s.dest_table or "") == str(dest_table or "")
+        and str(s.workspace_id or "") == ws
         and not persisted_mapping_rows(s.mappings)
     ]
-    if len(same_route) == 1:
-        return same_route[0]
-    if len(same_route) > 1:
-        return None
-    same_pair_empty = [
-        s
-        for s in all_schedules
-        if str(s.source_connector_id or "") == src
-        and str(s.dest_connector_id or "") == dst
-        and not persisted_mapping_rows(s.mappings)
-    ]
-    if len(same_pair_empty) != 1:
-        return None
-    candidate = same_pair_empty[0]
-    request = candidate.approval_request if isinstance(candidate.approval_request, dict) else {}
-    if request and is_empty_mapping_finding(
-        str(request.get("code") or ""),
-        str(request.get("finding") or ""),
-    ):
-        return candidate
-    # Never-run New schedule draft on this pair — Studio Schedule should
-    # persist onto it rather than leave a second paused empty row.
-    return candidate
+    return same_route[0] if len(same_route) == 1 else None
 
 
 def schedule_name_key(name: str) -> str:
@@ -1380,7 +1398,23 @@ def _assert_schedule_connectors_allowed(data: Mapping[str, Any], *, require_taps
     )
 
 
-def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
+def create_schedule(
+    data: dict[str, Any],
+    *,
+    refuse_empty_enable: bool = False,
+    warnings: list[str] | None = None,
+) -> PipelineSchedule:
+    """Create one schedule.
+
+    ``refuse_empty_enable`` — the caller asked for ``enabled: true`` in so many
+    words (REST create). A schedule without mappings cannot be armed, so that
+    request is refused with ``EMPTY_MAPPING_CONTRACT`` instead of being stored
+    disabled behind the caller's back (QA SC7). Without it, an empty-mapping
+    schedule is saved as a disabled draft and says so in ``warnings``.
+
+    ``warnings`` collects what the caller must be told but that does not refuse
+    the save (draft saved disabled; source table unverifiable).
+    """
     _assert_schedule_connectors_allowed(data, require_taps=bool(data.get("enabled", True)))
     payload = dict(data)
     from services.duplicate_policy import validate_schedule_file_policy
@@ -1412,6 +1446,21 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
     from services.schedule_mapping_contract import persisted_mapping_rows
 
     rows = persisted_mapping_rows(payload.get("mappings"))
+    if refuse_empty_enable and bool(payload.get("enabled", True)) and not rows:
+        from services.api_errors import ApiError
+        from services.schedule_mapping_contract import (
+            EMPTY_MAPPING_CODE,
+            EMPTY_MAPPING_CORRECTIVE,
+            EMPTY_MAPPING_REFUSAL,
+        )
+
+        raise ApiError(
+            422,
+            EMPTY_MAPPING_CODE,
+            f"enabled: true was requested, but {EMPTY_MAPPING_REFUSAL[0].lower()}"
+            f"{EMPTY_MAPPING_REFUSAL[1:]} Send enabled: false to save a draft. "
+            f"{EMPTY_MAPPING_CORRECTIVE}",
+        )
     if rows:
         target = find_studio_replay_target(
             replay_id,
@@ -1419,7 +1468,12 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
             str(payload.get("dest_connector_id") or ""),
             str(payload.get("source_table") or ""),
             str(payload.get("dest_table") or ""),
+            workspace_id=str(payload.get("workspace_id") or ""),
         )
+        if target and (target.workspace_id or "") != str(payload.get("workspace_id") or ""):
+            raise PermissionError(
+                "replay_schedule_id names a schedule in another workspace"
+            )
         if target:
             patch = {k: v for k, v in payload.items() if k != "id"}
             patch["interval"] = interval
@@ -1446,6 +1500,12 @@ def create_schedule(data: dict[str, Any]) -> PipelineSchedule:
         )
     elif rows:
         enabled_note = ""
+    if enabled_note and warnings is not None:
+        warnings.append(enabled_note)
+    from services.schedule_source_probe import assert_schedule_source
+
+    # Outside the name lock: a catalog round trip must not serialise saves.
+    assert_schedule_source(payload, armed=enabled, warnings=warnings)
     with _NAME_LOCK:
         _assert_unique_schedule_name_locked(str(payload.get("name") or ""))
         schedules = _load_all()
@@ -1523,7 +1583,7 @@ def resolve_machine_interval(data: dict[str, Any], stored: str) -> str:
     raw_preset = data.get("interval_preset")
     if raw_preset is not None and str(raw_preset).strip():
         preset = str(raw_preset).strip().lower()
-        if preset not in INTERVALS and rolling_minutes(preset) is None:
+        if preset not in INTERVALS and preset != "cron" and rolling_minutes(preset) is None:
             raise ValueError(f"Invalid interval: {raw_preset}")
         return preset
     if "interval" not in data:
@@ -1547,7 +1607,8 @@ def project_operator_cadence(data: dict[str, Any]) -> dict[str, Any]:
     cron = str(data.get("cron") or "").strip()
     label = str(data.get("cadence_label") or "")
     out = dict(data)
-    out["interval_preset"] = preset
+    # A row stored before cron became its own preset still reads as cron.
+    out["interval_preset"] = "cron" if cron and rolling_minutes(preset) is None else preset
     if cron and label:
         out["interval"] = label
     elif rolling_minutes(preset) is not None and label:
@@ -1555,8 +1616,35 @@ def project_operator_cadence(data: dict[str, Any]) -> dict[str, Any]:
     return out
 
 
-def update_schedule(schedule_id: str, data: dict[str, Any]) -> PipelineSchedule | None:
-    """Update one schedule. The name lock covers the uniqueness check and the write."""
+_SOURCE_KEYS = frozenset(
+    {"source_connector_id", "source_table", "source_read_mode", "procedure_call", "source_query"}
+)
+
+
+def update_schedule(
+    schedule_id: str,
+    data: dict[str, Any],
+    *,
+    warnings: list[str] | None = None,
+) -> PipelineSchedule | None:
+    """Update one schedule. The name lock covers the uniqueness check and the write.
+
+    Enabling a schedule, or pointing an enabled one at another source, asks the
+    source catalog first (QA SC5) — outside the lock, so a slow source cannot
+    stall every other schedule write.
+    """
+    current = get_schedule(schedule_id)
+    if current is not None:
+        merged = {**current.to_dict(), **data}
+        armed = bool(merged.get("enabled"))
+        enabling = armed and not current.enabled
+        source_changed = any(
+            key in data and data[key] != getattr(current, key, None) for key in _SOURCE_KEYS
+        )
+        if enabling or source_changed:
+            from services.schedule_source_probe import assert_schedule_source
+
+            assert_schedule_source(merged, armed=armed, warnings=warnings)
     with _NAME_LOCK:
         return _update_schedule_locked(schedule_id, data)
 
@@ -1661,6 +1749,9 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
             _assert_dest_pipeline_ownership(merged, exclude_id=schedule_id)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
+        if persisted_mapping_rows(merged.get("mappings")):
+            # "Created disabled: no mappings" is history once mappings exist.
+            merged["enabled_note"] = ""
         if any(key in data for key in ("duplicate_policy", "in_file_dedupe", "primary_key")):
             from services.duplicate_policy import validate_schedule_file_policy
 

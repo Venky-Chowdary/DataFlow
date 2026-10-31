@@ -1551,10 +1551,12 @@ def test_list_summary_exposes_advanced_write_knobs():
 
 
 def test_five_minute_cron_is_the_interval_operators_read(temp_store):
-    """DEF-A-014 / DEF-B-006. GET says every 5 minutes. The runner token stays daily.
+    """DEF-A-014 / DEF-B-006. GET says every 5 minutes; the stored token is cron.
 
     Echoing the label on update must not raise Invalid interval and must not
     retarget the preset. interval_preset is how an edit changes the token.
+    A cron is its own preset (QA round 11 SC8): ``daily`` beside ``*/5`` read
+    as a daily schedule on the status panel.
     """
     from src.routers.schedules_router import ScheduleResponse
 
@@ -1571,23 +1573,24 @@ def test_five_minute_cron_is_the_interval_operators_read(temp_store):
     })
     body = ScheduleResponse.from_schedule(sched)
     assert body.interval == "Every 5 minutes UTC"
-    assert body.interval_preset == "daily"
+    assert body.interval_preset == "cron"
     assert body.cadence_label == "Every 5 minutes UTC"
-    assert store.get_schedule(sched.id).interval == "daily"
+    assert store.get_schedule(sched.id).interval == "cron"
     echoed = store.update_schedule(
         sched.id,
         {"interval": "Every 5 minutes UTC", "cron": "*/5 * * * *"},
     )
     assert echoed is not None
-    assert echoed.interval == "daily"
+    assert echoed.interval == "cron"
     assert echoed.cron == "*/5 * * * *"
+    # A preset edit needs the cron cleared — the form sends cron "" with it.
     moved = store.update_schedule(
         sched.id,
-        {"interval_preset": "hourly", "interval": "Every 5 minutes UTC"},
+        {"interval_preset": "hourly", "interval": "Every 5 minutes UTC", "cron": ""},
     )
     assert moved is not None
     assert moved.interval == "hourly"
-    assert moved.cron == "*/5 * * * *"
+    assert moved.cron == ""
     with pytest.raises(ValueError, match="Invalid interval"):
         store.update_schedule(sched.id, {"interval": "fortnightly"})
 

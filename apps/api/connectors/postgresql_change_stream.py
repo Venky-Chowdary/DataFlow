@@ -96,6 +96,32 @@ def _create_logical_slot(cur: Any, slot_name: str, plugin: str) -> tuple[str | N
     return lsn, plugin
 
 
+def _slot_capacity_and_privilege(cur: Any) -> bool:
+    """True when the catalog proves this login may create one more logical slot.
+
+    Raises the server's own wording when the slot quota is exhausted (so the
+    refusal classifies as ``replication_slot_quota`` with its remedy). Returns
+    False when the privilege cannot be proven from the catalog — the caller
+    then asks the server with a real create.
+    """
+    cur.execute(
+        "SELECT current_setting('max_replication_slots')::int "
+        "- (SELECT count(*) FROM pg_replication_slots)"
+    )
+    free = cur.fetchone()
+    if free is not None and int(free[0]) <= 0:
+        raise RuntimeError(
+            "all replication slots are in use (max_replication_slots reached) — "
+            "no slot is free for this stream"
+        )
+    cur.execute(
+        "SELECT coalesce(bool_or(r.rolsuper OR r.rolreplication), false) "
+        "FROM pg_roles r WHERE pg_has_role(current_user, r.oid, 'MEMBER')"
+    )
+    row = cur.fetchone()
+    return bool(row and row[0])
+
+
 def _peek_slot_has_change(
     cur: Any,
     *,
@@ -835,15 +861,24 @@ class PostgreSqlChangeStreamCdc:
                     exists = cur.fetchone() is not None
                     if exists:
                         return True
-                    test_slot = f"{self.slot_name}_avail_test"[:63]
-                    plugin = self.output_plugin or "pgoutput"
-                    # Guard against logical-replication probes hanging when the
-                    # server is not really ready (e.g. lock_timeout / statement
-                    # timeout disabled by session guards).
-                    cur.execute("SET LOCAL statement_timeout = '5000ms'")
-                    _lsn, used = _create_logical_slot(cur, test_slot, plugin)
-                    self.output_plugin = used
-                    cur.execute("SELECT pg_drop_replication_slot(%s)", (test_slot,))
+                    # Can this login create the slot? Answered from the
+                    # catalog, without creating one. A throwaway probe slot
+                    # waited for every transaction open on the server, and
+                    # under its 5 s statement_timeout any write transaction
+                    # older than that failed the attach (QA round 11: "could
+                    # not attach: statement timeout"); the real slot then paid
+                    # the same snapshot wait a second time.
+                    if not _slot_capacity_and_privilege(cur):
+                        # Managed services grant replication through a role
+                        # the catalog cannot see (e.g. rds_replication): only
+                        # a real create can answer. The privilege check runs
+                        # before the snapshot wait, so this stays fast.
+                        test_slot = f"{self.slot_name}_avail_test"[:63]
+                        plugin = self.output_plugin or "pgoutput"
+                        cur.execute("SET LOCAL statement_timeout = '5000ms'")
+                        _lsn, used = _create_logical_slot(cur, test_slot, plugin)
+                        self.output_plugin = used
+                        cur.execute("SELECT pg_drop_replication_slot(%s)", (test_slot,))
                 conn.commit()
             return True
         except Exception as exc:

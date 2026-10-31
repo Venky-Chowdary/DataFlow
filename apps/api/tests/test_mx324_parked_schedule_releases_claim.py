@@ -134,6 +134,11 @@ def test_dispatch_exception_after_claim_releases_it_immediately(tmp_path, monkey
     from services import schedule_store as store
     from services.connector_store import create_connector
 
+    import sqlite3
+
+    # The source table exists: a save on a missing one is refused (QA round 11 SC5).
+    with sqlite3.connect(tmp_path / "s.sqlite") as db:
+        db.execute("CREATE TABLE s (id INTEGER)")
     src = create_connector({"name": "S2", "type": "sqlite", "role": "source",
                             "connection_string": f"sqlite:///{tmp_path / 's.sqlite'}",
                             "workspace_id": ""})
