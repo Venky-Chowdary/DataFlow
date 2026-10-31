@@ -388,8 +388,14 @@ of two shapes, and the plan (`destination_contract`), the preflight warning
 
 | Layout | Physical table | Gate-8 |
 |--------|----------------|--------|
-| `table` | The typed table the Map shows: one column per mapped field with its type, SQL NULL as NULL. Written and verified as PostgreSQL. | Full PostgreSQL read-back |
-| `document` | `id TEXT` (the source key), `content TEXT` (embedded text), `embedding vector(n)`, `metadata JSONB` (every mapped value, SQL NULL as JSON null), `source_id`, `chunk_index`, `created_at`. The embedded text follows one rule for every row: `text_template`, else `content_column` (NULL / '' gives empty content and a NULL vector), else the whole row as JSON. | Every source value re-read and found in `metadata` |
+| `table` (default for a new table) | The typed table the Map shows: one column per mapped field with its type, SQL NULL as NULL, plus `embedding vector(n)` after them (and `embedding_text TEXT` when a `text_template` builds the text). Written and verified as PostgreSQL. | Full PostgreSQL read-back of every source column |
+| `document` (opt-in) | `id TEXT` (the source key), `content TEXT` (embedded text), `embedding vector(n)`, `metadata JSONB` (every mapped value, SQL NULL as JSON null), `source_id`, `chunk_index`, `created_at`. | Every source value re-read and found in `metadata` |
+
+Both layouts embed the same text, from one declared rule for every row:
+`text_template`, else `content_column` (NULL / '' gives no vector), else
+precomputed vectors in `embedding_column`, else the mapped row as canonical
+JSON. `n` comes from `embedding_dimensions` or the embedding model; the plan
+and the preflight warning name it.
 
 How the layout is chosen, first match wins:
 
@@ -397,14 +403,12 @@ How the layout is chosen, first match wins:
    `start_transfer` argument) or in the saved connector's `extra`.
 2. An existing table keeps its shape: a table with `id, content, embedding,
    metadata, source_id, chunk_index` stays a document table; any other existing
-   table is typed. Tables DataFlow created before this change keep working on
-   run 2.
-3. A new table: `document` (production behaviour), or `table` when
-   `DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT=1` (default off).
-
-With the flag off, each new table that would have been typed is recorded once
-an hour as the audit event `pgvector.would_create_typed_table` (`table`,
-`today`, `with_flag`).
+   table is typed (its embedding column is filled only if it already has one).
+   Tables DataFlow created before this change keep working on run 2.
+3. A new table: `table` (owner decision, round 8). Round 6's
+   `DATAFLOW_PGVECTOR_TYPED_TABLE_DEFAULT` flag is removed; to keep building
+   document tables for new destinations, set `vector_layout: document` in the
+   connector's `extra`.
 
 Document tables created before this change: run 2 re-embeds documents whose
 text changes under the single rule (the old per-row pick of the longest text

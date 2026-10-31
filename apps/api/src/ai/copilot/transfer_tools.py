@@ -1345,7 +1345,8 @@ def plan_transfer(
     )
 
     contract = plan_destination_contract(
-        pgvector_layout, dst_conn, mappings, {r["name"]: r["inferred_type"] for r in src_rows}
+        pgvector_layout, dst_conn, mappings, {r["name"]: r["inferred_type"] for r in src_rows},
+        dst_info=dst_info,
     )
     if contract:
         preflight = attach_contract_to_preflight(preflight, contract)

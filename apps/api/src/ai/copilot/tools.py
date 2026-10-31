@@ -711,7 +711,8 @@ TOOL_DEFINITIONS: list[dict] = [
                         "pgvector destinations only (D209): 'table' creates the "
                         "typed table the Map shows; 'document' is an embedding/RAG "
                         "load (id, content, embedding, metadata). Omitted: the "
-                        "saved connector's choice, else the existing table's shape."
+                        "saved connector's choice, else the existing table's shape, "
+                        "else a typed table with an embedding column."
                     ),
                 },
                 "ddl_acknowledgement": {
@@ -874,7 +875,8 @@ TOOL_DEFINITIONS: list[dict] = [
                         "pgvector destinations only (D209): 'table' creates the "
                         "typed table the Map shows; 'document' is an embedding/RAG "
                         "load (id, content, embedding, metadata). Omitted: the "
-                        "saved connector's choice, else the existing table's shape."
+                        "saved connector's choice, else the existing table's shape, "
+                        "else a typed table with an embedding column."
                     ),
                 },
             },
