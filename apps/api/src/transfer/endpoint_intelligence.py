@@ -35,6 +35,7 @@ def _list_sqlalchemy_tables(
     A failed catalog read is not an empty inventory. Callers must not report
     "connected, no tables" when the connection itself failed.
     """
+    from connectors.generic_sql import connection_options
     from services.dialect_profiles import normalize_schema
     from services.schema_introspect import introspect_schema
 
@@ -60,6 +61,8 @@ def _list_sqlalchemy_tables(
             # dial target (D4).
             catalog_type=str(cfg.get("type") or fmt or ""),
             table="",
+            # TLS trust / service name / driver keywords the writer dials with.
+            **connection_options(cfg),
         )
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
         logger.warning(

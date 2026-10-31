@@ -727,29 +727,26 @@ CONNECTION_OPTION_KEYS: tuple[str, ...] = (
 
 
 def connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
-    """The connection-affecting extras in ``cfg`` (see :data:`CONNECTION_OPTION_KEYS`)."""
+    """The connection-affecting extras in ``cfg`` (see :data:`CONNECTION_OPTION_KEYS`).
+
+    A saved connector keeps them under ``extra`` (the Connectors form saves
+    TLS trust there); a top-level value wins. Reading only the top level
+    dropped ``trust_server_certificate`` on every path that built its cfg from
+    the saved record (introspect, sample, preflight read), so ODBC Driver 18
+    refused a self-signed SQL Server while the writer, which flattened
+    ``extra``, connected (QA round 11).
+    """
+    nested = cfg.get("extra") if isinstance(cfg.get("extra"), Mapping) else {}
     return {
-        key: cfg[key]
+        key: cfg[key] if cfg.get(key) not in (None, "") else nested[key]
         for key in CONNECTION_OPTION_KEYS
-        if cfg.get(key) not in (None, "")
+        if cfg.get(key) not in (None, "") or nested.get(key) not in (None, "")
     }
 
 
 def with_connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
-    """Top-level handshake keywords, including those nested under ``extra``.
-
-    Dest COUNT, uniqueness, and engine pooling all key off top-level TLS /
-    SID / driver fields. Leaving ``trust_server_certificate`` inside
-    ``endpoint.extra`` made the writer and dest COUNT open a different
-    handshake than Validate (ODBC Driver 18 verify-or-fail vs operator trust).
-    """
-    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    opts = connection_options({**extra, **dict(cfg)})
-    if not opts:
-        return dict(cfg)
-    merged = dict(cfg)
-    merged.update(opts)
-    return merged
+    """``cfg`` with its handshake keywords, nested ``extra`` ones included, top level."""
+    return {**dict(cfg), **connection_options(cfg)}
 
 
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
