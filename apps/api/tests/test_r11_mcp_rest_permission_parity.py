@@ -72,6 +72,20 @@ STRICTER: dict[str, str] = {
     ),
 }
 
+#: Tools whose permission follows the role model while the REST route's RBAC
+#: rule is narrower — each admits exactly the listed extra roles and no other.
+#: Job lifecycle: ``job.manage`` is the role model's "cancel/retry/resume"
+#: permission (operators hold it, and Pilot confirms for them by design —
+#: tests/test_pilot_lifecycle_tools.py), but ``/connectors/jobs/{id}/...``
+#: falls through to the ``/api/v1/connectors/`` prefix rule (connector.write).
+#: Not a privilege-escalation class (the operator role exists to run jobs);
+#: recorded for an owner decision: give the REST routes job.manage, or narrow
+#: Pilot. A NEW divergence fails the test.
+ROLE_MODEL_WIDER_THAN_REST: dict[str, set[str]] = {
+    tool: {"operator"}
+    for tool in ("cancel_job", "retry_job", "rerun_job", "resume_job", "replay_quarantine")
+}
+
 #: Pilot-only mutations: no REST twin, confirmed through /copilot/confirm.
 PILOT_ONLY_MUTATION: dict[str, str] = {
     "start_dataset_transfer": "start_transfer",
@@ -122,6 +136,10 @@ def test_tool_admits_exactly_the_roles_its_rest_twin_admits(tool):
     assert isinstance(rest, str), (tool, method, path, rest)
     permission, _effect = tool_requirement(tool)
     tool_roles, rest_roles = _roles(permission), _roles(rest)
+    if tool in ROLE_MODEL_WIDER_THAN_REST:
+        assert tool_roles - rest_roles == ROLE_MODEL_WIDER_THAN_REST[tool], (tool, permission, rest)
+        assert rest_roles <= tool_roles, (tool, permission, rest)
+        return
     assert tool_roles <= rest_roles, (
         f"{tool} admits {sorted(tool_roles - rest_roles)} that {method} {path} refuses "
         f"(tool {permission}, REST {rest})"

@@ -13,13 +13,15 @@ Two things close it:
 * **Access** (:func:`orphan_key_manageable`): besides platform admins, the key's
   creator — or an admin of the workspace being looked at, when the creator is a
   member of it — sees a workspace-less key in Settings -> API keys and revokes
-  it with the normal DELETE. Signed-in people only: a key never manages
+  it with the normal DELETE. A platform admin's deliberately platform-wide key
+  is not an orphan, and no platform admin's key is handed to workspace admins:
+  only platform admins and the creator manage those. Signed-in people only: a key never manages
   another workspace-less key. Rotation stays refused (it would mint a second
   credential with no workspace).
 * **Repair** (:func:`run_orphaned_api_key_migration`): once per deployment, at
   startup, every live workspace-less key gets a workspace back — through its
   rotation chain first (``integrations_store.repair_rotated_api_keys``), else
-  the creator's sole workspace. A key whose owner is ambiguous (creator in
+  the creator's sole workspace (platform-wide keys are skipped). A key whose owner is ambiguous (creator in
   several workspaces, or none) is left as it is and stays revocable as above
   and visible to platform admins. Idempotent; audited
   (``iam.api_key.orphan_migration``) whenever it changes or leaves something.
@@ -46,6 +48,35 @@ def _norm(email: Any) -> str:
     return str(email or "").strip().lower()
 
 
+def is_platform_key(key: dict[str, Any]) -> bool:
+    """A platform admin's ``admin`` key with no workspace: deliberately platform-wide.
+
+    The same rule the request gate and the key list's ``access`` label use
+    (``tenant_scope.actor_is_unrestricted``). Such a key is not an orphan: it
+    stays the platform admins' (and its creator's), and is never bound to a
+    workspace by the repair.
+    """
+    from services.integrations_store import resolve_stored_api_key_role
+    from services.tenant_scope import actor_is_unrestricted
+
+    return bool(actor_is_unrestricted({
+        "email": key.get("created_by") or "",
+        "role": resolve_stored_api_key_role(key.get("role")),
+        "auth_kind": "api_key",
+        "workspace_id": "",
+    }))
+
+
+def _is_platform_admin(email: str) -> bool:
+    from src.services.auth_service import lookup_user
+
+    try:
+        account = lookup_user(email)
+    except Exception:  # noqa: BLE001 - unreadable: treat as platform-administered
+        return True
+    return bool(account) and str(account.get("role") or "").strip().lower() == "admin"
+
+
 def orphan_key_manageable(request: Any, key: dict[str, Any]) -> bool:
     """May this signed-in person list and revoke this workspace-less key?"""
     if str(key.get("workspace_id") or "").strip():
@@ -59,6 +90,10 @@ def orphan_key_manageable(request: Any, key: dict[str, Any]) -> bool:
         return False
     if caller == creator:
         return True
+    if is_platform_key(key) or _is_platform_admin(creator):
+        # A platform admin's keys are platform-administered: workspace admins
+        # of workspaces the platform admin happens to belong to do not get them.
+        return False
     from services.effective_principal import request_principal
     from services.team_store import get_workspace_role
     from services.workspace_access import tenant_scope
@@ -152,7 +187,7 @@ def migrate_orphaned_api_keys(*, dry_run: bool = False) -> dict[str, Any]:
     for record in store.load_api_key_records():
         if record.get("workspace_id") or store._is_revoked(record) or record["id"] in repaired:
             continue
-        if store._key_expired(record):
+        if store._key_expired(record) or is_platform_key(record):
             continue
         creator = str(record.get("created_by") or "")
         workspace_id = _creator_sole_workspace(creator)

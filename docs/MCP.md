@@ -27,6 +27,15 @@ The canonical role/scope table is
 `datawrap:<permission>` or the bare permission shown here; role grants are
 defined by `services.rbac`.
 
+Each tool requires the same permission as the REST route that performs the
+same operation (`tests/test_r11_mcp_rest_permission_parity.py` walks every
+tool). The role a call runs under is the one the REST gate resolves for the
+addressed workspace (`X-Workspace-Id`): the workspace membership role, and for
+an API key its own role capped at its creator's current role — never the raw
+platform label. `test_connector` additionally refuses connector types that run
+executables on the API host (`singer_tap`) unless the caller is the platform
+administrator, exactly as `POST /connectors/saved/{id}/test` does.
+
 | Tool | Required permission scope | Effect |
 | --- | --- | --- |
 | `aggregate_data` | `query.use` | `read` |
@@ -34,7 +43,7 @@ defined by `services.rbac`.
 | `analyze_result` | `query.use` | `read` |
 | `brief_workspace` | `workspace.read` | `read` |
 | `cancel_job` | `job.manage` | `mutate` |
-| `clear_cursor_resnapshot` | `job.manage` | `mutate` |
+| `clear_cursor_resnapshot` | `workspace.manage` | `mutate` |
 | `compare_connectors` | `connector.read` | `read` |
 | `compare_datasets` | `workspace.read` | `read` |
 | `confirm_action` | `workspace.read` | `read` |
@@ -87,7 +96,7 @@ defined by `services.rbac`.
 | `start_dataset_transfer` | `job.run` | `mutate` |
 | `start_transfer` | `job.run` | `mutate` |
 | `start_transfer_studio` | `workspace.read` | `read` |
-| `test_connector` | `connector.read` | `read` |
+| `test_connector` | `connector.write` | `read` |
 | `update_connector` | `connector.write` | `mutate` |
 | `update_schedule` | `schedule.manage` | `mutate` |
 

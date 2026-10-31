@@ -112,11 +112,19 @@ def _seed_qa_orphan(world) -> tuple[dict, dict]:
     return source, {**orphan, "key": raw}
 
 
+def _stored_workspace(key_id: str) -> str:
+    from services import integrations_store
+
+    record = next(r for r in integrations_store.load_api_key_records() if r["id"] == key_id)
+    return str(record.get("workspace_id") or "")
+
+
 def test_orphaned_rotated_keys_are_repaired_listed_and_revocable(world):
     _source, orphan = _seed_qa_orphan(world)
     assert _alive(world, orphan["key"])
-    assert _listed(world, orphan["id"]) is None
-    assert world.owner.delete(f"/api/v1/workspace/api-keys/{orphan['id']}").status_code == 404
+    # K1 (round 11): the orphan's creator (the owner who rotated it) sees it in
+    # Settings -> API keys even before any repair, and could revoke it there.
+    assert _listed(world, orphan["id"]) is not None
 
     # Workspace admins cannot run the deployment-wide repair.
     assert world.owner.post("/api/v1/iam/api-keys/repair-rotated", json={}).status_code == 403
@@ -126,11 +134,12 @@ def test_orphaned_rotated_keys_are_repaired_listed_and_revocable(world):
     assert dry.json()["dry_run"] is True
     assert [r["id"] for r in dry.json()["repairs"]] == [orphan["id"]]
     assert dry.json()["repairs"][0]["workspace_id"] == world.workspace_id
-    assert _listed(world, orphan["id"]) is None  # dry run changed nothing
+    assert _stored_workspace(orphan["id"]) == ""  # dry run changed nothing
 
     applied = world.root.post("/api/v1/iam/api-keys/repair-rotated", json={"dry_run": False})
     assert applied.status_code == 200, applied.text
     assert world.audit("iam.api_key.repair_rotated")
+    assert _stored_workspace(orphan["id"]) == world.workspace_id
     assert _listed(world, orphan["id"]) is not None
     assert world.owner.delete(f"/api/v1/workspace/api-keys/{orphan['id']}").status_code == 200
     assert not _alive(world, orphan["key"])

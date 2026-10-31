@@ -100,12 +100,16 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     # Testing a connection dials the connector from the API host and records
     # the result, so it is connector.write like its REST route (RB6); it
     # stages nothing, so it stays a READ effect for the chat loop.
+    # Job lifecycle stays job.manage, the role model's "cancel/retry/resume"
+    # permission (operators hold it); the REST routes fall through to
+    # connector.write — a recorded divergence awaiting an owner decision
+    # (ROLE_MODEL_WIDER_THAN_REST in the parity test).
     "test_connector": (Permission.CONNECTOR_WRITE, READ),
-    "cancel_job": (Permission.CONNECTOR_WRITE, MUTATE),
-    "retry_job": (Permission.CONNECTOR_WRITE, MUTATE),
-    "rerun_job": (Permission.CONNECTOR_WRITE, MUTATE),
-    "resume_job": (Permission.CONNECTOR_WRITE, MUTATE),
-    "replay_quarantine": (Permission.CONNECTOR_WRITE, MUTATE),
+    "cancel_job": (Permission.JOB_MANAGE, MUTATE),
+    "retry_job": (Permission.JOB_MANAGE, MUTATE),
+    "rerun_job": (Permission.JOB_MANAGE, MUTATE),
+    "resume_job": (Permission.JOB_MANAGE, MUTATE),
+    "replay_quarantine": (Permission.JOB_MANAGE, MUTATE),
     "repair_cdc_drift": (Permission.JOB_MANAGE, MUTATE),
     "delete_connector": (Permission.CONNECTOR_DELETE, MUTATE),
     "update_connector": (Permission.CONNECTOR_WRITE, MUTATE),
@@ -128,11 +132,11 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "create_connector": Permission.CONNECTOR_WRITE,
     "run_schedule": Permission.SCHEDULE_MANAGE,
     "create_schedule": Permission.SCHEDULE_MANAGE,
-    "cancel_job": Permission.CONNECTOR_WRITE,
-    "retry_job": Permission.CONNECTOR_WRITE,
-    "rerun_job": Permission.CONNECTOR_WRITE,
-    "resume_job": Permission.CONNECTOR_WRITE,
-    "replay_quarantine": Permission.CONNECTOR_WRITE,
+    "cancel_job": Permission.JOB_MANAGE,
+    "retry_job": Permission.JOB_MANAGE,
+    "rerun_job": Permission.JOB_MANAGE,
+    "resume_job": Permission.JOB_MANAGE,
+    "replay_quarantine": Permission.JOB_MANAGE,
     "repair_cdc_drift": Permission.JOB_MANAGE,
     "delete_connector": Permission.CONNECTOR_DELETE,
     "update_connector": Permission.CONNECTOR_WRITE,
