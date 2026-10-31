@@ -624,17 +624,34 @@ def test_generic_sql_float_refuses_empty():
         _to_sa_value("  ", "FLOAT64", sa.Float(), "duckdb", "duckdb")
 
 
-def test_oracle_dense_upsert_empty_promotes_to_sparse_sentinel():
-    """Dense Oracle upsert must not SET col=NULL for '' — route via DF_MISSING."""
-    from services.value_serializer import DF_MISSING_SENTINEL, is_missing_sentinel
+def test_oracle_dense_upsert_empty_binds_null_with_the_row():
+    """D210 (owner decision 4): '' in an Oracle upsert is written as NULL.
 
-    # Mirror the promote logic used in generic_sql write path.
-    row = (1, "", "keep")
-    promoted = tuple(
-        DF_MISSING_SENTINEL if (isinstance(v, str) and v == "") else v for v in row
+    It used to be promoted to a sparse "omit" that left the cell out of the
+    MERGE SET, so the old value stayed. The bundle now keeps the row dense and
+    the text cell binds as NULL alongside the rest of the row.
+    """
+    import sqlalchemy as sa
+
+    from connectors.generic_sql import _generic_bind_tuple_rows
+
+    rows, dicts, _nums = _generic_bind_tuple_rows(
+        [(1, "", "keep")],
+        [1],
+        target_cols=["id", "note", "tag"],
+        dest_types={"id": "integer", "note": "VARCHAR2(60)", "tag": "VARCHAR2(60)"},
+        sa_col_types={"id": sa.Integer(), "note": sa.String(60), "tag": sa.String(60)},
+        dialect_name="oracle",
+        db_type="oracle",
+        rejected_details=[],
+        policy="write_quarantine",
+        mappings=[],
     )
-    assert is_missing_sentinel(promoted[1])
-    assert promoted[0] == 1 and promoted[2] == "keep"
+    assert rows == [(1, "", "keep")]
+    assert dicts[0]["note"] is None and dicts[0]["tag"] == "keep"
+    import connectors.generic_sql as gs
+
+    assert not hasattr(gs, "_generic_promote_oracle_empties")
 
 
 def test_overlay_promotes_specialty_inet_from_map_varchar():

@@ -511,9 +511,14 @@ def test_long_int8_varbyte_national_wave23():
 
     assert is_national_string_carrier("NATIONAL CHARACTER VARYING(50)") is True
     assert is_lossy_coercion("NATIONAL CHARACTER VARYING(50)", "VARCHAR(50)") is True
-    assert create_new_mapping_target_type("CHAR(10)", "sqlserver") == "CHAR(10)"
-    assert national_charset_would_invent("CHAR(10)", "NCHAR(10)") is True
-    assert is_lossy_coercion("CHAR(10)", "NCHAR(10)") is True
+    # D212: an unbound source can hold non-ASCII text, so SQL Server gets the
+    # national carrier; a SQL Server code-page CHAR source keeps its polarity.
+    assert create_new_mapping_target_type("CHAR(10)", "sqlserver") == "NCHAR(10)"
+    assert national_charset_would_invent("CHAR(10)", "NCHAR(10)") is False
+    assert national_charset_would_invent("CHAR(10)", "NCHAR(10)", source_db="sqlserver") is True
+    assert create_new_mapping_target_type(
+        "CHAR(10)", "sqlserver", source_db="sqlserver"
+    ).startswith("CHAR(10)")
 
     assert create_new_mapping_target_type("SYSNAME", "sqlserver") == "NVARCHAR(128)"
     assert normalize_logical_type("Nullable(Int32)") == "integer"

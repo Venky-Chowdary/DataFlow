@@ -66,8 +66,9 @@ def test_source_column_unicode_capacity(
         ("mysql", "varchar(32) CHARACTER SET latin1", "VARCHAR(32)"),
         ("mysql", "char(10) CHARACTER SET latin1", "CHAR(10)"),
         ("postgresql", "varchar(64)", "NVARCHAR(64)"),
-        ("oracle", "varchar2(32)", "VARCHAR(32)"),
-        ("mysql", "varchar(32)", "VARCHAR(32)"),
+        # D212: no declared single-byte charset -> Unicode-capable -> national.
+        ("oracle", "varchar2(32)", "NVARCHAR(32)"),
+        ("mysql", "varchar(32)", "NVARCHAR(32)"),
         ("mysql", "int", "BIGINT"),
     ],
 )
