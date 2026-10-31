@@ -683,8 +683,11 @@ def resolve_create_fidelity_plan(
         if keys:
             quoted = ", ".join(_q(col, dest) for col in keys)
             constraints.append(f"PRIMARY KEY ({quoted})")
+            from services.created_key_collation import key_collation_suffix
+
             for col in keys:
-                suffixes[col] = ["NOT NULL"]
+                suffixes[col] = [*key_collation_suffix(col, target_columns, target_types, dest),
+                                 "NOT NULL"]
                 not_null.append(col)
             reason = (
                 "Source schema catalog unavailable. Operator upsert key "
