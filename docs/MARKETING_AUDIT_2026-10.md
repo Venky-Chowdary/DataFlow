@@ -166,7 +166,7 @@ apps/web/src` returns one code comment, `components/transfer/ValidateDashboard.t
 | Layers: Isolate / Encrypt / Reside / Prove | partly wrong | as Trust above | Rewritten to code-true wording |
 | Badges | partly wrong | as Enterprise | Adjusted |
 | Agents "never receive raw destination passwords" | current | `docs/MCP.md` | Kept (positive form) |
-| Missing: audit chain, signed webhooks, session timeout, SCIM, API-key caps, per-workspace PII key | missing | §2 | Added a "Controls you can switch on" block reusing the layer grid |
+| Missing: audit chain, signed webhooks, session timeout, SCIM, API-key caps, per-workspace PII key | missing | §2 | Added a "Controls your admins switch on" block reusing the layer grid |
 
 ### 3.6 Connectors (`#/integrations`)
 
@@ -188,6 +188,8 @@ apps/web/src` returns one code comment, `components/transfer/ValidateDashboard.t
 | Block "What we will not claim on the call" | negative | — | Replaced by "What you will see on the call" |
 | Table "Advanced where Fivetran, Airbyte, Informatica, and Databricks stop" | negative / unverifiable | — | Replaced with Datawrap-only "What the pilot proves" table |
 | Response time "one business day" | current (owner-owned) | — | Kept |
+| Hero note "No SOC 2 certificate is claimed." | negative | — | Removed |
+| Form destination chips Redshift, Databricks | wrong (implies support) | matrix:377-378 | Iceberg / S3 and Oracle |
 
 ### 3.8 Product and solution pages (`#/product/*`, `#/solutions/*`)
 
@@ -225,6 +227,7 @@ apps/web/src` returns one code comment, `components/transfer/ValidateDashboard.t
 | `seo.ts` `DEFAULT_DESCRIPTION`, `landing` | stale | — | Rewritten |
 | `index.html` description / OG / Twitter "9 preflight gates … G8 reconcile proof" | stale | — | Rewritten |
 | `index.html` JSON-LD block ends `]},` | **wrong — invalid JSON** (trailing comma, crawlers drop the whole graph) | `apps/web/index.html` JSON-LD line | Fixed; featureList updated |
+| Runtime JSON-LD description (`web/lib/usePageMeta.ts`) | stale | — | Rewritten |
 | `sitemap.xml` | current | lists every marketing route | `lastmod` not used; unchanged |
 | `robots.txt` | current | — | Unchanged |
 
@@ -268,3 +271,15 @@ These stay off every page. None of them is mentioned on a page, not even as a
 6. **Legal pages.** Privacy and Terms say "Last updated August 2026" and
    mention "default 90 days" retention; the retention purge now exists
    (`job_retention.py`). Legal should confirm the default before any change.
+
+## 6. Verification of this branch
+
+- Guards: `web/lib/provenEvidence.test.ts` now pins the policy — no planned
+  connector, MFA, IP allowlist or zero-loss absolute on a public page, no
+  disclaimer copy, and `MARKETING_STACK` names only transfer-ready drivers.
+- Screenshot baselines: the only `toHaveScreenshot` baselines are
+  `apps/web/e2e/wizard-parity.spec.ts-snapshots`, `wizard.spec.ts-snapshots`
+  and `studio-next.spec.ts-snapshots` (wizard, login, query, settings,
+  canvas). None renders a marketing page or a module this branch changed,
+  so none needs regenerating. `e2e/prod-smoke.spec.ts:23` asserts the hero
+  heading "Move any schema", which is unchanged.
