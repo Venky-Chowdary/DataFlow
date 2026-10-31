@@ -636,8 +636,17 @@ async def _add_timing_header_response(request: Request, call_next):
         )
 
     path = request.url.path
+    named_admin = False
+    if request.method != "GET" and path.startswith("/api/v1/"):
+        try:
+            from services.admin_audit import record_unhandled_admin_change
+
+            named_admin = record_unhandled_admin_change(request, response.status_code)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Admin audit suppressed: %s", exc, exc_info=exc)
     if (
         request.method != "GET"
+        and not named_admin
         and path.startswith("/api/v1/")
         and "/health" not in path
         and (tracker is None or tracker.get("named", 0) == 0)

@@ -93,6 +93,15 @@ SECURITY_EVENTS: dict[str, str] = {
     "email.event.received": "An email delivery webhook event was received.",
 }
 
+def _register_admin_events() -> None:
+    from services.admin_audit import ADMIN_EVENTS
+
+    for name, description in ADMIN_EVENTS.items():
+        SECURITY_EVENTS.setdefault(name, description)
+
+
+_register_admin_events()
+
 _REQUEST_PRINCIPAL: ContextVar[dict[str, str] | None] = ContextVar(
     "audit_request_principal", default=None
 )
@@ -128,12 +137,14 @@ def note_workspace_header(request: Request) -> None:
 
         if not requested_workspace_id(request):
             return
-        authorized_workspace_id(request)
+        authorized = authorized_workspace_id(request)
         tracker = current_request_audit()
         if tracker is not None:
             tracker["workspace_header_rejected"] = bool(
                 getattr(request.state, "workspace_header_rejected", False)
             )
+            # The workspace an admin event in this request belongs to.
+            tracker["workspace_id"] = str(authorized or "")
     except Exception:
         return
 

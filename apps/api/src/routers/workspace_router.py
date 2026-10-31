@@ -23,6 +23,7 @@ from services.team_store import (
     can_write_workspace,
     get_workspace,
 )
+from services.admin_audit import record_admin_change
 from services.workspace_access import tenant_scope
 from services.tenant_store import (
     Tenant,
@@ -182,7 +183,6 @@ async def get_settings():
 
 @router.patch("/settings")
 async def patch_settings(body: WorkspaceSettingsBody, request: Request):
-    from services.audit_log import append_audit_event
     from services.workspace_store import update_workspace_settings
 
     from services.workspace_store import InvalidTimezone
@@ -199,11 +199,10 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
         )
     except InvalidTimezone as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    append_audit_event(
-        action="workspace.settings.update",
-        resource="/workspace/settings",
-        actor=actor,
-        level="info",
+    record_admin_change(
+        request,
+        "workspace.settings.update",
+        target="workspace_settings",
         details={
             "org_name": updated["org_name"],
             "timezone": updated["timezone"],
@@ -225,7 +224,6 @@ async def get_sso():
 
 @router.patch("/sso/{sso_type}")
 async def patch_sso(sso_type: str, body: SsoConfigBody, request: Request):
-    from services.audit_log import append_audit_event
     from services.integrations_store import update_sso_config, validate_sso_config
 
     from services.integrations_store import SsoConfigRefused
@@ -241,12 +239,16 @@ async def patch_sso(sso_type: str, body: SsoConfigBody, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     check = validate_sso_config(sso_type)
-    append_audit_event(
-        action="workspace.sso.update",
-        resource=f"/workspace/sso/{sso_type}",
-        actor=_actor(request),
-        level="info",
-        details={"type": sso_type, "enabled": updated.get("enabled"), "ready": check["ready"]},
+    record_admin_change(
+        request,
+        "workspace.sso.update",
+        target=sso_type,
+        details={
+            "type": sso_type,
+            "enabled": updated.get("enabled"),
+            "ready": check["ready"],
+            "changed_fields": sorted(body.model_dump(exclude_none=True).keys()),
+        },
     )
     return {"config": updated, "validation": check}
 
@@ -269,7 +271,6 @@ async def get_ai_providers():
 def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
     # Sync on purpose: the live key check does blocking network I/O, so FastAPI
     # must run this in a worker thread instead of on the event loop.
-    from services.audit_log import append_audit_event
     from services.integrations_store import update_ai_provider
 
     payload = body.model_dump(exclude_none=True)
@@ -292,11 +293,10 @@ def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
-    append_audit_event(
-        action="workspace.ai_provider.update",
-        resource=f"/workspace/ai-providers/{provider}",
-        actor=_actor(request),
-        level="info",
+    record_admin_change(
+        request,
+        "workspace.ai_provider.update",
+        target=provider,
         details={"provider": provider, "enabled": updated.get("enabled"), "model": updated.get("model")},
     )
     return updated
@@ -305,7 +305,6 @@ def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
 @router.delete("/ai-providers/{provider}/key")
 def delete_ai_provider_key_route(provider: str, request: Request):
     """Forget the saved key; on auto Pilot returns to the local engine."""
-    from services.audit_log import append_audit_event
     from services.integrations_store import delete_ai_provider_key
 
     from ..ai.llm.provider import clear_auth_failures
@@ -316,11 +315,10 @@ def delete_ai_provider_key_route(provider: str, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     clear_auth_failures()
 
-    append_audit_event(
-        action="workspace.ai_provider.key_removed",
-        resource=f"/workspace/ai-providers/{provider}",
-        actor=_actor(request),
-        level="info",
+    record_admin_change(
+        request,
+        "workspace.ai_provider.key_removed",
+        target=provider,
         details={"provider": provider},
     )
     return updated
@@ -369,7 +367,6 @@ async def get_pilot_engine():
 
 @router.patch("/pilot-engine")
 async def patch_pilot_engine(body: PilotEngineBody, request: Request):
-    from services.audit_log import append_audit_event
     from services.integrations_store import set_pilot_engine_preference
 
     from ..ai.llm.provider import pilot_engine_decision
@@ -380,11 +377,10 @@ async def patch_pilot_engine(body: PilotEngineBody, request: Request):
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     decision = pilot_engine_decision()
-    append_audit_event(
-        action="workspace.pilot_engine.update",
-        resource="/workspace/pilot-engine",
-        actor=_actor(request),
-        level="info",
+    record_admin_change(
+        request,
+        "workspace.pilot_engine.update",
+        target="pilot_engine",
         details={"preference": saved, "engine": decision["engine"], "source": decision["source"]},
     )
     return {"preference": saved, **decision}
@@ -454,18 +450,16 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
 
 @router.delete("/api-keys/{key_id}")
 async def delete_api_key(key_id: str, request: Request):
-    from services.audit_log import append_audit_event
     from services.integrations_store import list_api_keys, revoke_api_key
 
     if not any(
         k["id"] == key_id and _own_workspace_key(request, k) for k in list_api_keys()
     ) or not revoke_api_key(key_id):
         raise HTTPException(status_code=404, detail="API key not found")
-    append_audit_event(
-        action="workspace.api_key.revoke",
-        resource=f"/workspace/api-keys/{key_id}",
-        actor=_actor(request),
-        level="warn",
+    record_admin_change(
+        request,
+        "workspace.api_key.revoke",
+        target=key_id,
         details={"id": key_id},
     )
     return {"ok": True}
