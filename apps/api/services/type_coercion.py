@@ -447,7 +447,9 @@ def assess_create_new_type_risk(
             observe_numeric_samples,
         )
 
-        ieee = ieee_float_create_new_risk(observe_numeric_samples(samples))
+        ieee = ieee_float_create_new_risk(
+            observe_numeric_samples(samples), target_type=tgt, dest_db=db
+        )
         if ieee:
             risks.append(ieee)
 

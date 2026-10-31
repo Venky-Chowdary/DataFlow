@@ -108,6 +108,38 @@ def numeric_keys(
     return out
 
 
+_TRUE_SPELLINGS = frozenset({"1", "true", "t", "yes", "y"})
+_FALSE_SPELLINGS = frozenset({"0", "false", "f", "no", "n"})
+
+
+def _canon_bool(value: Any) -> str:
+    """A boolean field read as 0/1 (MySQL/MariaDB TINYINT(1), BIT(1)) equals its JSON bool."""
+    if value is None or isinstance(value, bool):
+        return _canon(value)
+    if isinstance(value, (bytes, bytearray)) and len(value) == 1:
+        value = value[0]
+    if isinstance(value, (int, Decimal)) and value in (0, 1):
+        return _canon(bool(value))
+    text = str(value).strip().lower()
+    if text in _TRUE_SPELLINGS:
+        return _canon(True)
+    if text in _FALSE_SPELLINGS:
+        return _canon(False)
+    return _canon(value)
+
+
+def boolean_keys(mappings: list[dict[str, Any]]) -> set[str]:
+    """Metadata keys the plan declares BOOLEAN (the writer stores a JSON bool)."""
+    from services.type_system import normalize_logical_type
+
+    out: set[str] = set()
+    for m in mappings or []:
+        if normalize_logical_type(str(m.get("target_type") or "")) == "boolean":
+            source = str(m.get("source") or "").strip()
+            out.add(str(m.get("target") or source).strip())
+    return out
+
+
 def carried_fields(
     mappings: list[dict[str, Any]], options: Mapping[str, Any]
 ) -> list[tuple[str, str]]:
@@ -169,6 +201,7 @@ def compare_documents(
     documents: list[Mapping[str, Any]],
     fields: list[tuple[str, str]],
     numeric: set[str] | None = None,
+    boolean: set[str] | None = None,
 ) -> dict[str, Any]:
     """Every source row must be a document whose carried fields equal it.
 
@@ -178,16 +211,24 @@ def compare_documents(
     compare byte for byte, so '007' never equals '7'.
     """
     numeric = set(numeric or set())
+    boolean = set(boolean or set())
     for source, key in fields:
         if any(_is_number(m.get(key, m.get(source))) for m in documents) or any(
             _is_number(r.get(source)) for r in source_rows
         ):
             numeric.add(key)
+    # A declared BOOLEAN read as 0/1 is stored as a JSON bool: not a number.
+    numeric -= boolean
+
+    def canon_for(key: str) -> Callable[[Any], str]:
+        if key in boolean:
+            return _canon_bool
+        return _canon_numeric if key in numeric else _canon
 
     def dest_key(meta: Mapping[str, Any]) -> tuple[str, ...] | None:
         cells = []
         for source, key in fields:
-            canon = _canon_numeric if key in numeric else _canon
+            canon = canon_for(key)
             if key in meta:
                 cells.append(canon(meta[key]))
             elif source in meta:
@@ -201,7 +242,9 @@ def compare_documents(
     unmatched: list[dict[str, Any]] = []
     for row in source_rows:
         options = [
-            sorted(_canon_text_or_temporal(row.get(source), key in numeric))
+            [_canon_bool(row.get(source))]
+            if key in boolean
+            else sorted(_canon_text_or_temporal(row.get(source), key in numeric))
             for source, key in fields
         ]
         hit = next(
@@ -254,7 +297,9 @@ def verify_document_values(
     except Exception as exc:  # noqa: BLE001 — the count-only report stands
         logger.warning("pgvector document value proof unavailable: %s", type(exc).__name__)
         return None
-    return compare_documents(src, docs, fields, numeric_keys(mappings, source_schema))
+    return compare_documents(
+        src, docs, fields, numeric_keys(mappings, source_schema), boolean_keys(mappings)
+    )
 
 
 def gate8_document_report(
