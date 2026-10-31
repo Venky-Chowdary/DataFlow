@@ -10,6 +10,7 @@ from __future__ import annotations
 import ipaddress
 import logging
 import re
+from decimal import Decimal
 from typing import Any
 
 _logger = logging.getLogger(__name__)
@@ -153,6 +154,55 @@ def _is_phone(text: str) -> bool:
     return 7 <= sum(ch.isdigit() for ch in text) <= 15
 
 
+def _is_bare_digits(text: str) -> bool:
+    """``5551234567`` — a phone, an order number and a count all look like this."""
+    return text.isascii() and text.isdigit()
+
+
+#: Share of non-empty sampled values that must be phone-shaped before a column
+#: of bare digit runs counts as phones without a name hint (QA round 11).
+_BARE_PHONE_SHARE = 0.8
+
+_NUMERIC_TYPE_RE = re.compile(
+    r"^(?:big|small|tiny|medium)?int(?:eger)?\d*\b|^(?:numeric|decimal|number|"
+    r"float\d*|double|real|money|serial|bigserial|smallserial)\b|^u?int\d+$",
+    re.I,
+)
+
+
+def _numeric_column(raw_values: list[Any], declared_type: str = "") -> bool:
+    """The column holds numbers: a declared numeric type, or native numeric cells."""
+    if declared_type and _NUMERIC_TYPE_RE.match(declared_type.strip()):
+        return True
+    present = [v for v in raw_values if v is not None and not (isinstance(v, str) and not v.strip())]
+    return bool(present) and all(
+        isinstance(v, (int, float, Decimal)) and not isinstance(v, bool) for v in present
+    )
+
+
+def _bare_digits_may_be_phone(
+    name_hits: list[str], values: list[str], raw_values: list[Any], declared_type: str
+) -> bool:
+    """Whether a bare digit run in this column is evidence of a phone number.
+
+    A single 7-15 digit value used to flag the column, so counts
+    (``num_sequences = 12345678``) and order numbers read as phones and forced
+    a PII acknowledgment (QA round 11, RNAcentral). Bare digits now count only
+    under a phone-hinting name, or when most non-empty values look like a phone
+    and the column does not hold numbers. Formatted values (``+1 555 …``,
+    ``(555) 123-4567``) are phones on their own.
+    """
+    if "phone" in name_hits:
+        return True
+    if _numeric_column(raw_values, declared_type):
+        return False
+    non_empty = [v for v in values if v]
+    if not non_empty:
+        return False
+    phone_like = sum(1 for v in non_empty if _is_bare_digits(v) and _is_phone(v))
+    return phone_like / len(non_empty) >= _BARE_PHONE_SHARE
+
+
 def _mrz_check_digit(field: str) -> int:
     """ICAO 9303 check digit: weights 7-3-1, A-Z = 10..35, ``<`` = 0."""
     total = 0
@@ -189,7 +239,7 @@ def _is_passport_mrz(text: str) -> bool:
     )
 
 
-def _value_hits(values: list[str]) -> list[str]:
+def _value_hits(values: list[str], *, bare_digit_phones: bool = True) -> list[str]:
     hits: list[str] = []
     for value in values:
         text = str(value).strip()
@@ -210,7 +260,7 @@ def _value_hits(values: list[str]) -> list[str]:
             # the phone shape matches card numbers, so PCI wins precedence.
             if luhn_valid(text):
                 hits.append("pci_pan")
-            elif _is_phone(text):
+            elif _is_phone(text) and (bare_digit_phones or not _is_bare_digits(text)):
                 hits.append("phone")
             elif ACCOUNT_RE.match(text):
                 hits.append("account")
@@ -245,8 +295,12 @@ def detect_pii_fields(
     rows: list[dict[str, Any]] | None = None,
     *,
     sample_limit: int = 100,
+    column_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Identify columns that are likely sensitive or regulated.
+
+    ``column_types`` (source column → declared type) lets a numeric column's
+    digits be read as numbers even when the sample carries them as text.
 
     Returns a structured report with the sensitive fields, their detected risk
     categories, and a coarse risk level suitable for preflight gating.
@@ -260,8 +314,16 @@ def detect_pii_fields(
 
     for col in columns:
         name_hits = _field_hits(col)
-        sample_values = [str(row.get(col, "")).strip() for row in sample_rows if col in row]
-        value_hits = _value_hits(sample_values)
+        raw_values = [row.get(col) for row in sample_rows if col in row]
+        sample_values = [
+            "" if value is None else str(value).strip() for value in raw_values
+        ]
+        value_hits = _value_hits(
+            sample_values,
+            bare_digit_phones=_bare_digits_may_be_phone(
+                name_hits, sample_values, raw_values, str((column_types or {}).get(col) or "")
+            ),
+        )
         if value_hits and _temporal_column(col, sample_values):
             _logger.info(
                 "PII value pattern(s) %s on column %r ignored: every sampled value "
@@ -326,13 +388,16 @@ def score_compliance_risk(
     rows: list[dict[str, Any]] | None = None,
     *,
     sample_limit: int = 100,
+    column_types: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Score the compliance and privacy risk of a dataset.
 
     The score is deterministic and bounded to [0.0, 1.0]. The result is meant
     for preflight review, not for claiming legal compliance.
     """
-    pii_report = detect_pii_fields(columns, rows, sample_limit=sample_limit)
+    pii_report = detect_pii_fields(
+        columns, rows, sample_limit=sample_limit, column_types=column_types
+    )
     sensitive_fields = pii_report["sensitive_fields"]
     field_risk = pii_report["field_risk"]
 
