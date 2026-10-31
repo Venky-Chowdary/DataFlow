@@ -462,7 +462,8 @@ def test_production_check_counts_forks_and_foreign_keys_and_never_writes(chain):
 
     env = {
         **os.environ,
-        "MONGODB_URI": f"{MONGO_URI.rstrip('/')}/{chain['db_name']}",
+        # --db names the database; the URI may carry options (?authSource=...).
+        "MONGODB_URI": MONGO_URI,
         "DATAFLOW_AUDIT_HMAC_KEY": AUDIT_KEY,
         "DATAFLOW_AUTH_SECRET": LOGIN_SECRET,
         "PYTHONPATH": os.pathsep.join(
