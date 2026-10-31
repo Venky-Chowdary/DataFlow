@@ -1204,6 +1204,15 @@ TOOL_DEFINITIONS: list[dict] = [
                         "ones. Empty does not invent UTC. Offset-bearing values stay as written."
                     ),
                 },
+                "source_encoding": {
+                    "type": "string",
+                    "description": (
+                        "The file's text encoding (cp1251, cp1250, iso-8859-7, utf-16...). "
+                        "Declared, it is read strictly. Undeclared, a non-UTF-8 file is "
+                        "read as Windows-1252 with a preflight warning, or refused when "
+                        "its bytes cannot be Windows-1252."
+                    ),
+                },
                 "contract_id": {"type": "string"},
                 "require_signed_contract": {"type": "boolean"},
                 "schema_drift_acknowledged": {
@@ -4384,6 +4393,7 @@ class DataPilotTools:
         upsert_key: str = "",
         primary_key: str = "",
         dedupe_key: str = "",
+        source_encoding: str = "",
     ) -> ToolResult:
         from .dataset_transfer import stage_dataset_transfer
 
@@ -4404,6 +4414,7 @@ class DataPilotTools:
             upsert_key=upsert_key,
             primary_key=primary_key,
             dedupe_key=dedupe_key,
+            source_encoding=source_encoding,
         )
 
     def _create_schedule(

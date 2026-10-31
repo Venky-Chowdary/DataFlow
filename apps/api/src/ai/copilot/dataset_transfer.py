@@ -131,6 +131,7 @@ def stage_dataset_transfer(
     upsert_key: str = "",
     primary_key: str = "",
     dedupe_key: str = "",
+    source_encoding: str = "",
 ) -> Any:
     """Stage a file→connector transfer. Returns a tool result. Does not write."""
     tool = "start_dataset_transfer"
@@ -183,13 +184,18 @@ def stage_dataset_transfer(
         return _tool_result(tool, success=False, error=str(exc))
 
     from services.file_parser import FileParser
+    from services.read_options import ReadOptions
 
-    parsed = FileParser.parse(path.read_bytes(), path.name)
+    # A declared encoding is strict, and Execute reads with the same option.
+    encoding = (source_encoding or "").strip()
+    read_options = ReadOptions(encoding=encoding) if encoding else None
+    parsed = FileParser.parse(path.read_bytes(), path.name, read_options=read_options)
     if not getattr(parsed, "success", False) or not getattr(parsed, "columns", None):
+        why = str(getattr(parsed, "error", "") or "").strip()
         return _tool_result(
             tool,
             success=False,
-            error=f"Could not read {path.name}.",
+            error=f"Could not read {path.name}." + (f" {why}" if why else ""),
         )
 
     from .transfer_tools import (
@@ -335,7 +341,7 @@ def stage_dataset_transfer(
         schema_policy=schema_policy,
         validation_mode=validation_mode,
         src_db_type=file_type,
-        source_config={"path": str(path), "format": file_type},
+        source_config={"path": str(path), "format": file_type, "encoding": encoding},
         dest_db_type=dest_db,
         dest_exists=dest_exists,
         source_kind="file",
@@ -387,6 +393,7 @@ def stage_dataset_transfer(
         "preflight_run_id": preflight.get("run_id"),
         "source_path": str(path),
         "source_filename": path.name,
+        **({"read_options": read_options.to_wire()} if read_options else {}),
         "schema_drift_acknowledged": bool(schema_drift_acknowledged),
     }
     if payload["schema_drift_acknowledged"]:
@@ -414,6 +421,16 @@ def stage_dataset_transfer(
     }
     if pii_ack:
         preview["pii_acknowledgement"] = dict(pii_ack)
+    encoding_report = preflight.get("source_encoding") or next(
+        (dict(g.get("details") or {}) for g in preflight.get("gates") or []
+         if g.get("id") == "g1_source_encoding"), {})
+    if encoding_report.get("encoding_guessed"):
+        # The guess is shown where the operator confirms, not only in the run log.
+        preview["source_encoding"] = dict(encoding_report)
+        preview["warnings"] = [
+            str(g.get("message") or "") for g in preflight.get("gates") or []
+            if g.get("id") == "g1_source_encoding"
+        ]
     from .ack_ledger import get_ack_ledger
 
     ack_id = get_ack_ledger().put(kind="start_transfer", payload=payload, preview=preview)
