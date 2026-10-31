@@ -35,16 +35,6 @@ from services.reconciliation import (
 logger = logging.getLogger(__name__)
 
 #: Destination type strings routed to this module.
-ORACLE_DB_TYPES: Final = frozenset(
-    {
-        "oracle",
-        "oracledb",
-        "oracle_db",
-        "oracle_autonomous",
-        "oracle_autonomous_warehouse",
-        "amazon_rds_oracle",
-    }
-)
 
 #: Oracle column types that cannot appear in ORDER BY / IN comparisons.
 _ORACLE_LOB_TYPES: Final = {"CLOB", "NCLOB", "BLOB", "LONG", "LONG RAW", "XMLTYPE"}
@@ -52,7 +42,9 @@ _ORACLE_LOB_TYPES: Final = {"CLOB", "NCLOB", "BLOB", "LONG", "LONG RAW", "XMLTYP
 
 def is_oracle_destination(db_type: str, dest: dict[str, Any]) -> bool:
     """True when this destination is Oracle, including generic SQL URLs."""
-    if db_type in ORACLE_DB_TYPES:
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(db_type) == "oracle":
         return True
     return db_type == "generic_sql" and str(
         dest.get("connection_string") or ""

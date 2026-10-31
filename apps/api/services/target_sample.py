@@ -403,14 +403,9 @@ def _read_destination_sample(
                 conn.close()
             return [dict(zip(names, row)) for row in rows]
 
-        if db_type in {
-            "oracle",
-            "oracledb",
-            "oracle_db",
-            "oracle_autonomous",
-            "oracle_autonomous_warehouse",
-            "amazon_rds_oracle",
-        } or (
+        from src.transfer.engine_family import family_or_kind
+
+        if family_or_kind(db_type) == "oracle" or (
             db_type == "generic_sql"
             and (dest.get("connection_string") or "").lower().startswith("oracle")
         ):

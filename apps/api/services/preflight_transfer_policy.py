@@ -341,16 +341,9 @@ def run_transfer_policy_gates(
     if snap_gate:
         gates.append(snap_gate)
     src_key = str(product or src or "").strip().lower().replace("-", "_")
-    postgresish = src_key in {
-        "postgresql",
-        "postgres",
-        "citus",
-        "cockroach",
-        "cockroachdb",
-        "greenplum",
-        "timescaledb",
-        "neon",
-    }
+    from services.cdc_log_capture_probe import is_postgres_log_source
+
+    postgresish = is_postgres_log_source(src_key)
     if sync == "cdc" and (kind not in {"file", "cloud"} or postgresish):
         gates.extend(
             _ps._cdc_log_capture_gates(

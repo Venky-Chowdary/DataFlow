@@ -310,14 +310,7 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "driver": driver,
             "auth_source": cfg.get("auth_source", ""),
         }
-        if ok and driver in {
-            "sqlserver",
-            "mssql",
-            "oracle",
-            "azure_sql_database",
-            "microsoft_sql_server",
-            "amazon_rds_sql_server",
-        }:
+        if ok and driver in {"sqlserver", "oracle"}:  # ``driver`` is resolved above
             try:
                 from services.source_ha_probe import probe_source_ha_safe
 

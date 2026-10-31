@@ -2743,11 +2743,9 @@ def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") ->
         return _mysql_clock_default("CURRENT_TIMESTAMP", dest_type) if mysql_family else "CURRENT_TIMESTAMP"
     # SQL Server BIT and Oracle NUMBER(1) reject the token ``false``.
     # PostgreSQL boolean defaults arrive as that token.
-    dest_name = (dest_dialect or "").lower()
-    numeric_bool = dest_name in {
-        "sqlserver", "mssql", "sql_server", "azure_sql", "azure_sql_database",
-        "oracle",
-    }
+    from src.transfer.engine_family import family_or_kind
+
+    numeric_bool = family_or_kind(dest_dialect) in {"sqlserver", "oracle"}
     type_name = (dest_type or "").upper()
     number_one = type_name.startswith("NUMBER(1)") or type_name.startswith("NUMBER(1,")
     if numeric_bool and (
@@ -2766,7 +2764,7 @@ def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") ->
     if not numeric_bool and lowered not in {"true", "false"}:
         from services.pg_default_legal import pg_boolean_default
 
-        pg_bool = pg_boolean_default(text, dest_type, dest_name)
+        pg_bool = pg_boolean_default(text, dest_type, dest_dialect or "")
         if pg_bool:
             return pg_bool
     return text

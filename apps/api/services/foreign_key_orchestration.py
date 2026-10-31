@@ -44,7 +44,11 @@ def measure_source_foreign_keys(
     the difference between a plan that costs milliseconds and one an operator
     notices.
     """
-    key = (dialect or "").strip().lower()
+    # A hosted twin or distinct engine on a duplex wire (mariadb, sql_server,
+    # amazon_rds_postgresql ...) reads its catalog through that family.
+    from src.transfer.engine_family import family_or_kind
+
+    key = family_or_kind(dialect)
     from services.dialect_profiles import catalog_namespace
 
     schema = catalog_namespace(key, cfg)

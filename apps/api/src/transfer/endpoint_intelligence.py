@@ -19,6 +19,7 @@ from .adapters import (
     resolve_connector_config,
 )
 from .connector_capabilities import CATALOG_ID_ALIASES, resolve_driver_type
+from .engine_family import family_or_kind
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 from services.procedure_source import is_callable_source
@@ -298,11 +299,16 @@ def _specialty_object_list(
 
 
 def _s3_family_format(fmt: str) -> str:
-    """MinIO, Wasabi, B2, Spaces, and R2 list through the S3 probe."""
+    """The format this module dispatches on, resolved once.
+
+    MinIO, Wasabi, B2, Spaces, and R2 list through the S3 probe. A duplex SQL
+    tile (``alloydb``, ``amazon_rds_mysql``, ``pgvector``, ``sql_server``) is
+    its engine family, from the resolver execution uses.
+    """
     key = (fmt or "").lower().strip()
     if key == "s3" or CATALOG_ID_ALIASES.get(key) == "s3":
         return "s3"
-    return key
+    return family_or_kind(key)
 
 
 def _introspect_endpoint_guarded(
@@ -447,16 +453,10 @@ def _introspect_endpoint_impl(
     }:
         return _attach_create_on_write_dest(out, endpoint, cfg, fmt)
 
-    # pgvector is an extension, not a separate engine: the destination is an
-    # ordinary PostgreSQL table with a vector column, reached through the same
-    # connection config. Leaving it out of this branch meant existence and
-    # column types were never measured, so Validate refused create-new and
-    # overwrite for lack of facts one catalog query answers.
-    # TimescaleDB is Postgres wire. Leaving the catalog id off this branch
-    # made destination introspect say "not yet implemented" while the same
-    # connector as a source already read through the Postgres driver.
-    # CockroachDB stays off: the catalog lists it planned.
-    if fmt in {"postgresql", "pgvector", "timescaledb", "timescale"}:
+    # Every PostgreSQL-family tile (pgvector, TimescaleDB, AlloyDB, RDS, Azure,
+    # Cloud SQL, Aurora ...) is an ordinary PostgreSQL catalog reached through
+    # the same connection config; ``fmt`` is already the family.
+    if fmt == "postgresql":
         if _dest_table_schema_only(endpoint):
             return _attach_dest_table_schema(out, endpoint)
         from connectors.postgresql import test_postgresql
@@ -599,7 +599,7 @@ def _introspect_endpoint_impl(
             _attach_db_sample(out, endpoint)
         return out
 
-    if fmt in {"mysql", "mariadb"}:
+    if fmt == "mysql":
         if _dest_table_schema_only(endpoint):
             return _attach_dest_table_schema(out, endpoint)
         from connectors.mysql import test_mysql

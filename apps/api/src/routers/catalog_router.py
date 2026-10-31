@@ -11,11 +11,14 @@ async def list_catalog_connectors(
     role: str = Query("all", description="source | destination | all"),
     category: str = Query(""),
     status: str = Query(""),
-    limit: int = Query(60, le=200),
+    limit: int = Query(60, ge=0, le=200),
+    offset: int = Query(0, ge=0, description="Index of the first connector to return"),
     transfer_only: bool = Query(False, description="Only connectors with full transfer support"),
 ):
     from ..services.catalog_service import search_catalog
-    return search_catalog(q, role, category, status, limit, transfer_only=transfer_only)
+    return search_catalog(
+        q, role, category, status, limit, transfer_only=transfer_only, offset=offset
+    )
 
 
 @router.get("/stats")

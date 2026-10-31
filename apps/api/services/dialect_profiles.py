@@ -73,13 +73,6 @@ DIALECT_PROFILES: dict[str, DialectProfile] = {
 _ALIASES: dict[str, str] = {
     "mssql+pyodbc": "sqlserver",
     "mssql+pymssql": "sqlserver",
-    "sql_server": "sqlserver",
-    "microsoft_sql_server": "sqlserver",
-    "azure_sql": "sqlserver",
-    "azure_sql_database": "sqlserver",
-    "azure_sql_managed_instance": "sqlserver",
-    "google_cloud_sql_sql_server": "sqlserver",
-    "amazon_rds_sql_server": "sqlserver",
     "synapse": "sqlserver",
     "azure_synapse": "sqlserver",
     "synapse_analytics": "sqlserver",
@@ -89,13 +82,6 @@ _ALIASES: dict[str, str] = {
     "mysql+pymysql": "mysql",
     "oracle+oracledb": "oracle",
     "oracle+cx_oracle": "oracle",
-    "oracledb": "oracle",
-    "oracle_db": "oracle",
-    "oracle_autonomous": "oracle",
-    "oracle_adw": "oracle",
-    "oracle_atp": "oracle",
-    "oracle_autonomous_warehouse": "oracle",
-    "amazon_rds_oracle": "oracle",
     "autonomous_database": "oracle",
     "bq": "bigquery",
     "motherduck": "duckdb",
@@ -117,7 +103,11 @@ def normalize_driver(driver: str | None) -> str:
     raw = (driver or "").strip().lower()
     if not raw:
         return ""
-    return _ALIASES.get(raw, raw)
+    if raw in _ALIASES:
+        return _ALIASES[raw]
+    from src.transfer.engine_family import sql_duplex_family
+
+    return sql_duplex_family(raw) or raw
 
 
 def dialect_profile(driver: str | None) -> DialectProfile:
@@ -259,17 +249,10 @@ _FETCH_FIRST_DIALECTS: frozenset[str] = frozenset(
         "oracle+oracledb",
         "oracle+cx_oracle",
         "autonomous_database",
-        "amazon_rds_oracle",
-        "mssql",
         "sqlserver",
-        "microsoft_sql_server",
-        "azure_sql_database",
-        "azure_sql_managed_instance",
         "synapse_analytics",
         "azure_synapse_dedicated",
         "azure_synapse_serverless",
-        "google_cloud_sql_sql_server",
-        "amazon_rds_sql_server",
         "db2",
         "ibm_db2",
         "db2_luw",
@@ -283,14 +266,7 @@ _ORACLE_LIKE: frozenset[str] = frozenset(
         "oracle",
         "oracle+oracledb",
         "oracle+cx_oracle",
-        "oracledb",
-        "oracle_db",
-        "oracle_autonomous",
-        "oracle_adw",
-        "oracle_atp",
-        "oracle_autonomous_warehouse",
         "autonomous_database",
-        "amazon_rds_oracle",
     }
 )
 
@@ -310,7 +286,7 @@ def warehouse_sql_quote_dialect(driver: str | None) -> str | None:
     PG-catalog — ``to_regclass`` is not this family.
     """
     key = dialect_profile(driver).driver
-    if key in {"sqlserver", "mssql"}:
+    if key == "sqlserver":
         return "sqlserver"
     if key == "oracle":
         return "oracle"
@@ -336,7 +312,6 @@ _UPPER_FOLDING_DIALECTS: frozenset[str] = frozenset(
         "oracle+oracledb",
         "oracle+cx_oracle",
         "autonomous_database",
-        "amazon_rds_oracle",
         "snowflake",
         "db2",
         "ibm_db2",

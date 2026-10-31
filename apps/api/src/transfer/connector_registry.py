@@ -16,7 +16,7 @@ from connectors.sdk import list_descriptors
 from services.connector_telemetry import connector_operation, driver_family
 from services.log_redaction import redact_log_text
 
-from .connector_capabilities import _DRIVER_CAPS, default_port, file_source_types
+from .connector_capabilities import _DRIVER_CAPS, default_port, file_source_types, resolve_driver_type
 
 
 @dataclass(frozen=True)
@@ -726,6 +726,8 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
 
             with pinned_egress(workspace_id=str(cfg.get("workspace_id") or "")):
                 result = _run_probe_impl(db_type, cfg)
+                if not result[0]:
+                    result = _name_protocol_mismatch(db_type, cfg, result)
         except EgressRefused as exc:
             op.failed(category="probe_failed")
             return False, str(exc)
@@ -739,13 +741,27 @@ def run_probe(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         return result
 
 
+def _name_protocol_mismatch(
+    db_type: str, cfg: dict[str, Any], result: tuple[bool, str]
+) -> tuple[bool, str]:
+    """A MySQL handshake answered by PostgreSQL (or the reverse) says so."""
+    if cfg.get("connection_string"):
+        return result
+    from services.wire_protocol_sniff import protocol_mismatch_message
+
+    host = str(cfg.get("host") or "")
+    port = int(cfg.get("port") or default_port(resolve_driver_type(db_type)) or 0)
+    # The catalog tile names the hint (``amazon_aurora``); callers may pass the
+    # resolved driver as ``db_type``.
+    message = protocol_mismatch_message(str(cfg.get("type") or db_type), host, port)
+    return (False, message) if message else result
+
+
 def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
     import importlib
 
     from services.connector_auth import engine_login_role
     from services.egress_guard import metadata_endpoint_refusal
-
-    from .connector_capabilities import resolve_driver_type
 
     refusal = metadata_endpoint_refusal(
         str(cfg.get("host") or ""),

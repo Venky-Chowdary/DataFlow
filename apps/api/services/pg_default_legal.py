@@ -14,11 +14,12 @@ fidelity report says why. NULL stays NULL.
 
 from __future__ import annotations
 
-_PG_FAMILY = frozenset({
-    "postgresql", "postgres", "pgvector", "timescaledb", "alloydb", "cockroachdb",
-    "amazon_rds_postgresql", "azure_database_for_postgresql", "google_cloud_sql_postgresql",
-    "aurora_postgresql", "supabase", "neon", "redshift", "amazon_redshift",
-})
+def _pg_boolean_dialect(dest_dialect: str) -> bool:
+    """PostgreSQL wire (hosted twins, pgvector, TimescaleDB, CockroachDB...)
+    or Redshift: the canonical kind resolver decides (engine_family)."""
+    from src.transfer.engine_family import engine_family, is_postgresql_family
+
+    return is_postgresql_family(dest_dialect) or engine_family(dest_dialect) == "redshift"
 
 _FALSE = frozenset({"0", "false", "f", "n", "no", "off", "b'0'", "0::boolean"})
 _TRUE = frozenset({"1", "true", "t", "y", "yes", "on", "b'1'", "1::boolean"})
@@ -36,7 +37,7 @@ def pg_boolean_default(default_sql: str, dest_type: str, dest_dialect: str) -> s
     ``""``: no boolean literal means this default — do not carry it.
     Otherwise ``"false"``, ``"true"`` or ``"NULL"``.
     """
-    if (dest_dialect or "").strip().lower() not in _PG_FAMILY or not _is_boolean_type(dest_type):
+    if not _is_boolean_type(dest_type) or not _pg_boolean_dialect(dest_dialect):
         return None
     text = (default_sql or "").strip()
     while text.startswith("(") and text.endswith(")"):

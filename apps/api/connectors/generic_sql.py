@@ -87,6 +87,7 @@ from services.engine_pool import release_engine
 from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
 from services.value_serializer import cell_to_string
+from src.transfer.engine_family import FamilyMembers
 
 _gsql = sys.modules[__name__]
 
@@ -428,7 +429,9 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
 
 
 def _drivername(db_type: str) -> str:
-    return _DRIVERNAME_MAP.get(db_type, db_type)
+    from src.transfer.engine_family import family_or_kind
+
+    return _DRIVERNAME_MAP.get(db_type) or _DRIVERNAME_MAP.get(family_or_kind(db_type), db_type)
 
 
 def _mssql_odbc_driver() -> str | None:
@@ -626,7 +629,9 @@ class _MssqlQmarkConnection:
 
 
 def _default_port(db_type: str) -> int:
-    return _DEFAULT_PORT_MAP.get(db_type, 0)
+    from src.transfer.engine_family import family_or_kind
+
+    return _DEFAULT_PORT_MAP.get(db_type) or _DEFAULT_PORT_MAP.get(family_or_kind(db_type), 0)
 
 
 def _normalize_sqlite_url(url: str) -> str:
@@ -1166,19 +1171,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # Before the first connect, so NUMBER is text+Decimal, not float64.
             install_oracle_exact_fetch()
         if (
-            db_type in {
-                "mssql",
-                "sql_server",
-                "sqlserver",
-                "microsoft_sql_server",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "synapse_analytics",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-            }
-            or "mssql" in driver
+            "mssql" in driver
         ):
             from connectors.sqlserver_datetime2 import install_sqlserver_datetime2_bind
 
@@ -1197,19 +1190,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
 
         # SQL Server: refuse silent VARCHAR truncation at the session level.
         if (
-            db_type in {
-                "mssql",
-                "sql_server",
-                "sqlserver",
-                "microsoft_sql_server",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "synapse_analytics",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-            }
-            or "mssql" in driver
+            "mssql" in driver
         ):
             from connectors.write_resilience import apply_mssql_session_guards
 
@@ -1480,11 +1461,10 @@ _DuckDBJSON = _ExactJSON
 #: Dialects whose catalogs fold unquoted identifiers to a single case.
 _FOLDING_DIALECTS: Final = {"oracle", "snowflake", "db2", "ibm_db_sa"}
 
-_ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw", "oracle_atp"}
-
-
-_MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
-_MYSQL_WIRES: Final = {"mysql", "mariadb", "tidb", "singlestore"}
+# Wire membership comes from the one engine resolver (hosted tiles included).
+_ORACLE_WIRES: Final = FamilyMembers("oracle")
+_MSSQL_WIRES: Final = FamilyMembers("sqlserver", also=("synapse", "azure_synapse"))
+_MYSQL_WIRES: Final = FamilyMembers("mysql")
 
 
 def physical_table_spelling(
