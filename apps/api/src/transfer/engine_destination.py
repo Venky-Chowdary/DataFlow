@@ -539,6 +539,44 @@ def _drop_destination_table(
     mongo: Any = None,
     job_id: str = "",
 ) -> bool:
+    """Clear the destination for an overwrite, pulsing the job while it waits.
+
+    The DROP / TRUNCATE / backup copy can queue behind a lock another session
+    holds (the failed attempt's pooled session, a SQL client). The job showed
+    5% with a frozen heartbeat for as long as that lasted (D19); every write
+    session's lock wait is bounded (``destination_lock_wait_seconds``), so the
+    wait ends in a named lock-timeout failure, and the pulse proves the run is
+    alive until then.
+    """
+    if mongo is None or not job_id or destination.kind != "database":
+        return _clear_destination_table(
+            destination, mappings=mappings, checkpoint=checkpoint,
+            checkpoint_service=checkpoint_service, mongo=mongo, job_id=job_id,
+        )
+    from connectors.write_resilience import destination_lock_wait_seconds
+
+    with _engine._job_phase_heartbeat(
+        mongo,
+        job_id,
+        phase="writing",
+        message="Preparing destination — clearing table for full refresh…",
+        interval_s=max(0.25, min(15.0, destination_lock_wait_seconds() / 4)),
+    ):
+        return _clear_destination_table(
+            destination, mappings=mappings, checkpoint=checkpoint,
+            checkpoint_service=checkpoint_service, mongo=mongo, job_id=job_id,
+        )
+
+
+def _clear_destination_table(
+    destination: EndpointConfig,
+    *,
+    mappings: list[dict] | None = None,
+    checkpoint: Any = None,
+    checkpoint_service: Any = None,
+    mongo: Any = None,
+    job_id: str = "",
+) -> bool:
     """Drop the destination object for full-refresh overwrite sync modes.
 
     Raises :class:`FullRefreshDropFailed` when a drop was attempted and failed.

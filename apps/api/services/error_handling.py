@@ -247,6 +247,9 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "lock wait timeout exceeded",
             "1205",
             "metadata lock",
+            # SQL Server 1222 and PostgreSQL 55P03: the same bounded wait.
+            "lock request time out period exceeded",
+            "due to lock timeout",
         ),
         {
             "code": "destination_lock_timeout",
@@ -254,9 +257,10 @@ _OPERATOR_FAILURE_RULES: tuple[tuple[tuple[str, ...], dict[str, str]], ...] = (
             "confidence": "high",
             "title": "Destination table is locked",
             "fix": (
-                "Close other sessions on this MySQL table (Workbench, Validate probes, "
-                "stuck prior jobs), then re-run. Datawrap fails closed instead of waiting "
-                "minutes behind a metadata lock."
+                "Another session holds a lock on this destination table (a SQL client, "
+                "a Validate probe, or a stuck earlier attempt). Close it, then re-run. "
+                "Datawrap fails closed after the bounded lock wait instead of waiting "
+                "forever behind it."
             ),
         },
     ),
