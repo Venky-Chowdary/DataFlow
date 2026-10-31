@@ -137,13 +137,21 @@ def test_cancel_resume_cancel_message_equals_destination(env, monkeypatch):
         return status in {"pending", "queued", "running", "validating", "starting"}
 
     def _settle(worker: threading.Thread | None, timeout: float = 300) -> None:
+        # The cancel endpoint turns the job "cancelled" at once; the run then
+        # stops at its next checkpoint, re-counts the destination and only then
+        # writes cancel_outcome and the message. Wait for the run itself to
+        # exit: the first leg's thread, or a resumed run on the transfer
+        # scheduler (local_job_ids), never a fixed sleep (CI read the
+        # endpoint's interim "Transfer cancelled by user" 1.5 s after cancel).
+        from services.transfer_scheduler import local_job_ids
+
         if worker is not None:
             worker.join(timeout)
             assert not worker.is_alive(), "still running after cancel"
         deadline = time.time() + timeout
-        while time.time() < deadline and _running(None):
+        while time.time() < deadline and (job_id in local_job_ids() or _running(None)):
             time.sleep(0.2)
-        time.sleep(1.5)
+        assert job_id not in local_job_ids(), ("resumed run still running", store.get_job(job_id))
 
     def _cancel_when(threshold: int, worker: threading.Thread | None, leg: str) -> dict:
         deadline = time.time() + 900
