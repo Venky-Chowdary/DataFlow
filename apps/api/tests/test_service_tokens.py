@@ -29,6 +29,11 @@ def token_app(tmp_path, monkeypatch):
 
     monkeypatch.setenv("DATAFLOW_REQUIRE_AUTH", "1")
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "test-service-token-secret")
+    # Keys here belong to no workspace, which makes them deployment-level:
+    # only a platform admin's keys may manage them (round 8), so their minter
+    # is the bootstrap platform admin.
+    monkeypatch.setenv("DATAFLOW_ADMIN_EMAIL", "operator@example.com")
+    monkeypatch.setenv("DATAFLOW_ADMIN_PASSWORD", "Operator-Bootstrap-2026")
     monkeypatch.setattr(auth_service, "_REQUIRE_AUTH", True)
     monkeypatch.setattr(integrations_store, "STORE_PATH", tmp_path / "integrations.json")
     monkeypatch.setattr(integrations_store, "_keys_collection", lambda: None)
@@ -327,7 +332,7 @@ def test_iam_is_admin_only_and_route_errors_are_mapped(token_app):
     missing_rotation = client.post(
         "/api/v1/iam/api-keys/missing/rotate",
         headers=_auth(admin["key"]),
-        json={"overlap_seconds": 86400},
+        json={"overlap_seconds": 300},  # a grace is at most 1h since round 8
     )
     key_to_rotate = _mint(store)
     first_rotation = client.post(

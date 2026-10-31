@@ -27,11 +27,16 @@ from r9_workspace_world import r9  # noqa: E402,F401
 
 _WEB_SRC = Path(__file__).resolve().parents[3] / "apps" / "web" / "src"
 
-# The six fallbacks apps/web/src/lib/api.ts tried after the real route.
-DEAD_FALLBACKS = (
+# The six fallbacks apps/web/src/lib/api.ts tried after the real route. Two of
+# them (GET /jobs, GET /jobs/{id}) became read-only aliases of the
+# /connectors/jobs handlers in the same round (QA enterprise #50); the other
+# four never existed. The web no longer calls any of them.
+LIVE_ALIASES = (
     ("GET", "/api/v1/jobs"),
     ("GET", "/api/v1/jobs/{job}"),
-    ("PATCH", "/api/v1/jobs/{job}"),
+)
+DEAD_FALLBACKS = (
+    # PATCH on the read-only alias path is the router's 405, asserted below.
     ("POST", "/api/v1/jobs/{job}/retry"),
     ("POST", "/api/v1/jobs/{job}/resume"),
     ("POST", "/api/v1/jobs/{job}/cancel"),
@@ -55,6 +60,11 @@ def test_dead_routes_are_404_for_a_signed_in_admin_not_no_rbac_rule(r9):
         assert response.status_code == 404, (method, path, response.status_code, response.text)
         assert "No RBAC rule" not in response.text
         assert response.json().get("reason") != "no_rule"
+
+    renamed = owner.patch(f"/api/v1/jobs/{job_id}", json={"name": "x"})
+    assert renamed.status_code == 405, renamed.text
+    for method, template in LIVE_ALIASES:
+        assert owner.request(method, template.format(job=job_id)).status_code == 200
 
     # The real routes behind those fallbacks answer for the same job.
     real = owner.get(f"/api/v1/connectors/jobs/{job_id}")

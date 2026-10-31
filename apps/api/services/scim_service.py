@@ -460,6 +460,12 @@ def _managed_membership_cleanup(email: str, *, actor: str) -> None:
             pass
         managed.pop((workspace_id, member_email), None)
     _store_call(scim_store.set_managed_memberships, managed)
+    adopted = _store_call(scim_store.get_adopted_memberships)
+    if any(member_email == email for _ws, member_email in adopted):
+        _store_call(
+            scim_store.set_adopted_memberships,
+            {key: role for key, role in adopted.items() if key[1] != email},
+        )
 
 
 def deprovision_user(
@@ -587,7 +593,9 @@ def get_group(group_id: str) -> dict[str, Any]:
     return _resource_group(group)
 
 
-def create_group(payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
+def create_group(
+    payload: dict[str, Any], *, actor: str, principal: dict[str, Any] | None = None
+) -> dict[str, Any]:
     name = str(payload.get("displayName") or "").strip()
     if not name:
         _fail(400, "displayName is required", "invalidValue")
@@ -610,7 +618,7 @@ def create_group(payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
     _store_call(scim_store.create_group, group)
     if incoming:
         try:
-            group = _apply_group_members(group, ids, actor=actor)
+            group = _apply_group_members(group, ids, actor=actor, principal=principal)
         except ScimError:
             _store_call(scim_store.delete_group, group["id"])
             raise
@@ -629,6 +637,48 @@ def create_group(payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
         },
     )
     return _resource_group(group)
+
+
+_KEY_ROLE_TO_MEMBERSHIP = {"admin": "admin", "editor": "editor", "operator": "editor", "viewer": "viewer"}
+
+
+def role_ceiling(principal: dict[str, Any] | None, workspace_id: str) -> str | None:
+    """Highest workspace role a SCIM caller may grant in ``workspace_id``.
+
+    A mapped group applies a role on the caller's authority, so the escalation
+    rule for minting credentials holds here too: never more than the token's
+    own grant. A key is its own principal (``services.effective_role``): its
+    stored role is the ceiling, and a key bound to one workspace has no
+    authority in another (``None``: that workspace is left untouched). A
+    session caller is bounded by its own role in the workspace. ``principal``
+    ``None`` is an internal call with no request: uncapped.
+    """
+    if not principal:
+        return "admin"
+    from services.rbac import normalize_role
+
+    own_role = normalize_role(principal.get("role"))
+    ceiling = _KEY_ROLE_TO_MEMBERSHIP.get(own_role, "viewer")
+    if str(principal.get("auth_kind") or "") == "api_key":
+        key_id = str(principal.get("api_key_id") or "")
+        record = next(
+            (row for row in integrations_store.list_api_keys() if row.get("id") == key_id),
+            None,
+        )
+        bound = str((record or {}).get("workspace_id") or "")
+        if bound and bound != workspace_id:
+            return None
+        return ceiling
+    if own_role == "admin":
+        return ceiling
+    member_role = team_store.get_workspace_role(
+        workspace_id=workspace_id, email=str(principal.get("email") or "")
+    )
+    return member_role or None
+
+
+def _min_role(left: str, right: str) -> str:
+    return left if _ROLE_ORDER.get(left, 0) <= _ROLE_ORDER.get(right, 0) else right
 
 
 def _group_proposals(changed_group: dict[str, Any], proposed_members: list[str] | None):
@@ -661,6 +711,7 @@ def _apply_group_members(
     proposed_members: list[str],
     *,
     actor: str,
+    principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     proposed = sorted(set(proposed_members))
     affected_ids, desired = _group_proposals(group, proposed)
@@ -684,7 +735,9 @@ def _apply_group_members(
         with ExitStack() as locks:
             for workspace_id in sorted(workspace_ids):
                 locks.enter_context(team_store.workspace_membership_lock(workspace_id))
-            return _apply_group_members_locked(group, proposed, actor=actor)
+            return _apply_group_members_locked(
+                group, proposed, actor=actor, principal=principal
+            )
     except team_store.TeamStoreBusy as exc:
         _fail(503, str(exc), "serverError")
 
@@ -694,28 +747,59 @@ def _apply_group_members_locked(
     proposed_members: list[str],
     *,
     actor: str,
+    principal: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Apply a group's new member list to the workspace roles its mapping names.
+
+    A mapped group *sets* the member's role. A member who already belonged to
+    the workspace before any mapped group (a manual membership) is adopted: the
+    mapped role applies while they are in a mapped group, and their earlier
+    role is restored — not deleted — when they leave the last one. Every role
+    is capped by :func:`role_ceiling`, and no plan may leave a workspace
+    without an administrator.
+    """
     proposed = sorted(set(proposed_members))
     previous = set(group.get("members", []))
     affected_ids, desired = _group_proposals(group, proposed)
     managed = _store_call(scim_store.get_managed_memberships)
+    adopted = _store_call(scim_store.get_adopted_memberships)
     affected_emails: dict[str, str] = {}
     for user_id in affected_ids:
         user = _store_call(scim_store.get_user, user_id)
         if user:
             affected_emails[user_id] = user["userName"]
 
-    plans = []
-    for (user_id, workspace_id), new_role in desired.items():
+    ceilings: dict[str, str | None] = {}
+
+    def ceiling_for(workspace_id: str) -> str | None:
+        if workspace_id not in ceilings:
+            ceilings[workspace_id] = role_ceiling(principal, workspace_id)
+        return ceilings[workspace_id]
+
+    capped: list[dict[str, Any]] = []
+    # (user_id, workspace_id, email, old_managed, current_role, new_role, adopt)
+    plans: list[tuple[Any, str, str, Any, str, Any, bool]] = []
+    for (user_id, workspace_id), wanted in desired.items():
         email = affected_emails.get(user_id)
         if not email:
             continue
         key = (workspace_id, email)
         old_managed_role = managed.get(key)
         current_role = team_store.get_workspace_role(workspace_id=workspace_id, email=email)
-        if old_managed_role is None and current_role:
+        ceiling = ceiling_for(workspace_id)
+        new_role = wanted
+        if ceiling is None or (
+            current_role and _ROLE_ORDER.get(current_role, 0) > _ROLE_ORDER[ceiling]
+        ):
+            capped.append({"user_id": user_id, "workspace_id": workspace_id,
+                           "mapped_role": wanted, "ceiling": ceiling, "applied": False})
             continue
-        plans.append((user_id, workspace_id, email, old_managed_role, current_role, new_role))
+        if _ROLE_ORDER[new_role] > _ROLE_ORDER[ceiling]:
+            capped.append({"user_id": user_id, "workspace_id": workspace_id,
+                           "mapped_role": wanted, "ceiling": ceiling, "applied": True})
+            new_role = ceiling
+        adopt = old_managed_role is None and bool(current_role) and key not in adopted
+        plans.append((user_id, workspace_id, email, old_managed_role, current_role, new_role, adopt))
     desired_keys = {
         (workspace_id, affected_emails[user_id])
         for (user_id, workspace_id) in desired
@@ -725,7 +809,16 @@ def _apply_group_members_locked(
         if email not in affected_emails.values() or (workspace_id, email) in desired_keys:
             continue
         current_role = team_store.get_workspace_role(workspace_id=workspace_id, email=email)
-        plans.append((None, workspace_id, email, old_role, current_role, None))
+        ceiling = ceiling_for(workspace_id)
+        if ceiling is None or (
+            current_role and _ROLE_ORDER.get(current_role, 0) > _ROLE_ORDER[ceiling]
+        ):
+            capped.append({"workspace_id": workspace_id, "mapped_role": None,
+                           "ceiling": ceiling, "applied": False})
+            continue
+        # A membership this group adopted goes back to the role it had before.
+        restore = adopted.get((workspace_id, email)) or None
+        plans.append((None, workspace_id, email, old_role, current_role, restore, False))
 
     for workspace_id in {plan[1] for plan in plans}:
         admins = {
@@ -735,20 +828,21 @@ def _apply_group_members_locked(
         }
         workspace_plans = [plan for plan in plans if plan[1] == workspace_id]
         removed_admins = {
-            email.strip().lower()
-            for _uid, _workspace_id, email, _old, current, new in workspace_plans
-            if current == "admin" and new != "admin"
+            plan[2].strip().lower()
+            for plan in workspace_plans
+            if plan[4] == "admin" and plan[5] != "admin"
         }
         added_admins = {
-            email.strip().lower()
-            for _uid, _workspace_id, email, _old, current, new in workspace_plans
-            if current != "admin" and new == "admin"
+            plan[2].strip().lower()
+            for plan in workspace_plans
+            if plan[4] != "admin" and plan[5] == "admin"
         }
         if len((admins - removed_admins) | added_admins) < 1:
             _fail(409, "SCIM group change would remove the last workspace admin", "mutability")
 
     try:
-        for user_id, workspace_id, email, old_managed, current_role, new_role in plans:
+        for user_id, workspace_id, email, old_managed, current_role, new_role, adopt in plans:
+            key = (workspace_id, email)
             if new_role is None:
                 if current_role:
                     team_store.remove_workspace_member(
@@ -757,9 +851,27 @@ def _apply_group_members_locked(
                         removed_by=actor or "scim",
                         actor_is_platform_admin=True,
                     )
-                managed.pop((workspace_id, email), None)
+                managed.pop(key, None)
+                adopted.pop(key, None)
                 continue
-            if old_managed is None:
+            if user_id is None:
+                # Leaving the last mapped group: restore the adopted role.
+                if current_role != new_role:
+                    team_store.add_workspace_member(
+                        workspace_id=workspace_id,
+                        email=email,
+                        role=new_role,
+                        added_by="scim",
+                        actor_is_platform_admin=True,
+                    )
+                    _audit_role_change(group, user_id, workspace_id, current_role, new_role,
+                                       actor=actor, reason="restored_prior_role")
+                managed.pop(key, None)
+                adopted.pop(key, None)
+                continue
+            if adopt:
+                adopted[key] = current_role
+            if old_managed is None and not current_role:
                 team_store.add_workspace_member(
                     workspace_id=workspace_id,
                     email=email,
@@ -767,7 +879,7 @@ def _apply_group_members_locked(
                     added_by="scim",
                     actor_is_platform_admin=True,
                 )
-                managed[(workspace_id, email)] = new_role
+                managed[key] = new_role
             elif old_managed != new_role or current_role != new_role:
                 team_store.add_workspace_member(
                     workspace_id=workspace_id,
@@ -776,20 +888,16 @@ def _apply_group_members_locked(
                     added_by="scim",
                     actor_is_platform_admin=True,
                 )
-                managed[(workspace_id, email)] = new_role
-                role_before = old_managed if old_managed != new_role else current_role
+                managed[key] = new_role
+                role_before = current_role if adopt else (
+                    old_managed if old_managed != new_role else current_role
+                )
                 if role_before and role_before != new_role:
-                    _audit(
-                        "scim.group.role_change",
-                        actor=actor,
-                        resource=f"workspace:{workspace_id}",
-                        details={
-                            "group_id": group["id"],
-                            "user_id": user_id,
-                            "workspace_id": workspace_id,
-                            "changed_attributes": ["role"],
-                        },
-                    )
+                    _audit_role_change(group, user_id, workspace_id, role_before, new_role,
+                                       actor=actor,
+                                       reason="adopted_membership" if adopt else "group_mapping")
+            else:
+                managed[key] = new_role
     except team_store.LastAdminProtected as exc:
         _fail(409, str(exc), "mutability")
     except team_store.TeamStoreBusy as exc:
@@ -800,6 +908,16 @@ def _apply_group_members_locked(
     group["members"] = proposed
     saved = _store_call(scim_store.update_group, group)
     _store_call(scim_store.set_managed_memberships, managed)
+    _store_call(scim_store.set_adopted_memberships, adopted)
+    for row in capped:
+        _audit(
+            "scim.group.role_capped",
+            actor=actor,
+            resource=f"workspace:{row['workspace_id']}",
+            outcome="succeeded" if row["applied"] else "skipped",
+            reason_code="grant_exceeds_token" if row["ceiling"] else "no_authority_in_workspace",
+            details={"group_id": group["id"], **row},
+        )
     for member_id in sorted(set(proposed) - previous):
         _audit(
             "scim.group.member_add",
@@ -825,7 +943,39 @@ def _apply_group_members_locked(
     return saved
 
 
-def replace_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
+def _audit_role_change(
+    group: dict[str, Any],
+    user_id: Any,
+    workspace_id: str,
+    role_before: str,
+    role_after: str,
+    *,
+    actor: str,
+    reason: str,
+) -> None:
+    _audit(
+        "scim.group.role_change",
+        actor=actor,
+        resource=f"workspace:{workspace_id}",
+        details={
+            "group_id": group["id"],
+            "user_id": user_id,
+            "workspace_id": workspace_id,
+            "changed_attributes": ["role"],
+            "role_before": role_before,
+            "role_after": role_after,
+            "reason": reason,
+        },
+    )
+
+
+def replace_group(
+    group_id: str,
+    payload: dict[str, Any],
+    *,
+    actor: str,
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     current = _store_call(scim_store.get_group, group_id)
     group = dict(current) if current is not None else None
     if group is None:
@@ -844,7 +994,7 @@ def replace_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict
     for user_id in ids:
         if _store_call(scim_store.get_user, user_id) is None:
             _fail(400, f"Unknown SCIM user id: {user_id}", "invalidValue")
-    saved = _apply_group_members(group, ids, actor=actor)
+    saved = _apply_group_members(group, ids, actor=actor, principal=principal)
     _audit(
         "scim.group.replace",
         actor=actor,
@@ -857,7 +1007,13 @@ def replace_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict
     return _resource_group(saved)
 
 
-def patch_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict[str, Any]:
+def patch_group(
+    group_id: str,
+    payload: dict[str, Any],
+    *,
+    actor: str,
+    principal: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     group = _store_call(scim_store.get_group, group_id)
     if group is None:
         _fail(404, "Group not found")
@@ -902,7 +1058,7 @@ def patch_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict[s
     if not changed:
         return _resource_group(group)
     old_members = set(group.get("members", []))
-    saved = _apply_group_members(group, members, actor=actor)
+    saved = _apply_group_members(group, members, actor=actor, principal=principal)
     new_members = set(saved.get("members", []))
     if new_members == old_members:
         _audit(
@@ -917,11 +1073,13 @@ def patch_group(group_id: str, payload: dict[str, Any], *, actor: str) -> dict[s
     return _resource_group(saved)
 
 
-def delete_group(group_id: str, *, actor: str) -> None:
+def delete_group(
+    group_id: str, *, actor: str, principal: dict[str, Any] | None = None
+) -> None:
     group = _store_call(scim_store.get_group, group_id)
     if group is None:
         _fail(404, "Group not found")
-    _apply_group_members(group, [], actor=actor)
+    _apply_group_members(group, [], actor=actor, principal=principal)
     _store_call(scim_store.delete_group, group_id)
     _audit(
         "scim.group.delete",

@@ -64,6 +64,8 @@ from services.copy_sqlserver_sqlserver import (
     _table_ref as _ss_table_ref,
 )
 
+from services.copy_range_proof import range_keys_match  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 
@@ -194,6 +196,10 @@ def copy_sqlserver_to_oracle(
             stage_table = staged_overwrite_name(dest_table)
             swap_trash_table = overwrite_trash_name(dest_table)
             dest_ref = _ora_table_ref(swap_schema, stage_table)
+            # Load the staged table, not the live one (D210 sibling).
+            insert_sql = (
+                f"INSERT INTO {dest_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+            )
             dest_table = stage_table
             swap_at_end = True
             exists = False
@@ -247,14 +253,23 @@ def copy_sqlserver_to_oracle(
                         dst_cur, dest_ref, dest_ident, part
                     )
                     expected = int(part["source_count"])
-                    if already == expected:
+                    # A count is not identity: skip only a range that holds this
+                    # source range's keys (append of N new keys into N rows).
+                    if already == expected and range_keys_match(
+                        src_dialect="sqlserver", src_cur=src_cur, src_ref=source_ref, src_ident=src_ident,
+                        dst_dialect="oracle", dst_cur=dst_cur, dst_ref=dest_ref, dst_ident=dest_ident,
+                        part=part,
+                    ):
                         part["action"] = "skip"
                         part["dest_count"] = already
                     elif already == 0:
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
-                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
+                        occupied_pk_range_action(
+                            already, expected, replace_destination=replace_destination,
+                            keys_proven=False,
+                        )
                         _ora_delete_range(
                             dst_cur, dest_ref, dest_ident, part
                         )

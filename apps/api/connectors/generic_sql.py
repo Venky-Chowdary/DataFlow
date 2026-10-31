@@ -62,6 +62,7 @@ from connectors.schema_drift import (
     is_wider_type,
     raise_widen_refusal,
 )
+from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
     bind_time_clock,
     coerce_sql_temporal,
@@ -4562,45 +4563,6 @@ def _generic_sql_map_kwargs(
     }
 
 
-def _generic_promote_oracle_empties(
-    finished: Any,
-    *,
-    write_mode: str,
-    conflict_columns: list[str] | None,
-    dest_db: str,
-) -> Any:
-    """Oracle VARCHAR2 ''→NULL on dense MERGE SET is a wipe — promote to sparse omit."""
-    _db = str(dest_db or "").strip().lower()
-    if not (
-        write_mode == "upsert"
-        and conflict_columns
-        and (_db in {"oracle", "oracledb", "oracle_autonomous"} or _db.startswith("oracle"))
-    ):
-        return finished
-    from services.value_serializer import DF_MISSING_SENTINEL
-
-    kept_dense: list[tuple] = []
-    kept_nums: list[int] = []
-    nums = list(finished.dense_row_numbers or [])
-    for i, row in enumerate(finished.dense_rows):
-        if any(isinstance(v, str) and v == "" for v in row):
-            finished.sparse_rows.append(
-                tuple(
-                    DF_MISSING_SENTINEL if (isinstance(v, str) and v == "") else v
-                    for v in row
-                )
-            )
-            if i < len(nums):
-                finished.sparse_row_numbers.append(nums[i])
-        else:
-            kept_dense.append(row)
-            if i < len(nums):
-                kept_nums.append(nums[i])
-    finished.dense_rows = kept_dense
-    finished.dense_row_numbers = kept_nums
-    return finished
-
-
 def _generic_finish_mapped_bundle(
     bundle: Any,
     *,
@@ -4634,12 +4596,9 @@ def _generic_finish_mapped_bundle(
         write_mode=write_mode,
         conflict_columns=conflict_columns,
     )
-    finished = _generic_promote_oracle_empties(
-        finished,
-        write_mode=write_mode,
-        conflict_columns=conflict_columns,
-        dest_db=dest_db,
-    )
+    # D210: Oracle stores '' as NULL. A cell that changed to '' is bound as
+    # NULL with the rest of the row (sql_bind ``oracle_empty_is_null``) — it is
+    # never left out of the MERGE SET, which kept the stale value.
     if not (write_mode == "upsert" and conflict_columns):
         finished.dense_rows = materialize_missing_as_null_for_dense_write(
             finished.dense_rows
@@ -4647,11 +4606,6 @@ def _generic_finish_mapped_bundle(
     finished.dense_dicts: list[dict[str, Any]] = []
     finished.sparse_dicts: list[dict[str, Any]] = []
     if sa_col_types is not None:
-        oracle_omit = write_mode == "upsert" and (
-            dialect_name in {"oracle", "oracledb", "oracle_autonomous"}
-            or str(dialect_name).startswith("oracle")
-            or str(db_type or "").lower().startswith("oracle")
-        )
         finished.dense_rows, finished.dense_dicts, finished.dense_row_numbers = (
             _generic_bind_tuple_rows(
                 finished.dense_rows,
@@ -4679,7 +4633,6 @@ def _generic_finish_mapped_bundle(
                 policy=policy,
                 mappings=mappings,
                 sparse=True,
-                oracle_upsert_omit_empty=oracle_omit,
             )
         )
     finished.checksum_rows = combined_mapped_rows_for_checksum(
@@ -4702,7 +4655,6 @@ def _generic_bind_tuple_rows(
     policy: Any,
     mappings: list,
     sparse: bool = False,
-    oracle_upsert_omit_empty: bool = False,
 ) -> tuple[list[tuple], list[dict[str, Any]], list[int]]:
     """Bind one bundle to SQLAlchemy cells. Surviving tuples stay for checksum."""
     from connectors.writer_common import append_write_quarantine_detail
@@ -4724,14 +4676,6 @@ def _generic_bind_tuple_rows(
             col = target_cols[i]
             raw = row[i] if i < len(row) else None
             if sparse and is_missing_sentinel(raw):
-                cells[col] = DF_MISSING_SENTINEL
-                continue
-            if (
-                sparse
-                and oracle_upsert_omit_empty
-                and isinstance(raw, str)
-                and raw == ""
-            ):
                 cells[col] = DF_MISSING_SENTINEL
                 continue
             try:
@@ -6122,10 +6066,9 @@ def write_mapped_rows(
                                 rollback_exc,
                                 exc_info=rollback_exc,
                             )
-                        if is_sql_data_error(chunk_exc) and policy in {
-                            "quarantine",
-                            "coerce_null",
-                        }:
+                        if is_sql_data_error(chunk_exc) and salvage_policy(
+                            policy, mappings
+                        ) in SALVAGE_POLICIES:
                             chunk_written = 0
                             for row_i, row in enumerate(batch):
                                 try:

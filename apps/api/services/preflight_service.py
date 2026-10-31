@@ -2937,6 +2937,9 @@ def run_file_preflight(
     except Exception as mode_exc:
         logger.debug("validation mode stamp side-effects skipped: %s", mode_exc)
 
+    from services.oracle_empty_string import attach_oracle_empty_string_warning
+
+    attach_oracle_empty_string_warning(out, dest_kind, plan_mappings)
     from services.file_pickup import attach_direct_dated_file_warning
 
     attach_direct_dated_file_warning(out, source_table or source_filename)

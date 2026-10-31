@@ -133,9 +133,17 @@ def test_apply_transform_hash_pii(monkeypatch):
 def test_apply_transform_hash_pii_refuses_insecure_default(monkeypatch):
     monkeypatch.delenv("DATAFLOW_PII_HASH_KEY", raising=False)
     monkeypatch.delenv("DATAFLOW_SECRET", raising=False)
+    # Round 8: keys are per-workspace and auto-provisioned; "no key" now means
+    # the key store cannot answer, and the message names no infrastructure.
+    from services import pii_hash_keys
+
+    def _unavailable(_workspace_id):
+        raise pii_hash_keys.PiiHashKeyUnavailable("store down")
+
+    monkeypatch.setattr(pii_hash_keys, "workspace_key", _unavailable)
     val, err = apply_transform("alice@example.com", "hash_pii")
     assert val is None or val == ""
-    assert err and "DATAFLOW_PII_HASH_KEY" in err
+    assert err and "hashing key" in err and "PII_HASH_KEY" not in err
 
 
 def test_redact_reconciliation_masks_mismatch_values():

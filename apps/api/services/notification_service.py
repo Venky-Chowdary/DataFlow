@@ -85,6 +85,8 @@ def _http_post(
     payload: dict[str, Any],
     headers: dict[str, str] | None = None,
     timeout: float = 30.0,
+    *,
+    raw_body: bytes | None = None,
 ) -> dict[str, Any]:
     """POST JSON. A non-2xx answer returns ``ok: False`` with its ``status`` and
     a short redacted ``body`` so callers can tell a refusal from a transport
@@ -92,7 +94,7 @@ def _http_post(
     if not _allowed_url(url):
         return {"ok": False, "error": "Webhook URL is not allowed (private, loopback, or non-http(s))"}
     try:
-        data = json.dumps(payload, default=json_default).encode("utf-8")
+        data = raw_body if raw_body is not None else json.dumps(payload, default=json_default).encode("utf-8")
         req = urllib.request.Request(
             url,
             data=data,
@@ -379,7 +381,16 @@ def _send_webhook(channel: NotificationChannel, payload: dict[str, Any]) -> dict
             headers = json.loads(headers)
         except Exception:
             headers = {}
-    return _http_post(url, payload, headers or {})
+    from services.webhook_signing import SECRET_CONFIG_KEY, signature_headers
+
+    body = json.dumps(payload, default=json_default).encode("utf-8")
+    secret = str(channel.config.get(SECRET_CONFIG_KEY) or "")
+    signed = dict(headers or {})
+    if secret:
+        # The signature covers exactly the bytes sent; it is added last so a
+        # configured custom header can never replace it.
+        signed.update(signature_headers(secret, body))
+    return _http_post(url, payload, signed, raw_body=body)
 
 
 def _payload_text(payload: dict[str, Any]) -> str:

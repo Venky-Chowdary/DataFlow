@@ -368,6 +368,8 @@ _PATH_RULES: list[tuple[str, str, str]] = [
     ("GET", "/api/v1/mcp/logs", Permission.AI_USE),
     ("*", "/api/v1/mcp/policy", Permission.WORKSPACE_MANAGE),
     ("*", "/api/v1/mcp/", Permission.AI_USE),
+    # Job history under its own name (QA enterprise #50): a read every role holds.
+    ("GET", "/api/v1/jobs/", Permission.JOB_READ),
     ("GET", "/api/v1/connectors/", Permission.CONNECTOR_READ),
     ("*", "/api/v1/connectors/", Permission.CONNECTOR_WRITE),
     ("*", "/api/v1/query/", Permission.QUERY_USE),
@@ -445,6 +447,7 @@ _EXACT_PATH_RULES: tuple[tuple[str, str, str | None], ...] = (
     ("GET", "/", Permission.JOB_READ),
     ("GET", "/api/v1", Permission.JOB_READ),
     ("GET", "/api/v1/health", Permission.JOB_READ),
+    ("GET", "/api/v1/jobs", Permission.JOB_READ),
     ("GET", "/api/v1/contracts", Permission.JOB_READ),
     ("POST", "/api/v1/contracts", Permission.CONNECTOR_WRITE),
 )

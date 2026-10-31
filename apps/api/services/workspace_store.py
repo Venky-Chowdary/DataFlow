@@ -22,6 +22,30 @@ _DEFAULTS: dict[str, Any] = {
 }
 
 
+_ATTRIBUTION = ("updated_at", "updated_by")
+
+
+class InvalidTimezone(ValueError):
+    pass
+
+
+def validate_timezone(name: str) -> str:
+    """The IANA zone ``name`` names, or ``InvalidTimezone``.
+
+    Checked against the zone database itself (``zoneinfo.available_timezones``),
+    so a well-formed but invented name like ``Mars/Olympus`` is refused.
+    """
+    from zoneinfo import available_timezones
+
+    zone = (name or "").strip()
+    if zone in {"UTC", "Etc/UTC"} or zone in available_timezones():
+        return zone
+    raise InvalidTimezone(
+        f"{zone!r} is not an IANA time zone. Use a name such as UTC, "
+        "America/New_York or Europe/Berlin."
+    )
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -34,7 +58,11 @@ def _load_raw() -> dict[str, Any]:
         if not isinstance(raw, dict):
             return dict(_DEFAULTS)
         merged = dict(_DEFAULTS)
-        merged.update({k: v for k, v in raw.items() if k in _DEFAULTS or k.startswith("_")})
+        # Attribution is stored beside the preferences. Filtering it out with the
+        # unknown keys made every read report updated_at/updated_by as null.
+        merged.update(
+            {k: v for k, v in raw.items() if k in _DEFAULTS or k in _ATTRIBUTION or k.startswith("_")}
+        )
         return merged
     except Exception:
         return dict(_DEFAULTS)
@@ -71,7 +99,7 @@ def update_workspace_settings(
     if org_name is not None:
         data["org_name"] = org_name.strip()[:128] or _DEFAULTS["org_name"]
     if timezone is not None:
-        data["timezone"] = timezone.strip()[:64] or _DEFAULTS["timezone"]
+        data["timezone"] = validate_timezone(timezone) if timezone.strip() else _DEFAULTS["timezone"]
     if retention_days is not None:
         data["retention_days"] = max(1, min(3650, int(retention_days)))
     if studio_schema_browser is not None:
@@ -79,7 +107,6 @@ def update_workspace_settings(
     if studio_canvas is not None:
         data["studio_canvas"] = bool(studio_canvas)
     data["updated_at"] = _now()
-    if actor:
-        data["updated_by"] = actor
+    data["updated_by"] = actor or "system"
     _save(data)
     return get_workspace_settings()

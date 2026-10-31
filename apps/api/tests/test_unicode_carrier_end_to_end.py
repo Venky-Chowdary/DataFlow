@@ -75,13 +75,20 @@ class TestConversionContractAcceptsRequiredPromotion:
             ), source
 
     def test_codepage_source_promotion_still_invents(self):
-        for source in CODEPAGE_SOURCES:
-            assert national_charset_would_invent(
+        # D212: only a source that *declares* a single-byte code page invents
+        # national polarity; SQL Server VARCHAR is one by declaration.
+        assert national_charset_would_invent("VARCHAR(64)", "NVARCHAR(64)", source_db="mssql")
+        assert national_charset_would_invent(
+            "VARCHAR(64) CHARACTER SET latin1", "NVARCHAR(64)", source_db="mysql"
+        )
+
+    def test_unmeasured_source_promotion_preserves(self):
+        # D212: an Oracle VARCHAR2 (AL32UTF8), a MySQL column with no stated
+        # charset, or an unbound engine can hold any scalar — NVARCHAR keeps it.
+        for source in ("oracle", "mysql", ""):
+            assert not national_charset_would_invent(
                 "VARCHAR(64)", "NVARCHAR(64)", source_db=source
             ), source
-
-    def test_unknown_source_keeps_conservative_answer(self):
-        assert national_charset_would_invent("VARCHAR(64)", "NVARCHAR(64)")
 
     def test_classify_conversion_unblocks_under_bound_source_engine(self):
         with bind_source_engine("postgresql"):

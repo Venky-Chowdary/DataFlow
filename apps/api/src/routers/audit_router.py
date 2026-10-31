@@ -180,6 +180,13 @@ async def list_events(
     limit: int = Query(50, ge=1, le=500),
     level: str | None = Query(None, description="info | success | warn | error | all"),
     after_seq: int | None = Query(None, ge=0),
+    action: str | None = Query(
+        None,
+        max_length=512,
+        description="Comma-separated action names; a trailing * matches a prefix (team.member.*)",
+    ),
+    q: str | None = Query(None, max_length=200, description="Substring of action, resource or actor"),
+    search: str | None = Query(None, max_length=200, description="Alias of q"),
 ):
     from services.audit_log import list_audit_events
 
@@ -194,6 +201,8 @@ async def list_events(
         level=level,
         workspace_filter=scope.strict_filter(),
         after_seq=after_seq,
+        action=action,
+        search=q or search,
     )
     next_seq, cursor_headers = _next_after_seq(events, after_seq)
     from services.audit_actor_display import add_actor_display

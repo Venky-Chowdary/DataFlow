@@ -1180,7 +1180,7 @@ export interface ModelCapabilities {
     available: boolean;
     status: string;
     blocked_reason?: string;
-    key_state?: "ready" | "none" | "disabled" | "undecryptable";
+    key_state?: "ready" | "none" | "disabled" | "undecryptable" | "unreachable";
   }[];
   settings_storage?: { path?: string; persistent: boolean; reason: string };
   guarantees: string[];
@@ -3468,6 +3468,18 @@ export async function fetchMcpLogs(limit = 50): Promise<Array<{
   return data.logs ?? [];
 }
 
+export async function purgeJobRetention(body: { dry_run: boolean; confirm_token?: string }): Promise<{
+  would_remove?: number;
+  removed?: number;
+  cutoff: string;
+  retention_days: number;
+  confirm_token: string;
+}> {
+  const res = await apiFetch(`${API_BASE}/workspace/jobs/retention/purge`, { method: "POST", body: JSON.stringify(body) });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not purge old jobs"));
+  return res.json();
+}
+
 export async function fetchWorkspaceSettings(): Promise<{
   org_name: string;
   timezone: string;
@@ -3619,6 +3631,10 @@ export type SsoConfig = {
   redirect_uri?: string;
   scopes?: string;
   tenant_id?: string;
+  /** Sign-ins from these domains route to this IdP (`/auth/sso/route`). */
+  email_domains?: string[];
+  /** Write-only: remove the stored client secret (blank keeps it). */
+  clear_client_secret?: boolean;
 };
 
 export function resolveApiBase(): string {
@@ -3708,6 +3724,8 @@ export async function testAiProviderKey(provider: string): Promise<{
   ok: boolean;
   provider: string;
   error: string;
+  base_url?: string;
+  models?: string[];
   capabilities: ModelCapabilities;
 }> {
   const res = await apiFetch(`${API_BASE}/workspace/ai-providers/${provider}/test`, { method: "POST" });
@@ -4467,6 +4485,16 @@ export interface NotificationChannel {
   created_at: string;
   updated_at: string;
   created_by: string;
+  /** Webhook channels: a signing secret exists (never returned on reads). */
+  signing_secret_set?: boolean;
+  /** Present only in the create / rotate response — shown once. */
+  signing_secret?: string;
+}
+
+export async function rotateNotificationSigningSecret(id: string): Promise<NotificationChannel> {
+  const res = await apiFetch(`${API_BASE}/workspace/notifications/${id}/signing-secret/rotate`, { method: "POST" });
+  if (!res.ok) throw new Error(await parseApiError(res, "Could not rotate the signing secret"));
+  return res.json();
 }
 
 export async function fetchNotificationChannels(workspaceId?: string): Promise<{ channels: NotificationChannel[] }> {
@@ -4509,6 +4537,7 @@ export type Tenant = {
   security_contact_email: string;
   mfa_required: boolean;
   session_timeout_hours: number;
+  enforce_session_timeout?: boolean;
   ip_allowlist: string[];
   egress_allowlist: string[];
   created_at: string;
@@ -4587,6 +4616,12 @@ export type SecurityPosture = {
   mfa_enforced?: boolean;
   session_timeout_hours: number;
   session_timeout_enforced?: boolean;
+  /** Exactly what each control enforces (round 8). */
+  enforcement?: {
+    ip_allowlist?: { enforced?: boolean; missing?: string[]; scope?: string };
+    session_timeout?: { enforced?: boolean; hours?: number | null };
+    mfa?: { enforced?: boolean; status?: string };
+  };
   byok_encrypts_secrets?: boolean;
   tls_version: string;
   compliance: Array<{ framework: string; status: string; evidence: string }>;

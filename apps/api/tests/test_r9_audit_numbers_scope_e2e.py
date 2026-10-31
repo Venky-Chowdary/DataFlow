@@ -27,7 +27,7 @@ from r9_workspace_world import r9  # noqa: E402,F401
 
 
 def _seed_platform_audit(r9) -> dict[str, str]:
-    from services import audit_anchor, audit_coverage, audit_log, evidence_chain
+    from services import audit_anchor, audit_log, evidence_chain
 
     acme = audit_log.append_audit_event(
         action="r9.acme.activity", resource="/r9", actor="owner@acme.test",
@@ -45,8 +45,6 @@ def _seed_platform_audit(r9) -> dict[str, str]:
     evidence_chain.record_truncation(
         removed_count=4321, last_removed_event_hash="feed" * 16, first_kept_event_hash=None
     )
-    with audit_coverage._FAILURE_LOCK:
-        audit_coverage._AUDIT_ACCESS_FAILURES += 7
     return {"acme": acme["event_hash"], "bravo": bravo["event_hash"], "platform": platform["event_hash"]}
 
 
@@ -57,6 +55,10 @@ def test_signup_sees_its_own_audit_head_not_platform_numbers(r9, tmp_path, monke
     monkeypatch.setattr(audit_log, "_mongo_collection", lambda: r9.db["audit_events"])
     monkeypatch.setattr(audit_anchor, "_store_path", lambda: tmp_path / "anchors.jsonl")
     monkeypatch.setattr(evidence_chain, "truncation_store_path", lambda: tmp_path / "truncations.jsonl")
+    from services import audit_coverage
+
+    # The process-wide counter, set for this test only.
+    monkeypatch.setattr(audit_coverage, "_AUDIT_ACCESS_FAILURES", 7)
     hashes = _seed_platform_audit(r9)
     bravo = r9.bravo()
 

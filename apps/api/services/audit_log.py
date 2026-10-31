@@ -8,6 +8,7 @@ local JSONL file.
 from __future__ import annotations
 
 import json
+import re
 import logging
 import os
 import threading
@@ -259,6 +260,16 @@ def append_audit_event(
             if tracker.get("workspace_header_rejected"):
                 details["workspace_header_rejected"] = True
 
+    if tracker is not None and not action.startswith("http."):
+        from services.admin_audit import ADMIN_EVENTS
+
+        if action in ADMIN_EVENTS:
+            # A handler's own admin event: the middleware must not add a second
+            # one, and it belongs to the workspace the request was made in.
+            tracker["admin_event"] = action
+            if not (workspace_id or "").strip():
+                workspace_id = str(tracker.get("workspace_id") or "") or None
+
     if principal is None:
         from services.audit_coverage import current_request_principal
 
@@ -488,6 +499,39 @@ def _event_in_scope(
     return True
 
 
+def _action_terms(action: str | None) -> tuple[set[str], list[str]]:
+    exact: set[str] = set()
+    prefixes: list[str] = []
+    for term in str(action or "").split(","):
+        term = term.strip()
+        if not term:
+            continue
+        if term.endswith("*"):
+            prefixes.append(term[:-1])
+        else:
+            exact.add(term)
+    return exact, prefixes
+
+
+def _action_mongo_query(action: str | None) -> Any:
+    exact, prefixes = _action_terms(action)
+    if not exact and not prefixes:
+        return None
+    if not prefixes:
+        return exact.pop() if len(exact) == 1 else {"$in": sorted(exact)}
+    pattern = "|".join(
+        [f"^{re.escape(p)}" for p in prefixes] + [f"^{re.escape(e)}$" for e in sorted(exact)]
+    )
+    return {"$regex": pattern}
+
+
+def _action_matches(action: str | None, value: str) -> bool:
+    exact, prefixes = _action_terms(action)
+    if not exact and not prefixes:
+        return True
+    return value in exact or any(value.startswith(p) for p in prefixes)
+
+
 def list_audit_events(
     *,
     limit: int = 100,
@@ -499,8 +543,14 @@ def list_audit_events(
     until: str | None = None,
     after_seq: int | None = None,
     workspace_filter: WorkspaceFilter | None = None,
+    action: str | None = None,
+    search: str | None = None,
 ) -> list[dict[str, Any]]:
     """Return recent events, or an ascending chain-sequence cursor page.
+
+    ``action`` is a comma-separated list of exact action names; an entry
+    ending in ``*`` (``team.member.*``) matches that prefix. ``search`` is a
+    case-insensitive substring of the action, resource or actor.
 
     ``workspace_id`` / ``tenant_id`` are exact matches. Unscoped historical
     events (empty workspace) are excluded from a scoped query so one tenant
@@ -522,6 +572,15 @@ def list_audit_events(
                 query["level"] = level
             if actor:
                 query["actor"] = actor
+            action_query = _action_mongo_query(action)
+            if action_query is not None:
+                query["action"] = action_query
+            if search and search.strip():
+                needle = {"$regex": re.escape(search.strip()), "$options": "i"}
+                # Under $and: the workspace filter below may bring its own $or.
+                query["$and"] = [
+                    {"$or": [{"action": needle}, {"resource": needle}, {"actor": needle}]}
+                ]
             if workspace_filter is not None:
                 query.update(workspace_filter.mongo_query())
             if ws:
@@ -563,6 +622,13 @@ def list_audit_events(
         if level and level != "all" and ev.get("level") != level:
             continue
         if actor and ev.get("actor") != actor:
+            continue
+        if not _action_matches(action, str(ev.get("action") or "")):
+            continue
+        if search and search.strip() and not any(
+            search.strip().lower() in str(ev.get(field) or "").lower()
+            for field in ("action", "resource", "actor")
+        ):
             continue
         if after_seq is not None and chain_seq_of(ev) <= after_seq:
             continue

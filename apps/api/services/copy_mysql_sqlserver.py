@@ -68,6 +68,8 @@ from services.copy_sqlserver_sqlserver import (
     _table_ref as _ss_table_ref,
 )
 
+from services.copy_range_proof import range_keys_match  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 
@@ -260,7 +262,13 @@ def copy_mysql_to_sqlserver(
                             dst_cur, dest_ref, dest_ident, part
                         )
                         expected = int(part["source_count"])
-                        if already == expected:
+                        # A count is not identity: skip only a range that holds this
+                        # source range's keys (append of N new keys into N rows).
+                        if already == expected and range_keys_match(
+                            src_dialect="mysql", src_cur=src_cur, src_ref=table_q, src_ident=src_ident,
+                            dst_dialect="sqlserver", dst_cur=dst_cur, dst_ref=dest_ref, dst_ident=dest_ident,
+                            part=part,
+                        ):
                             part["action"] = "skip"
                             part["dest_count"] = already
                         elif already == 0:
@@ -273,7 +281,10 @@ def copy_mysql_to_sqlserver(
                                 )
                             )
                         else:
-                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
+                            occupied_pk_range_action(
+                                already, expected, replace_destination=replace_destination,
+                                keys_proven=False,
+                            )
                             _ss_delete_range(
                                 dst_cur, dest_ref, dest_ident, part
                             )

@@ -25,7 +25,10 @@ _started = threading.Event()
 _shutdown = False
 _worker_id = worker_id()
 _lease_store = WorkerLeaseStore(_worker_id)
-_inflight: set[str] = set()
+#: job id -> runs of it this process has submitted and not finished. A count,
+#: not a set: a resume can start while the cancelled run is still stopping,
+#: and the old run's exit must not make the new one look ownerless (D213).
+_inflight: dict[str, int] = {}
 _inflight_lock = threading.Lock()
 
 
@@ -146,9 +149,22 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
         job_id,
         ttl_seconds=ttl_seconds,
         on_lost=_mark_lease_lost,
+        fence=fence,
     )
     with _inflight_lock:
-        _inflight.add(job_id)
+        _inflight[job_id] = _inflight.get(job_id, 0) + 1
+
+    def _done() -> None:
+        # Release only the lease THIS run took. After a same-process takeover
+        # the process's current fence is the newer run's (QA D213).
+        stop_heartbeat()
+        _lease_store.release(job_id, fence=fence)
+        with _inflight_lock:
+            left = _inflight.get(job_id, 0) - 1
+            if left > 0:
+                _inflight[job_id] = left
+            else:
+                _inflight.pop(job_id, None)
 
     def _leased_fn(*a: Any, **kw: Any) -> Any:
         detach_token = None
@@ -173,10 +189,7 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
         try:
             return fn(*a, **kw)
         finally:
-            stop_heartbeat()
-            _lease_store.release(job_id)
-            with _inflight_lock:
-                _inflight.discard(job_id)
+            _done()
             if detach_token is not None:
                 try:
                     from services.tracing import detach_context
@@ -195,10 +208,7 @@ def submit(job_id: str, fn: Callable[..., Any], *args: Any, **kwargs: Any) -> co
     try:
         return executor.submit(_leased_fn, *args, **kwargs)
     except Exception:
-        stop_heartbeat()
-        _lease_store.release(job_id)
-        with _inflight_lock:
-            _inflight.discard(job_id)
+        _done()
         raise
 
 

@@ -92,6 +92,27 @@ def _env_reread_mode() -> str:
     return "auto"
 
 
+#: SQL sources the write pass reads through ``_read_batch`` with a cursor or an
+#: offset, but which are not snapshot-scan sources. Outside a resume they stay
+#: on the write-pass digest. A resumed pass that wrote only the tail has no
+#: population digest without a re-read, so for these the tail re-read runs
+#: (QA D213: SQL Server -> MySQL resume failed Gate-8 on 31 correct rows).
+_PARTIAL_PASS_REREAD_FAMILIES: Final[frozenset[str]] = frozenset({"sqlserver"})
+
+
+def reread_loop_supports(src_type: str, *, partial_write_pass: bool = False) -> bool:
+    """True when the Gate-8 re-read loop may page ``src_type``.
+
+    A partial write pass (resume covering only the tail) also re-reads SQL
+    Server: comparing that session's digest with the whole destination is a
+    guaranteed false mismatch on a complete table.
+    """
+    raw = (src_type or "").strip().lower()
+    if raw in REREAD_SCAN_SOURCES:
+        return True
+    return bool(partial_write_pass) and engine_family(raw) in _PARTIAL_PASS_REREAD_FAMILIES
+
+
 def should_reread_source(
     *,
     src_type: str,

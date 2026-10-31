@@ -4329,6 +4329,12 @@ def _culprit_census_conn(fmt: str, cfg: dict[str, Any]) -> tuple[str, Any] | Non
         from services.copy_sqlserver_sqlserver import _ss_connect
 
         return eng, _ss_connect(cfg)
+    if eng == "oracle" or eng.startswith("oracle"):
+        # D212: an Oracle side used to have "no census driver", so an
+        # Oracle -> SQL Server engine copy proved COUNT(*) only.
+        from services.value_readback import oracle_census_connection
+
+        return "oracle", oracle_census_connection(cfg)
     if eng == "snowflake":
         from connectors.snowflake_conn import get_connection, normalize_account
         from connectors.sql_identifiers import snowflake_fold_identifier
@@ -7137,6 +7143,18 @@ def _run_reconciliation_impl(
                         " Destination key census compared the mapped columns "
                         "key-by-key on both sides — all values agree."
                     )
+        if _census_verdict is None and not _census_note and balanced:
+            # D212: no value compare ran. A text column whose values cannot
+            # round-trip (Unicode-capable source on a code-page carrier) makes
+            # the count-only verdict a failure — never green over a lossy write.
+            from services.value_readback import count_only_text_risk_verdict
+
+            _census_verdict = count_only_text_risk_verdict(
+                source_endpoint=source_endpoint,
+                endpoint=endpoint,
+                mappings=mapping_dicts,
+                reason=_census_unverified_reason,
+            )
         if _census_verdict is not None:
             _base = ReconciliationReport(
                 passed=False,
@@ -7154,6 +7172,11 @@ def _run_reconciliation_impl(
             ).to_dict()
             _base["culprit_keys"] = _census_verdict["culprit_keys"]
             _base["verification_verdict"] = "failed"
+            if _census_verdict.get("value_compare"):
+                _base["value_compare"] = _census_verdict["value_compare"]
+            else:
+                _base["value_compare"] = {"ran": True, "method": "key_census",
+                                          "passed": False}
             return _finalize(_base)
         _count_only_report = ReconciliationReport(
             passed=balanced,
