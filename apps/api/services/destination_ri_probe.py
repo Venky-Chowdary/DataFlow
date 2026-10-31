@@ -377,8 +377,34 @@ def referential_integrity_proven(evidence: Mapping[str, Any] | None) -> bool:
     return True
 
 
-def build_dest_ri_validate_gate(*, has_relationships: bool) -> dict[str, Any]:
-    """Validate never claims dest population RI — that is a post-write Gate-8 proof."""
+def build_dest_ri_validate_gate(
+    *,
+    has_relationships: bool,
+    parent_finding: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate never claims dest population RI — that is a post-write Gate-8 proof.
+
+    ``parent_finding`` is the plan-time FK parent probe: a parent that is not at
+    the destination is stated here (warn) instead of failing the run mid-write.
+    """
+    if isinstance(parent_finding, Mapping) and parent_finding.get("code") in {
+        "fk_parent_absent_at_destination",
+        "fk_route_ignore",
+    }:
+        return {
+            "id": GATE_ID,
+            "status": "warn" if parent_finding.get("severity") == "warn" else "skip",
+            "message": str(parent_finding.get("message") or ""),
+            "duration_ms": 0,
+            "details": {
+                "schema": REPORT_SCHEMA,
+                "declared": True,
+                "evidence": "plan_time_parent_probe",
+                "parents": list(parent_finding.get("parents") or []),
+                "relationships": list(parent_finding.get("columns") or []),
+                "rule_id": f"{GATE_ID}.{parent_finding.get('code')}",
+            },
+        }
     if not has_relationships:
         return {
             "id": GATE_ID,

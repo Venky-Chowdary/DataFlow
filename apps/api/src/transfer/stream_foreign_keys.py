@@ -49,6 +49,137 @@ def single_table_foreign_key_carry_deferred() -> bool:
     return bool(_DEFER_SINGLE_TABLE_FK.get())
 
 
+#: Destination option key of the ``foreign_keys`` route option. Not the bare
+#: ``foreign_keys`` key: destination introspection stores the destination's own
+#: FK list there and would overwrite the operator's choice.
+FK_ROUTE_OPTION = "foreign_keys_mode"
+
+#: Route option ``foreign_keys`` (MCP ``foreign_keys``; REST/Studio destination
+#: option ``foreign_keys_mode``):
+#: ``carry``  (default) quarantine orphans against destination parents that
+#:            exist, then add the constraint after the load;
+#: ``guard``  quarantine orphans, but add no constraint;
+#: ``ignore`` neither guard nor carry: the child rows land as read.
+FK_ROUTE_POLICIES = ("carry", "guard", "ignore")
+
+# The operator's FK risk acknowledgement for the run being executed. The
+# engine binds it from the request (Validate ≡ Execute): with it, an orphan
+# row is quarantined in strict mode instead of failing the run.
+_FK_RISK_ACKNOWLEDGED: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "df_fk_risk_acknowledged",
+    default=False,
+)
+
+
+def push_fk_risk_acknowledged(acknowledged: bool) -> contextvars.Token[bool]:
+    return _FK_RISK_ACKNOWLEDGED.set(bool(acknowledged))
+
+
+def pop_fk_risk_acknowledged(token: contextvars.Token[bool]) -> None:
+    _FK_RISK_ACKNOWLEDGED.reset(token)
+
+
+def fk_route_policy(destination: Any) -> str:
+    """The route's ``foreign_keys`` option, validated. Raises on an unknown value.
+
+    A typo must not silently fall back to the default: the operator asked for a
+    behaviour the run would not have.
+    """
+    extra = getattr(destination, "extra", None)
+    if not isinstance(extra, dict) and isinstance(destination, dict):
+        extra = destination.get("extra") if isinstance(destination.get("extra"), dict) else destination
+    extra = extra or {}
+    raw_value = extra.get(FK_ROUTE_OPTION)
+    if raw_value in (None, "") and isinstance(extra.get("foreign_keys"), str):
+        raw_value = extra.get("foreign_keys")
+    raw = str(raw_value or "").strip().lower()
+    if not raw:
+        return "carry"
+    if raw not in FK_ROUTE_POLICIES:
+        raise ValueError(
+            f"foreign_keys={raw!r} is not a route option; use one of "
+            + ", ".join(FK_ROUTE_POLICIES)
+            + "."
+        )
+    return raw
+
+
+@dataclass
+class FKParentPlan:
+    """Plan-time answer: which source references have a parent at the destination."""
+
+    table: str = ""
+    policy: str = "carry"
+    present: list[Any] = field(default_factory=list)
+    absent: list[Any] = field(default_factory=list)
+    unknown: list[Any] = field(default_factory=list)
+    detail: str = ""
+
+    def labels(self, items: list[Any]) -> list[str]:
+        return [_fk_label(self.table, fk) for fk in items]
+
+
+def _fk_label(table: str, fk: Any) -> str:
+    cols = ",".join(str(c) for c in (getattr(fk, "columns", None) or []))
+    pcols = ",".join(str(c) for c in (getattr(fk, "referenced_columns", None) or []))
+    parent = str(getattr(fk, "referenced_table", "") or "")
+    return f"{table}.{cols} -> {parent}.{pcols}"
+
+
+def plan_fk_parents(
+    source: EndpointConfig,
+    destination: EndpointConfig,
+    table: str,
+    *,
+    dest_type: str = "",
+    dest_cfg: dict[str, Any] | None = None,
+    source_keys: Any = None,
+) -> FKParentPlan:
+    """Probe, once and before any row moves, whether each FK parent exists.
+
+    The write-path guard used to discover a missing parent on the first page
+    and fail the run mid-flight ("could not verify … refusing"), so a child
+    table could never be copied on its own (QA round 11: Rfam ``family``).
+    A parent that is not at the destination is now a plan-time finding: no
+    guard and no constraint for that reference. A parent that exists keeps
+    the guard. A catalog that cannot be listed is ``unknown`` and keeps the
+    guard (fail closed), exactly as before.
+    """
+    policy = fk_route_policy(destination)
+    plan = FKParentPlan(table=table, policy=policy)
+    keys = source_keys
+    if keys is None:
+        keys = foreign_key_context(source, [table]).source_keys.get(table)
+    items = [
+        fk
+        for fk in (getattr(keys, "items", None) or [])
+        if str(getattr(fk, "referenced_table", "") or "").strip()
+        and str(getattr(fk, "referenced_table", "")).strip().lower() != (table or "").lower()
+    ]
+    if not items or destination.kind != "database":
+        return plan
+    try:
+        from connectors.generic_sql import _engine
+        from services.dialect_profiles import catalog_namespace
+        from services.foreign_key_orchestration import _destination_tables
+
+        d_type = dest_type or resolve_driver_type(destination.format)
+        d_cfg = dest_cfg if dest_cfg is not None else resolve_connector_config(destination)
+        known = _destination_tables(_engine(d_cfg), d_type, catalog_namespace(d_type, d_cfg))
+    except Exception as exc:  # noqa: BLE001 — an unreadable catalog is a state
+        known = None
+        plan.detail = f"{type(exc).__name__}: {exc}"
+    for fk in items:
+        parent = str(getattr(fk, "referenced_table", "")).strip().lower()
+        if known is None:
+            plan.unknown.append(fk)
+        elif parent in known or parent.split(".")[-1] in known:
+            plan.present.append(fk)
+        else:
+            plan.absent.append(fk)
+    return plan
+
+
 @dataclass
 class ForeignKeyContext:
     """Measured source references for the tables of one multi-stream job."""
@@ -190,6 +321,8 @@ class FKOrphanGuard:
         self._dest_cfg = dest_cfg
         self._dest_dialect = dest_dialect
         self._relations = relations
+        # An acknowledged FK risk quarantines orphans even in strict mode.
+        self.risk_acknowledged = bool(_FK_RISK_ACKNOWLEDGED.get())
         # Tuples proven present stay present for the run (append semantics).
         # Misses are never cached — a parent arriving mid-run must verify.
         self._present: list[set[tuple[Any, ...]]] = [set() for _ in relations]
@@ -308,12 +441,25 @@ def build_fk_orphan_guard(
         return None
     if (dest_type or "").lower() not in _FK_GUARD_DIALECTS:
         return None
+    if fk_route_policy(destination) == "ignore":
+        return None
     fk_context = foreign_key_context(source, [table])
     keys = fk_context.source_keys.get(table)
     if keys is None or not getattr(keys, "items", None):
         return None
+    parent_plan = plan_fk_parents(
+        source, destination, table, dest_type=dest_type, dest_cfg=dest_cfg, source_keys=keys
+    )
+    absent = {id(fk) for fk in parent_plan.absent}
+    if parent_plan.absent:
+        logger.warning(
+            "FK guard: no destination parent for %s — not guarded, not carried",
+            "; ".join(parent_plan.labels(parent_plan.absent)),
+        )
     relations: list[_FKGuardRelation] = []
     for fk in keys.items:
+        if id(fk) in absent:
+            continue
         child_cols = [str(c).strip() for c in (fk.columns or []) if str(c).strip()]
         parent_cols = [
             str(c).strip() for c in (fk.referenced_columns or []) if str(c).strip()
@@ -358,6 +504,17 @@ def carry_single_table_foreign_keys(
     source parent would be bound instead.
     """
     if single_table_foreign_key_carry_deferred():
+        return
+    policy = fk_route_policy(destination)
+    if policy != "carry":
+        dest_summary["foreign_keys"] = {
+            "decisions": [],
+            "counts": {},
+            "integrity_violations": 0,
+            "carried": 0,
+            "verdict": "not_requested",
+            "policy": policy,
+        }
         return
     fk_context = foreign_key_context(source, [table])
     if not fk_context.source_keys:

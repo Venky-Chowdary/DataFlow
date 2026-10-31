@@ -68,6 +68,21 @@ def _read_batch_unscoped(
     from connectors.generic_sql import connection_options
 
     src_type = source_read_driver(src_type)
+    from services.procedure_source import is_callable_source, read_callable_batch
+
+    # Procedure / custom-SQL extract — one CALL, then page the spool. The first
+    # branch, before any registry or per-dialect table reader: a leftover table
+    # name must not hijack the read, and a query source has no table to require.
+    if is_callable_source(cfg):
+        return read_callable_batch(
+            cfg,
+            offset=offset,
+            limit=limit,
+            peek=False,
+            columns=columns,
+            cursor_column=cursor_column or None,
+            cursor_after=cursor_after,
+        )
     from connectors.sdk import get_descriptor
 
     descriptor = get_descriptor(src_type)
@@ -85,7 +100,6 @@ def _read_batch_unscoped(
         )
 
     from connectors.sql_snapshot_scan import FILTERED_SCAN_SOURCES
-    from services.procedure_source import is_callable_source, read_callable_batch
 
     # Incremental read on a source with no unique tie-break: one held snapshot
     # scan bounded by ``WHERE cursor > watermark``. Never falls back to an
@@ -106,19 +120,6 @@ def _read_batch_unscoped(
             "filter_column": scan_filter[0],
             "filter_after": scan_filter[1],
         }
-
-    # Procedure / custom-SQL extract — one CALL, then page the spool.
-    # Must run before table readers so a leftover table name cannot hijack the read.
-    if is_callable_source(cfg):
-        return read_callable_batch(
-            cfg,
-            offset=offset,
-            limit=limit,
-            peek=False,
-            columns=columns,
-            cursor_column=cursor_column or None,
-            cursor_after=cursor_after,
-        )
 
     # Phase F2 — N-col composite keyset (≥3) on SQLAlchemy dialects goes through
     # generic_sql so PG/MySQL/Snowflake share the portable OR/AND builder.

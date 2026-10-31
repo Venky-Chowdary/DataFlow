@@ -317,7 +317,11 @@ def _filter_batch(run, batch):
         kept_rows, orphan_details = cfg.fk_orphan_guard.partition(
             list(batch.headers or []), list(batch.rows)
         )
-        if orphan_details and _stream._fk_orphans_fail_closed(cfg.validation_mode):
+        if (
+            orphan_details
+            and _stream._fk_orphans_fail_closed(cfg.validation_mode)
+            and not getattr(cfg.fk_orphan_guard, "risk_acknowledged", False)
+        ):
             raise ValueError(_stream._fk_orphan_violation_message(orphan_details))
         if orphan_details:
             batch.rows = kept_rows

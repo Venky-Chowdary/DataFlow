@@ -704,6 +704,25 @@ TOOL_DEFINITIONS: list[dict] = [
                         "Acknowledge a schema_drift review block so the plan can clear."
                     ),
                 },
+                "foreign_keys": {
+                    "type": "string",
+                    "enum": ["carry", "guard", "ignore"],
+                    "description": (
+                        "Source foreign keys on this route. 'carry' (default): child "
+                        "rows are checked against destination parents that exist and "
+                        "the constraint is added after the load; a parent missing at "
+                        "the destination is reported at plan time and not carried. "
+                        "'guard': check rows, add no constraint. 'ignore': copy rows "
+                        "as read."
+                    ),
+                },
+                "fk_risk_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept foreign-key risk: orphan child rows are quarantined "
+                        "instead of refusing the run in strict mode."
+                    ),
+                },
                 "vector_layout": {
                     "type": "string",
                     "enum": ["table", "document"],
@@ -876,6 +895,25 @@ TOOL_DEFINITIONS: list[dict] = [
                         "approved_by": {"type": "string"},
                         "reason": {"type": "string"},
                     },
+                },
+                "foreign_keys": {
+                    "type": "string",
+                    "enum": ["carry", "guard", "ignore"],
+                    "description": (
+                        "Source foreign keys on this route. 'carry' (default): child "
+                        "rows are checked against destination parents that exist and "
+                        "the constraint is added after the load; a parent missing at "
+                        "the destination is reported at plan time and not carried. "
+                        "'guard': check rows, add no constraint. 'ignore': copy rows "
+                        "as read."
+                    ),
+                },
+                "fk_risk_acknowledged": {
+                    "type": "boolean",
+                    "description": (
+                        "Accept foreign-key risk: orphan child rows are quarantined "
+                        "instead of refusing the run in strict mode."
+                    ),
                 },
                 "vector_layout": {
                     "type": "string",
@@ -4256,6 +4294,8 @@ class DataPilotTools:
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
         vector_layout: str = "",
+        foreign_keys: str = "",
+        fk_risk_acknowledged: bool = False,
         delete_mode: str = "",
     ) -> ToolResult:
         from .transfer_tools import plan_transfer
@@ -4294,6 +4334,8 @@ class DataPilotTools:
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
             vector_layout=vector_layout,
+            foreign_keys=foreign_keys,
+            fk_risk_acknowledged=fk_risk_acknowledged,
             delete_mode=delete_mode,
         )
 
@@ -4333,6 +4375,8 @@ class DataPilotTools:
         schema_drift_acknowledged: bool = False,
         ddl_acknowledgement: dict | None = None,
         vector_layout: str = "",
+        foreign_keys: str = "",
+        fk_risk_acknowledged: bool = False,
         delete_mode: str = "",
     ) -> ToolResult:
         from .transfer_tools import start_transfer
@@ -4372,6 +4416,8 @@ class DataPilotTools:
             schema_drift_acknowledged=schema_drift_acknowledged,
             ddl_acknowledgement=ddl_acknowledgement,
             vector_layout=vector_layout,
+            foreign_keys=foreign_keys,
+            fk_risk_acknowledged=fk_risk_acknowledged,
             delete_mode=delete_mode,
         )
 

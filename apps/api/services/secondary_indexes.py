@@ -185,6 +185,9 @@ def probe_secondary_indexes(
 
         return reader(as_driver_cursor(cursor), schema, table)
     except Exception as exc:  # noqa: BLE001 — a refused catalog is evidence
+        from services.catalog_statement_cap import note_budget_exceeded
+
+        note_budget_exceeded(f"The index catalog probe of {table}", exc)
         return SourceIndexes(
             dialect=d,
             status="unavailable",

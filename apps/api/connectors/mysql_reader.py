@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Any
@@ -39,12 +40,19 @@ def _cell(value: Any, *, instant: bool = False) -> str:
 def _mysql_column_types(cur, table: str) -> list[tuple[str, str]]:
     """Ordered (name, data_type) from the session's own database."""
     cur.execute(
-        "SELECT COLUMN_NAME, DATA_TYPE FROM information_schema.COLUMNS "
+        "SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_PRECISION FROM information_schema.COLUMNS "
         "WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = %s "
         "ORDER BY ORDINAL_POSITION",
         (table,),
     )
-    return [(str(name), str(data_type or "").lower()) for name, data_type in cur.fetchall()]
+    out: list[tuple[str, str]] = []
+    for name, data_type, precision in cur.fetchall():
+        dtype = str(data_type or "").lower()
+        if dtype == "bit":
+            # The width decides the bitstring wire (``_mysql_select_list``).
+            dtype = f"bit({int(precision or 1)})"
+        out.append((str(name), dtype))
+    return out
 
 
 def _column_types(cur, table: str, *, identity: str = "") -> list[tuple[str, str]]:
@@ -71,6 +79,15 @@ def _json_names_from_types(types: list[tuple[str, str]]) -> frozenset[str]:
     )
 
 
+def _bit_widths_from_types(types: list[tuple[str, str]]) -> dict[str, int]:
+    widths: dict[str, int] = {}
+    for name, data_type in types:
+        m = re.match(r"^bit\((\d+)\)$", data_type or "")
+        if m:
+            widths[name] = int(m.group(1))
+    return widths
+
+
 def _mysql_select_list(
     columns: list[str] | None, types: list[tuple[str, str]]
 ) -> str | None:
@@ -83,13 +100,22 @@ def _mysql_select_list(
     json_cols = _json_names_from_types(types) | frozenset(
         name for name, data_type in types if data_type == "time"
     )
-    if not json_cols and not columns:
+    bit_widths = _bit_widths_from_types(types)
+    if not json_cols and not bit_widths and not columns:
         return None
     names = list(columns) if columns else [name for name, _ in types]
     parts: list[str] = []
     for name in names:
         q = quote_sql_identifier(require_safe_identifier(name, preserve_case=True), "`")
-        if name in json_cols:
+        if name in bit_widths:
+            # BIT(n) is a bit string, not opaque bytes: the driver's bytes
+            # became base64 text no BOOLEAN / BIT(n) destination could bind
+            # ("Invalid boolean: 'AQ=='"). MSB-first 0/1 digits, width kept.
+            parts.append(
+                f"CASE WHEN {q} IS NULL THEN NULL ELSE "
+                f"LPAD(BIN({q} + 0), {bit_widths[name]}, '0') END AS {q}"
+            )
+        elif name in json_cols:
             parts.append(
                 f"CASE WHEN {q} IS NULL THEN NULL ELSE "
                 f"CAST({q} AS CHAR CHARACTER SET utf8mb4) END AS {q}"

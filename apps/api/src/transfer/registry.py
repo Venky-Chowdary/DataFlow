@@ -10,6 +10,9 @@ import logging
 LIVE_TABULAR_SOURCE_FORMATS = [
     "csv", "tsv", "json", "jsonl", "ndjson", "excel", "parquet", "avro", "orc", "xml",
     "yaml", "fixed_width",
+    # An uploaded SQLite file is staged and read through database/sqlite
+    # (src/transfer/endpoint_kind.py) — round 11.
+    "sqlite",
 ]
 LIVE_DOCUMENT_SOURCE_FORMATS = ["pdf", "docx", "html"]
 LIVE_SOURCE_FORMATS = LIVE_TABULAR_SOURCE_FORMATS + LIVE_DOCUMENT_SOURCE_FORMATS
@@ -127,6 +130,21 @@ def validate_transfer(source_kind: str, source_format: str, dest_kind: str, dest
             return dest_ready(caps)
         except Exception:
             return False
+
+    # ``file`` + an export format is ``file_export``; a SQLite export is a
+    # SQLite database file (round 11: "database → file/* not yet live").
+    try:
+        from .endpoint_kind import canonical_destination
+    except ImportError:  # loaded standalone (test_registry.py)
+        canonical_destination = None  # type: ignore[assignment]
+    if canonical_destination is not None:
+        dest_kind, dest_format = canonical_destination(dest_kind, dest_format)
+    if (dest_kind or "").strip().lower() == "file":
+        return False, (
+            f"Destination kind 'file' with format '{dest_format}' is not a destination: "
+            "use kind 'file_export' with one of " + ", ".join(sorted(LIVE_DEST_FILE_FORMATS))
+            + ", format 'sqlite' for a SQLite file, or kind 'database'."
+        )
 
     src_fmt = _resolve(source_format)
     dst_fmt = _resolve(dest_format)

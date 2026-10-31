@@ -114,6 +114,13 @@ def normalize_logical_type(inferred: str | None) -> str:
     )
     if m_wrap:
         return normalize_logical_type(m_wrap.group(1).strip())
+    # ``INT4 UNSIGNED`` (MySQL introspect's explicit-width spelling) is the
+    # INT UNSIGNED family, not an unknown token: as ``string`` it travelled as
+    # a silent TEXT carrier for an integer key (QA round 11).
+    m_intn = re.match(r"^INT([1-8])(\s+(?:UNSIGNED|SIGNED|ZEROFILL).*)$", upper)
+    if m_intn:
+        keyword = {"1": "TINYINT", "2": "SMALLINT", "3": "MEDIUMINT", "8": "BIGINT"}
+        return normalize_logical_type(keyword.get(m_intn.group(1), "INT") + m_intn.group(2))
     # DynamoDB AttributeValue type codes — exact tokens only (never match bare
     # "n"/"s" inside other dialects). AWS docs: S/N/B/BOOL/NULL/M/L/SS/NS/BS.
     # Codes that are also generic SQL/Avro aliases defer to CANONICAL_TYPES, so
@@ -342,6 +349,12 @@ def ddl_type(db_type: str, inferred: str | LogicalType | NativeType | None) -> s
     if destination_is_file_export(db_type):
         return _file_export_ddl(inferred)
     db = _normalize_dest_db(db_type)
+    if isinstance(inferred, str):
+        # MySQL-only tokens (UNSIGNED, display width, YEAR) become the signed
+        # carrier that holds every value before any per-dialect mapping.
+        from services.mysql_carrier_legalize import legal_carrier_for_dest
+
+        inferred = legal_carrier_for_dest(db_type, inferred) or inferred
     nested = _nested_ddl_for_dest(db, inferred)
     if nested:
         return nested
@@ -2176,6 +2189,14 @@ def _materialize_dest_ddl_unchecked(
             raw = inherited
     if not raw:
         return ddl_type(db_type, "VARCHAR")
+    from services.mysql_carrier_legalize import legal_carrier_for_dest
+
+    legal = legal_carrier_for_dest(db_type, raw)
+    if legal:
+        # ``int(10) unsigned`` / ``bigint(20)`` is not a physical stamp on a
+        # destination that cannot spell it: pasted into CREATE it is a syntax
+        # error (PG) that aborts the rest of the transaction.
+        return ddl_type(db_type, legal)
     upper = raw.upper()
     if db == "iceberg":
         # Rematerialize SQL/Spark ARRAY / VECTOR spellings to list<…>.
