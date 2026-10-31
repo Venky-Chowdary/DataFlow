@@ -39,6 +39,7 @@ export function TenantSettings() {
   const [securityContact, setSecurityContact] = useState("");
   const [mfaRequired, setMfaRequired] = useState(false);
   const [sessionTimeout, setSessionTimeout] = useState(8);
+  const [enforceTimeout, setEnforceTimeout] = useState(false);
   const [ipAllowlist, setIpAllowlist] = useState("");
   const [egressAllowlist, setEgressAllowlist] = useState("");
   const [workspaceId, setWorkspaceId] = useState("");
@@ -93,6 +94,7 @@ export function TenantSettings() {
           setSecurityContact(t.security_contact_email);
           setMfaRequired(t.mfa_required);
           setSessionTimeout(t.session_timeout_hours);
+          setEnforceTimeout(Boolean(t.enforce_session_timeout));
           setIpAllowlist((t.ip_allowlist || []).join("\n"));
           setEgressAllowlist((t.egress_allowlist || []).join("\n"));
           setWorkspaceId(t.workspace_id);
@@ -138,6 +140,7 @@ export function TenantSettings() {
         security_contact_email: securityContact.trim(),
         mfa_required: mfaRequired,
         session_timeout_hours: Math.max(1, Math.min(24, Number(sessionTimeout) || 8)),
+        enforce_session_timeout: enforceTimeout,
         ip_allowlist: ipAllowlist.split("\n").map((s) => s.trim()).filter(Boolean),
         egress_allowlist: egressAllowlist.split("\n").map((s) => s.trim()).filter(Boolean),
       };
@@ -256,9 +259,12 @@ export function TenantSettings() {
               <input id="tenant-contact" className="df2-input" value={securityContact} onChange={(e) => setSecurityContact(e.target.value)} placeholder="security@example.com" />
             </div>
             <div className="df2-settings-field">
-              <label htmlFor="tenant-timeout">Session timeout (hours) — recorded</label>
+              <label htmlFor="tenant-timeout">Session timeout (idle hours)</label>
               <input id="tenant-timeout" className="df2-input" type="number" min={1} max={24} value={sessionTimeout} onChange={(e) => setSessionTimeout(Number(e.target.value))} />
-              <p className="df2-settings-hint">Policy memory only. Token lifetime is DATAFLOW_TOKEN_TTL_SEC, not this field.</p>
+              <label className="df2-settings-hint" htmlFor="tenant-timeout-enforce">
+                <input id="tenant-timeout-enforce" type="checkbox" checked={enforceTimeout} onChange={(e) => setEnforceTimeout(e.target.checked)} />{" "}
+                Enforce as idle timeout — sign members out after this many idle hours (API keys are not affected).
+              </label>
             </div>
           </div>
 

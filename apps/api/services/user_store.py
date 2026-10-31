@@ -517,7 +517,7 @@ def claim_rekey_pending(email: str, *, lease_seconds: int = REKEY_LEASE_SECONDS)
              "rekey_pending": {"$exists": True, "$nin": [None, ""]},
              "$or": [{"rekey_lease": {"$exists": False}},
                      {"rekey_lease": None},
-                     {"rekey_lease": {"$lte": now.isoformat()}}]},
+                     {"rekey_lease": {"$lte": now}}]},
             {"$set": {"rekey_lease": lease_until,
                       "updated_at": now}},
             return_document=ReturnDocument.AFTER,

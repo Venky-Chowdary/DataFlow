@@ -130,6 +130,8 @@ def test_security_event_registry_is_valid_and_call_sites_are_literal():
                     path in {
                         _API_ROOT / "services" / "scim_service.py",
                         _API_ROOT / "src" / "routers" / "auth_router.py",
+                        # Names come from its ADMIN_ROUTES table, all registered.
+                        _API_ROOT / "services" / "admin_audit.py",
                     }
                     and node.args
                     and isinstance(node.args[0], ast.Name)

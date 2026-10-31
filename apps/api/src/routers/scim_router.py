@@ -32,6 +32,16 @@ class ScimRoute(APIRoute):
         return handler
 
 
+def _principal(request: Request) -> dict[str, Any] | None:
+    """The SCIM caller, so a mapped role is capped at the token's own grant."""
+    from src.services import auth_service
+
+    if not auth_service.auth_required():
+        return None
+    user = getattr(request.state, "user", None)
+    return user if isinstance(user, dict) else None
+
+
 def _page_value(value: str, name: str) -> int:
     try:
         return int(value)
@@ -182,7 +192,9 @@ def delete_scim_user(user_id: str, request: Request):
 
 @router.post("/Groups", status_code=201, response_class=ScimJSONResponse)
 def create_scim_group(request: Request, payload: dict[str, Any] = Body(...)):
-    group = scim_service.create_group(payload, actor=actor_email(request))
+    group = scim_service.create_group(
+        payload, actor=actor_email(request), principal=_principal(request)
+    )
     location = request.url_for("get_scim_group", group_id=group["id"])
     return ScimJSONResponse(
         status_code=201,
@@ -215,7 +227,9 @@ def replace_scim_group(
     request: Request,
     payload: dict[str, Any] = Body(...),
 ):
-    return scim_service.replace_group(group_id, payload, actor=actor_email(request))
+    return scim_service.replace_group(
+        group_id, payload, actor=actor_email(request), principal=_principal(request)
+    )
 
 
 @router.patch("/Groups/{group_id}", response_class=ScimJSONResponse)
@@ -224,10 +238,14 @@ def patch_scim_group(
     request: Request,
     payload: dict[str, Any] = Body(...),
 ):
-    return scim_service.patch_group(group_id, payload, actor=actor_email(request))
+    return scim_service.patch_group(
+        group_id, payload, actor=actor_email(request), principal=_principal(request)
+    )
 
 
 @router.delete("/Groups/{group_id}", status_code=204)
 def delete_scim_group(group_id: str, request: Request):
-    scim_service.delete_group(group_id, actor=actor_email(request))
+    scim_service.delete_group(
+        group_id, actor=actor_email(request), principal=_principal(request)
+    )
     return Response(status_code=204)

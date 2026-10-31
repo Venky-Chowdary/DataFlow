@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import logging
 import secrets
 import threading
@@ -222,10 +223,12 @@ def apply_integrations_to_env() -> None:
             os.environ[model_env_key] = str(model)
 
     ollama = data["ai_providers"].get("ollama", {})
-    if ollama.get("base_url") and not os.environ.get("OLLAMA_BASE_URL"):
-        os.environ["OLLAMA_BASE_URL"] = str(ollama["base_url"])
-    if ollama.get("model") and not os.environ.get("OLLAMA_MODEL"):
-        os.environ["OLLAMA_MODEL"] = str(ollama["model"])
+    # A value this process hydrated follows the store: otherwise the first
+    # saved base URL stuck in the environment and a later change never applied.
+    for env_key, field in (("OLLAMA_BASE_URL", "base_url"), ("OLLAMA_MODEL", "model")):
+        if ollama.get(field) and (not os.environ.get(env_key) or env_key in _HYDRATED_ENV):
+            os.environ[env_key] = str(ollama[field])
+            _HYDRATED_ENV.add(env_key)
 
 
 # ── SSO ──────────────────────────────────────────────────────────────────────
@@ -278,12 +281,70 @@ def get_sso_configs() -> dict[str, dict[str, Any]]:
     return out
 
 
+class SsoConfigRefused(ValueError):
+    """An SSO save that would leave an enabled provider unusable or ambiguous."""
+
+    def __init__(self, message: str, *, missing: list[str] | None = None):
+        super().__init__(message)
+        self.missing = list(missing or [])
+
+
+_SSO_REQUIRED = {
+    "saml": ("entity_id", "sso_url", "x509_cert"),
+    "oidc": ("issuer", "client_id", "client_secret", "redirect_uri"),
+    "azure_ad": ("tenant_id", "client_id", "client_secret", "redirect_uri"),
+}
+_DOMAIN_RE = re.compile(r"^(?=.{1,253}$)(?!-)[a-z0-9-]{1,63}(?<!-)(\.(?!-)[a-z0-9-]{1,63}(?<!-))+$")
+
+
+def normalize_email_domains(raw: Any) -> list[str]:
+    """Lower-cased, de-duplicated domains; a leading ``@`` is accepted.
+
+    Raises ``SsoConfigRefused`` naming the first value that is not a domain, so
+    a typo is refused instead of silently never routing anyone.
+    """
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        raw = [part for part in re.split(r"[\s,]+", raw) if part]
+    if not isinstance(raw, list):
+        raise SsoConfigRefused("email_domains must be a list of domains")
+    out: list[str] = []
+    for item in raw:
+        domain = str(item or "").strip().lower().lstrip("@").rstrip(".")
+        if not domain:
+            continue
+        if not _DOMAIN_RE.match(domain):
+            raise SsoConfigRefused(f"{str(item)!r} is not an email domain (expected e.g. example.com)")
+        if domain not in out:
+            out.append(domain)
+    return out
+
+
+def _sso_missing(sso_type: str, cfg: dict[str, Any]) -> list[str]:
+    return [f for f in _SSO_REQUIRED.get(sso_type, ()) if not str(cfg.get(f, "") or "").strip()]
+
+
 def update_sso_config(sso_type: str, patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge ``patch`` into the stored provider config.
+
+    * ``client_secret`` blank (or the mask) keeps the stored secret;
+      ``clear_client_secret: true`` removes it explicitly.
+    * ``email_domains`` is normalized and must not be claimed by another
+      provider (routing would be ambiguous).
+    * The merged config may be *enabled* only when every required field is
+      set; a disabled draft may be saved incomplete. Nothing is written when
+      the save is refused.
+    """
     if sso_type not in _SSO_TYPES:
         raise ValueError(f"Unknown SSO type: {sso_type}")
     data = _load_raw()
-    cfg = data["sso"][sso_type]
+    cfg = dict(data["sso"][sso_type])
     existing_secret = cfg.get("client_secret", "")
+    patch = dict(patch)
+    clear_secret = bool(patch.pop("clear_client_secret", False))
+    if clear_secret and "client_secret" not in cfg:
+        raise SsoConfigRefused(f"{sso_type} has no client secret to clear")
 
     for key, value in patch.items():
         if key == "client_secret":
@@ -291,8 +352,31 @@ def update_sso_config(sso_type: str, patch: dict[str, Any]) -> dict[str, Any]:
         elif key == "x509_cert":
             if value:
                 cfg["x509_cert"] = str(value)
+        elif key == "email_domains":
+            cfg["email_domains"] = normalize_email_domains(value)
         elif key in cfg or key == "enabled":
             cfg[key] = value
+    if clear_secret:
+        cfg["client_secret"] = ""
+
+    for other in _SSO_TYPES:
+        if other == sso_type:
+            continue
+        taken = set(cfg.get("email_domains") or []) & {
+            str(d).lower() for d in (data["sso"][other].get("email_domains") or [])
+        }
+        if taken:
+            raise SsoConfigRefused(
+                f"{sorted(taken)[0]} is already routed to {other}; a domain can belong to one provider"
+            )
+
+    missing = _sso_missing(sso_type, cfg)
+    if cfg.get("enabled") and missing:
+        raise SsoConfigRefused(
+            f"Cannot enable {sso_type}: missing {', '.join(missing)}. "
+            "Save it disabled as a draft, or fill these in first.",
+            missing=missing,
+        )
 
     data["sso"][sso_type] = cfg
     data["updated_at"] = _now()
@@ -305,18 +389,7 @@ def validate_sso_config(sso_type: str) -> dict[str, Any]:
     cfg = data["sso"][sso_type]
     missing: list[str] = []
 
-    if sso_type == "saml":
-        for field in ("entity_id", "sso_url", "x509_cert"):
-            if not str(cfg.get(field, "")).strip():
-                missing.append(field)
-    elif sso_type == "oidc":
-        for field in ("issuer", "client_id", "client_secret", "redirect_uri"):
-            if not str(cfg.get(field, "")).strip():
-                missing.append(field)
-    elif sso_type == "azure_ad":
-        for field in ("tenant_id", "client_id", "client_secret", "redirect_uri"):
-            if not str(cfg.get(field, "")).strip():
-                missing.append(field)
+    missing.extend(_sso_missing(sso_type, cfg))
 
     enabled = bool(cfg.get("enabled"))
     ready = len(missing) == 0
@@ -401,7 +474,9 @@ def provider_key_state(provider: str) -> str:
     import os
 
     if provider == "ollama":
-        return "ready"
+        if not ai_provider_enabled("ollama"):
+            return "disabled"
+        return "ready" if ollama_status()["reachable"] else "unreachable"
     if not ai_provider_enabled(provider):
         return "disabled"
     env_val = os.environ.get({"openai": "OPENAI_API_KEY", "anthropic": "ANTHROPIC_API_KEY"}.get(provider, ""), "")
@@ -425,8 +500,15 @@ def get_ai_provider_configs() -> dict[str, dict[str, Any]]:
         key = row.get("api_key", "")
         # Configured means a key we can actually use (env or store), not merely
         # a byte string sitting in the file.
-        row["configured"] = bool(resolve_provider_api_key(provider)) or provider == "ollama"
         row["key_state"] = provider_key_state(provider)
+        if provider == "ollama":
+            # Ollama has no key: it is usable only when its server answers.
+            status = ollama_status()
+            row["configured"] = row["key_state"] == "ready"
+            row["reachable"] = status["reachable"]
+            row["status_detail"] = status["detail"]
+        else:
+            row["configured"] = bool(resolve_provider_api_key(provider))
         row["api_key"] = _mask_secret(key) if key else ""
         out[provider] = row
     return out
@@ -449,6 +531,7 @@ def update_ai_provider(provider: str, patch: dict[str, Any]) -> dict[str, Any]:
     data["updated_at"] = _now()
     _save(data)
     apply_integrations_to_env()
+    _OLLAMA_PROBE.clear()
     return get_ai_provider_configs()[provider]
 
 
@@ -557,6 +640,45 @@ def resolve_provider_model(provider: str, default: str) -> str:
         return os.environ[env_key]
     data = _load_raw()
     return str(data["ai_providers"].get(provider, {}).get("model") or default)
+
+
+_OLLAMA_PROBE_TTL_SEC = 10.0
+_OLLAMA_PROBE: dict[str, tuple[float, dict[str, Any]]] = {}
+
+
+def ollama_status(*, fresh: bool = False) -> dict[str, Any]:
+    """Whether the configured Ollama server answers, and which models it has.
+
+    ``GET {base_url}/api/tags`` with a short timeout. Cached for a few seconds
+    per base URL so a Settings page refresh does not stall on a dead host;
+    ``fresh`` (the Test button) always probes.
+    """
+    import time
+
+    base_url = resolve_ollama_base_url().rstrip("/")
+    now = time.monotonic()
+    cached = _OLLAMA_PROBE.get(base_url)
+    if not fresh and cached and now - cached[0] < _OLLAMA_PROBE_TTL_SEC:
+        return cached[1]
+    result: dict[str, Any] = {"base_url": base_url, "reachable": False, "models": [], "detail": ""}
+    try:
+        import httpx
+
+        resp = httpx.get(f"{base_url}/api/tags", timeout=2.0)
+        if resp.status_code == 200:
+            body = resp.json() if resp.content else {}
+            result["models"] = [
+                str(m.get("name") or m.get("model") or "")
+                for m in (body.get("models") or [])
+                if isinstance(m, dict)
+            ]
+            result["reachable"] = True
+        else:
+            result["detail"] = f"Ollama answered HTTP {resp.status_code} at {base_url}."
+    except Exception as exc:  # noqa: BLE001 — any failure means unreachable
+        result["detail"] = f"Ollama is not reachable at {base_url} ({type(exc).__name__})."
+    _OLLAMA_PROBE[base_url] = (now, result)
+    return result
 
 
 def resolve_ollama_base_url(default: str = "http://localhost:11434") -> str:

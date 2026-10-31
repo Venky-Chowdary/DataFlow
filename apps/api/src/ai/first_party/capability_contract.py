@@ -630,7 +630,8 @@ def transfer_workers_default() -> int:
 
 
 def session_timeout_enforced() -> bool:
-    """Token TTL is DATAFLOW_TOKEN_TTL_SEC — tenant.session_timeout_hours is memory."""
+    """Not enforced deployment-wide: per workspace, only when its tenant sets
+    enforce_session_timeout (services.session_policy), so the card explains it."""
     return False
 
 
@@ -1128,10 +1129,10 @@ def session_timeout_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="What is session timeout",
         text=(
-            "Session timeout is recorded as session_timeout_hours; "
-            "session_timeout_enforced is false because the timeout is not "
-            "wired. "
-            "Token lifetime is DATAFLOW_TOKEN_TTL_SEC."
+            "Session timeout: session_timeout_enforced is true for a workspace only when its "
+            "tenant turns enforce_session_timeout on; then session_timeout_hours "
+            "signs out sign-in sessions idle that long. API keys are not sessions. "
+            "Absolute token lifetime is DATAFLOW_TOKEN_TTL_SEC."
         ),
         source_module="src/routers/workspace_router.py · session_timeout_enforced",
         category="enterprise",
