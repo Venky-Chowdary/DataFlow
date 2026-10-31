@@ -182,7 +182,7 @@ def test_schedule_router_passes_typed_error_through(monkeypatch):
 
     monkeypatch.setattr(schedules_router, "resolve_write_workspace", lambda request, ws: "ws")
 
-    def _refuse(_payload):
+    def _refuse(_payload, **_kw):
         from services.request_principal import singer_taps_dir
 
         singer_taps_dir()

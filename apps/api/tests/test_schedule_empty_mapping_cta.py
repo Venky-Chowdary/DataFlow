@@ -105,8 +105,13 @@ def test_persist_mappings_closes_empty_mapping_park(temp_store):
     assert open_approvals() == []
 
 
-def test_create_with_mappings_replays_unique_empty_draft_on_same_pair(temp_store):
-    """Studio footer POSTs a new pipeline today — persist onto the parked draft."""
+def test_create_with_mappings_never_adopts_a_parked_draft_it_was_not_given(temp_store):
+    """A plain create is a new pipeline (QA round 11 SC5 side bug).
+
+    The connector-pair fallback used to persist this create onto the parked
+    draft and answer with the draft's id. Studio replays through an explicit
+    ``replay_schedule_id`` (or a PATCH of that id), so nothing is guessed.
+    """
     store = temp_store
     draft = _empty_draft(store)
     _park_empty_mapping(store, draft)
@@ -122,17 +127,12 @@ def test_create_with_mappings_replays_unique_empty_draft_on_same_pair(temp_store
         "enabled": True,
         "mappings": [{"source": "id", "target": "id"}],
     })
-    assert live.id == draft.id
-    assert live.source_table == "orders"
-    assert live.dest_table == "orders_dw"
-    assert live.enabled is True
-    assert persisted_mapping_rows(live.mappings)
-    assert live.approval_request["status"] == "approved"
-    assert len(store.list_schedules()) == 1
-
-    from services.schedule_approvals import open_approvals
-
-    assert open_approvals() == []
+    assert live.id != draft.id
+    assert live.enabled is True and persisted_mapping_rows(live.mappings)
+    kept = store.get_schedule(draft.id)
+    assert (kept.source_table, kept.dest_table) == ("sample", "newtable")
+    assert kept.approval_request["status"] == "open"
+    assert len(store.list_schedules()) == 2
 
 
 def test_explicit_replay_schedule_id_wins(temp_store):

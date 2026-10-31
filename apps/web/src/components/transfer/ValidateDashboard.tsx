@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useMemo, useRef, useState } from "react";
+import { FkRouteNotices } from "./FkRouteNotices";
 import { DtIcon } from "../DtIcon";
 import { Spinner } from "../LoadingState";
 import { Button } from "../ui/Button";
@@ -301,6 +302,8 @@ interface ValidateDashboardProps {
    * Re-runs Validate with fk_risk_acknowledged=true — does not claim RI proven.
    */
   onAcknowledgeFkRisk?: () => void;
+  /** The FK-risk acknowledgment Validate already carries for this run. */
+  fkRiskAcknowledged?: boolean;
   /**
    * Module 16 — opt-in full-table population orphan scan (only path to RI proven).
    * Expensive; default off. Sample Validate never equals population RI.
@@ -789,6 +792,7 @@ export function ValidateDashboard({
   onAcknowledgeCompliance,
   onAcknowledgeSchemaDrift,
   onAcknowledgeFkRisk,
+  fkRiskAcknowledged = false,
   runPopulationOrphanScan = false,
   onRunPopulationOrphanScanChange,
   repairMappings = [],
@@ -2607,7 +2611,7 @@ export function ValidateDashboard({
               <div>
                 <strong>Staging on · promote clean rows</strong>
                 <p>
-                  Writes land in <code>{"{table}_df_staging"}</code> first; only clean rows promote to the primary table.
+                  Writes land in a staging table next to the destination first; only clean rows promote to the primary table.
                   Bad rows stay in staging + DLQ — Validate does not prove the final table until Execute finishes promote.
                 </p>
               </div>
@@ -3388,6 +3392,15 @@ export function ValidateDashboard({
             </div>
           )}
         </div>
+      )}
+
+      {preflight && !running && (
+        <FkRouteNotices
+          preflight={preflight}
+          fkRiskAcknowledged={fkRiskAcknowledged}
+          onAcknowledgeFkRisk={onAcknowledgeFkRisk}
+          running={running}
+        />
       )}
 
       {preflight && displayBlockers.length > 0 && !running && (

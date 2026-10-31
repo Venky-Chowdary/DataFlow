@@ -503,6 +503,25 @@ def sampled_numeric_is_not_a_domain(source_db: str) -> bool:
     return sample_page_is_not_a_precision_contract(key)
 
 
+def profiled_text_decimal_type(profiled: str, source_db: str) -> str:
+    """The source type of a column the source declares as text and we profiled as decimal.
+
+    A parquet/ORC/Avro ``string`` column holding prices is still a string to the
+    file: the ``DECIMAL(2,1)`` our profile read off the first rows is a sample,
+    not a domain. Keeping that bound created ``price NUMERIC(2,1)`` and
+    quarantined 491 of 500 rows (QA round 11). The family stays (it is
+    numeric); the bound goes, so create-new takes the open carrier (bare
+    ``NUMERIC`` on PostgreSQL) and the population scan judges the rest.
+    Sources whose every numeric is already a sample keep their own rule.
+    """
+    from services.type_system import normalize_logical_type, unbound_sampled_numeric_carrier
+
+    raw = str(profiled or "").strip()
+    if normalize_logical_type(raw) != "decimal" or sampled_numeric_is_not_a_domain(source_db):
+        return raw
+    return unbound_sampled_numeric_carrier(raw)
+
+
 def open_domain_decimal_carrier(scale: int | None, *, dest_db: str = "") -> str | None:
     """Create-new carrier for a decimal whose domain no catalog declares.
 

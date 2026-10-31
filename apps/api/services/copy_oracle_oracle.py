@@ -51,21 +51,11 @@ _INTEGER_PK_TYPES = frozenset({
     "binary_double",
 })
 
-_ORACLE_FAMILY = frozenset({
-    "oracle",
-    "oracle_db",
-    "oracledb",
-    "oracle_autonomous",
-    "oracle_autonomous_warehouse",
-    "amazon_rds_oracle",
-})
-
-
 def oracle_family_name(engine: str | None) -> str:
-    raw = (engine or "").strip().lower()
-    if raw in _ORACLE_FAMILY:
-        return "oracle"
-    return raw
+    """Duplex family from the one resolver; any other kind as given."""
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(engine)
 
 
 def oracle_oracle_insert_select_enabled() -> bool:

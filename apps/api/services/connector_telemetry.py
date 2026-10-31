@@ -8,6 +8,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from functools import lru_cache
 from typing import Any
 
 from services.error_handling import RetryBudget
@@ -212,6 +213,15 @@ def log_retry(
     return on_transient
 
 
+@lru_cache(maxsize=1)
+def _catalog_tile_ids() -> frozenset[str]:
+    from services.catalog_service import load_catalog
+
+    return frozenset(
+        str(row.get("id") or "").lower() for row in load_catalog().get("connectors") or []
+    )
+
+
 def driver_family(raw: str) -> str:
     cid = str(raw or "").lower().strip()
     try:
@@ -235,6 +245,12 @@ def driver_family(raw: str) -> str:
             if cid in {str(item).lower().strip() for item in descriptor.catalog_ids}:
                 return descriptor.id
         alias = CATALOG_ID_ALIASES.get(cid)
+        if not alias and cid in _catalog_tile_ids():
+            # A published tile (``alloydb``) is its engine family. Free text is
+            # not folded: a metric label must not invent a driver for it.
+            from src.transfer.engine_family import sql_duplex_family
+
+            alias = sql_duplex_family(cid)
         return alias if alias in allowed else "unknown"
     except Exception as exc:
         _LOG.debug("driver family resolution failed: %s", type(exc).__name__)

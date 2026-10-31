@@ -1072,6 +1072,25 @@ def plan_create_new_fidelity(
             continue
         default_sql = _normalize_default_sql(expr, dest, _dest_type(dest_col))
         dest_dialect = (dest or "").lower()
+        from services.pg_default_legal import pg_boolean_default
+
+        pg_bool = pg_boolean_default(default_sql, _dest_type(dest_col), dest_dialect)
+        if pg_bool == "":
+            report.items.append(
+                SchemaFidelityItem(
+                    aspect="default",
+                    name=dest_col,
+                    status="unsupported",
+                    reason=(
+                        "PostgreSQL BOOLEAN takes only true/false; this source "
+                        "default is not a boolean literal. The column is created "
+                        "without it."
+                    ),
+                    source_detail=str(expr)[:200],
+                )
+            )
+            continue
+        default_sql = pg_bool or default_sql
         if dest_dialect in {"mysql", "mariadb"} and not mysql_default_is_legal(
             default_sql, _dest_type(dest_col), dialect=dest_dialect
         ):
@@ -2724,11 +2743,9 @@ def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") ->
         return _mysql_clock_default("CURRENT_TIMESTAMP", dest_type) if mysql_family else "CURRENT_TIMESTAMP"
     # SQL Server BIT and Oracle NUMBER(1) reject the token ``false``.
     # PostgreSQL boolean defaults arrive as that token.
-    dest_name = (dest_dialect or "").lower()
-    numeric_bool = dest_name in {
-        "sqlserver", "mssql", "sql_server", "azure_sql", "azure_sql_database",
-        "oracle",
-    }
+    from src.transfer.engine_family import family_or_kind
+
+    numeric_bool = family_or_kind(dest_dialect) in {"sqlserver", "oracle"}
     type_name = (dest_type or "").upper()
     number_one = type_name.startswith("NUMBER(1)") or type_name.startswith("NUMBER(1,")
     if numeric_bool and (
@@ -2738,6 +2755,18 @@ def _normalize_default_sql(expr: str, dest_dialect: str, dest_type: str = "") ->
             return "0"
         if lowered in {"true", "t", "'true'", "'t'"}:
             return "1"
+    # MySQL TINYINT(1) / BIT(1) defaults arrive as ``0``/``1``/``b'0'``. Onto a
+    # real BOOLEAN column PostgreSQL rejects an integer default ("column is of
+    # type boolean but default expression is of type integer"), and the CREATE
+    # failure aborted the rest of the load's transaction (QA round 11, Rfam).
+    # One rule for that: services.pg_default_legal (the caller also drops and
+    # reports a default no boolean literal means, when this returns it as is).
+    if not numeric_bool and lowered not in {"true", "false"}:
+        from services.pg_default_legal import pg_boolean_default
+
+        pg_bool = pg_boolean_default(text, dest_type, dest_dialect or "")
+        if pg_bool:
+            return pg_bool
     return text
 
 

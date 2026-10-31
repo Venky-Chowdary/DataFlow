@@ -17,6 +17,11 @@ import {
 } from "../../lib/mirrorDeleteMode";
 import { destStreamPlaceholder } from "../../lib/sourceReadMode";
 import {
+  FOREIGN_KEYS_MODE_OPTIONS,
+  normalizeForeignKeysMode,
+  type ForeignKeysMode,
+} from "../../lib/foreignKeysMode";
+import {
   CURSOR_SEMANTICS,
   CURSOR_SEMANTICS_LABELS,
   evaluateCursorSemantics,
@@ -137,6 +142,9 @@ interface DestinationAdvancedDrawerProps {
   /** Mirror: soft delete (default) or an explicit hard DELETE of missing keys. */
   mirrorDeleteMode?: MirrorDeleteMode;
   onMirrorDeleteModeChange?: (mode: MirrorDeleteMode) => void;
+  /** Source foreign keys on this route (round 11): carry | guard | ignore. */
+  foreignKeysMode?: ForeignKeysMode;
+  onForeignKeysModeChange?: (mode: ForeignKeysMode) => void;
   /** Priority-first sync: sort source by this column before write. */
   priorityColumn?: string;
   priorityDirection?: "asc" | "desc";
@@ -286,6 +294,8 @@ export function DestinationAdvancedDrawer({
   onSnapshotModeChange,
   mirrorDeleteMode = "soft",
   onMirrorDeleteModeChange,
+  foreignKeysMode = "carry",
+  onForeignKeysModeChange,
   priorityColumn = "",
   priorityDirection = "desc",
   rowLimit = 0,
@@ -549,6 +559,25 @@ export function DestinationAdvancedDrawer({
           </div>
         )}
 
+        <div className="df2-field df2-adv-foreign-keys-field">
+          <label className="df2-label" htmlFor="df2-adv-foreign-keys">Foreign keys</label>
+          <select
+            id="df2-adv-foreign-keys"
+            className="df2-input df2-select"
+            value={foreignKeysMode}
+            onChange={(e) => onForeignKeysModeChange?.(normalizeForeignKeysMode(e.target.value))}
+            disabled={!onForeignKeysModeChange}
+            aria-describedby="df2-adv-foreign-keys-hint"
+          >
+            {FOREIGN_KEYS_MODE_OPTIONS.map((o) => (
+              <option key={o.id} value={o.id}>{o.label}</option>
+            ))}
+          </select>
+          <p className="df2-label-hint" id="df2-adv-foreign-keys-hint">
+            {FOREIGN_KEYS_MODE_OPTIONS.find((o) => o.id === foreignKeysMode)?.detail}
+          </p>
+        </div>
+
         {syncMode === "cdc" && (
           <div className="df2-field df2-adv-snapshot-field">
             <label className="df2-label" htmlFor="df2-adv-snapshot-mode">CDC snapshot mode</label>
@@ -583,7 +612,7 @@ export function DestinationAdvancedDrawer({
               }}
               disabled={!onDeliveryGuaranteeChange}
             >
-              <option value="at_least_once">at_least_once — default upsert (PK + _df_lsn)</option>
+              <option value="at_least_once">at_least_once — default upsert (primary key + change-log position)</option>
               <option value="exactly_once" disabled={!exactlyOnceWired}>
                 {exactlyOnceWired
                   ? "exactly_once — dest-owned watermark + shared-log bundle (opt-in)"
@@ -736,7 +765,7 @@ export function DestinationAdvancedDrawer({
                 <small>
                   {writeViaStagingSupported === false
                     ? "Unavailable for this destination — SQL engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."
-                    : "Load into {table}_df_staging first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
+                    : "Load into a staging table next to the destination first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
                 </small>
               </span>
             </label>

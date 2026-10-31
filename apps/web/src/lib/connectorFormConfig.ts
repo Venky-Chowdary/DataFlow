@@ -540,7 +540,7 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
       text("database", isBigQuery ? "GCP project ID" : "Bucket name")
     );
     if (isBigQuery) {
-      saFields.push(text("schema", "Dataset", { optional: true, placeholder: "dataflow" }));
+      saFields.push(text("schema", "Dataset", { optional: true, placeholder: "analytics" }));
     }
   } else if (isAzure) {
     saFields.push(

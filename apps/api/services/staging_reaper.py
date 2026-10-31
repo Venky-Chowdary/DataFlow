@@ -87,6 +87,40 @@ def bound_lock_wait(conn: Any, dialect_name: str) -> None:
             logger.debug("staging reap rollback after lock bound failed")
 
 
+_LOCK_WAIT_RESET = {
+    "postgresql": "RESET lock_timeout",
+    "redshift": "RESET lock_timeout",
+    "mysql": "SET SESSION lock_wait_timeout = DEFAULT",
+    "sqlserver": "SET LOCK_TIMEOUT -1",
+    "mssql": "SET LOCK_TIMEOUT -1",
+}
+
+
+def reset_lock_wait(conn: Any, dialect_name: str) -> None:
+    """Undo :func:`bound_lock_wait` — the 2s bound is the sweep's, not the session's.
+
+    A pooled connection kept ``lock_timeout = '2s'`` after a sweep, so the next
+    statement that waited on a lock under load (a mirror COUNT or UPDATE) was
+    cancelled (R11).
+    """
+    import sqlalchemy as sa
+
+    from services.dialect_profiles import dialect_profile
+
+    stmt = _LOCK_WAIT_RESET.get(dialect_profile(dialect_name).driver, "")
+    if not stmt:
+        return
+    try:
+        conn.execute(sa.text(stmt))
+        conn.commit()
+    except Exception as exc:  # noqa: BLE001 - best effort, never fatal
+        logger.debug("staging reap lock reset skipped: %s", exc)
+        try:
+            conn.rollback()
+        except Exception:  # noqa: BLE001 - best effort, never fatal
+            logger.debug("staging reap rollback after lock reset failed")
+
+
 def drop_staging_table(conn: Any, qualified: str) -> None:
     """Drop one staging table, tolerating engines without ``IF EXISTS``."""
     import sqlalchemy as sa
@@ -150,21 +184,25 @@ def reap_orphan_staging(
 
     dropped: list[str] = []
     bounded = False
-    for row in rows:
-        name = str(row[0])
-        if keep and name == keep:
-            continue
-        age = staging_age_seconds(prefix, name)
-        if age is not None and age < STAGING_TTL_SECONDS:
-            # In TTL: a concurrent run may still be filling this one.
-            continue
-        if age is None and not bounded:
-            # Unstamped names predate the stamp scheme, so age is unknowable —
-            # a bounded lock wait skips one an older build still holds.
-            bound_lock_wait(conn, dialect_name)
-            bounded = True
-        drop_staging_table(conn, _qualified_name(name, schema_name, dialect_name))
-        dropped.append(name)
+    try:
+        for row in rows:
+            name = str(row[0])
+            if keep and name == keep:
+                continue
+            age = staging_age_seconds(prefix, name)
+            if age is not None and age < STAGING_TTL_SECONDS:
+                # In TTL: a concurrent run may still be filling this one.
+                continue
+            if age is None and not bounded:
+                # Unstamped names predate the stamp scheme, so age is unknowable —
+                # a bounded lock wait skips one an older build still holds.
+                bound_lock_wait(conn, dialect_name)
+                bounded = True
+            drop_staging_table(conn, _qualified_name(name, schema_name, dialect_name))
+            dropped.append(name)
+    finally:
+        if bounded:
+            reset_lock_wait(conn, dialect_name)
     if dropped:
         logger.info(
             "reaped %d orphaned staging table(s) for %s", len(dropped), prefix

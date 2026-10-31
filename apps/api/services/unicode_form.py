@@ -183,38 +183,21 @@ def classify_form(text: str) -> FormKind:
 
 def _norm_engine(engine: str | None) -> str:
     """Keep mysql vs mariadb distinct — UCA 4.0 NFC fold is not the same."""
+    from src.transfer.engine_family import engine_flavour, sql_duplex_family
+
     d = (engine or "").strip().lower()
-    if d in {
-        "postgres",
-        "pg",
-        "postgresql",
-        "cockroachdb",
-        "cockroach",
-        "timescaledb",
-        "timescale",
-        "alloydb",
-        "yugabyte",
-        "citus",
-        "greenplum",
-        "neon",
-        "aurora_postgres",
-        "aurora-postgresql",
-    }:
-        return "postgresql"
-    if d == "redshift":
-        return "redshift"
-    if d in {"mssql", "azure_sql", "azure_sql_database", "sqlserver", "synapse"}:
-        return "sqlserver"
-    if d in {"mariadb", "maria"}:
+    if engine_flavour(d) == "mariadb":
         return "mariadb"
-    if d in {"tidb", "tidb_cloud", "aurora_mysql", "aurora-mysql", "percona", "mysql2"}:
-        return "mysql"
-    if d == "mysql":
-        return "mysql"
+    family = sql_duplex_family(d)
+    if family:
+        return family
+    # PostgreSQL / T-SQL grammar engines without a duplex driver.
+    if d in {"citus", "greenplum"}:
+        return "postgresql"
+    if d == "synapse":
+        return "sqlserver"
     if d in {"sqlite", "libsql", "turso"}:
         return "sqlite"
-    if d in {"oracle", "oracledb"}:
-        return "oracle"
     if d in {"duckdb", "motherduck"}:
         return "duckdb"
     return d

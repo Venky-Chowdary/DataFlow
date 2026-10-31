@@ -1155,19 +1155,21 @@ def probe_mysql_retention(
         )
 
 
-_PG_RETENTION_DIALECTS = frozenset(
-    {
-        "postgresql",
-        "postgres",
-        "pg",
-        "amazon_rds_postgresql",
-        "aurora_postgres",
-        "alloydb",
-        "supabase",
-        "timescaledb",
-        "cloudsql_postgres",
-    }
-)
+def _retention_dialect(raw: Any) -> str:
+    """Retention dialect of a source tile, from the one engine resolver.
+
+    PostgreSQL, MySQL and MariaDB themselves (hosted or not) keep a WAL / binlog
+    this module reads; wire lookalikes (CockroachDB, TiDB) do not.
+    """
+    from src.transfer.engine_family import engine_flavour
+
+    flavour = engine_flavour(str(raw or ""))
+    if flavour == "mariadb":
+        return "mysql"
+    if flavour in {"postgresql", "mysql", "sqlserver", "oracle"}:
+        return flavour
+    return str(raw or "").strip().lower()
+
 
 _MONGO_RETENTION_DIALECTS = frozenset(
     {
@@ -1354,9 +1356,7 @@ def probe_cdc_retention(
     watermark: str | None = None,
 ) -> RetentionProbeResult:
     """Dispatch retention probe by dialect."""
-    dialect = str(cfg.get("type") or cfg.get("format") or "").lower()
-    if dialect in {"mssql", "sql_server", "microsoft_sql_server", "azure_sql_database", "amazon_rds_sql_server"}:
-        dialect = "sqlserver"
+    dialect = _retention_dialect(cfg.get("type") or cfg.get("format"))
     if dialect == "sqlserver":
         return probe_sqlserver_retention(
             cfg,
@@ -1369,11 +1369,11 @@ def probe_cdc_retention(
         return probe_oracle_retention(
             cfg, cursor_key=cursor_key, watermark=watermark
         )
-    if dialect in {"mysql", "mariadb", "amazon_rds_mysql", "azure_mysql", "mysql8"}:
+    if dialect == "mysql":
         return probe_mysql_retention(
             cfg, cursor_key=cursor_key, watermark=watermark
         )
-    if dialect in _PG_RETENTION_DIALECTS:
+    if dialect == "postgresql":
         return probe_postgres_retention(
             cfg,
             table=table,
@@ -1399,28 +1399,15 @@ def attach_cdc_retention(cdc: Any, src_cfg: dict[str, Any] | None, *, table: str
     """Probe once and stash on the CDC adapter for checkpoint/job fields."""
     if not src_cfg:
         return None
-    dialect = str(src_cfg.get("type") or "").lower()
-    if dialect not in {
-        "sqlserver",
-        "mssql",
-        "oracle",
-        "mysql",
-        "mariadb",
-        "amazon_rds_mysql",
-        "azure_mysql",
-        "mysql8",
-        "sql_server",
-        "microsoft_sql_server",
-        "azure_sql_database",
-        "amazon_rds_sql_server",
-    } | _PG_RETENTION_DIALECTS | _MONGO_RETENTION_DIALECTS:
+    dialect = _retention_dialect(src_cfg.get("type"))
+    if dialect not in {"sqlserver", "oracle", "mysql", "postgresql"} | _MONGO_RETENTION_DIALECTS:
         return None
     table_name = table or str(getattr(cdc, "table", "") or src_cfg.get("table") or "")
     if isinstance(table_name, (list, tuple)):
         table_name = str(table_name[0]) if table_name else ""
     cursor_key = str(getattr(cdc, "cursor_key", "") or src_cfg.get("cursor_key") or "")
     schema = str(src_cfg.get("schema") or getattr(cdc, "schema", "") or "")
-    if dialect in _PG_RETENTION_DIALECTS and cdc is not None and hasattr(
+    if dialect == "postgresql" and cdc is not None and hasattr(
         cdc, "_slot_catalog_status"
     ):
         catalog: dict[str, Any] = {}

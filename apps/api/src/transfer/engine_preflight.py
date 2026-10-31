@@ -21,6 +21,7 @@ def _execute_preflight_parity_kwargs(
     Owns ``destination_table_exists`` so callers must not also pass that kwarg
     into ``run_file_preflight`` (duplicate keyword → hard Execute failure).
     """
+    from services.fk_parent_preflight import with_fk_route_option
     from services.primary_key import extract_contract_primary_key_columns
     from services.preflight_service import inspect_destination_for_preflight
 
@@ -145,7 +146,9 @@ def _execute_preflight_parity_kwargs(
         # D112 — the live CHECK constraints, so Execute names offending rows
         # before the write instead of surfacing the driver's raw violation.
         "destination_check_constraints": list(dest_meta.get("check_constraints") or []),
-        "destination_config": dest_meta.get("_probe_cfg") or None,
+        "destination_config": with_fk_route_option(
+            dest_meta.get("_probe_cfg"), extra.get("foreign_keys_mode")
+        ),
         "contract_primary_key": contract_pk,
         "stream_contracts": stream_contracts,
         "privilege_probe": privilege_probe or None,

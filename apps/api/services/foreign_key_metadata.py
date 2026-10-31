@@ -37,9 +37,7 @@ SUPPORTED_DIALECTS = frozenset({
     "postgresql",
     "redshift",
     "mysql",
-    "mariadb",
     "sqlserver",
-    "mssql",
     "oracle",
     "sqlite",
 })
@@ -310,9 +308,7 @@ def coerce_validated(value: Any) -> bool | None:
 
 # These catalogs record whether existing rows were checked. MySQL and SQLite
 # do not: the constraint itself is the check they report.
-_VALIDATION_BIT_DIALECTS = frozenset(
-    {"postgresql", "sqlserver", "mssql", "oracle"}
-)
+_VALIDATION_BIT_DIALECTS = frozenset({"postgresql", "sqlserver", "oracle"})
 
 # These engines store a primary key, a unique constraint, and a foreign key
 # and do not check rows against them. The object is planner metadata.
@@ -351,8 +347,6 @@ def _dialect_key(dialect: str) -> str:
     ``snowflake_aws`` and ``google_bigquery`` are not a second rule.
     """
     key = normalize_driver(dialect)
-    if key == "postgres":
-        key = "postgresql"
     from services.copy_bigquery_common import bigquery_family_name
     from services.copy_snowflake_common import snowflake_family_name
 
@@ -669,27 +663,11 @@ def oracle_uniqueness_validation_reason(gap: str) -> str:
 # do not. Redshift is not in this set.
 _POSTGRES_INDEX_DIALECTS = frozenset(
     {
-        "pg",
-        "timescaledb",
-        "timescale",
-        "alloydb",
+        "postgresql",
         "citus",
-        "supabase",
-        "supabase_db",
-        "neon",
-        "neon_serverless",
-        "azure_postgres",
-        "aws_rds_postgres",
-        "rds_postgres",
-        "aurora_postgres",
-        "aurora-postgresql",
-        "cloudsql_postgres",
-        "gcp_cloud_sql_postgres",
-        "cloud_sql_postgres",
         "greenplum",
         "greenplum_cloud",
         "yugabytedb",
-        "yugabyte",
         "opengauss",
         "open_gauss",
     }
@@ -699,12 +677,13 @@ _POSTGRES_INDEX_DIALECTS = frozenset(
 def postgres_index_catalog(dialect: str) -> bool:
     """True when this engine's unique indexes live in ``pg_index``.
 
-    ``postgres`` and ``postgresql`` fold through :func:`_dialect_key`.
-    Hosted twins keep their own names and still use that catalog.
+    Hosted twins (AlloyDB, RDS, Neon, TimescaleDB ...) are PostgreSQL itself
+    (:func:`engine_flavour`). CockroachDB speaks the wire without this catalog.
     """
-    if _dialect_key(dialect) == "postgresql":
-        return True
-    return normalize_driver(dialect) in _POSTGRES_INDEX_DIALECTS
+    from src.transfer.engine_family import engine_flavour
+
+    flavour = engine_flavour(dialect)
+    return flavour in _POSTGRES_INDEX_DIALECTS or (dialect or "").strip().lower() in _POSTGRES_INDEX_DIALECTS
 
 
 def postgres_unique_index_gap(
@@ -861,37 +840,19 @@ def oracle_check_validation_reason(gap: str) -> str:
 # MariaDB enforces CHECK and has no ENFORCED column. A session variable is
 # not a per-constraint bit. TiDB, SingleStore, and the analytical engines
 # that share a MySQL writer are not this catalog.
-_MYSQL_CHECK_ENFORCED_DIALECTS = frozenset(
-    {
-        "mysql",
-        "mysql8",
-        "amazon_rds_mysql",
-        "amazon_aurora_mysql",
-        "azure_mysql",
-        "azure_database_for_mysql",
-        "aurora_mysql",
-        "aurora-mysql",
-        "cloudsql_mysql",
-        "gcp_cloud_sql_mysql",
-        "google_cloud_sql_mysql",
-        "rds_mysql",
-        "mysql_rds",
-        "mysql_cloud_sql",
-        "mysql_azure",
-        "mysql_aurora_global",
-        "mysql_planetscale",
-        "percona",
-    }
-)
+_MYSQL_CHECK_ENFORCED_DIALECTS = frozenset({"mysql", "mysql8"})
 
 
 def mysql_check_enforced_catalog(dialect: str) -> bool:
     """True when CHECK enforcement is ``TABLE_CONSTRAINTS.ENFORCED``.
 
-    Hosted MySQL twins keep their own names and still use that column.
-    ``mariadb`` does not.
+    Hosted MySQL twins are MySQL itself (:func:`engine_flavour`) and use that
+    column. ``mariadb``, TiDB and SingleStore do not.
     """
-    return normalize_driver(dialect) in _MYSQL_CHECK_ENFORCED_DIALECTS
+    from src.transfer.engine_family import engine_flavour
+
+    raw = (dialect or "").strip().lower()
+    return engine_flavour(raw) in _MYSQL_CHECK_ENFORCED_DIALECTS or raw in _MYSQL_CHECK_ENFORCED_DIALECTS
 
 
 def mysql_check_enforced(value: Any) -> bool | None:
@@ -1223,7 +1184,7 @@ def validation_catalog_dialect(dialect: str) -> str | None:
     if key in _UNENFORCED_FK_DIALECTS:
         return None
     if key in _VALIDATION_BIT_DIALECTS:
-        return "sqlserver" if key == "mssql" else key
+        return key
     return None
 
 
@@ -1235,8 +1196,6 @@ def catalog_probe_dialect(dialect: str) -> str | None:
     Redshift is unenforced and still names the actions the planner stored.
     """
     key = _dialect_key(dialect)
-    if key == "mssql":
-        key = "sqlserver"
     return key if key in _PROBES else None
 
 
@@ -2049,9 +2008,7 @@ def _probe_snowflake(cursor: Any, schema: str, table: str) -> ForeignKeys:
 _PROBES = {
     "postgresql": _probe_postgres,
     "mysql": _probe_mysql,
-    "mariadb": _probe_mysql,
     "sqlserver": _probe_sqlserver,
-    "mssql": _probe_sqlserver,
     "oracle": _probe_oracle,
     "redshift": _probe_redshift,
     "sqlite": _probe_sqlite,

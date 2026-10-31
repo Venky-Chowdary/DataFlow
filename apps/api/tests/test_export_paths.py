@@ -77,7 +77,7 @@ def test_sibling_dir_sharing_the_prefix_is_refused():
 
 @pytest.mark.parametrize(
     "raw",
-    ["x.py", "src/routers/x.py", "../src/routers/query_router.py", "x.pth", "x.cfg", "x.csv.py", "x.sqlite"],
+    ["x.py", "src/routers/x.py", "../src/routers/query_router.py", "x.pth", "x.cfg", "x.csv.py", "x.so"],
 )
 def test_non_export_extensions_are_refused(raw):
     with pytest.raises(ExportPathError):

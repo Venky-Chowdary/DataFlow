@@ -1,11 +1,13 @@
 """Workspace session idle-timeout policy (QA enterprise #7, round 8).
 
 A tenant (the workspace's enterprise profile) records ``session_timeout_hours``.
-Until now that was policy memory only. When the tenant also sets
-``enforce_session_timeout: true`` a sign-in session that has been idle longer
-than that many hours is revoked on its next request (401). The default is
-unchanged: no tenant, or a tenant without the flag, enforces nothing beyond
-the token's own TTL.
+When the tenant's ``enforce_session_timeout`` is on — the default since QA
+round 11, and set whenever the hours are saved — a sign-in session that has
+been idle longer than that many hours is revoked on its next request (401).
+No tenant, or a tenant that explicitly records the hours as policy only,
+enforces nothing beyond the token's own TTL. Session rows are durable in
+Mongo (services.auth_sessions); a session with no activity on record is
+recorded as seen now instead of skipping the check.
 
 A session belongs to a person, not to one workspace, so the strictest
 enforced policy among the workspaces they are a member of applies. API keys

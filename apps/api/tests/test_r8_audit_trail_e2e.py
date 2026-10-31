@@ -69,9 +69,15 @@ def test_admin_changes_are_named_with_actor_target_and_outcome(ent):
     viewer = ent.member(email=viewer_email, workspace_id=ws, role="viewer")
 
     # Success: settings, SSO, AI provider, notification channel, key revoke.
-    assert admin.patch("/api/v1/workspace/settings", json={"org_name": "Named"}).status_code == 200
-    assert admin.patch("/api/v1/workspace/sso/oidc", json={"client_id": "dw"}).status_code == 200
-    assert admin.patch("/api/v1/workspace/ai-providers/ollama", json={"model": "llama3.2"}).status_code == 200
+    # Settings, SSO and AI providers are deployment-wide: the platform admin
+    # changes them (round 10); the workspace admin's attempt is a named refusal.
+    platform = {"X-Workspace-Id": ws}
+    assert ent.admin.patch("/api/v1/workspace/settings", json={"org_name": "Named"}, headers=platform).status_code == 200
+    assert ent.admin.patch("/api/v1/workspace/sso/oidc", json={"client_id": "dw"}, headers=platform).status_code == 200
+    assert ent.admin.patch(
+        "/api/v1/workspace/ai-providers/ollama", json={"model": "llama3.2"}, headers=platform
+    ).status_code == 200
+    assert admin.patch("/api/v1/workspace/sso/oidc", json={"client_id": "evil"}).status_code == 403
     channel = admin.post(
         "/api/v1/workspace/notifications",
         json={"workspace_id": ws, "kind": "webhook", "label": "r8",
@@ -85,11 +91,14 @@ def test_admin_changes_are_named_with_actor_target_and_outcome(ent):
     assert ent.admin.delete(f"/api/v1/workspace/api-keys/{key_id}", headers={"X-Workspace-Id": ws}).status_code == 200
 
     settings = _named(ent, ws, "workspace.settings.update")
-    assert settings[0]["actor"] == admin_email
+    assert settings[0]["actor"] == ADMIN_EMAIL
     assert settings[0]["outcome"] == "succeeded"
     assert settings[0]["details"]["target"] == "workspace_settings"
     sso = _named(ent, ws, "workspace.sso.update")[0]
-    assert (sso["details"]["target"], sso["outcome"], sso["actor"]) == ("oidc", "succeeded", admin_email)
+    assert (sso["details"]["target"], sso["outcome"], sso["actor"]) == ("oidc", "succeeded", ADMIN_EMAIL)
+    denied = _named(ent, ws, "platform_settings.write.denied")[0]
+    assert (denied["details"]["target"], denied["outcome"], denied["actor"]) == ("oidc", "failed", admin_email)
+    assert denied["details"]["route_action"] == "workspace.sso.update"
     ai = _named(ent, ws, "workspace.ai_provider.update")[0]
     assert ai["details"]["target"] == "ollama"
     created = _named(ent, ws, "workspace.notification.create")[0]
@@ -105,7 +114,9 @@ def test_admin_changes_are_named_with_actor_target_and_outcome(ent):
     rotate = ent.bearer(viewer_key, ws).post(f"/api/v1/iam/api-keys/{key_id}/rotate", json={})
     assert rotate.status_code == 403
     # An invalid admin change (400) is a failed outcome as well.
-    assert admin.patch("/api/v1/workspace/sso/saml", json={"enabled": True}).status_code == 400
+    assert ent.admin.patch(
+        "/api/v1/workspace/sso/saml", json={"enabled": True}, headers=platform
+    ).status_code == 400
 
     def refused(action: str, actor: str) -> dict:
         rows = [e for e in _named(ent, ws, action) if e.get("outcome") == "failed" and e["actor"] == actor]
@@ -115,7 +126,7 @@ def test_admin_changes_are_named_with_actor_target_and_outcome(ent):
     assert refused("workspace.settings.update", viewer_email)["reason_code"] == "forbidden"
     assert refused("workspace.sso.update", viewer_email)["details"]["target"] == "saml"
     assert refused("workspace.notification.delete", viewer_email)["details"]["status"] == 403
-    assert refused("workspace.sso.update", admin_email)["reason_code"] == "invalid_request"
+    assert refused("workspace.sso.update", ADMIN_EMAIL)["reason_code"] == "invalid_request"
     rot = [e for e in _named(ent, ws, "iam.api_key.rotate") if e.get("outcome") == "failed"]
     assert rot and rot[0]["details"]["target"] == key_id
 

@@ -1460,6 +1460,8 @@ def _run_sql_query(connector, body, *, json_engine_text: bool = False):
         "schema": connector.schema,
         "warehouse": connector.warehouse,
         "ssl": connector.ssl,
+        # TLS trust / SID / driver keywords the operator saved (QA round 11).
+        "extra": dict(getattr(connector, "extra", None) or {}),
     }
     try:
         engine = get_sqlalchemy_engine(cfg)

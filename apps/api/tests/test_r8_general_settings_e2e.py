@@ -17,7 +17,10 @@ from r8_ent_harness import ADMIN_EMAIL, ent  # noqa: F401
 
 def test_timezone_must_be_an_iana_zone(ent):
     ws = ent.workspace("General tz")
-    admin = ent.member(email="general-admin-r8@example.com", workspace_id=ws, role="admin")
+    # The organization profile is deployment-wide: the platform admin edits it
+    # (round 10, tests/test_r10_platform_settings_e2e.py).
+    admin = ent.admin
+    admin.headers["X-Workspace-Id"] = ws
     for bad in ("Mars/Olympus", "Not A Zone", "../../etc/passwd", "America/Atlantis"):
         res = admin.patch("/api/v1/workspace/settings", json={"timezone": bad})
         assert res.status_code == 400, (bad, res.text)
@@ -32,7 +35,15 @@ def test_timezone_must_be_an_iana_zone(ent):
 def test_every_change_records_when_and_by_whom(ent):
     ws = ent.workspace("General attribution")
     admin_email = "general-attr-r8@example.com"
-    admin = ent.member(email=admin_email, workspace_id=ws, role="admin")
+    # Only a platform admin changes the deployment-wide profile (round 10):
+    # the first writer is a second platform admin, the second the bootstrap one.
+    created = ent.admin.post(
+        "/api/v1/team/users",
+        json={"email": admin_email, "platform_role": "admin", "workspace_id": ws, "workspace_role": "admin"},
+    )
+    assert created.status_code == 200, created.text
+    admin = ent.login(admin_email, created.json()["temporary_password"])
+    admin.headers["X-Workspace-Id"] = ws
     viewer = ent.member(email="general-viewer-r8@example.com", workspace_id=ws, role="viewer")
 
     first = admin.patch("/api/v1/workspace/settings", json={"org_name": "Acme QA"})

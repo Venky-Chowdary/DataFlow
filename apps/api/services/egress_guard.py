@@ -197,7 +197,7 @@ def _configured_networks(
     if allowlist is not None:
         return _parse_allowlist(allowlist)
     entries = _workspace_egress_entries(workspace_id)
-    raw = os.environ.get("DATAFLOW_EGRESS_ALLOWLIST", "")
+    raw = getenv_brand("EGRESS_ALLOWLIST", "") or ""
     if raw.strip():
         entries.extend(part.strip() for part in raw.split(",") if part.strip())
     return _parse_allowlist(entries)
@@ -302,8 +302,8 @@ def _refusal_text(host: str, phrase: str) -> str:
     return (
         f"Refused connector host {host}: {phrase} addresses are not connection "
         "targets. To reach an on-prem or loopback target, allowlist its range "
-        "(for example 127.0.0.0/8) via DATAFLOW_EGRESS_ALLOWLIST or the "
-        "workspace egress allowlist."
+        "(for example 127.0.0.0/8) in the workspace egress allowlist, or ask the "
+        "deployment's operator to allow it."
     )
 
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_dataset_of
 import logging
 import re
 import sys
@@ -962,7 +963,7 @@ def read_source_database(
             database=cfg["database"],
             username=cfg.get("username", ""),
             password=cfg.get("password", ""),
-            schema=cfg.get("schema", "dataflow"),
+            schema=bigquery_dataset_of(cfg),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),
@@ -1844,7 +1845,7 @@ def _write_destination_database(
     if db_type == "bigquery":
         from connectors.bigquery_writer import write_mapped_rows
 
-        common["schema"] = cfg.get("schema", "dataflow")
+        common["schema"] = bigquery_dataset_of(cfg)
         for col in columns:
             ddl_log.append(
                 f"BQ COLUMN {col} {ddl_type('bigquery', schema.get(col, 'string'))}"

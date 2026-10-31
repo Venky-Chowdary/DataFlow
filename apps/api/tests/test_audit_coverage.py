@@ -36,6 +36,14 @@ def audit_app(monkeypatch, tmp_path):
 
     from src.main import app
 
+    # The K1 startup repair (services.orphaned_api_keys) binds a workspace-less
+    # key to its creator's sole workspace. These tests are about audit
+    # coverage of a workspace-less admin key, so the repair stays out of the
+    # lifespan here (it has its own suite: test_r11_orphaned_api_keys_e2e.py).
+    from services import orphaned_api_keys
+
+    monkeypatch.setattr(orphaned_api_keys, "run_orphaned_api_key_migration", lambda *a, **k: None)
+
     actor = "audit-actor@example.test"
     key = integrations_store.create_api_key("Audit test", actor, role="admin")
     workspace = team_store.create_workspace(name="Audit coverage", created_by=actor)
@@ -127,7 +135,20 @@ def test_sensitive_routes_record_actor_status_and_correlation_without_secrets(
     )
 
 
-def test_failed_sensitive_handler_is_recorded_with_its_status(audit_app):
+def test_failed_sensitive_handler_is_recorded_with_its_status(audit_app, monkeypatch):
+    # SSO is deployment-wide: only a platform admin's request reaches the
+    # handler (round 10). The key's creator is made one so the handler's own
+    # 400 is what gets recorded.
+    from src.services import auth_service
+
+    real_lookup = auth_service.lookup_user
+    monkeypatch.setattr(
+        auth_service,
+        "lookup_user",
+        lambda email: {"email": email, "role": "admin"}
+        if email == audit_app["actor"]
+        else real_lookup(email),
+    )
     response = audit_app["client"].patch(
         "/api/v1/workspace/sso/not-a-provider",
         headers=_headers(audit_app),

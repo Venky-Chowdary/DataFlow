@@ -28,14 +28,6 @@ logger = logging.getLogger(__name__)
 
 _MAX_ORPHAN_EXAMPLES = 25
 
-_SQLISH = {
-    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb",
-    "supabase", "mysql", "mariadb", "singlestore", "sqlserver", "mssql",
-    "synapse", "azure_sql_database", "oracle", "db2", "sqlite", "duckdb",
-    "generic_sql", "h2", "snowflake", "clickhouse", "trino", "presto",
-    "questdb",
-}
-
 
 def _sql_population_orphan_scan(
     cfg: dict[str, Any],
@@ -193,7 +185,9 @@ def probe_population_fk_orphans(
         if db_type:
             cfg = dict(cfg)
             cfg.setdefault("type", db_type)
-        if db_type and db_type not in _SQLISH:
+        from services.source_duplicate_probe import is_sqlish_source
+
+        if db_type and not is_sqlish_source(db_type):
             finding = _unavailable_finding(
                 note=f"Population orphan scan not implemented for source type {db_type}.",
                 validation_mode=validation_mode,

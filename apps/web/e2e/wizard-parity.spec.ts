@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { expectDisjoint, expectWithinViewport } from "./layout";
 import { isolateDrafts, openStudio, settleInput, settleToasts } from "./support";
@@ -7,10 +10,29 @@ import { isolateDrafts, openStudio, settleInput, settleToasts } from "./support"
  * Generate those baselines with PLAYWRIGHT_BASE_URL pointed at that commit.
  * A non-zero diff here means the classic screen moved.
  *
- * The destination overflow count follows GET /transfer/capabilities.
- * A fresh API reports 101 destination engines (+88 in the dropdown).
- * An older process that still had 100 engines painted +87.
+ * The destination step paints the API's engine catalog: the first eight
+ * "More engines" tiles and the "+N in dropdown" count both come from
+ * GET /transfer/capabilities `destination_databases`. That list is catalog
+ * data, not classic-screen layout: a regenerated catalog (round 11 dropped a
+ * stray `snowflake_b1fcb2` id and added `amazon_aurora_postgresql`) moved a
+ * tile and failed this parity check with no layout change. The spec pins that
+ * one field to the list the baselines were captured against; every other
+ * capability field stays live, and every pixel of the screen stays checked.
  */
+const PARITY_DEST_ENGINES: string[] = JSON.parse(
+  readFileSync(
+    join(dirname(fileURLToPath(import.meta.url)), "fixtures", "parity", "destination_databases.json"),
+    "utf8",
+  ),
+);
+
+async function pinDestinationEngines(page: Page): Promise<void> {
+  await page.route("**/api/v1/transfer/capabilities", async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, destination_databases: PARITY_DEST_ENGINES } });
+  });
+}
 
 const VIEWS = [
   { width: 1440, height: 900, theme: "light", tag: "light-1440" },
@@ -85,6 +107,7 @@ test.describe("flags-off parity", () => {
   });
 
   test("source, destination, and query match the pre-upgrade screens", async ({ page }) => {
+    await pinDestinationEngines(page);
     await page.route("**/api/v1/connectors/saved", async (route) => {
       await route.fulfill({
         status: 200,

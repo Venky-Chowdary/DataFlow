@@ -327,13 +327,17 @@ def _legacy_tokens_allowed() -> bool:
     return not is_production()
 
 
-def create_token(email: str) -> tuple[str, int]:
-    """Mint Bearer token with server-side session (``jti``) — Phase D3."""
+def create_token(email: str, *, amr: list[str] | None = None) -> tuple[str, int]:
+    """Mint Bearer token with server-side session (``jti``) — Phase D3.
+
+    ``amr``: how the person authenticated (``pwd``/``otp``/``recovery``/``sso``),
+    read by the workspace MFA policy. Omitted means password-only.
+    """
     from services.auth_sessions import create_session
 
     expires = int(time.time()) + _read_token_ttl_sec()
     email_n = email.strip().lower()
-    jti = create_session(email_n, expires_at=expires)
+    jti = create_session(email_n, expires_at=expires, amr=amr)
     payload = f"{email_n}:{expires}:{jti}"
     sig = hmac.new(_token_secret().encode("utf-8"), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}:{sig}", expires

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from services.brand import bigquery_dataset_of
 from typing import Any
 from src.transfer.stream import (
     Callable,
@@ -476,7 +477,7 @@ def _write_batch(
             database=cfg["database"],
             username=cfg.get("username", ""),
             password=cfg.get("password", ""),
-            schema=cfg.get("schema", "dataflow"),
+            schema=bigquery_dataset_of(cfg),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),

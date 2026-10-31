@@ -961,25 +961,14 @@ def _stream_database_transfer_impl(
     run.cfg.table = _source_name(run.cfg.source)
     if is_callable_source(run.cfg.source) or is_callable_source(run.cfg.src_cfg):
         from services.procedure_source import (
-            parse_callable_source,
-            procedure_params_of,
-            procedure_text_of,
+            callable_stream_table,
             source_object_for_cursor,
-            source_read_mode_of,
-            stream_name_for_callable,
         )
 
         if not run.cfg.table:
-            try:
-                spec = parse_callable_source(
-                    procedure_text_of(run.cfg.source) or procedure_text_of(run.cfg.src_cfg),
-                    dialect=run.cfg.src_read_type,
-                    mode=source_read_mode_of(run.cfg.source) or source_read_mode_of(run.cfg.src_cfg),
-                    params=procedure_params_of(run.cfg.source) or procedure_params_of(run.cfg.src_cfg),
-                )
-                run.cfg.table = stream_name_for_callable(spec)
-            except Exception:
-                run.cfg.table = "procedure_result"
+            run.cfg.table = callable_stream_table(
+                run.cfg.source, run.cfg.src_cfg, dialect=run.cfg.src_read_type
+            )
         cursor_source_object = (
             source_object_for_cursor(run.cfg.source)
             or source_object_for_cursor(run.cfg.src_cfg)

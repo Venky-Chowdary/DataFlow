@@ -4,6 +4,7 @@ from typing import Any, Mapping
 from services import type_system as _ts
 from services.dest_dialect_facts import dest_has_no_uuid_type
 from services.document_instant import document_instant_wire_preserved
+from services.mysql_carrier_legalize import legal_widen_holds_source
 from services.source_engine_scope import active_source_engine, bind_source_engine
 from services.type_system import (
     LOGICAL_ARRAY,
@@ -158,6 +159,9 @@ def is_precision_collapse_coercion(
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
+    # A dialect-legal widen of a MySQL-only token (UNSIGNED, YEAR, display
+    # width) onto a destination that cannot spell it keeps every value.
+    _legal = legal_widen_holds_source(source_type, target_type, dest_db=dest_db)
     if document_instant_wire_preserved(
         source_type, target_type, dest_db=dest_db, population=population
     ):
@@ -198,7 +202,7 @@ def is_precision_collapse_coercion(
         return True
     if smalldatetime_domain_would_invent(source_type, target_type):
         return True
-    if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
+    if not _legal and decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if _blocking_width(
         source,
@@ -227,15 +231,15 @@ def is_precision_collapse_coercion(
         return True
     if bitstring_width_would_narrow(source_type, target_type):
         return True
-    if unsigned_integer_would_overflow(source_type, target_type):
+    if not _legal and unsigned_integer_would_overflow(source_type, target_type):
         return True
-    if unsigned_signed_polarity_invent(source_type, target_type):
+    if not _legal and unsigned_signed_polarity_invent(source_type, target_type):
         return True
-    if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
+    if not _legal and integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
-    if year_domain_would_collapse(source_type, target_type):
+    if not _legal and year_domain_would_collapse(source_type, target_type):
         return True
     if money_domain_would_collapse(source_type, target_type):
         return True
@@ -831,6 +835,9 @@ def is_lossy_coercion(
     dest_db = _normalize_dest_db(dest_db) if dest_db else ""
     src = normalize_logical_type(source_type)
     tgt = normalize_logical_type(target_type)
+    # A dialect-legal widen of a MySQL-only token (UNSIGNED, YEAR, display
+    # width) onto a destination that cannot spell it keeps every value.
+    _legal = legal_widen_holds_source(source_type, target_type, dest_db=dest_db)
     if src == tgt:
         # Same logical family can still drop TZ polarity, DECIMAL params,
         # VARCHAR width, UNSIGNED range, STRUCT/MAP fields, or ARRAY elements.
@@ -859,7 +866,7 @@ def is_lossy_coercion(
             return True
         if smalldatetime_domain_would_invent(source_type, target_type):
             return True
-        if decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
+        if not _legal and decimal_params_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if _blocking_width(
             source,
@@ -890,15 +897,15 @@ def is_lossy_coercion(
             return True
         if bitstring_width_would_narrow(source_type, target_type):
             return True
-        if year_domain_would_collapse(source_type, target_type):
+        if not _legal and year_domain_would_collapse(source_type, target_type):
             return True
         if money_domain_would_collapse(source_type, target_type):
             return True
-        if unsigned_integer_would_overflow(source_type, target_type):
+        if not _legal and unsigned_integer_would_overflow(source_type, target_type):
             return True
-        if unsigned_signed_polarity_invent(source_type, target_type):
+        if not _legal and unsigned_signed_polarity_invent(source_type, target_type):
             return True
-        if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
+        if not _legal and integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
         if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
             return True
@@ -1062,17 +1069,17 @@ def is_lossy_coercion(
         return True
     if smalldatetime_domain_would_invent(source_type, target_type):
         return True
-    if year_domain_would_collapse(source_type, target_type):
+    if not _legal and year_domain_would_collapse(source_type, target_type):
         return True
     if money_domain_would_collapse(source_type, target_type):
         return True
     if bitstring_opaque_bytes_collapse(source_type, target_type):
         return True
-    if unsigned_integer_would_overflow(source_type, target_type):
+    if not _legal and unsigned_integer_would_overflow(source_type, target_type):
         return True
-    if unsigned_signed_polarity_invent(source_type, target_type):
+    if not _legal and unsigned_signed_polarity_invent(source_type, target_type):
         return True
-    if integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
+    if not _legal and integer_width_would_narrow(source_type, target_type, dest_db=dest_db):
         return True
     if float_mantissa_would_narrow(source_type, target_type, dest_db=dest_db):
         return True

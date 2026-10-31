@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.audit_log import append_audit_event
+from services.rbac import Permission
 from services.team_store import (
     ROLES,
     LastAdminProtected,
@@ -90,6 +91,10 @@ class MemberBody(BaseModel):
     )
 
 
+class AccountCreationRequiresAdmin(PermissionDenied):
+    reason = "account_creation_requires_admin"
+
+
 def _actor(request: Request) -> str:
     return normalize_email(getattr(request.state, "user_email", None) or "") or "anonymous"
 
@@ -163,6 +168,7 @@ _TEAM_ERROR_STATUS: dict[type[TeamStoreError], int] = {
     WorkspaceNotFound: 404,
     MemberNotFound: 404,
     PermissionDenied: 403,
+    AccountCreationRequiresAdmin: 403,
     TeamStoreBusy: 503,
     # A state conflict, not malformed input: the request is well-formed and would
     # be accepted once another admin exists.
@@ -455,6 +461,25 @@ async def post_member(workspace_id: str, body: MemberBody, request: Request):
     except UserStoreError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     principal = _principal(request, workspace_id)
+    if body.create_account and get_user(email) is None and not principal.has(
+        Permission.WORKSPACE_MANAGE
+    ):
+        # A new platform login and its one-time password are the workspace
+        # admin's to issue (RB3): an editor brings in existing users, or adds
+        # the email without a login. Refused before anything is written.
+        refusal = AccountCreationRequiresAdmin(
+            "Creating a login with a one-time password requires the workspace admin "
+            "role. Add the person without a login, or ask a workspace admin to create it."
+        )
+        _audit_refusal(
+            refusal,
+            principal=principal,
+            operation="add",
+            workspace_id=workspace_id,
+            target=email,
+            attempted_role=body.role,
+        )
+        raise _http_error(refusal)
     # Membership first, so authority and the duplicate refusal are both decided
     # before a login is minted: creating an account for someone who is already a
     # member left a fresh one-time password behind a 409 nobody could act on.
@@ -684,3 +709,113 @@ async def break_glass_restore_admin(
         },
     )
     return {"membership": membership.to_dict(), "from_role": previous or None}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Platform administrators
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class PlatformRoleBody(BaseModel):
+    role: str = Field(..., pattern="^(admin|member)$")
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
+def _environment_provisioned(email: str) -> bool:
+    """An account whose platform role comes from DATAFLOW_ADMIN_EMAIL / DATAFLOW_AUTH_USERS.
+
+    Sign-in reads the environment before the account store, so a stored role
+    for such an address would never take effect; it is changed where it is set.
+    """
+    from src.services.auth_service import _admin_user_from_env, _users_from_auth_users_env
+
+    admin = _admin_user_from_env()
+    env_emails = {normalize_email(str(admin["email"]))} if admin else set()
+    env_emails |= {normalize_email(str(u.get("email") or "")) for u in _users_from_auth_users_env()}
+    return email in env_emails
+
+
+@router.post("/users/{email}/platform-role")
+async def set_platform_role(email: str, body: PlatformRoleBody, request: Request):
+    """Make an account a platform admin (or a member again), on the record.
+
+    Platform admins alone change deployment-wide settings (general, SSO, AI
+    providers), so this is how a deployment gets its next one without a
+    database edit. Deliberately as narrow as break-glass:
+
+    - a platform administrator signed in as themselves — the environment
+      bootstrap admin included — never an API key, even one a platform admin
+      minted with no workspace;
+    - a written reason, recorded verbatim;
+    - the account must already exist in the account store (``POST /team/users``);
+      an address provisioned through the environment is changed there;
+    - every attempt, granted or refused, is an audit event at ``warn``.
+    """
+    principal = _principal(request, "")
+    target = normalize_email(email)
+    reason = " ".join(body.reason.split())
+    resource = f"/team/users/{target}/platform-role"
+
+    def refuse(status: int, detail: str, code: str) -> HTTPException:
+        _audit(
+            "team.platform_role.denied",
+            actor=principal.email,
+            resource=resource,
+            level="warn",
+            details={
+                "target": target,
+                "attempted_role": body.role,
+                "reason_code": code,
+                "reason": reason,
+                "principal": principal.describe(),
+            },
+        )
+        return HTTPException(status_code=status, detail=detail)
+
+    if not reason:
+        raise refuse(422, "A reason is required to change a platform role", "reason_required")
+    if principal.kind != "session" or not _is_platform_admin(request):
+        raise refuse(
+            403,
+            "Changing a platform role requires a platform administrator signed in as themselves",
+            "not_platform_admin_session",
+        )
+    try:
+        target = validate_email(target)
+    except UserStoreError as e:
+        raise refuse(400, str(e), "invalid_email") from e
+    if target == principal.email and body.role != "admin":
+        raise refuse(400, "You cannot drop your own platform administrator role", "self_demotion")
+    if _environment_provisioned(target):
+        raise refuse(
+            409,
+            f"{target} is provisioned by DATAFLOW_ADMIN_EMAIL / DATAFLOW_AUTH_USERS; "
+            "change its role in the environment",
+            "environment_provisioned",
+        )
+    existing = get_user(target)
+    if not existing:
+        raise refuse(
+            404,
+            f"{target} has no account — create it first (POST /team/users)",
+            "account_not_found",
+        )
+    previous = str(existing.get("role") or "member")
+    try:
+        user = update_user(email=target, role=body.role)
+    except UserStoreError as e:
+        raise refuse(404, str(e), "account_not_found") from e
+    _audit(
+        "team.platform_role.change",
+        actor=principal.email,
+        resource=resource,
+        level="warn",
+        details={
+            "target": target,
+            "from_role": previous,
+            "to_role": user["role"],
+            "reason": reason,
+            "principal": principal.describe(),
+        },
+    )
+    return {"user": user, "from_role": previous}

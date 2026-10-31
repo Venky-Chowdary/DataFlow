@@ -77,24 +77,12 @@ _MYSQL_NATIONAL_RE = re.compile(
     r"^(?:NVARCHAR|NCHAR|NATIONAL\s+(?:VAR)?CHAR(?:ACTER)?)\b", re.I
 )
 
-_MYSQL_FAMILY = frozenset({"mysql", "mariadb", "tidb", "aurora_mysql", "singlestore"})
-_PG_FAMILY = frozenset(
-    {
-        "postgresql",
-        "redshift",
-        "greenplum",
-        "cockroachdb",
-        "yugabytedb",
-        "timescaledb",
-        "alloydb",
-        "citus",
-        "duckdb",
-    }
-)
-_SQLSERVER_FAMILY = frozenset(
-    {"sqlserver", "mssql", "azure_sql", "azure_sql_database", "synapse"}
-)
-_ORACLE_FAMILY = frozenset({"oracle", "oracledb", "oracle_autonomous"})
+# Keyed on the engine ``_normalize_dest_db`` resolves: a hosted tile or a
+# grammar twin (Greenplum, Citus, Synapse) has already folded onto its family.
+_MYSQL_FAMILY = frozenset({"mysql"})
+_PG_FAMILY = frozenset({"postgresql", "redshift", "duckdb"})
+_SQLSERVER_FAMILY = frozenset({"sqlserver"})
+_ORACLE_FAMILY = frozenset({"oracle"})
 _UTF8_DESTS = frozenset(
     {
         "snowflake",

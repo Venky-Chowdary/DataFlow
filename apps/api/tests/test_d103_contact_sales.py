@@ -315,7 +315,7 @@ def test_rate_limit_per_ip_spoofed_leftmost_xff_shares_bucket_behind_proxy(
         "src.routers.contact_router.persist_lead",
         lambda l: {**l, "lead_id": "x", "created_at": "t"},
     )
-    monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "1")
+    monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "2")
     monkeypatch.delenv("DATAWRAP_TRUSTED_PROXY_COUNT", raising=False)
     monkeypatch.delenv("TRUSTED_PROXY_COUNT", raising=False)
     from src.routers import contact_router
@@ -325,7 +325,8 @@ def test_rate_limit_per_ip_spoofed_leftmost_xff_shares_bucket_behind_proxy(
         r = client.post(
             "/api/v1/contact-sales",
             json=_payload(email=f"proxied{i}@example.com"),
-            # attacker-forged leftmost hop, real client appended by our edge proxy
+            # attacker-forged leftmost hop; our edge appended the real client and
+            # the next proxy appended the edge (10.0.0.1): client = hops[-2]
             headers={"X-Forwarded-For": f"9.9.9.{i}, 203.0.113.7, 10.0.0.1"},
         )
         statuses.append(r.status_code)
@@ -349,6 +350,10 @@ def test_client_ip_uses_trusted_proxy_resolution(monkeypatch):
     monkeypatch.delenv("DATAWRAP_TRUSTED_PROXY_COUNT", raising=False)
     monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "0")
     assert contact_router._client_ip(_req("1.2.3.4")) == "198.51.100.4"
+    # One proxy appends the client it saw: hops[-1] (ProxyFix semantics).
     monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "1")
-    assert contact_router._client_ip(_req("1.2.3.4, 203.0.113.7")) == "1.2.3.4"
+    assert contact_router._client_ip(_req("1.2.3.4")) == "1.2.3.4"
+    assert contact_router._client_ip(_req("6.6.6.6, 1.2.3.4")) == "1.2.3.4"
+    # Two proxies: the second appended the first's address.
+    monkeypatch.setenv("DATAFLOW_TRUSTED_PROXY_COUNT", "2")
     assert contact_router._client_ip(_req("6.6.6.6, 1.2.3.4, 203.0.113.7")) == "1.2.3.4"

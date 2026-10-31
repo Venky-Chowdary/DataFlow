@@ -189,7 +189,8 @@ async function parseApiError(res: Response, fallback: string): Promise<string> {
   return (await readApiRefusal(res, fallback)).detail;
 }
 
-async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
+/** Authenticated fetch (Bearer + X-Workspace-Id + CSRF); shared by the lib/*Api modules. */
+export async function apiFetch(input: RequestInfo | URL, init: TimedRequestInit = {}): Promise<Response> {
   const { timeoutMs = DEFAULT_REQUEST_TIMEOUT_MS, signal, ...requestInit } = init;
   const headers = new Headers(requestInit.headers);
   const session = readSession();
@@ -3480,7 +3481,16 @@ export async function purgeJobRetention(body: { dry_run: boolean; confirm_token?
   return res.json();
 }
 
-export async function fetchWorkspaceSettings(): Promise<{
+/**
+ * Deployment-wide settings (General, SSO, AI providers) are one document for
+ * every workspace; only a platform admin changes them. Reads say so.
+ */
+export type PlatformEditability = {
+  editable?: boolean;
+  editable_reason?: string | null;
+};
+
+export async function fetchWorkspaceSettings(): Promise<PlatformEditability & {
   org_name: string;
   timezone: string;
   retention_days: number;
@@ -3540,6 +3550,15 @@ export type EffectiveIdentity = {
   workspace_choice_ambiguous: boolean;
   must_change_password: boolean;
   auth_required: boolean;
+  /** Two-factor standing; ``hold`` set = this session only reaches two-factor setup. */
+  mfa?: {
+    enrolled: boolean;
+    required: boolean;
+    hold: "mfa_enrollment_required" | "mfa_verification_required" | null;
+    session_verified: boolean;
+    via_sso: boolean;
+    sso_exempt: boolean;
+  };
 };
 
 /** Who the API says you are, and what it will let you do in this workspace. */
@@ -3597,7 +3616,12 @@ export type AuditChainFinding = {
 };
 
 export type AuditChainVerification = {
-  verified: boolean;
+  /** null when nothing was walked (`status` says why). */
+  verified: boolean | null;
+  status?: "verified" | "findings" | "nothing_checked" | "store_unavailable";
+  store?: "mongo" | "file";
+  records_in_scope?: number;
+  truncated_by_limit?: boolean;
   checked: number;
   chain_head: string | null;
   findings: AuditChainFinding[];
@@ -3646,11 +3670,14 @@ export function ssoStartUrl(type: SsoType): string {
   return `${resolveApiBase()}/auth/sso/${type}/start`;
 }
 
-export async function fetchSsoConfigs(): Promise<Record<SsoType, SsoConfig>> {
+export async function fetchSsoSettings(): Promise<PlatformEditability & { providers: Record<SsoType, SsoConfig> }> {
   const res = await apiFetch(`${API_BASE}/workspace/sso`);
   if (!res.ok) throw new Error("Failed to load SSO settings");
-  const data = await res.json();
-  return data.providers;
+  return res.json();
+}
+
+export async function fetchSsoConfigs(): Promise<Record<SsoType, SsoConfig>> {
+  return (await fetchSsoSettings()).providers;
 }
 
 export async function updateSsoConfig(type: SsoType, body: Partial<SsoConfig>): Promise<{ config: SsoConfig; validation: { ok: boolean; message: string; missing_fields: string[] } }> {
@@ -3706,7 +3733,7 @@ export async function updateAiProviderSettings(provider: string, body: {
 
 export type PilotEngineChoice = "auto" | "local" | "hybrid" | "cloud";
 
-export type PilotEngineStatus = {
+export type PilotEngineStatus = PlatformEditability & {
   preference: PilotEngineChoice;
   engine: string;
   source: string;
@@ -4083,11 +4110,22 @@ export async function fetchSignupMetrics(): Promise<SignupMetrics | null> {
   return (await res.json()) as SignupMetrics;
 }
 
-export async function loginWorkspace(email: string, password: string): Promise<{
+export interface LoginSession {
   token: string;
   expires_at: number;
   user: { email: string; name: string; role: string };
-}> {
+  must_change_password?: boolean;
+}
+
+/** 202 from /auth/login: the password matched an account with two-factor on. */
+export interface LoginMfaChallenge {
+  mfa_required: true;
+  challenge: string;
+  challenge_expires_at: number;
+  methods: string[];
+}
+
+export async function loginWorkspace(email: string, password: string): Promise<LoginSession | LoginMfaChallenge> {
   const res = await apiFetch(`${API_BASE}/auth/login`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -4542,6 +4580,28 @@ export type Tenant = {
   egress_allowlist: string[];
   created_at: string;
   updated_at: string;
+  /** What is enforced now (read and save responses; same source as the posture). */
+  enforcement?: TenantEnforcement;
+};
+
+export type ControlStatus = "enforced" | "audit_only" | "untrusted_client_ip" | "recorded_only" | "not_configured";
+
+/** `enforcement` block of the tenant save response and the security posture (QA round 11). */
+export type TenantEnforcement = {
+  ip_allowlist?: { enforced?: boolean; status?: ControlStatus; missing?: string[]; scope?: string; client_ip_source?: string };
+  session_timeout?: { enforced?: boolean; status?: ControlStatus; hours?: number | null; kind?: string };
+  mfa?: {
+    enforced?: boolean;
+    status?: string;
+    sso_exempt?: boolean;
+    missing?: string[];
+    members_total?: number;
+    members_enrolled?: number;
+  };
+  /** The address the server sees for this caller. */
+  caller_ip?: string;
+  /** Admin-facing: what is saved but not enforced, and who can change it. */
+  warnings?: string[];
 };
 
 export type ByokKey = {
@@ -4616,12 +4676,8 @@ export type SecurityPosture = {
   mfa_enforced?: boolean;
   session_timeout_hours: number;
   session_timeout_enforced?: boolean;
-  /** Exactly what each control enforces (round 8). */
-  enforcement?: {
-    ip_allowlist?: { enforced?: boolean; missing?: string[]; scope?: string };
-    session_timeout?: { enforced?: boolean; hours?: number | null };
-    mfa?: { enforced?: boolean; status?: string };
-  };
+  /** Exactly what each control enforces (round 8; round 11 adds status, warnings and real MFA). */
+  enforcement?: TenantEnforcement;
   byok_encrypts_secrets?: boolean;
   tls_version: string;
   compliance: Array<{ framework: string; status: string; evidence: string }>;

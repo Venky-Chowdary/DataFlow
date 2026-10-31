@@ -18,6 +18,9 @@ from services.decision_kernel import materialize_dest_ddl
 from services.value_serializer import json_default
 
 from connectors.postgresql_conn import get_connection
+from connectors.pg_tx_guard import explain_aborted as pg_explain_aborted
+from connectors.pg_tx_guard import savepoint as pg_savepoint
+from connectors.pg_tx_guard import tolerated as pg_tolerated
 from connectors.schema_drift import widen_existing_columns_native
 from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
@@ -196,6 +199,10 @@ def _fetch_pg_column_types(cursor: Any, schema: str, table_name: str) -> dict[st
                 ddl = f"VARCHAR({int(char_len)})"
             elif data in {"CHARACTER", "CHAR"} and char_len:
                 ddl = f"CHAR({int(char_len)})"
+            elif data in {"BIT", "BIT VARYING"} and char_len:
+                # Bare ``BIT`` reads as the BOOLEAN logical and cast every
+                # ``10101010`` cell as a boolean; the width is the bitstring.
+                ddl = f"{data}({int(char_len)})"
             elif udt in _udt_scalar:
                 ddl = _udt_scalar[udt]
             elif data in {
@@ -754,42 +761,23 @@ def _redshift_stage_delete(
         key_rows.append(tuple(row[idx] if idx < len(row) else None for idx in conflict_idxs))
     cursor.executemany(insert_sql, key_rows)
 
-    join_pred = sql_mod.SQL(" AND ").join(
-        sql_mod.SQL("t.{} IS NOT DISTINCT FROM s.{}").format(
-            sql_mod.Identifier(c), sql_mod.Identifier(c)
+    # Null-safe equality spelled without IS NOT DISTINCT FROM, which Redshift
+    # lacks: trying it first aborted the transaction, so the fallback DELETE
+    # failed "current transaction is aborted" (Redshift has no savepoints; R11).
+    eq_pred = sql_mod.SQL(" AND ").join(
+        sql_mod.SQL("(({t} = s.{c}) OR ({t} IS NULL AND s.{c} IS NULL))").format(
+            t=sql_mod.Identifier(table_name, c), c=sql_mod.Identifier(c)
         )
         for c in conflict_cols
     )
-    # Redshift may lack IS NOT DISTINCT FROM — use equality + null-safe OR.
-    try:
-        cursor.execute(
-            sql_mod.SQL(
-                "DELETE FROM {}.{} USING {} AS s WHERE {}"
-            ).format(
-                sql_mod.Identifier(schema),
-                sql_mod.Identifier(table_name),
-                sql_mod.Identifier(stage),
-                join_pred,
-            )
+    cursor.execute(
+        sql_mod.SQL("DELETE FROM {}.{} USING {} AS s WHERE {}").format(
+            sql_mod.Identifier(schema),
+            sql_mod.Identifier(table_name),
+            sql_mod.Identifier(stage),
+            eq_pred,
         )
-    except Exception:
-        # Null-safe equality fallback
-        eq_pred = sql_mod.SQL(" AND ").join(
-            sql_mod.SQL(
-                "((t.{c} = s.{c}) OR (t.{c} IS NULL AND s.{c} IS NULL))"
-            ).format(c=sql_mod.Identifier(c))
-            for c in conflict_cols
-        )
-        cursor.execute(
-            sql_mod.SQL(
-                "DELETE FROM {}.{} USING {} AS s WHERE {}"
-            ).format(
-                sql_mod.Identifier(schema),
-                sql_mod.Identifier(table_name),
-                sql_mod.Identifier(stage),
-                eq_pred,
-            )
-        )
+    )
     try:
         cursor.execute(sql_mod.SQL("DROP TABLE IF EXISTS {}").format(sql_mod.Identifier(stage)))
     except Exception as exc:
@@ -1904,6 +1892,9 @@ def write_mapped_rows(
 
                 for stmt in collect_pg_enum_prerequisites(logical_types):
                     cursor.execute(stmt)
+                from connectors.pgvector_extension import ensure_vector_extension
+
+                ensure_vector_extension(cursor, target_types, engine=engine)  # R11
             fidelity_plan = None
             from services.schema_fidelity import (
                 empty_unsupported_report,
@@ -1912,126 +1903,129 @@ def write_mapped_rows(
             )
 
             try:
-                # Probe existence so we do not claim PK carry on IF NOT EXISTS no-op.
-                cursor.execute(
-                    """
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = %s
-                    LIMIT 1
-                    """,
-                    (schema, table_name),
-                )
-                pg_table_existed = cursor.fetchone() is not None
-                from services.physical_placement_ddl import (
-                    list_destination_tablespaces,
-                )
+                # A refused fidelity CREATE is rolled back before the types-only
+                # fallback runs; otherwise the fallback failed "aborted" (R11).
+                with pg_savepoint(cursor, engine=engine, label="schema fidelity CREATE"):
+                    # Probe existence so we do not claim PK carry on IF NOT EXISTS no-op.
+                    cursor.execute(
+                        """
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (schema, table_name),
+                    )
+                    pg_table_existed = cursor.fetchone() is not None
+                    from services.physical_placement_ddl import (
+                        list_destination_tablespaces,
+                    )
 
-                fidelity_plan = resolve_create_fidelity_plan(
-                    source_schema_catalog=_kwargs.get("source_schema_catalog"),
-                    mappings=mappings,
-                    target_columns=target_cols,
-                    target_types=target_types,
-                    dest_dialect="postgresql",
-                    table_already_exists=pg_table_existed,
-                    dest_table=table_name,
-                    dest_schema=schema,
-                    dest_tablespaces=list_destination_tablespaces(
-                        "postgresql", cursor
-                    ),
-                    carry_keys=write_mode != "insert"
-                    or bool(_kwargs.get("carry_source_keys")),
-                    operator_key_columns=(
-                        list(conflict_columns or []) if write_mode == "upsert" else None
-                    ),
-                )
-                if fidelity_plan.column_renames and fidelity_plan.dest_columns:
-                    target_cols[:] = list(fidelity_plan.dest_columns)
-                body = render_create_column_defs(
-                    columns=target_cols,
-                    types=target_types,
-                    plan=(None if pg_table_existed else fidelity_plan),
-                    dialect="postgresql",
-                )
-                if not pg_table_existed:
-                    from services.overwrite_keep import append_kept_column_sql
-
-                    body = append_kept_column_sql(
-                        body,
-                        list(_kwargs.get("preserve_columns") or []),
+                    fidelity_plan = resolve_create_fidelity_plan(
+                        source_schema_catalog=_kwargs.get("source_schema_catalog"),
+                        mappings=mappings,
+                        target_columns=target_cols,
+                        target_types=target_types,
+                        dest_dialect="postgresql",
+                        table_already_exists=pg_table_existed,
+                        dest_table=table_name,
+                        dest_schema=schema,
+                        dest_tablespaces=list_destination_tablespaces(
+                            "postgresql", cursor
+                        ),
+                        carry_keys=write_mode != "insert"
+                        or bool(_kwargs.get("carry_source_keys")),
+                        operator_key_columns=(
+                            list(conflict_columns or []) if write_mode == "upsert" else None
+                        ),
+                    )
+                    if fidelity_plan.column_renames and fidelity_plan.dest_columns:
+                        target_cols[:] = list(fidelity_plan.dest_columns)
+                    body = render_create_column_defs(
+                        columns=target_cols,
+                        types=target_types,
+                        plan=(None if pg_table_existed else fidelity_plan),
                         dialect="postgresql",
-                        existing=list(target_cols),
                     )
-                # Placement (PARTITION BY / TABLESPACE) is part of the CREATE
-                # itself — a table cannot be partitioned after the fact.
-                cursor.execute(
-                    sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({}) {}").format(
-                        sql.Identifier(schema),
-                        sql.Identifier(table_name),
-                        sql.SQL(body),
-                        sql.SQL(fidelity_plan.create_suffix or ""),
+                    if not pg_table_existed:
+                        from services.overwrite_keep import append_kept_column_sql
+
+                        body = append_kept_column_sql(
+                            body,
+                            list(_kwargs.get("preserve_columns") or []),
+                            dialect="postgresql",
+                            existing=list(target_cols),
+                        )
+                    # Placement (PARTITION BY / TABLESPACE) is part of the CREATE
+                    # itself — a table cannot be partitioned after the fact.
+                    cursor.execute(
+                        sql.SQL("CREATE TABLE IF NOT EXISTS {}.{} ({}) {}").format(
+                            sql.Identifier(schema),
+                            sql.Identifier(table_name),
+                            sql.SQL(body),
+                            sql.SQL(fidelity_plan.create_suffix or ""),
+                        )
                     )
-                )
-                from services.schema_fidelity import apply_post_create_sql
+                    from services.schema_fidelity import apply_post_create_sql
 
-                # A refused CREATE INDEX must not abort the load or leave the
-                # certificate claiming an index the destination does not have;
-                # each statement gets its own savepoint.
-                def _run_post_create(stmt: str) -> None:
-                    cursor.execute("SAVEPOINT df_post_create")
-                    try:
-                        cursor.execute(stmt)
-                    except Exception:
-                        cursor.execute("ROLLBACK TO SAVEPOINT df_post_create")
-                        raise
-                    cursor.execute("RELEASE SAVEPOINT df_post_create")
+                    # A refused CREATE INDEX must not abort the load or leave the
+                    # certificate claiming an index the destination does not have;
+                    # each statement gets its own savepoint.
+                    def _run_post_create(stmt: str) -> None:
+                        cursor.execute("SAVEPOINT df_post_create")
+                        try:
+                            cursor.execute(stmt)
+                        except Exception:
+                            cursor.execute("ROLLBACK TO SAVEPOINT df_post_create")
+                            raise
+                        cursor.execute("RELEASE SAVEPOINT df_post_create")
 
-                apply_post_create_sql(fidelity_plan, _run_post_create)
-                from services.schema_fidelity import (
-                    certify_placement_on_destination,
-                )
+                    apply_post_create_sql(fidelity_plan, _run_post_create)
+                    from services.schema_fidelity import (
+                        certify_placement_on_destination,
+                    )
 
-                certify_placement_on_destination(
-                    fidelity_plan,
-                    dialect="postgresql",
-                    cursor=cursor,
-                    schema=schema,
-                    table=table_name,
-                )
-                from services.identity_carry import psycopg2_fetchall
-                from services.schema_fidelity import (
-                    certify_identity_on_destination,
-                )
+                    certify_placement_on_destination(
+                        fidelity_plan,
+                        dialect="postgresql",
+                        cursor=cursor,
+                        schema=schema,
+                        table=table_name,
+                    )
+                    from services.identity_carry import psycopg2_fetchall
+                    from services.schema_fidelity import (
+                        certify_identity_on_destination,
+                    )
 
-                certify_identity_on_destination(
-                    fidelity_plan,
-                    dialect="postgresql",
-                    schema=schema,
-                    table=table_name,
-                    fetchall=psycopg2_fetchall(cursor),
-                )
-                from services.schema_fidelity import (
-                    certify_collation_on_destination,
-                )
+                    certify_identity_on_destination(
+                        fidelity_plan,
+                        dialect="postgresql",
+                        schema=schema,
+                        table=table_name,
+                        fetchall=psycopg2_fetchall(cursor),
+                    )
+                    from services.schema_fidelity import (
+                        certify_collation_on_destination,
+                    )
 
-                certify_collation_on_destination(
-                    fidelity_plan,
-                    dialect="postgresql",
-                    schema=schema,
-                    table=table_name,
-                    fetchall=psycopg2_fetchall(cursor),
-                )
-                from services.schema_fidelity import (
-                    certify_structure_on_destination,
-                )
+                    certify_collation_on_destination(
+                        fidelity_plan,
+                        dialect="postgresql",
+                        schema=schema,
+                        table=table_name,
+                        fetchall=psycopg2_fetchall(cursor),
+                    )
+                    from services.schema_fidelity import (
+                        certify_structure_on_destination,
+                    )
 
-                certify_structure_on_destination(
-                    fidelity_plan,
-                    dialect="postgresql",
-                    schema=schema,
-                    table=table_name,
-                    fetchall=psycopg2_fetchall(cursor),
-                )
-                _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
+                    certify_structure_on_destination(
+                        fidelity_plan,
+                        dialect="postgresql",
+                        schema=schema,
+                        table=table_name,
+                        fetchall=psycopg2_fetchall(cursor),
+                    )
+                    _kwargs["_schema_fidelity_report"] = fidelity_plan.report.to_dict()
             except Exception as exc:
                 logger.warning(
                     "PostgreSQL schema fidelity plan failed; falling back to types-only CREATE: %s",
@@ -2071,7 +2065,8 @@ def write_mapped_rows(
                     source_dialect="",
                     dest_dialect="postgresql",
                     reason=(
-                        f"Schema fidelity CREATE failed ({type(exc).__name__}); "
+                        f"Schema fidelity CREATE failed ({type(exc).__name__}: "
+                        f"{str(exc).strip().splitlines()[0][:300] if str(exc).strip() else ''}); "
                         "fell back to types-only CREATE TABLE — constraints not carried."
                     ),
                 ).to_dict()
@@ -2085,7 +2080,7 @@ def write_mapped_rows(
                 # later upserts/replays may add the unique index without the
                 # operator-table disclosed-DDL gate (D101). Operator tables
                 # never carry this comment, so the gate stays fail-closed.
-                try:
+                with pg_tolerated(cursor, "managed-table comment", engine=engine):
                     from services.brand import new_marker_comment
 
                     cursor.execute(
@@ -2095,8 +2090,6 @@ def write_mapped_rows(
                             sql.Literal(new_marker_comment(f"{schema}.{table_name}")),
                         )
                     )
-                except Exception:
-                    logger.debug("managed-table comment skipped", exc_info=True)
                 try:
                     from services.auto_create_lifecycle import register_auto_create
 
@@ -2249,7 +2242,7 @@ def write_mapped_rows(
                     # A table a prior run created carries the 'dataflow:managed'
                     # (or, flag on, 'datawrap:managed') comment — index DDL on
                     # it is ours to make; only unmarked (operator) tables gate.
-                    try:
+                    with pg_tolerated(cursor, "managed-table probe", engine=engine):
                         cursor.execute(
                             "SELECT obj_description(to_regclass(%s), 'pg_class')",
                             (f'"{schema}"."{table_name}"',),
@@ -2258,8 +2251,6 @@ def write_mapped_rows(
                         from services.brand import is_own
 
                         pg_table_managed = bool(_row and is_own("managed_table_comment", _row[0]))
-                    except Exception:
-                        logger.debug("managed-table probe skipped", exc_info=True)
                 if pg_table_existed and not pg_table_managed:
                     # D101: DDL on an operator's existing table is disclosed
                     # and approved at Validate — never created silently.
@@ -2332,15 +2323,16 @@ def write_mapped_rows(
             # Existence before CREATE — create-new may skip overlay require.
             table_existed = False
             try:
-                cur.execute(
-                    """
-                    SELECT 1 FROM information_schema.tables
-                    WHERE table_schema = %s AND table_name = %s
-                    LIMIT 1
-                    """,
-                    (schema, table_name),
-                )
-                table_existed = cur.fetchone() is not None
+                with pg_savepoint(cur, engine=engine, label="table existence probe"):
+                    cur.execute(
+                        """
+                        SELECT 1 FROM information_schema.tables
+                        WHERE table_schema = %s AND table_name = %s
+                        LIMIT 1
+                        """,
+                        (schema, table_name),
+                    )
+                    table_existed = cur.fetchone() is not None
             except Exception:
                 table_existed = not create_table
 
@@ -2410,12 +2402,13 @@ def write_mapped_rows(
             if table_existed and not backfill_new_fields and not additive_refuse:
                 missing_cols: list[str] = []
                 try:
-                    cur.execute(
-                        """SELECT column_name FROM information_schema.columns
-                           WHERE table_schema = %s AND table_name = %s""",
-                        (schema, table_name),
-                    )
-                    existing_cols = {str(row[0]).lower() for row in cur.fetchall()}
+                    with pg_savepoint(cur, engine=engine, label="missing-column probe"):
+                        cur.execute(
+                            """SELECT column_name FROM information_schema.columns
+                               WHERE table_schema = %s AND table_name = %s""",
+                            (schema, table_name),
+                        )
+                        existing_cols = {str(row[0]).lower() for row in cur.fetchall()}
                     missing_cols = [
                         str(col)
                         for col in target_cols
@@ -2641,17 +2634,11 @@ def write_mapped_rows(
                 quoted = quote_table_ref(table_name, schema, dialect="postgresql")
                 truncate_sql, delete_sql = overwrite_empty_statements("postgresql", quoted)
                 try:
-                    if truncate_sql:
-                        cur.execute(truncate_sql)
-                    else:
-                        cur.execute(delete_sql)
-                except Exception as trunc_exc:
                     # A foreign key can refuse TRUNCATE. Roll back that statement
-                    # only — setup already committed — then delete in place.
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        logger.debug("overwrite truncate rollback failed", exc_info=True)
+                    # only (savepoint), then delete in place.
+                    with pg_savepoint(cur, engine=engine, label="overwrite TRUNCATE"):
+                        cur.execute(truncate_sql or delete_sql)
+                except Exception as trunc_exc:
                     missing = str(trunc_exc).lower()
                     if any(
                         token in missing
@@ -2891,6 +2878,14 @@ def write_mapped_rows(
                                             logger.warning(
                                                 "Exception suppressed: %s", exc2, exc_info=exc2
                                             )
+                                        # The rollback discarded the rows this chunk had
+                                        # already released: stop, never count them (R11).
+                                        raise RuntimeError(
+                                            "PostgreSQL lost the salvage savepoint "
+                                            f"({exc}); the {chunk_written} row(s) salvaged in "
+                                            "this chunk were rolled back and are not counted. "
+                                            f"First row error: {row_exc}"
+                                        ) from row_exc
                                     if is_connection_lost(row_exc):
                                         raise
                                     col_name = extract_column_from_sql_error(row_exc) or "*"
@@ -2940,7 +2935,11 @@ def write_mapped_rows(
                                 if not (held and held.active):
                                     conn.commit()
                             except Exception as exc:
-                                logger.warning("Exception suppressed: %s", exc, exc_info=exc)
+                                # Uncommitted salvage is not written (R11).
+                                raise RuntimeError(
+                                    f"PostgreSQL salvage commit failed ({exc}); "
+                                    f"{chunk_written} salvaged row(s) are not written."
+                                ) from exc
                             break
                         attempt += 1
                         held = _held_overwrite()
@@ -3048,6 +3047,7 @@ def write_mapped_rows(
                                 dense_nums=dense_nums,
                                 target_cols=target_cols,
                                 conflict_columns=conflict_for_part,
+                                engine=engine,
                             )
                             rows_skipped += len(skipped_keys)
                             skipped_identity_keys.extend(skipped_keys)
@@ -3242,7 +3242,7 @@ def write_mapped_rows(
             target_schema=schema or "public",
             checksum=write_acc.digest() if written else "",
             chunks_completed=chunks_completed,
-            error=str(exc),
+            error=pg_explain_aborted(exc, locals().get("conn")),
             rejected_rows=rejected_rows,
             rejected_details=rejected_details,
             coerced_null_rows=coerced_null_rows,
@@ -3268,6 +3268,7 @@ def _drop_skip_existing_keys(
     dense_nums: list,
     target_cols: list[str],
     conflict_columns: list[str],
+    engine: str = "",
 ) -> tuple[list, list, list[str]]:
     """Drop keys already stored when the policy is skip-duplicates.
 
@@ -3292,25 +3293,28 @@ def _drop_skip_existing_keys(
     )
     cols_sql = psql.SQL(", ").join(psql.Identifier(col) for col in names)
     try:
-        for start in range(0, len(dense), 200):
-            chunk = dense[start : start + 200]
-            placeholders = psql.SQL(", ").join(
-                psql.SQL("({})").format(
-                    psql.SQL(", ").join(psql.Placeholder() for _ in names)
+        # A failed probe falls back to "drop nothing"; the savepoint keeps the
+        # write transaction usable for the INSERT that follows (R11).
+        with pg_savepoint(cur, engine=engine, label="skip-existing key probe"):
+            for start in range(0, len(dense), 200):
+                chunk = dense[start : start + 200]
+                placeholders = psql.SQL(", ").join(
+                    psql.SQL("({})").format(
+                        psql.SQL(", ").join(psql.Placeholder() for _ in names)
+                    )
+                    for _ in chunk
                 )
-                for _ in chunk
-            )
-            params = [row[index] for row in chunk for index in indexes]
-            cur.execute(
-                psql.SQL("SELECT {} FROM {} WHERE ({}) IN (VALUES {})").format(
-                    cols_sql, table_sql, cols_sql, placeholders
-                ),
-                params,
-            )
-            for found in cur.fetchall():
-                existing.add(tuple(
-                    None if value is None else str(value).strip() for value in found
-                ))
+                params = [row[index] for row in chunk for index in indexes]
+                cur.execute(
+                    psql.SQL("SELECT {} FROM {} WHERE ({}) IN (VALUES {})").format(
+                        cols_sql, table_sql, cols_sql, placeholders
+                    ),
+                    params,
+                )
+                for found in cur.fetchall():
+                    existing.add(tuple(
+                        None if value is None else str(value).strip() for value in found
+                    ))
     except Exception:
         return dense, dense_nums, []
     kept = []

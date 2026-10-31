@@ -135,16 +135,13 @@ class CollationCarryPlan:
 
 
 def _norm(dialect: str | None) -> str:
+    """Engine family; MariaDB stays itself (its collations are not MySQL's)."""
+    from src.transfer.engine_family import engine_flavour, sql_duplex_family
+
     d = (dialect or "").strip().lower()
-    if d in {"postgres", "postgresql", "redshift", "timescale", "cockroach"}:
-        return "redshift" if d == "redshift" else "postgresql"
-    if d in {"mssql", "azure_sql", "azure_sql_database", "sqlserver"}:
-        return "sqlserver"
-    if d == "tidb":
-        return "mysql"
-    if d == "mariadb":
+    if engine_flavour(d) == "mariadb":
         return "mariadb"
-    return d
+    return sql_duplex_family(d) or d
 
 
 def _base_type(declared: str | None) -> str:

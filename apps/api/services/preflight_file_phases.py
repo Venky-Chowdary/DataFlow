@@ -105,6 +105,28 @@ def apply_constraint_findings(
                 "source FK introspect skipped: %s", src_fk_exc, exc_info=src_fk_exc
             )
 
+        # Round 11: is each source reference's parent at the destination? One
+        # plan-time finding instead of the write guard failing mid-run.
+        if src_fks and (destination_config or destination_connector_id):
+            from services.fk_parent_preflight import assess_fk_parents
+
+            parent_report = assess_fk_parents(
+                foreign_keys=src_fks,
+                destination_config=_dest_probe_config(destination_config)
+                if destination_config
+                else None,
+                source_table=source_table or "",
+                sample_rows=sample_rows,
+                validation_mode=validation_mode,
+                fk_risk_acknowledged=bool(fk_risk_acknowledged),
+            )
+            out["fk_parent_plan"] = {
+                k: v for k, v in parent_report.items() if k != "finding"
+            }
+            if parent_report.get("finding"):
+                out["fk_parent_plan"]["finding"] = parent_report["finding"]
+                findings.append(parent_report["finding"])
+
         # A destination FK names a parent table that lives in the
         # destination, so its parent keys are looked up there. Probing the
         # source for it failed closed on every source that lacks the parent

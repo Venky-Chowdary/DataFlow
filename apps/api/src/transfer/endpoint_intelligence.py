@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_dataset_of
 import logging
 from typing import Any
 
@@ -18,6 +19,7 @@ from .adapters import (
     resolve_connector_config,
 )
 from .connector_capabilities import CATALOG_ID_ALIASES, resolve_driver_type
+from .engine_family import family_or_kind
 from .models import EndpointConfig
 from .type_mapper import ddl_type
 from services.procedure_source import is_callable_source
@@ -34,6 +36,7 @@ def _list_sqlalchemy_tables(
     A failed catalog read is not an empty inventory. Callers must not report
     "connected, no tables" when the connection itself failed.
     """
+    from connectors.generic_sql import connection_options
     from services.dialect_profiles import normalize_schema
     from services.schema_introspect import introspect_schema
 
@@ -59,6 +62,8 @@ def _list_sqlalchemy_tables(
             # dial target (D4).
             catalog_type=str(cfg.get("type") or fmt or ""),
             table="",
+            # TLS trust / service name / driver keywords the writer dials with.
+            **connection_options(cfg),
         )
     except (OSError, RuntimeError, ValueError, TypeError) as exc:
         logger.warning(
@@ -297,11 +302,16 @@ def _specialty_object_list(
 
 
 def _s3_family_format(fmt: str) -> str:
-    """MinIO, Wasabi, B2, Spaces, and R2 list through the S3 probe."""
+    """The format this module dispatches on, resolved once.
+
+    MinIO, Wasabi, B2, Spaces, and R2 list through the S3 probe. A duplex SQL
+    tile (``alloydb``, ``amazon_rds_mysql``, ``pgvector``, ``sql_server``) is
+    its engine family, from the resolver execution uses.
+    """
     key = (fmt or "").lower().strip()
     if key == "s3" or CATALOG_ID_ALIASES.get(key) == "s3":
         return "s3"
-    return key
+    return family_or_kind(key)
 
 
 def _introspect_endpoint_guarded(
@@ -446,16 +456,10 @@ def _introspect_endpoint_impl(
     }:
         return _attach_create_on_write_dest(out, endpoint, cfg, fmt)
 
-    # pgvector is an extension, not a separate engine: the destination is an
-    # ordinary PostgreSQL table with a vector column, reached through the same
-    # connection config. Leaving it out of this branch meant existence and
-    # column types were never measured, so Validate refused create-new and
-    # overwrite for lack of facts one catalog query answers.
-    # TimescaleDB is Postgres wire. Leaving the catalog id off this branch
-    # made destination introspect say "not yet implemented" while the same
-    # connector as a source already read through the Postgres driver.
-    # CockroachDB stays off: the catalog lists it planned.
-    if fmt in {"postgresql", "pgvector", "timescaledb", "timescale"}:
+    # Every PostgreSQL-family tile (pgvector, TimescaleDB, AlloyDB, RDS, Azure,
+    # Cloud SQL, Aurora ...) is an ordinary PostgreSQL catalog reached through
+    # the same connection config; ``fmt`` is already the family.
+    if fmt == "postgresql":
         if _dest_table_schema_only(endpoint):
             return _attach_dest_table_schema(out, endpoint)
         from connectors.postgresql import test_postgresql
@@ -598,7 +602,7 @@ def _introspect_endpoint_impl(
             _attach_db_sample(out, endpoint)
         return out
 
-    if fmt in {"mysql", "mariadb"}:
+    if fmt == "mysql":
         if _dest_table_schema_only(endpoint):
             return _attach_dest_table_schema(out, endpoint)
         from connectors.mysql import test_mysql
@@ -639,7 +643,7 @@ def _introspect_endpoint_impl(
             database=cfg["database"],
             username=cfg.get("username", ""),
             password=cfg.get("password", ""),
-            schema=cfg.get("schema", "dataflow"),
+            schema=bigquery_dataset_of(cfg),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),

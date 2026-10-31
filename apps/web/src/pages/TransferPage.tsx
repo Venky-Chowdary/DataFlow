@@ -263,6 +263,7 @@ import {
   type StreamFieldContract,
 } from "../lib/streamContracts";
 import type { MirrorDeleteMode } from "../lib/mirrorDeleteMode";
+import { foreignKeysDestExtra, type ForeignKeysMode } from "../lib/foreignKeysMode";
 import type { TransferPageProps } from "./transfer/TransferPageProps";
 import {
   ACCEPTED_UPLOAD_EXTENSIONS,
@@ -479,7 +480,7 @@ export function TransferPage({
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
-  const [targetDb, setTargetDb] = useState("dataflow_test");
+  const [targetDb, setTargetDb] = useState("");
   const [targetCollection, setTargetCollection] = useState("");
   const [destHost, setDestHost] = useState("");
   const [destPort, setDestPort] = useState(0);
@@ -540,6 +541,8 @@ export function TransferPage({
   const [snapshotMode, setSnapshotMode] = useState("initial");
   // Mirror: soft delete unless the operator explicitly picks a hard DELETE.
   const [mirrorDeleteMode, setMirrorDeleteMode] = useState<MirrorDeleteMode>("soft");
+  // Round 11: route option for source foreign keys (carry | guard | ignore).
+  const [foreignKeysMode, setForeignKeysMode] = useState<ForeignKeysMode>("carry");
   const [deliveryGuarantee, setDeliveryGuarantee] = useState<CdcDeliveryGuarantee>(
     CDC_DELIVERY_AT_LEAST_ONCE,
   );
@@ -735,6 +738,7 @@ export function TransferPage({
           ? { schema_types: destSchemaMap }
           : {}),
         ...(syncMode === "cdc" && allowAppendOnly ? { allow_append_only: true } : {}),
+        ...foreignKeysDestExtra(foreignKeysMode),
         ...(isVector
           ? {
               ...(vectorContentColumn ? { content_column: vectorContentColumn } : {}),
@@ -4830,6 +4834,7 @@ export function TransferPage({
           }),
           dest_extra: {
             allow_append_only: allowAppendOnly,
+            ...foreignKeysDestExtra(foreignKeysMode),
             ...(destWriteMode === "procedure"
               ? {
                   dest_write_mode: "procedure",
@@ -5442,6 +5447,7 @@ export function TransferPage({
           if (syncMode === "cdc" && allowAppendOnly) {
             extra.allow_append_only = true;
           }
+          Object.assign(extra, foreignKeysDestExtra(foreignKeysMode));
           if (destWriteMode === "procedure") {
             extra.dest_write_mode = "procedure";
             extra.dest_procedure_call = destProcedureCall.trim();
@@ -6391,7 +6397,7 @@ export function TransferPage({
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPlanLoading(false);
-    setTargetDb("dataflow_test");
+    setTargetDb("");
     setTargetCollection("");
     setDestHost("");
     setDestPort(0);
@@ -7533,7 +7539,7 @@ export function TransferPage({
                     className="df2-input"
                     value={destSchema}
                     onChange={(e) => setDestSchema(e.target.value)}
-                    placeholder="dataflow"
+                    placeholder="analytics"
                     autoComplete="off"
                     spellCheck={false}
                   />
@@ -8066,6 +8072,7 @@ export function TransferPage({
                 acknowledgmentReason: "Keep existing mappings for this run; ignore new/changed columns",
               });
             }}
+            fkRiskAcknowledged={fkRiskAcknowledged}
             onAcknowledgeFkRisk={() => {
               toast({
                 title: "Submitting FK-risk acknowledgment",
@@ -8303,7 +8310,7 @@ export function TransferPage({
                   ? "Execute now to start governed transfer with live theater progress and reconciliation evidence."
                   : "Re-open Validate to confirm API preflight (decision approve) before treating this run as cleared."}
                 {writeViaStaging
-                  ? " Staging is on — rows land in {table}_df_staging first; only clean rows promote to primary."
+                  ? " Staging is on — rows land in a staging table next to the destination first; only clean rows promote to primary."
                   : ""}
               </p>
             </div>
@@ -8659,6 +8666,8 @@ export function TransferPage({
         onSnapshotModeChange={setSnapshotMode}
         mirrorDeleteMode={mirrorDeleteMode}
         onMirrorDeleteModeChange={setMirrorDeleteMode}
+        foreignKeysMode={foreignKeysMode}
+        onForeignKeysModeChange={setForeignKeysMode}
         deliveryGuarantee={deliveryGuarantee}
         onDeliveryGuaranteeChange={setDeliveryGuarantee}
         exactlyOnceWired={exactlyOnceWiredDest(destDriverType || destType)}

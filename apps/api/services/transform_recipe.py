@@ -30,6 +30,17 @@ from services.transform_engine import normalize_engine_transform
 #:                     recipe, counted in preview, never silent.
 ON_ERROR_MODES = frozenset({"fail", "keep_original"})
 
+#: The engine's word for ``fail`` (``services.shape_models.ON_ERROR_ALIASES``):
+#: a step written in Shape's vocabulary saves into the library unchanged in
+#: meaning (QA round 11, T9).
+_RECIPE_ON_ERROR_ALIASES = {"refuse": "fail"}
+
+
+def _recipe_on_error(raw: Any) -> str:
+    value = str(raw or "fail").strip().lower() or "fail"
+    return _RECIPE_ON_ERROR_ALIASES.get(value, value)
+
+
 #: Lifecycle. ``draft`` recipes may be saved but can never bind to a transfer
 #: or run; ``active`` recipes passed every check the compiler knows how to run.
 #: Validation is what flips draft→active — never an operator's confidence.
@@ -121,7 +132,7 @@ class RecipeStep:
         return cls(
             column=str(data.get("column") or "").strip(),
             op=str(data.get("op") or "").strip(),
-            on_error=str(data.get("on_error") or "fail").strip().lower(),
+            on_error=_recipe_on_error(data.get("on_error")),
             enabled=bool(data.get("enabled", True)),
             options=dict(data.get("options") or {}),
             output_column=str(data.get("output_column") or "").strip(),

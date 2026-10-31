@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_default_dataset
 import datetime
 import json
 import logging
@@ -240,10 +241,8 @@ def _refine_columns_by_samples(
 #: name has to be split before the lookup. Document stores are deliberately
 #: absent: a MongoDB collection name may legitimately contain a dot.
 _NAMESPACED_SQL_ENGINES = frozenset({
-    "postgresql", "redshift", "pgvector", "mysql", "mariadb", "snowflake",
-    "sqlserver", "mssql", "sql_server", "azure_sql", "oracle", "oracle_db",
-    "amazon_rds_oracle", "bigquery", "generic_sql", "duckdb", "clickhouse",
-    "trino", "presto",
+    "postgresql", "redshift", "mysql", "snowflake", "sqlserver", "oracle",
+    "bigquery", "generic_sql", "duckdb", "clickhouse", "trino", "presto",
 })
 
 
@@ -258,8 +257,10 @@ def split_object_namespace(
     asked for a table literally named ``public.vt_src`` and answered no rows.
     Existence must never depend on where a name sorts in a truncated page.
     """
-    name = (table or "").strip()
-    if not name or (db_type or "").lower() not in _NAMESPACED_SQL_ENGINES:
+    from src.transfer.engine_family import family_or_kind
+
+    name, db_type = (table or "").strip(), family_or_kind(db_type)
+    if not name or db_type not in _NAMESPACED_SQL_ENGINES:
         return schema, database, name
     parts = [p.strip().strip('"').strip("`").strip("[]") for p in name.split(".")]
     parts = [p for p in parts if p]
@@ -267,7 +268,7 @@ def split_object_namespace(
         return schema, database, name
     leaf = parts[-1]
     namespace = parts[-2]
-    if (db_type or "").lower() in {"mysql", "mariadb"}:
+    if db_type == "mysql":
         # MySQL has no schema layer: the qualifier is the database, and the
         # introspector prefers ``database`` over ``schema``.
         return schema, namespace, leaf
@@ -373,13 +374,10 @@ def _introspect_schema_unscoped(
     must report empty columns so Studio can honestly create-on-write — not
     claim ``users`` exists in ``railway`` because another DB on the host has it.
     """
-    # Timescale is the Postgres catalog. Cockroach stays unresolved here so a
-    # planned engine does not inherit a live schema probe.
-    if db_type in {"timescaledb", "timescale"}:
-        db_type = "postgresql"
-    # MariaDB is the MySQL catalog (same INFORMATION_SCHEMA, same driver).
-    if db_type in {"mariadb", "maria"}:
-        db_type = "mysql"
+    # A duplex SQL tile reads its engine family's catalog (one resolver).
+    from src.transfer.engine_family import family_or_kind
+
+    db_type = family_or_kind(db_type)
     if ssl is None:
         # A caller that never said anything about TLS must not make it mandatory.
         from services.connector_store import default_ssl
@@ -414,7 +412,7 @@ def _introspect_schema_unscoped(
     schema, database, table = split_object_namespace(
         db_type, table, schema=schema, database=database
     )
-    if db_type in {"postgresql", "redshift", "pgvector"}:
+    if db_type in {"postgresql", "redshift"}:
         return _introspect_postgresql(
             host=host,
             port=port,
@@ -462,7 +460,7 @@ def _introspect_schema_unscoped(
             introspect_purpose=introspect_purpose,
             **options,
         )
-    if db_type in ("oracle", "oracle_db", "amazon_rds_oracle"):
+    if db_type == "oracle":
         return _si._introspect_oracle(
             host=host,
             port=port,
@@ -476,7 +474,7 @@ def _introspect_schema_unscoped(
             strict_namespace=strict_namespace,
             **options,
         )
-    if db_type in ("sqlserver", "mssql", "sql_server", "azure_sql"):
+    if db_type == "sqlserver":
         return _si._introspect_sqlserver(
             host=host,
             port=port,
@@ -493,7 +491,7 @@ def _introspect_schema_unscoped(
     if db_type == "bigquery":
         return _introspect_bigquery(
             database=database,
-            schema=schema or "dataflow",
+            schema=schema or bigquery_default_dataset(),
             connection_string=connection_string,
             table=table,
             strict_namespace=strict_namespace,
@@ -1492,43 +1490,11 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                         (db_name, requested or target),
                     )
                     rows = cur.fetchall()
-                # Wrong database in the form is common for *source* discovery.
-                # Destination probes must stay in the operator-chosen database —
-                # otherwise a host-wide `users` table makes railway.users look real.
-                if not rows and not bool(kwargs.get("strict_namespace")):
-                    cur.execute(
-                        """
-                        SELECT table_schema, table_name
-                        FROM information_schema.tables
-                        WHERE table_type = 'BASE TABLE'
-                          AND LOWER(table_name) = LOWER(%s)
-                          AND table_schema NOT IN (
-                            'mysql', 'information_schema', 'performance_schema', 'sys'
-                          )
-                        ORDER BY CASE
-                          WHEN table_schema = %s THEN 0
-                          ELSE 1
-                        END
-                        LIMIT 5
-                        """,
-                        (requested or target, db_name),
-                    )
-                    for found_db, found_table in cur.fetchall() or []:
-                        cur.execute(
-                            """
-                            SELECT column_name, column_type, is_nullable, EXTRA,
-                                   COLLATION_NAME, CHARACTER_SET_NAME, COLUMN_DEFAULT
-                            FROM information_schema.columns
-                            WHERE table_schema = %s AND table_name = %s
-                            ORDER BY ordinal_position
-                            """,
-                            (found_db, found_table),
-                        )
-                        rows = cur.fetchall()
-                        if rows:
-                            db_name = found_db
-                            target = found_table
-                            break
+                # No host-wide fallback: a MySQL connector names its database.
+                # Scanning information_schema.tables across every schema of the
+                # server for a lookalike name hung Validate on hosts with
+                # thousands of schemas (QA round 11, Ensembl) and could bind a
+                # different database's table.
                 for row in rows:
                     name, dtype, nullable = row[0], row[1], row[2]
                     extra = str(row[3] if len(row) > 3 else "").lower()
@@ -1589,15 +1555,19 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
                 foreign_keys, foreign_keys_meta = _fetch_foreign_keys(
                     "mysql", cur, db_name, target
                 )
-                physical_storage = probe_physical_storage(
-                    "mysql", cur, db_name, target
-                ).to_dict()
-                check_meta = probe_check_constraints(
-                    "mysql", cur, db_name, target
-                ).to_dict()
-                indexes_meta = probe_secondary_indexes(
-                    "mysql", cur, db_name, target
-                ).to_dict()
+                from services.catalog_statement_cap import mysql_catalog_cap
+
+                # Optional evidence: each catalog statement is capped (round 11).
+                with mysql_catalog_cap(cur):
+                    physical_storage = probe_physical_storage(
+                        "mysql", cur, db_name, target
+                    ).to_dict()
+                    check_meta = probe_check_constraints(
+                        "mysql", cur, db_name, target
+                    ).to_dict()
+                    indexes_meta = probe_secondary_indexes(
+                        "mysql", cur, db_name, target
+                    ).to_dict()
                 apply_identity_probe("mysql", cur, db_name, target, columns)
         conn.close()
         return {
@@ -1621,7 +1591,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
 
 def _introspect_bigquery(**kwargs) -> dict[str, Any]:
     project_id = kwargs.get("database", "")
-    dataset_id = kwargs.get("schema") or "dataflow"
+    dataset_id = kwargs.get("schema") or bigquery_default_dataset()
     table = kwargs.get("table")
     try:
         from connectors.bigquery_conn import get_client

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_default_dataset
 import logging
 import uuid
 from dataclasses import dataclass
@@ -876,7 +877,7 @@ def write_mapped_rows(
         mappings=mappings,
     )
     project_id = database or host
-    dataset_id = schema or "dataflow"
+    dataset_id = schema or bigquery_default_dataset()
     table_name = sanitize_identifier(table_name)
     policy = transform_error_policy(error_policy)
     conflict_columns = list(conflict_columns or [])

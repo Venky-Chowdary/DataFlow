@@ -24,6 +24,16 @@ _SEEN: dict[Hashable, float] = {}
 _LOCK = threading.Lock()
 
 
+def setting_name(flag: str) -> str:
+    """``DATAFLOW_EGRESS_ENFORCE_NEW`` -> ``egress_enforce_new`` (no brand prefix)."""
+    text = str(flag or "").strip()
+    for prefix in ("DATAWRAP_", "DATAFLOW_"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+            break
+    return text.lower()
+
+
 def audit_would_apply(
     action: str,
     *,
@@ -53,7 +63,9 @@ def audit_would_apply(
             actor="system",
             level="warn",
             workspace_id=workspace_id or None,
-            details={**details, "enforced": False, "flag": flag},
+            # Audit rows are read by workspace admins: name the setting, not
+            # the server variable (the log line above keeps the variable).
+            details={**details, "enforced": False, "flag": setting_name(flag)},
         )
     except Exception as exc:
         logger.debug("%s audit write failed: %s", action, type(exc).__name__)

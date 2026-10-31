@@ -3645,20 +3645,11 @@ def vector_to_array_wire_preserved(
         return False
     if normalize_logical_type(el) != LOGICAL_FLOAT:
         return False
-    db = (dest_db or "").strip().lower()
+    db = _normalize_dest_db(dest_db)
     if not db:
         # Fail closed without destination — ARRAY wire is not universal.
         return False
-    if db in {
-        "postgresql",
-        "postgres",
-        "pg",
-        "cockroachdb",
-        "timescaledb",
-        "alloydb",
-        "snowflake",
-        "redshift",
-    }:
+    if db in {"postgresql", "snowflake", "redshift"}:
         return False
     return db in {
         "databricks",
@@ -7036,7 +7027,8 @@ _BARE_TEMPORAL_DIGITS: dict[str, int] = {
 
 def _bare_temporal_digits(dest_db: str) -> int | None:
     """Engine default fractional digits, or ``None`` for an unnamed engine."""
-    return _BARE_TEMPORAL_DIGITS.get((dest_db or "").strip().lower())
+    digits = _BARE_TEMPORAL_DIGITS.get(_normalize_dest_db(dest_db))
+    return _BARE_TEMPORAL_DIGITS.get((dest_db or "").strip().lower()) if digits is None else digits
 
 
 def destination_temporal_fractional_digits(

@@ -614,9 +614,9 @@ def probe_population_codes(
     cfg, db_type = _normalize_source_cfg(source_connector_id, source_config)
     table = str(source_table or "").strip()
     if cfg and table:
-        from services.source_duplicate_probe import SQLISH_SOURCE_TYPES
+        from services.source_duplicate_probe import is_sqlish_source
 
-        if db_type in SQLISH_SOURCE_TYPES or not db_type:
+        if is_sqlish_source(db_type) or not db_type:
             try:
                 observed, truncated = scan_sql_observed_codes(
                     cfg, table, wanted, cap=cap

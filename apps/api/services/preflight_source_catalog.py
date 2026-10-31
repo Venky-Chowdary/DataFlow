@@ -84,7 +84,9 @@ def load_source_foreign_keys(
         source_config=source_config,
         workspace_id=workspace_id,
     )
-    if not cfg or db_type not in SUPPORTED_DIALECTS:
+    from src.transfer.engine_family import family_or_kind
+
+    if not cfg or family_or_kind(db_type) not in SUPPORTED_DIALECTS:
         return []
     measured = measure_source_foreign_keys(db_type, cfg, [table]).get(table)
     if measured is None or not measured.measured:

@@ -43,22 +43,17 @@ _TABLESPACE_CLAUSE = {
     "sqlserver": "ON {ident}",
 }
 
-_PG_FAMILY = frozenset({"postgresql", "postgres", "redshift"})
-_MYSQL_FAMILY = frozenset({"mysql", "mariadb"})
+_PG_FAMILY = frozenset({"postgresql", "redshift"})
+_MYSQL_FAMILY = frozenset({"mysql"})
 # MySQL partition methods that declare explicit per-partition values.
 _MYSQL_VALUE_METHODS = {"range", "list", "range columns", "list columns"}
 _SAFE_BOUND = re.compile(r"^[A-Za-z0-9_,\s'\"().:+\-]*$")
 
 
 def _norm(dialect: str) -> str:
-    d = (dialect or "").strip().lower()
-    if d in {"postgres", "cockroachdb", "yugabytedb"}:
-        return "postgresql"
-    if d in {"mariadb"}:
-        return "mysql"
-    if d in {"mssql", "azure_sql"}:
-        return "sqlserver"
-    return d
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(dialect)
 
 
 def _same_family(source: str, dest: str) -> bool:

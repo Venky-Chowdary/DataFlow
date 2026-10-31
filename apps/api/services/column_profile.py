@@ -59,25 +59,27 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
+
 # PostgreSQL and MySQL families render an aggregate the same way on both ends of
 # a same-engine route, which is the precondition for comparing min/max/sum as
 # text. Every other engine needs its own proof before it may claim this path.
-_PG_FAMILY = frozenset(
-    {"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase"}
-)
-_MYSQL_FAMILY = frozenset({"mysql", "mariadb"})
-
-
 def _norm(engine: str | None) -> str:
     return (engine or "").strip().lower()
 
 
 def profile_engine_family(engine: str | None) -> str:
-    """Canonical profile family (``postgresql``/``mysql``) or ``""`` if unknown."""
-    e = _norm(engine)
-    if e in _PG_FAMILY:
+    """Canonical profile family (``postgresql``/``mysql``) or ``""`` if unknown.
+
+    PostgreSQL, MySQL and MariaDB themselves, hosted or not (one resolver,
+    :func:`engine_flavour`). Wire lookalikes (CockroachDB, TiDB) need their
+    own proof first.
+    """
+    from src.transfer.engine_family import engine_flavour
+
+    flavour = engine_flavour(_norm(engine))
+    if flavour == "postgresql":
         return "postgresql"
-    if e in _MYSQL_FAMILY:
+    if flavour in {"mysql", "mariadb"}:
         return "mysql"
     return ""
 

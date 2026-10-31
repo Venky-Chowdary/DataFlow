@@ -197,19 +197,21 @@ class ShapeRunner:
         }
 
 
+# Keyed on engine family: every duplex SQL tile is typed (one resolver).
 TYPED_VALUE_SOURCES = frozenset({
-    "postgresql", "postgres", "mysql", "mariadb", "sqlite", "sqlserver",
-    "mssql", "oracle", "mongodb", "bigquery", "snowflake", "databricks",
-    "clickhouse", "redshift", "db2", "informix", "duckdb", "cassandra",
-    "cockroachdb", "greenplum", "teradata", "sybase", "hana", "vertica",
-    "db2i", "firebird", "timescaledb", "yugabytedb", "singlestore",
+    "postgresql", "mysql", "sqlite", "sqlserver", "oracle", "mongodb",
+    "bigquery", "snowflake", "databricks", "clickhouse", "redshift", "db2",
+    "informix", "duckdb", "cassandra", "greenplum", "teradata", "sybase",
+    "hana", "vertica", "db2i", "firebird",
 })
 
 
 def is_typed_value_source(fmt: str) -> bool:
     """True when the source is a typed database whose '' and whitespace-only
     text cells are stored values — not spreadsheet-empty cells (X-1)."""
-    return str(fmt or "").strip().lower() in TYPED_VALUE_SOURCES
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(fmt) in TYPED_VALUE_SOURCES
 
 
 def build_shape_runner(
@@ -421,6 +423,11 @@ def recipe_output_schema(
                 ):
                     inferred[column] = _text_carrier(prior.get(column, ""))
 
+    # A derive's type follows from its operands' declared types (DECIMAL(10,2)
+    # * 2 -> DECIMAL(11,2)); a shaped sample only bounds the rows it saw (R11).
+    from services.shape_type_propagation import propagated_derive_types
+
+    propagated = propagated_derive_types(recipe, prior)
     out: dict[str, str] = {}
     for column in columns:
         if column not in touched and column in prior:
@@ -431,7 +438,7 @@ def recipe_output_schema(
         if origin and origin not in touched and origin in prior:
             out[column] = prior[origin]
             continue
-        declared = inferred.get(column) or prior.get(column) or "VARCHAR"
+        declared = propagated.get(column) or inferred.get(column) or prior.get(column) or "VARCHAR"
         ceiling = ceilings.get(column)
         if ceiling is not None:
             declared = _capped_decimal(declared, ceiling)

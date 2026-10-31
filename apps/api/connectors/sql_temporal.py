@@ -762,7 +762,9 @@ def oracle_tick_bind(value: Any, parsed: Any, *, carrier: str, engine: str) -> s
 
 def _oracle_beyond_micro(engine: str, source_type: str) -> bool:
     """An Oracle TIMESTAMP(7..9) destination column."""
-    if (engine or "").strip().lower() not in {"oracle", "oracledb", "oracle_db"}:
+    from src.transfer.engine_family import is_oracle_family
+
+    if not is_oracle_family(engine):
         return False
     match = re.search(r"\(\s*(\d+)\s*\)", source_type or "")
     return bool(match) and int(match.group(1)) > 6
@@ -837,23 +839,11 @@ def pg_temporal_special(value: Any) -> str | None:
     return None
 
 
-_PG_FAMILY = frozenset({
-    "postgresql",
-    "postgres",
-    "redshift",
-    "cockroachdb",
-    "timescaledb",
-    "supabase",
-})
+# Keyed on ``_normalize_dest_db`` (hosted tiles and grammar twins fold first).
+_PG_FAMILY = frozenset({"postgresql", "redshift"})
 
 _MSSQL_FAMILY = frozenset({
     "sqlserver",
-    "mssql",
-    "sql_server",
-    "microsoft_sql_server",
-    "azure_sql",
-    "azure_sql_database",
-    "synapse",
     "synapse_analytics",
     "azure_synapse_dedicated",
     "azure_synapse_serverless",
@@ -951,21 +941,14 @@ def _temporal_year_beyond(value: Any, *, lo: int, hi: int) -> int | None:
 
 
 # Destinations that bind temporals like MySQL/Postgres (ISO-Z literals unsafe).
-# Includes generic_sql dialects, warehouses, and common catalog aliases so Validate
-# matches the write path.
+# Includes generic_sql dialects and warehouses; a duplex SQL tile is looked up
+# by its engine family so Validate matches the write path.
 _WIRE_DESTS = frozenset({
     "mysql",
-    "mariadb",
-    "singlestore",
     "postgresql",
-    "postgres",
     "redshift",
-    "cockroachdb",
-    "timescaledb",
-    "supabase",
     "oracle",
     "sqlserver",
-    "mssql",
     "synapse",
     "generic_sql",
     "clickhouse",
@@ -1145,7 +1128,9 @@ def wire_check_temporal(value: Any, ddl_type: str, *, engine: str = "") -> dict[
 
 
 def dest_uses_sql_wire_probe(dest_db_type: str | None) -> bool:
-    return (dest_db_type or "").strip().lower() in _WIRE_DESTS
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(dest_db_type) in _WIRE_DESTS
 
 
 def extract_column_from_sql_error(exc: BaseException | str) -> str | None:

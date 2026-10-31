@@ -133,7 +133,11 @@ def _verify_chain(context) -> None:
         ),
     )
     assert response.status_code == 200, response.text
-    assert response.json()["verified"] is True
+    body = response.json()
+    # A1 (round 11): a workspace with no records of its own is
+    # ``nothing_checked`` (verified null), never "verified" over nothing.
+    assert body["verified"] is not False, body["findings"]
+    assert body["status"] in {"verified", "nothing_checked"}, body
 
 
 def test_each_named_write_produces_one_correlated_event(one_event_app):
