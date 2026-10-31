@@ -246,14 +246,31 @@ def _serialize(value: Any) -> str:
     return cell_to_string(value, preserve_sql_null=True)
 
 
-def _project_doc_row(doc: dict[str, Any], headers: list[str]) -> list[str]:
+def _inside_present_document(doc: dict[str, Any], header: str) -> bool:
+    """True when ``header`` is a flattened child path of a field this document has.
+
+    ``maybe_v`` is expanded from ``maybe``. When ``maybe`` is present (an object
+    without ``v``, or null) the child is known to be null; only a missing
+    ``maybe`` leaves ``maybe_v`` unknown. Projecting it as missing kept the
+    previous run's ``maybe_v`` on upsert while ``maybe`` went null (D211).
+    """
+    return any(
+        header.startswith(f"{key}_") and (value is None or isinstance(value, dict))
+        for key, value in doc.items()
+    )
+
+
+def _project_doc_row(
+    doc: dict[str, Any], headers: list[str], *, flattened: bool = False
+) -> list[str]:
     """Project a Mongo document onto headers — missing ≠ explicit null."""
     from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
 
     row: list[str] = []
     for h in headers:
         if h not in doc:
-            row.append(DF_MISSING_SENTINEL)
+            known_null = flattened and _inside_present_document(doc, h)
+            row.append(SQL_NULL_SENTINEL if known_null else DF_MISSING_SENTINEL)
         elif doc[h] is None:
             row.append(SQL_NULL_SENTINEL)
         else:
@@ -284,7 +301,10 @@ def _page_docs_to_batch(
                 seen.add(k)
                 page_keys.append(k)
     headers = union_attribute_keys(columns, page_keys) if columns else page_keys
-    rows = [_project_doc_row(doc, headers) for doc in docs]
+    from services.json_intelligence import mongo_flatten_enabled
+
+    flattened = mongo_flatten_enabled(cfg)
+    rows = [_project_doc_row(doc, headers, flattened=flattened) for doc in docs]
     return ReadBatch(headers=headers, rows=rows, offset=offset, total_rows=total)
 
 

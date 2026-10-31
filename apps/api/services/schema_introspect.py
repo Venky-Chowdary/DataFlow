@@ -4857,6 +4857,22 @@ def catalog_read_back(dest_db: str, physical: str) -> str:
     return mapper(raw) if mapper else raw
 
 
+def catalog_read_backs(dest_db: str, physical: str) -> tuple[str, ...]:
+    """Every ``inferred_type`` :func:`catalog_read_back` may report across the wire family.
+
+    MariaDB speaks the MySQL dialect (``mariadb`` normalises to ``mysql``) but
+    its ``JSON`` is an alias the catalog reports as ``LONGTEXT`` with
+    ``utf8mb4_bin``. DataFlow's own JSON column on that family reads back as
+    either spelling (D211).
+    """
+    from services.dest_dialect_facts import _normalize_dest_db
+
+    first = catalog_read_back(dest_db, physical)
+    if _normalize_dest_db(dest_db) == "mysql" and first.upper() == "JSON":
+        return (first, "LONGTEXT COLLATE utf8mb4_bin")
+    return (first,)
+
+
 _ENTERPRISE_INTROSPECT_EXPORTS = frozenset(
     {
         "_introspect_oracle",
