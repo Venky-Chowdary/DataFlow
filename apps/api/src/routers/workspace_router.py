@@ -114,6 +114,14 @@ class ApiKeyCreateBody(BaseModel):
         default="90d",
         description="7d, 30d, 60d, 90d, 365d, or never. Logging out does not revoke the key.",
     )
+    scopes: list[str] | None = Field(
+        default=None,
+        max_length=64,
+        description=(
+            "Optional permission names (e.g. connector.read) narrowing the key below its "
+            "role, enforced like service-account scopes. Omit for the full role."
+        ),
+    )
 
 
 def _actor(request: Request) -> str:
@@ -404,7 +412,7 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
         request,
         route="POST /api/v1/workspace/api-keys",
         target_role=body.role,
-        target_scopes=None,
+        target_scopes=body.scopes,
     )
     try:
         created = create_api_key(
@@ -412,6 +420,7 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
             actor,
             role=body.role,
             expires_in=body.expires_in,
+            scopes=body.scopes,
             workspace_id=tenant_scope(request).workspace_id,
         )
     except ValueError as exc:
@@ -427,6 +436,7 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
             "name": created["name"],
             "prefix": created["prefix"],
             "role": created["role"],
+            "scopes": created.get("scopes"),
             "lifetime": created.get("lifetime"),
             "expires_at": created.get("expires_at"),
         },
