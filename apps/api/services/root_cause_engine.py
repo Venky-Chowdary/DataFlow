@@ -1573,7 +1573,7 @@ def build_root_causes(preflight: dict[str, Any] | None) -> list[MigrationRootCau
             "Sign CAST_AND_CONTINUE only for intentional lossy casts",
         ]
         if any(
-            "hash_pii is not configured" in str(src.get("message") or "")
+            "hash_pii could not load this workspace" in str(src.get("message") or "")
             for src in xf_gates + xf_blockers
         ):
             # D8: the cells fail because the HMAC key is missing, not because

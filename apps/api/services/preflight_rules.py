@@ -442,23 +442,22 @@ PREFLIGHT_GATE_RULES: dict[str, dict[str, Any]] = {
         ],
     },
     "g_pii_hash_key": {
-        "title": "hash_pii key not configured",
+        "title": "hash_pii key unavailable",
         "category": "hard",
         "why": (
             "A mapping or shape step hashes a column with hash_pii, an HMAC digest "
-            "that needs a secret key. No key is set, and a built-in default is "
-            "refused because the digests would be reversible across tenants."
+            "under this workspace's own secret key. The key could not be loaded, "
+            "and a built-in default is refused because the digests would be "
+            "reversible across tenants."
         ),
         "fix": (
-            "Set DATAFLOW_PII_HASH_KEY (or DATAWRAP_PII_HASH_KEY) on the API service "
-            "to a long random secret (e.g. `openssl rand -hex 32`) in its secret "
-            "variables (Railway: service -> Variables), redeploy, then re-run "
-            "Validate. Keep the key stable: a new key changes every digest. If a "
-            "keyed digest is not required, switch the column to mask_pii or redact. "
-            "Do not remove the transform: the column would be written in clear."
+            "Re-run Validate in a moment. If the key still cannot be loaded, ask "
+            "your Datawrap administrator. If a keyed digest is not required, switch "
+            "the column to mask_pii or redact. Do not remove the transform: the "
+            "column would be written in clear."
         ),
         "examples": [
-            "email → hash_pii with no DATAFLOW_PII_HASH_KEY on the API service.",
+            "email → hash_pii while the workspace hashing key cannot be loaded.",
         ],
     },
     "g9_data_integrity": {

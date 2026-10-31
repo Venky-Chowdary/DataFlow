@@ -175,6 +175,9 @@ def build_world(backend: str, tmp_path: Path, monkeypatch) -> tuple[World, Any]:
     monkeypatch.setattr(audit_log, "STORE_PATH", tmp_path / "audit.jsonl")
     monkeypatch.setattr(audit_log, "_mongo_collection", lambda: None)
     monkeypatch.setattr(team_store, "_store_path", lambda: tmp_path / "teams.json")
+    from services import notification_store
+
+    monkeypatch.setattr(notification_store, "STORE_PATH", tmp_path / "notifications.json")
 
     client = db = None
     if backend == "mongo":

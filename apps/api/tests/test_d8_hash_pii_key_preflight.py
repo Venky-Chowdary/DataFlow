@@ -22,8 +22,16 @@ _KEY_VARS = (
 
 @pytest.fixture()
 def no_key(monkeypatch):
+    """No pinned key and the workspace key store cannot answer (round 8: keys
+    are per-workspace and auto-provisioned, so "missing" means unavailable)."""
     for name in _KEY_VARS:
         monkeypatch.delenv(name, raising=False)
+    from services import pii_hash_keys
+
+    def unavailable(_workspace_id):
+        raise pii_hash_keys.PiiHashKeyUnavailable("store down")
+
+    monkeypatch.setattr(pii_hash_keys, "workspace_key", unavailable)
 
 
 def _preflight(sample_rows, *, transform="hash_pii", shape_recipe=None):
@@ -64,12 +72,15 @@ def _operator_text(result) -> str:
 def _assert_setup_guidance(result):
     assert result.get("passed") is False
     text = _operator_text(result)
-    assert "DATAFLOW_PII_HASH_KEY" in text, text
-    assert "re-run Validate" in text, text
+    assert "hashing key" in text, text
+    assert "re-run Validate" in text or "Re-run Validate" in text, text
+    # A tenant-facing message never names infrastructure (QA enterprise #19).
+    for leak in ("PII_HASH_KEY", "DATAFLOW_", "DATAWRAP_", "Railway", "openssl", "Variables"):
+        assert leak not in text, (leak, text)
     # The fix must never be "drop the hash" or "hold every row out".
     for b in result.get("blockers") or []:
         fix = str((b.get("guidance") or {}).get("fix") or "")
-        if "PII_HASH_KEY" in str(b.get("message") or "") + fix:
+        if "hashing key" in str(b.get("message") or "") + fix:
             assert "identity" not in fix and "CAST_AND_CONTINUE" not in fix, fix
 
 
@@ -92,7 +103,15 @@ def test_missing_key_blocks_a_shape_recipe_hash_step(no_key):
 def test_configured_key_does_not_raise_the_setup_blocker(monkeypatch):
     monkeypatch.setenv("DATAFLOW_PII_HASH_KEY", "unit-test-pii-key")
     result = _preflight([{"email": "ada@example.com"}])
-    assert "PII_HASH_KEY" not in _operator_text(result)
+    assert "hashing key" not in _operator_text(result)
+
+
+def test_unpinned_deployment_provisions_a_workspace_key_instead_of_blocking(monkeypatch, tmp_path):
+    for name in _KEY_VARS:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("DATAFLOW_DATA_DIR", str(tmp_path))
+    result = _preflight([{"email": "ada@example.com"}])
+    assert "hashing key" not in _operator_text(result)
 
 
 def test_runtime_error_still_fails_closed_and_names_the_setup(no_key):
@@ -100,5 +119,6 @@ def test_runtime_error_still_fails_closed_and_names_the_setup(no_key):
 
     value, err = apply_transform("ada@example.com", "hash_pii")
     assert value is None
-    assert err and "DATAFLOW_PII_HASH_KEY" in err and "No row was hashed" in err
+    assert err and "hashing key" in err and "no row was hashed" in err
+    assert "PII_HASH_KEY" not in err and "Railway" not in err
     assert "replay" not in err
