@@ -369,6 +369,7 @@ def run_file_preflight(
     acknowledgment_reason: str = "",
     run_population_orphan_scan: bool = False,
     resume: bool = False,
+    source_encoding: dict[str, Any] | None = None,
     population_rows: Iterable[Mapping[str, Any]] | None = None,
     population_replay: Callable[[], Iterable[Mapping[str, Any]] | None] | None = None,
     rows_are_population: bool = False,
@@ -2577,6 +2578,9 @@ def run_file_preflight(
             ),
         ]
         out["passed"] = False
+    from services.source_encoding_guess import apply_encoding_gate, preflight_file_encoding
+
+    apply_encoding_gate(out, source_encoding or preflight_file_encoding(source_format, source_config))
     out["passed_count"] = sum(1 for g in out["gates"] if g.get("status") == "pass")
     out["total_gates"] = len(out["gates"])
     out["readiness_score"] = round(

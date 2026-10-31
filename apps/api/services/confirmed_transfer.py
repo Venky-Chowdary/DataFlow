@@ -66,6 +66,9 @@ def transfer_request_from_ack(payload: dict[str, Any]) -> TransferRequest:
         source_filename=str(payload.get("source_filename") or ""),
         source_path=source_path,
         source_object_uri=str(payload.get("source_object_uri") or ""),
+        # The declared read window (an uploaded file's encoding): Execute
+        # reads the bytes the way staging did, strictly.
+        read_options=dict(payload.get("read_options") or {}),
         skip_preflight=False,
         triggered_by="data-pilot",
         # The operator's PII acknowledgement from staging: Execute re-runs
