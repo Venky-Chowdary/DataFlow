@@ -694,6 +694,7 @@ Switched by the flag in this build:
 | PostgreSQL `application_name` | `dataflow` | `datawrap` |
 | Table ownership comment (PostgreSQL, MySQL; row writers and the MySQL COPY routes) | `dataflow:managed` | `datawrap:managed` |
 | Exactly-once CDC watermark table (SQLAlchemy destinations: PostgreSQL, MySQL, SQL Server, Snowflake, …) | `_df_cdc_eos_watermarks` (Oracle `df_cdc_eos_watermarks`) | `_dw_cdc_eos_watermarks` (Oracle `dw_cdc_eos_watermarks`) |
+| Prefix of a newly minted workspace API key (both prefixes always authenticate) | `dfk_` | `dwk_` |
 
 Recognised and listed, but still created under the old name even with the flag
 on (their run-to-run identity is not yet resolved per destination; switching
@@ -731,3 +732,39 @@ connector names none: BigQuery dataset `dataflow`, Snowflake schema
 3. Do not rename old artifacts by hand while pipelines run against them. A
    renamed watermark table makes the next CDC run start a new one and
    re-snapshot; a renamed `_df_lsn` column breaks the monotonic-apply guard.
+
+### Staged rollout runbook (owner decision: new objects only, flag first)
+
+The flag stays **off** by default in every environment. Turn it on in staging
+first, prove that old and new names both work, then turn it on in production.
+`tests/test_r8_brand_flag_rollout_e2e.py` runs this sequence end to end
+(two API keys, two runs, flag off → on → off).
+
+1. **Staging: enable.** Run the dry run above against each staging
+   destination and keep its output. Set `DATAWRAP_BRAND_OBJECT_NAMES=1` on every
+   staging API, worker and scheduler process and restart them together.
+2. **Staging: check that old names still work.**
+   * An existing `dfk_` key still authenticates (any authenticated call, e.g.
+     `GET /api/v1/workspace/pilot-engine` with `Authorization: Bearer dfk_…`).
+   * A scheduled or manual run into a table created before the switch
+     (comment `dataflow:managed`) succeeds, and the table keeps its comment and
+     name. A CDC destination keeps using `_df_cdc_eos_watermarks` (no
+     re-snapshot).
+3. **Staging: check that new names work.**
+   * A key minted now starts with `dwk_` and authenticates.
+   * A run that creates a new table marks it `datawrap:managed`; run 2 into it
+     upserts. A new CDC destination creates `_dw_cdc_eos_watermarks`.
+   * Each new-name creation appears once in the audit log as
+     `brand.object_name.created` (`details.kind`, `name`, `legacy_name`).
+   * Re-run the dry run: every pre-existing artifact is still listed with
+     `action: keep`.
+4. **Staging: check rollback.** Unset the flag, restart, and repeat steps 2
+   and 3 for the objects created in step 3: `dwk_` keys still authenticate and
+   `datawrap:managed` tables and `_dw_` watermark tables keep being used. New
+   objects go back to the old names. Re-enable the flag.
+5. **Production: enable.** Repeat step 1 in production (dry run first, then the
+   flag on every process at once), then repeat the spot checks of steps 2 and 3
+   on one low-risk pipeline and one API key before announcing the change.
+6. **If anything fails:** unset the flag and restart. Nothing was renamed, so
+   every pipeline and key keeps working; objects created under the new names
+   while the flag was on keep working as they are.
