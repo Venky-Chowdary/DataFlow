@@ -41,6 +41,8 @@ from services.api_errors import ApiError, api_error_handler
 from .middleware.auth_middleware import AuthMiddleware
 from .middleware.production_config_middleware import ProductionConfigMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
+from .middleware.proxy_fix_middleware import ProxyFixMiddleware
+from .middleware.workspace_ip_allowlist_middleware import WorkspaceIpAllowlistMiddleware
 from .middleware.tenant_scope_middleware import TenantScopeMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
@@ -115,6 +117,13 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    try:
+        # Saved IP allowlists with no proxy hop count: say so once at boot.
+        from services.ip_allowlist_policy import warn_if_hop_count_unset
+
+        warn_if_hop_count_unset(logging.getLogger("datawrap.security"))
+    except Exception as ae:  # pragma: no cover - a hint must never block boot
+        print(f"[!] IP allowlist startup check skipped: {ae}")
     global _SECURITY_SETTINGS_SNAPSHOT_RECORDED
     with _SECURITY_SETTINGS_SNAPSHOT_LOCK:
         record_snapshot = not _SECURITY_SETTINGS_SNAPSHOT_RECORDED
@@ -405,6 +414,8 @@ if not _cors_origin_regex and is_railway():
 app.add_middleware(TenantScopeMiddleware)
 app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
+# Workspace IP allowlist: after auth (needs the actor), before RBAC/routers.
+app.add_middleware(WorkspaceIpAllowlistMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
 # Outermost: a missing production secret must not reach auth or transfer.
@@ -681,6 +692,11 @@ async def _add_timing_header_response(request: Request, call_next):
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     return response
+
+
+# Outermost: client address and scheme from the trusted proxy chain
+# (DATAWRAP_TRUSTED_PROXY_COUNT, ProxyFix semantics) before anything reads them.
+app.add_middleware(ProxyFixMiddleware)
 
 
 app.include_router(ai_router, prefix="/api/v1")

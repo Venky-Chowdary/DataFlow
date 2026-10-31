@@ -154,7 +154,13 @@ def _session_idled_out(token: str, email: str) -> bool:
     jti = token_jti(token) or ""
     if not jti:
         return False
-    if not enforce_idle(email=email, last_seen_at=session_last_seen(jti)):
+    last_seen = session_last_seen(jti)
+    if last_seen is None:
+        # No activity on record (row lost or never touched): record it as seen
+        # now so the idle clock starts, rather than never checking it.
+        touch_session(jti, min_interval=0)
+        return False
+    if not enforce_idle(email=email, last_seen_at=last_seen):
         revoke_session(jti)
         return True
     touch_session(jti, min_interval=TOUCH_INTERVAL_SEC)

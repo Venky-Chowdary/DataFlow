@@ -487,8 +487,9 @@ def login_mfa_enforced() -> bool:
 
 
 def ip_allowlist_enforced_without_custom_domain() -> bool:
-    """CIDR list is stored; enforcement requires a custom domain."""
-    return False
+    """QA round 11: a workspace list is enforced on every host after auth
+    (WorkspaceIpAllowlistMiddleware), for sessions and API keys alike."""
+    return True
 
 
 def sqlserver_is_transfer_ready() -> bool:
@@ -635,8 +636,8 @@ def transfer_workers_default() -> int:
 
 
 def session_timeout_enforced() -> bool:
-    """Not enforced deployment-wide: per workspace, only when its tenant sets
-    enforce_session_timeout (services.session_policy), so the card explains it."""
+    """Not deployment-wide: per workspace, once its tenant saves the hours
+    (enforce_session_timeout, on by default), so the card explains it."""
     return False
 
 
@@ -926,17 +927,17 @@ def audit_export_card() -> CapabilityCard | None:
 
 
 def ip_allowlist_card() -> CapabilityCard | None:
-    if ip_allowlist_enforced_without_custom_domain():
-        return None
     return CapabilityCard(
         title="Do you support IP allowlists",
         text=(
-            "A tenant IP allowlist (CIDR) is stored on the workspace and is "
-            "enforced only when a vanity app host is configured; without that "
-            "host the list is never evaluated. "
-            "ip_allowlist_enforced stays false until then."
+            "Yes. A workspace IP allowlist (CIDR) is enforced on every signed-in "
+            "request and API key call to that workspace, on the shared app host and "
+            "on a custom domain; requests from outside get 403 and are audited. "
+            "Saving a list that excludes your own address is refused. "
+            "ip_allowlist_enforced is true once a list is saved, unless your platform "
+            "administrator switched enforcement off, in which case outside requests are only logged."
         ),
-        source_module="src/routers/workspace_router.py · ip_allowlist_enforced",
+        source_module="services/ip_allowlist_policy.py · src/middleware/workspace_ip_allowlist_middleware.py",
         category="enterprise",
     )
 
@@ -1146,10 +1147,10 @@ def session_timeout_card() -> CapabilityCard | None:
     return CapabilityCard(
         title="What is session timeout",
         text=(
-            "Session timeout: session_timeout_enforced is true for a workspace only when its "
-            "tenant turns enforce_session_timeout on; then session_timeout_hours "
-            "signs out sign-in sessions idle that long. API keys are not sessions. "
-            "Absolute token lifetime is DATAFLOW_TOKEN_TTL_SEC."
+            "Session timeout: session_timeout_enforced is true for a workspace once it "
+            "saves session_timeout_hours (enforcement is on by default; an admin can record "
+            "the hours as policy only); sign-in sessions idle that long are signed out. "
+            "API keys are not sessions. The absolute sign-in token lifetime is set by the platform."
         ),
         source_module="src/routers/workspace_router.py · session_timeout_enforced",
         category="enterprise",

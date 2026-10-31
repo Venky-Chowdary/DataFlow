@@ -25,6 +25,9 @@ from services.auth_rate_limit import reset_auth_rate_limits
 from src.main import app
 
 
+_INSIDE = {"X-Forwarded-For": "203.0.113.5"}
+
+
 @pytest.fixture
 def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))
@@ -46,8 +49,13 @@ def admin(stores, monkeypatch):
     monkeypatch.setenv("DATAFLOW_ADMIN_EMAIL", "root@example.com")
     monkeypatch.setenv("DATAFLOW_ADMIN_PASSWORD", "Bootstrap-Admin-2026")
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "test-secret-not-production")
+    # QA round 11: saved IP allowlists are enforced and a list that excludes
+    # the saving admin is refused, so every client here calls from inside the
+    # lists these tests save (one trusted proxy appends the address).
+    monkeypatch.setenv("DATAWRAP_TRUSTED_PROXY_COUNT", "1")
     reset_auth_rate_limits()
     c = TestClient(app)
+    c.headers.update(_INSIDE)
     login = c.post(
         "/api/v1/auth/login",
         json={"email": "root@example.com", "password": "Bootstrap-Admin-2026"},
@@ -77,6 +85,7 @@ def _signed_in(client, *, email: str, workspace_id: str, workspace_role: str) ->
     assert created.status_code == 200, created.text
     issued = created.json()["temporary_password"]
     peer = TestClient(app)
+    peer.headers.update(_INSIDE)
     login = peer.post("/api/v1/auth/login", json={"email": email, "password": issued})
     assert login.status_code == 200, login.text
     peer.headers["Authorization"] = f"Bearer {login.json()['token']}"

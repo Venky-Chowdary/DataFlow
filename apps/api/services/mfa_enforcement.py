@@ -278,7 +278,7 @@ def posture(tenant: Any) -> dict[str, Any]:
     auth_on = bool(auth_required())
     missing = [name for name, ok in (
         ("tenant.mfa_required", required),
-        ("DATAFLOW_REQUIRE_AUTH=1", auth_on),
+        ("sign-in required on this deployment (ask your platform administrator)", auth_on),
     ) if not ok]
     block: dict[str, Any] = {
         "enforced": required and auth_on,
@@ -288,11 +288,11 @@ def posture(tenant: Any) -> dict[str, Any]:
         "held_session_reaches": "two-factor setup and verification, /auth/me, change-password, logout",
         "sso_exempt": sso_exempt(),
         "sso_note": (
-            "SSO sessions are exempt: the identity provider performs MFA (DATAFLOW_MFA_SSO_EXEMPT=0 holds them too)"
+            "SSO sessions are exempt: the identity provider performs MFA (your platform administrator can hold them too)"
             if sso_exempt() else "SSO sessions are held like password sessions"
         ),
         "not_covered": "API keys, service accounts, SCIM tokens and MCP OAuth tokens (not interactive)",
-        "requires": ["tenant.mfa_required", "DATAFLOW_REQUIRE_AUTH=1"],
+        "requires": ["tenant.mfa_required", "sign-in required on this deployment"],
         "missing": missing,
     }
     workspace_id = str(getattr(tenant, "workspace_id", "") or "") if tenant else ""

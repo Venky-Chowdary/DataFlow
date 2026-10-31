@@ -1,12 +1,14 @@
 /**
- * Settings -> Security posture rows (QA enterprise #6/#7/#8, round 8).
+ * Settings -> Security posture rows and the Enterprise save feedback
+ * (QA enterprise #6/#7/#8, round 8; QA round 11 S7).
  *
- * Badges must say exactly what the API enforces: session timeout is an idle
- * timeout only when the tenant turns enforcement on; the IP allowlist only on
- * the tenant custom domain with DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE on; MFA
- * only while the tenant requires it (round 11).
+ * Badges and toasts say exactly what the API enforces, from the same
+ * `enforcement` block the posture and the tenant save response carry. Copy is
+ * for workspace admins: a control only the platform can switch on says "ask
+ * your platform administrator", never a deployment variable name. MFA is
+ * enforced only while the tenant requires it (round 11).
  */
-import type { SecurityPosture } from "./api";
+import type { SecurityPosture, TenantEnforcement } from "./api";
 
 export type PostureRow = { title: string; desc: string; on: boolean; pending: boolean };
 
@@ -23,17 +25,16 @@ export function sessionTimeoutRow(p: SecurityPosture): PostureRow {
 }
 
 export function ipAllowlistRow(p: SecurityPosture): PostureRow {
-  const missing = p.enforcement?.ip_allowlist?.missing ?? [];
-  return {
-    title: "IP allowlisting",
-    desc: p.ip_allowlist_enforced
-      ? "Enforced for requests to this tenant's custom domain. The shared app host is not covered."
-      : missing.length
-        ? `Not enforced. Missing: ${missing.join(", ")}.`
-        : "Not enforced.",
-    on: Boolean(p.ip_allowlist_enforced),
-    pending: false,
-  };
+  const status = p.enforcement?.ip_allowlist?.status;
+  let desc = "Not enforced. Save an IP allowlist under Enterprise to restrict this workspace.";
+  if (p.ip_allowlist_enforced) {
+    desc = "Enforced for every sign-in session and API key using this workspace, on any host.";
+  } else if (status === "audit_only") {
+    desc = "Saved, not enforced: requests from outside the list are only logged. Ask your platform administrator to enable IP allowlist enforcement.";
+  } else if (status === "untrusted_client_ip") {
+    desc = "Saved, not enforced: the platform's proxy hop count is not configured, so real client addresses are not visible and requests are only logged. Ask your platform administrator to set it.";
+  }
+  return { title: "IP allowlisting", desc, on: Boolean(p.ip_allowlist_enforced), pending: false };
 }
 
 export function mfaRow(p?: SecurityPosture | null): PostureRow {
@@ -52,4 +53,44 @@ export function mfaRow(p?: SecurityPosture | null): PostureRow {
     on,
     pending: false,
   };
+}
+
+export type SaveFeedback = {
+  title: string;
+  message: string;
+  tone: "success" | "warning";
+  /** One line per control, as the API reports it now. */
+  lines: string[];
+  warnings: string[];
+};
+
+/** What the Enterprise save toast and status panel say, from the save response. */
+export function tenantSaveFeedback(e: TenantEnforcement | undefined): SaveFeedback {
+  if (!e) {
+    return {
+      title: "Tenant saved",
+      message: "Saved. Enforcement status is not available; check Security & compliance.",
+      tone: "warning",
+      lines: [],
+      warnings: ["The server did not report what is enforced."],
+    };
+  }
+  const lines: string[] = [];
+  const ip = e.ip_allowlist;
+  if (ip?.status === "enforced") lines.push("IP allowlist: enforced.");
+  else if (ip?.status === "audit_only" || ip?.status === "untrusted_client_ip") {
+    lines.push("IP allowlist: saved, not enforced (requests are only logged).");
+  }
+  else lines.push("IP allowlist: none saved.");
+  const st = e.session_timeout;
+  if (st?.enforced) lines.push(`Session timeout: enforced (${st.hours}h idle).`);
+  else if (st?.status === "recorded_only") lines.push(`Session timeout: recorded, not enforced (${st.hours}h).`);
+  const mfa = e.mfa;
+  if (mfa?.enforced) lines.push("Two-factor authentication: enforced.");
+  else if (mfa?.status === "available") lines.push("Two-factor authentication: available, not required.");
+  else lines.push("Two-factor authentication: not enforced.");
+  const warnings = e.warnings ?? [];
+  return warnings.length
+    ? { title: "Saved — not everything is enforced", message: warnings[0], tone: "warning", lines, warnings }
+    : { title: "Tenant saved", message: lines.slice(0, 2).join(" "), tone: "success", lines, warnings };
 }

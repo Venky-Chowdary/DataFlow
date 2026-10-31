@@ -4575,6 +4575,28 @@ export type Tenant = {
   egress_allowlist: string[];
   created_at: string;
   updated_at: string;
+  /** What is enforced now (read and save responses; same source as the posture). */
+  enforcement?: TenantEnforcement;
+};
+
+export type ControlStatus = "enforced" | "audit_only" | "untrusted_client_ip" | "recorded_only" | "not_configured";
+
+/** `enforcement` block of the tenant save response and the security posture (QA round 11). */
+export type TenantEnforcement = {
+  ip_allowlist?: { enforced?: boolean; status?: ControlStatus; missing?: string[]; scope?: string; client_ip_source?: string };
+  session_timeout?: { enforced?: boolean; status?: ControlStatus; hours?: number | null; kind?: string };
+  mfa?: {
+    enforced?: boolean;
+    status?: string;
+    sso_exempt?: boolean;
+    missing?: string[];
+    members_total?: number;
+    members_enrolled?: number;
+  };
+  /** The address the server sees for this caller. */
+  caller_ip?: string;
+  /** Admin-facing: what is saved but not enforced, and who can change it. */
+  warnings?: string[];
 };
 
 export type ByokKey = {
@@ -4649,19 +4671,8 @@ export type SecurityPosture = {
   mfa_enforced?: boolean;
   session_timeout_hours: number;
   session_timeout_enforced?: boolean;
-  /** Exactly what each control enforces (round 8). */
-  enforcement?: {
-    ip_allowlist?: { enforced?: boolean; missing?: string[]; scope?: string };
-    session_timeout?: { enforced?: boolean; hours?: number | null };
-    mfa?: {
-      enforced?: boolean;
-      status?: string;
-      sso_exempt?: boolean;
-      missing?: string[];
-      members_total?: number;
-      members_enrolled?: number;
-    };
-  };
+  /** Exactly what each control enforces (round 8; round 11 adds status, warnings and real MFA). */
+  enforcement?: TenantEnforcement;
   byok_encrypts_secrets?: boolean;
   tls_version: string;
   compliance: Array<{ framework: string; status: string; evidence: string }>;
