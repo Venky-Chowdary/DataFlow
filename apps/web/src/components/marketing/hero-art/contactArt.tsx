@@ -43,14 +43,14 @@ const CHECKPOINTS: {
     n: "02",
     head: "scoped pilot",
     strong: "on your stack",
-    detail: ["semantic map · G1–G9", "quarantine, not silent drop"],
+    detail: ["semantic map · G1–G9", "quarantine with replay"],
     x: 790,
   },
   {
     n: "03",
     head: "reconcile",
     strong: "dest-engine reread",
-    detail: ["COUNT + checksum MATCH", "refused if it does not agree"],
+    detail: ["COUNT + checksum MATCH", "value & key census"],
     x: 1110,
   },
 ];
@@ -64,7 +64,7 @@ export function PilotRouteArt() {
     <HeroArtFrame
       canvas={{ w: BAND_W, h: BAND_H }}
       label="The route from a pilot request to a reconcile artifact: a thirty-minute discovery call, a scoped pilot on your own stack through semantic mapping, gates G1 to G9 and quarantine, then a destination-engine reread that produces a COUNT and checksum artifact you keep — and a refused nurture-queue branch, because a solutions engineer replies within one business day."
-      caption="Schematic of the engagement, not a sales funnel. The pilot runs the production engine; the artifact at the end is yours."
+      caption="Schematic of the engagement. The pilot runs the production engine; the artifact at the end is yours."
     >
       <ArtLabel x={44} y={92} tone="teal">
         one business day
@@ -101,11 +101,11 @@ export function PilotRouteArt() {
         <line x1={412} y1={96} x2={428} y2={112} />
         <line x1={428} y1={96} x2={412} y2={112} />
       </g>
-      <ArtText x={446} y={98} size={13.5} tone="danger">
-        no nurture queue
+      <ArtText x={446} y={98} size={13.5} tone="teal">
+        straight to an engineer
       </ArtText>
       <ArtText x={446} y={122} size={12.5} tone="muted">
-        a person answers, not a sequence
+        a solutions engineer answers you
       </ArtText>
 
       {/* The route itself — drawn between the plates, never across their labels. */}
@@ -148,7 +148,7 @@ export function PilotRouteArt() {
       </ArtText>
 
       <ArtText x={470} y={396} size={13.5} tone="muted">
-        the pilot runs the production engine — skip_preflight is never set from this form
+        the pilot runs the production engine, with every preflight gate
       </ArtText>
     </HeroArtFrame>
   );
