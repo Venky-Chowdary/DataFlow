@@ -71,6 +71,8 @@ ARTIFACTS: dict[str, Artifact] = dict([
        "exactly-once CDC watermark table (SQLAlchemy destinations)", True),
     _a("cdc_eos_watermark_table_oracle", "df_cdc_eos_watermarks", "dw_cdc_eos_watermarks", "table",
        "exactly-once CDC watermark table on Oracle", True),
+    _a("api_key_prefix", "dfk_", "dwk_", "external",
+       "prefix of a newly minted workspace API key (both prefixes authenticate)", True),
     # -- recognised, listed by the dry run, NOT switched yet --------------------
     _a("cdc_lsn_column", "_df_lsn", "_dw_lsn", "column",
        "CDC monotonic-apply column on every CDC destination table"),

@@ -64,11 +64,12 @@ def test_verify_http_withholds_foreign_findings_when_header_set(client):
     scoped = client.get("/api/v1/audit/verify", headers={"X-Workspace-Id": "ws-a"})
     assert scoped.status_code == 200
     body = scoped.json()
-    assert body["verified"] is False
+    # R7: the workspace verdict covers its own chain only.
+    assert body["verified"] is True
     assert body["scope"] == "workspace"
     assert all(f.get("event_id") != theirs["id"] for f in body["findings"])
     assert theirs["id"] not in scoped.text
-    assert body["withheld_findings"] >= 1
+    assert body["withheld_findings"] == 0
 
 
 def test_verify_names_the_record_that_was_edited(client):

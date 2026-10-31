@@ -235,7 +235,8 @@ def test_run_completion_leaves_a_chained_record_without_a_pack_export(file_chain
 
 
 def test_workspace_verify_withholds_foreign_event_ids(file_chain):
-    """Walk stays global; Settings must not list another workspace's event id."""
+    """A workspace verdict is its own chain's (R7): a foreign tamper neither
+    fails it nor appears in it; the platform walk still names it."""
     audit.append_audit_event(
         action="job.run", resource="/jobs/mine", actor="a@ok.com", workspace_id="ws-a"
     )
@@ -253,16 +254,16 @@ def test_workspace_verify_withholds_foreign_event_ids(file_chain):
     assert any(f["event_id"] == theirs["id"] for f in platform["findings"])
 
     scoped = chain.verify_chain(workspace_id="ws-a")
-    assert scoped["verified"] is False
-    assert scoped["checked"] == 2
+    assert scoped["verified"] is True
+    assert scoped["checked"] == 1
     assert scoped["scope"] == "workspace"
     assert scoped["workspace_id"] == "ws-a"
-    assert scoped["withheld_findings"] >= 1
+    assert scoped["withheld_findings"] == 0
     ids = [f.get("event_id") for f in scoped["findings"]]
     assert theirs["id"] not in ids
     assert "mallory@evil.com" not in json.dumps(scoped)
     assert "someone-else" not in json.dumps(scoped["findings"])
-    assert "other workspaces are withheld" in scoped["honesty"]
+    assert "this workspace's own chain" in scoped["honesty"]
 
 
 def test_workspace_verify_still_names_this_workspace_tamper(file_chain):

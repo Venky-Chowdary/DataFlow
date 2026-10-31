@@ -161,9 +161,9 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
             request.state.user = {"email": email, "role": "viewer"}
         return None
 
-    from services.integrations_store import verify_workspace_api_key
+    from services.integrations_store import is_workspace_api_key, verify_workspace_api_key
 
-    key_info = verify_workspace_api_key(token) if token.startswith("dfk_") else None
+    key_info = verify_workspace_api_key(token) if is_workspace_api_key(token) else None
     if key_info:
         request.state.user_email = key_info.get("created_by") or "api-key"
         user = {
@@ -186,7 +186,7 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
         request.state.api_key_auth = True
         return None
 
-    if token.startswith("dfk_"):
+    if is_workspace_api_key(token):
         return "unknown_api_key"
 
     if not request.url.path.startswith("/api/v1/mcp"):

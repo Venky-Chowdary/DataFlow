@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { DtIcon } from "../components/DtIcon";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
@@ -9,10 +9,14 @@ import { PageShell } from "../components/ui/PageShell";
 import { StatCard } from "../components/ui/StatCard";
 import { FilterTabs } from "../components/ui/FilterTabs";
 import { useToast } from "../components/Toast";
+import { compareThroughput } from "../lib/benchmarkCompare";
+import { createPoller, type Poller } from "../lib/poller";
 import {
-  downloadBenchmarkReport,
+  downloadBenchmarkRunReport,
+  fetchBenchmarkRun,
   fetchProofLedger,
-  runBenchmark,
+  startBenchmarkRun,
+  type BenchmarkRun,
   runDesktopLab,
   runDesktopLabCross,
   runFidelityProof,
@@ -46,6 +50,9 @@ export function BenchmarksPage() {
   const [running, setRunning] = useState(false);
   const [report, setReport] = useState<BenchmarkReport | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [run, setRun] = useState<BenchmarkRun | null>(null);
+  const pollerRef = useRef<Poller | null>(null);
+  useEffect(() => () => pollerRef.current?.stop(), []);
 
   const [ledger, setLedger] = useState<ProofLedger | null>(null);
   const [ledgerLoading, setLedgerLoading] = useState(true);
@@ -72,8 +79,6 @@ export function BenchmarksPage() {
   useEffect(() => {
     void loadLedger();
   }, []);
-
-  const isFaster = (rps: number, baseline: number) => rps >= baseline;
 
   const handleFidelity = async () => {
     setFidelityRunning(true);
@@ -130,30 +135,44 @@ export function BenchmarksPage() {
     }
   };
 
+  // The benchmark is a background run: the request returns at once and the
+  // page polls its progress, so a 100k run cannot time out behind a proxy.
   const handleRun = async () => {
+    pollerRef.current?.stop();
     setRunning(true);
     setError(null);
+    setReport(null);
     try {
-      const res = await runBenchmark(rows);
-      setReport(res);
-      if (!res.success) {
-        setError(res.error || "Benchmark completed with errors");
-      }
+      const started = await startBenchmarkRun(rows);
+      setRun(started);
+      pollerRef.current = createPoller<BenchmarkRun>({
+        read: () => fetchBenchmarkRun(started.id),
+        delayMs: () => 1_000,
+        isDone: (r) => r.status === "succeeded" || r.status === "failed",
+        onResult: (r) => {
+          setRun(r);
+          if (r.status === "succeeded" || r.status === "failed") {
+            setRunning(false);
+            if (r.report) setReport(r.report);
+            if (r.status === "failed") setError(r.error || r.report?.error || "Benchmark completed with errors");
+          }
+        },
+      });
     } catch (e) {
+      setRunning(false);
       setError(e instanceof Error ? e.message : "Benchmark request failed");
       toast({ title: "Benchmark failed", message: String(e), tone: "error" });
-    } finally {
-      setRunning(false);
     }
   };
 
   const handleDownload = async () => {
+    if (!run) return;
     try {
-      const blob = await downloadBenchmarkReport(rows);
+      const blob = await downloadBenchmarkRunReport(run.id);
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
-      a.download = `datawrap-benchmark-report-${rows}.md`;
+      a.download = `datawrap-benchmark-report-${run.rows}.md`;
       a.click();
       URL.revokeObjectURL(url);
     } catch (e) {
@@ -163,11 +182,9 @@ export function BenchmarksPage() {
 
   const comparison = useMemo(() => {
     if (!report) return null;
-    const dataflowRps = report.records_per_second;
     return report.competitors.map((c) => ({
       ...c,
-      dataflow_ratio: dataflowRps / Math.max(c.typical_rps, 1),
-      faster: isFaster(dataflowRps, c.typical_rps),
+      versus: c.comparison ?? compareThroughput(report.records_per_second, c.typical_rps),
     }));
   }, [report]);
 
@@ -560,8 +577,8 @@ export function BenchmarksPage() {
                 <div>
                   <strong>Workload class: synthetic CSV → SQLite on this API host</strong>
                   <p>
-                    These numbers measure local file→SQLite throughput (often ~10k rows in under a second).
-                    They are <em>not</em> MongoDB→Snowflake or other warehouse runs — those depend on network RTT,
+                    These numbers measure local file→SQLite throughput on this API host, including the
+                    checksums and verification every real transfer runs — so they track the host&apos;s CPU. They are <em>not</em> MongoDB→Snowflake or other warehouse runs — those depend on network RTT,
                     warehouse size, COPY vs INSERT, and transform/quarantine work. Always trust the rows/sec shown
                     on the live job theater for a real transfer.
                   </p>
@@ -590,7 +607,7 @@ export function BenchmarksPage() {
                   <Button
                     variant="secondary"
                     onClick={handleDownload}
-                    disabled={!report || running}
+                    disabled={!report || !run || running}
                     leadingIcon={<DtIcon name="download" size={14} />}
                   >
                     Report
@@ -609,7 +626,14 @@ export function BenchmarksPage() {
               </div>
 
               {running && (
-                <SectionLoader title="Running benchmark" hint={`Transferring ${rows.toLocaleString()} synthetic rows to SQLite…`} />
+                <SectionLoader
+                  title="Running benchmark"
+                  hint={
+                    run
+                      ? `${run.phase} · ${Math.round(run.progress_pct)}% · ${formatSeconds(run.elapsed_seconds)} elapsed — ${run.rows.toLocaleString()} synthetic rows to SQLite`
+                      : `Starting a ${rows.toLocaleString()}-row run…`
+                  }
+                />
               )}
 
               {error && !running && (
@@ -625,7 +649,11 @@ export function BenchmarksPage() {
                     <StatCard label="Rows transferred" value={formatNumber(report.rows)} icon="layers" />
                     <StatCard label="Throughput" value={`${formatNumber(report.records_per_second)} rows/sec`} icon="zap" />
                     <StatCard label="Elapsed time" value={formatSeconds(report.elapsed_seconds)} icon="clock" />
-                    <StatCard label="Peak memory" value={`${formatNumber(report.peak_memory_mb)} MB`} icon="cpu" />
+                    <StatCard
+                      label="Peak memory (benchmark process)"
+                      value={report.peak_memory_mb > 0 ? `${formatNumber(report.peak_memory_mb)} MB` : "Not measured"}
+                      icon="cpu"
+                    />
                   </div>
 
                   <div className="df2-page-benchmarks-section">
@@ -642,7 +670,7 @@ export function BenchmarksPage() {
                             <th>Product</th>
                             <th>Typical rows/sec</th>
                             <th>Resume</th>
-                            <th>vs Datawrap</th>
+                            <th>Datawrap vs this</th>
                           </tr>
                         </thead>
                         <tbody>
@@ -665,8 +693,8 @@ export function BenchmarksPage() {
                                 {c.product === "Datawrap" ? (
                                   <span className="df2-badge df2-badge-success">baseline</span>
                                 ) : (
-                                  <span className={`df2-badge ${c.faster ? "df2-badge-success" : "df2-badge-warning"}`}>
-                                    {c.faster ? `${c.dataflow_ratio.toFixed(1)}x faster` : `${(1 / c.dataflow_ratio).toFixed(1)}x slower`}
+                                  <span className={`df2-badge ${c.versus.verdict === "faster" ? "df2-badge-success" : c.versus.verdict === "slower" ? "df2-badge-warning" : "df2-badge-muted"}`}>
+                                    {c.versus.label}
                                   </span>
                                 )}
                               </td>

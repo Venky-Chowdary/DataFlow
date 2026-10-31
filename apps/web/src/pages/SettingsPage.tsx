@@ -20,6 +20,7 @@ import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
 import { chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
+import { auditActorLabel } from "../lib/auditActor";
 import { connectorEgressState } from "../lib/egressPosture";
 import { TENANT_SAVED_EVENT, useActiveWorkspaceId } from "../lib/workspace";
 import { useVisibleRefresh } from "../lib/visibleRefresh";
@@ -240,7 +241,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
           events.map((ev) => ({
             id: ev.id,
             time: new Date(ev.time).toLocaleString(),
-            actor: ev.actor,
+            actor: auditActorLabel(ev),
             action: ev.action,
             resource: ev.resource,
             level: (ev.level === "success" ? "success" : ev.level === "warn" ? "warn" : ev.level === "error" ? "error" : "info") as AuditLog["level"],
@@ -1153,7 +1154,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   <div className="df2-permission-notice" role="alert" data-testid="settings-storage-warning">
                     <DtIcon name="alert" size={16} />
                     <p>
-                      <strong>Saved keys will not survive a restart. </strong>
+                      <strong>Saved keys may need to be entered again. </strong>
                       {modelCapabilities.settings_storage.reason}
                     </p>
                   </div>

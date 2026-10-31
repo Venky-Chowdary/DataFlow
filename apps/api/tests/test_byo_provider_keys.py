@@ -496,7 +496,7 @@ def test_models_route_exposes_settings_storage(client, monkeypatch):
     assert res.status_code == 200, res.text
     body = res.json()
     assert body["settings_storage"]["persistent"] is False
-    assert "volume" in body["settings_storage"]["reason"]
+    assert "administrator" in body["settings_storage"]["reason"]
 
     monkeypatch.delenv("RAILWAY_ENVIRONMENT")
     assert client.get("/api/v1/copilot/models").json()["settings_storage"]["persistent"] is True

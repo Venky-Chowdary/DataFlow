@@ -362,10 +362,15 @@ async def get_members(workspace_id: str, request: Request):
     accounts = {str(u.get("email")): u for u in list_users()}
     for member in members:
         account = accounts.get(member["email"])
+        invited_name = str(member.get("name") or "")
         if account is not None:
             member["has_account"] = True
             member["account_status"] = account.get("status")
-            member["name"] = account.get("name")
+            # The member's own account name wins; the invite name fills a blank
+            # or the placeholder create_user derives from the email local part.
+            own = str(account.get("name") or "").strip()
+            placeholder = own == member["email"].split("@")[0]
+            member["name"] = (invited_name or own) if (not own or placeholder) else own
             continue
         # Environment-provisioned identities (bootstrap admin, DATAFLOW_AUTH_USERS)
         # can sign in without a stored account — reporting "no account" for them
@@ -373,7 +378,8 @@ async def get_members(workspace_id: str, request: Request):
         env_user = lookup_user(member["email"])
         member["has_account"] = env_user is not None
         member["account_status"] = "provisioned" if env_user else "no_account"
-        member["name"] = str(env_user.get("name", "")) if env_user else ""
+        env_name = str(env_user.get("name", "")).strip() if env_user else ""
+        member["name"] = env_name or invited_name
     return {"members": members, "roles": list(ROLES)}
 
 
@@ -403,6 +409,7 @@ async def post_member(workspace_id: str, body: MemberBody, request: Request):
             added_by=actor,
             actor_is_platform_admin=platform_admin,
             refuse_existing=True,
+            name=body.name,
         )
     except TeamStoreError as e:
         raise _http_error(e) from e
@@ -412,7 +419,7 @@ async def post_member(workspace_id: str, body: MemberBody, request: Request):
         try:
             account, issued = create_user(
                 email=email,
-                name=body.name,
+                name=membership.name,
                 role="member",
                 created_by=actor,
             )

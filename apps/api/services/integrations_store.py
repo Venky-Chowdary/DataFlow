@@ -31,6 +31,22 @@ API_KEY_LIFETIMES: dict[str, int | None] = {
     "never": None,
 }
 DEFAULT_API_KEY_LIFETIME = "90d"
+#: Every prefix a workspace API key may carry. ``dfk_`` keys stay valid forever;
+#: new keys take ``dwk_`` when the brand flag is on (services.brand).
+API_KEY_PREFIXES = ("dfk_", "dwk_")
+
+
+def is_workspace_api_key(token: str) -> bool:
+    return bool(token) and token.startswith(API_KEY_PREFIXES)
+
+
+def _mint_raw_key(key_id: str) -> str:
+    from services import brand
+
+    prefix = brand.name_for_new("api_key_prefix")
+    if prefix != brand.artifact("api_key_prefix").legacy:
+        brand.audit_new_name("api_key_prefix", prefix, f"api_key:{key_id}")
+    return f"{prefix}{secrets.token_urlsafe(32)}"
 
 _SSO_TYPES = ("saml", "oidc", "azure_ad")
 _CLOUD_PROVIDERS = ("openai", "anthropic")
@@ -96,14 +112,27 @@ def _empty_store() -> dict[str, Any]:
     }
 
 
-def _load_raw() -> dict[str, Any]:
+def _read_file() -> dict[str, Any] | None:
     if not STORE_PATH.exists():
-        return _empty_store()
+        return None
     try:
         raw = json.loads(STORE_PATH.read_text(encoding="utf-8"))
-        if not isinstance(raw, dict):
-            raise ValueError("invalid store")
     except Exception:
+        return None
+    return raw if isinstance(raw, dict) else None
+
+
+def _load_raw() -> dict[str, Any]:
+    from services.integrations_persistence import load_sections, save_sections
+
+    file_raw = _read_file()
+    durable = load_sections()
+    if durable is None and file_raw is not None:
+        # Heal: a settings file written before the database held them (or while
+        # it was down) is copied up once, so the next restart keeps it.
+        save_sections(file_raw)
+    raw = {**(file_raw or {}), **(durable or {})}
+    if not raw:
         return _empty_store()
 
     sso = _default_sso()
@@ -142,6 +171,10 @@ def _load_raw() -> dict[str, Any]:
 
 
 def _save(data: dict[str, Any]) -> None:
+    from services.integrations_persistence import save_sections
+
+    # Database first: it is what survives a restart; the file is a local cache.
+    save_sections(json.loads(json.dumps(data, default=json_default)))
     STORE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STORE_PATH.write_text(json.dumps(data, indent=2, default=json_default), encoding="utf-8")
 
@@ -320,28 +353,39 @@ def get_sso_config_raw(sso_type: str) -> dict[str, Any]:
 
 
 def storage_status() -> dict[str, Any]:
-    """Where Settings are written and whether that location survives a restart.
+    """Whether saved Settings survive a restart, in words a user can act on.
 
-    A container without a mounted volume writes to its own filesystem, so
-    every redeploy or restart reverts the store to whatever the image shipped
-    with. Reporting that is the difference between "the key vanished" and
-    "the key was never going to stay".
+    Durable when the control-plane database holds them. Otherwise a container
+    without a mounted volume loses them on every deploy; the operator-facing
+    detail (path, volume) goes to the log, never to the Settings screen.
     """
     import os
 
-    path = STORE_PATH
+    from services.integrations_persistence import durable
+
+    if durable():
+        return {"persistent": True, "reason": ""}
     persistent = True
-    reason = ""
+    path = STORE_PATH
     if is_railway():
         root = path.parent.parent if path.parent.name == "data" else path.parent
-        if not (os.path.ismount(root) or os.path.ismount(path.parent)):
-            persistent = False
-            reason = (
-                f"{path.parent} is not a mounted volume on this Railway service, so "
-                "saved settings are lost on every deploy or restart. Attach a volume at "
-                f"{root} (or set DATAFLOW_DATA_DIR to a mounted path)."
+        persistent = bool(os.path.ismount(root) or os.path.ismount(path.parent))
+        if not persistent:
+            logger.warning(
+                "Settings store %s is on an ephemeral disk and no settings database "
+                "is configured; saved keys are lost on restart (mount a volume at %s "
+                "or configure MongoDB).", path, root,
             )
-    return {"path": str(path), "persistent": persistent, "reason": reason}
+    return {
+        "persistent": persistent,
+        "reason": (
+            ""
+            if persistent
+            else "Saved model keys can't be stored durably on this deployment yet, so "
+            "they may need to be entered again after an update. Ask your administrator "
+            "to connect the settings database."
+        ),
+    }
 
 
 def provider_key_state(provider: str) -> str:
@@ -762,10 +806,11 @@ def create_api_key(
             raise ValueError(
                 f"scope is outside the {stored_role} role: {sorted(disallowed_scopes)[0]}"
             )
-    raw = f"dfk_{secrets.token_urlsafe(32)}"
+    key_id = str(uuid.uuid4())
+    raw = _mint_raw_key(key_id)
     prefix = raw[:12]
     record = {
-        "id": str(uuid.uuid4()),
+        "id": key_id,
         "name": name.strip()[:64] or "API key",
         "prefix": prefix,
         "role": stored_role,
@@ -822,8 +867,8 @@ def rotate_api_key(
             raise ValueError("API key scopes are invalid")
         stored_scopes = sorted(set(scopes)) if scopes is not None else None
 
-        raw = f"dfk_{secrets.token_urlsafe(32)}"
         new_id = str(uuid.uuid4())
+        raw = _mint_raw_key(new_id)
         new_record = {
             "id": new_id,
             "name": source.get("name", "API key"),
@@ -884,7 +929,7 @@ def revoke_api_key(key_id: str) -> bool:
 
 
 def verify_workspace_api_key(raw: str) -> dict[str, Any] | None:
-    if not raw or not raw.startswith("dfk_"):
+    if not is_workspace_api_key(raw):
         return None
     digest = _hash_api_key(raw)
     for item in load_api_key_records():
