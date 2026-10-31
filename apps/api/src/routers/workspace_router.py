@@ -385,11 +385,44 @@ def _own_workspace_key(request: Request, key: dict[str, Any]) -> bool:
     return bool(key.get("workspace_id")) and key["workspace_id"] == scope.workspace_id
 
 
+def _with_access_label(key: dict[str, Any]) -> dict[str, Any]:
+    """Say what the key can reach (D219) — the label is computed, not stored.
+
+    An ``admin`` key minted by a platform admin is unrestricted: it reads and
+    acts in every workspace, whatever workspace it was minted in. Any other key
+    is held to its workspace. ``actor_is_unrestricted`` is the one rule the
+    request gate applies to the key, so the label cannot drift from it.
+    """
+    from services.integrations_store import resolve_stored_api_key_role
+    from services.tenant_scope import actor_is_unrestricted
+
+    principal = {
+        "email": key.get("created_by") or "",
+        "role": resolve_stored_api_key_role(key.get("role")),
+        "auth_kind": "api_key",
+    }
+    if actor_is_unrestricted(principal):
+        access = "platform"
+        label = (
+            "Platform-wide: minted by a platform admin with the admin role, this key "
+            "reads and acts in every workspace."
+        )
+    elif key.get("workspace_id"):
+        access = "workspace"
+        label = "This workspace only."
+    else:
+        access = "workspace"
+        label = "Only the workspaces its creator belongs to; not platform-wide."
+    return {**key, "access": access, "access_label": label}
+
+
 @router.get("/api-keys")
 async def get_api_keys(request: Request):
     from services.integrations_store import list_api_keys
 
-    return {"keys": [k for k in list_api_keys() if _own_workspace_key(request, k)]}
+    return {
+        "keys": [_with_access_label(k) for k in list_api_keys() if _own_workspace_key(request, k)]
+    }
 
 
 @router.post("/api-keys")
@@ -431,7 +464,7 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
             "expires_at": created.get("expires_at"),
         },
     )
-    return created
+    return _with_access_label(created)
 
 
 @router.delete("/api-keys/{key_id}")

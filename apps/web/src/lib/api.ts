@@ -3756,6 +3756,9 @@ export type WorkspaceApiKey = {
   expires_at?: string | null;
   lifetime?: WorkspaceApiKeyLifetime | string;
   expired?: boolean;
+  /** What the key can reach, computed by the API (D219). */
+  access?: "platform" | "workspace" | string;
+  access_label?: string;
 };
 
 export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {

@@ -114,7 +114,13 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const workspaceManage = useWriteGate(PERMISSIONS.workspaceManage);
   // The key store is deployment-wide, so keys are IAM administration (iam.manage).
   const iamManage = useWriteGate(PERMISSIONS.iamManage);
-  const retentionPurgeDisabled = !workspaceManage.allowed
+  // Retention purges the platform-wide trail, so it is a platform admin's (D220).
+  const [platformAdmin, setPlatformAdmin] = useState(false);
+  const retentionAllowed = workspaceManage.allowed && platformAdmin;
+  const retentionReason = !workspaceManage.allowed
+    ? workspaceManage.reason
+    : "Audit retention acts on the platform-wide trail: platform administrators only.";
+  const retentionPurgeDisabled = !retentionAllowed
     || retentionLoading
     || !retentionResult?.dry_run
     || retentionResult.legal_hold
@@ -178,11 +184,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
       })
       .finally(() => setSettingsLoading(false));
     fetchWorkspaces()
-      .then(({ workspaces: rows }) => {
+      .then(({ workspaces: rows, platformAdmin: isPlatformAdmin }) => {
         const current = rows.find((w) => w.id === activeWorkspace);
         setWorkspaceLabel(current?.name || "");
+        setPlatformAdmin(isPlatformAdmin);
       })
-      .catch(() => setWorkspaceLabel(""));
+      .catch(() => {
+        setWorkspaceLabel("");
+        setPlatformAdmin(false);
+      });
   }, [activeWorkspace]);
 
   const loadModelsAndSso = useCallback(() => {
@@ -617,7 +627,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   };
 
   const previewAuditRetention = async () => {
-    if (!workspaceManage.allowed) return;
+    if (!retentionAllowed) return;
     setRetentionLoading(true);
     setRetentionError("");
     setRetentionResult(null);
@@ -631,7 +641,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   };
 
   const purgeAuditRetentionNow = async () => {
-    if (!workspaceManage.allowed) return;
+    if (!retentionAllowed) return;
     if (!await confirm({
       title: "Purge expired audit events?",
       message: "This permanently removes events outside the configured retention window. A retention checkpoint will be recorded.",
@@ -1354,6 +1364,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                               <div className="df2-api-key-card-meta-row">
                                 <span className="df2-api-key-card-meta">Prefix: <code>{key.prefix}…</code></span>
                                 <span className="df2-api-key-card-meta">Role: {key.role || "editor"}</span>
+                                {key.access_label && (
+                                  <span className="df2-api-key-card-meta" data-testid="api-key-access">
+                                    Access: {key.access_label}
+                                  </span>
+                                )}
                                 <span className="df2-api-key-card-meta">
                                   Created {key.created_at ? new Date(key.created_at).toLocaleString() : "—"}
                                 </span>
@@ -1527,15 +1542,15 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 </div>
                 <div className="df2-settings-section-body">
                   <PermissionNotice
-                    allowed={workspaceManage.allowed}
-                    reason={workspaceManage.reason}
-                    what="Audit retention requires workspace.manage."
+                    allowed={retentionAllowed}
+                    reason={retentionAllowed ? "" : retentionReason}
+                    what="Audit retention is a platform administrator action."
                   />
                   <div className="df2-settings-section-actions">
                     <Button
                       variant="secondary"
-                      disabled={!workspaceManage.allowed || retentionLoading}
-                      title={workspaceManage.reason || undefined}
+                      disabled={!retentionAllowed || retentionLoading}
+                      title={retentionAllowed ? undefined : retentionReason}
                       data-testid="audit-retention-preview"
                       onClick={() => void previewAuditRetention()}
                     >
@@ -1544,7 +1559,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     <Button
                       variant="danger"
                       disabled={retentionPurgeDisabled}
-                      title={workspaceManage.reason || undefined}
+                      title={retentionAllowed ? undefined : retentionReason}
                       data-testid="audit-retention-purge"
                       onClick={() => void purgeAuditRetentionNow()}
                     >
