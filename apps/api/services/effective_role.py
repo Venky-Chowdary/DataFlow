@@ -155,6 +155,13 @@ def resolve_effective_role(user: dict[str, Any] | None, workspace_id: str = "") 
     # It is also never more than the person who minted it may do *today*: a
     # key an admin minted stops acting as admin once that admin is demoted.
     if str(user.get("auth_kind") or "") == "api_key":
+        # A key minted in a workspace acts there only: naming another
+        # workspace gives it no more than viewer at the gate, and the tenant
+        # scope then refuses the read (services.effective_principal).
+        bound = str(user.get("workspace_id") or "").strip()
+        if bound and workspace_id and workspace_id != bound:
+            return "viewer"
+        workspace_id = workspace_id or bound
         return cap_role(platform_role, api_key_creator_cap(user, workspace_id))
     if platform_role == "admin":
         return "admin"

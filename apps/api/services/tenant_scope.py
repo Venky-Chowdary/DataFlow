@@ -256,6 +256,9 @@ def actor_is_unrestricted(user: dict[str, Any] | None) -> bool:
         return False
     if str(user.get("auth_kind") or "") != "api_key":
         return True
+    # A key minted in a workspace belongs to that workspace, whoever minted it.
+    if str(user.get("workspace_id") or "").strip():
+        return False
     creator = lookup_user(str(user.get("email") or ""))
     return bool(creator) and str(creator.get("role") or "").strip().lower() == "admin"
 
@@ -268,11 +271,19 @@ def _base_scope(request: Any) -> TenantScope:
     raw_email = getattr(state, "user_email", None)
     email = normalize_email(raw_email) if isinstance(raw_email, str) else ""
     user = getattr(state, "user", None)
+    if isinstance(user, dict) and str(user.get("auth_kind") or "") == "api_key":
+        # A key reads its own workspace, not its creator's memberships
+        # (services.effective_principal — the resolver every route uses).
+        from services.effective_principal import api_key_memberships
+
+        memberships = api_key_memberships(user)
+    else:
+        memberships = ordered_memberships(email) if email else ()
     scope = TenantScope(
         actor=email or "anonymous",
         unrestricted=actor_is_unrestricted(user),
         enforced=require_workspace_isolation(),
-        memberships=ordered_memberships(email) if email else (),
+        memberships=memberships,
     )
     if state is not None:
         try:

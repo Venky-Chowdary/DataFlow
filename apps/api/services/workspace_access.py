@@ -58,7 +58,16 @@ def authorized_workspace_id(request: Request) -> str:
             setattr(state, cache_key, "")
             return ""
 
-        if can_read_workspace(workspace_id, actor_email(request)):
+        user = getattr(state, "user", None)
+        if isinstance(user, dict) and str(user.get("auth_kind") or "") == "api_key":
+            # An API key reads its own workspace only, never its creator's
+            # other memberships (tenant scope, services.effective_principal).
+            from services.tenant_scope import _base_scope
+
+            allowed = workspace_id in _base_scope(request).member_workspace_ids
+        else:
+            allowed = can_read_workspace(workspace_id, actor_email(request))
+        if allowed:
             result = workspace_id
             state.workspace_header_rejected = False
         else:
