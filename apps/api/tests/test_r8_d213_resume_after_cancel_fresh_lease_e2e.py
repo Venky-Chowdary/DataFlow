@@ -237,14 +237,22 @@ class _Route:
                 ))
 
 
-@pytest.mark.parametrize("timing", ["while_stopping", "after_stopped"])
-@pytest.mark.parametrize("cancel_at", ["before_first_write", "after_partial_write"])
+# (cancel_at, timing). ``while_stopping`` is QA's race: Resume lands before
+# the cancelled run reached its next checkpoint. ``after_stopped`` resumes once
+# it is gone; before any write that case already passed on 557f556c, so only
+# the partial-write one is kept (it failed Gate-8 on SQL Server and SQLite).
+_CASES = [
+    ("before_first_write", "while_stopping"),
+    ("after_partial_write", "while_stopping"),
+    ("after_partial_write", "after_stopped"),
+]
+
+
+@pytest.mark.parametrize("cancel_at,timing", _CASES)
 @pytest.mark.parametrize("route", ["mysql_to_sqlite", "sqlserver_to_mysql"])
 def test_resume_after_cancel_completes_with_every_row(
     env, tmp_path, monkeypatch, route, cancel_at, timing
 ):
-    """``while_stopping`` is QA's race: Resume lands before the cancelled run
-    reached its next checkpoint. ``after_stopped`` resumes once it is gone."""
     from fastapi.testclient import TestClient
 
     from services import transfer_scheduler
