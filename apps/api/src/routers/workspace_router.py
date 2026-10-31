@@ -451,9 +451,9 @@ def _own_workspace_key(request: Request, key: dict[str, Any]) -> bool:
 def _with_access_label(key: dict[str, Any]) -> dict[str, Any]:
     """Say what the key can reach (D219) — the label is computed, not stored.
 
-    An ``admin`` key minted by a platform admin is unrestricted: it reads and
-    acts in every workspace, whatever workspace it was minted in. Any other key
-    is held to its workspace. ``actor_is_unrestricted`` is the one rule the
+    An ``admin`` key a platform admin minted with no workspace is unrestricted:
+    it reads and acts in every workspace. A key minted in a workspace belongs
+    to that workspace, whoever minted it. ``actor_is_unrestricted`` is the one rule the
     request gate applies to the key, so the label cannot drift from it.
     """
     from services.integrations_store import resolve_stored_api_key_role
@@ -463,12 +463,13 @@ def _with_access_label(key: dict[str, Any]) -> dict[str, Any]:
         "email": key.get("created_by") or "",
         "role": resolve_stored_api_key_role(key.get("role")),
         "auth_kind": "api_key",
+        "workspace_id": key.get("workspace_id") or "",
     }
     if actor_is_unrestricted(principal):
         access = "platform"
         label = (
-            "Platform-wide: minted by a platform admin with the admin role, this key "
-            "reads and acts in every workspace."
+            "Platform-wide: minted by a platform admin with the admin role and no "
+            "workspace, this key reads and acts in every workspace."
         )
     elif key.get("workspace_id"):
         access = "workspace"

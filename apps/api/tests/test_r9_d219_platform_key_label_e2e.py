@@ -1,9 +1,9 @@
 """QA D219: the platform key says what it is.
 
-An ``admin`` key minted by a platform admin is unrestricted — it reads and acts
-in every workspace (``tenant_scope.actor_is_unrestricted``) — yet the key list
-showed it like any other key of the workspace it was minted in. Keys minted by
-anyone else are correctly held to their workspace. The fix is only the label:
+An ``admin`` key a platform admin minted with no workspace is unrestricted — it
+reads and acts in every workspace (``tenant_scope.actor_is_unrestricted``) —
+yet the key list showed it like any other key. Keys minted in a workspace (by
+anyone, including a platform admin) are held to that workspace. The fix is only the label:
 every listed (and freshly minted) key now carries ``access`` and
 ``access_label`` that match what the key can actually do.
 
@@ -31,9 +31,11 @@ def _listed(c, key_id: str) -> dict:
 
 def test_platform_key_is_labelled_platform_wide_and_scoped_keys_workspace_only(r9):
     root = r9.world.root  # header: Acme
-    platform_key = r9.world.mint_key("admin", by=root, name="ops-automation")
+    root_platform = r9.login("root@example.test", "Bootstrap-Admin-2026!", None)
+    platform_key = r9.world.mint_key("admin", by=root_platform, name="ops-automation")
     owner_key = r9.world.mint_key("admin", name="acme-admin")
     editor_key = r9.world.mint_key("editor", by=root, name="root-editor")
+    root_in_acme_key = r9.world.mint_key("admin", by=root, name="root-in-acme")
 
     assert platform_key["access"] == "platform"
     assert "every workspace" in platform_key["access_label"].lower()
@@ -41,7 +43,7 @@ def test_platform_key_is_labelled_platform_wide_and_scoped_keys_workspace_only(r
         row = _listed(listing_client, platform_key["id"])
         assert row["access"] == "platform"
         assert row["access_label"] == platform_key["access_label"]
-    for key in (owner_key, editor_key):
+    for key in (owner_key, editor_key, root_in_acme_key):
         assert key["access"] == "workspace"
         row = _listed(r9.owner, key["id"])
         assert row["access"] == "workspace"
@@ -58,3 +60,4 @@ def test_platform_key_is_labelled_platform_wide_and_scoped_keys_workspace_only(r
     assert into_bravo(platform_key) == 200
     assert into_bravo(owner_key) == 403
     assert into_bravo(editor_key) == 403
+    assert into_bravo(root_in_acme_key) == 403
