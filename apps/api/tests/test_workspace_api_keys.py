@@ -241,6 +241,10 @@ def test_api_key_role_is_enforced_when_auth_is_required(key_store, monkeypatch):
 
     monkeypatch.setattr(auth_service, "auth_required", lambda: True)
     monkeypatch.setattr(effective_role, "_membership_role", lambda **_k: "admin")
+    from r8_key_owner import ensure_key_owners
+
+    # Round 8: a key needs an accountable creator.
+    ensure_key_owners('admin@example.com')
     editor = integrations_store.create_api_key(
         "Editor", "admin@example.com", role="editor", expires_in="30d"
     )

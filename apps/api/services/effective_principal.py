@@ -177,3 +177,58 @@ def request_may_write_workspace(request: Any, workspace_id: str) -> bool:
     if not workspace_id:
         return not require_workspace_isolation()
     return request_principal(request, workspace_id).member_role in ("editor", "admin")
+
+
+_GATE_TO_MEMBERSHIP = {"admin": "admin", "editor": "editor", "operator": "viewer", "viewer": "viewer"}
+
+
+def api_key_memberships(user: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """The workspaces an API key may read, with its role there.
+
+    A key minted in a workspace reads that workspace only — never the other
+    workspaces its creator belongs to — and only while its creator still holds
+    authority there (``resolve_principal``). A legacy key minted before keys
+    carried a workspace reads its creator's workspace when that is unambiguous
+    (exactly one membership), and nothing otherwise.
+    """
+    bound = str(user.get("workspace_id") or "").strip()
+    if bound:
+        candidates = [bound]
+    else:
+        from services.team_store import list_memberships_for_user
+
+        email = str(user.get("email") or "").strip().lower()
+        rows = [m for m in list_memberships_for_user(email) if m.get("workspace_id")] if email else []
+        candidates = [str(rows[0]["workspace_id"])] if len(rows) == 1 else []
+    out: list[tuple[str, str]] = []
+    for workspace_id in candidates:
+        role = resolve_principal(user, workspace_id).member_role
+        if role:
+            out.append((workspace_id, _GATE_TO_MEMBERSHIP.get(role, "viewer")))
+    return tuple(out)
+
+
+def api_key_creator_is_accountable(creator_email: str, kind: str = "api_key") -> bool:
+    """A key's creator must still be someone: an active account, an
+    environment identity, or a workspace member. A deleted or never-existing
+    creator leaves the key with no one accountable for it, so it is refused
+    rather than left with its full role; a disabled account's personal keys
+    are refused too."""
+    creator = str(creator_email or "").strip().lower()
+    if not creator or creator in ("api-key", "anonymous"):
+        return False
+    from services.team_store import list_memberships_for_user
+    from services.user_store import get_user_record
+    from src.services.auth_service import lookup_user
+
+    stored = get_user_record(creator)
+    if stored is not None:
+        if str(stored.get("status") or "active") == "active":
+            return True
+        # A deactivated person's own keys die with the account; service
+        # accounts and SCIM tokens belong to the organization and survive it
+        # (SCIM deprovisioning keeps them, capped at viewer by the creator cap).
+        return kind in ("service_account", "scim")
+    if lookup_user(creator) is not None:
+        return True
+    return bool(list_memberships_for_user(creator))

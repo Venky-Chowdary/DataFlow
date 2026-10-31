@@ -44,6 +44,10 @@ def policy_client(monkeypatch, tmp_path):
         lambda **event: audit_events.append(event),
     )
 
+    from r8_key_owner import ensure_key_owners
+
+    # Round 8: a key needs an accountable creator.
+    ensure_key_owners('viewer@example.test', 'scoped@example.test', 'admin@example.test')
     viewer = integrations_store.create_api_key(
         "viewer",
         "viewer@example.test",

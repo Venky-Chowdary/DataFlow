@@ -33,7 +33,6 @@ from services.team_store import (
     list_memberships_for_user,
     list_workspace_members,
     list_workspaces,
-    list_workspaces_for_user,
     remove_workspace_member,
     rename_workspace,
 )
@@ -329,7 +328,15 @@ async def get_workspaces(request: Request):
     """Workspaces the caller may act in — every one for a platform administrator."""
     actor = _actor(request)
     platform_admin = _is_platform_admin(request)
-    workspaces = list_workspaces() if platform_admin else list_workspaces_for_user(actor)
+    if platform_admin:
+        workspaces = list_workspaces()
+    else:
+        # The tenant scope's workspaces: a session's memberships, an API key's
+        # own workspace only (never its creator's other memberships).
+        from services.tenant_scope import _base_scope
+
+        visible = _base_scope(request).member_workspace_ids
+        workspaces = [ws for ws in list_workspaces() if ws.id in visible]
     return {
         "workspaces": [
             {**ws.to_dict(), "member_count": len(list_workspace_members(ws.id))} for ws in workspaces
