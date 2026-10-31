@@ -87,6 +87,19 @@ def _driver(kind: str) -> str:
     return ""
 
 
+def _sqlite_file_exists(cfg: dict[str, Any]) -> bool:
+    from pathlib import Path
+
+    from connectors.sqlite_common import sqlite_file_path
+
+    path = sqlite_file_path(
+        str(cfg.get("database") or ""),
+        str(cfg.get("connection_string") or ""),
+        str(cfg.get("host") or ""),
+    )
+    return bool(path) and (path == ":memory:" or Path(path).is_file())
+
+
 def _bounded_exists(driver: str, cfg: dict[str, Any], schema: str, table: str) -> bool | None:
     from services.dest_precount import destination_table_exists
 
@@ -138,7 +151,12 @@ def probe_schedule_source(data: Mapping[str, Any]) -> SourceProbe:
         sch, table = split_qualified_table(raw, schema_from_cfg(driver, cfg) or None)
         schema = sch or ""
     shown = f"{schema}.{table}" if schema else table
-    exists = _bounded_exists(driver, cfg, schema, table)
+    if driver == "sqlite" and not _sqlite_file_exists(cfg):
+        # sqlite3.connect would create an empty file: never as a side effect
+        # of a save, and an absent file has no tables.
+        exists: bool | None = False
+    else:
+        exists = _bounded_exists(driver, cfg, schema, table)
     if exists is True:
         return SourceProbe(PRESENT, table=shown, connector=label)
     if exists is False:
