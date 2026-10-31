@@ -130,19 +130,19 @@ def test_sc9_every_delivery_is_logged_and_listed_per_workspace(live, receiver):
     finally:
         drop_pg(table)
 
-    # Test-send, the refused run, and the failed job's two alerts (the engine's
-    # job alert and the schedule's run alert).
-    assert len(received) == 4, [r["body"].get("status") for r in received]
+    # Test-send, the refused run, and one alert for the failed job (the
+    # schedule's; the engine's job alert stands down for a scheduled job).
+    assert len(received) == 3, [r["body"].get("status") for r in received]
 
     listed = admin.get(f"/api/v1/workspace/notifications/{channel_id}/deliveries")
     assert listed.status_code == 200, listed.text
     rows = listed.json()["deliveries"]
-    assert len(rows) == 4, rows
+    assert len(rows) == 3, rows
     assert rows == sorted(rows, key=lambda r: r["attempted_at"], reverse=True)
     test = [r for r in rows if r["event"] == "test"]
     sched_rows = [r for r in rows if r["event"] == "schedule.run.failed"]
     job_rows = [r for r in rows if r["event"] == "job.failed"]
-    assert len(test) == 1 and len(sched_rows) == 2 and len(job_rows) == 1, rows
+    assert len(test) == 1 and len(sched_rows) == 2 and job_rows == [], rows
     test = test[0]
     newest, refused = sched_rows
     assert test["ok"] is True and test["http_status"] == 200 and test["signed"] is True
@@ -150,7 +150,6 @@ def test_sc9_every_delivery_is_logged_and_listed_per_workspace(live, receiver):
     assert refused["job_id"] == "" and refused["schedule_id"] == sid and refused["ok"] is True
     assert newest["job_id"] and newest["schedule_id"] == sid
     assert newest["ok"] is False and newest["http_status"] == 500, newest
-    assert job_rows[0]["job_id"] == newest["job_id"] and job_rows[0]["http_status"] == 500
     assert "ops@example.com" not in json.dumps(rows)
     for row in rows:
         assert row["channel_id"] == channel_id and row["kind"] == "webhook"
@@ -173,7 +172,7 @@ def test_sc9_every_delivery_is_logged_and_listed_per_workspace(live, receiver):
 
     # Stored in MongoDB with a TTL, and nothing secret on disk.
     docs = list(live.db["notification_deliveries"].find({"channel_id": channel_id}))
-    assert len(docs) == 4
+    assert len(docs) == 3
     assert all(isinstance(d["expires_at"], datetime) for d in docs)
     indexes = live.db["notification_deliveries"].index_information()
     assert any(ix.get("expireAfterSeconds") == 0 for ix in indexes.values()), indexes

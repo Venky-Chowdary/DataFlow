@@ -892,6 +892,22 @@ def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> N
         )
         from services.platform_config import public_url, web_url
 
+        from services.schedule_run_lifecycle import current_run_id
+        from services.schedule_store import get_schedule, has_open_approval
+
+        # Re-read: the caller's copy predates the finding this run may have
+        # just opened, and the alert must say whether the pipeline is parked.
+        sched = get_schedule(sched.id) or sched
+        run_id = current_run_id(sched.id) or next(
+            (
+                str(r.get("run_id") or "")
+                for r in reversed(sched.run_history or [])
+                if isinstance(r, dict) and (not job_id or r.get("job_id") == job_id)
+            ),
+            "",
+        )
+        request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+        parked = has_open_approval(sched)
         doc = job_doc or {}
         payload = build_job_payload(
             job_id=job_id,
@@ -910,10 +926,25 @@ def _notify_schedule(sched, job_id: str, status: str, job_doc: dict | None) -> N
             base_url=public_url(),
             web_url=web_url(),
         )
+        # The schedule-aware alert: which pipeline, and whether it is now
+        # parked waiting on a person (and on what).
+        payload["schedule_id"] = sched.id
+        payload["schedule_name"] = sched.name or ""
+        payload["parked"] = bool(parked)
+        payload["approval_code"] = str(request.get("code") or "") if parked else ""
+        payload["title"] = f"Pipeline “{sched.name or sched.id}” run {status}" + (
+            " — parked, needs a decision" if parked else ""
+        )
+        payload["text"] = (
+            f"Pipeline: {sched.name or sched.id}\n"
+            + (f"Parked: {payload['approval_code'] or 'waiting on a decision'}\n" if parked else "")
+            + payload.get("text", "")
+        )
         from services.notification_delivery_log import delivery_context
 
         with delivery_context(
             schedule_id=sched.id,
+            run_id=run_id,
             job_id=job_id,
             event=f"schedule.run.{'succeeded' if success else 'failed'}",
         ):

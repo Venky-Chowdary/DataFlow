@@ -497,16 +497,71 @@ def notify_workspace(
     *,
     context: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
-    """Broadcast a payload to every enabled channel in a workspace."""
+    """Broadcast a payload to every enabled channel in a workspace.
+
+    One alert per failure per channel: every sender comes through here, so the
+    dedupe lives here (``_failure_alert_key`` + ``claim_alert``) instead of in
+    each sender.
+    """
+    key = _failure_alert_key(payload, context)
+    if key and _owned_by_schedule_alert(payload, context):
+        # A schedule-fired job's failure is announced by the scheduler, with
+        # the schedule's name and whether it is parked; the engine's generic
+        # job alert stands down.
+        return []
     channels = list_channels(workspace_id=workspace_id, enabled_only=True)
     results = []
     for channel in channels:
         decrypted = get_channel_decrypted(channel.id)
         if not decrypted:
             continue
+        if key:
+            from services.notification_delivery_log import claim_alert
+
+            if not claim_alert(key, channel.id):
+                continue
         sent = send_to_channel(decrypted, payload, context=context)
         results.append({"channel_id": channel.id, "kind": channel.kind, **sent})
     return results
+
+
+_FAILED_STATUSES = frozenset({"failed", "error", "cancelled_with_error"})
+
+
+def _failure_alert_key(payload: dict[str, Any], context: dict[str, Any] | None) -> str:
+    """``failed|job:<id>`` or ``failed|run:<schedule>:<run>``; "" when not a failure."""
+    from services.notification_delivery_log import current_context
+
+    ctx = {**current_context(), **(context or {})}
+    if str((payload or {}).get("status") or "").strip().lower() not in _FAILED_STATUSES:
+        return ""
+    job_id = str(ctx.get("job_id") or (payload or {}).get("job_id") or "").strip()
+    if job_id:
+        return f"failed|job:{job_id}"
+    schedule_id = str(ctx.get("schedule_id") or "").strip()
+    run_id = str(ctx.get("run_id") or "").strip()
+    if schedule_id and run_id:
+        return f"failed|run:{schedule_id}:{run_id}"
+    return ""
+
+
+def _owned_by_schedule_alert(payload: dict[str, Any], context: dict[str, Any] | None) -> bool:
+    """True for a job alert about a job a schedule dispatched (the scheduler alerts)."""
+    from services.notification_delivery_log import current_context
+
+    ctx = {**current_context(), **(context or {})}
+    if ctx.get("schedule_id"):
+        return False  # this *is* the schedule alert
+    job_id = str((payload or {}).get("job_id") or "").strip()
+    if not job_id:
+        return False
+    try:
+        from services.schedule_store import schedule_for_job
+
+        return schedule_for_job(job_id) is not None
+    except Exception:  # noqa: BLE001 - unknown ownership: keep the job alert
+        logger.debug("schedule ownership lookup failed for job %s", job_id, exc_info=True)
+        return False
 
 
 def log_job_notifications(job_id: str, results: list[dict[str, Any]]) -> bool:

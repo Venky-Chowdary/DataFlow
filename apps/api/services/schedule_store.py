@@ -966,6 +966,19 @@ def get_schedule(schedule_id: str) -> PipelineSchedule | None:
     return None
 
 
+def schedule_for_job(job_id: str) -> PipelineSchedule | None:
+    """The schedule that dispatched ``job_id`` (its claim, last job or history)."""
+    jid = str(job_id or "").strip()
+    if not jid:
+        return None
+    for s in _load_all():
+        if jid in (str(s.running_job_id or ""), str(s.last_job_id or "")):
+            return s
+        if any(str(r.get("job_id") or "") == jid for r in (s.run_history or []) if isinstance(r, dict)):
+            return s
+    return None
+
+
 def accepted_schedule_sync_mode(sync_mode: str) -> str:
     """Schedule spelling, or the canonical mode an alias resolves to.
 

@@ -188,6 +188,64 @@ def record_delivery(record: dict[str, Any]) -> None:
         logger.exception("notification delivery could not be recorded")
 
 
+# ── One alert per failure ──────────────────────────────────────────────────
+CLAIMS_COLLECTION = "notification_alert_claims"
+_CLAIM_DAYS = 7
+_LOCAL_CLAIMS: dict[str, float] = {}
+_LOCAL_CLAIMS_CAP = 20000
+_CLAIM_LOCK = threading.Lock()
+
+
+def claim_alert(key: str, channel_id: str) -> bool:
+    """First claimant of (failure, channel) wins; every later sender stands down.
+
+    Keyed on the job (or, before any job exists, the schedule run) plus the
+    event bucket, so the engine's job alert, the exception-level alert and the
+    scheduler's run alert can no longer each page the same channel for one
+    failure. Mongo makes the claim cross-process; without it the claim is
+    per-process. A claim store error answers True: an extra alert beats a
+    lost one.
+    """
+    claim_id = f"{key}|{channel_id}"
+    coll = None
+    try:
+        from services.control_plane_store import mongo_collection
+
+        coll = mongo_collection(CLAIMS_COLLECTION)
+    except Exception:  # noqa: BLE001
+        coll = None
+    if coll is not None:
+        try:
+            from pymongo.errors import DuplicateKeyError
+
+            if str(getattr(coll, "full_name", "")) + "#claims" not in _INDEXED:
+                try:
+                    coll.create_index("expires_at", expireAfterSeconds=0, name="claim_ttl")
+                except Exception:  # noqa: BLE001
+                    pass
+                _INDEXED.add(str(getattr(coll, "full_name", "")) + "#claims")
+            now = datetime.now(timezone.utc)
+            try:
+                coll.insert_one({"_id": claim_id, "at": now,
+                                 "expires_at": now + timedelta(days=_CLAIM_DAYS)})
+                return True
+            except DuplicateKeyError:
+                return False
+        except Exception:  # noqa: BLE001
+            logger.warning("alert claim store unavailable; sending", exc_info=True)
+            return True
+    import time as _time
+
+    with _CLAIM_LOCK:
+        if claim_id in _LOCAL_CLAIMS:
+            return False
+        if len(_LOCAL_CLAIMS) >= _LOCAL_CLAIMS_CAP:
+            for old in sorted(_LOCAL_CLAIMS, key=_LOCAL_CLAIMS.get)[: _LOCAL_CLAIMS_CAP // 10]:
+                _LOCAL_CLAIMS.pop(old, None)
+        _LOCAL_CLAIMS[claim_id] = _time.time()
+    return True
+
+
 def _public(row: dict[str, Any]) -> dict[str, Any]:
     out = {k: v for k, v in row.items() if k != "_id"}
     expires = out.get("expires_at")
