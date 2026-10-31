@@ -139,3 +139,32 @@ def test_salvage_reports_only_rows_the_destination_holds(monkeypatch):
     finally:
         conn.close()
         h.drop_table("postgresql", dst)
+
+
+@pytest.mark.parametrize("delete_mode", ["", "hard"])
+def test_mirror_with_a_declared_key_that_repeats_never_leaves_a_partial_write(client, delete_mode):
+    """QA's other reading of M5: a keyless source, a key named in the run, and
+    the key repeats in the source. Refused before the write, or loaded whole —
+    never a prefix of rows left behind a failed job."""
+    token = uuid.uuid4().hex[:8]
+    src, dst = f"r11mr_s_{token}", f"r11mr_d_{token}"
+    r.pg(f'CREATE TABLE public."{src}" (id integer, note text)')  # no primary key
+    r.pg(f'INSERT INTO public."{src}" SELECT g, \'n\' || g FROM generate_series(1, 1000) g')
+    r.pg(f'INSERT INTO public."{src}" VALUES (999, \'dup\'), (1000, NULL)')  # repeated keys last
+    for i, note in NOTES.items():
+        r.pg(f'UPDATE public."{src}" SET note = %s WHERE id = %s', (note, i))
+    args = dict(source_connector_id=r.connector("source", r.pg_cfg()), source_table=src,
+                dest_connector_id=r.connector("destination", r.pg_cfg()), dest_table=dst,
+                sync_mode="full_refresh_mirror", primary_key="id",
+                **({"delete_mode": delete_mode} if delete_mode else {}))
+    try:
+        ok, staged = r.stage(client, args)
+        if ok and not h.blockers_of(staged) and isinstance(staged, dict) and staged.get("ack_id"):
+            job = r.confirm_job(client, staged, expect=None)
+            if job.get("status") != "completed":
+                assert not r.table_exists(dst) or r.pg(f'SELECT count(*) FROM public."{dst}"') == [(0,)], job
+        else:
+            assert not r.table_exists(dst), "a refused mirror created the destination"
+    finally:
+        h.drop_table("postgresql", src)
+        h.drop_table("postgresql", dst)

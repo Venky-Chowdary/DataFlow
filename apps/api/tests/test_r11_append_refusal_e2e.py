@@ -78,7 +78,8 @@ def test_incremental_append_refusal_is_predicted_by_validate_and_writes_nothing(
         assert r.pg(f'SELECT count(*) FROM public."{dst}"') == [(2000,)]
 
         # The remedy the refusal names lands the update and the new rows.
-        job = r.run(client, {**args, "sync_mode": "incremental_deduped"})
+        # (incremental_deduped is the Studio's name; MCP spells it incremental_upsert.)
+        job = r.run(client, {**args, "sync_mode": "incremental_upsert"})
         assert job.get("status") == "completed"
         got = dict(r.pg(f'SELECT id, note FROM public."{dst}" WHERE id IN (1, 2, 3, 4, 5, 1500, 2010)'))
         assert got == {**NOTES, 1500: "ⓤpd", 2010: "new2010"}

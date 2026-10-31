@@ -170,8 +170,9 @@ def test_recipe_derive_amount_times_two_is_sized_for_every_row(client):
             assert _status(job) == "completed", (run, job.get("error") or job.get("message"))
             got = r.pg(f'SELECT id, name, amount, amount2 FROM public."{dst}" ORDER BY id')
             assert len(got) == 1000
+            names = {**NAMES, 8: "ñ"} if run == 2 else NAMES
             for row_id, name, amount, amount2 in got:
-                assert name == NAMES.get(row_id, f"n{row_id}")
+                assert name == names.get(row_id, f"n{row_id}")
                 assert amount2 == (None if amount is None else amount * 2), (row_id, amount, amount2)
             top = Decimal("2740.00") if run == 1 else Decimal("199999999.98")
             assert max(a for _i, _n, _a, a in got if a is not None) == top
