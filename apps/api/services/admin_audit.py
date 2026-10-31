@@ -51,6 +51,7 @@ ADMIN_ROUTES: tuple[tuple[str, str, str], ...] = (
     ("PATCH", "/api/v1/workspace/tenant/{tenant_id}", "workspace.tenant.update"),
     ("DELETE", "/api/v1/workspace/tenant/{tenant_id}", "workspace.tenant.delete"),
     ("POST", "/api/v1/workspace/jobs/retention/purge", "workspace.jobs.retention.purge"),
+    ("POST", "/api/v1/workspace/pii-hash-key/rotate", "workspace.pii_hash_key.rotate"),
 )
 
 #: Registered descriptions (merged into ``audit_coverage.SECURITY_EVENTS``).
