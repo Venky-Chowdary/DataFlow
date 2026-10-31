@@ -22,7 +22,7 @@ from services.byok_key_manager import (
 from services.admin_audit import record_admin_change
 from services.effective_principal import request_may_write_workspace
 from services.team_store import get_workspace
-from services.workspace_access import tenant_scope
+from services.workspace_access import assert_resource_workspace, tenant_scope
 from services.tenant_store import (
     Tenant,
     create_tenant,
@@ -448,11 +448,45 @@ def _own_workspace_key(request: Request, key: dict[str, Any]) -> bool:
     return bool(key.get("workspace_id")) and key["workspace_id"] == scope.workspace_id
 
 
+def _with_access_label(key: dict[str, Any]) -> dict[str, Any]:
+    """Say what the key can reach (D219) — the label is computed, not stored.
+
+    An ``admin`` key a platform admin minted with no workspace is unrestricted:
+    it reads and acts in every workspace. A key minted in a workspace belongs
+    to that workspace, whoever minted it. ``actor_is_unrestricted`` is the one rule the
+    request gate applies to the key, so the label cannot drift from it.
+    """
+    from services.integrations_store import resolve_stored_api_key_role
+    from services.tenant_scope import actor_is_unrestricted
+
+    principal = {
+        "email": key.get("created_by") or "",
+        "role": resolve_stored_api_key_role(key.get("role")),
+        "auth_kind": "api_key",
+        "workspace_id": key.get("workspace_id") or "",
+    }
+    if actor_is_unrestricted(principal):
+        access = "platform"
+        label = (
+            "Platform-wide: minted by a platform admin with the admin role and no "
+            "workspace, this key reads and acts in every workspace."
+        )
+    elif key.get("workspace_id"):
+        access = "workspace"
+        label = "This workspace only."
+    else:
+        access = "workspace"
+        label = "Only the workspaces its creator belongs to; not platform-wide."
+    return {**key, "access": access, "access_label": label}
+
+
 @router.get("/api-keys")
 async def get_api_keys(request: Request):
     from services.integrations_store import list_api_keys
 
-    return {"keys": [k for k in list_api_keys() if _own_workspace_key(request, k)]}
+    return {
+        "keys": [_with_access_label(k) for k in list_api_keys() if _own_workspace_key(request, k)]
+    }
 
 
 @router.post("/api-keys")
@@ -496,7 +530,7 @@ async def post_api_key(body: ApiKeyCreateBody, request: Request):
             "expires_at": created.get("expires_at"),
         },
     )
-    return created
+    return _with_access_label(created)
 
 
 @router.delete("/api-keys/{key_id}")
@@ -620,6 +654,23 @@ class NotificationChannelUpdate(BaseModel):
     config: dict[str, Any] | None = None
 
 
+def _assert_channel_visible(request: Request, channel_workspace_id: str) -> None:
+    """A channel outside the caller's tenant scope is a 404, like a missing id (D222).
+
+    The list route's rule: a workspace channel belongs to that workspace, and
+    an unscoped (deployment-wide) channel to an unrestricted actor while
+    isolation is enforced. Only a caller who can see the channel gets the 403
+    for lacking write access.
+    """
+    if not (channel_workspace_id or "").strip():
+        # Deployment-wide channel: the platform admin's, whichever workspace
+        # they are looking at (the list route shows these to them only).
+        if not tenant_scope(request).unrestricted:
+            raise HTTPException(status_code=404, detail="Channel not found")
+        return
+    assert_resource_workspace(request, channel_workspace_id, not_found_detail="Channel not found")
+
+
 def _channel_scope_writable(request: Request, workspace_id: str) -> bool:
     """Write access to channels of ``workspace_id``; unscoped ones are deployment-wide."""
     if workspace_id:
@@ -728,6 +779,7 @@ async def patch_notification(channel_id: str, body: NotificationChannelUpdate, r
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    _assert_channel_visible(request, channel.workspace_id)
     if not _channel_scope_writable(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     updates = body.model_dump(exclude_none=True)
@@ -745,6 +797,7 @@ async def delete_notification(channel_id: str, request: Request):
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    _assert_channel_visible(request, channel.workspace_id)
     if not _channel_scope_writable(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     if not delete_channel(channel_id):
@@ -761,6 +814,7 @@ async def test_notification(channel_id: str, request: Request):
     channel = get_channel_decrypted(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
+    _assert_channel_visible(request, channel.workspace_id)
     if not _channel_scope_writable(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     payload = build_job_payload(

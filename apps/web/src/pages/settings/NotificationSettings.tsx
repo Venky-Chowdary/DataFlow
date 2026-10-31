@@ -19,7 +19,7 @@ import { PERMISSIONS, useWriteGate } from "../../lib/PermissionsContext";
 import { PermissionNotice } from "../../components/PermissionNotice";
 import { Button } from "../../components/ui/Button";
 import { SigningSecretNotice } from "../../components/team/SigningSecretNotice";
-import { setActiveWorkspaceId, useActiveWorkspaceId } from "../../lib/workspace";
+import { landingWorkspaceId, setActiveWorkspaceId, useActiveWorkspaceId } from "../../lib/workspace";
 import { useVisibleRefresh } from "../../lib/visibleRefresh";
 
 type ChannelKind = "slack" | "teams" | "email" | "servicenow" | "webhook";
@@ -70,9 +70,9 @@ export function NotificationSettings() {
 
   useEffect(() => {
     fetchWorkspaces()
-      .then(({ workspaces: w }) => {
+      .then(({ workspaces: w, defaultWorkspaceId }) => {
         setWorkspaces(w);
-        if (w.length && !selectedWorkspace) setActiveWorkspaceId(w[0].id);
+        if (w.length && !selectedWorkspace) setActiveWorkspaceId(landingWorkspaceId(w, defaultWorkspaceId));
       })
       .catch(() => setWorkspaces([]));
   }, [selectedWorkspace]);

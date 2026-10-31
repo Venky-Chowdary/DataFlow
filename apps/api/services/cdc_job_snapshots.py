@@ -146,6 +146,7 @@ def request_snapshot_for_job(
         primary_key=pk,
         chunk_size=chunk_size,
         row_filter=row_filter,
+        workspace_id=str(job.get("workspace_id") or ""),
     )
     row = sig.to_dict()
     row["resolved_source_key"] = ctx["source_key"]

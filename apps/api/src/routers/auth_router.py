@@ -1046,6 +1046,23 @@ async def login(body: LoginRequest, request: Request):
     }
 
 
+def _landing_workspace(request: Request, user: Any, email: str, named_workspace_id: str) -> str:
+    """Remember a workspace the session named (and may use); answer where to land.
+
+    Only a signed-in person's choice is remembered — an API key names a
+    workspace per call, which is not a preference.
+    """
+    from services.workspace_preference import landing_workspace_id, remember_workspace
+
+    try:
+        if named_workspace_id and str((user or {}).get("auth_kind") or "") != "api_key":
+            remember_workspace(email, named_workspace_id)
+        return landing_workspace_id(tenant_scope(request, ""))
+    except Exception as exc:  # noqa: BLE001 - never fail the identity read on a preference
+        logging.getLogger(__name__).warning("landing workspace unavailable: %s", type(exc).__name__)
+        return ""
+
+
 @router.get("/me")
 async def me(request: Request):
     """Who the API decided you are, and what it will let you do here.
@@ -1082,6 +1099,7 @@ async def me(request: Request):
     # is resolved in that same workspace: a response whose permissions were
     # decided somewhere other than the workspace it reports is not an answer.
     workspace_id = resolved_workspace_id(user, named_workspace_id)
+    default_workspace_id = _landing_workspace(request, user, email, named_workspace_id)
     summary = permission_summary(user, workspace_id)
     account = get_stored_user(email)
     workspace_role = ""
@@ -1100,6 +1118,9 @@ async def me(request: Request):
         "name": display_name or email,
         "platform_role": str((user or {}).get("role") or "member"),
         "workspace_id": workspace_id,
+        # Where this account should land when the browser names no workspace
+        # (D218): last used, else its own — never simply the oldest.
+        "default_workspace_id": default_workspace_id,
         "workspace_role": workspace_role,
         "must_change_password": bool(account and account.get("must_change_password")),
         "auth_required": auth_required(),

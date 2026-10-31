@@ -131,6 +131,10 @@ class SnapshotSignal:
     # Structured filter (services/cdc_snapshot_filter.py) bounding the chunk
     # reads; None = whole table. Never raw SQL.
     row_filter: dict[str, Any] | None = None
+    # Owning workspace ("" = requested before signals were scoped: legacy,
+    # platform-admin only while isolation is enforced). The standalone signal
+    # routes read and cancel by id, so they gate on this (D222).
+    workspace_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -154,6 +158,7 @@ class SnapshotSignal:
             lsn_low=str(d.get("lsn_low") or ""),
             lsn_high=str(d.get("lsn_high") or ""),
             row_filter=d.get("row_filter") or None,
+            workspace_id=str(d.get("workspace_id") or "").strip(),
         )
 
 
@@ -307,6 +312,7 @@ def request_incremental_snapshot(
     primary_key: str | list[str] | None = None,
     chunk_size: int = 1000,
     row_filter: Any = None,
+    workspace_id: str = "",
 ) -> SnapshotSignal:
     """Enqueue an incremental snapshot for ``table`` on ``source_key``.
 
@@ -323,6 +329,7 @@ def request_incremental_snapshot(
         primary_key=_normalize_signal_primary_key(primary_key),
         chunk_size=max(1, min(int(chunk_size), 50_000)),
         row_filter=spec,
+        workspace_id=str(workspace_id or "").strip(),
     )
     saved = _upsert_signal(sig)
     logging.getLogger(__name__).info(

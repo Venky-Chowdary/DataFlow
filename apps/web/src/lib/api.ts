@@ -839,19 +839,6 @@ export async function transformRecipeWhereUsed(id: string): Promise<{
   return res.json();
 }
 
-export async function syncJobNow(
-  jobId: string,
-  mode: "delta" | "full" = "delta",
-): Promise<{ job_id?: string }> {
-  const res = await apiFetch(`${API_BASE}/jobs/${encodeURIComponent(jobId)}/sync`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ mode }),
-  });
-  if (!res.ok) throw await apiErrorFrom(res, "Sync now is not available on this API yet");
-  return res.json();
-}
-
 export async function syncScheduleNow(
   id: string,
   mode: "delta" | "full" = "delta",
@@ -1491,7 +1478,7 @@ export async function fetchJobs(): Promise<JobHistory> {
     total?: number;
     status_counts?: Record<string, number>;
   }>(
-    [`${API_BASE}/connectors/jobs`, `${API_BASE}/jobs`],
+    [`${API_BASE}/connectors/jobs`],
     "Failed to load jobs",
     { timeoutMs: 45_000 },
   );
@@ -1502,7 +1489,7 @@ export type JobProgress = import("./types").JobProgress;
 
 export async function fetchJob(jobId: string): Promise<JobProgress> {
   return requestJson<JobProgress>(
-    [`${API_BASE}/connectors/jobs/${jobId}`, `${API_BASE}/jobs/${jobId}`],
+    [`${API_BASE}/connectors/jobs/${jobId}`],
     "Job not found"
   );
 }
@@ -1588,10 +1575,7 @@ export async function executeJobRollback(
 }
 
 export async function renameJob(jobId: string, name: string): Promise<JobProgress> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}`,
-    `${API_BASE}/jobs/${jobId}`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1637,10 +1621,7 @@ export async function retryJob(
   options: { force?: boolean } = {},
 ): Promise<{ job_id: string; retry_of: string; duplicate_risk_acknowledged?: boolean }> {
   const query = options.force ? "?force=true" : "";
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/retry${query}`,
-    `${API_BASE}/jobs/${jobId}/retry${query}`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/retry${query}`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1724,10 +1705,7 @@ export async function resumeJob(jobId: string): Promise<{
   restarted?: boolean;
   message?: string;
 }> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/resume`,
-    `${API_BASE}/jobs/${jobId}/resume`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/resume`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -1750,10 +1728,7 @@ export async function resumeJob(jobId: string): Promise<{
 }
 
 export async function cancelJob(jobId: string): Promise<{ success: boolean; job_id: string; status: string; message?: string }> {
-  const urls = [
-    `${API_BASE}/connectors/jobs/${jobId}/cancel`,
-    `${API_BASE}/jobs/${jobId}/cancel`,
-  ];
+  const urls = [`${API_BASE}/connectors/jobs/${jobId}/cancel`];
   let lastError: unknown;
   for (const url of urls) {
     try {
@@ -3553,6 +3528,8 @@ export type EffectiveIdentity = {
   name: string;
   platform_role: string;
   workspace_id: string;
+  /** The API's landing workspace for this account: last used, else its own (D218). */
+  default_workspace_id?: string;
   workspace_role: string;
   effective_role: string;
   permissions: string[];
@@ -3797,6 +3774,9 @@ export type WorkspaceApiKey = {
   expires_at?: string | null;
   lifetime?: WorkspaceApiKeyLifetime | string;
   expired?: boolean;
+  /** What the key can reach, computed by the API (D219). */
+  access?: "platform" | "workspace" | string;
+  access_label?: string;
 };
 
 export async function fetchWorkspaceApiKeys(): Promise<WorkspaceApiKey[]> {
@@ -3949,11 +3929,22 @@ export type PlatformUser = {
   workspaces?: { workspace_id: string; role: WorkspaceRole }[];
 };
 
-export async function fetchWorkspaces(): Promise<{ workspaces: Workspace[]; platformAdmin: boolean; actor: string }> {
+export async function fetchWorkspaces(): Promise<{
+  workspaces: Workspace[];
+  platformAdmin: boolean;
+  actor: string;
+  /** Where this account lands when the browser names no workspace (D218). */
+  defaultWorkspaceId: string;
+}> {
   const res = await apiFetch(`${API_BASE}/team/workspaces`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
   const data = await res.json();
-  return { workspaces: data.workspaces ?? [], platformAdmin: !!data.platform_admin, actor: data.actor ?? "" };
+  return {
+    workspaces: data.workspaces ?? [],
+    platformAdmin: !!data.platform_admin,
+    actor: data.actor ?? "",
+    defaultWorkspaceId: typeof data.default_workspace_id === "string" ? data.default_workspace_id : "",
+  };
 }
 
 export async function createWorkspace(name: string): Promise<Workspace> {

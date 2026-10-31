@@ -47,6 +47,18 @@ export function setActiveWorkspaceId(workspaceId: string): void {
   }
 }
 
+/**
+ * The workspace to name when the browser has none (or a stale one): the API's
+ * landing choice — last used, else the account's own (D218) — when it is in
+ * the list, else the first row. The list is oldest-first, so taking row 0
+ * alone landed every platform admin in the oldest workspace.
+ */
+export function landingWorkspaceId(rows: ReadonlyArray<{ id: string }>, preferred?: string): string {
+  const want = (preferred || "").trim();
+  if (want && rows.some((w) => w.id === want)) return want;
+  return rows[0]?.id ?? "";
+}
+
 export function clearActiveWorkspaceId(): void {
   setActiveWorkspaceId("");
 }

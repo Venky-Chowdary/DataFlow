@@ -343,7 +343,19 @@ async def get_workspaces(request: Request):
         ],
         "platform_admin": platform_admin,
         "actor": actor,
+        # The list is oldest-first; this is where the caller should land (D218).
+        "default_workspace_id": _landing_workspace_id(request),
     }
+
+
+def _landing_workspace_id(request: Request) -> str:
+    from services.tenant_scope import resolve_tenant_scope
+    from services.workspace_preference import landing_workspace_id
+
+    try:
+        return landing_workspace_id(resolve_tenant_scope(request, ""))
+    except Exception:  # noqa: BLE001 - the list must still answer
+        return ""
 
 
 @router.post("/workspaces")
