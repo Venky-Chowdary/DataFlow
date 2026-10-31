@@ -311,9 +311,9 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
         body: "Workspace **admins** complete these once per workspace. Operators do not need this checklist to run day-to-day transfers — it is for IT and security readiness.",
         steps: [
           "**Settings → SSO** — choose SAML or OIDC, paste IdP metadata URL (or upload XML), map roles if your IdP sends group claims, then click **Test login** and **Save**.",
-          "**Settings → Enterprise** — set tenant display name, data **region**, MFA policy, session timeout, and optional IP allowlist. The workspace picker here is the same live workspace as Team.",
+          "**Settings → Enterprise** — set tenant display name, data **region**, session timeout, and (for a tenant custom domain) an optional IP allowlist. The workspace picker here is the same live workspace as Team.",
           "**Settings → Enterprise → BYOK** — upload your customer KMS key when procurement requires customer-managed encryption for connector secrets.",
-          "**Settings → Team** — invite Viewers, Editors, and Admins with least privilege; re-check IdP group → role mapping after SSO enforce. Member and login lists refresh while the tab is open.",
+          "**Settings → Team** — invite Viewers, Editors, and Admins with least privilege; re-check IdP group → role mapping after SSO setup. Member and login lists refresh while the tab is open.",
           "**Settings → Security** — download the **Security posture report** for SOC 2 / GDPR / HIPAA questionnaires. Controls are implemented; no third-party certificate is claimed.",
         ],
         tip: "If your tenant URL is not live yet, email **sales@datawrap.io**. Provisioning is handled by Datawrap — operators never install or run a local API.",
@@ -1256,7 +1256,7 @@ const ARTICLES: Record<HelpDocId, HelpDocArticle> = {
       {
         id: "byok-region",
         title: "BYOK, region, and audit",
-        body: "Settings → Enterprise sets tenant name, custom domain, data region, MFA, session timeout, and IP allowlist. Optional BYOK wraps connector secrets with your KMS key. Settings → Audit Logs lists mapping decisions, job runs, quarantine events, and MCP calls for SOC 2 / GDPR / HIPAA review. Settings → Security downloads the Security posture report for procurement.",
+        body: "Settings → Enterprise sets tenant name, custom domain, data region, session timeout, and an IP allowlist for the custom domain. Optional BYOK wraps connector secrets with your KMS key. Settings → Audit Logs lists mapping decisions, job runs, quarantine events, and MCP calls for SOC 2 / GDPR / HIPAA review. Settings → Security downloads the Security posture report for procurement.",
       },
     ],
   },

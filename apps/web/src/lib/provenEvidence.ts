@@ -49,7 +49,7 @@ export const PROVEN_EVIDENCE: EvidenceRow[] = [
     claim: "Identity / sequence generator carried on create-new, re-read from the destination catalog and proven by a post-cutover insert without a key",
     engines: "PostgreSQL, MySQL, SQL Server, Oracle",
     cases: 16,
-    result: "14 carried, 2 declared unsupported (never silently dropped)",
+    result: "14 carried, 2 flagged by name before the load",
     artifact: "identity_live_results.json",
   },
   {

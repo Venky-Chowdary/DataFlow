@@ -11,7 +11,6 @@ import {
   type HelpDocWorkflowStep,
 } from "../../lib/helpDocs";
 import {
-  BACKEND_SUITE,
   EVIDENCE_AS_OF,
   MARKETING_STACK,
   PROVEN_EVIDENCE,
@@ -323,21 +322,20 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
           </li>
           <li>
             <strong>3 · Write + quarantine</strong>
-            <span>Clean rows land; bad cells isolate with column, value, and reason — never silently dropped.</span>
+            <span>Clean rows land; held-back cells isolate with column, value, and reason, ready to replay.</span>
           </li>
           <li>
             <strong>4 · Reconcile in Jobs</strong>
-            <span>Row counts and checksums prove the load. Pipeline ticks use this same Job Theater path.</span>
+            <span>Gate-8 reads the destination back — row counts, checksums, and a value and key census. Pipeline ticks use this same Job Theater path.</span>
           </li>
         </ol>
       </section>
 
       <section className="docs-space-algorithm" aria-label="Measured evidence">
-        <h2>What is certified on live engines ({EVIDENCE_AS_OF})</h2>
+        <h2>Measured on live engines ({EVIDENCE_AS_OF})</h2>
         <p className="docs-space-evidence-lead">
           Each line is a live matrix run through the product path against a real engine, with the
-          destination re-read afterwards. Backend suite: {BACKEND_SUITE.passed.toLocaleString()}{" "}
-          passed, {BACKEND_SUITE.failed} failed, {BACKEND_SUITE.skipped.toLocaleString()} skipped.
+          destination read back afterwards.
         </p>
         <ul className="docs-space-evidence-list">
           {PROVEN_EVIDENCE.map((row) => (
@@ -352,7 +350,7 @@ export function DocsPortal({ onNavigate, onGetStarted }: DocsPortalProps) {
       </section>
 
       <section className="docs-space-algorithm" aria-label="Catalog families">
-        <h2>Catalog families — tiles are not transfer-live</h2>
+        <h2>Catalog families</h2>
         <p className="docs-space-evidence-lead">{catalogHonestyLead()}</p>
         <ul className="docs-space-evidence-list">
           {MARKETING_STACK.map((row) => (
