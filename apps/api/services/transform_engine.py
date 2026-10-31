@@ -1686,27 +1686,46 @@ def _parse_uuid(value: str) -> str | None:
         return None
 
 
-#: Operator setup for a missing ``hash_pii`` key. Validate raises it as a
-#: blocker and the write path refuses with it, so both name one fix (D8).
+#: What a tenant is told when ``hash_pii`` cannot get its key. Validate raises
+#: it as a blocker and the write path refuses with it, so both say the same
+#: thing (D8). It names no environment variable, host or vendor: the key is a
+#: workspace secret the platform manages (``services.pii_hash_keys``).
 PII_HASH_KEY_SETUP = (
-    "hash_pii is not configured: no HMAC key is set. Set DATAFLOW_PII_HASH_KEY "
-    "(or DATAWRAP_PII_HASH_KEY) on the API service to a long random secret, "
-    "e.g. the output of `openssl rand -hex 32`, in its secret variables "
-    "(Railway: service -> Variables), redeploy, then re-run Validate. Keep the "
-    "key stable and private: a new key changes every digest. No row was "
-    "hashed, and a shared default key is refused because it would be "
-    "reversible across tenants. Use mask_pii or redact if a keyed digest is "
-    "not required."
+    "hash_pii could not load this workspace's hashing key, so no row was hashed. "
+    "Try again in a moment, then re-run Validate; if it keeps happening, ask your "
+    "Datawrap administrator. Use mask_pii or redact if a keyed digest is not "
+    "required."
 )
 
 
-def pii_hash_key() -> str:
-    """The ``hash_pii`` HMAC key, or ``""`` when none is configured."""
-    return getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET") or ""
+def _current_workspace() -> str:
+    from services.egress_guard import current_egress_workspace
+    from services.workspace_filter import current_workspace_stamp
+
+    return current_workspace_stamp() or current_egress_workspace()
+
+
+def pii_hash_key(workspace_id: str | None = None) -> str:
+    """The ``hash_pii`` HMAC key for the workspace, or ``""`` when unavailable.
+
+    An operator-pinned ``PII_HASH_KEY`` (or the legacy ``SECRET``) wins, so a
+    deployment that configured one keeps every digest it has written.
+    Otherwise each workspace has its own key, generated on first use and
+    stored encrypted — deterministic within a workspace, different across them.
+    """
+    pinned = getenv_brand("PII_HASH_KEY") or getenv_brand("SECRET") or ""
+    if pinned:
+        return pinned
+    from services.pii_hash_keys import PiiHashKeyUnavailable, workspace_key
+
+    try:
+        return workspace_key(_current_workspace() if workspace_id is None else workspace_id)
+    except PiiHashKeyUnavailable:
+        return ""
 
 
 def _hash_pii(value: str) -> str:
-    """HMAC-SHA256 digest for PII masking. Requires DATAFLOW_PII_HASH_KEY in prod."""
+    """HMAC-SHA256 digest under the workspace's key (fails closed, never a default)."""
     secret = pii_hash_key()
     if not secret:
         # Fail closed — never hash with a shared public default (would be reversible

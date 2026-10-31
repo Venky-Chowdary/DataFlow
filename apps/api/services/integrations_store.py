@@ -54,6 +54,9 @@ _CLOUD_PROVIDERS = ("openai", "anthropic")
 _MASK = "••••••••"
 _PILOT_ENGINES = ("auto", "local", "hybrid", "cloud")
 _API_KEY_ROTATION_LOCK = threading.Lock()
+#: Longest grace an operator may ask for when rotating a key. The old key is
+#: revoked at once unless a grace is asked for explicitly.
+MAX_ROTATION_GRACE_SECONDS = 3600
 
 
 def _now() -> str:
@@ -877,6 +880,7 @@ def _public_api_key(item: dict[str, Any], *, secret: str | None = None) -> dict[
         "workspace_id": item.get("workspace_id") or "",
         "rotated_from": item.get("rotated_from"),
         "rotated_to": item.get("rotated_to"),
+        "grace_until": item.get("grace_until") or None,
     }
     if secret is not None:
         row["key"] = secret
@@ -954,10 +958,18 @@ def rotate_api_key(
     key_id: str,
     *,
     actor: str,
-    overlap_seconds: int = 86400,
+    overlap_seconds: int = 0,
 ) -> dict[str, Any]:
-    if not isinstance(overlap_seconds, int) or not 0 <= overlap_seconds <= 604800:
-        raise ValueError("overlap_seconds must be between 0 and 604800")
+    """Replace a key with a new one in the same workspace, owned by the same person.
+
+    The new key inherits the source's workspace and creator (it is the same
+    credential, re-issued), so it is listed and revocable wherever the old one
+    was; ``rotated_by`` records who rotated it. The old key is revoked at once,
+    or — only when ``overlap_seconds`` asks for it — kept until ``grace_until``
+    (at most ``MAX_ROTATION_GRACE_SECONDS``), listed and revocable meanwhile.
+    """
+    if not isinstance(overlap_seconds, int) or not 0 <= overlap_seconds <= MAX_ROTATION_GRACE_SECONDS:
+        raise ValueError(f"overlap_seconds must be between 0 and {MAX_ROTATION_GRACE_SECONDS}")
     with _API_KEY_ROTATION_LOCK:
         source = next(
             (item for item in load_api_key_records() if str(item.get("id")) == key_id),
@@ -965,13 +977,13 @@ def rotate_api_key(
         )
         if source is None:
             raise ApiKeyNotFound(key_id)
+        if source.get("rotated_to"):
+            raise ValueError("already been rotated")
         if _is_revoked(source):
             raise ValueError("revoked API keys cannot be rotated")
         now = datetime.now(timezone.utc)
         if _key_expired(source, now=now):
             raise ValueError("expired API keys cannot be rotated")
-        if source.get("rotated_to"):
-            raise ValueError("already been rotated")
 
         lifetime = source.get("lifetime") or (
             "never" if not source.get("expires_at") else DEFAULT_API_KEY_LIFETIME
@@ -998,21 +1010,25 @@ def rotate_api_key(
             "role": resolve_stored_api_key_role(source.get("role")),
             "key_hash": _hash_api_key(raw),
             "created_at": now.isoformat(),
-            "created_by": actor,
+            "created_by": source.get("created_by") or actor,
+            "rotated_by": actor,
             "last_used_at": None,
             "lifetime": lifetime,
             "expires_at": _expires_at(lifetime, now=now),
             "scopes": stored_scopes,
             "kind": kind,
+            "workspace_id": source.get("workspace_id") or "",
             "rotated_from": key_id,
         }
 
-        overlap_expiry = now + timedelta(seconds=overlap_seconds)
-        source_expiry = _parse_expires_at(source.get("expires_at"))
-        if source_expiry:
-            source["expires_at"] = min(source_expiry, overlap_expiry).isoformat()
+        if overlap_seconds:
+            overlap_expiry = now + timedelta(seconds=overlap_seconds)
+            source_expiry = _parse_expires_at(source.get("expires_at"))
+            grace = min(source_expiry, overlap_expiry) if source_expiry else overlap_expiry
+            source["expires_at"] = grace.isoformat()
+            source["grace_until"] = grace.isoformat()
         else:
-            source["expires_at"] = overlap_expiry.isoformat()
+            source["revoked_at"] = now.isoformat()
         source["rotated_to"] = new_id
 
         _upsert_api_key_record(new_record)
@@ -1029,6 +1045,52 @@ def rotate_api_key(
                 raise ValueError("already been rotated")
             _save_file_api_key_record(source)
         return _public_api_key(new_record, secret=raw)
+
+
+def repair_rotated_api_keys(*, dry_run: bool = True) -> list[dict[str, Any]]:
+    """Give keys minted by the pre-fix rotate endpoint their workspace and owner back.
+
+    Before round 8 a rotated key was written with no ``workspace_id`` and the
+    rotating caller as ``created_by``: listed nowhere, revocable by nobody but
+    a platform admin who knew its id, yet authenticating. Walk each such key's
+    ``rotated_from`` chain to the first ancestor that has a workspace and copy
+    that workspace and creator. Revoked keys are left alone. ``dry_run``
+    (default) only reports. Returns one row per key repaired (or to repair).
+    """
+    with _API_KEY_ROTATION_LOCK:
+        records = load_api_key_records()
+        by_id = {str(r.get("id")): r for r in records}
+        repairs: list[dict[str, Any]] = []
+        for record in records:
+            if record.get("workspace_id") or not record.get("rotated_from") or _is_revoked(record):
+                continue
+            ancestor = by_id.get(str(record.get("rotated_from")))
+            seen: set[str] = set()
+            while ancestor is not None and not ancestor.get("workspace_id"):
+                aid = str(ancestor.get("id"))
+                if aid in seen or not ancestor.get("rotated_from"):
+                    ancestor = None
+                    break
+                seen.add(aid)
+                ancestor = by_id.get(str(ancestor.get("rotated_from")))
+            if ancestor is None:
+                continue
+            row = {
+                "id": record["id"],
+                "prefix": record.get("prefix"),
+                "workspace_id": ancestor["workspace_id"],
+                "created_by": ancestor.get("created_by") or record.get("created_by"),
+                "previous_created_by": record.get("created_by"),
+                "rotated_from": record.get("rotated_from"),
+            }
+            repairs.append(row)
+            if not dry_run:
+                fixed = dict(record)
+                fixed["workspace_id"] = row["workspace_id"]
+                fixed["created_by"] = row["created_by"]
+                fixed.setdefault("rotated_by", record.get("created_by"))
+                _upsert_api_key_record(fixed)
+        return repairs
 
 
 def revoke_api_key(key_id: str) -> bool:

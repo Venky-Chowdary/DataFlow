@@ -239,6 +239,11 @@ def copy_postgres_to_oracle(
                 swap_trash_table = overwrite_trash_name(dest_table)
                 dest_ref = _ora_table_ref(swap_schema, stage_table)
                 dest_table = stage_table
+                # The rows go to the staged table: an INSERT naming the live
+                # table loaded the old dest and left the stage empty (D210).
+                insert_sql = (
+                    f"INSERT INTO {dest_ref} ({col_sql}) VALUES ({placeholders})"  # nosec B608
+                )
                 swap_at_end = True
                 exists = False
             if exists:
