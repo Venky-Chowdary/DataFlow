@@ -4061,9 +4061,9 @@ def code_page_sink_would_collapse(
     if not dest_db:
         return False
     src_engine = source_db or active_source_engine()
-    if not source_text_is_unicode(src_engine) and not source_column_holds_unicode(
-        src_engine, source_type
-    ):
+    # D212: only a source that declares a single-byte code page is safe on a
+    # code-page sink; an Oracle VARCHAR2 or an unstated MySQL charset is not.
+    if source_text_declared_single_byte(src_engine, source_type):
         return False
     if normalize_logical_type(source_type) not in {LOGICAL_STRING, LOGICAL_TEXT}:
         return False
@@ -4582,6 +4582,35 @@ def source_column_holds_unicode(source_db: str | None, source_type: str) -> bool
     return max_code_point > 0xFF
 
 
+def source_text_declared_single_byte(source_db: str | None, source_type: str) -> bool:
+    """True only when the source *declares* a single-byte code page for this column.
+
+    D212: a SQL Server code-page ``VARCHAR`` carrier is allowed only when the
+    source text cannot hold anything wider — a column declaring ``latin1`` /
+    ``cp1252`` / ``ascii`` (MySQL/MariaDB ``CHARACTER SET``/``COLLATE``,
+    Oracle ``WE8*``/``US7ASCII``), or SQL Server's own non-national ``VARCHAR``
+    on a non-UTF-8 collation. Everything else — an Oracle ``VARCHAR2`` on an
+    AL32UTF8 database, a MySQL column introspected without a charset, an
+    unbound engine — can hold non-ASCII text and must not land on a code page,
+    which stores '東京' as '??'.
+    """
+    text = strip_identity_qualifier(source_type or "")
+    if not text.strip() or is_national_string_carrier(text):
+        return False
+    if source_text_is_unicode(source_db):
+        return False
+    from services.encoding_capacity import classify_capacity, parse_declared_charset
+
+    if parse_declared_charset(source_type).strip():
+        cap = classify_capacity(source_db or "", source_type)
+        return cap.form in {"latin1", "cp1252", "ascii"} and 0 < cap.max_code_point <= 0xFF
+    if _normalize_dest_db(source_db or "") in _SQLSERVER_FAMILY:
+        # SQL Server VARCHAR/CHAR/TEXT is code-page text by declaration
+        # (a ``*_UTF8`` collation was answered by parse_declared_charset).
+        return normalize_logical_type(text) in {LOGICAL_STRING, LOGICAL_TEXT}
+    return False
+
+
 def unicode_safe_target_carrier(
     carrier: str,
     *,
@@ -4596,22 +4625,20 @@ def unicode_safe_target_carrier(
     ``?`` on write (``中`` has no Latin1 code point). When the source can only
     emit Unicode, the sole non-lossy create-new carrier is ``NVARCHAR``/
     ``NCHAR`` — the same default Microsoft's own SSMA applies. This is
-    preservation, not national invent: it never fires for a source whose text
-    is genuinely code-page bound (a ``latin1`` MySQL column, an unmeasured
-    Oracle database character set, SQL Server's own ``VARCHAR``), and never for
-    a ``_UTF8`` collation, where ``VARCHAR`` already holds the full repertoire.
-
-    The source engine answers for engines with no code-page text type at all;
-    engines that carry a per-column character set are answered by the column
-    (:func:`source_column_holds_unicode`).
+    preservation, not national invent. It stays a code page only when the
+    source *declares* a matching single-byte charset
+    (:func:`source_text_declared_single_byte`: a ``latin1`` MySQL column, SQL
+    Server's own ``VARCHAR``), and never fires for a ``_UTF8`` collation, where
+    ``VARCHAR`` already holds the full repertoire. An Oracle ``VARCHAR2`` or a
+    column whose charset nobody declared is Unicode-capable (D212).
     """
     text = (carrier or "").strip()
     if not text:
         return carrier
     if _normalize_dest_db(dest_db) not in _SQLSERVER_FAMILY:
         return carrier
-    if not source_text_is_unicode(source_db) and not source_column_holds_unicode(
-        source_db, source_type
+    if source_text_declared_single_byte(
+        source_db or active_source_engine(), source_type or text
     ):
         return carrier
     if is_national_string_carrier(text):
@@ -4805,6 +4832,10 @@ def national_charset_would_invent(
     if source_text_is_unicode(src_engine):
         return False
     if not is_national_string_carrier(target_type):
+        return False
+    # D212: a source that does not declare a single-byte charset can hold any
+    # scalar; the national carrier preserves it — no repertoire is invented.
+    if not source_text_declared_single_byte(src_engine, source_type):
         return False
     if source_column_holds_unicode(src_engine, source_type):
         from services.encoding_capacity import classify_capacity
