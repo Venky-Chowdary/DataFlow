@@ -33,6 +33,7 @@ from services.procedure_source import (
     CALLABLE_REFUSED_SYNC_MODES,
     PROCEDURE_DIALECTS,
     QUERY_ONLY_DIALECTS,
+    procedure_dialect,
     CallableSpec,
     ProcedureSourceError,
     compile_callable_sql,
@@ -257,8 +258,7 @@ def plan_dest_procedure(dest: Any) -> DestProcedurePlan | None:
     if (
         mode != MODE_QUERY
         and dialect_n
-        and dialect_n not in PROCEDURE_DIALECTS
-        and dialect_n != "generic_sql"
+        and procedure_dialect(dialect_n) not in PROCEDURE_DIALECTS
     ):
         raise ProcedureDestinationError(
             f"Destination stored procedure is not offered for '{dialect_n}'.",

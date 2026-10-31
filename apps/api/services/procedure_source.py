@@ -54,30 +54,25 @@ MODE_QUERY = "query"
 MODE_PROCEDURE = "procedure"
 CALLABLE_MODES = frozenset({MODE_QUERY, MODE_PROCEDURE})
 
-#: Dialects that can execute CALL/EXEC (or a set-returning function).
+#: Dialects that can execute CALL/EXEC (or a set-returning function). Keyed
+#: on engine family: a hosted tile is its family (:func:`procedure_dialect`).
 PROCEDURE_DIALECTS = frozenset({
     "postgresql",
-    "postgres",
-    "pgvector",
     "redshift",
     "mysql",
-    "mariadb",
     "sqlserver",
-    "mssql",
     "oracle",
     "snowflake",
     "generic_sql",
     "greenplum",
-    "cockroachdb",
-    "timescaledb",
-    "yugabytedb",
-    "alloydb",
-    "amazon_rds_postgresql",
-    "amazon_rds_mysql",
-    "amazon_rds_sql_server",
-    "azure_sql_database",
-    "microsoft_sql_server",
 })
+
+
+def procedure_dialect(dialect: str | None) -> str:
+    """The key the procedure dialect sets are looked up by."""
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(dialect)
 
 QUERY_ONLY_DIALECTS = frozenset({"sqlite", "duckdb"})
 
@@ -87,14 +82,7 @@ QUERY_ONLY_DIALECTS = frozenset({"sqlite", "duckdb"})
 # commits, MyISAM, SQL Server / Oracle autonomous work, Snowflake, PG-wire
 # lookalikes not proven here) is refused before confirm unless the operator
 # declares the result schema.
-PEEK_ROLLBACK_DIALECTS = frozenset({
-    "postgresql",
-    "postgres",
-    "pgvector",
-    "timescaledb",
-    "alloydb",
-    "amazon_rds_postgresql",
-})
+PEEK_ROLLBACK_DIALECTS = frozenset({"postgresql"})
 
 _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 _QUALIFIED = rf"(?:{_IDENT}\.){{0,2}}{_IDENT}"
@@ -532,6 +520,27 @@ def assert_callable_sync_allowed(sync_mode: str, source: Any) -> None:
         raise ProcedureSourceError(reason)
 
 
+def callable_stream_table(source: Any, cfg: Any, *, dialect: str = "") -> str:
+    """Stream label of a query / procedure source, or ``""`` for a table read.
+
+    The one answer every reader uses before any per-dialect table requirement:
+    a query-mode source has no table, and asking for one ("Source table name
+    required") refused every MySQL query-mode run (QA round 11).
+    """
+    if not (is_callable_source(source) or is_callable_source(cfg)):
+        return ""
+    try:
+        spec = parse_callable_source(
+            procedure_text_of(source) or procedure_text_of(cfg),
+            dialect=dialect,
+            mode=source_read_mode_of(source) or source_read_mode_of(cfg),
+            params=procedure_params_of(source) or procedure_params_of(cfg),
+        )
+        return stream_name_for_callable(spec)
+    except Exception:
+        return "procedure_result"
+
+
 def parse_callable_source(
     text: str,
     *,
@@ -573,7 +582,7 @@ def parse_callable_source(
             f"{dialect_n or 'This engine'} has no stored procedures — "
             "use Table or a read-only SELECT."
         )
-    if dialect_n and dialect_n not in PROCEDURE_DIALECTS and dialect_n != "generic_sql":
+    if dialect_n and procedure_dialect(dialect_n) not in PROCEDURE_DIALECTS:
         # generic_sql catalog tiles still flow as generic_sql; unknown leaf
         # dialects are allowed only when the operator typed CALL/EXEC explicitly.
         if not re.match(r"^\s*(CALL|EXEC|EXECUTE|SELECT)\b", stripped, re.IGNORECASE):
@@ -1394,7 +1403,10 @@ def _peek_without_executing(cfg: Mapping[str, Any], spec: CallableSpec) -> dict[
             spec.identifier, len(declared),
         )
         return declared
-    if dialect in PEEK_ROLLBACK_DIALECTS:
+    from src.transfer.engine_family import engine_flavour
+
+    # PostgreSQL itself, hosted or not; wire lookalikes (CockroachDB) are not proven.
+    if engine_flavour(dialect) in PEEK_ROLLBACK_DIALECTS:
         return None
     logger.warning(
         "procedure %s not executed before confirm: %s cannot guarantee a rollback of its side effects",

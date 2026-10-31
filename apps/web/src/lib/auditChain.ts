@@ -7,8 +7,14 @@
  */
 
 export type ChainVerdictReport = {
-  verified: boolean;
+  /** null: nothing was walked (no records, or the store could not be read). */
+  verified: boolean | null;
+  /** verified | findings | nothing_checked | store_unavailable (older APIs omit it). */
+  status?: string;
   checked: number;
+  /** The newest `checked` of `records_in_scope` were walked; older ones were not. */
+  truncated_by_limit?: boolean;
+  records_in_scope?: number;
   findings: Array<{ kind?: string; index?: number; event_id?: string; detail?: string; workspace_id?: string | null }>;
   /** Sent by older APIs; never shown — it is not this workspace's verdict. */
   withheld_findings?: number;
@@ -21,11 +27,23 @@ function reanchoredNote(report: ChainVerdictReport): string {
   return n ? ` (${n} re-anchored)` : "";
 }
 
+/** Nothing walked is never a verdict (A1): no records, or an unreadable store. */
+export function chainNotChecked(report: ChainVerdictReport): boolean {
+  return report.verified === null || report.status === "nothing_checked" || report.status === "store_unavailable";
+}
+
+function windowNote(report: ChainVerdictReport): string {
+  if (!report.truncated_by_limit || report.records_in_scope == null) return "";
+  return ` (newest ${report.checked} of ${report.records_in_scope})`;
+}
+
 export function chainVerdictTitle(report: ChainVerdictReport): string {
   const workspace = report.scope === "workspace";
+  if (report.status === "store_unavailable") return "Chain not checked — the audit store could not be read";
+  if (chainNotChecked(report)) return "Nothing to verify — no audit records were checked";
   if (report.verified) {
     const lead = workspace ? "This workspace's chain is intact" : "Chain intact";
-    return `${lead} — ${report.checked} records re-walked${reanchoredNote(report)}`;
+    return `${lead} — ${report.checked} records re-walked${windowNote(report)}${reanchoredNote(report)}`;
   }
   const findings = report.findings ?? [];
   if (!findings.length) return "Chain verification failed";
@@ -37,6 +55,8 @@ export function chainVerdictTitle(report: ChainVerdictReport): string {
 }
 
 export function chainVerdictToast(report: ChainVerdictReport): string {
+  if (report.status === "store_unavailable") return "The audit store could not be read; nothing was verified. Try again.";
+  if (chainNotChecked(report)) return "No audit records were found to check, so nothing was verified.";
   if (report.verified) {
     return `${report.checked} records re-walked — none altered or missing.`;
   }

@@ -117,4 +117,5 @@ def test_verify_pack_flags_a_pack_whose_chain_record_is_gone(client):
 
 
 def test_verify_pack_rejects_a_non_pack_body(client):
-    assert client.post("/api/v1/audit/verify-pack", json={}).status_code == 400
+    # PP3 (round 11): 422 naming the missing keys, the same as /transfer/proof-pack/verify.
+    assert client.post("/api/v1/audit/verify-pack", json={}).status_code == 422

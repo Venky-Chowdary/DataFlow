@@ -84,7 +84,7 @@ def _lead(question: str) -> str:
         ("who can export audit logs", ("audit.read",), ("signed soc 2", "type ii letter")),
         ("can I export audit logs as CSV", ("csv", "audit"), ("select format csv", "file export")),
         ("do you support IP allowlists", ("ip allowlist",), ("mfa_enforced",)),
-        ("can I require MFA", ("login mfa is not wired",), ("ip allowlist",)),
+        ("can I require MFA", ("two-factor", "totp"), ("ip allowlist", "not wired")),
         ("where is the CDC watermark stored", ("resume token",), ("separate run", "exactly-once delivery")),
         ("can I set a watermark", ("resume token", "watermark"), ("separate run",)),
         ("what is the difference between incremental and upsert", ("cursor-bounded",), ("upsert is a sync mode", "merge into")),

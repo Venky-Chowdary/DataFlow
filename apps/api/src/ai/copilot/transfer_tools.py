@@ -856,6 +856,8 @@ def plan_transfer(
     ddl_acknowledgement: dict[str, Any] | None = None,
     vector_layout: str = "",
     delete_mode: str = "",
+    foreign_keys: str = "",
+    fk_risk_acknowledged: bool = False,
 ):
     """Plan a real transfer: live schemas, real mapping, real preflight gates.
 
@@ -873,6 +875,12 @@ def plan_transfer(
     unapplied = [str(q) for q in (rule_questions or []) if str(q or "").strip()]
     if unapplied:
         return _tool_result(tool, success=False, error=_unapplied_rules_error(unapplied))
+    from src.transfer.stream_foreign_keys import fk_route_policy
+
+    try:
+        fk_policy = fk_route_policy({"extra": {"foreign_keys_mode": foreign_keys}})
+    except ValueError as exc:
+        return _tool_result(tool, success=False, error=str(exc))
     if all_tables and not src_table:
         return _tool_result(
             tool,
@@ -1316,6 +1324,8 @@ def plan_transfer(
             schema_drift_acknowledged=bool(schema_drift_acknowledged),
             ddl_ack=ddl_ack,
             shape_recipe=shape_recipe or None,
+            foreign_keys=fk_policy,
+            fk_risk_acknowledged=bool(fk_risk_acknowledged),
         )
         if (
             _contract_pass == 2
@@ -1392,7 +1402,9 @@ def plan_transfer(
                 "column_count": len(dst_rows),
                 "table_exists": dest_exists,
                 **({"vector_layout": contract["layout"]} if contract else {}),
+                **({"foreign_keys_mode": fk_policy} if fk_policy != "carry" else {}),
             },
+            "fk_risk_acknowledged": bool(fk_risk_acknowledged),
             # D209: the physical shape the job creates, column by column.
             **({"destination_contract": contract} if contract else {}),
             # Mirror: what happens to destination rows whose key left the source.
@@ -1909,8 +1921,11 @@ def _run_preflight(
     schema_drift_acknowledged: bool = False,
     ddl_ack: dict[str, str] | None = None,
     shape_recipe: dict[str, Any] | None = None,
+    foreign_keys: str = "",
+    fk_risk_acknowledged: bool = False,
 ) -> dict[str, Any]:
     """Run the real 9 gates and persist the run so the operator can cite it."""
+    from services.fk_parent_preflight import with_fk_route_option
     from services.population_fit_scan import STUDIO_FIT_SCAN_SECONDS
     from services.preflight_run_store import save_preflight_run
     from services.preflight_service import (
@@ -2096,7 +2111,10 @@ def _run_preflight(
             destination_dynamo_index_attributes=dict(
                 dest_probe.get("dynamo_index_attributes") or {}
             ),
-            destination_config=dest_probe.get("_probe_cfg") or None,
+            destination_config=with_fk_route_option(
+                dest_probe.get("_probe_cfg"), foreign_keys
+            ),
+            fk_risk_acknowledged=bool(fk_risk_acknowledged),
             source_kind=source_kind or "database",
             source_format=src_db_type,
             source_table=src_table,
@@ -2575,6 +2593,8 @@ def start_transfer(
     ddl_acknowledgement: dict[str, Any] | None = None,
     vector_layout: str = "",
     delete_mode: str = "",
+    foreign_keys: str = "",
+    fk_risk_acknowledged: bool = False,
 ):
     """Stage a transfer for explicit Confirm. This never moves data by itself."""
     tool = "start_transfer"
@@ -2611,6 +2631,8 @@ def start_transfer(
         ddl_acknowledgement=ddl_acknowledgement,
         vector_layout=vector_layout,
         delete_mode=delete_mode,
+        foreign_keys=foreign_keys,
+        fk_risk_acknowledged=fk_risk_acknowledged,
         # The plan evaluates the bound contract against this route (QA MX3-18).
         contract_id=contract_id,
         require_signed_contract=require_signed_contract,
@@ -2709,13 +2731,21 @@ def start_transfer(
             "connector_id": destination["connector_id"],
             "schema": destination.get("schema") or "",
             "table": destination["table"],
-            # D209: the job builds the layout the plan showed.
+            # D209: the job builds the layout the plan showed; the FK route
+            # option rides the same destination options.
             **(
-                {"extra": {"vector_layout": destination["vector_layout"]}}
-                if destination.get("vector_layout")
+                {
+                    "extra": {
+                        k: destination[k]
+                        for k in ("vector_layout", "foreign_keys_mode")
+                        if destination.get(k)
+                    }
+                }
+                if destination.get("vector_layout") or destination.get("foreign_keys_mode")
                 else {}
             ),
         },
+        "fk_risk_acknowledged": bool(plan.get("fk_risk_acknowledged")),
         "mappings": engine_mappings,
         "column_types": plan.get("column_types") or {},
         "sync_mode": plan.get("sync_mode"),

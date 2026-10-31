@@ -81,31 +81,24 @@ def overwrite_replaces_rows(dest_db_type: str | None) -> bool:
 # Overwrite of an existing relational table empties rows in place. DROP+CREATE
 # threw away primary key, unique, NOT NULL, check, foreign key and identity
 # (DEF-V7-E1-021). Warehouses that still DROP stay on the recreate path.
+# Keyed on ``overwrite_engine_kind``: a duplex SQL tile is already its family.
 _OVERWRITE_KEEPS_EXISTING_TABLE = frozenset({
     "postgresql",
     "redshift",
     "mysql",
-    "mariadb",
     "sqlite",
     "oracle",
     "sqlserver",
     "generic_sql",
-    "cockroachdb",
     "greenplum",
-    "timescaledb",
     "db2",
     "teradata",
 })
 
 
+# T-SQL engines without the SQL Server driver (duplex tiles fold through
+# ``normalize_dest_kind``).
 _SQLSERVER_OVERWRITE_ALIASES = frozenset({
-    "mssql",
-    "sql_server",
-    "microsoft_sql_server",
-    "azure_sql",
-    "azure_sql_database",
-    "amazon_rds_sql_server",
-    "google_cloud_sql_sql_server",
     "synapse",
     "synapse_analytics",
     "azure_synapse_dedicated",
@@ -122,8 +115,6 @@ def overwrite_engine_kind(dest_db_type: str | None) -> str:
     kind = normalize_dest_kind(dest_db_type)
     if kind in _SQLSERVER_OVERWRITE_ALIASES or kind.startswith("mssql"):
         return "sqlserver"
-    if kind in {"postgres", "pg"}:
-        return "postgresql"
     return kind
 
 
@@ -161,6 +152,11 @@ def normalize_dest_kind(dest_db_type: str | None, default: str = "") -> str:
     raw = (dest_db_type or default).strip().lower().replace(" ", "_")
     if not raw:
         return ""
+    from src.transfer.engine_family import sql_duplex_family
+
+    family = sql_duplex_family(raw)
+    if family:
+        return family
     if raw in _DB_TYPE_ALIASES:
         return _DB_TYPE_ALIASES[raw]
     if raw.startswith("mongodb"):

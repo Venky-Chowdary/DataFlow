@@ -87,6 +87,7 @@ from services.engine_pool import release_engine
 from services.error_handling import TransferCancelled
 from services.identity_carry import identity_seed_step
 from services.value_serializer import cell_to_string
+from src.transfer.engine_family import FamilyMembers
 
 _gsql = sys.modules[__name__]
 
@@ -428,7 +429,9 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
 
 
 def _drivername(db_type: str) -> str:
-    return _DRIVERNAME_MAP.get(db_type, db_type)
+    from src.transfer.engine_family import family_or_kind
+
+    return _DRIVERNAME_MAP.get(db_type) or _DRIVERNAME_MAP.get(family_or_kind(db_type), db_type)
 
 
 def _mssql_odbc_driver() -> str | None:
@@ -626,7 +629,9 @@ class _MssqlQmarkConnection:
 
 
 def _default_port(db_type: str) -> int:
-    return _DEFAULT_PORT_MAP.get(db_type, 0)
+    from src.transfer.engine_family import family_or_kind
+
+    return _DEFAULT_PORT_MAP.get(db_type) or _DEFAULT_PORT_MAP.get(family_or_kind(db_type), 0)
 
 
 def _normalize_sqlite_url(url: str) -> str:
@@ -722,29 +727,26 @@ CONNECTION_OPTION_KEYS: tuple[str, ...] = (
 
 
 def connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
-    """The connection-affecting extras in ``cfg`` (see :data:`CONNECTION_OPTION_KEYS`)."""
+    """The connection-affecting extras in ``cfg`` (see :data:`CONNECTION_OPTION_KEYS`).
+
+    A saved connector keeps them under ``extra`` (the Connectors form saves
+    TLS trust there); a top-level value wins. Reading only the top level
+    dropped ``trust_server_certificate`` on every path that built its cfg from
+    the saved record (introspect, sample, preflight read), so ODBC Driver 18
+    refused a self-signed SQL Server while the writer, which flattened
+    ``extra``, connected (QA round 11).
+    """
+    nested = cfg.get("extra") if isinstance(cfg.get("extra"), Mapping) else {}
     return {
-        key: cfg[key]
+        key: cfg[key] if cfg.get(key) not in (None, "") else nested[key]
         for key in CONNECTION_OPTION_KEYS
-        if cfg.get(key) not in (None, "")
+        if cfg.get(key) not in (None, "") or nested.get(key) not in (None, "")
     }
 
 
 def with_connection_options(cfg: Mapping[str, Any]) -> dict[str, Any]:
-    """Top-level handshake keywords, including those nested under ``extra``.
-
-    Dest COUNT, uniqueness, and engine pooling all key off top-level TLS /
-    SID / driver fields. Leaving ``trust_server_certificate`` inside
-    ``endpoint.extra`` made the writer and dest COUNT open a different
-    handshake than Validate (ODBC Driver 18 verify-or-fail vs operator trust).
-    """
-    extra = cfg.get("extra") if isinstance(cfg.get("extra"), dict) else {}
-    opts = connection_options({**extra, **dict(cfg)})
-    if not opts:
-        return dict(cfg)
-    merged = dict(cfg)
-    merged.update(opts)
-    return merged
+    """``cfg`` with its handshake keywords, nested ``extra`` ones included, top level."""
+    return {**dict(cfg), **connection_options(cfg)}
 
 
 def _build_url(cfg: dict[str, Any]) -> str | sa.URL:
@@ -1166,19 +1168,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # Before the first connect, so NUMBER is text+Decimal, not float64.
             install_oracle_exact_fetch()
         if (
-            db_type in {
-                "mssql",
-                "sql_server",
-                "sqlserver",
-                "microsoft_sql_server",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "synapse_analytics",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-            }
-            or "mssql" in driver
+            "mssql" in driver
         ):
             from connectors.sqlserver_datetime2 import install_sqlserver_datetime2_bind
 
@@ -1197,19 +1187,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
 
         # SQL Server: refuse silent VARCHAR truncation at the session level.
         if (
-            db_type in {
-                "mssql",
-                "sql_server",
-                "sqlserver",
-                "microsoft_sql_server",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "synapse_analytics",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-            }
-            or "mssql" in driver
+            "mssql" in driver
         ):
             from connectors.write_resilience import apply_mssql_session_guards
 
@@ -1480,11 +1458,10 @@ _DuckDBJSON = _ExactJSON
 #: Dialects whose catalogs fold unquoted identifiers to a single case.
 _FOLDING_DIALECTS: Final = {"oracle", "snowflake", "db2", "ibm_db_sa"}
 
-_ORACLE_WIRES: Final = {"oracle", "oracledb", "oracle_autonomous", "oracle_adw", "oracle_atp"}
-
-
-_MSSQL_WIRES: Final = {"sqlserver", "mssql", "azure_sql", "synapse", "azure_synapse"}
-_MYSQL_WIRES: Final = {"mysql", "mariadb", "tidb", "singlestore"}
+# Wire membership comes from the one engine resolver (hosted tiles included).
+_ORACLE_WIRES: Final = FamilyMembers("oracle")
+_MSSQL_WIRES: Final = FamilyMembers("sqlserver", also=("synapse", "azure_synapse"))
+_MYSQL_WIRES: Final = FamilyMembers("mysql")
 
 
 def physical_table_spelling(

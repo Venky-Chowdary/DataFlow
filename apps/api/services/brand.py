@@ -73,6 +73,15 @@ ARTIFACTS: dict[str, Artifact] = dict([
        "exactly-once CDC watermark table on Oracle", True),
     _a("api_key_prefix", "dfk_", "dwk_", "external",
        "prefix of a newly minted workspace API key (both prefixes authenticate)", True),
+    # Per-run landing table: dropped and recreated by every staged run, its name
+    # recorded on the job (rollback plans read it from there), so a run under
+    # either name never forks state.
+    _a("pre_ingestion_staging_table", "_df_staging", "_dw_staging", "table_suffix",
+       "write_via_staging landing table <table>_df_staging (refreshed every run)", True),
+    # Read where the connector names no dataset; a dataset the connector names
+    # is never replaced, so only connectors that never named one move.
+    _a("bigquery_default_dataset", "dataflow", "datawrap", "external",
+       "BigQuery dataset used when the connector names none", True),
     # -- recognised, listed by the dry run, NOT switched yet --------------------
     _a("cdc_lsn_column", "_df_lsn", "_dw_lsn", "column",
        "CDC monotonic-apply column on every CDC destination table"),
@@ -134,8 +143,6 @@ ARTIFACTS: dict[str, Artifact] = dict([
        "temporary file names on SFTP / local destinations and the preflight write probe"),
     _a("saas_idempotency_key_prefix", "dataflow-", "datawrap-", "external",
        "idempotency keys sent to Stripe / Shopify / Airtable"),
-    _a("bigquery_default_dataset", "dataflow", "datawrap", "external",
-       "BigQuery dataset used when the connector names none"),
     _a("snowflake_default_schema", "DATAFLOW", "DATAWRAP", "external",
        "Snowflake schema used by the COPY route when none is configured"),
 ])
@@ -282,7 +289,7 @@ def audit_new_name(kind: str, name: str, target: str) -> None:
                 "name": name,
                 "legacy_name": art.legacy,
                 "where": art.where,
-                "flag": f"DATAWRAP_{OBJECT_NAMES_FLAG}",
+                "flag": OBJECT_NAMES_FLAG.lower(),
             },
             reason_code="brand_object_names_flag",
         )
@@ -300,3 +307,14 @@ def new_marker_comment(table: str) -> str:
 
 def session_application_name() -> str:
     return name_for_new("session_application_name")
+
+
+def bigquery_default_dataset() -> str:
+    """The BigQuery dataset used when the connector names none (flag-dependent)."""
+    return name_for_new("bigquery_default_dataset")
+
+
+def bigquery_dataset_of(cfg: dict | None) -> str:
+    """The connector's own dataset, else the default. Blank counts as unnamed."""
+    named = str((cfg or {}).get("schema") or "").strip()
+    return named or bigquery_default_dataset()

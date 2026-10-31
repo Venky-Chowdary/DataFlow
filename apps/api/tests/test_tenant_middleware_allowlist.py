@@ -1,4 +1,4 @@
-"""Tenant IP allowlist: public-path matching must not switch the allowlist off."""
+"""Workspace IP allowlist: public paths, kill switch and break-glass at the middleware."""
 
 from __future__ import annotations
 
@@ -63,28 +63,42 @@ def test_public_paths_stay_public(path):
 
 @pytest.fixture
 def client(monkeypatch):
+    """The real allowlist middleware behind a stub auth layer.
+
+    Since QA round 11 the list is enforced after auth by
+    WorkspaceIpAllowlistMiddleware (every host, sessions and API keys);
+    tests/test_r11_security_enforcement_e2e.py drives it through src.main.
+    Here the workspace resolution and client address are pinned so this
+    suite only exercises public paths, the kill switch and break-glass.
+    """
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
+    from starlette.middleware.base import BaseHTTPMiddleware
 
-    tenant = Tenant(
-        id="t-acme",
-        workspace_id="ws-acme",
-        custom_domain="acme.example.com",
-        ip_allowlist=[ALLOWED_IP],
-    )
-    # Client-IP resolution has its own trust-boundary tests; pin it here so
-    # this suite only exercises public-path matching and the allowlist.
-    monkeypatch.setattr(
-        tm, "_client_ip", lambda request: request.headers.get("x-test-client-ip", "")
-    )
-    monkeypatch.setattr(
-        tm,
-        "resolve_tenant_from_host",
-        lambda host: tenant if host == "acme.example.com" else None,
-    )
+    from services import ip_allowlist_policy as policy
+    from src.middleware import workspace_ip_allowlist_middleware as wm
+    from src.services import auth_service
+
+    tenant = Tenant(id="t-acme", workspace_id="ws-acme", ip_allowlist=[ALLOWED_IP])
+    monkeypatch.setattr(auth_service, "auth_required", lambda: True)
+    monkeypatch.setattr(policy, "client_ip_from_request",
+                        lambda request: request.headers.get("x-test-client-ip", ""))
+    monkeypatch.setattr(policy, "_request_workspaces",
+                        lambda request: ({"ws-acme"}, request.headers.get("x-test-platform-admin") == "1"))
+    monkeypatch.setattr("services.tenant_store.tenants_for_workspaces", lambda ids: [tenant])
+    events: list = []
+    monkeypatch.setattr(wm, "record_security_event", lambda event, **kw: events.append((event, kw)))
+
+    class _StubAuth(BaseHTTPMiddleware):
+        async def dispatch(self, request, call_next):
+            if request.headers.get("x-test-user"):
+                request.state.user_email = request.headers["x-test-user"]
+                request.state.user = {"email": request.state.user_email, "role": "editor"}
+            return await call_next(request)
 
     app = FastAPI()
-    app.add_middleware(tm.TenantMiddleware)
+    app.add_middleware(wm.WorkspaceIpAllowlistMiddleware)
+    app.add_middleware(_StubAuth)
 
     @app.get("/")
     def root():
@@ -98,36 +112,52 @@ def client(monkeypatch):
     def connectors():
         return {"ok": True}
 
-    return TestClient(app)
+    c = TestClient(app)
+    c.events = events
+    return c
 
 
-def _get(client, path: str, ip: str, host: str = "acme.example.com"):
-    return client.get(path, headers={"host": host, "x-test-client-ip": ip})
+def _get(client, path: str, ip: str, **extra):
+    return client.get(path, headers={"x-test-user": "u@example.com", "x-test-client-ip": ip, **extra})
 
 
-def test_allowlist_blocks_disallowed_ip_on_api_path(client, monkeypatch):
-    monkeypatch.setenv("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE", "1")
+@pytest.fixture
+def enforce_default(monkeypatch):
+    monkeypatch.delenv("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE", raising=False)
+    monkeypatch.delenv("DATAWRAP_TENANT_IP_ALLOWLIST_ENFORCE", raising=False)
+
+
+def test_allowlist_blocks_disallowed_ip_by_default(client, enforce_default):
     resp = _get(client, "/api/v1/connectors", BLOCKED_IP)
     assert resp.status_code == 403
-    assert resp.json()["detail"] == "Access denied by tenant IP allowlist"
+    assert resp.json()["reason"] == "ip_not_in_workspace_allowlist"
+    assert [e for e, _ in client.events] == ["workspace.ip_allowlist.blocked"]
+    assert client.events[0][1]["workspace_id"] == "ws-acme"
 
 
-def test_allowlist_admits_allowed_ip_on_api_path(client):
+def test_allowlist_admits_allowed_ip_on_api_path(client, enforce_default):
     assert _get(client, "/api/v1/connectors", ALLOWED_IP).status_code == 200
+    assert client.events == []
 
 
 @pytest.mark.parametrize("path", ["/", "/health"])
-def test_public_paths_skip_allowlist(client, path):
+def test_public_paths_skip_allowlist(client, enforce_default, path):
     assert _get(client, path, BLOCKED_IP).status_code == 200
 
 
-def test_non_tenant_host_is_not_filtered(client):
-    assert (
-        _get(
-            client, "/api/v1/connectors", BLOCKED_IP, host="other.example.com"
-        ).status_code
-        == 200
-    )
+def test_unauthenticated_requests_are_left_to_auth(client, enforce_default):
+    res = client.get("/api/v1/connectors", headers={"x-test-client-ip": BLOCKED_IP})
+    assert res.status_code == 200  # the stub has no auth; the real app 401s first
+
+
+def test_break_glass_needs_a_platform_admin_and_a_reason(client, enforce_default):
+    glass = {"X-Datawrap-Break-Glass": "INC-1 restore customer access"}
+    assert _get(client, "/api/v1/connectors", BLOCKED_IP, **glass).status_code == 403
+    assert _get(client, "/api/v1/connectors", BLOCKED_IP, **{"x-test-platform-admin": "1",
+                "X-Datawrap-Break-Glass": "short"}).status_code == 403
+    ok = _get(client, "/api/v1/connectors", BLOCKED_IP, **{"x-test-platform-admin": "1", **glass})
+    assert ok.status_code == 200
+    assert [e for e, _ in client.events][-1] == "workspace.ip_allowlist.break_glass"
 
 
 def test_every_unauthenticated_route_stays_reachable_on_allowlisted_tenant():
@@ -162,34 +192,27 @@ def test_webhooks_signup_and_verify_skip_allowlist(client, path):
     assert tm._is_public_path(path) is True
 
 
-def test_enforcement_is_off_by_default_and_audits_would_block(client, monkeypatch):
-    """Default = production behaviour before the fix: nothing is blocked, but
-    the request that the allowlist would have blocked leaves an audit entry."""
+@pytest.mark.parametrize("off", ["0", "false", "off", "no"])
+def test_kill_switch_off_admits_and_audits_would_block(client, monkeypatch, off):
+    """The platform kill switch: nothing is blocked, but the request that the
+    allowlist would have blocked leaves an audit entry."""
     monkeypatch.delenv("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE", raising=False)
-    monkeypatch.delenv("DATAWRAP_TENANT_IP_ALLOWLIST_ENFORCE", raising=False)
-    events = []
-    monkeypatch.setattr(
-        tm, "record_security_event", lambda event, **kw: events.append((event, kw))
-    )
+    monkeypatch.setenv("DATAWRAP_TENANT_IP_ALLOWLIST_ENFORCE", off)
 
     assert _get(client, "/api/v1/connectors", BLOCKED_IP).status_code == 200
     assert _get(client, "/api/v1/connectors", ALLOWED_IP).status_code == 200
     assert _get(client, "/health", BLOCKED_IP).status_code == 200
 
-    assert [e for e, _ in events] == ["tenant.ip_allowlist.would_block"]
-    kw = events[0][1]
+    assert [e for e, _ in client.events] == ["tenant.ip_allowlist.would_block"]
+    kw = client.events[0][1]
     assert kw["details"]["tenant_id"] == "t-acme"
     assert kw["details"]["path"] == "/api/v1/connectors"
     assert kw["details"]["client_ip"] == BLOCKED_IP
 
 
-def test_would_block_event_is_registered():
+def test_allowlist_events_are_registered():
     from services.audit_coverage import SECURITY_EVENTS
 
-    assert "tenant.ip_allowlist.would_block" in SECURITY_EVENTS
-
-
-def test_enforce_flag_off_values_do_not_block(client, monkeypatch):
-    monkeypatch.setenv("DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE", "0")
-    monkeypatch.setattr(tm, "record_security_event", lambda *a, **k: None)
-    assert _get(client, "/api/v1/connectors", BLOCKED_IP).status_code == 200
+    for name in ("tenant.ip_allowlist.would_block", "workspace.ip_allowlist.blocked",
+                 "workspace.ip_allowlist.break_glass", "workspace.ip_allowlist.lockout_refused"):
+        assert name in SECURITY_EVENTS

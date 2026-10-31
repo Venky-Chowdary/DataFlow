@@ -1178,18 +1178,7 @@ CAPABILITY_REGISTRY: dict[str, dict[str, Any]] = {
 
 # Aliases used by the UI, connectors, and driver layer.
 CONNECTOR_ALIASES: dict[str, str] = {
-    "postgres": "postgresql",
-    "pg": "postgresql",
-    "mysql2": "mysql",
-    "mariadb": "mysql",
-    "mssql": "sqlserver",
-    "sql_server": "sqlserver",
     "ms_sql": "sqlserver",
-    "azure_sql": "sqlserver",
-    "azure_sql_database": "sqlserver",
-    "amazon_rds_sql_server": "sqlserver",
-    "oracle_db": "oracle",
-    "oracle_autonomous_warehouse": "oracle",
     "mongo": "mongodb",
     "documentdb": "mongodb",
     "document_db": "mongodb",
@@ -1225,8 +1214,12 @@ CONNECTOR_ALIASES: dict[str, str] = {
 
 
 def _normalize_connector_id(key: str) -> str:
+    from src.transfer.engine_family import sql_duplex_family
+
     k = (key or "").lower().strip()
-    return CONNECTOR_ALIASES.get(k, k)
+    if k in CONNECTOR_ALIASES or k in CAPABILITY_REGISTRY:
+        return CONNECTOR_ALIASES.get(k, k)
+    return sql_duplex_family(k) or k
 
 
 def _align_registry_honesty() -> None:

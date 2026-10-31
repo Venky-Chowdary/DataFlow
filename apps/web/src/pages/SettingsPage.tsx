@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { STUDIO_CANVAS_KEY, STUDIO_SCHEMA_BROWSER_KEY, writeLocalStudioFlag } from "../lib/studioFlags";
 import { DtIcon } from "../components/DtIcon";
 import { ChangeEmailCard } from "../components/ChangeEmailCard";
+import { TwoFactorCard } from "../components/TwoFactorCard";
 import { Button } from "../components/ui/Button";
 import { EmptyState } from "../components/ui/EmptyState";
 import { SectionLoader } from "../components/LoadingState";
@@ -21,7 +22,7 @@ import { type PlatformLock, platformLock, UNLOCKED } from "../lib/platformSettin
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
-import { chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
+import { chainNotChecked, chainVerdictTitle, chainVerdictToast } from "../lib/auditChain";
 import { auditActorLabel } from "../lib/auditActor";
 import { buildSsoPatch, missingForEnable } from "../lib/ssoSettings";
 import { providerHasTest, providerTestLabel, providerTestToast } from "../lib/aiProviderTest";
@@ -640,10 +641,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     try {
       const report = await verifyAuditChain();
       setChainReport(report);
+      const notChecked = chainNotChecked(report);
       toast({
-        title: report.verified ? "Chain verified" : "Chain verification failed",
+        title: notChecked ? "Nothing verified" : report.verified ? "Chain verified" : "Chain verification failed",
         message: chainVerdictToast(report),
-        tone: report.verified ? "success" : "error",
+        tone: notChecked ? "warning" : report.verified ? "success" : "error",
       });
     } catch (err) {
       setChainReport(null);
@@ -955,6 +957,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   </span>
                 </div>
                 <div className="df2-settings-section-body">
+                  <TwoFactorCard />
                   {postureLoading && <p className="df2-cell-meta">Loading security posture…</p>}
                   {!postureLoading && posture && (
                     <>
@@ -967,7 +970,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           ipAllowlistRow(posture),
                           { title: "Connector egress", desc: egressCopy, on: egress === "on", pending: egress === "unknown" },
                           sessionTimeoutRow(posture),
-                          mfaRow(),
+                          mfaRow(posture),
                         ].map((item) => (
                           <div key={item.title} className="df2-settings-policy-row" data-testid={item.title === "Connector egress" ? "connector-egress-row" : undefined}>
                             <div>
@@ -1081,7 +1084,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           { title: "PII detection", desc: "Sensitive column tagging at ingest and mapping review." },
                           { title: "IP allowlisting", desc: "Restrict API and MCP access to approved CIDR ranges." },
                           { title: "Session timeout", desc: "Automatically sign out idle workspace sessions." },
-                          { title: "MFA required for admins", desc: "Enforce multi-factor authentication for owner and admin roles." },
+                          { title: "Two-factor authentication", desc: "Require an authenticator-app code at every password sign-in." },
                         ].map((item) => (
                           <div key={item.title} className="df2-settings-policy-row">
                             <div>
@@ -1525,7 +1528,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-section-body">
                   {chainReport && (
                     <div
-                      className={`df2-chain-verdict ${chainReport.verified ? "is-ok" : "is-broken"}`}
+                      className={`df2-chain-verdict ${chainNotChecked(chainReport) ? "is-unknown" : chainReport.verified ? "is-ok" : "is-broken"}`}
                       role="status"
                     >
                       <strong>{chainVerdictTitle(chainReport)}</strong>

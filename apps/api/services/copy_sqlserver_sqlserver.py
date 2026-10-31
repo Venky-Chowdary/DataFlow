@@ -52,23 +52,11 @@ _INTEGER_PK_TYPES = frozenset({
     "bigint",
 })
 
-_SQLSERVER_FAMILY = frozenset({
-    "sqlserver",
-    "mssql",
-    "sql_server",
-    "microsoft_sql_server",
-    "azure_sql",
-    "azure_sql_database",
-    "amazon_rds_sql_server",
-    "google_cloud_sql_sql_server",
-})
-
-
 def sqlserver_family_name(engine: str | None) -> str:
-    raw = (engine or "").strip().lower()
-    if raw in _SQLSERVER_FAMILY:
-        return "sqlserver"
-    return raw
+    """Duplex family from the one resolver; any other kind as given."""
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(engine)
 
 
 def sqlserver_sqlserver_insert_select_enabled() -> bool:
@@ -216,11 +204,14 @@ def _ss_table_pk_and_types(
     cur: Any, schema: str, table: str, columns: list[str]
 ) -> tuple[list[str], dict[str, str]]:
     obj = _object_id_name(schema, table)
+    # TYPE_NAME(system_type_id) is the column's base type. Joining sys.types
+    # on system_type_id alone also matched the built-in alias ``sysname``
+    # (system_type_id 231, like nvarchar), which then overwrote ``nvarchar``:
+    # every NVARCHAR column was re-created as SYSNAME — NVARCHAR(128) NOT
+    # NULL — so the first NULL or long cell failed the copy (QA round 11).
     cur.execute(
-        "SELECT c.name, ty.name, c.max_length, c.precision, c.scale "
+        "SELECT c.name, TYPE_NAME(c.system_type_id), c.max_length, c.precision, c.scale "
         "FROM sys.columns c "
-        "JOIN sys.types ty ON c.system_type_id = ty.system_type_id "
-        "AND ty.is_user_defined = 0 "
         "WHERE c.object_id = OBJECT_ID(%s) "
         "ORDER BY c.column_id",
         (obj,),
@@ -282,7 +273,13 @@ def _create_sql(
     )
     cols: list[str] = []
     for (_source, target), ddl in zip(pairs, ddls):
-        cols.append(f"{_ident(target)} {ddl}{carry.column_suffix(target)}")
+        suffix = carry.column_suffix(target)
+        keyed = target in (carry.primary_key or ()) or target in pk_dest
+        if "NOT NULL" not in suffix.upper() and not keyed:
+            # Say NULL: an unstated column follows the session's
+            # ANSI_NULL_DFLT, which is OFF on a FreeTDS (pymssql) connection.
+            suffix += " NULL"
+        cols.append(f"{_ident(target)} {ddl}{suffix}")
     if carry.primary_key:
         pk_sql = ", ".join(_ident(c) for c in carry.primary_key)
         constraint = f"PK_{dest_table}"[:128]

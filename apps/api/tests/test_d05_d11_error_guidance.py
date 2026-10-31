@@ -11,7 +11,9 @@ def test_d05_egress_refusal_names_the_allowlist():
 
     refusal = metadata_endpoint_refusal("127.0.0.1", allowlist=())
     assert refusal
-    assert "DATAFLOW_EGRESS_ALLOWLIST" in refusal
+    # Round 11 (B1): it names the setting a user can change, never a server variable.
+    assert "workspace egress allowlist" in refusal
+    assert "DATAFLOW_" not in refusal and "DATAWRAP_" not in refusal
     assert "127.0.0.0/8" in refusal
 
 

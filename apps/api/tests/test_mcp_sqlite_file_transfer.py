@@ -291,7 +291,8 @@ def test_mcp_loads_sample_payments_into_sqlite(mcp_client):
     after = get_schedule(schedule_id)
     assert after is not None
     assert after.cron == "0 3 * * *"
-    assert after.interval == "daily"
+    # A cron is its own preset (QA round 11 SC8), never "daily" beside it.
+    assert after.interval == "cron"
     assert after.mappings == mappings_before
     assert after.source_connector_id == stored.source_connector_id
     assert after.dest_table == stored.dest_table

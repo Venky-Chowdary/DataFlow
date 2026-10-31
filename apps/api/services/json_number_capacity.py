@@ -36,15 +36,21 @@ _DECIMAL128_EXP = (-6176, 6111)
 _SNOWFLAKE_DIGITS = 38
 _SNOWFLAKE_SCALE = 37
 
-_MYSQL_FAMILY = frozenset({"mysql", "tidb", "aurora_mysql", "aurora-mysql", "singlestore"})
 _SNOWFLAKE_JSON = frozenset({"VARIANT", "OBJECT", "ARRAY"})
+
+
+def _mysql_json_is_double(engine: str) -> bool:
+    """MySQL-family JSON parses numbers to double; MariaDB's JSON is text."""
+    from src.transfer.engine_family import engine_flavour, sql_duplex_family
+
+    return sql_duplex_family(engine) == "mysql" and engine_flavour(engine) != "mariadb"
 
 
 def json_number_capacity(engine: Any, ddl_type: Any) -> str | None:
     """``"double"`` / ``"bson"`` / ``"snowflake"``, or ``None`` when exact."""
     eng = str(engine or "").strip().lower()
     base = str(ddl_type or "").strip().upper().split("(", 1)[0].strip()
-    if eng in _MYSQL_FAMILY and base == "JSON":
+    if base == "JSON" and _mysql_json_is_double(eng):
         return "double"
     if eng in {"mongodb", "mongo", "documentdb", "cosmosdb_mongo"}:
         return "bson"

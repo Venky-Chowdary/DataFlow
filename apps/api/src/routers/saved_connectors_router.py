@@ -95,6 +95,43 @@ class ConnectorSaveDTO(BaseModel):
         return self
 
 
+class ConnectorPatchDTO(BaseModel):
+    """Partial edit: every field optional; an absent or null field is unchanged.
+
+    PUT replaces the whole connector, so a client sending one field reset every
+    other one to its default. PATCH merges over the stored row (QA round 11,
+    P4); the merged connector passes the same request bounds as a save.
+    """
+
+    model_config = ConfigDict(populate_by_name=True, extra="forbid")
+
+    name: str | None = None
+    type: str | None = None
+    role: str | None = None
+    host: str | None = None
+    port: int | None = None
+    database: str | None = None
+    username: str | None = None
+    password: str | None = None
+    db_schema: str | None = Field(default=None, alias="schema")
+    connection_string: str | None = None
+    ssl: bool | None = None
+    warehouse: str | None = None
+    auth_mode: str | None = None
+    auth_role: str | None = None
+    api_key: str | None = None
+    service_account: str | None = None
+    private_key: str | None = None
+    endpoint_url: str | None = None
+    path_style: bool | None = None
+    auth_source: str | None = None
+    host_key: str | None = None
+    known_hosts: str | None = None
+    host_key_policy: str | None = None
+    trust_server_certificate: bool | None = None
+    group_id: str | None = None
+
+
 def _actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
@@ -298,6 +335,53 @@ def update_saved_connector(
     if not updated:
         raise HTTPException(status_code=404, detail="Connector not found")
     _persist_form_test_status(connector_id, form_test)
+    refreshed = get_connector(connector_id, workspace_id=workspace_id) or updated
+    return _to_ui(refreshed)
+
+
+@router.patch("/{connector_id}")
+def patch_saved_connector(
+    connector_id: str,
+    body: ConnectorPatchDTO,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Change only the fields named; RBAC, secrets and egress exactly as PUT."""
+    workspace_id = _resolve_workspace(request, workspace_id)
+    existing = get_connector(connector_id, workspace_id=workspace_id)
+    _writable_connector_or_404(request, existing)
+    patch = {
+        k: v for k, v in body.model_dump(by_alias=True, exclude_unset=True).items() if v is not None
+    }
+    # A masked / empty secret is "unchanged" — never written over the saved one.
+    for field in (*_Secret_fields, "connection_string"):
+        if field in patch and _is_masked_value(patch[field]):
+            patch.pop(field)
+    stored = existing.to_dict()
+    merged = {**stored, **patch}
+    from services.connector_request_limits import connector_request_errors
+
+    err = connector_request_errors(
+        name=str(merged.get("name") or ""),
+        db_type=str(merged.get("type") or ""),
+        host=str(merged.get("host") or ""),
+        port=merged.get("port"),
+        database=str(merged.get("database") or ""),
+        username=str(merged.get("username") or ""),
+        schema=str(merged.get("schema") or ""),
+        connection_string=str(merged.get("connection_string") or ""),
+        require_name=True,
+    )
+    if err:
+        raise HTTPException(status_code=422, detail=err)
+    require_admin_connector_access(request, merged.get("type"), existing.type)
+    if not patch:
+        return _to_ui(existing)
+    _refuse_unsafe_egress(merged, existing)
+    patch["workspace_id"] = existing.workspace_id or workspace_id
+    updated = update_connector(connector_id, patch, workspace_id=workspace_id)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Connector not found")
     refreshed = get_connector(connector_id, workspace_id=workspace_id) or updated
     return _to_ui(refreshed)
 

@@ -160,20 +160,14 @@ class PrivilegeProbeResult:
 
 
 def _normalize_engine(db_type: str) -> str:
+    from src.transfer.engine_family import sql_duplex_family
+
     engine = (db_type or "").strip().lower()
+    family = sql_duplex_family(engine)
+    if family:
+        return family
     if engine in {"amazon_redshift", "redshift"}:
         return "redshift"
-    if engine in {
-        "amazon_aurora_postgresql", "amazon_rds_postgresql", "supabase", "neon", "pgvector",
-        "timescaledb", "timescale",
-    }:
-        return "postgresql"
-    if engine in {
-        "mariadb", "amazon_aurora_mysql", "amazon_rds_mysql", "planetscale",
-    }:
-        return "mysql"
-    if engine in {"mssql", "microsoft_sql_server", "azure_sql"}:
-        return "sqlserver"
     if engine in {"google_bigquery"}:
         return "bigquery"
     if engine in {"mongo", "documentdb", "amazon_documentdb"}:

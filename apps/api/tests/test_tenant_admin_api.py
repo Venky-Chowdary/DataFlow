@@ -25,6 +25,9 @@ from services.auth_rate_limit import reset_auth_rate_limits
 from src.main import app
 
 
+_INSIDE = {"X-Forwarded-For": "203.0.113.5"}
+
+
 @pytest.fixture
 def stores(tmp_path, monkeypatch):
     monkeypatch.setenv("DATAFLOW_TEAM_STORE", str(tmp_path / "teams.json"))
@@ -32,8 +35,10 @@ def stores(tmp_path, monkeypatch):
     monkeypatch.setattr(team_store, "mongo_database", lambda: None)
     monkeypatch.setattr(user_store, "mongo_database", lambda: None)
     import services.tenant_store as tenant_store
+    from services import mfa_store
 
     monkeypatch.setattr(tenant_store, "STORE_PATH", tmp_path / "tenants.json")
+    monkeypatch.setattr(mfa_store, "mongo_database", lambda: None)
     return tmp_path
 
 
@@ -44,8 +49,13 @@ def admin(stores, monkeypatch):
     monkeypatch.setenv("DATAFLOW_ADMIN_EMAIL", "root@example.com")
     monkeypatch.setenv("DATAFLOW_ADMIN_PASSWORD", "Bootstrap-Admin-2026")
     monkeypatch.setenv("DATAFLOW_AUTH_SECRET", "test-secret-not-production")
+    # QA round 11: saved IP allowlists are enforced and a list that excludes
+    # the saving admin is refused, so every client here calls from inside the
+    # lists these tests save (one trusted proxy appends the address).
+    monkeypatch.setenv("DATAWRAP_TRUSTED_PROXY_COUNT", "1")
     reset_auth_rate_limits()
     c = TestClient(app)
+    c.headers.update(_INSIDE)
     login = c.post(
         "/api/v1/auth/login",
         json={"email": "root@example.com", "password": "Bootstrap-Admin-2026"},
@@ -75,14 +85,25 @@ def _signed_in(client, *, email: str, workspace_id: str, workspace_role: str) ->
     assert created.status_code == 200, created.text
     issued = created.json()["temporary_password"]
     peer = TestClient(app)
+    peer.headers.update(_INSIDE)
     login = peer.post("/api/v1/auth/login", json={"email": email, "password": issued})
     assert login.status_code == 200, login.text
     peer.headers["Authorization"] = f"Bearer {login.json()['token']}"
     return peer
 
 
+def _enroll_two_factor(client) -> None:
+    """Requiring MFA is refused from a session the policy would hold (round 11)."""
+    from services import totp
+
+    secret = client.post("/api/v1/auth/mfa/totp/enroll", json={}).json()["secret"]
+    code = totp.totp(totp.secret_bytes(secret))
+    assert client.post("/api/v1/auth/mfa/totp/confirm", json={"code": code}).status_code == 200
+
+
 def test_platform_admin_creates_a_tenant_for_a_workspace(admin):
     ws_id = _workspace(admin, "Acme")
+    _enroll_two_factor(admin)
 
     created = admin.post(
         "/api/v1/workspace/tenant",

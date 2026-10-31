@@ -62,23 +62,17 @@ REREAD_SCAN_SOURCES: Final[frozenset[str]] = frozenset(
     }
 )
 
-_PG_FAMILY: Final[frozenset[str]] = frozenset(
-    {"postgresql", "postgres", "pg", "timescaledb", "alloydb", "supabase", "redshift", "pgvector"}
-)
-_MYSQL_FAMILY: Final[frozenset[str]] = frozenset({"mysql", "mariadb", "tidb"})
-_MSSQL_FAMILY: Final[frozenset[str]] = frozenset({"sqlserver", "mssql", "azure_sql"})
-
-
 def engine_family(engine: str | None) -> str:
-    """Canonical family so ``postgres`` and ``postgresql`` do not look heterogeneous."""
+    """Canonical family so ``postgres`` and ``postgresql`` do not look heterogeneous.
+
+    The duplex SQL families come from the one resolver
+    (:func:`src.transfer.engine_family.engine_family`); Redshift re-reads as
+    PostgreSQL wire.
+    """
+    from src.transfer.engine_family import family_or_kind
+
     raw = (engine or "").strip().lower()
-    if raw in _PG_FAMILY:
-        return "postgresql"
-    if raw in _MYSQL_FAMILY:
-        return "mysql"
-    if raw in _MSSQL_FAMILY:
-        return "sqlserver"
-    return raw
+    return "postgresql" if raw == "redshift" else family_or_kind(raw)
 
 
 def _env_reread_mode() -> str:

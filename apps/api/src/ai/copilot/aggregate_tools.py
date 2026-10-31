@@ -805,10 +805,12 @@ def _is_temporal(col_type: str) -> bool:
 
 def _temporal_group_expr(quoted: str, grain: str, dialect: str) -> str | None:
     """Dialect-correct date truncation for "by month" style grouping."""
-    d = (dialect or "").lower()
-    if d in {"postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "snowflake", "duckdb"}:
+    from src.transfer.engine_family import family_or_kind
+
+    d = family_or_kind(dialect)
+    if d in {"postgresql", "redshift", "snowflake", "duckdb"}:
         return f"DATE_TRUNC('{grain}', {quoted})"
-    if d in {"mysql", "mariadb", "tidb"}:
+    if d == "mysql":
         fmt = {
             "day": "%Y-%m-%d",
             "month": "%Y-%m-01",
@@ -1728,7 +1730,9 @@ def _estimate_table_row_counts(
         return {}
     sql = ""
     family = ""
-    if ctype in {"postgresql", "postgres", "pg", "redshift", "greenplum", "cockroachdb", "timescaledb", "yugabytedb"}:
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(ctype) in {"postgresql", "redshift", "greenplum"}:
         family = "postgresql"
         # A partitioned table (relkind 'p') and a TimescaleDB hypertable keep
         # no rows of their own: their volume is the sum of their partitions /
@@ -1824,9 +1828,11 @@ def _direct_row_count(conn: dict[str, Any], name: str) -> int | None:
     A count that fails or is cancelled by its time budget raises.
     """
     ctype = str(conn.get("type") or conn.get("format") or "").lower()
-    if ctype in {"postgresql", "postgres", "pg", "timescaledb", "greenplum", "cockroachdb", "yugabytedb"}:
+    from src.transfer.engine_family import family_or_kind
+
+    if family_or_kind(ctype) in {"postgresql", "greenplum"}:
         family = "postgresql"
-    elif ctype in {"mysql", "mariadb", "tidb"}:
+    elif family_or_kind(ctype) == "mysql":
         family = "mysql"
     else:
         return None

@@ -521,6 +521,19 @@ def declared_copy_carrier(
     )
 
 
+def copy_create_carrier(item: dict[str, Any], declared: str) -> str:
+    """The carrier a fast-path CREATE declares: the mapping's target first.
+
+    ``declared_copy_carrier`` answers what the *source* holds, which is what the
+    COPY-safety checks need. The CREATE must instead declare what the row path
+    would create (Map ≡ CREATE): the source stamp of a MySQL table
+    (``int(10) unsigned``) is not a destination type, and building the CREATE
+    from it produced a PostgreSQL syntax error (QA round 11). A mapping without
+    a target type keeps the source carrier, legalised by ``materialize_dest_ddl``.
+    """
+    return str(item.get("target_type") or declared or "")
+
+
 #: Mapping transforms that bind a text cell *as* a typed value on the row path.
 _TYPED_PARSE_TRANSFORMS = frozenset(
     {"integer", "decimal", "boolean", "date", "datetime", "time"}

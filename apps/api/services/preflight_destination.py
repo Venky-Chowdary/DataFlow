@@ -538,6 +538,7 @@ def inspect_destination_for_preflight(
         probe_extra.update(dict(getattr(endpoint, "extra", None) or {}))
         probe_extra.update(dict(dest_extra or {}))
         out["redshift_staging_probe"] = probe_redshift_staging(probe_extra)
-    from services.pgvector_layout import document_table_preflight_view
+    from services.pgvector_layout import document_table_preflight_view, refuse_missing_vector_type
 
+    refuse_missing_vector_type(out, endpoint)
     return document_table_preflight_view(out)

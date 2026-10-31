@@ -33,15 +33,23 @@ ProbeStatus = Literal[
     "error",
 ]
 
-# SQL path covers generic_sql and all SQL-like catalog IDs.
+# SQL path: the duplex SQL families plus the SQLAlchemy dialects the generic
+# driver serves. Keyed on engine family — a hosted tile (``alloydb``,
+# ``amazon_rds_mysql``, ``sql_server``, ``amazon_rds_oracle``, ``pgvector``)
+# is its family through :func:`is_sqlish_source`, never a spelling listed here.
 SQLISH_SOURCE_TYPES = frozenset({
-    # pgvector is PostgreSQL on the wire: same GROUP BY probe (D140).
-    "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb", "supabase", "pgvector",
-    "mysql", "mariadb", "singlestore",
-    "sqlserver", "mssql", "synapse", "azure_sql_database",
-    "oracle", "db2", "sqlite", "duckdb", "generic_sql", "h2",
+    "postgresql", "mysql", "sqlserver", "oracle", "redshift",
+    "synapse", "db2", "sqlite", "duckdb", "generic_sql", "h2",
     "snowflake", "bigquery", "databricks", "clickhouse", "trino", "presto", "questdb",
 })
+
+
+def is_sqlish_source(kind: str | None) -> bool:
+    """True when a GROUP BY / catalog probe can address this engine."""
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(kind) in SQLISH_SOURCE_TYPES
+
 
 # Sources whose whole payload is readable, so uniqueness is proven by scanning
 # it rather than by asking the engine to GROUP BY. These have no query language
@@ -836,6 +844,10 @@ def probe_source_duplicate_keys_result(
                 or ""
             ).lower()
 
+        # One resolver for the engine family; the catalog id stays on cfg.
+        from src.transfer.engine_family import family_or_kind
+
+        db_type = family_or_kind(db_type)
         if not cfg:
             return SourceDuplicateProbeResult(
                 status="skipped_no_source",
@@ -1008,7 +1020,7 @@ def probe_source_duplicate_keys_result(
                 primary_key_columns=pk_columns,
             )
 
-        if db_type not in SQLISH_SOURCE_TYPES:
+        if not is_sqlish_source(db_type):
             msg = f"Duplicate-key probe not implemented for source type {db_type or 'unknown'}"
             logger.debug(msg)
             return SourceDuplicateProbeResult(

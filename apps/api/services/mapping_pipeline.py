@@ -1092,6 +1092,10 @@ def run_mapping_pipeline(
                     ):
                         merged_schema[name] = declared
                         continue
+                    from services.decimal_observe import profiled_text_decimal_type
+
+                    upgraded = profiled_text_decimal_type(str(upgraded), source_db_type)
+                    merged_schema[name] = upgraded
                     declared_source_types[name] = str(upgraded)
             for name in present_empty_text:
                 if normalize_logical_type(merged_schema.get(name)) in {"json", "array"}:

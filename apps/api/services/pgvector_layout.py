@@ -494,3 +494,35 @@ def document_table_engine_view(destination: Any, info: dict[str, Any]) -> dict[s
         "foreign_keys": [],
         "message": _DOC_TABLE_NOTE,
     }
+
+
+def refuse_missing_vector_type(probe: dict[str, Any], endpoint: Any) -> None:
+    """Validate refuses a new pgvector table this role cannot give a vector type.
+
+    The writer creates the ``vector`` extension when the role may (R11). When
+    the type is absent and the role may not, the CREATE could only fail at Run;
+    G2 now says so before Confirm, by name, instead of "transaction aborted".
+    """
+    if str(probe.get("db_type") or "").lower() != "pgvector" or not probe.get("connected"):
+        return
+    if probe.get("table_exists") is True:
+        return  # an existing table keeps its shape; its vector columns prove the type
+    try:
+        from connectors.pgvector_extension import vector_extension_refusal
+        from src.transfer.adapters import resolve_connector_config
+
+        reason = vector_extension_refusal(dict(resolve_connector_config(endpoint) or {}))
+    except Exception:  # noqa: BLE001 - an unreadable catalog leaves the writer's refusal
+        return
+    if not reason:
+        return
+    probe["can_write"] = False
+    probe["can_create_table"] = False
+    probe["privilege_probe"] = {
+        **dict(probe.get("privilege_probe") or {}),
+        "status": "denied",
+        "detail": reason,
+        "can_write": False,
+        "can_create_table": False,
+    }
+    probe["message"] = reason

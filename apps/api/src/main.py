@@ -41,10 +41,13 @@ from services.api_errors import ApiError, api_error_handler
 from .middleware.auth_middleware import AuthMiddleware
 from .middleware.production_config_middleware import ProductionConfigMiddleware
 from .middleware.tenant_middleware import TenantMiddleware
+from .middleware.proxy_fix_middleware import ProxyFixMiddleware
+from .middleware.workspace_ip_allowlist_middleware import WorkspaceIpAllowlistMiddleware
 from .middleware.tenant_scope_middleware import TenantScopeMiddleware
 from .routers.ai_router import router as ai_router
 from .routers.audit_router import router as audit_router
 from .routers.auth_router import router as auth_router
+from .routers.mfa_router import admin_router as mfa_admin_router, router as mfa_router
 from .routers.iam_router import router as iam_router
 from .routers.scim_router import router as scim_router
 from .routers.automation_router import router as automation_router
@@ -114,6 +117,13 @@ async def lifespan(app: FastAPI):
         configure_logging()
     except Exception as le:  # pragma: no cover - logging must never block boot
         print(f"[!] Logging bootstrap warning: {le}")
+    try:
+        # Saved IP allowlists with no proxy hop count: say so once at boot.
+        from services.ip_allowlist_policy import warn_if_hop_count_unset
+
+        warn_if_hop_count_unset(logging.getLogger("datawrap.security"))
+    except Exception as ae:  # pragma: no cover - a hint must never block boot
+        print(f"[!] IP allowlist startup check skipped: {ae}")
     global _SECURITY_SETTINGS_SNAPSHOT_RECORDED
     with _SECURITY_SETTINGS_SNAPSHOT_LOCK:
         record_snapshot = not _SECURITY_SETTINGS_SNAPSHOT_RECORDED
@@ -154,6 +164,11 @@ async def lifespan(app: FastAPI):
     from services.rbac import record_unruled_routes_allowed_startup
 
     record_unruled_routes_allowed_startup()
+    # K1: once per deployment, give workspace-less API keys their workspace
+    # back (idempotent, audited, never blocks boot).
+    from services.orphaned_api_keys import run_orphaned_api_key_migration
+
+    run_orphaned_api_key_migration()
     # Durable mail outbox: a restart can leave 'queued' rows behind —
     # re-queue them through the send lane so no reset/OTP mail is lost.
     try:
@@ -404,6 +419,8 @@ if not _cors_origin_regex and is_railway():
 app.add_middleware(TenantScopeMiddleware)
 app.add_middleware(AuditAccessMiddleware)
 app.add_middleware(RBACMiddleware)
+# Workspace IP allowlist: after auth (needs the actor), before RBAC/routers.
+app.add_middleware(WorkspaceIpAllowlistMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(TenantMiddleware)
 # Outermost: a missing production secret must not reach auth or transfer.
@@ -682,6 +699,11 @@ async def _add_timing_header_response(request: Request, call_next):
     return response
 
 
+# Outermost: client address and scheme from the trusted proxy chain
+# (DATAWRAP_TRUSTED_PROXY_COUNT, ProxyFix semantics) before anything reads them.
+app.add_middleware(ProxyFixMiddleware)
+
+
 app.include_router(ai_router, prefix="/api/v1")
 app.include_router(saved_connectors_router, prefix="/api/v1")
 app.include_router(connectors_router, prefix="/api/v1")
@@ -699,6 +721,10 @@ app.include_router(schedules_router, prefix="/api/v1")
 app.include_router(auth_router, prefix="/api/v1")
 # Compatibility mount when VITE_API_BASE omits /api/v1 (hits /auth/login).
 app.include_router(auth_router)
+# Two-factor (TOTP) self-service and the challenge exchange, on both mounts.
+app.include_router(mfa_router, prefix="/api/v1")
+app.include_router(mfa_router)
+app.include_router(mfa_admin_router, prefix="/api/v1")
 # Self-serve signup: every route 404s while DATAWRAP_SIGNUP_ENABLED is off.
 app.include_router(signup_router, prefix="/api/v1")
 app.include_router(signup_router)

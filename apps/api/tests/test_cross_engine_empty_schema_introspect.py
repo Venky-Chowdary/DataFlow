@@ -77,7 +77,13 @@ def test_pg_cross_schema_recovery():
     assert [c["name"] for c in result["columns"]] == ["id", "title"]
 
 
-def test_mysql_cross_database_recovery():
+def test_mysql_does_not_scan_other_databases():
+    """QA round 11 (Ensembl): no host-wide information_schema fallback.
+
+    A MySQL connector names its database. Scanning every schema of the server
+    for a lookalike table hung Validate on hosts with thousands of schemas and
+    could bind another database's table, so a miss stays a miss.
+    """
     cur = MagicMock()
     cur.fetchall.side_effect = [
         [],
@@ -97,9 +103,10 @@ def test_mysql_cross_database_recovery():
             host="h", port=3306, database="wrong_db", username="u", password="p",
             schema="", connection_string="", ssl=True, table="jobs",
         )
-    assert result["ok"] is True
-    assert result["schema"] == "app_prod"
-    assert [c["name"] for c in result["columns"]] == ["id", "title"]
+    assert result["schema"] == "wrong_db"
+    assert result["columns"] == []
+    executed = " ".join(str(c.args[0]) for c in cur.execute.call_args_list)
+    assert "table_schema NOT IN" not in executed
 
 
 def test_snowflake_cross_schema_recovery():

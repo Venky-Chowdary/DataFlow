@@ -154,7 +154,13 @@ def _session_idled_out(token: str, email: str) -> bool:
     jti = token_jti(token) or ""
     if not jti:
         return False
-    if not enforce_idle(email=email, last_seen_at=session_last_seen(jti)):
+    last_seen = session_last_seen(jti)
+    if last_seen is None:
+        # No activity on record (row lost or never touched): record it as seen
+        # now so the idle clock starts, rather than never checking it.
+        touch_session(jti, min_interval=0)
+        return False
+    if not enforce_idle(email=email, last_seen_at=last_seen):
         revoke_session(jti)
         return True
     touch_session(jti, min_interval=TOUCH_INTERVAL_SEC)
@@ -227,6 +233,13 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
     request.state.user_email = user["email"]
     request.state.user = user
     return None
+
+
+def _mfa_detached(request: Request, token: str) -> bool:
+    from services.mfa_enforcement import detach_if_held
+
+    detach_if_held(request, token=token)
+    return not getattr(request.state, "user", None)
 
 
 def _attach_user(request: Request, token: str) -> bool:
@@ -386,7 +399,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             ):
                 # Public routes still attach identity when a Bearer token is present
                 # (MCP tools/call uses this; discovery works without a token).
-                if token and _attach_user_reason(request, token) is None:
+                # A session held by the workspace MFA policy is anonymous here.
+                if (
+                    token
+                    and _attach_user_reason(request, token) is None
+                    and not _mfa_detached(request, token)
+                ):
                     from services import audit_coverage
 
                     principal_context = audit_coverage
@@ -469,6 +487,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
             forbidden = _tenant_bind_forbidden(request)
             if forbidden is not None:
                 return forbidden
+            # Workspace "require MFA": a held session reaches enrolment only.
+            from services.mfa_enforcement import gate as mfa_gate
+
+            held = mfa_gate(request, token=token, cookie_doc=cookie_doc if not token else None)
+            if held is not None:
+                return held
 
             return await call_next(request)
         finally:

@@ -12,6 +12,7 @@ from services.acknowledgment_contract import (
     audit_acknowledgments,
     resolve_acknowledgments,
 )
+from services.fk_parent_preflight import with_fk_route_option
 from services.preflight_cursor_gate import resolve_read_scope
 from services.shape_preflight import (
     ShapePreflightRefused,
@@ -238,7 +239,85 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
     """
     Run core G1–G9 preflight gates before a transfer.
     Blocks transfer if any gate fails — no mocked pass when connectors or samples are missing.
+
+    The gates dial customer systems with blocking drivers. They run off the
+    event loop, under the preflight deadline (QA round 11: an Ensembl MySQL
+    Validate held the loop for more than five minutes). Past the deadline the
+    answer is a blocked preflight that names what was still waiting.
     """
+    import asyncio
+
+    from starlette.concurrency import run_in_threadpool
+
+    from ..ai.copilot.tool_deadline import (
+        ANSWER_RESERVE_SECONDS,
+        _Progress,
+        deadline_scope,
+        deadline_timeout_message,
+        preflight_deadline_seconds,
+    )
+
+    seconds = preflight_deadline_seconds()
+    progress = _Progress(limit=seconds)
+
+    def _bounded() -> Any:
+        from services.catalog_statement_cap import (
+            attach_budget_findings,
+            collect_budget_findings,
+        )
+
+        with deadline_scope(seconds, progress), collect_budget_findings() as found:
+            return attach_budget_findings(_run_preflight_blocking(body, http_request), found)
+
+    work = asyncio.ensure_future(run_in_threadpool(_bounded))
+    try:
+        return await asyncio.wait_for(
+            asyncio.shield(work), timeout=seconds + ANSWER_RESERVE_SECONDS
+        )
+    except asyncio.TimeoutError:
+        return _preflight_deadline_refusal(
+            body, deadline_timeout_message("Preflight", seconds, progress), seconds
+        )
+
+
+def _preflight_deadline_refusal(body: PreflightRequest, message: str, seconds: float) -> dict:
+    """A blocked preflight the operator can read, never a hung request."""
+    from services.preflight_run_store import save_preflight_run
+
+    gate = {
+        "id": "preflight_deadline",
+        "status": "block",
+        "message": message,
+        "duration_ms": int(seconds * 1000),
+        "details": {"deadline_seconds": seconds},
+    }
+    gated = {
+        "passed": False,
+        "gates": [gate],
+        "blockers": [{"id": "preflight_deadline", "message": message, "details": gate["details"]}],
+        "warnings": [],
+        "passed_count": 0,
+        "total_gates": 1,
+        "readiness_score": 0.0,
+    }
+    return save_preflight_run(
+        gated,
+        source_label=body.source_type or body.source_kind or "source",
+        dest_label=str(body.dest_table or body.dest_type or body.dest_kind or "destination"),
+        validation_mode=body.validation_mode,
+        route={
+            "source_kind": body.source_kind,
+            "source_type": body.source_type,
+            "source_connector_id": body.source_connector_id,
+            "dest_type": body.dest_type,
+            "dest_connector_id": body.connector_id,
+            "dest_table": body.dest_table,
+        },
+    )
+
+
+def _run_preflight_blocking(body: PreflightRequest, http_request: Request):
+    """The gates themselves: blocking I/O, run by :func:`run_preflight` off the loop."""
     from services.workspace_access import assert_connector_accessible
 
     # Preflight probes and introspects saved connectors with their stored
@@ -491,7 +570,9 @@ async def run_preflight(body: PreflightRequest, http_request: Request):
             destination_unique_keys=dest_meta.get("unique_keys") or [],
             destination_foreign_keys=dest_meta.get("foreign_keys") or [],
             destination_check_constraints=dest_meta.get("check_constraints") or [],
-            destination_config=dest_meta.get("_probe_cfg") or None,
+            destination_config=with_fk_route_option(
+                dest_meta.get("_probe_cfg"), (body.dest_extra or {}).get("foreign_keys_mode")
+            ),
             stream_contracts=list(body.stream_contracts or []),
             date_locale=body.date_locale,
             number_locale=body.number_locale,

@@ -58,7 +58,7 @@ def require_sso_authorization(email: str) -> None:
         if allowed_domains and email.split("@")[-1].lower() not in allowed_domains:
             raise HTTPException(
                 status_code=403,
-                detail="SSO email domain is not in DATAFLOW_SSO_ALLOWED_DOMAINS",
+                detail="SSO email domain is not on this deployment's allowed SSO domain list",
             )
         return
     if not _is_sso_email_allowed(email):

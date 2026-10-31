@@ -17,6 +17,7 @@ from typing import Any, Optional
 from fastapi import (
     APIRouter,
     BackgroundTasks,
+    Body,
     File,
     Form,
     Header,
@@ -1823,17 +1824,17 @@ async def get_transfer_proof_pack(job_id: str, request: Request):
     return pack
 
 
-class ProofPackVerifyBody(BaseModel):
-    pack: dict = Field(default_factory=dict)
-
-
 @router.post("/proof-pack/verify")
-async def verify_transfer_proof_pack(body: ProofPackVerifyBody):
-    """Verify a previously exported signed proof pack against the platform secret."""
+async def verify_transfer_proof_pack(body: Any = Body(...)):
+    """Verify a previously exported signed proof pack against the platform secret.
+
+    Accepts ``{"pack": <pack>}`` or the pack itself, like ``/audit/verify-pack``;
+    a body that is not a pack is a 422 naming the missing keys (PP3).
+    """
+    from services.proof_pack_request import pack_from_body
     from services.signed_proof_pack import verify_signed_proof_pack
 
-    result = verify_signed_proof_pack(body.pack if isinstance(body.pack, dict) else {})
-    return result
+    return verify_signed_proof_pack(pack_from_body(body))
 
 
 @router.get("/{job_id}/certificate")

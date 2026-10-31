@@ -418,6 +418,30 @@ _CAST_TYPES = ("text", "integer", "decimal", "boolean", "date", "timestamp")
 # dishonesty this engine exists to remove.
 _ERROR_POLICIES = ("refuse", "divert", "null")
 
+#: The Transform Library (and its built-in templates) spells ``refuse`` as
+#: ``fail``; one vocabulary means a recipe step pasted into Shape means the
+#: same thing there (QA round 11, T9). The canonical word is what is stored
+#: and hashed, so ``fail`` and ``refuse`` are the same recipe.
+ON_ERROR_ALIASES = {"fail": "refuse"}
+
+
+def canonical_on_error(raw: Any, *, where: str = "step") -> str:
+    """The engine policy for a step's ``on_error``, or a ShapeError naming why not."""
+    value = str(raw or "refuse").strip().casefold() or "refuse"
+    value = ON_ERROR_ALIASES.get(value, value)
+    if value in _ERROR_POLICIES:
+        return value
+    if value == "keep_original":
+        raise ShapeError(
+            f"{where}: on_error 'keep_original' writes the untransformed value, "
+            "which the transfer engine cannot honor. Choose refuse (alias fail), "
+            "divert or null"
+        )
+    raise ShapeError(
+        f"{where}: on_error must be one of {', '.join(_ERROR_POLICIES)} "
+        "(fail is accepted as refuse)"
+    )
+
 
 def describe_catalog() -> list[dict[str, Any]]:
     """The operation catalog, for the Shape editor."""
@@ -878,11 +902,7 @@ def _parse_step(
         if options.get(name) in (None, ""):
             raise ShapeError(f"{where}: {op} needs '{name}'")
 
-    on_error = str(raw.get("on_error") or "refuse").strip().casefold()
-    if on_error not in _ERROR_POLICIES:
-        raise ShapeError(
-            f"{where}: on_error must be one of {', '.join(_ERROR_POLICIES)}"
-        )
+    on_error = canonical_on_error(raw.get("on_error"), where=where)
 
     column = str(raw.get("column") or raw.get("source_column") or "").strip()
     if definition.needs_column:

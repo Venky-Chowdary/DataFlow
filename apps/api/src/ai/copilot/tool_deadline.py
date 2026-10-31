@@ -546,6 +546,71 @@ def bounded_step(
         return StepResult(timed_out=True, seconds=budget)
 
 
+#: Validate outside a tool call (Studio REST, engine Execute preflight). Same
+#: default as the interactive reads/probes an operator waits on (D181); it is
+#: that existing budget, not a new or larger one.
+PREFLIGHT_DEADLINE_ENV = "DATAFLOW_PREFLIGHT_DEADLINE_SECONDS"
+
+
+def preflight_deadline_seconds() -> float:
+    return _seconds_from_env(PREFLIGHT_DEADLINE_ENV, DEFAULT_QUERY_DEADLINE_SECONDS)
+
+
+@contextlib.contextmanager
+def deadline_scope(seconds: float, progress: _Progress | None = None):
+    """Bind a wall-clock budget to blocking work on this thread.
+
+    Outside a tool call ``remaining_seconds`` was ``None``, so neither
+    :func:`bounded_step` nor the statement budget applied: a REST or engine
+    preflight ran every catalog statement unbounded and hung on a server with
+    thousands of schemas (QA round 11, Ensembl). Inside the scope both apply,
+    and pooled sessions carry ``statement_timeout`` / ``MAX_EXECUTION_TIME``.
+    An enclosing tool deadline is tighter and is kept.
+    """
+    from services import statement_budget
+
+    statement_budget.install()
+    if _progress.get() is not None:
+        yield _progress.get()
+        return
+    bound = progress or _Progress(limit=seconds)
+    token = _progress.set(bound)
+    try:
+        yield bound
+    finally:
+        _progress.reset(token)
+
+
+def without_deadline(rows: Any) -> Any:
+    """Iterate ``rows`` with the deadline lifted for each fetch.
+
+    The pre-write population walk is not a catalog probe: a transfer job keeps
+    its long socket timeouts for it, as before the preflight deadline existed.
+    Set and reset inside one resume, so nothing leaks into the caller.
+    """
+    if rows is None:
+        return None
+    iterator = iter(rows)
+
+    def _gen() -> Any:
+        while True:
+            token = _progress.set(None)
+            try:
+                item = next(iterator)
+            except StopIteration:
+                return
+            finally:
+                _progress.reset(token)
+            yield item
+
+    return _gen()
+
+
+def deadline_timeout_message(tool: str, seconds: float, progress: _Progress) -> str:
+    """The operator-facing message naming what was still waiting at the deadline."""
+    return _timeout_message(tool, seconds, progress)
+
+
 @contextlib.contextmanager
 def deadline_context_for_tests(seconds: float):
     """Bind a tool budget to the current thread (tests and scripts only)."""

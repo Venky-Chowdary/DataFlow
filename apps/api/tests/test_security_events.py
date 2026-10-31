@@ -561,8 +561,12 @@ def test_domain_security_events_include_safe_request_metadata(domain_security_ap
     assert exported.status_code == 200, exported.text
     verified = client.get("/api/v1/audit/verify", headers=headers)
     assert verified.status_code == 200, verified.text
+    # PP3 (round 11): a body that is not a pack is a 422; a real (here
+    # unsigned-for-this-key) pack shape is verified and audited.
     proof = client.post(
-        "/api/v1/audit/verify-pack", headers=headers, json={"not_a_pack": True}
+        "/api/v1/audit/verify-pack",
+        headers=headers,
+        json={"pack": {"job_id": "j", "content_sha256": "0" * 64, "signature": {"value": "x"}}},
     )
     assert proof.status_code == 200, proof.text
     scanned = client.get("/api/v1/audit/secret-scan", headers=headers)

@@ -169,6 +169,12 @@
   background: #fef2f2;
 }
 
+/* Nothing was walked (no records, or the store could not be read): not a verdict. */
+.df2-chain-verdict.is-unknown {
+  border-left-color: var(--df-warning-border);
+  background: var(--df-warning-bg);
+}
+
 .df2-chain-verdict ul {
   margin: 8px 0 0;
   padding-left: 18px;

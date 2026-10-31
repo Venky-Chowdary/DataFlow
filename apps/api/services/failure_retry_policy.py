@@ -99,6 +99,34 @@ _DETERMINISTIC_PATTERNS: tuple[tuple[str, str], ...] = (
      "then re-run."),
 )
 
+# A relation the driver says is absent. The quoted name is captured so a
+# schedule's finding can name the table (QA SC5). This is not a retry class on
+# its own — a table can be mid-swap — the scheduler decides with the schedule's
+# source table in hand. ``role "x" does not exist`` is a login failure and is
+# classified with the credential refusals above.
+_MISSING_RELATION_RES: tuple[re.Pattern[str], ...] = (
+    re.compile(r'relation "([^"]+)" does not exist', re.I),
+    re.compile(r"table '([^']+)' doesn't exist", re.I),
+    re.compile(r"no such table: ([^\s,;]+)", re.I),
+    re.compile(r"invalid object name '([^']+)'", re.I),
+    re.compile(r"collection ['\"]?([^'\"\s]+)['\"]? (?:does not exist|not found)", re.I),
+)
+_MISSING_RELATION_GENERIC = re.compile(
+    r"ora-00942|table or view does not exist|table was not found", re.I
+)
+
+
+def missing_relation_name(text: str | None) -> str | None:
+    """The table a "does not exist" failure names: ``""`` when it names none,
+    ``None`` when the failure is not a missing relation at all."""
+    message = str(text or "")
+    for pattern in _MISSING_RELATION_RES:
+        match = pattern.search(message)
+        if match:
+            return match.group(1).strip()
+    return "" if _MISSING_RELATION_GENERIC.search(message) else None
+
+
 # Failures whose cause is the moment, not the configuration.
 _TRANSIENT_PATTERNS: tuple[str, ...] = (
     r"connection (reset|refused|aborted|closed|timed out|error)",
