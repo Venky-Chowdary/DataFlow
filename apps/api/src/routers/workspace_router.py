@@ -463,6 +463,35 @@ async def delete_api_key(key_id: str, request: Request):
     return {"ok": True}
 
 
+@router.get("/pii-hash-key")
+async def get_pii_hash_key_status(request: Request):
+    """Versions and dates of this workspace's hash_pii key — never key material."""
+    from services.pii_hash_keys import key_status
+
+    return key_status(tenant_scope(request).workspace_id)
+
+
+@router.post("/pii-hash-key/rotate")
+async def rotate_pii_hash_key(request: Request):
+    """Start a new hash_pii key version for this workspace (changes future digests)."""
+    from services.audit_log import append_audit_event
+    from services.pii_hash_keys import PiiHashKeyUnavailable, rotate_workspace_key
+
+    workspace_id = tenant_scope(request).workspace_id
+    try:
+        status = rotate_workspace_key(workspace_id, actor=_actor(request))
+    except PiiHashKeyUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    append_audit_event(
+        action="workspace.pii_hash_key.rotate",
+        resource="/workspace/pii-hash-key",
+        actor=_actor(request),
+        level="warn",
+        details={"workspace_id": workspace_id, "active_version": status["active_version"]},
+    )
+    return status
+
+
 # Workspace creation, membership and accounts live in ``src.routers.team_router``.
 # Two routers owning the same collection meant the UI could add a member through
 # one authorization rule and read it back through another.
