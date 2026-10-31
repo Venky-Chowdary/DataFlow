@@ -1480,7 +1480,8 @@ async def get_job_quarantine(job_id: str, request: Request):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not _can_access_job(request, job):
-        raise HTTPException(status_code=403, detail="Workspace access denied")
+        # Another workspace's job answers exactly like a missing one (D222).
+        raise HTTPException(status_code=404, detail="Job not found")
 
     details = merge_job_quarantine(job)
     from services.quarantine_dlq import (
@@ -1604,7 +1605,8 @@ async def export_job_quarantine(job_id: str, request: Request):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not _can_access_job(request, job):
-        raise HTTPException(status_code=403, detail="Workspace access denied")
+        # Another workspace's job answers exactly like a missing one (D222).
+        raise HTTPException(status_code=404, detail="Job not found")
     if not _can_mutate_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace write access required")
 
@@ -1977,7 +1979,8 @@ async def replay_job_quarantine(job_id: str, body: QuarantineReplayRequest, requ
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     if not _can_access_job(request, job):
-        raise HTTPException(status_code=403, detail="Workspace access denied")
+        # Another workspace's job answers exactly like a missing one (D222).
+        raise HTTPException(status_code=404, detail="Job not found")
     if not _can_mutate_job(request, job):
         raise HTTPException(status_code=403, detail="Workspace write access required")
 

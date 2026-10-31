@@ -2177,10 +2177,9 @@ async def cancel_job_cdc_snapshot(job_id: str, signal_id: str, request: Request)
     if sig is None:
         raise HTTPException(status_code=404, detail="Snapshot signal not found")
     if sig.source_key not in ctx["source_keys"]:
-        raise HTTPException(
-            status_code=403,
-            detail="Signal source_key does not match this job's CDC fingerprint",
-        )
+        # Another job's (possibly another workspace's) signal answers exactly
+        # like one that does not exist; a 403 here confirmed the id (D222).
+        raise HTTPException(status_code=404, detail="Snapshot signal not found")
     cancelled = cancel_signal(signal_id)
     if cancelled is None:
         raise HTTPException(status_code=404, detail="Snapshot signal not found")
