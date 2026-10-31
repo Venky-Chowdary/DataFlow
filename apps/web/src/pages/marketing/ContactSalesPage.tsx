@@ -21,10 +21,10 @@ const SOURCES = [
 const DESTINATIONS = [
   "Snowflake",
   "BigQuery",
-  "Redshift",
-  "Databricks",
+  "Iceberg / S3",
   "PostgreSQL",
   "SQL Server",
+  "Oracle",
   "Other",
 ] as const;
 
@@ -37,31 +37,39 @@ const NEXT_STEPS = [
   {
     n: "02",
     title: "Scoped pilot on your stack",
-    body: "Same Transfer Studio path: semantic map, G1–G9, write with quarantine.",
+    body: "The production Transfer Studio path: semantic map, G1–G9, write with quarantine and replay.",
   },
   {
     n: "03",
-    title: "Reconcile artifact you keep",
-    body: "Dest-engine COUNT and checksum MATCH. We do not call a green status “done.”",
+    title: "Signed proof pack you keep",
+    body: "Gate-8 read-back with destination COUNT, checksums, and a value and key census that MATCH.",
   },
 ];
 
 const FAQS = [
   {
     q: "How fast do you reply?",
-    a: "A solutions engineer replies within one business day. This is not a drip sequence. You can also write sales@datawrap.io now.",
+    a: "A solutions engineer replies within one business day. You can also write sales@datawrap.io now.",
   },
   {
     q: "Is the pilot the same engine as production?",
-    a: "Yes. skip_preflight never comes from this form, Pilot chat, or the public Studio execute path. CDC stays at-least-once upsert until a route proves dest-owned exactly-once.",
+    a: "Yes. The pilot runs the production engine with every preflight gate, quarantine, and post-write verification — the same path Studio, Pipelines, Pilot, and MCP use.",
   },
   {
-    q: "Do you claim 700+ live connectors?",
-    a: `No. Catalog tiles are not transfer-live. ${TRANSFER_READY_DRIVERS} drivers are TRANSFER_READY. Warehouse and SaaS tiles that are not live-certified stay labeled Planned until a named matrix exists.`,
+    q: "How many connectors are live?",
+    a: `${TRANSFER_READY_DRIVERS} drivers are transfer-ready today across databases, warehouses, object storage, files, Kafka, vector databases, and apps — each with the same map, gates, and verification.`,
   },
   {
-    q: "How is this different from Fivetran, Airbyte, or Informatica?",
-    a: "Fivetran and Airbyte optimize connector breadth and managed ELT. Informatica CDI offers Target Pre/Post-load SQL and optional continue-on-error. Databricks Lakeflow is cursor-column lakehouse ingest. Datawrap’s wedge is semantic mapping you can review, fail-fast G1–G9, quarantine instead of silent drop, dest query/CALL with binds, and dest-engine checksum proof.",
+    q: "Which change data capture engines do you support?",
+    a: "SQL Server native CDC, PostgreSQL logical decoding, MySQL binlog, and Oracle LogMiner — each with a consistent snapshot, resume from the log position, and deletes carried through.",
+  },
+  {
+    q: "What makes Datawrap different?",
+    a: "Semantic mapping you can review, nine preflight gates before every write, quarantine with replay, signed risk contracts for intentional casts, destination query and stored-procedure writes with binds, and a value-by-value read-back from the destination on every load.",
+  },
+  {
+    q: "What do you provide for security review?",
+    a: "A security questionnaire, a DPA, and a workspace audit export from a hash-chained, signed audit log your reviewers can verify. SSO (OIDC / SAML), SCIM, RBAC, and BYOK are available on Enterprise.",
   },
 ];
 
@@ -213,8 +221,8 @@ export function ContactSalesPage({
             <p className="lp-sales-kicker">Contact sales</p>
             <h1>Talk to a solutions engineer.</h1>
             <p className="lp-sales-hero-lead">
-              Scope Map → G1–G9 → quarantine → dest-engine checksum on your stack. Reply
-              within one business day — not a drip campaign.
+              Scope Map → G1–G9 → quarantine → Gate-8 verification on your stack. A solutions
+              engineer replies within one business day.
             </p>
             <p className="lp-sales-hero-mail">
               <a className="lp-sales-mail" href="mailto:sales@datawrap.io?subject=Datawrap%20pilot%20request">
@@ -223,7 +231,6 @@ export function ContactSalesPage({
               <span>
                 One business day. General questions:{" "}
                 <a className="lp-sales-mail" href="mailto:contact@datawrap.io">contact@datawrap.io</a>.
-                No SOC 2 certificate is claimed.
               </span>
             </p>
             {/* The drawing carries these three steps above 960px; below it, the list does. */}
@@ -431,17 +438,17 @@ export function ContactSalesPage({
         </div>
       </section>
 
-      <section className="lp-sales-follow" aria-label="Honesty on the call">
+      <section className="lp-sales-follow" aria-label="What you will see on the call">
         <div className="lp-mkt-wrap lp-sales-honesty">
           <div>
-            <p className="lp-sales-kicker lp-sales-kicker--ink">Honesty</p>
-            <h2>What we will not claim on the call</h2>
+            <p className="lp-sales-kicker lp-sales-kicker--ink">On the call</p>
+            <h2>What you will see</h2>
           </div>
           <ul>
-            <li>Catalog count as transfer-live</li>
-            <li>Platform-wide exactly-once</li>
-            <li>SOC 2 / ISO certificate — controls exist; audit is not done</li>
-            <li>Informatica continue-on-error as success</li>
+            <li>Your source and destination, mapped by meaning</li>
+            <li>Every preflight gate, live, on your schema</li>
+            <li>A verified read-back from your destination</li>
+            <li>The enterprise controls your security team asks for</li>
           </ul>
           <div className="lp-sales-rail-links">
             <button type="button" onClick={() => onNavigate("security")}>Security</button>
@@ -451,14 +458,14 @@ export function ContactSalesPage({
         </div>
       </section>
 
-      <section className="lp-sales-compare" aria-label="How we position against the market">
+      <section className="lp-sales-compare" aria-label="What the pilot proves">
         <div className="lp-mkt-wrap">
           <header>
-            <p className="lp-sales-kicker lp-sales-kicker--ink">Market position</p>
-            <h2>Advanced where Fivetran, Airbyte, Informatica, and Databricks stop.</h2>
+            <p className="lp-sales-kicker lp-sales-kicker--ink">What the pilot proves</p>
+            <h2>Every load verified, on your own stack.</h2>
             <p>
-              We do not out-claim their connector catalogs. We out-prove the load: mapping you can
-              review, gates that block write, quarantine you can replay, dest SQL you can bind.
+              Mapping you can review, gates before the write, quarantine you can replay, destination
+              SQL you can bind, and a read-back you can archive.
             </p>
           </header>
           <div className="lp-sales-table-wrap">
@@ -466,54 +473,40 @@ export function ContactSalesPage({
               <thead>
                 <tr>
                   <th scope="col">Capability</th>
-                  <th scope="col">Fivetran / Airbyte</th>
-                  <th scope="col">Informatica CDI</th>
-                  <th scope="col">Databricks Lakeflow</th>
-                  <th scope="col">Datawrap</th>
+                  <th scope="col">What Datawrap does</th>
+                  <th scope="col">What you keep</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
                   <th scope="row">Column mapping</th>
-                  <td>Schema sync / name match</td>
-                  <td>Designer mappings</td>
-                  <td>Lakehouse table ingest</td>
-                  <td>Semantic role + confidence; extra source stays on Map (G13)</td>
-                </tr>
-                <tr>
-                  <th scope="row">Failed rows</th>
-                  <td>Retry / skip / job status</td>
-                  <td>Optional continue-on-error</td>
-                  <td>Pipeline / job status</td>
-                  <td>Quarantine with column, value, reason — never silent drop</td>
-                </tr>
-                <tr>
-                  <th scope="row">Dest SQL</th>
-                  <td>Table / stream writers</td>
-                  <td>Target Pre/Post-load + SQL override</td>
-                  <td>Cursor-column table ingest — dest CALL is not the writer</td>
-                  <td>Dest query INSERT/MERGE and dest CALL, binds only, quarantine</td>
+                  <td>Semantic role + confidence; extra source columns stay visible on Map</td>
+                  <td>Reviewed mapping decisions</td>
                 </tr>
                 <tr>
                   <th scope="row">Preflight</th>
-                  <td>Connector checks</td>
-                  <td>Session validation</td>
-                  <td>Ingest / pipeline checks</td>
-                  <td>Nine core gates G1–G9 before write</td>
+                  <td>Nine core gates G1–G9 before every write, collation-aware key checks included</td>
+                  <td>Gate results per run</td>
+                </tr>
+                <tr>
+                  <th scope="row">Held-back rows</th>
+                  <td>Quarantine with column, value, and reason; replay once fixed</td>
+                  <td>A durable quarantine queue</td>
+                </tr>
+                <tr>
+                  <th scope="row">Destination SQL</th>
+                  <td>Destination INSERT/MERGE and stored-procedure writes, binds only, with quarantine</td>
+                  <td>Per-row outcomes</td>
                 </tr>
                 <tr>
                   <th scope="row">Proof</th>
-                  <td>Logs and row counts</td>
-                  <td>Session logs</td>
-                  <td>Lakehouse job metrics</td>
-                  <td>Dest-engine COUNT + checksum MATCH</td>
+                  <td>Gate-8 read-back: destination COUNT, checksums, value and key census</td>
+                  <td>A signed proof pack</td>
                 </tr>
                 <tr>
                   <th scope="row">CDC</th>
-                  <td>Managed incremental / CDC</td>
-                  <td>PowerCenter / CDI CDC</td>
-                  <td>Lakeflow CDC into Delta</td>
-                  <td>At-least-once upsert default; dest-owned EOS only when a route proves it</td>
+                  <td>SQL Server, PostgreSQL, MySQL, and Oracle — snapshot, stream, resume</td>
+                  <td>Idempotent upserts on your keys</td>
                 </tr>
               </tbody>
             </table>

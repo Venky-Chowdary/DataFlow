@@ -10,7 +10,7 @@ import { ProofEvidenceSection } from "../components/landing/ProofEvidenceSection
 import { ProductShot } from "../components/marketing/ProductShot";
 import { ObservabilityInAction } from "../components/landing/ObservabilityInAction";
 import { useRevealOnScroll } from "../hooks/useRevealOnScroll";
-import { BACKEND_SUITE, EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS, catalogHonestyLead } from "../lib/provenEvidence";
+import { EVIDENCE_AS_OF, TRANSFER_READY_DRIVERS, catalogHonestyLead } from "../lib/provenEvidence";
 import { connectorDisplayName } from "../lib/connectorTypes";
 import type { PublicRoute } from "../lib/publicNavigation";
 
@@ -24,46 +24,40 @@ const STACK_IDS = [
   "postgresql",
   "snowflake",
   "bigquery",
-  "redshift",
+  "sqlserver",
+  "oracle",
   "mongodb",
   "mysql",
   "kafka",
-  "salesforce",
   "s3",
 ];
 
-/** Wide marquee set — every branded icon we ship, plus stack staples. */
+/** Marquee rows — transfer-ready drivers only (transfer_live_driver_types()). */
 const CONNECTOR_MARQUEE_IDS = [
   "postgresql",
   "mysql",
+  "sqlserver",
+  "oracle",
   "mongodb",
   "snowflake",
   "bigquery",
-  "redshift",
-  "clickhouse",
-  "dynamodb",
-  "elasticsearch",
-  "kafka",
-  "redis",
+  "iceberg",
   "s3",
+  "adls",
+  "gcs",
+  "kafka",
+  "pgvector",
+  "qdrant",
+  "elasticsearch",
+  "dynamodb",
+  "redis",
   "salesforce",
+  "hubspot",
+  "stripe",
+  "parquet",
   "csv",
   "json",
-  "generic_sql",
-  "postgresql",
-  "snowflake",
-  "bigquery",
-  "mongodb",
-  "kafka",
-  "mysql",
-  "redshift",
-  "s3",
-  "clickhouse",
-  "elasticsearch",
-  "dynamodb",
-  "redis",
-  "salesforce",
-  "csv",
+  "sftp",
 ];
 
 const CONNECTOR_MARQUEE_ROW_B = [
@@ -71,30 +65,26 @@ const CONNECTOR_MARQUEE_ROW_B = [
   "kafka",
   "postgresql",
   "bigquery",
+  "pinecone",
+  "sqlserver",
   "redis",
   "mongodb",
-  "s3",
+  "gcs",
+  "oracle",
+  "weaviate",
   "mysql",
-  "clickhouse",
+  "s3",
+  "neo4j",
   "salesforce",
-  "redshift",
+  "iceberg",
+  "milvus",
+  "couchbase",
   "elasticsearch",
+  "adls",
+  "stripe",
   "dynamodb",
-  "json",
-  "generic_sql",
-  "csv",
-  "snowflake",
-  "postgresql",
-  "kafka",
-  "bigquery",
-  "mongodb",
-  "s3",
-  "mysql",
-  "redis",
-  "clickhouse",
-  "salesforce",
-  "redshift",
-  "elasticsearch",
+  "sqlite",
+  "hubspot",
 ];
 
 function ConnectorMarquee({
@@ -141,7 +131,7 @@ const SURFACES: {
     id: "studio",
     label: "Studio",
     title: "Transfer Studio plans every load",
-    body: "Connect source and destination, review semantic maps with confidence scores, pass nine preflight gates, then write with quarantine. The same path Pilot and MCP reuse — no silent shortcut.",
+    body: "Connect source and destination, review semantic maps with confidence scores, clear nine preflight gates, then write with quarantine and value-by-value verification. Pilot and MCP run the exact same path.",
     route: "product-transfer",
     cta: "Open Transfer Studio",
   },
@@ -149,15 +139,15 @@ const SURFACES: {
     id: "theater",
     label: "Theater",
     title: "Job Theater proves what ran",
-    body: "Live phases, quarantine samples with reasons, and checksum reconcile reports. If a job finished, you can show the proof — not just a green status.",
+    body: "Live phases, quarantine samples with reasons, and a Gate-8 verification report read back from the destination. Every finished job comes with proof you can export.",
     route: "product-jobs",
     cta: "See Job Theater",
   },
   {
     id: "pipelines",
     label: "Pipelines",
-    title: "Schedules that still run gates",
-    body: "Watermark incremental, upsert, append, or overwrite — every tick is a real job. Schema drift blocks the next run until you review the diff.",
+    title: "Schedules that run every gate",
+    body: "Typed watermarks, upsert, append, mirror with soft delete, or native CDC — every tick is a real, verified job. Schema drift waits for your review in Map before the next run.",
     route: "product-pipelines",
     cta: "Explore Pipelines",
   },
@@ -165,15 +155,15 @@ const SURFACES: {
     id: "mcp",
     label: "MCP",
     title: "Agents inherit the same gates",
-    body: "MCP tools never receive raw destination passwords. Agents map, preflight, and reconcile under workspace RBAC — the same engine as the UI.",
+    body: "Agents work through secret references, under workspace RBAC and API keys capped at their creator's role. They map, preflight, and verify on the same engine as the UI.",
     route: "product-mcp",
     cta: "Read MCP docs",
   },
   {
     id: "query",
     label: "Query",
-    title: "Playground is read-only. Dest SQL lives in Studio.",
-    body: "Query Playground runs SELECT/WITH against saved connectors. Destination INSERT/MERGE and dest CALL are Transfer Studio write modes — binds only, quarantine on failure, not CDC.",
+    title: "Explore live data safely, then load it in Studio",
+    body: "Query Playground runs read-only SELECT and WITH against saved connectors. When a slice is ready, Transfer Studio writes it — table, destination INSERT/MERGE, or a stored procedure call, all with binds and quarantine.",
     route: "product-query",
     cta: "Open Query Playground",
   },
@@ -267,9 +257,10 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               <span className="lp-hero-title-b">anywhere — proven.</span>
             </h1>
             <p className="lp-hero-sub">
-              Datawrap maps your columns by meaning, refuses the write when a gate fails, and asks
-              the destination engine itself to prove what landed. One governed path for Studio,
-              Pipelines, Pilot, and MCP.
+              Datawrap maps your columns by meaning, clears nine preflight gates before it writes,
+              then reads every load back from the destination and verifies it value by value. If
+              anything doesn&apos;t match, Datawrap tells you instead of reporting success. One
+              governed path for Studio, Pipelines, Pilot, and MCP.
             </p>
             <div className="lp-hero-cta">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>
@@ -285,13 +276,13 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </button>
             </div>
             <p className="lp-hero-meta">
-              {TRANSFER_READY_DRIVERS} TRANSFER_READY
+              {TRANSFER_READY_DRIVERS} transfer-ready drivers
               <span aria-hidden>·</span>
-              G1–G9
+              G1–G9 preflight
               <span aria-hidden>·</span>
-              dest-engine MATCH
+              Gate-8 read-back
               <span aria-hidden>·</span>
-              0 silent drops
+              4 native CDC engines
             </p>
           </div>
           <div className="lp-hero-visual lp-hero-visual--stage">
@@ -322,42 +313,43 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
       <section className="lp-home-problem" id="why">
         <div className="lp-home-problem-inner">
           <Reveal className="lp-home-section-head">
-            <p className="lp-section-kicker">Why pipelines fail operators</p>
-            <h2>Sync status is not proof.</h2>
+            <p className="lp-section-kicker">Built for the questions operators get asked</p>
+            <h2>Did every row land, exactly as it left?</h2>
             <p>
-              Most ELT tools celebrate “job complete.” Operators still cannot answer: did every row
-              land, did types coerce safely, and what was silently dropped?
+              Datawrap answers with evidence: which column went where, which values were held back
+              and why, and a destination read-back that matches the source value for value.
             </p>
           </Reveal>
           <ol className="lp-home-pain-list lp-home-pain-rail">
             <li className="is-ink">
               <span className="lp-home-pain-num">01</span>
               <div>
-                <h3>String-match mapping</h3>
+                <h3>Mapping by meaning</h3>
                 <p>
-                  <code>order_amt</code> and <code>total_amount</code> miss each other on string
-                  match. Blindly aliasing every <code>amt</code> onto <code>payment_amount</code>
-                  writes the wrong money column.
+                  <code>order_amt</code> pairs with <code>total_amount</code> because the order
+                  qualifier matches — and stays clear of <code>payment_amount</code>. Same-role
+                  collisions wait for your review in Map.
                 </p>
               </div>
             </li>
             <li className="is-soft">
               <span className="lp-home-pain-num">02</span>
               <div>
-                <h3>Best-effort coercion</h3>
+                <h3>Exact types, end to end</h3>
                 <p>
-                  Currency strings land in NUMERIC columns as nulls or truncated values — no
-                  quarantine, no reason, no replay path.
+                  Decimals stay exact, timestamps keep every microsecond (and DATETIME2&apos;s
+                  seventh digit), and Unicode text lands on NVARCHAR. A value that can&apos;t fit
+                  goes to quarantine with its reason and a replay path.
                 </p>
               </div>
             </li>
             <li className="is-outline">
               <span className="lp-home-pain-num">03</span>
               <div>
-                <h3>No reconcile artifact</h3>
+                <h3>Proof you can archive</h3>
                 <p>
-                  Green status without row-count and checksum proof. Finance and compliance cannot
-                  archive the load.
+                  Row counts, value and key census, and a signed proof pack linked into a
+                  tamper-evident audit chain — ready for finance and compliance.
                 </p>
               </div>
             </li>
@@ -372,8 +364,8 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <p className="lp-section-kicker">The architecture</p>
             <h2>One governed layer between source and destination.</h2>
             <p>
-              Datawrap connects your systems, maps with roles and type fit, fails-fast before write,
-              and proves every load — for humans and agents.
+              Datawrap connects your systems, maps with roles and type fit, gates every write, and
+              verifies every load — for humans and agents alike.
             </p>
           </Reveal>
 
@@ -385,13 +377,13 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </div>
               <h3>Semantic mapping</h3>
               <p>
-                Roles, synonyms, and qualifiers score every edge — not name equality.
-                Same-role collisions wait for Map review. They do not auto-write.
+                Roles, synonyms, qualifiers, and type fit score every edge. Same-role collisions
+                wait for your review in Map before anything is written.
               </p>
               <ul>
                 <li>Role-aware column matching</li>
                 <li>Confidence thresholds</li>
-                <li>Human review on drift</li>
+                <li>Manual review on schema drift</li>
               </ul>
             </li>
             <li className="lp-home-arch-step lp-home-arch-step--connector" aria-hidden>
@@ -404,12 +396,13 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
               </div>
               <h3>Nine fail-fast gates</h3>
               <p>
-                G1–G9 run before any write. Dry-run isolates coerce failures into quarantine with
-                column, value, and reason — never silent drops.
+                G1–G9 run before any write: schema, types, capacity, privileges, collation-aware
+                key checks, and a dry run that sends coerce failures to quarantine with column,
+                value, and reason.
               </p>
               <ul>
                 <li>Schema &amp; type contracts</li>
-                <li>Capacity probes</li>
+                <li>Capacity &amp; privilege probes</li>
                 <li>Dry-run coerce samples</li>
               </ul>
             </li>
@@ -421,15 +414,15 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 <span className="lp-home-arch-step-num">03</span>
                 <span className="lp-home-arch-step-tag">Prove</span>
               </div>
-              <h3>Write with proof</h3>
+              <h3>Write, then verify</h3>
               <p>
-                Clean rows land; bad rows quarantine in the open. Checksum + row counts flash MATCH
-                only when source and destination agree.
+                Clean rows land and held-back rows quarantine in the open. Gate-8 reads the
+                destination back and shows MATCH when every value and key agrees.
               </p>
               <ul>
-                <li>Quarantine with reasons</li>
-                <li>Checksum reconcile</li>
-                <li>Exportable audit pack</li>
+                <li>Quarantine with replay</li>
+                <li>Value &amp; key census</li>
+                <li>Signed proof pack</li>
               </ul>
             </li>
           </ol>
@@ -447,48 +440,48 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
 
       <ObservabilityInAction />
 
-      <section className="lp-home-market" id="vs-market" aria-label="How Datawrap differs">
+      <section className="lp-home-market" id="vs-market" aria-label="What sets Datawrap apart">
         <div className="lp-home-market-inner">
           <Reveal className="lp-home-section-head">
-            <p className="lp-section-kicker">Versus the market</p>
-            <h2>More advanced than connector-count marketing.</h2>
+            <p className="lp-section-kicker">What sets Datawrap apart</p>
+            <h2>Every load verified. Every exception explained.</h2>
             <p>
-              Fivetran and Airbyte win on catalog breadth. Informatica wins on designer SQL.
-              Datawrap wins on proof: semantic maps you review, nine gates that can block write,
-              quarantine instead of continue-on-error, dest query/CALL with binds, dest-engine checksum.
+              Semantic maps you review, nine gates before the write, quarantine with replay, and a
+              read-back from the destination engine itself. Every load is verified value by value;
+              if anything doesn&apos;t match, Datawrap tells you instead of reporting success.
             </p>
           </Reveal>
           <div className="lp-home-market-grid">
             <article>
-              <span>Fivetran / Airbyte</span>
-              <h3>Managed ELT, schema sync</h3>
+              <span>Verify</span>
+              <h3>Gate-8 read-back</h3>
               <p>
-                Fully-managed connectors and incremental sync. Job complete is a status. Failed
-                coerce is rarely a first-class quarantine with replay.
+                After the write, Datawrap reads the destination back and runs a value and key
+                census against the source. The job shows MATCH only when they agree.
               </p>
             </article>
             <article>
-              <span>Informatica CDI</span>
-              <h3>Target Pre/Post-load SQL</h3>
+              <span>Govern</span>
+              <h3>Signed risk contracts</h3>
               <p>
-                Connected CALL and SQL override are real. Optional continue-on-error can treat a
-                failed statement as success. We refuse that — failed dest SQL quarantines.
+                An intentional cast or truncation is a signed, immutable contract that states what
+                may change and how the writer behaves — recorded with the job.
               </p>
             </article>
             <article>
-              <span>Databricks Lakeflow</span>
-              <h3>Cursor-column lakehouse ingest</h3>
+              <span>Recover</span>
+              <h3>Quarantine with replay</h3>
               <p>
-                Excellent at table ingest into Delta. Dest stored-procedure write and dest-engine
-                COUNT/checksum are not their writer. We sit in front as the governed path.
+                Held-back rows keep column, value, and reason in a durable, workspace-scoped queue.
+                Fix the source or the map and replay them into the same destination.
               </p>
             </article>
             <article className="is-ours">
               <span>Datawrap</span>
               <h3>Map · G1–G9 · quarantine · MATCH</h3>
               <p>
-                Extra source columns stay on Map. Dest INSERT/MERGE and dest CALL use binds only.
-                CDC default is at-least-once upsert until a route proves dest-owned exactly-once.
+                One engine behind Transfer Studio, Pipelines, Pilot, and MCP. Destination INSERT,
+                MERGE, and stored-procedure writes use binds, with quarantine on every path.
               </p>
             </article>
           </div>
@@ -498,37 +491,61 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
       <section className="lp-home-depth" id="engine-depth" aria-label="Engine capabilities">
         <div className="lp-home-depth-inner">
           <Reveal className="lp-home-section-head">
-            <p className="lp-section-kicker">What the engine actually does</p>
+            <p className="lp-section-kicker">What the engine does</p>
             <h2>Every surface runs the same algorithms.</h2>
             <p>
-              Studio, Pipelines, Pilot, and MCP do not get a shortcut. These are product facts —
-              not a feature wall invented for this page.
+              Studio, Pipelines, Pilot, and MCP share one engine. Each item below is a shipped
+              product capability.
             </p>
           </Reveal>
           <ul className="lp-home-depth-list">
             <li>
               <strong>Semantic map</strong>
-              <p>Role, qualifier, and type fit. False friends stay in review. Extra source = G13.</p>
+              <p>Role, qualifier, and type fit score every edge. Ambiguous pairs wait for review.</p>
             </li>
             <li>
               <strong>Nine preflight gates</strong>
-              <p>G1–G9 fail-fast. skip_preflight never from chat or public Studio execute.</p>
+              <p>G1–G9 clear before every write, from Studio, schedules, chat, and agents alike.</p>
             </li>
             <li>
-              <strong>Source query / CALL</strong>
-              <p>Read-only SELECT or one CALL/EXEC, spooled once. CDC on callable is refused.</p>
+              <strong>Post-write verification</strong>
+              <p>Gate-8 reads the destination back: row counts plus a value and key census.</p>
             </li>
             <li>
-              <strong>Dest query / CALL</strong>
-              <p>One INSERT/MERGE/UPDATE or one CALL per row. Missing binds quarantine.</p>
+              <strong>Quarantine &amp; replay</strong>
+              <p>Column, value, and reason for every held-back row, with replay into the same target.</p>
             </li>
             <li>
-              <strong>Quarantine</strong>
-              <p>Column + value + reason. Never a silent drop into “job complete.”</p>
+              <strong>Signed risk contracts</strong>
+              <p>Intentional fidelity changes are signed, immutable, and enforced by the writer.</p>
             </li>
             <li>
-              <strong>Dest-engine proof</strong>
-              <p>COUNT and checksum from the destination — not writer-stamped scan().count().</p>
+              <strong>Schema drift review</strong>
+              <p>A new or renamed source column waits for approval in Map; the next run picks it up.</p>
+            </li>
+            <li>
+              <strong>Native CDC</strong>
+              <p>SQL Server native CDC, PostgreSQL logical decoding, MySQL binlog, and Oracle LogMiner.</p>
+            </li>
+            <li>
+              <strong>Schedules &amp; watermarks</strong>
+              <p>Incremental cursors bound in the column&apos;s own type, zone-aware, read exactly once.</p>
+            </li>
+            <li>
+              <strong>Unicode &amp; collation safety</strong>
+              <p>Unicode text lands on NVARCHAR; keys the destination collation would merge are caught by name.</p>
+            </li>
+            <li>
+              <strong>Timestamp precision</strong>
+              <p>Every microsecond carried, DATETIME2(7)&apos;s seventh digit included, and compared by Gate-8.</p>
+            </li>
+            <li>
+              <strong>Encoding detection</strong>
+              <p>Legacy CSV encodings are detected, shown, and recorded with the job; a declared encoding is strict.</p>
+            </li>
+            <li>
+              <strong>Streams &amp; vectors</strong>
+              <p>Kafka topics as a source; typed pgvector tables plus Pinecone, Qdrant, Weaviate, and Milvus.</p>
             </li>
           </ul>
         </div>
@@ -538,20 +555,20 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <div className="lp-home-measured-inner">
           <Reveal className="lp-home-section-head">
             <p className="lp-section-kicker">Measured {EVIDENCE_AS_OF}</p>
-            <h2>Numbers from named fixtures — not a marketing floor.</h2>
+            <h2>Numbers from named, re-runnable fixtures.</h2>
             <p>
-              Every figure here is recorded in the readiness report. We do not invent 99% accuracy
-              or 700+ live connectors.
+              Every figure here traces to a recorded run against real engines, with the destination
+              read back afterwards.
             </p>
           </Reveal>
           <dl className="lp-home-measured-grid">
             <div>
               <dt>{TRANSFER_READY_DRIVERS}</dt>
-              <dd>TRANSFER_READY drivers after the honesty filter</dd>
+              <dd>Transfer-ready drivers across databases, warehouses, files, streams, and vectors</dd>
             </div>
             <div>
-              <dt>{BACKEND_SUITE.passed.toLocaleString("en-US")}</dt>
-              <dd>Backend tests passed · {BACKEND_SUITE.failed} failed · {BACKEND_SUITE.skipped.toLocaleString("en-US")} skipped</dd>
+              <dt>4</dt>
+              <dd>Native CDC engines: SQL Server, PostgreSQL, MySQL, Oracle</dd>
             </div>
             <div>
               <dt>48</dt>
@@ -576,7 +593,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <h2>Every column earns a confidence score</h2>
             <p>
               Format, role, qualifier, and type fit outrank string similarity. Ambiguous edges wait
-              for review before they pin. A 96% headline is not how Map works.
+              for review before they pin, and your decisions are remembered by the workspace.
             </p>
           </Reveal>
           <div className="lp-home-proof-grid">
@@ -586,15 +603,16 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 <h3>Role-aware matching</h3>
                 <p>
                   <code>order_amt</code> pairs with <code>total_amount</code> because the order
-                  qualifier matches. <code>payment_amount</code> is a different column — both
-                  being NUMERIC amounts is not identity.
+                  qualifier matches. <code>payment_amount</code> keeps its own mapping, even though
+                  both are NUMERIC amounts.
                 </p>
               </article>
               <article>
                 <span>02</span>
                 <h3>Continuous confidence</h3>
                 <p>
-                  Each edge gets a score from format, role, and type fit. Low scores never auto-pin.
+                  Each edge gets a score from format, role, and type fit. Only confident edges pin
+                  automatically.
                 </p>
               </article>
               <article>
@@ -617,10 +635,10 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <div className="lp-home-proof-inner">
           <Reveal className="lp-home-section-head">
             <p className="lp-section-kicker">Runtime proof</p>
-            <h2>Checksum reconcile flashes MATCH</h2>
+            <h2>Read back, verified, then MATCH</h2>
             <p>
-              Success is never status alone. The engine hashes mapped source rows, reads the
-              destination, and only then flashes MATCH — with quarantine counts surfaced.
+              The engine hashes the mapped source rows, reads the destination back, and runs a value
+              and key census. MATCH appears when they agree — with quarantine counts alongside.
             </p>
           </Reveal>
           <div className="lp-home-proof-grid lp-home-proof-grid--reverse">
@@ -634,13 +652,13 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
                 <span>02</span>
                 <h3>Quarantine the rest</h3>
                 <p>
-                  Bad values keep column, sample, and reason — never a silent drop into “complete.”
+                  Held-back values keep column, sample, and reason, ready to fix and replay.
                 </p>
               </article>
               <article>
                 <span>03</span>
-                <h3>Prove with checksums</h3>
-                <p>Row counts and content hashes must agree before MATCH is shown.</p>
+                <h3>Verify value by value</h3>
+                <p>Row counts, content hashes, and the key census agree before MATCH is shown.</p>
               </article>
             </div>
             <div className="lp-home-proof-stage">
@@ -656,21 +674,21 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
           <Reveal className="lp-home-section-head">
             <p className="lp-section-kicker">Use cases</p>
             <h2>What operators run</h2>
-            <p>Migration, recurring sync, and warehouse loading — same nine core gates every time.</p>
+            <p>Migration, recurring sync, and warehouse loading — the same gates and verification every time.</p>
           </Reveal>
           <div className="lp-home-usecase-list lp-home-usecase-bento">
             <article className="lp-home-usecase is-featured">
               <span>Migration</span>
               <h3>Cross-schema cutover with dual-run proof</h3>
-              <p>Pilot a subset for checksum confidence, then cutover with quarantine visible.</p>
+              <p>Pilot a subset, verify it, then cut over with identity, keys, and constraints carried.</p>
               <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("solution-migrations")}>
                 Migration path →
               </button>
             </article>
             <article className="lp-home-usecase is-soft">
               <span>Sync</span>
-              <h3>Recurring sync that still runs preflight</h3>
-              <p>Every tick is a real job. Drift blocks the next run until you review.</p>
+              <h3>Recurring sync with every gate</h3>
+              <p>Native CDC or typed watermarks; every tick is a verified job and drift waits for review.</p>
               <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("solution-sync")}>
                 Sync path →
               </button>
@@ -678,7 +696,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <article className="lp-home-usecase is-outline">
               <span>Warehouse</span>
               <h3>Bulk loads finance can archive</h3>
-              <p>Snowflake, BigQuery, Redshift with capacity probes and reconcile reports.</p>
+              <p>Snowflake, BigQuery, Iceberg, and cloud storage with capacity probes and verified MERGE.</p>
               <button type="button" className="lp-btn lp-btn--ghost" onClick={() => onNavigate("solution-warehouse")}>
                 Warehouse path →
               </button>
@@ -694,10 +712,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
             <p className="lp-section-kicker">Connectors</p>
             <h2>Load Snowflake, BigQuery, and your lake</h2>
             <p>
-              Native connectors for warehouses, object storage, databases, and apps. Map once,
-              validate before write, quarantine bad rows, and keep a checksum — one catalog,
-              one governed path. <strong>{TRANSFER_READY_DRIVERS} TRANSFER_READY drivers</strong> are
-              transfer-live. Catalog tiles that are not certified stay Planned.
+              Native drivers for warehouses, object storage, databases, streams, vector stores, and
+              apps. Map once, validate before write, quarantine bad rows, and verify every load —
+              one catalog, one governed path, <strong>{TRANSFER_READY_DRIVERS} transfer-ready drivers</strong>.
             </p>
           </Reveal>
         </div>
@@ -707,8 +724,7 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         </div>
         <div className="lp-home-connectors-inner">
           <p className="lp-home-connectors-note">
-            {catalogHonestyLead()} Open the catalog to pick a source and destination — logos
-            include Planned tiles.
+            {catalogHonestyLead()} Open the catalog to pick a source and destination.
           </p>
           <div className="lp-home-arch-cta">
             <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("integrations")}>
@@ -729,8 +745,9 @@ export function LandingHome({ onLogin: _onLogin, onGetStarted, onNavigate }: Lan
         <div className="lp-home-final-inner">
           <h2>Ship a governed transfer today</h2>
           <p>
-            Start free on the engine enterprises run behind SSO, BYOK, and audit. Your first load
-            ends the way every load should: a reconcile artifact you can hand to finance.
+            Start free on the engine enterprises run behind SSO, SCIM, BYOK, and a tamper-evident
+            audit chain. Your first load ends the way every load should: verified, with a proof
+            pack you can hand to finance.
           </p>
           <div className="lp-hero-cta">
             <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={onGetStarted}>

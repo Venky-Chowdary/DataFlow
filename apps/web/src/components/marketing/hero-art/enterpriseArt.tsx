@@ -63,10 +63,10 @@ export function PerimeterArt() {
         Workspace
       </ArtText>
       <ArtText x={cx} y={cy + 14} anchor="middle" size={15} tone="teal">
-        tenant isolated
+        workspace isolated
       </ArtText>
       <ArtText x={cx} y={cy + 44} anchor="middle" size={14} tone="muted" mono>
-        region pinned
+        data region set
       </ArtText>
 
       <ArtPacket path={`M${cx} ${cy - 292} A292 292 0 0 1 ${cx} ${cy + 292}`} dur={7} />
@@ -166,7 +166,7 @@ export function VaultArt() {
 const FAMILIES: { title: string; nodes: string[] }[] = [
   { title: "files", nodes: ["CSV", "JSONL", "Parquet", "Excel"] },
   { title: "oltp", nodes: ["PostgreSQL", "MySQL", "Oracle", "SQL Server"] },
-  { title: "warehouse", nodes: ["Snowflake", "BigQuery", "Redshift", "Databricks"] },
+  { title: "warehouse · stream", nodes: ["Snowflake", "BigQuery", "Iceberg", "Kafka"] },
   { title: "object · nosql", nodes: ["S3", "GCS", "ADLS", "MongoDB"] },
 ];
 
@@ -177,7 +177,7 @@ export function LatticeArt({ readyCount }: { readyCount?: number }) {
   return (
     <HeroArtFrame
       label="Connector families joined by typed routes"
-      caption="Any family to any family — the route is typed, not assumed."
+      caption="Any family to any family — every route typed and verified."
       focus={{ x: 8, y: 108, w: 620, h: 420 }}
     >
       {FAMILIES.map((f, ci) => (

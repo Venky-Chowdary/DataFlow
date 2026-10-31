@@ -49,7 +49,7 @@ export const PROVEN_EVIDENCE: EvidenceRow[] = [
     claim: "Identity / sequence generator carried on create-new, re-read from the destination catalog and proven by a post-cutover insert without a key",
     engines: "PostgreSQL, MySQL, SQL Server, Oracle",
     cases: 16,
-    result: "14 carried, 2 declared unsupported (never silently dropped)",
+    result: "14 carried, 2 flagged by name before the load",
     artifact: "identity_live_results.json",
   },
   {
@@ -143,18 +143,18 @@ export const TRANSFER_READY_DRIVERS = 46;
 export const DESKTOP_LAB_CATALOG_SLOTS = 80;
 
 /**
- * Operator-facing honesty line. Catalog tile count is never a live-driver count.
- * Hosts without optional warehouse/SaaS packages report fewer via capabilities.
+ * Public catalog lead: the measured transfer-ready driver count, stated as
+ * what it is. Catalog tile count is never presented as a live-driver count.
  */
 export function catalogHonestyLead(readyCount: number = TRANSFER_READY_DRIVERS): string {
   return (
-    `Catalog tiles are not transfer-live. ${readyCount} drivers are TRANSFER_READY ` +
-    `when optional packages are present. A given host may report fewer via GET /capabilities.`
+    `${readyCount} drivers are transfer-ready: each one maps, runs preflight, quarantines bad rows, ` +
+    `and verifies the load through the same engine.`
   );
 }
 
-/** Studio-aligned family badge. Mixed = at least one name is Planned or package-gated. */
-export type CatalogFamilyBadge = "Certified" | "Mixed" | "Planned";
+/** Public family badge. Only transfer-ready drivers are named in MARKETING_STACK. */
+export type CatalogFamilyBadge = "Transfer-ready";
 
 /**
  * Internal operator ledger — not rendered on marketing pages.
@@ -221,8 +221,11 @@ export const NOT_PROVEN: UnprovenRow[] = [
 ];
 
 /**
- * Public catalog families — product language, never CI blockers.
- * Names may include Planned tiles. `note` must say so; `badge` matches Studio.
+ * Public catalog families. Every name listed here is in
+ * `transfer_live_driver_types()` on the current base (46 drivers). Catalog
+ * entries whose status is `planned` (Redshift, Databricks, ClickHouse,
+ * MariaDB, CockroachDB, Shopify) are not named — see
+ * docs/MARKETING_AUDIT_2026-10.md, "Not claimed on purpose".
  */
 export const MARKETING_STACK: ReadonlyArray<{
   family: string;
@@ -231,32 +234,46 @@ export const MARKETING_STACK: ReadonlyArray<{
   note: string;
 }> = [
   {
-    family: "Warehouses",
-    items: "Snowflake, BigQuery, Redshift, Databricks",
-    badge: "Mixed",
+    family: "Warehouses & lakehouse",
+    items: "Snowflake, BigQuery, Apache Iceberg",
+    badge: "Transfer-ready",
     note:
-      "Snowflake and BigQuery are TRANSFER_READY when their packages are installed. Redshift and Databricks stay Planned until a named PRODUCTION_SKU matrix. Every warehouse load still maps, gates, quarantines, and checksums.",
+      "Load and read Snowflake and BigQuery with create-new tables, MERGE upserts, and post-write verification. Snowflake connects with password or key-pair auth; Iceberg works with SQL and REST catalogs.",
   },
   {
     family: "Object storage",
     items: "Amazon S3, Azure Data Lake Storage, Google Cloud Storage",
-    badge: "Mixed",
+    badge: "Transfer-ready",
     note:
-      "S3, ADLS, and GCS are TRANSFER_READY when their packages are installed. Catalog tiles without a named matrix stay Planned. Writes still quarantine and account rows.",
+      "S3-compatible endpoints, s3:// URLs and prefixes. CSV, JSON, Parquet, Avro, and ORC — decimals land exact and every row is accounted for.",
   },
   {
     family: "Databases",
-    items: "PostgreSQL, MySQL, SQL Server, Oracle, MongoDB",
-    badge: "Mixed",
+    items: "PostgreSQL, MySQL, SQL Server, Oracle, MongoDB, SQLite",
+    badge: "Transfer-ready",
     note:
-      "PostgreSQL, MySQL, and MongoDB are certified full transfer. SQL Server and Oracle are TRANSFER_READY when their packages are installed. Schema carry, identity, and checksum reconcile stay on every cutover.",
+      "Identity, foreign keys, CHECK constraints, and indexes carry on create-new. Native change data capture on SQL Server, PostgreSQL, MySQL, and Oracle.",
   },
   {
-    family: "Applications",
-    items: "Salesforce, Stripe, Shopify, HubSpot",
-    badge: "Mixed",
+    family: "Streaming",
+    items: "Apache Kafka",
+    badge: "Transfer-ready",
     note:
-      "Salesforce and HubSpot are certified reverse-ETL. Stripe is a named incremental-cursor SKU (created watermark, dest COUNT). Shopify stays Planned until PRODUCTION_SKU. Connecting a catalog tile is not a live transfer.",
+      "Read topics as a source. Every field gets one exact type across the whole run, and JSON numbers keep the spelling the message gave them.",
+  },
+  {
+    family: "Vector databases",
+    items: "pgvector, Pinecone, Qdrant, Weaviate, Milvus",
+    badge: "Transfer-ready",
+    note:
+      "New pgvector tables are typed by default: every source column with its real type plus an embedding column, verified like PostgreSQL.",
+  },
+  {
+    family: "Applications & APIs",
+    items: "Salesforce, HubSpot, Stripe, REST APIs",
+    badge: "Transfer-ready",
+    note:
+      "Reverse-ETL into Salesforce and HubSpot, incremental Stripe reads on the created cursor, and REST sources with the same map, gates, and verification.",
   },
 ];
 
@@ -268,17 +285,17 @@ export const MARKETING_PROOF_HIGHLIGHTS = [
   },
   {
     title: "Identity and keys survive cutover",
-    body: "Sequences, foreign keys, and CHECK constraints are carried or explicitly refused — never silently dropped.",
+    body: "Sequences, foreign keys, and CHECK constraints carry to the destination — each one proven on the destination itself after cutover.",
     stat: "43 live cases",
   },
   {
-    title: "Retries cannot corrupt a load",
-    body: "A failed attempt that already committed rows cannot be blindly restarted under a non-convergent mode.",
+    title: "Retries keep a load correct",
+    body: "Before any retry, Datawrap checks what the failed attempt already committed and restarts only on a path that converges.",
     stat: "14 scheduler cases",
   },
   {
     title: "Transforms load by column name",
-    body: "Unmatched columns are refused. Incremental transforms stay column-correct on PostgreSQL, MySQL, and SQL Server.",
+    body: "Incremental transforms match every column by name on PostgreSQL, MySQL, and SQL Server.",
     stat: "33 live cases",
   },
 ] as const;

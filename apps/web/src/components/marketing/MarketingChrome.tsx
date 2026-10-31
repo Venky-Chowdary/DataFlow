@@ -3,6 +3,7 @@ import { BrandWordmark } from "../BrandWordmark";
 import { DtIcon } from "../DtIcon";
 import type { PublicRoute } from "../../lib/publicNavigation";
 import { hashForPublicRoute } from "../../lib/publicNavigation";
+import { TRANSFER_READY_DRIVERS } from "../../lib/provenEvidence";
 
 type NavMenu = "product" | "solutions" | "resources" | null;
 
@@ -134,15 +135,15 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                 <div className="lp-nav-dropdown">
                   <a href={link("product-transfer")} onClick={(e) => { e.preventDefault(); go("product-transfer"); }}>
                     <strong>Transfer Studio</strong>
-                    <span>Map, preflight, and prove any→any loads</span>
+                    <span>Map, preflight, and verify any→any loads</span>
                   </a>
                   <a href={link("product-jobs")} onClick={(e) => { e.preventDefault(); go("product-jobs"); }}>
                     <strong>Job Theater</strong>
-                    <span>Live phases, quarantine, and proof reports</span>
+                    <span>Live phases, quarantine, and verification reports</span>
                   </a>
                   <a href={link("product-pipelines")} onClick={(e) => { e.preventDefault(); go("product-pipelines"); }}>
                     <strong>Pipelines</strong>
-                    <span>Scheduled sync with watermarks &amp; gates</span>
+                    <span>Schedules, typed watermarks &amp; native CDC</span>
                   </a>
                   <a href={link("product-query")} onClick={(e) => { e.preventDefault(); go("product-query"); }}>
                     <strong>Query Playground</strong>
@@ -150,7 +151,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("product-pilot")} onClick={(e) => { e.preventDefault(); go("product-pilot"); }}>
                     <strong>Datawrap Pilot</strong>
-                    <span>Natural-language triage for transfers</span>
+                    <span>Local-engine copilot for transfers</span>
                   </a>
                   <a href={link("product-mcp")} onClick={(e) => { e.preventDefault(); go("product-mcp"); }}>
                     <strong>MCP Server</strong>
@@ -158,7 +159,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>
                     <strong>Connectors</strong>
-                    <span>Native drivers + SQLAlchemy generics</span>
+                    <span>{TRANSFER_READY_DRIVERS} transfer-ready drivers</span>
                   </a>
                 </div>
               </div>
@@ -182,11 +183,11 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("solution-warehouse")} onClick={(e) => { e.preventDefault(); go("solution-warehouse"); }}>
                     <strong>Warehouse loading</strong>
-                    <span>Warehouse loads with reconcile proof</span>
+                    <span>Warehouse loads, verified on read-back</span>
                   </a>
                   <a href={link("solution-sync")} onClick={(e) => { e.preventDefault(); go("solution-sync"); }}>
                     <strong>Recurring sync</strong>
-                    <span>Incremental pipelines with quarantine</span>
+                    <span>CDC and incremental pipelines</span>
                   </a>
                 </div>
               </div>
@@ -221,19 +222,19 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                   </a>
                   <a href={link("help-getting-started")} onClick={(e) => { e.preventDefault(); go("help-getting-started"); }}>
                     <strong>Getting started</strong>
-                    <span>Connect → map → preflight → prove</span>
+                    <span>Connect → map → preflight → verify</span>
                   </a>
                   <a href={link("enterprise")} onClick={(e) => { e.preventDefault(); go("enterprise"); }}>
                     <strong>Enterprise</strong>
-                    <span>SSO, RBAC, audit, tenants</span>
+                    <span>SSO, SCIM, RBAC, audit chain</span>
                   </a>
                   <a href={link("security")} onClick={(e) => { e.preventDefault(); go("security"); }}>
                     <strong>Security</strong>
-                    <span>Encryption, residency, governance</span>
+                    <span>Isolation, encryption, identity, audit</span>
                   </a>
                   <a href={link("integrations")} onClick={(e) => { e.preventDefault(); go("integrations"); }}>
                     <strong>Connector catalog</strong>
-                    <span>Warehouses, lakes, and apps</span>
+                    <span>Warehouses, lakes, streams, vectors, apps</span>
                   </a>
                 </div>
               </div>
@@ -309,7 +310,7 @@ export function MarketingChrome({ route, onNavigate, onLogin, onGetStarted, chil
                 Anywhere to anywhere — wrapped with proof.
               </p>
               <p className="lp-footer-proof">
-                Catalog tiles are not transfer-live. CDC stays at-least-once upsert until a route proves dest-owned exactly-once.
+                Every load verified value by value — if anything doesn&apos;t match, Datawrap tells you.
               </p>
             </div>
             <div>

@@ -14,7 +14,7 @@ export interface PageMeta {
 
 const BASE_TITLE = "Datawrap";
 const DEFAULT_DESCRIPTION =
-  "Integrity-first data transfer — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and G1–G9 preflight gates.";
+  "Integrity-first data transfer — semantic mapping, G1–G9 preflight, native CDC, quarantine with replay, and every load verified value by value.";
 const DEFAULT_KEYWORDS =
   "data transfer, data migration, ETL, database migration, CSV to PostgreSQL, Snowflake migration, semantic mapping, preflight validation, data pipeline, Datawrap";
 
@@ -22,7 +22,7 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   landing: {
     title: "Universal Data Transfer Platform",
     description:
-      "Move data between any source and destination — databases, files, warehouses, and APIs. AI column mapping, G1–G9 preflight gates, and live reconciliation.",
+      "Move data between databases, warehouses, files, streams, and APIs. Semantic mapping, G1–G9 preflight, native CDC, and value-by-value verification.",
     keywords:
       "data transfer platform, database migration tool, file to database, PostgreSQL to Snowflake, data sync, ETL platform, semantic mapping",
     ogType: "website",
@@ -57,7 +57,7 @@ export const PAGE_META: Record<Screen | "login", PageMeta> = {
   pilot: {
     title: "Datawrap Pilot",
     description:
-      "AI agent for natural-language data operations — inspect schemas, run transfers, and troubleshoot pipelines.",
+      "Copilot on Datawrap's own local engine — inspect schemas, run transfers, and troubleshoot pipelines, with Confirm before anything moves.",
     keywords: "AI data agent, natural language ETL, Datawrap Pilot, schema inspection",
     robots: "noindex",
   },

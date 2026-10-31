@@ -80,15 +80,11 @@ export function PlanLadderArt() {
       <ArtText x={64} y={176} size={18}>
         and security.
       </ArtText>
-      {/* The meter we do not run: rows moved never sets the invoice. */}
-      <g>
-        <ArtText x={64} y={228} size={15} tone="danger">
-          monthly active rows
-        </ArtText>
-        <line x1={58} y1={222} x2={266} y2={222} stroke={INK.danger} strokeWidth="2" />
-      </g>
+      <ArtText x={64} y={228} size={15} tone="teal">
+        one quote per cadence
+      </ArtText>
       <ArtText x={64} y={258} size={15} tone="muted">
-        never sets the invoice
+        verification always included
       </ArtText>
 
       {PLAN_STEPS.map((step, i) => {
@@ -124,7 +120,7 @@ export function PlanLadderArt() {
         in every plan
       </ArtLabel>
       <ArtText x={48} y={RAIL_Y + 78} size={15} tone="muted">
-        semantic map · G1–G9 · quarantine · destination reread
+        semantic map · G1–G9 · quarantine · Gate-8 read-back
       </ArtText>
     </HeroArtFrame>
   );
@@ -134,15 +130,15 @@ export function PlanLadderArt() {
 
 const EVIDENCE_PLATES: { stat: string; claim: string; scope: string }[] = [
   { stat: "48 cases", claim: "schema drift held", scope: "widen · refuse narrow · defaults" },
-  { stat: "43 cases", claim: "identity and keys", scope: "carried or explicitly refused" },
-  { stat: "14 cases", claim: "retry cannot corrupt", scope: "committed rows never replayed blind" },
+  { stat: "43 cases", claim: "identity and keys", scope: "carried, proven on the destination" },
+  { stat: "14 cases", claim: "retries stay correct", scope: "committed rows checked before retry" },
 ];
 
 export function EvidencePlatesArt() {
   return (
     <HeroArtFrame
-      label="Measured evidence plates with an empty, refused logo plate"
-      caption="Each plate names its case count and engines. The empty plate is the one we will not fill."
+      label="Measured evidence plates with an open plate for your pilot"
+      caption="Each plate names its case count and engines. The open plate is reserved for your pilot."
       focus={{ x: 40, y: 96, w: 560, h: 440 }}
     >
       {EVIDENCE_PLATES.map((plate, i) => {
@@ -184,16 +180,15 @@ export function EvidencePlatesArt() {
         strokeDasharray="8 9"
       />
       <ArtText x={800} y={172} anchor="middle" size={16} tone="muted">
-        logo wall
+        your pilot
       </ArtText>
-      <line x1={700} y1={196} x2={900} y2={196} stroke={INK.danger} strokeWidth="2.5" />
-      <ArtText x={800} y={230} anchor="middle" size={13} tone="danger">
-        no invented marks
+      <ArtText x={800} y={230} anchor="middle" size={13} tone="teal">
+        your sources · your destinations
       </ArtText>
 
       <ArtSeal cx={800} cy={378} r={44} label={`measured ${EVIDENCE_AS_OF}`} />
       <ArtText x={800} y={496} anchor="middle" size={14} tone="muted">
-        destination reread, not writer counts
+        read back from the destination
       </ArtText>
     </HeroArtFrame>
   );

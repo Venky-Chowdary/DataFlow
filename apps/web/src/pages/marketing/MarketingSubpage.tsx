@@ -60,8 +60,8 @@ function StatsStrip({ items }: { items: { value: string; label: string }[] }) {
 }
 
 /**
- * Control posture, not certificates. No third-party audit has been completed,
- * so the footnote ships with the badges and cannot be dropped by a caller.
+ * Control posture badges. Each label names a shipped control
+ * (docs/MARKETING_AUDIT_2026-10.md §2); certifications are not listed.
  */
 function ComplianceBadges({ items }: { items: string[] }) {
   return (
@@ -75,8 +75,8 @@ function ComplianceBadges({ items }: { items: string[] }) {
         ))}
       </div>
       <p className="lp-mkt-compliance-note">
-        Encryption, SSO, customer-managed keys, and audit logging ship with the product.
-        Request the security questionnaire and DPA for procurement.
+        Encryption, SSO, SCIM, customer-managed keys, and a tamper-evident audit log ship with
+        the product. Request the security questionnaire and DPA for procurement.
       </p>
     </div>
   );
@@ -136,62 +136,75 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       name: "Starter",
       price: "Free",
       period: "forever",
-      blurb: "Ship a governed transfer today — same engine, real preflight, no teaser demo.",
+      blurb: "Ship a governed, verified transfer today on the full production engine.",
       cta: "Start free",
       action: onGetStarted,
       tone: "starter" as const,
       features: [
-        "Transfer Studio — table, dest query, dest CALL",
-        "G1–G9 fail-fast + quarantine",
-        "Dest-engine COUNT + checksum",
-        `${TRANSFER_READY_DRIVERS} TRANSFER_READY drivers`,
+        "Transfer Studio — table, destination query, stored procedure",
+        "G1–G9 preflight + quarantine with replay",
+        "Gate-8 read-back with value & key census",
+        `${TRANSFER_READY_DRIVERS} transfer-ready drivers`,
       ],
     },
     {
       name: "Team",
       price: "Custom",
       period: "usage-aligned",
-      blurb: "Pipelines, Pilot, and shared connectors — priced to cadence, never seats-first.",
+      blurb: "Pipelines, native CDC, Pilot, and shared connectors — priced to cadence and connectors.",
       cta: "Contact sales",
       action: () => onNavigate("contact"),
       tone: "team" as const,
       featured: true,
-      features: ["Everything in Starter", "Scheduled pipelines", "Datawrap Pilot", "Shared connectors + email support"],
+      features: [
+        "Everything in Starter",
+        "Schedules, typed watermarks & native CDC",
+        "Datawrap Pilot on its own local engine",
+        "Shared connectors + email support",
+      ],
     },
     {
       name: "Enterprise",
       price: "Custom",
       period: "security & scale",
-      blurb: "SSO, BYOK, tenant isolation, MCP under policy, and a dedicated success engineer.",
+      blurb: "SSO, SCIM, BYOK, workspace isolation, MCP under policy, and a dedicated success engineer.",
       cta: "Contact sales",
       action: () => onNavigate("contact"),
       tone: "enterprise" as const,
-      features: ["Everything in Team", "SSO / SAML + BYOK", "MCP for agents", "Dedicated success"],
+      features: [
+        "Everything in Team",
+        "SSO (OIDC / SAML) + SCIM + BYOK",
+        "MCP for agents + tamper-evident audit",
+        "Dedicated success",
+      ],
     },
   ];
 
   const compareRows = [
-    { feature: "Transfer Studio (table / dest query / dest CALL)", starter: true, team: true, enterprise: true },
-    { feature: "G1–G9 preflight & quarantine", starter: true, team: true, enterprise: true },
-    { feature: "Dest-engine checksum MATCH", starter: true, team: true, enterprise: true },
+    { feature: "Transfer Studio (table / destination query / stored procedure)", starter: true, team: true, enterprise: true },
+    { feature: "G1–G9 preflight & quarantine with replay", starter: true, team: true, enterprise: true },
+    { feature: "Gate-8 read-back: value & key census", starter: true, team: true, enterprise: true },
     { feature: "Source query / stored procedure read", starter: true, team: true, enterprise: true },
-    { feature: "Pipelines & schedules", starter: false, team: true, enterprise: true },
+    { feature: "Signed risk contracts & proof packs", starter: true, team: true, enterprise: true },
+    { feature: "Pipelines, schedules & typed watermarks", starter: false, team: true, enterprise: true },
+    { feature: "Native CDC (SQL Server, PostgreSQL, MySQL, Oracle)", starter: false, team: true, enterprise: true },
     { feature: "Datawrap Pilot", starter: false, team: true, enterprise: true },
     { feature: "MCP for agents", starter: false, team: false, enterprise: true },
-    { feature: "SSO / SAML", starter: false, team: false, enterprise: true },
-    { feature: "BYOK & dedicated tenant", starter: false, team: false, enterprise: true },
+    { feature: "SSO (OIDC / SAML) & SCIM", starter: false, team: false, enterprise: true },
+    { feature: "BYOK & custom domain", starter: false, team: false, enterprise: true },
+    { feature: "Tamper-evident audit chain & signed webhooks", starter: false, team: false, enterprise: true },
   ];
 
   return (
     <div className="lp-mkt-page lp-page-pricing lp-pricing-v2">
       <MarketingInkHero
         kicker="Pricing"
-        title={<>Plans that scale with proof — not MAR surprises.</>}
+        title={<>Plans that scale with proof.</>}
         lead={
           <>
-            Fivetran bills Monthly Active Rows. Informatica bills consumption modules. Datawrap
-            prices cadence and security. Semantic map, G1–G9, quarantine, dest query/CALL, and
-            dest-engine checksum ship in Starter — not behind Enterprise.
+            Datawrap prices cadence and security. Semantic mapping, G1–G9 preflight, quarantine
+            with replay, destination query and stored-procedure writes, and value-by-value
+            verification all ship in Starter.
           </>
         }
         actions={
@@ -210,8 +223,8 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         }
         slas={[
           { value: "Free", label: "Starter forever" },
-          { value: "G1–G9", label: "In every plan" },
-          { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY drivers" },
+          { value: "Verified", label: "Every load, every plan" },
+          { value: String(TRANSFER_READY_DRIVERS), label: "Transfer-ready drivers" },
           { value: "Custom", label: "Team & Enterprise" },
         ]}
         aside={
@@ -266,8 +279,8 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
             <p className="lp-mkt-kicker">Compare</p>
             <h2>One engine. Three unlock levels.</h2>
             <p>
-              Silent-data-loss prevention ships in Starter. Collaboration unlocks in Team.
-              Identity, tenancy, and agents unlock in Enterprise.
+              Verification ships in Starter. Schedules, CDC, and collaboration unlock in Team.
+              Identity, tenancy, audit, and agents unlock in Enterprise.
             </p>
           </div>
           <div className="lp-pricing-v2-table-wrap">
@@ -298,12 +311,12 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
       <MarketingReveal>
         <section className="lp-pricing-v2-principles" aria-label="Pricing principles">
           <div className="lp-pricing-principle">
-            <strong>Honest free tier</strong>
-            <span>Full Transfer Studio path — no teaser demo.</span>
+            <strong>A real free tier</strong>
+            <span>The full Transfer Studio path, verification included.</span>
           </div>
           <div className="lp-pricing-principle">
             <strong>Quote when you scale</strong>
-            <span>Priced to connectors and cadence, never seats-first.</span>
+            <span>Priced to connectors and cadence.</span>
           </div>
           <div className="lp-pricing-principle">
             <strong>One engine everywhere</strong>
@@ -312,14 +325,14 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
         </section>
       </MarketingReveal>
 
-      <section className="lp-sales-compare" aria-label="How pricing differs from the market">
+      <section className="lp-sales-compare" aria-label="What every plan includes">
         <div className="lp-mkt-wrap">
           <header>
-            <p className="lp-sales-kicker lp-sales-kicker--ink">Versus the market</p>
-            <h2>Pay for cadence — not for every changed row.</h2>
+            <p className="lp-sales-kicker lp-sales-kicker--ink">In every plan</p>
+            <h2>Pay for cadence. Verification is always included.</h2>
             <p>
-              Fivetran MAR and Informatica IPU make cost a function of churn. We quote connectors
-              and schedule. Proof is not an add-on SKU.
+              We quote connectors and schedule. The proof engine is the same in every plan — it is
+              how Datawrap moves data.
             </p>
           </header>
           <div className="lp-sales-table-wrap">
@@ -327,35 +340,35 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
               <thead>
                 <tr>
                   <th scope="col">Dimension</th>
-                  <th scope="col">Fivetran</th>
-                  <th scope="col">Informatica CDI</th>
-                  <th scope="col">Datawrap</th>
+                  <th scope="col">What you get</th>
+                  <th scope="col">How it works</th>
+                  <th scope="col">Plans</th>
                 </tr>
               </thead>
               <tbody>
                 <tr>
                   <th scope="row">Meter</th>
-                  <td>Monthly Active Rows per connector</td>
-                  <td>IPU / consumption modules</td>
-                  <td>Cadence + security tier — quote when you scale</td>
+                  <td>Cadence + security tier</td>
+                  <td>Quoted when you scale</td>
+                  <td>Team · Enterprise</td>
                 </tr>
                 <tr>
                   <th scope="row">Proof</th>
-                  <td>Sync status and logs</td>
-                  <td>Session logs</td>
-                  <td>Dest-engine COUNT + checksum in Starter</td>
+                  <td>Gate-8 read-back</td>
+                  <td>Row counts plus a value and key census from the destination</td>
+                  <td>All plans</td>
                 </tr>
                 <tr>
-                  <th scope="row">Failed rows</th>
-                  <td>Retry / skip</td>
-                  <td>Optional continue-on-error</td>
-                  <td>Quarantine + replay — never a silent drop</td>
+                  <th scope="row">Held-back rows</th>
+                  <td>Quarantine + replay</td>
+                  <td>Column, value, and reason in a durable workspace queue</td>
+                  <td>All plans</td>
                 </tr>
                 <tr>
-                  <th scope="row">Dest SQL</th>
-                  <td>Table / stream writers</td>
-                  <td>Target Pre/Post-load</td>
-                  <td>Dest query and dest CALL in every plan</td>
+                  <th scope="row">Destination SQL</th>
+                  <td>Query and stored procedure</td>
+                  <td>One INSERT/MERGE/UPDATE or CALL per row, binds only</td>
+                  <td>All plans</td>
                 </tr>
               </tbody>
             </table>
@@ -369,9 +382,8 @@ function PricingPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStart
             <div>
               <h3>Procurement, MSA, or a security pack?</h3>
               <p>
-                Enterprise deals ship with a negotiated MSA, DPA, and a pre-populated security
-                questionnaire. Controls exist; no SOC&nbsp;2 or ISO certificate is claimed until a
-                third-party audit exists.
+                Enterprise deals ship with a negotiated MSA, DPA, a pre-populated security
+                questionnaire, and a workspace audit export your reviewers can verify.
               </p>
             </div>
             <div className="lp-pricing-v2-cta-actions">
@@ -394,26 +406,38 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
     {
       id: "identity",
       kicker: "01 · Identity",
-      title: "SSO that actually gates runs",
-      body: "SAML/OIDC and SCIM-ready roles. Every Transfer Studio job, Pilot session, and MCP call inherits who is allowed to map, approve, and write.",
+      title: "SSO and SCIM that gate every run",
+      body: "OIDC and SAML sign-in with email-domain routing to the right identity provider. SCIM 2.0 provisions users and maps groups to workspace roles; deactivating a user revokes their sessions and keys.",
+    },
+    {
+      id: "access",
+      kicker: "02 · Access",
+      title: "RBAC with API keys that can't outrank you",
+      body: "Viewer, Editor, and Admin roles on every Studio job, Pilot session, and MCP call. An API key carries a role and scopes no higher than the person who created it, and the audit log names the key.",
     },
     {
       id: "tenancy",
-      kicker: "02 · Tenancy",
-      title: "Isolation without a fork",
-      body: "Dedicated tenants, custom domains, and region pinning. Same governed engine — no shared control-plane bleed between customers.",
+      kicker: "03 · Tenancy",
+      title: "Workspace isolation at the store layer",
+      body: "Every read of jobs, connectors, schedules, notifications, and audit is scoped to the caller's workspace — Pilot and MCP tools included. Custom domains and a per-workspace data region on top.",
     },
     {
       id: "keys",
-      kicker: "03 · Keys",
+      kicker: "04 · Keys",
       title: "BYOK on connector secrets",
-      body: "Customer-managed keys wrap credentials. Purpose keys stay scoped to the job that needs them — never a global vault shortcut.",
+      body: "Connector secrets are encrypted at rest and can be wrapped with your own key: local, wrapped, or AWS KMS, with rotation. PII hashing uses a per-workspace key generated on first use.",
     },
     {
       id: "audit",
-      kicker: "04 · Audit",
-      title: "Proof ready for SOC review",
-      body: "Immutable logs for jobs, mapping decisions, quarantine samples, and agent MCP calls — checksum reconcile included.",
+      kicker: "05 · Audit",
+      title: "A tamper-evident audit chain",
+      body: "Every record is hash-chained and signed with the chain's own key, named by a key id. Verify the chain per workspace, filter by action, level, and time, and export CSV, JSON, NDJSON, or CEF.",
+    },
+    {
+      id: "operations",
+      kicker: "06 · Operations",
+      title: "Policies you can turn on",
+      body: "Idle session timeout, signed webhooks (HMAC-SHA256 with per-channel secrets), job-history retention purge with a dry run first, and deployment settings reserved for platform admins.",
     },
   ];
 
@@ -424,9 +448,9 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
         title={<>Controls that travel with every load.</>}
         lead={
           <>
-            SSO, RBAC, BYOK, and tenant isolation on the same Transfer Studio engine. No parallel
-            “enterprise-only” path that skips G1–G9. Informatica-class procurement, Fivetran-class
-            clarity, Datawrap proof on the dest.
+            SSO, SCIM, RBAC, BYOK, workspace isolation, and a tamper-evident audit chain — on the
+            same Transfer Studio engine, with every G1–G9 gate and every post-write verification
+            in place.
           </>
         }
         actions={
@@ -440,10 +464,10 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
           </div>
         }
         slas={[
-          { value: "SSO", label: "SAML / OIDC" },
+          { value: "SSO", label: "OIDC / SAML" },
+          { value: "SCIM", label: "Group → role" },
           { value: "BYOK", label: "Customer keys" },
-          { value: "9 / 9", label: "Preflight required" },
-          { value: "MATCH", label: "Dest-engine checksum" },
+          { value: "Chained", label: "Signed audit log" },
         ]}
         aside={
           <div className="lp-sales-hero-art">
@@ -458,8 +482,8 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
             <p className="lp-mkt-kicker">Control plane</p>
             <h2>Enterprise controls on every run</h2>
             <p>
-              Identity, tenancy, keys, and audit wrap the same map → preflight → prove path — not a
-              wall of feature cards bolted on after the fact.
+              Identity, access, tenancy, keys, audit, and operations policies wrap the same
+              map → preflight → verify path that every load runs.
             </p>
           </div>
           <div className="lp-ent-capability-grid">
@@ -481,25 +505,25 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
               <p className="lp-mkt-kicker">How it lands</p>
               <h2>One engine. Enterprise controls on top.</h2>
               <p>
-                Procurement does not get a different transfer algorithm. Your teams map, preflight,
-                quarantine, and reconcile the same way — with identity, tenancy, and keys wrapping
-                every run.
+                Your teams map, preflight, quarantine, and verify the same way on every plan — with
+                identity, tenancy, and keys wrapping every run.
               </p>
               <ul className="lp-ent-checklist">
                 <li>Workspace RBAC for who can map, approve drift, and run production loads</li>
-                <li>Region pinning for jobs and artifacts when policy requires residency</li>
-                <li>MCP and Datawrap Pilot inherit the same gates — agents never get a silent shortcut</li>
+                <li>A workspace data region, with residency enforcement that refuses out-of-region destinations before the run</li>
+                <li>MCP and Datawrap Pilot run the same gates, with secret references instead of passwords</li>
+                <li>Signed proof packs and a verifiable audit export for every review</li>
                 <li>Security questionnaire and control-mapping pack for procurement kickoff</li>
               </ul>
             </div>
             <aside className="lp-ent-panel" aria-label="Enterprise control snapshot">
               <h3>Control snapshot</h3>
-              <div className="lp-ent-panel-row"><span>Identity</span><em>SSO enforced</em></div>
+              <div className="lp-ent-panel-row"><span>Identity</span><em>OIDC / SAML · SCIM</em></div>
               <div className="lp-ent-panel-row"><span>Secrets</span><em>BYOK wrapped</em></div>
               <div className="lp-ent-panel-row"><span>Preflight</span><em>9 / 9 required</em></div>
-              <div className="lp-ent-panel-row"><span>Quarantine</span><em>surfaced, never dropped</em></div>
-              <div className="lp-ent-panel-row"><span>Reconcile</span><em>checksum + counts</em></div>
-              <div className="lp-ent-panel-row"><span>Audit</span><em>jobs · maps · agents</em></div>
+              <div className="lp-ent-panel-row"><span>Quarantine</span><em>replayable</em></div>
+              <div className="lp-ent-panel-row"><span>Verify</span><em>value &amp; key census</em></div>
+              <div className="lp-ent-panel-row"><span>Audit</span><em>hash-chained · key id</em></div>
             </aside>
           </div>
         </section>
@@ -512,10 +536,10 @@ function EnterprisePage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetSt
               <p className="lp-mkt-kicker lp-mkt-kicker--on-ink">Ready when procurement is</p>
               <h2>Ship governed transfers under enterprise policy</h2>
               <p>
-                Start a pilot on the same engine. Add SSO, BYOK, and audit when security is ready —
-                without re-platforming operators.
+                Start a pilot on the same engine. Add SSO, SCIM, BYOK, and audit policies when
+                security is ready — your operators keep working the same way.
               </p>
-              <ComplianceBadges items={["Encryption at rest", "SSO / SAML", "Customer-managed keys", "GDPR processing", "Regional residency"]} />
+              <ComplianceBadges items={["Credentials encrypted at rest", "SSO / SAML / OIDC", "SCIM 2.0", "Customer-managed keys", "GDPR processing", "Workspace data region"]} />
             </div>
             <div className="lp-ent-cta-actions">
               <button type="button" className="lp-btn lp-btn--brand lp-btn--lg" onClick={() => onNavigate("contact")}>
@@ -537,11 +561,11 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
     <div className="lp-mkt-page lp-cust-v3">
       <MarketingInkHero
         kicker="Customers"
-        title={<>Every load leaves proof — not a logo wall.</>}
+        title={<>Every load leaves proof you can keep.</>}
         lead={
           <>
-            We do not invent customer marks. What we publish is measured: schema drift, identity
-            carry, retry safety, and dest-engine reconcile on named engines. Book a pilot on{" "}
+            What we publish is measured: schema drift, identity carry, retry safety, and
+            destination read-back on named engines. Book a pilot and get the same evidence on{" "}
             <em>your</em> sources and destinations.
           </>
         }
@@ -558,8 +582,8 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         slas={[
           { value: "9", label: "Core preflight gates" },
           { value: "48", label: "Live schema-drift cases" },
-          { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY drivers" },
-          { value: "0", label: "Silent drops by design" },
+          { value: String(TRANSFER_READY_DRIVERS), label: "Transfer-ready drivers" },
+          { value: "4", label: "Native CDC engines" },
         ]}
         aside={
           <div className="lp-sales-hero-art">
@@ -572,19 +596,19 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         <div className="lp-shell lp-cust3-metrics-row">
           <div>
             <strong>Migrations</strong>
-            <span>Oracle / SQL Server cutover with identity and FK carry</span>
+            <span>Oracle and SQL Server cutover with identity, FK, and Unicode carry</span>
           </div>
           <div>
             <strong>Warehouses</strong>
-            <span>Snowflake, BigQuery, Redshift, Databricks — MERGE + MATCH</span>
+            <span>Snowflake, BigQuery, Apache Iceberg — MERGE + verified</span>
           </div>
           <div>
             <strong>Lakes</strong>
-            <span>Amazon S3, ADLS, Google Cloud Storage</span>
+            <span>Amazon S3, ADLS, Google Cloud Storage — exact decimals</span>
           </div>
           <div>
             <strong>CDC</strong>
-            <span>At-least-once upsert until a route proves dest-owned EOS</span>
+            <span>SQL Server, PostgreSQL, MySQL, Oracle — snapshot, stream, resume</span>
           </div>
         </div>
       </section>
@@ -594,7 +618,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           <div className="lp-shell">
             <div className="lp-cust3-section-head">
               <p className="lp-mkt-kicker">Why Datawrap</p>
-              <h2>Built for operators who cannot afford a quiet miss</h2>
+              <h2>Built for operators who answer for every row</h2>
             </div>
             <div className="lp-mkt-evidence-grid">
               {MARKETING_PROOF_HIGHLIGHTS.map((row) => (
@@ -617,10 +641,10 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           <div className="lp-shell">
             <div className="lp-cust3-section-head">
               <p className="lp-mkt-kicker">Your stack</p>
-              <h2>Warehouses, lakes, databases, and apps</h2>
+              <h2>Warehouses, lakes, databases, streams, vectors, and apps</h2>
               <p>
-                {catalogHonestyLead()} Same map, same gates, same reconcile report — every
-                destination that is actually TRANSFER_READY.
+                {catalogHonestyLead()} Same map, same gates, same verification report on every
+                destination.
               </p>
             </div>
             <div className="lp-mkt-evidence-grid">
@@ -641,7 +665,7 @@ function CustomersPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             <h2>Run a pilot on your data</h2>
             <p>
               Design partners get a scoped load on their own sources and destinations — mapping,
-              preflight, quarantine, and a reconcile artifact you keep.
+              preflight, quarantine, and a signed proof pack you keep.
             </p>
           </div>
           <div className="lp-hero-cta">
@@ -842,32 +866,61 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
       phase: "01",
       t: "Isolate",
       tag: "Tenancy",
-      d: "Dedicated tenants, workspace scoping, and per-tenant security posture — no shared control-plane bleed.",
-      pill: "Tenant isolated",
+      d: "Every store read is scoped to the caller's workspace — jobs, connectors, schedules, notifications, audit, and agent tools.",
+      pill: "Workspace isolated",
     },
     {
       phase: "02",
       t: "Encrypt",
       tag: "Keys",
-      d: "Customer-managed keys wrap connector secrets. Purpose keys stay scoped to the job that needs them.",
+      d: "TLS in transit. Connector secrets encrypted at rest and wrappable with your own key: local, wrapped, or AWS KMS.",
       pill: "BYOK wrapped",
     },
     {
       phase: "03",
-      t: "Reside",
-      tag: "Regions",
-      d: "Pin jobs and artifacts to the regions your policy requires. Audit trails stay where you choose.",
-      pill: "Region pinned",
+      t: "Authenticate",
+      tag: "Identity",
+      d: "OIDC and SAML SSO with email-domain routing, SCIM 2.0 group-to-role provisioning, and an idle session timeout.",
+      pill: "SSO · SCIM",
     },
     {
       phase: "04",
       t: "Prove",
-      tag: "Reconcile",
-      d: "Post-load reconciliation verifies counts and content hashes. Quarantine never silently drops rows.",
-      pill: "Checksum MATCH",
+      tag: "Verify",
+      d: "Every load is read back and verified value by value. Every action lands in a hash-chained, signed audit log.",
+      pill: "Gate-8 MATCH",
     },
   ];
-
+  const controls = [
+    {
+      phase: "05",
+      t: "Least privilege",
+      tag: "RBAC",
+      d: "Viewer, Editor, and Admin roles. API keys carry a role and scopes capped at their creator's own grants.",
+      pill: "Key role capped",
+    },
+    {
+      phase: "06",
+      t: "Signed delivery",
+      tag: "Webhooks",
+      d: "Each webhook channel has its own secret; every delivery carries a timestamped HMAC-SHA256 signature.",
+      pill: "HMAC-SHA256",
+    },
+    {
+      phase: "07",
+      t: "Residency",
+      tag: "Regions",
+      d: "Each workspace records its data region; with residency enforcement on, a destination in another region is refused before the run starts.",
+      pill: "Region checked",
+    },
+    {
+      phase: "08",
+      t: "Retention",
+      tag: "Lifecycle",
+      d: "Purge finished jobs older than your retention window, with a dry run and a confirm token first.",
+      pill: "Dry run first",
+    },
+  ];
   return (
     <div className="lp-mkt-page lp-sec-v2">
       <MarketingInkHero
@@ -875,9 +928,8 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         title={<>Security that moves with the data.</>}
         lead={
           <>
-            Isolation, encryption, residency, and dest-engine checksum — the same path Transfer
-            Studio already uses. Agents inherit it. No SOC&nbsp;2 or ISO certificate is claimed
-            until a third-party audit exists.
+            Isolation, encryption, identity, and verified loads — on the same path Transfer Studio
+            uses, inherited by Pilot and every MCP agent.
           </>
         }
         actions={
@@ -893,7 +945,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         slas={[
           { value: "TLS", label: "In transit" },
           { value: "BYOK", label: "Connector secrets" },
-          { value: "9 / 9", label: "Gates before write" },
+          { value: "SCIM", label: "Group → role" },
           { value: "RBAC", label: "Studio · Pilot · MCP" },
         ]}
         aside={
@@ -907,12 +959,14 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
         <section className="lp-sec-badges" aria-label="Compliance posture">
           <ComplianceBadges
             items={[
-              "Encryption at rest",
-              "SSO / SAML",
+              "Credentials encrypted at rest",
+              "SSO / SAML / OIDC",
+              "SCIM 2.0",
               "Customer-managed keys",
               "GDPR processing",
-              "Audit logging",
-              "Regional residency",
+              "Tamper-evident audit log",
+              "Signed webhooks",
+              "Workspace data region",
             ]}
           />
         </section>
@@ -923,10 +977,35 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
           <div className="lp-sec-section-head">
             <p className="lp-mkt-kicker">Control plane</p>
             <h2>Four layers between source and destination</h2>
-            <p>A continuous security path that activates on every transfer — not a wall of checkboxes.</p>
+            <p>A continuous security path that activates on every transfer.</p>
           </div>
           <div className="lp-sec-layer-grid">
             {layers.map((layer) => (
+              <article key={layer.phase} className="lp-sec-layer-card">
+                <div className="lp-sec-layer-top">
+                  <span className="lp-sec-layer-num">{layer.phase}</span>
+                  <span className="lp-sec-layer-tag">{layer.tag}</span>
+                </div>
+                <h3>{layer.t}</h3>
+                <p>{layer.d}</p>
+                <em>{layer.pill}</em>
+              </article>
+            ))}
+          </div>
+        </section>
+      </MarketingReveal>
+      <MarketingReveal>
+        <section className="lp-sec-section">
+          <div className="lp-sec-section-head">
+            <p className="lp-mkt-kicker">Workspace controls</p>
+            <h2>Controls your admins switch on</h2>
+            <p>
+              Least-privilege keys, signed webhooks, residency, and retention — set per workspace,
+              with deployment-wide settings reserved for platform admins.
+            </p>
+          </div>
+          <div className="lp-sec-layer-grid">
+            {controls.map((layer) => (
               <article key={layer.phase} className="lp-sec-layer-card">
                 <div className="lp-sec-layer-top">
                   <span className="lp-sec-layer-num">{layer.phase}</span>
@@ -947,8 +1026,9 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             <p className="lp-mkt-kicker">Runtime proof</p>
             <h2>Agents inherit the same gates</h2>
             <p>
-              MCP tools and Datawrap Pilot never receive raw destination passwords. Every agent
-              action rides the same RBAC, quarantine, and reconciliation path as Transfer Studio.
+              MCP tools and Datawrap Pilot work through secret references, so agents act without
+              ever handling a destination password. Every agent action rides the same RBAC,
+              quarantine, and verification path as Transfer Studio.
             </p>
             <div className="lp-sec-agent-actions">
               <button type="button" className="lp-btn lp-btn--brand" onClick={() => onNavigate("contact")}>
@@ -964,7 +1044,7 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
             <div className="lp-sec-agent-path">
               <span>Auth</span><i /><span>Map</span><i /><span>G1–G9</span><i /><span>Prove</span>
             </div>
-            <div className="lp-sec-agent-chip is-ok">No raw passwords</div>
+            <div className="lp-sec-agent-chip is-ok">Secret references only</div>
           </div>
         </section>
       </MarketingReveal>
@@ -973,10 +1053,12 @@ function SecurityPage({ onNavigate }: Pick<PageActions, "onNavigate">) {
 }
 
 const INTEGRATION_FAMILY_ICONS: Record<string, string[]> = {
-  Warehouses: ["snowflake", "bigquery", "redshift"],
-  "Object storage": ["s3"],
-  Databases: ["postgresql", "mysql", "mongodb"],
-  Applications: ["salesforce", "hubspot"],
+  "Warehouses & lakehouse": ["snowflake", "bigquery", "iceberg"],
+  "Object storage": ["s3", "adls", "gcs"],
+  Databases: ["postgresql", "mysql", "sqlserver", "oracle", "mongodb"],
+  Streaming: ["kafka"],
+  "Vector databases": ["pgvector", "pinecone", "qdrant", "weaviate", "milvus"],
+  "Applications & APIs": ["salesforce", "hubspot", "stripe"],
 };
 
 function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGetStarted" | "onNavigate">) {
@@ -985,13 +1067,12 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
     <div className="lp-mkt-page lp-int-v2">
       <MarketingInkHero
         kicker="Connection catalog"
-        title={<>Connect the systems you already run — {TRANSFER_READY_DRIVERS} TRANSFER_READY.</>}
+        title={<>Connect the systems you already run — {TRANSFER_READY_DRIVERS} transfer-ready drivers.</>}
         lead={
           <>
-            Catalog tiles are not transfer-live. {TRANSFER_READY_DRIVERS} drivers are{" "}
-            <code>TRANSFER_READY</code>. Warehouse and SaaS tiles without a named matrix stay
-            Planned. Every production load still maps, gates, quarantines, and returns a dest-engine
-            checksum.
+            Databases, warehouses, object storage, files, Kafka, vector stores, and apps. Every
+            load maps, clears preflight, quarantines held-back rows, and is verified against the
+            destination engine.
           </>
         }
         actions={
@@ -1005,9 +1086,9 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           </div>
         }
         slas={[
-          { value: String(TRANSFER_READY_DRIVERS), label: "TRANSFER_READY" },
-          { value: "Mixed", label: "Warehouse tiles" },
-          { value: "SQLA", label: "Generic SQL drivers" },
+          { value: String(TRANSFER_READY_DRIVERS), label: "Transfer-ready" },
+          { value: "4", label: "Native CDC engines" },
+          { value: "5", label: "Vector destinations" },
           { value: "DLQ", label: "Quarantine replay" },
         ]}
         aside={
@@ -1020,9 +1101,9 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
       <MarketingReveal>
         <section className="lp-int-strip" aria-label="Capability labels">
           <div><strong>DLQ</strong><span>Quarantine replay</span></div>
-          <div><strong>Mixed</strong><span>Warehouse tiles — not all live</span></div>
-          <div><strong>SQLA</strong><span>Generic drivers</span></div>
-          <div><strong>Files</strong><span>CSV · JSON · Parquet</span></div>
+          <div><strong>CDC</strong><span>SQL Server · PostgreSQL · MySQL · Oracle</span></div>
+          <div><strong>SQLA</strong><span>Generic SQL drivers</span></div>
+          <div><strong>Files</strong><span>CSV · JSON · Parquet · Avro · ORC · Excel</span></div>
         </section>
       </MarketingReveal>
 
@@ -1032,8 +1113,8 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
             <p className="lp-mkt-kicker">Catalog families</p>
             <h2>What you can connect</h2>
             <p>
-              Grouped the way teams plan loads — warehouses first, then lakes, databases, and apps.
-              Family badges match Studio: Certified, Mixed, or Planned. Tiles are not transfer-live.
+              Grouped the way teams plan loads — warehouses first, then lakes, databases, streams,
+              vector stores, and apps. Every name below is a transfer-ready driver.
             </p>
           </div>
           <div className="lp-int-family-grid">
@@ -1061,23 +1142,24 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
         <section className="lp-int-honesty">
           <div>
             <p className="lp-mkt-kicker">The bar</p>
-            <h2>Every production load still proves itself</h2>
+            <h2>Every load proves itself</h2>
             <p>
-              Every destination still runs the same path: introspect, map, preflight, write, and
-              reconcile. Warehouses, lakes, databases, and apps share one engine and one report.
+              Every destination runs the same path: introspect, map, preflight, write, and verify.
+              Warehouses, lakes, databases, streams, vectors, and apps share one engine and one
+              report.
             </p>
             <ul>
-              <li>Upserts only where the destination truly supports them</li>
-              <li>Incremental sync uses a real watermark, not a guessed cursor</li>
-              <li>Bad rows quarantine with a reason — they are never dropped quietly</li>
+              <li>Upsert and MERGE wherever the destination&apos;s keys support them</li>
+              <li>Incremental sync binds a typed watermark on the cursor column</li>
+              <li>Held-back rows quarantine with a reason and replay once fixed</li>
             </ul>
           </div>
           <aside className="lp-int-honesty-panel">
-            <h3>Every route still runs</h3>
+            <h3>Every route runs</h3>
             <div><span>01</span><em>Semantic map</em></div>
             <div><span>02</span><em>G1–G9 preflight</em></div>
             <div><span>03</span><em>Quarantine write</em></div>
-            <div><span>04</span><em>Checksum prove</em></div>
+            <div><span>04</span><em>Gate-8 verify</em></div>
           </aside>
         </section>
       </MarketingReveal>
@@ -1087,8 +1169,8 @@ function IntegrationsPage({ onGetStarted, onNavigate }: Pick<PageActions, "onGet
           <div>
             <h2>Browse the connector catalog</h2>
             <p>
-              Open Transfer Studio and pick a source and destination. Certified filters show
-              TRANSFER_READY drivers only — the same engine as production.
+              Open Transfer Studio and pick a source and destination. The transfer-ready filter
+              shows every driver you can load today, on the same engine as production.
             </p>
           </div>
           <div className="lp-int-cta-actions">

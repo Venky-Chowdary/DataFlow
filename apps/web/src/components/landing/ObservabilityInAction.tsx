@@ -16,8 +16,8 @@ export function ObservabilityInAction() {
           <h2>Click the product. Watch the proof.</h2>
           <p>
             Tap Map, Validate, Write, or Prove. Each stage replays what the engine behind
-            Studio, Pipelines, Pilot, and MCP actually does — semantic scores, G1–G9,
-            quarantine with reasons, and a destination-engine checksum.
+            Studio, Pipelines, Pilot, and MCP runs — semantic scores, G1–G9,
+            quarantine with reasons, and a value-by-value read-back from the destination.
           </p>
         </header>
         <ProductJourneyCinema />
