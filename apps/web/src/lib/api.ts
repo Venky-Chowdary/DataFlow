@@ -3616,7 +3616,12 @@ export type AuditChainFinding = {
 };
 
 export type AuditChainVerification = {
-  verified: boolean;
+  /** null when nothing was walked (`status` says why). */
+  verified: boolean | null;
+  status?: "verified" | "findings" | "nothing_checked" | "store_unavailable";
+  store?: "mongo" | "file";
+  records_in_scope?: number;
+  truncated_by_limit?: boolean;
   checked: number;
   chain_head: string | null;
   findings: AuditChainFinding[];

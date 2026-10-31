@@ -243,13 +243,17 @@ def verify_side_record(record: dict[str, Any], *, field: str) -> bytes | None:
 
 
 def describe() -> dict[str, Any]:
-    """What a verification report says about keys. Ids only, never key material."""
+    """What a verification report says about keys. Ids only, never key material.
+
+    Never names server variables either: this is read by workspace admins in
+    Settings (A1); the variables are described in this module's docstring.
+    """
     configured = bool(_env(KEY_ENV))
     current = None
     source = "unset"
     if configured:
         current = key_id_for(_env(KEY_ENV).encode("utf-8"))
-        source = "env"
+        source = "configured"
     else:
         generated = _generated_key(create=False) or _generated.get("<process>")
         if generated:
@@ -261,5 +265,4 @@ def describe() -> dict[str, Any]:
         "known_key_ids": sorted(keyring()),
         "retired_key_count": len(retired_keys()),
         "legacy_records_verify_under": "login secret, then retired keys",
-        "env": "DATAFLOW_AUDIT_HMAC_KEY / DATAFLOW_AUDIT_HMAC_RETIRED_KEYS",
     }

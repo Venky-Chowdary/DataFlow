@@ -954,8 +954,8 @@ async def login(body: LoginRequest, request: Request):
         raise HTTPException(
             status_code=503,
             detail=(
-                "No workspace users configured. Set DATAFLOW_ADMIN_EMAIL and "
-                "DATAFLOW_ADMIN_PASSWORD on the API service, then redeploy."
+                "No workspace users are configured yet. The deployment's operator "
+                "must set the bootstrap administrator account on the API service."
             ),
         )
     try:

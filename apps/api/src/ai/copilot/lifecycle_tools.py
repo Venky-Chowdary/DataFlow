@@ -1068,6 +1068,29 @@ def prepare_cdc_source(
     )
 
 
+def _host_executable_refusal(conn: dict[str, Any]) -> str | None:
+    """The REST test route's ``require_admin_connector_access``, for tools (RB6).
+
+    A ``singer_tap`` probe runs an executable on the API host every workspace
+    shares, so only the platform admin may trigger it — through Pilot and MCP
+    exactly as through ``POST /connectors/saved/{id}/test``. The principal is
+    the one RBACMiddleware bound for this request.
+    """
+    from services.api_errors import ApiError
+    from services.rbac import require_admin_connector_access
+
+    from .tool_permissions import DENIAL_PREFIX, current_caller_role
+
+    try:
+        require_admin_connector_access(None, conn.get("type"))
+    except ApiError as exc:
+        if exc.code != "singer_admin_required":
+            return exc.message  # taps disabled on this deployment: not a role refusal
+        role = current_caller_role() or "member"
+        return f"{DENIAL_PREFIX} ({role}) cannot test this connector: {exc.message}."
+    return None
+
+
 def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
     conn, err = _connector("test_connector", connector_id, name)
     if err:
@@ -1076,6 +1099,9 @@ def test_connector(connector_id: str = "", name: str = "") -> ToolResult:
     brief = _connector_brief(conn)
     if not brief["connector_id"]:
         return _unresolved_id_error("test_connector", conn)
+    refusal = _host_executable_refusal(conn)
+    if refusal:
+        return _tool_result("test_connector", success=False, output=None, error=refusal)
     from services.connector_probe import probe_saved_connector
     from services.connector_store import mark_tested
 

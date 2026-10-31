@@ -13,6 +13,7 @@ lost write.
 
 from __future__ import annotations
 
+from services.brand import bigquery_default_dataset
 import json
 import logging
 from typing import Any
@@ -817,7 +818,7 @@ def _read_destination_sample(
             from connectors.bigquery_conn import get_client, _is_local_endpoint
 
             project_id = dest.get("database", "")
-            dataset_id = schema or "dataflow"
+            dataset_id = schema or bigquery_default_dataset()
             is_local, _ = _is_local_endpoint(
                 dest.get("host", ""), dest.get("connection_string", "")
             )

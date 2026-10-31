@@ -737,7 +737,7 @@ def _audit_workspace_admin_iam(request: Request, permission: str, effective: str
                 "effective_role": effective,
                 "path": request.url.path,
                 "method": request.method.upper(),
-                "flag": "DATAFLOW_WORKSPACE_ADMIN_IAM",
+                "flag": "workspace_admin_iam",
             },
         )
     except Exception as exc:

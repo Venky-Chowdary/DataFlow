@@ -7,8 +7,9 @@ import io
 import json
 import os
 from datetime import datetime, timezone
+from typing import Any
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, Body, HTTPException, Query, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 from pydantic import BaseModel, Field
 
@@ -499,21 +500,23 @@ async def reanchor_audit_chain(body: ReanchorBody, request: Request):
 
 
 @router.post("/verify-pack")
-async def verify_proof_pack_against_chain(pack: dict, request: Request):
+async def verify_proof_pack_against_chain(request: Request, body: Any = Body(...)):
     """Verify an exported proof pack, and whether the chain still holds its record.
 
     Three separable questions, answered separately: is the pack's own signature
     intact, does it still hold the content its chain record was filed for, and
-    is that record still in the store.
+    is that record still in the store. Accepts the pack itself or
+    ``{"pack": <pack>}``, like ``/transfer/proof-pack/verify``; a body that is
+    not a pack is a 422 naming the missing keys (PP3).
     """
     from services.evidence_chain import find_anchor
+    from services.proof_pack_request import pack_from_body
     from services.signed_proof_pack import (
         pack_body_digest_excluding_anchor,
         verify_signed_proof_pack,
     )
 
-    if not isinstance(pack, dict) or not pack:
-        raise HTTPException(status_code=400, detail="Body must be an exported proof pack object")
+    pack = pack_from_body(body)
     result = verify_signed_proof_pack(pack)
     anchor = pack.get("chain_anchor") if isinstance(pack.get("chain_anchor"), dict) else {}
     digest = pack_body_digest_excluding_anchor(pack)

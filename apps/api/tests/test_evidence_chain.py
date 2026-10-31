@@ -176,7 +176,9 @@ def test_an_edited_retention_checkpoint_cannot_excuse_a_deletion(file_chain):
 def test_an_empty_store_does_not_claim_to_prove_history(file_chain):
     report = chain.verify_chain()
 
-    assert report["verified"] is True
+    # A1 (round 11): nothing walked is never "verified" — null, nothing_checked.
+    assert report["verified"] is None
+    assert report["status"] == "nothing_checked"
     assert report["checked"] == 0
     assert "proves nothing" in report["honesty"]
 

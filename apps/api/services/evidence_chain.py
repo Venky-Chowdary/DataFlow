@@ -168,42 +168,15 @@ def list_truncations() -> list[dict[str, Any]]:
 
 
 def read_chain(*, limit: int = MAX_VERIFY_EVENTS) -> list[dict[str, Any]]:
-    """The chain in write order (oldest first), across the whole store.
+    """The newest ``limit`` records of the whole store, in write order (oldest first).
 
-    Deliberately unscoped by workspace: the chain links every event, so a
-    workspace-filtered read would show gaps that are only filtering.
+    Unscoped by workspace: this is the platform line, and the indices of a
+    platform :func:`verify_chain` report point into exactly this list. A store
+    that cannot be read returns nothing — never another store's records.
     """
-    from services import audit_log
+    from services.audit_chain_window import read_window
 
-    coll = audit_log._mongo_collection()
-    if coll is not None:
-        try:
-            # Write order, not clock order: records sharing a timestamp would
-            # otherwise come back in an arbitrary order and be reported as
-            # broken links on a chain nobody had touched.
-            cursor = coll.find({}).sort(list(audit_log.CHAIN_ORDER)).limit(limit)
-            return [{k: v for k, v in doc.items() if k != "_id"} for doc in cursor]
-        except Exception as exc:
-            logger.warning("Mongo chain read failed; falling back to file: %s", exc)
-
-    path = audit_log.STORE_PATH
-    if not path.exists():
-        return []
-    try:
-        lines = path.read_text(encoding="utf-8").strip().splitlines()
-    except Exception:
-        return []
-    events: list[dict[str, Any]] = []
-    for line in lines[-limit:]:
-        if not line.strip():
-            continue
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(event, dict):
-            events.append(event)
-    return events
+    return read_window(limit=limit).events
 
 
 def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> dict[str, Any]:
@@ -253,50 +226,57 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
 
     A finding a platform admin migrated with :func:`reanchor_chain` (and that
     still matches the content sealed then) moves to ``reanchored``.
+
+    What was walked (A1): the newest ``limit`` records of the scope, read from
+    the store by workspace (``services.audit_chain_window``). The report names
+    the ``store``, the ``records_in_scope`` and whether the limit left older
+    ones out (``truncated_by_limit``). ``status`` is ``verified``,
+    ``findings``, ``nothing_checked`` (no record in scope — ``verified`` is
+    null: nothing walked is never verified) or ``store_unavailable`` (the
+    store could not be read; reported, never answered from another store).
     """
     from services.audit_chain_reanchor import split_reanchored
+    from services.audit_chain_window import read_window
 
-    events = read_chain(limit=limit)
-    truncations = list_truncations()
     ws = (workspace_id or "").strip()
-    if not events:
-        return present_verify_report(
-            {
-                "verified": True,
-                "checked": 0,
-                "chain_head": None,
-                "findings": [],
-                "categories": {name: 0 for name in CATEGORIES},
-                "tampering_detected": False,
-                "reanchored": [],
-                "retention_checkpoints": truncations,
-                "walked_limit": limit,
-                "honesty": (
-                    "No audit records to verify. An empty store proves nothing about "
-                    "history."
-                ),
-            },
-            [],
-            ws,
-        )
+    window = read_window(workspace_id=ws, limit=limit)
+    events = window.events
+    truncations = list_truncations()
+    walk = {
+        "store": window.store,
+        "records_in_scope": window.total,
+        "truncated_by_limit": window.truncated_by_limit,
+        "walked_limit": limit,
+        "retention_checkpoints": truncations,
+    }
+    if window.fallback_file_records:
+        walk["unwalked_file_records"] = window.fallback_file_records
+    if window.error or not events:
+        return present_verify_report(_unverified_report(window, walk), [], ws)
 
     from services.audit_log import _hmac_event_hash
 
+    positions = list(range(len(events)))
     if ws:
-        positions = [i for i, ev in enumerate(events) if _event_workspace(ev) == ws]
-        findings = _walk(
-            events, positions, _hmac_event_hash, truncations,
-            link_field="ws_prev_hash",
-            prefix_explained=_retention_explains_first(events, truncations),
+        first_claim = str(events[0].get("ws_prev_hash") or "")
+        prefix_explained: bool | None = (
+            window.truncated_by_limit
+            or _retention_explains_first(
+                [window.store_first] if window.store_first else [], truncations
+            )
+            or (bool(first_claim) and _prefix_explained(first_claim, truncations))
         )
-        head = events[positions[-1]] if positions else None
+        link_field = "ws_prev_hash"
     else:
-        positions = list(range(len(events)))
-        findings = _walk(
-            events, positions, _hmac_event_hash, truncations,
-            link_field="prev_hash", prefix_explained=None,
-        )
-        head = events[-1]
+        # The window's oldest record links to one the limit left out: that is
+        # the limit, not a deletion. A whole-store walk asks the checkpoints.
+        prefix_explained = True if window.truncated_by_limit else None
+        link_field = "prev_hash"
+    findings = _walk(
+        events, positions, _hmac_event_hash, truncations,
+        link_field=link_field, prefix_explained=prefix_explained,
+    )
+    head = events[-1]
     found = [f.as_dict() for f in findings]
     for f in found:
         ev = events[f["index"]]
@@ -310,9 +290,25 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
         categories[f["category"]] += 1
     from services.audit_chain_keys import describe
 
+    honesty = (
+        "Verification covers the records still in the store: it proves they "
+        "were not edited or removed since a holder of the chain key they "
+        "name wrote them. It does not prove the recorded facts are true, nor that "
+        "records were never discarded together with their checkpoint. Only an "
+        "external WORM / timestamp anchor narrows that."
+    )
+    if window.truncated_by_limit:
+        honesty += (
+            f" This walk covers the newest {len(events)} of {window.total} record(s); "
+            "the older ones were not walked, and the first walked record's link "
+            f"to them is not checked. Raise the limit (up to {MAX_VERIFY_EVENTS}) "
+            "to cover more."
+        )
     return present_verify_report(
         {
+            **walk,
             "verified": not found,
+            "status": "verified" if not found else "findings",
             "categories": categories,
             "tampering_detected": categories["tampering"] > 0,
             "signing": describe(),
@@ -321,19 +317,47 @@ def verify_chain(*, limit: int = MAX_VERIFY_EVENTS, workspace_id: str = "") -> d
             "chain_head": str((head or {}).get("event_hash") or "") or None,
             "findings": found,
             "reanchored": reanchored,
-            "retention_checkpoints": truncations,
-            "walked_limit": limit,
-            "honesty": (
-                "Verification covers the records still in the store: it proves they "
-                "were not edited or removed since a holder of the chain key they "
-                "name wrote them. It does not prove the recorded facts are true, nor that "
-                "records were never discarded together with their checkpoint. Only an "
-                "external WORM / timestamp anchor narrows that."
-            ),
+            "honesty": honesty,
         },
         events,
         ws,
     )
+
+
+def _unverified_report(window: Any, walk: dict[str, Any]) -> dict[str, Any]:
+    """Nothing was walked, so nothing is verified — and the report says why.
+
+    ``verified`` is null, not true: an empty walk proves nothing, and calling
+    it verified is what QA read as "verified: true, checked: 0" (A1).
+    """
+    if window.error:
+        status = "store_unavailable"
+        honesty = (
+            "The audit store could not be read, so no record was checked. This is "
+            "not a verdict on the chain; try again, and check the audit store's "
+            "health if it persists. The local fallback file is not substituted for it."
+        )
+    else:
+        status = "nothing_checked"
+        honesty = (
+            "No audit records were found to verify, so nothing was checked. An empty "
+            "walk proves nothing about history."
+        )
+    report: dict[str, Any] = {
+        **walk,
+        "verified": None,
+        "status": status,
+        "checked": 0,
+        "chain_head": None,
+        "findings": [],
+        "categories": {name: 0 for name in CATEGORIES},
+        "tampering_detected": False,
+        "reanchored": [],
+        "honesty": honesty,
+    }
+    if window.error:
+        report["store_error"] = window.error
+    return report
 
 
 def _event_workspace(event: dict[str, Any]) -> str:
@@ -385,8 +409,8 @@ def _walk(
                         detail=(
                             f"Signed under key {key_id}, which this deployment does "
                             "not hold, so its HMAC cannot be checked. This is a key "
-                            "configuration gap, not evidence of tampering: list that "
-                            "key in DATAFLOW_AUDIT_HMAC_RETIRED_KEYS to verify it."
+                            "configuration gap, not evidence of tampering: add that "
+                            "key to this deployment's retired audit keys to verify it."
                         ),
                     )
                 )
@@ -403,8 +427,8 @@ def _walk(
                             else "Recomputed HMAC does not match the stored event_hash "
                             "under the login secret or any retired key: this record "
                             "(written before the chain had its own key) was altered, "
-                            "or was signed under a login secret since rotated — list "
-                            "that secret in DATAFLOW_AUDIT_HMAC_RETIRED_KEYS."
+                            "or was signed under a login secret since rotated — add "
+                            "that secret to this deployment's retired audit keys."
                         ),
                     )
                 )
@@ -542,8 +566,8 @@ def _legacy_summary(
             "No record written before the chain had its own key verifies under the "
             "current login secret or any retired key. That is what a rotated login "
             "secret looks like; it is also what altering all of them would look like. "
-            "List the previous login secret in DATAFLOW_AUDIT_HMAC_RETIRED_KEYS to tell "
-            "them apart."
+            "Add the previous login secret to this deployment's retired audit keys to "
+            "tell them apart."
         )
     return out
 

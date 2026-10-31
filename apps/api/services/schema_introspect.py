@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_default_dataset
 import datetime
 import json
 import logging
@@ -493,7 +494,7 @@ def _introspect_schema_unscoped(
     if db_type == "bigquery":
         return _introspect_bigquery(
             database=database,
-            schema=schema or "dataflow",
+            schema=schema or bigquery_default_dataset(),
             connection_string=connection_string,
             table=table,
             strict_namespace=strict_namespace,
@@ -1621,7 +1622,7 @@ def _introspect_mysql(**kwargs) -> dict[str, Any]:
 
 def _introspect_bigquery(**kwargs) -> dict[str, Any]:
     project_id = kwargs.get("database", "")
-    dataset_id = kwargs.get("schema") or "dataflow"
+    dataset_id = kwargs.get("schema") or bigquery_default_dataset()
     table = kwargs.get("table")
     try:
         from connectors.bigquery_conn import get_client

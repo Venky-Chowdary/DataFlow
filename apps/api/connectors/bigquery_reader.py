@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_default_dataset
 import sys
 from pathlib import Path
 from typing import Any
@@ -40,7 +41,7 @@ def read_table_batch(
 ) -> ReadBatch:
     del username, password, ssl, warehouse
     project_id = database or host
-    dataset_id = schema or "dataflow"
+    dataset_id = schema or bigquery_default_dataset()
     table_ref = quote_table_ref(
         table,
         dialect="bigquery",
@@ -158,7 +159,7 @@ def read_table_cursor_batch(
     from services.keyset_pagination import present_cursor_bookmark, split_cursor_bookmark
 
     project_id = database or host
-    dataset_id = schema or "dataflow"
+    dataset_id = schema or bigquery_default_dataset()
     table_ref = quote_table_ref(
         table,
         dialect="bigquery",
@@ -286,7 +287,7 @@ def read_table_scan_batch(
         return _bigquery_scan_page(scan_state, offset=offset, limit=limit)
 
     project_id = database or host
-    dataset_id = schema or "dataflow"
+    dataset_id = schema or bigquery_default_dataset()
     table_ref = quote_table_ref(
         table,
         dialect="bigquery",

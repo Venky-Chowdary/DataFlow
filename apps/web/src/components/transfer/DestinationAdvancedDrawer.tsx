@@ -583,7 +583,7 @@ export function DestinationAdvancedDrawer({
               }}
               disabled={!onDeliveryGuaranteeChange}
             >
-              <option value="at_least_once">at_least_once — default upsert (PK + _df_lsn)</option>
+              <option value="at_least_once">at_least_once — default upsert (primary key + change-log position)</option>
               <option value="exactly_once" disabled={!exactlyOnceWired}>
                 {exactlyOnceWired
                   ? "exactly_once — dest-owned watermark + shared-log bundle (opt-in)"
@@ -736,7 +736,7 @@ export function DestinationAdvancedDrawer({
                 <small>
                   {writeViaStagingSupported === false
                     ? "Unavailable for this destination — SQL engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."
-                    : "Load into {table}_df_staging first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
+                    : "Load into a staging table next to the destination first, then promote only clean rows. Bad rows stay off primary (DLQ + staging). Strict validation blocks promote entirely."}
                 </small>
               </span>
             </label>

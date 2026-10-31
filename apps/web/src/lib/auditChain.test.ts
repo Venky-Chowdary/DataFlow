@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { chainVerdictTitle, chainVerdictToast } from "./auditChain.js";
+import { chainNotChecked, chainVerdictTitle, chainVerdictToast } from "./auditChain.js";
 
 describe("chainVerdictTitle", () => {
   it("names an intact platform walk", () => {
@@ -75,5 +75,29 @@ describe("chainVerdictToast", () => {
     });
     assert.match(msg, /1 record\(s\) in this workspace do not hold up/);
     assert.doesNotMatch(msg, /dfc-/);
+  });
+});
+
+describe("nothing walked is never a verdict (A1, round 11)", () => {
+  it("does not call an empty walk intact", () => {
+    const report = { verified: null, status: "nothing_checked", checked: 0, findings: [], scope: "workspace" as const };
+    assert.equal(chainNotChecked(report), true);
+    assert.doesNotMatch(chainVerdictTitle(report), /intact|verified/i);
+    assert.match(chainVerdictTitle(report), /Nothing to verify/);
+    assert.match(chainVerdictToast(report), /nothing was verified/);
+  });
+
+  it("says the store could not be read", () => {
+    const report = { verified: null, status: "store_unavailable", checked: 0, findings: [], scope: "workspace" as const };
+    assert.match(chainVerdictTitle(report), /could not be read/);
+    assert.doesNotMatch(chainVerdictToast(report), /intact|none altered/i);
+  });
+
+  it("names the newest window when the limit left older records out", () => {
+    const title = chainVerdictTitle({
+      verified: true, status: "verified", checked: 5, records_in_scope: 12, truncated_by_limit: true,
+      findings: [], scope: "workspace",
+    });
+    assert.equal(title, "This workspace's chain is intact — 5 records re-walked (newest 5 of 12)");
   });
 });
