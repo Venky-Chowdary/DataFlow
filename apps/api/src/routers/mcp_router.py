@@ -111,7 +111,7 @@ async def mcp_streamable(http_request: Request):
         )
 
     from src.ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
-    from src.ai.copilot.tool_permissions import bind_request_principal
+    from src.ai.copilot.tool_permissions import bind_request_principal, request_tool_role
     from src.services.auth_service import auth_required
 
     authenticated = _mcp_authenticated(http_request)
@@ -128,10 +128,9 @@ async def mcp_streamable(http_request: Request):
     )
     # When platform auth is off (local/dev), tools are callable without a Bearer token.
     allow_unauth_tools = not auth_required()
-    mcp_role = ""
-    if auth_required():
-        mcp_user = getattr(http_request.state, "user", None) or {}
-        mcp_role = str(mcp_user.get("role") or "viewer")
+    # The role the REST gate would resolve (workspace membership, API-key
+    # creator cap), not the raw platform label (RB6).
+    mcp_role = request_tool_role(http_request)
     session_id = http_request.headers.get("mcp-session-id") or new_session_id()
 
     messages = payload if isinstance(payload, list) else [payload]
@@ -321,22 +320,19 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     from services.mcp_invocation_log import log_mcp_invocation
     from services.mcp_rate_limit import check_mcp_rate_limit
     from services.secret_config import mask_secrets_in_text
-    from src.services.auth_service import auth_required as mcp_auth_required
     from src.ai.copilot.tool_permissions import is_permission_denial
 
     from ..ai.copilot.confirm_ack import reset_mcp_request, set_mcp_request
-    from ..ai.copilot.tool_permissions import bind_request_principal
+    from ..ai.copilot.tool_permissions import bind_request_principal, request_tool_role
     from ..ai.copilot.tools import get_pilot_tools
 
     client = http_request.headers.get("X-MCP-Client", "unknown")
     # MCP is a second door into the same tools, so it carries the same role gate:
     # an API key issued as viewer cannot start a transfer through an agent either.
-    # An enforced deployment with an unknown role falls back to viewer, never to
-    # the open posture — a token we cannot place must not get write reach.
-    mcp_role = ""
-    if mcp_auth_required():
-        mcp_user = getattr(http_request.state, "user", None) or {}
-        mcp_role = str(mcp_user.get("role") or "viewer")
+    # The role is the one the REST gate resolves for this workspace — membership
+    # role, API-key creator cap — never the raw platform label (RB6). An
+    # enforced deployment with an unknown principal falls back to viewer.
+    mcp_role = request_tool_role(http_request)
     actor = getattr(getattr(http_request, "state", None), "user_email", None) or client
     correlation_id = getattr(http_request.state, "correlation_id", None)
     limit = check_mcp_rate_limit(str(actor or client))

@@ -168,7 +168,7 @@
             "type": "text",
             "optional": true,
             "sensitive": false,
-            "placeholder": "dataflow"
+            "placeholder": "analytics"
           }
         ]
       }

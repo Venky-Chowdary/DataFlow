@@ -479,7 +479,7 @@ export function TransferPage({
   const [transferPlan, setTransferPlan] = useState<TransferPlan | null>(null);
   const [persistedPlanId, setPersistedPlanId] = useState<string | null>(null);
   const [planLoading, setPlanLoading] = useState(false);
-  const [targetDb, setTargetDb] = useState("dataflow_test");
+  const [targetDb, setTargetDb] = useState("");
   const [targetCollection, setTargetCollection] = useState("");
   const [destHost, setDestHost] = useState("");
   const [destPort, setDestPort] = useState(0);
@@ -6391,7 +6391,7 @@ export function TransferPage({
     setTransferPlan(null);
     setPersistedPlanId(null);
     setPlanLoading(false);
-    setTargetDb("dataflow_test");
+    setTargetDb("");
     setTargetCollection("");
     setDestHost("");
     setDestPort(0);
@@ -7533,7 +7533,7 @@ export function TransferPage({
                     className="df2-input"
                     value={destSchema}
                     onChange={(e) => setDestSchema(e.target.value)}
-                    placeholder="dataflow"
+                    placeholder="analytics"
                     autoComplete="off"
                     spellCheck={false}
                   />
@@ -8303,7 +8303,7 @@ export function TransferPage({
                   ? "Execute now to start governed transfer with live theater progress and reconciliation evidence."
                   : "Re-open Validate to confirm API preflight (decision approve) before treating this run as cleared."}
                 {writeViaStaging
-                  ? " Staging is on — rows land in {table}_df_staging first; only clean rows promote to primary."
+                  ? " Staging is on — rows land in a staging table next to the destination first; only clean rows promote to primary."
                   : ""}
               </p>
             </div>

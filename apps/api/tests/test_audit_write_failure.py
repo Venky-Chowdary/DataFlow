@@ -212,6 +212,21 @@ def test_mongo_failure_falls_back_and_counts_named_write(audit_failure_app, monk
     assert failures[0].store == "mongo"
     assert failures[0].fallback == "file"
     assert failures[0].correlation_id == correlation_id
+    # A1 (round 11): with Mongo the store and unreadable, verify reports it
+    # instead of verifying the local fallback file under Mongo's name ...
+    response = audit_failure_app["client"].get(
+        "/api/v1/audit/verify",
+        headers={
+            "Authorization": f"Bearer {audit_failure_app['verification_token']}",
+            "X-Correlation-ID": str(uuid4()),
+            "X-Workspace-Id": audit_failure_app["workspace_id"],
+        },
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "store_unavailable"
+    assert response.json()["verified"] is None
+    # ... and the records the fallback wrote still form a valid chain there.
+    monkeypatch.setattr(audit_failure_app["audit_log"], "_mongo_collection", lambda: None)
     _assert_chain_verifies(audit_failure_app)
 
 

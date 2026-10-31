@@ -832,7 +832,7 @@ export function ScheduleForm({ connectors, intervals, initial, saving, onSubmit,
             </label>
             <span className="df2-field-hint">
               {stagingSupported
-                ? "Load into {table}_df_staging first, then promote only clean rows. Same as Destination Advanced. Promote is at-least-once."
+                ? "Load into a staging table next to the destination first, then promote only clean rows. Same as Destination Advanced. Promote is at-least-once."
                 : "Unavailable for this destination — SQL table engines only (PostgreSQL, MySQL, Snowflake, BigQuery, …)."}
             </span>
           </div>

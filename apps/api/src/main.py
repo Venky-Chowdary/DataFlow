@@ -154,6 +154,11 @@ async def lifespan(app: FastAPI):
     from services.rbac import record_unruled_routes_allowed_startup
 
     record_unruled_routes_allowed_startup()
+    # K1: once per deployment, give workspace-less API keys their workspace
+    # back (idempotent, audited, never blocks boot).
+    from services.orphaned_api_keys import run_orphaned_api_key_migration
+
+    run_orphaned_api_key_migration()
     # Durable mail outbox: a restart can leave 'queued' rows behind —
     # re-queue them through the send lane so no reset/OTP mail is lost.
     try:

@@ -36,8 +36,13 @@ from r9_workspace_world import PASSWORD, r9  # noqa: E402,F401
 
 
 @pytest.fixture(autouse=True)
-def _no_mcp_rate_limit(monkeypatch):
+def _no_mcp_rate_limit(monkeypatch, tmp_path):
+    import src.ai.copilot.ack_ledger as ack_mod
+
     monkeypatch.setenv("DATAFLOW_MCP_RATE_LIMIT", "0")
+    # Each world has its own database: no ack ledger bound to an earlier one.
+    monkeypatch.setenv("DATAFLOW_PILOT_ACK_PATH", str(tmp_path / "acks.json"))
+    monkeypatch.setattr(ack_mod, "_ledger", None)
 
 
 def _connector(r9, *, ctype: str = "postgresql", name: str = "rb6 pg") -> str:

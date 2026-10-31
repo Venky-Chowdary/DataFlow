@@ -23,7 +23,7 @@ hardcoding ``\"public\"``.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 FoldMode = Literal["lower", "upper", "none"]
@@ -122,6 +122,11 @@ def normalize_driver(driver: str | None) -> str:
 
 def dialect_profile(driver: str | None) -> DialectProfile:
     key = normalize_driver(driver)
+    if key == "bigquery":
+        # The default dataset is a brand artifact (switchable, off by default).
+        from services.brand import bigquery_default_dataset
+
+        return replace(DIALECT_PROFILES[key], default_schema=bigquery_default_dataset())
     if key in DIALECT_PROFILES:
         return DIALECT_PROFILES[key]
     # Unknown SQL-ish engines: no Postgres leak — require explicit schema.

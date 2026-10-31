@@ -31,11 +31,34 @@ from services.procedure_destination import sibling_table_endpoint
 logger = logging.getLogger(__name__)
 
 
-def staging_table_name(dest_table: str | None) -> str:
-    """Stable per-target staging table (pairs with ``{table}_df_quarantine``)."""
+def _staging_base(dest_table: str | None) -> str:
     base = re.sub(r"[^a-zA-Z0-9_]", "_", (dest_table or "import").strip()) or "import"
-    base = re.sub(r"_+", "_", base).strip("_")[:48] or "import"
-    return f"{base}_df_staging"[:63]
+    return re.sub(r"_+", "_", base).strip("_")[:48] or "import"
+
+
+def staging_table_name(dest_table: str | None, *, suffix: str | None = None) -> str:
+    """Stable per-target staging table (pairs with ``{table}_df_quarantine``).
+
+    The suffix is the ``pre_ingestion_staging_table`` brand artifact:
+    ``_df_staging``, or ``_dw_staging`` for a run started with
+    ``DATAWRAP_BRAND_OBJECT_NAMES`` on. Either way it is the product's own
+    object (hidden from listings by ``brand.is_internal_object_name``).
+    """
+    from services import brand
+
+    tail = suffix or brand.name_for_new("pre_ingestion_staging_table")
+    return f"{_staging_base(dest_table)}{tail}"[:63]
+
+
+def _other_spelling_endpoint(destination: Any, stage_name: str, dest_table: str) -> Any | None:
+    """The staging table under the brand spelling this run is NOT using."""
+    from services import brand
+
+    for suffix in brand.known_names("pre_ingestion_staging_table"):
+        other = staging_table_name(dest_table, suffix=suffix)
+        if other != stage_name:
+            return sibling_table_endpoint(destination, other)
+    return None
 
 
 # SQL table writers only — Mongo/document DLQ ≠ pre-ingestion staging tables.
@@ -120,6 +143,14 @@ def write_via_pre_ingestion_staging(
 
     stage_ep = staging_endpoint(destination)
     ddl_log: list[str] = []
+    dest_table = str(
+        getattr(destination, "table", None) or getattr(destination, "collection", None) or "import"
+    )
+    from services import brand
+
+    if not stage_ep.table.endswith(brand.artifact("pre_ingestion_staging_table").legacy):
+        brand.audit_new_name("pre_ingestion_staging_table", brand.name_for_new(
+            "pre_ingestion_staging_table"), f"{dest_type}:{dest_table}")
 
     # 1) Refresh staging and load *every* source row so the stage is a complete,
     #    inspectable landing zone. ``coerce_null`` is explicit here rather than
@@ -128,6 +159,12 @@ def write_via_pre_ingestion_staging(
     #    the rows the operator needs to diagnose. The original cell value is still
     #    preserved in rejected_details for DLQ and replay.
     _drop_table(stage_ep)
+    # Every staged run replaces the previous run's landing table; when the brand
+    # flag changed between runs that table has the other spelling, so it is the
+    # one replaced (nothing else ever reads a previous run's stage).
+    other = _other_spelling_endpoint(destination, stage_ep.table, dest_table)
+    if other is not None:
+        _drop_table(other)
     # Staging diagnose may coerce_null so the landing table retains every row;
     # primary promote still uses validation_mode policy (never invent silent NULL).
     from connectors.writer_common import allow_job_coerce_null_writes

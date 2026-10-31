@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from services.brand import bigquery_dataset_of
 import logging
 from typing import Any
 
@@ -639,7 +640,7 @@ def _introspect_endpoint_impl(
             database=cfg["database"],
             username=cfg.get("username", ""),
             password=cfg.get("password", ""),
-            schema=cfg.get("schema", "dataflow"),
+            schema=bigquery_dataset_of(cfg),
             connection_string=cfg.get("connection_string", ""),
             ssl=cfg.get("ssl", False),
             warehouse=cfg.get("warehouse", ""),

@@ -212,7 +212,8 @@ export function TeamSettings() {
     setInviting(true);
     try {
       const result = await addWorkspaceMember(activeWorkspace, email, inviteRole, {
-        createAccount: createLogin,
+        // Minting a login is the workspace admin's (RB3); an editor adds members only.
+        createAccount: createLogin && canGrantAdmin,
         name: inviteName.trim(),
       });
       setInviteEmail("");
@@ -499,10 +500,11 @@ export function TeamSettings() {
                   <input
                     id="df2-team-create-login"
                     type="checkbox"
-                    checked={createLogin}
+                    checked={createLogin && canGrantAdmin}
+                    disabled={!canGrantAdmin}
                     onChange={(e) => setCreateLogin(e.target.checked)}
                   />
-                  Create a login (one-time password)
+                  Create a login (one-time password){canGrantAdmin ? "" : " — workspace admin only"}
                 </label>
                 <Button
                   variant="primary"

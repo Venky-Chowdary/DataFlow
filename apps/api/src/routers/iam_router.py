@@ -176,11 +176,12 @@ def list_service_accounts(request: Request):
     ]
 
 
-def _key_visible(request: Request, key: dict[str, Any]) -> bool:
-    """The same visibility as the workspace key list: own workspace, or platform admin."""
+def _key_visible(request: Request, key: dict[str, Any], *, orphans: bool = True) -> bool:
+    """The same visibility as the workspace key list (own workspace, platform
+    admin, or a workspace-less key's creator / creator-workspace admin)."""
     from src.routers.workspace_router import _own_workspace_key
 
-    return _own_workspace_key(request, key)
+    return _own_workspace_key(request, key, orphans=orphans)
 
 
 @router.post("/api-keys/{key_id}/rotate")
@@ -197,7 +198,9 @@ def rotate_api_key(key_id: str, body: ApiKeyRotation, request: Request):
     )
     # A key in another workspace is not there for this caller: rotating it
     # minted a credential the caller owned for someone else's workspace.
-    if existing is None or not _key_visible(request, existing):
+    # A workspace-less key is revoked, not re-issued: rotating it would mint a
+    # second credential with no workspace (K1).
+    if existing is None or not _key_visible(request, existing, orphans=False):
         raise HTTPException(status_code=404, detail="API key not found")
     if existing is not None:
         enforce_grant_bounds(

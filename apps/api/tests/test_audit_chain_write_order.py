@@ -46,8 +46,14 @@ class _Collection:
     def insert_one(self, doc: dict[str, Any]) -> None:
         self.docs.insert(0, dict(doc))
 
-    def find(self, _query: dict[str, Any] | None = None) -> _Cursor:
-        return _Cursor([dict(d) for d in self.docs])
+    def _match(self, query: dict[str, Any] | None) -> list[dict[str, Any]]:
+        return [d for d in self.docs if all(d.get(k) == v for k, v in (query or {}).items())]
+
+    def find(self, query: dict[str, Any] | None = None) -> _Cursor:
+        return _Cursor([dict(d) for d in self._match(query)])
+
+    def count_documents(self, query: dict[str, Any] | None = None) -> int:
+        return len(self._match(query))
 
 
 @pytest.fixture

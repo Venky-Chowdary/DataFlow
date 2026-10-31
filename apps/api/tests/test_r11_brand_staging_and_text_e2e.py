@@ -181,7 +181,7 @@ def test_bigquery_default_dataset_switches_through_name_for_new(monkeypatch):
     assert brand.bigquery_default_dataset() == "datawrap"
     assert default_schema_for("bigquery") == "datawrap"
     # A dataset the connector names is never replaced.
-    from src.transfer.batch_readers import bigquery_dataset_of
+    from services.brand import bigquery_dataset_of
 
     assert bigquery_dataset_of({"schema": "analytics"}) == "analytics"
     assert bigquery_dataset_of({"schema": "  "}) == "datawrap"

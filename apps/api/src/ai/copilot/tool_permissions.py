@@ -93,15 +93,19 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     # transfer and must not confirm a connector). The dispatcher lets a reader
     # in; can_confirm_kind refuses the kind before the ack is claimed.
     "confirm_action": (Permission.WORKSPACE_READ, READ),
-    # Lifecycle operations mirror /connectors/jobs/{id}/{cancel,retry,resume,
-    # quarantine/replay}, /saved-connectors/{id}/{test,DELETE} and
-    # /schedules/{id} PATCH|DELETE.
-    "test_connector": (Permission.CONNECTOR_READ, READ),
-    "cancel_job": (Permission.JOB_MANAGE, MUTATE),
-    "retry_job": (Permission.JOB_MANAGE, MUTATE),
-    "rerun_job": (Permission.JOB_MANAGE, MUTATE),
-    "resume_job": (Permission.JOB_MANAGE, MUTATE),
-    "replay_quarantine": (Permission.JOB_MANAGE, MUTATE),
+    # Lifecycle operations mirror /connectors/jobs/{id}/{cancel,retry,rerun,
+    # resume,quarantine/replay}, /connectors/saved/{id}/{test,DELETE} and
+    # /schedules/{id} PATCH|DELETE — the permission each of those REST routes
+    # is gated by (tests/test_r11_mcp_rest_permission_parity.py walks them).
+    # Testing a connection dials the connector from the API host and records
+    # the result, so it is connector.write like its REST route (RB6); it
+    # stages nothing, so it stays a READ effect for the chat loop.
+    "test_connector": (Permission.CONNECTOR_WRITE, READ),
+    "cancel_job": (Permission.CONNECTOR_WRITE, MUTATE),
+    "retry_job": (Permission.CONNECTOR_WRITE, MUTATE),
+    "rerun_job": (Permission.CONNECTOR_WRITE, MUTATE),
+    "resume_job": (Permission.CONNECTOR_WRITE, MUTATE),
+    "replay_quarantine": (Permission.CONNECTOR_WRITE, MUTATE),
     "repair_cdc_drift": (Permission.JOB_MANAGE, MUTATE),
     "delete_connector": (Permission.CONNECTOR_DELETE, MUTATE),
     "update_connector": (Permission.CONNECTOR_WRITE, MUTATE),
@@ -109,7 +113,8 @@ TOOL_PERMISSIONS: dict[str, tuple[str, str]] = {
     "delete_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
     "update_schedule": (Permission.SCHEDULE_MANAGE, MUTATE),
     "prepare_cdc_source": (Permission.JOB_RUN, MUTATE),
-    "clear_cursor_resnapshot": (Permission.JOB_MANAGE, MUTATE),
+    # POST /ops/cdc-cursors/clear is workspace administration.
+    "clear_cursor_resnapshot": (Permission.WORKSPACE_MANAGE, MUTATE),
     "rebaseline_transfer": (Permission.JOB_MANAGE, MUTATE),
 }
 
@@ -123,11 +128,11 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "create_connector": Permission.CONNECTOR_WRITE,
     "run_schedule": Permission.SCHEDULE_MANAGE,
     "create_schedule": Permission.SCHEDULE_MANAGE,
-    "cancel_job": Permission.JOB_MANAGE,
-    "retry_job": Permission.JOB_MANAGE,
-    "rerun_job": Permission.JOB_MANAGE,
-    "resume_job": Permission.JOB_MANAGE,
-    "replay_quarantine": Permission.JOB_MANAGE,
+    "cancel_job": Permission.CONNECTOR_WRITE,
+    "retry_job": Permission.CONNECTOR_WRITE,
+    "rerun_job": Permission.CONNECTOR_WRITE,
+    "resume_job": Permission.CONNECTOR_WRITE,
+    "replay_quarantine": Permission.CONNECTOR_WRITE,
     "repair_cdc_drift": Permission.JOB_MANAGE,
     "delete_connector": Permission.CONNECTOR_DELETE,
     "update_connector": Permission.CONNECTOR_WRITE,
@@ -136,7 +141,7 @@ ACK_KIND_PERMISSIONS: dict[str, str] = {
     "update_schedule": Permission.SCHEDULE_MANAGE,
     "prepare_cdc_source": Permission.JOB_RUN,
     "studio_remediation": Permission.JOB_RUN,
-    "clear_cursor_resnapshot": Permission.JOB_MANAGE,
+    "clear_cursor_resnapshot": Permission.WORKSPACE_MANAGE,
     "rebaseline_transfer": Permission.JOB_MANAGE,
 }
 
@@ -221,6 +226,28 @@ def caller_role(role: str, permissions: Iterable[str] | None = None) -> Iterator
     finally:
         _caller_permissions.reset(permissions_token)
         reset_caller_role(role_token)
+
+
+def request_tool_role(http_request: Any) -> str:
+    """The role a tool call from this request runs under ("" = auth off).
+
+    The same answer the REST gate gives (``resolve_effective_role``): the
+    membership role in the addressed workspace, and for an API key its own
+    role capped at its creator's current one. MCP used to read the raw
+    ``request.state.user["role"]`` — a workspace editor (platform label
+    ``member``) became a viewer, and a key outlived its creator's demotion
+    (RB6). An unknown principal fails closed to viewer.
+    """
+    from services.effective_role import (
+        resolve_effective_role,
+        workspace_id_from_request_headers,
+    )
+    from src.services.auth_service import auth_required
+
+    if not auth_required():
+        return ""
+    user = getattr(getattr(http_request, "state", None), "user", None) or {}
+    return resolve_effective_role(user, workspace_id_from_request_headers(http_request.headers))
 
 
 @contextlib.contextmanager

@@ -447,17 +447,25 @@ async def patch_pilot_engine(body: PilotEngineBody, request: Request):
     return {"preference": saved, **decision}
 
 
-def _own_workspace_key(request: Request, key: dict[str, Any]) -> bool:
+def _own_workspace_key(request: Request, key: dict[str, Any], *, orphans: bool = True) -> bool:
     """A workspace key is visible to its own workspace; a platform admin sees all.
 
-    Keys minted before keys carried a workspace (``workspace_id`` ""), and
-    keys minted through ``/iam``, belong to no workspace and are platform-admin
-    only. This holds whether or not DATAFLOW_WORKSPACE_ADMIN_IAM is on.
+    A key with no workspace (``workspace_id`` "": minted before keys carried
+    one, by the pre-round-8 rotate endpoint, or through ``/iam``) is also
+    listed to, and revocable by, its creator or an admin of the workspace in
+    view when the creator belongs to it (K1, ``services.orphaned_api_keys``).
+    ``orphans=False`` (rotation) keeps those platform-admin only.
     """
     scope = tenant_scope(request)
     if scope.unrestricted:
         return True
-    return bool(key.get("workspace_id")) and key["workspace_id"] == scope.workspace_id
+    if key.get("workspace_id"):
+        return key["workspace_id"] == scope.workspace_id
+    if not orphans:
+        return False
+    from services.orphaned_api_keys import orphan_key_manageable
+
+    return orphan_key_manageable(request, key)
 
 
 def _with_access_label(key: dict[str, Any]) -> dict[str, Any]:
@@ -771,7 +779,10 @@ async def rotate_notification_signing_secret(channel_id: str, request: Request):
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
+    # The rules PATCH/DELETE use: invisible is 404 (a deployment-wide channel
+    # is the platform admin's), visible but read-only is 403.
+    _assert_channel_visible(request, channel.workspace_id)
+    if not _channel_scope_writable(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     try:
         rotated = rotate_signing_secret(channel_id)

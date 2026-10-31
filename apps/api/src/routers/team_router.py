@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.audit_log import append_audit_event
+from services.rbac import Permission
 from services.team_store import (
     ROLES,
     LastAdminProtected,
@@ -90,6 +91,10 @@ class MemberBody(BaseModel):
     )
 
 
+class AccountCreationRequiresAdmin(PermissionDenied):
+    reason = "account_creation_requires_admin"
+
+
 def _actor(request: Request) -> str:
     return normalize_email(getattr(request.state, "user_email", None) or "") or "anonymous"
 
@@ -163,6 +168,7 @@ _TEAM_ERROR_STATUS: dict[type[TeamStoreError], int] = {
     WorkspaceNotFound: 404,
     MemberNotFound: 404,
     PermissionDenied: 403,
+    AccountCreationRequiresAdmin: 403,
     TeamStoreBusy: 503,
     # A state conflict, not malformed input: the request is well-formed and would
     # be accepted once another admin exists.
@@ -455,6 +461,25 @@ async def post_member(workspace_id: str, body: MemberBody, request: Request):
     except UserStoreError as e:
         raise HTTPException(status_code=400, detail=str(e)) from e
     principal = _principal(request, workspace_id)
+    if body.create_account and get_user(email) is None and not principal.has(
+        Permission.WORKSPACE_MANAGE
+    ):
+        # A new platform login and its one-time password are the workspace
+        # admin's to issue (RB3): an editor brings in existing users, or adds
+        # the email without a login. Refused before anything is written.
+        refusal = AccountCreationRequiresAdmin(
+            "Creating a login with a one-time password requires the workspace admin "
+            "role. Add the person without a login, or ask a workspace admin to create it."
+        )
+        _audit_refusal(
+            refusal,
+            principal=principal,
+            operation="add",
+            workspace_id=workspace_id,
+            target=email,
+            attempted_role=body.role,
+        )
+        raise _http_error(refusal)
     # Membership first, so authority and the duplicate refusal are both decided
     # before a login is minted: creating an account for someone who is already a
     # member left a fresh one-time password behind a 409 nobody could act on.

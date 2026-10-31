@@ -2607,7 +2607,7 @@ export function ValidateDashboard({
               <div>
                 <strong>Staging on · promote clean rows</strong>
                 <p>
-                  Writes land in <code>{"{table}_df_staging"}</code> first; only clean rows promote to the primary table.
+                  Writes land in a staging table next to the destination first; only clean rows promote to the primary table.
                   Bad rows stay in staging + DLQ — Validate does not prove the final table until Execute finishes promote.
                 </p>
               </div>
