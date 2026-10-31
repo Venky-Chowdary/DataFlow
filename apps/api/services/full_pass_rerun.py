@@ -131,3 +131,31 @@ def run_read_scope(
     except (TypeError, ValueError):
         pass
     return out
+
+
+def apply_schedule_full_pass(xfer_req: Any, sched: Any, *, attempt: int) -> dict | None:
+    """D210/D208: a schedule's retry, and its first run after a failed run, is a
+    full pass of an incremental upsert.
+
+    A failed attempt can leave a destination row that no longer matches the
+    source (QA D210: an Oracle row kept its old value where the source is now
+    ``''``). Continuing from the watermark never reads that row again, so the
+    stale value would be kept forever. Re-upserting every row is idempotent and
+    the saved watermark is neither used nor moved.
+    """
+    from services.job_status import is_completed
+
+    last_status = str(getattr(sched, "last_status", "") or "")
+    after_failure = attempt > 0 or (bool(last_status) and not is_completed(last_status))
+    if not after_failure:
+        return None
+    parent: dict | None = None
+    last_job_id = str(getattr(sched, "last_job_id", "") or "")
+    if last_job_id:
+        try:
+            from services.mongodb_service import get_mongodb_service
+
+            parent = get_mongodb_service().get_job(last_job_id)
+        except Exception:  # noqa: BLE001 - the report's watermark is informational
+            parent = None
+    return apply_full_pass(xfer_req, parent_job=parent, action="retry")
