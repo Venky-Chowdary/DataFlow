@@ -31,7 +31,7 @@ export const PRODUCT_FRAMES = {
     {
       src: WORKSPACE_SHOT.transferMap,
       alt: "Transfer Studio Map columns for sample-orders",
-      caption: "3 · Map — Align columns, Accept risk, continue",
+      caption: "3 · Map — Align columns, sign a risk contract where needed, continue",
     },
     {
       src: WORKSPACE_SHOT.transferValidate,
@@ -75,7 +75,7 @@ export const PRODUCT_FRAMES = {
     {
       src: WORKSPACE_SHOT.connectors,
       alt: "Connectors used by scheduled routes",
-      caption: "Same connectors — schedules never invent a second vault",
+      caption: "Same connectors — schedules share the workspace vault",
     },
   ],
   query: [
@@ -87,7 +87,7 @@ export const PRODUCT_FRAMES = {
     {
       src: WORKSPACE_SHOT.connectors,
       alt: "Connectors available to Query",
-      caption: "Same connectors — Query never invents a second credential path",
+      caption: "Same connectors — Query uses the workspace credentials",
     },
     {
       src: WORKSPACE_SHOT.transferSource,
@@ -99,7 +99,7 @@ export const PRODUCT_FRAMES = {
     {
       src: WORKSPACE_SHOT.pilot,
       alt: "Datawrap Pilot natural-language triage",
-      caption: "Datawrap Pilot — NL triage on the governed engine",
+      caption: "Datawrap Pilot — local-engine copilot on the governed engine",
     },
     {
       src: WORKSPACE_SHOT.jobs,
@@ -116,17 +116,17 @@ export const PRODUCT_FRAMES = {
     {
       src: WORKSPACE_SHOT.mcp,
       alt: "MCP Server page in the live workspace",
-      caption: "Agents share the workspace — MCP never returns raw passwords",
+      caption: "Agents share the workspace — MCP works through secret references",
     },
     {
       src: WORKSPACE_SHOT.jobs,
       alt: "MCP-triggered job in Theater",
-      caption: "Agent runs appear in Job Theater with full gate + proof audit",
+      caption: "Agent runs appear in Job Theater with full gate and verification audit",
     },
     {
       src: WORKSPACE_SHOT.connectors,
       alt: "Connectors agents inherit under RBAC",
-      caption: "Same connectors — agents never receive raw destination secrets",
+      caption: "Same connectors — agents inherit them under RBAC",
     },
   ],
 } as const satisfies Record<string, DocsShotFrame[]>;
@@ -179,13 +179,13 @@ export const REAL_PREFLIGHT_GATES: { id: string; title: string; algorithm: strin
     id: "G7", // Staging capacity — unknown estimate fails closed
     title: "Capacity",
     algorithm:
-      "Compare estimated volume to destination limits / warehouse slots. Warn or block per policy — never assume infinite capacity.",
+      "Compare estimated volume to destination limits / warehouse slots. Warn or block per policy before the window opens.",
   },
   {
     id: "G8", // Pre-write sample reconciliation; post-write checksum after Execute
     title: "Reconciliation plan",
     algorithm:
-      "Select row-count + content-checksum strategy for post-load proof. Without a reconcile plan, the run cannot claim success.",
+      "Select the row-count, checksum, and census strategy for post-load proof. After the write, Gate-8 reads the destination back and verifies it.",
   },
   {
     id: "G9", // Data integrity audit — unproven / not-configured fails closed
@@ -209,7 +209,7 @@ export function LiveProductReel({
       <div className="lp-mkt-live-reel-head">
         <span className="lp-mkt-live-pill">Live workspace</span>
         <h3>{title}</h3>
-        <p>The same operator surfaces — framed in product chrome, not redrawn as a second UI.</p>
+        <p>The same operator surfaces, framed in product chrome.</p>
       </div>
       <DocsShotReel frames={[...frames]} className="docs-shot-reel--product" surface={surface} />
     </div>
