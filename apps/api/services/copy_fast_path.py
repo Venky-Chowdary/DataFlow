@@ -54,6 +54,8 @@ from typing import Any, NamedTuple
 
 from services.brand_env import getenv_brand
 
+from services.copy_range_proof import range_keys_match  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 #: Pipe buffer between the two COPY cursors. Large enough that the reader is not
@@ -130,7 +132,7 @@ class FastPathUnavailable(Exception):
 
 
 def occupied_pk_range_action(
-    already: int, expected: int, *, replace_destination: bool
+    already: int, expected: int, *, replace_destination: bool, keys_proven: bool = True
 ) -> str:
     """How an occupied primary-key range may be loaded.
 
@@ -143,8 +145,12 @@ def occupied_pk_range_action(
     them drops rows this run did not write, the delete is committed, and the
     append conservation proof then fails on the missing growth
     (E3-001: dest 50 → 54, growth 4, 50 source rows unaccounted).
+
+    ``keys_proven=False``: the counts may match, but the range does not hold
+    this source range's keys (:func:`services.copy_range_proof.range_keys_match`)
+    — a count alone is never a skip (append of N new keys into N rows).
     """
-    if int(already) == int(expected):
+    if int(already) == int(expected) and (keys_proven or int(expected) == 0):
         return "skip"
     if int(already) == 0:
         return "load"
@@ -1544,13 +1550,22 @@ def copy_between_postgres(
                             dst_cur, dest_ref, dest_ident, part
                         )
                         expected = int(part["source_count"])
-                        if already == expected:
+                        # A count is not identity: skip only a range that holds this
+                        # source range's keys (append of N new keys into N rows).
+                        if already == expected and range_keys_match(
+                            src_dialect="postgresql", src_cur=src_cur, src_ref=source_ref, src_ident=src_ident,
+                            dst_dialect="postgresql", dst_cur=dst_cur, dst_ref=dest_ref, dst_ident=dest_ident,
+                            part=part,
+                        ):
                             part["action"] = "skip"
                             part["dest_count"] = already
                         elif already == 0:
                             part["action"] = "load"
                         else:
-                            occupied_pk_range_action(already, expected, replace_destination=replace_destination)
+                            occupied_pk_range_action(
+                                already, expected, replace_destination=replace_destination,
+                                keys_proven=False,
+                            )
                             from services.copy_pg_mysql import _pg_quoted_literal
 
                             pred = pk_range_predicate(

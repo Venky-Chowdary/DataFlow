@@ -40,6 +40,8 @@ from services.copy_pg_mysql import (
     pg_mysql_copy_workers,
 )
 
+from services.copy_range_proof import range_keys_match  # noqa: E402
+
 logger = logging.getLogger(__name__)
 
 _INTEGER_PK_TYPES = frozenset({
@@ -619,14 +621,23 @@ def copy_sqlserver_to_sqlserver(
                 for part in partitions:
                     already = _range_count(cur, dest_ref, dest_ident, part)
                     expected = int(part["source_count"])
-                    if already == expected:
+                    # A count is not identity: skip only a range that holds this
+                    # source range's keys (append of N new keys into N rows).
+                    if already == expected and range_keys_match(
+                        src_dialect="sqlserver", src_cur=cur, src_ref=source_ref, src_ident=src_ident,
+                        dst_dialect="sqlserver", dst_cur=cur, dst_ref=dest_ref, dst_ident=dest_ident,
+                        part=part,
+                    ):
                         part["action"] = "skip"
                         part["dest_count"] = already
                     elif already == 0:
                         part["action"] = "load"
                         to_copy.append(part)
                     else:
-                        occupied_pk_range_action(already, expected, replace_destination=replace_destination)
+                        occupied_pk_range_action(
+                            already, expected, replace_destination=replace_destination,
+                            keys_proven=False,
+                        )
                         _delete_range(cur, dest_ref, dest_ident, part)
                         part["action"] = "reload"
                         to_copy.append(part)
