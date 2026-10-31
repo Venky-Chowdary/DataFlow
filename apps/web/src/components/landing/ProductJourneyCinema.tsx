@@ -12,26 +12,26 @@ const STEPS: {
   {
     id: "map",
     kicker: "01 · Map",
-    title: "Semantic map, not string match",
-    body: "Every source column is scored against the destination. Extra source fields stay visible. Dest-only NOT NULL blocks create. False friends stay in review until you confirm them.",
+    title: "Semantic map by meaning",
+    body: "Every source column is scored against the destination by role, qualifier, and type. Extra source fields stay visible, and look-alike columns wait for your confirmation.",
   },
   {
     id: "validate",
     kicker: "02 · Validate",
     title: "Nine gates before a row moves",
-    body: "Preflight fails fast on type, PK, cursor, and dest-exists shape. skip_preflight never comes from chat or the public Studio execute path.",
+    body: "Preflight checks types, keys, collation, cursor, privileges, and the destination's shape before the write — from Studio, schedules, chat, and agents alike.",
   },
   {
     id: "write",
     kicker: "03 · Write",
-    title: "Quarantine, never silent drop",
-    body: "Bad rows surface with a reason. Procedure CALL and dest INSERT/MERGE failures quarantine. CDC default is at-least-once upsert until a route proves dest-owned exactly-once.",
+    title: "Quarantine with a reason",
+    body: "Held-back rows surface with column, value, and reason, and replay once fixed. Stored-procedure and destination INSERT/MERGE writes quarantine the same way.",
   },
   {
     id: "prove",
     kicker: "04 · Prove",
-    title: "Checksum reconcile on the dest engine",
-    body: "Theater shows dest LSN, fence, quarantine, and dest-engine COUNT — never a writer-stamped scan().count(). If a job finished, you can show the proof.",
+    title: "Verified on the destination engine",
+    body: "Gate-8 reads the destination back: engine COUNT, a value and key census, and quarantine counts in Job Theater. Every finished job carries its proof.",
   },
 ];
 
@@ -152,7 +152,7 @@ function JourneyStage({ stage, gateTick }: { stage: JourneyStepId; gateTick: num
       <div className="lp-journey-shot" aria-label="Write with quarantine">
         <header>
           <h4>Write · upsert</h4>
-          <em>at-least-once</em>
+          <em>idempotent</em>
         </header>
         <div className="lp-journey-metrics">
           <div><strong>12,471</strong><span>Applied</span></div>
@@ -177,7 +177,7 @@ function JourneyStage({ stage, gateTick }: { stage: JourneyStepId; gateTick: num
         <div className="is-ok"><strong>MATCH</strong><span>Checksum</span></div>
       </div>
       <p className="lp-journey-note">
-        Dest-engine COUNT — not writer-stamped <code>scan().count()</code>. Dest-owned EOS is per-route, never platform-wide.
+        Destination-engine COUNT plus a value and key census — the 9 held-back rows wait in quarantine with reasons.
       </p>
     </div>
   );

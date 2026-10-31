@@ -5,29 +5,29 @@ const LAYERS = [
     phase: "01",
     title: "Isolate",
     tag: "Tenancy",
-    body: "Dedicated tenants, workspace scoping, and per-tenant security posture — no shared control-plane bleed between customers.",
-    proof: "Tenant isolated",
+    body: "Every store read is scoped to the caller's workspace — jobs, connectors, schedules, audit, and agent tools alike. Custom domains and per-tenant policy on top.",
+    proof: "Workspace isolated",
   },
   {
     phase: "02",
     title: "Encrypt",
     tag: "Keys",
-    body: "Customer-managed keys wrap connector secrets. Purpose keys stay scoped to the job that needs them — never a global vault shortcut.",
+    body: "Connector secrets are encrypted at rest and can be wrapped with your own key — local, wrapped, or AWS KMS. PII hashing uses a per-workspace key.",
     proof: "BYOK wrapped",
   },
   {
     phase: "03",
-    title: "Reside",
-    tag: "Regions",
-    body: "Pin jobs and artifacts to the regions your policy requires. Audit trails stay where compliance and residency demand.",
-    proof: "Region pinned",
+    title: "Authenticate",
+    tag: "Identity",
+    body: "SSO with OIDC or SAML and email-domain routing, SCIM 2.0 group-to-role provisioning, and an idle session timeout you control.",
+    proof: "SSO · SCIM",
   },
   {
     phase: "04",
     title: "Prove",
-    tag: "Reconcile",
-    body: "Post-load reconciliation verifies counts and content hashes. Quarantine never silently drops rows from the load.",
-    proof: "Checksum MATCH",
+    tag: "Verify",
+    body: "Every load is read back and verified value by value, and every action lands in a hash-chained audit log signed with its own key.",
+    proof: "Gate-8 MATCH",
   },
 ];
 
@@ -45,8 +45,8 @@ export function TrustSection() {
           <p className="lp-section-kicker">Enterprise trust</p>
           <h2>Security that moves with the data</h2>
           <p>
-            Four continuous layers on every transfer — identity stays with the run, secrets stay
-            scoped, residency stays pinned, and proof stays exportable.
+            Four continuous layers on every transfer — the workspace stays isolated, secrets stay
+            encrypted, identity stays with the run, and proof stays exportable.
           </p>
         </header>
 
@@ -72,11 +72,11 @@ export function TrustSection() {
             </header>
             <div className="lp-home-trust-panel-row is-ok">
               <span>Identity</span>
-              <em>SSO · Okta</em>
+              <em>SSO · OIDC / SAML</em>
             </div>
             <div className="lp-home-trust-panel-row is-ok">
               <span>Secrets</span>
-              <em>BYOK · KMS</em>
+              <em>BYOK · AWS KMS</em>
             </div>
             <div className="lp-home-trust-panel-row is-ok">
               <span>Preflight</span>
@@ -88,11 +88,11 @@ export function TrustSection() {
             </div>
             <div className="lp-home-trust-panel-row is-ok">
               <span>Reconcile</span>
-              <em>after write</em>
+              <em>value &amp; key census</em>
             </div>
             <div className="lp-home-trust-panel-row">
               <span>Audit</span>
-              <em>jobs · maps · agents</em>
+              <em>hash-chained</em>
             </div>
           </aside>
         </div>
