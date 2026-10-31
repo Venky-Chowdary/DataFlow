@@ -295,6 +295,7 @@ INTERNAL = "dataflow-api-production-722b.up.railway.app"
 
 def test_mcp_manifest_never_names_the_internal_host_or_http(ent, monkeypatch):
     monkeypatch.setenv("DATAFLOW_ENV", "production")
+    monkeypatch.setenv("DATAWRAP_ENV", "production")
     monkeypatch.setenv("DATAWRAP_WEB_DOMAIN", "app.datawrap.example")
     monkeypatch.setenv("RAILWAY_PUBLIC_DOMAIN", INTERNAL)
     spoofed = {"Host": INTERNAL, "X-Forwarded-Proto": "http", "X-Forwarded-Host": "evil.example"}
@@ -317,3 +318,15 @@ def test_mcp_manifest_never_names_the_internal_host_or_http(ent, monkeypatch):
                         headers={"Host": INTERNAL, "X-Forwarded-Host": "data.customer.example",
                                  "X-Forwarded-Proto": "http"}).json()
     assert vanity["endpoints"]["mcp"] == "https://data.customer.example/api/v1/mcp"
+
+
+def test_https_from_the_proxy_chain_reaches_the_app(ent, monkeypatch):
+    """TLS ends at the edge: the app must still see https (ProxyFix scheme)."""
+    monkeypatch.setenv("DATAWRAP_TRUSTED_PROXY_COUNT", "1")
+    for name in ("DATAWRAP_WEB_DOMAIN", "DATAFLOW_WEB_DOMAIN", "DATAWRAP_WEB_URL", "DATAFLOW_WEB_URL",
+                 "DATAWRAP_PUBLIC_API_ORIGIN", "DATAFLOW_PUBLIC_API_ORIGIN"):
+        monkeypatch.delenv(name, raising=False)
+    res = ent.anonymous().get("/api/v1/mcp/manifest",
+                              headers={"X-Forwarded-For": INSIDE, "X-Forwarded-Proto": "https"})
+    assert res.status_code == 200
+    assert res.json()["endpoints"]["mcp"].startswith("https://"), res.json()["endpoints"]
