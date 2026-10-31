@@ -25,6 +25,7 @@ from services.team_store import (
     TeamStoreError,
     WorkspaceNotFound,
     add_workspace_member,
+    break_glass_set_admin,
     create_workspace,
     delete_workspace,
     get_workspace,
@@ -571,3 +572,96 @@ async def delete_member(workspace_id: str, email: str, request: Request):
         details={"workspace_id": workspace_id, "email": normalize_email(email)},
     )
     return {"ok": True}
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Break-glass recovery
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+class BreakGlassRestoreBody(BaseModel):
+    email: str = Field(..., max_length=254)
+    reason: str = Field(..., min_length=1, max_length=500)
+
+
+@router.post("/workspaces/{workspace_id}/break-glass/restore-admin")
+async def break_glass_restore_admin(
+    workspace_id: str, body: BreakGlassRestoreBody, request: Request
+):
+    """Restore a workspace admin when nobody who can sign in is admin any more.
+
+    The ordinary role routes cannot do this once the last real admin is gone:
+    they need an admin of that workspace. Before this route the only fix was a
+    database edit by support. It is deliberately narrow:
+
+    - a platform administrator, signed in as themselves — never an API key,
+      even one a platform admin minted (automation does not break glass);
+    - a written reason, recorded verbatim;
+    - the person restored must be able to sign in, or the lockout continues;
+    - every attempt, granted or refused, is an audit event at ``warn``.
+    """
+    principal = _principal(request, workspace_id)
+    target = normalize_email(body.email)
+    reason = " ".join(body.reason.split())
+
+    def refuse(status: int, detail: str, code: str) -> HTTPException:
+        _audit(
+            "team.break_glass.denied",
+            actor=principal.email,
+            resource=f"/team/workspaces/{workspace_id}/break-glass/restore-admin",
+            level="warn",
+            details={
+                "workspace_id": workspace_id,
+                "target": target,
+                "attempted_role": "admin",
+                "reason_code": code,
+                "reason": reason,
+                "principal": principal.describe(),
+            },
+        )
+        return HTTPException(status_code=status, detail=detail)
+
+    if not reason:
+        raise HTTPException(status_code=422, detail="A reason is required for break-glass")
+    if principal.kind != "session" or not _is_platform_admin(request):
+        raise refuse(
+            403,
+            "Break-glass requires a platform administrator signed in as themselves",
+            "not_platform_admin_session",
+        )
+    if not get_workspace(workspace_id):
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    try:
+        target = validate_email(target)
+    except UserStoreError as e:
+        raise HTTPException(status_code=400, detail=str(e)) from e
+    from services.sign_in_capability import can_sign_in
+
+    if not can_sign_in(target):
+        raise refuse(
+            400,
+            f"{target} cannot sign in, so restoring them would not end the lockout — "
+            "create or re-enable their account first",
+            "target_cannot_sign_in",
+        )
+    try:
+        previous, membership = break_glass_set_admin(
+            workspace_id=workspace_id, email=target, actor=principal.email
+        )
+    except TeamStoreError as e:
+        raise _http_error(e) from e
+    _audit(
+        "team.break_glass.restore_admin",
+        actor=principal.email,
+        resource=f"/team/workspaces/{workspace_id}/members/{target}",
+        level="warn",
+        details={
+            "workspace_id": workspace_id,
+            "target": target,
+            "from_role": previous or None,
+            "to_role": membership.role,
+            "reason": reason,
+            "principal": principal.describe(),
+        },
+    )
+    return {"membership": membership.to_dict(), "from_role": previous or None}

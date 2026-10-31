@@ -746,6 +746,30 @@ def _remove_workspace_member(
         raise MemberNotFound(f"{normalize_email(email)} is not a member of this workspace")
 
 
+def break_glass_set_admin(*, workspace_id: str, email: str, actor: str) -> tuple[str, Membership]:
+    """Make ``email`` an admin of the workspace, bypassing membership authorization.
+
+    Only ``team_router.break_glass_restore_admin`` calls this, after it has
+    checked that a platform administrator signed in as themselves asked, with a
+    reason, for someone who can sign in — and it audits the result. Returns the
+    role held before ("" when not a member) and the new membership.
+    """
+    with workspace_membership_lock(workspace_id):
+        if not workspace_id or not get_workspace(workspace_id):
+            raise WorkspaceNotFound("Workspace not found")
+        existing = next(iter(_read_memberships(workspace_id=workspace_id, email=email)), None)
+        membership = Membership(
+            workspace_id=workspace_id,
+            email=normalize_email(email),
+            role="admin",
+            added_at=existing.added_at if existing else _now(),
+            added_by=existing.added_by if existing else normalize_email(actor),
+            name=existing.name if existing else "",
+        )
+        _write_membership(membership)
+        return (existing.role if existing else ""), membership
+
+
 def get_workspace_role(*, workspace_id: str, email: str) -> str:
     """The user's role in a workspace, or '' when they are not a member."""
     if not workspace_id:

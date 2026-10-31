@@ -106,10 +106,26 @@ def _public(run: dict[str, Any]) -> dict[str, Any]:
     return {k: v for k, v in run.items() if not k.startswith("_")}
 
 
-def get_run(run_id: str) -> dict[str, Any] | None:
+class BenchmarkBusy(RuntimeError):
+    """Another workspace's benchmark holds the (single, CPU-bound) runner."""
+
+
+def get_run(
+    run_id: str, *, workspace_id: str | None = None, unrestricted: bool = False
+) -> dict[str, Any] | None:
+    """The run, or ``None`` — also when it belongs to another workspace.
+
+    ``workspace_id=None`` is the internal (unscoped) read; routes always pass
+    the request's workspace so a run id from another workspace reads as absent.
+    """
     with _LOCK:
         run = _RUNS.get(run_id)
-        return _public(run) if run else None
+        if run is None:
+            return None
+        if workspace_id is not None and not unrestricted:
+            if str(run.get("workspace_id") or "") != str(workspace_id or ""):
+                return None
+        return _public(run)
 
 
 def active_run() -> dict[str, Any] | None:
@@ -120,12 +136,19 @@ def active_run() -> dict[str, Any] | None:
     return None
 
 
-def start_run(rows: int) -> tuple[dict[str, Any], bool]:
-    """Start a benchmark run, or return the one in flight. ``(run, started)``."""
+def start_run(rows: int, *, workspace_id: str = "", started_by: str = "") -> tuple[dict[str, Any], bool]:
+    """Start a benchmark run, or return this workspace's run in flight. ``(run, started)``.
+
+    One run at a time per deployment (it saturates a core). A run in flight for
+    another workspace is never handed back — that would show one tenant another
+    tenant's run — so the caller is told the runner is busy instead.
+    """
     with _LOCK:
         for run in _RUNS.values():
             if run["status"] in {"queued", "running"}:
-                return _public(run), False
+                if str(run.get("workspace_id") or "") == str(workspace_id or ""):
+                    return _public(run), False
+                raise BenchmarkBusy("A benchmark is already running; try again when it finishes")
         run_id = uuid.uuid4().hex
         run = {
             "id": run_id,
@@ -139,6 +162,8 @@ def start_run(rows: int) -> tuple[dict[str, Any], bool]:
             "finished_at": None,
             "error": "",
             "report": None,
+            "workspace_id": str(workspace_id or ""),
+            "started_by": started_by,
         }
         _RUNS[run_id] = run
         for old in list(_RUNS)[:-_KEEP]:
