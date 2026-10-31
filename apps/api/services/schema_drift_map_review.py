@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from typing import Any, Iterable
 
+from connectors.sql_identifiers import sanitized_spellings
+
 #: Confidence an explicit, exact mapping carries; anything below is a suggestion.
 EXACT_CONFIDENCE = 0.999
 
@@ -54,6 +56,10 @@ def auto_matched_renames(
         if tgt.lower() in sources:  # the old name still feeds its own column
             continue
         if src.lower() in targets:  # the new name already has a column
+            continue
+        # The column DataFlow created for this same source name (``First Name``
+        # -> ``First_Name``, legacy ``Café`` -> ``Caf_``) is not a rename (D55).
+        if tgt.lower() in sanitized_spellings(src):
             continue
         try:
             confidence = float(m.get("confidence") or 0.0)
