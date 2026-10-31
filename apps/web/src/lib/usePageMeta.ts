@@ -126,7 +126,7 @@ function upsertJsonLd(meta: PageMeta, siteUrl: string, title: string, descriptio
         name: "Datawrap",
         alternateName: ["Datawrap Pilot", "Datawrap Transfer Studio"],
         description:
-          "Integrity-first data transfer platform — migrate databases, sync files, and move data with AI semantic mapping, CDC, quarantine, and 9 preflight gates.",
+          "Integrity-first data transfer platform — semantic mapping, 9 preflight gates, native CDC, quarantine with replay, and every load verified value by value.",
         inLanguage: "en-US",
         publisher: { "@id": `${siteUrl}/#organization` },
       },
