@@ -922,7 +922,7 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
     if not out:
         return out
     bare = re.sub(r"\s*\(\s*\d+\s*\)", "", out.upper()).strip()
-    db = (dest_db_type or "").strip().lower()
+    db = _normalize_dest_db(dest_db_type)
     # Destinations that cannot take typmod: strip illegal (p) if present.
     # Keep TIMESTAMP_NTZ / TIMESTAMPTZ polarity tokens — never collapse NTZ→TIMESTAMP
     # on Databricks (TIMESTAMP is session-TZ aware).
@@ -947,9 +947,9 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
             return out
         # SQL Server bare DATETIME2 defaults to precision 7 — stamp it so G3
         # does not treat create-new as FSP-0 collapse vs TIMESTAMP_NTZ(6+).
-        if bare == "DATETIME2" and db in {"sqlserver", "mssql", ""}:
+        if bare == "DATETIME2" and db in {"sqlserver", ""}:
             return "DATETIME2(7)"
-        if bare == "TIME" and db in {"sqlserver", "mssql"} and "(" not in out.upper():
+        if bare == "TIME" and db == "sqlserver" and "(" not in out.upper():
             return "TIME(7)"
         return out
     stamp_p = parse_temporal_fractional_precision(out)
@@ -959,43 +959,18 @@ def promote_create_new_temporal_stamp(src_type: str, stamped: str, dest_db_type:
     if bare == "TIMESTAMP":
         if db in _NO_TEMPORAL_TYPMOD_ENGINES:
             return out
-        if db in {
-            "",
-            "postgresql",
-            "postgres",
-            "pg",
-            "cockroach",
-            "cockroachdb",
-            "alloydb",
-            "timescaledb",
-            "yugabytedb",
-            "citus",
-            "supabase",
-            "greenplum",
-        }:
+        if db in {"", "postgresql"}:
             return f"TIMESTAMP({src_p})"
         return out
     if bare == "TIME":
         if db in _NO_TEMPORAL_TYPMOD_ENGINES:
             return out
-        if db in {
-            "",
-            "mysql",
-            "mariadb",
-            "tidb",
-            "postgresql",
-            "postgres",
-            "pg",
-            "cockroachdb",
-            "alloydb",
-            "sqlserver",
-            "mssql",
-        }:
+        if db in {"", "mysql", "postgresql", "sqlserver"}:
             return f"TIME({src_p})"
         return out
-    if bare == "DATETIME" and db in {"mysql", "mariadb", "tidb", ""}:
+    if bare == "DATETIME" and db in {"mysql", ""}:
         return f"DATETIME({src_p})"
-    if bare == "DATETIME2" and db in {"sqlserver", "mssql", ""}:
+    if bare == "DATETIME2" and db in {"sqlserver", ""}:
         return f"DATETIME2({src_p})"
     return out
 

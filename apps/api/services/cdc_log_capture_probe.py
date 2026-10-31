@@ -20,28 +20,12 @@ from services.cdc_capability import (
     query_cdc_change_refusal,
 )
 
+from src.transfer.engine_family import engine_flavour
+
 _logger = logging.getLogger(__name__)
 
-_MYSQL = {"mysql", "mariadb", "amazon_rds_mysql", "amazon_aurora_mysql", "azure_mysql"}
-_SQLSERVER = {
-    "sqlserver",
-    "mssql",
-    "sql_server",
-    "azure_sql_database",
-    "microsoft_sql_server",
-    "amazon_rds_sql_server",
-}
-_ORACLE = {"oracle"}
-_POSTGRES = {
-    "postgresql",
-    "postgres",
-    "citus",
-    "cockroach",
-    "cockroachdb",
-    "greenplum",
-    "timescaledb",
-    "neon",
-}
+# PostgreSQL-wire engines without the duplex driver that still decode WAL.
+_POSTGRES_GRAMMAR = {"citus", "greenplum"}
 _MONGO = {"mongodb", "mongo", "documentdb", "amazon_documentdb"}
 
 
@@ -58,14 +42,22 @@ class LogCaptureProbe:
 
 
 def _dialect(source_type: str) -> str:
+    """Log-capture dialect of a source tile: its engine family (one resolver).
+
+    MariaDB keeps its name: its binlog GTID differs from MySQL's.
+    """
     kind = str(source_type or "").strip().lower().replace("-", "_")
-    if kind in _MYSQL:
-        return "mariadb" if kind == "mariadb" else "mysql"
-    if kind in _SQLSERVER:
-        return "sqlserver"
-    if kind in _ORACLE:
-        return "oracle"
+    flavour = engine_flavour(kind)
+    # Hosted twins are MySQL / MariaDB themselves; TiDB, Vitess ... have no binlog.
+    if flavour in {"mysql", "mariadb", "sqlserver", "oracle"}:
+        return flavour
     return ""
+
+
+def is_postgres_log_source(kind: str) -> bool:
+    """PostgreSQL WAL source: PostgreSQL itself (hosted or not) or a WAL twin."""
+    kind = str(kind or "").strip().lower().replace("-", "_")
+    return engine_flavour(kind) in {"postgresql", "cockroachdb"} or kind in _POSTGRES_GRAMMAR
 
 
 def _try_reader(cls: Any, cfg: dict[str, Any], **kwargs: Any) -> tuple[bool | None, Any]:
@@ -146,7 +138,7 @@ def probe_log_capture(
     # Slot attach/retention stays with the slot probe; this gate only refuses
     # a server that cannot decode WAL at all. The slot probe needs a stored
     # LSN, so a first CDC run on wal_level=replica passed Validate (MX3-05).
-    if kind in _POSTGRES:
+    if is_postgres_log_source(kind):
         return _probe_postgres_wal_level(cfg)
     if kind in _MONGO:
         if not cfg or not table:

@@ -284,14 +284,9 @@ def probe_sample_fk_orphans(
             cfg = dict(cfg)
             cfg.setdefault("type", db_type)
 
-        sqlish = {
-            "postgresql", "postgres", "redshift", "cockroachdb", "timescaledb",
-            "supabase", "mysql", "mariadb", "singlestore", "sqlserver", "mssql",
-            "synapse", "azure_sql_database", "oracle", "db2", "sqlite", "duckdb",
-            "generic_sql", "h2", "snowflake", "bigquery", "databricks",
-            "clickhouse", "trino", "presto", "questdb",
-        }
-        if db_type and db_type not in sqlish:
+        from services.source_duplicate_probe import is_sqlish_source
+
+        if db_type and not is_sqlish_source(db_type):
             finding = _unavailable_finding(
                 note=f"Sample orphan probe not implemented for source type {db_type}.",
                 validation_mode=validation_mode,

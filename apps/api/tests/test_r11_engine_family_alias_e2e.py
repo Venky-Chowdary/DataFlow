@@ -368,3 +368,43 @@ def test_tile_as_destination_run1_and_run2_into_created_table(client, tile, engi
     finally:
         _drop(engine, src_t)
         _drop(engine, dst_t)
+
+
+# ------------------------------------------------- the wrong wire, named
+
+
+def test_aurora_mysql_tile_on_a_postgres_port_names_the_protocol(client):
+    """QA: ``amazon_aurora`` pointed at PostgreSQL said "Cannot reach host"."""
+    cfg = _connector_cfg("postgresql")
+    response = client.post("/api/v1/connectors/test", json={
+        "type": "amazon_aurora", "host": cfg["host"], "port": cfg["port"],
+        "database": cfg["database"], "username": cfg["username"], "password": cfg["password"],
+    })
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body.get("success") is False
+    message = str(body.get("message") or body.get("error") or "")
+    assert "speaks the PostgreSQL protocol" in message, message
+    assert "Amazon Aurora PostgreSQL" in message, message
+    assert "cannot reach" not in message.lower(), message
+
+
+def test_postgres_tile_on_a_mysql_port_names_the_protocol(client):
+    cfg = _connector_cfg("mysql")
+    response = client.post("/api/v1/connectors/test", json={
+        "type": "alloydb", "host": cfg["host"], "port": cfg["port"],
+        "database": cfg["database"], "username": cfg["username"], "password": cfg["password"],
+    })
+    assert response.status_code == 200, response.text
+    message = str(response.json().get("message") or "")
+    assert "speaks the MySQL protocol" in message, message
+
+
+def test_aurora_postgresql_tile_tests_green_on_postgres(client):
+    cfg = _connector_cfg("postgresql")
+    response = client.post("/api/v1/connectors/test", json={
+        "type": "amazon_aurora_postgresql", **{k: cfg[k] for k in (
+            "host", "port", "database", "username", "password")},
+    })
+    assert response.status_code == 200, response.text
+    assert response.json().get("success") is True, response.json()

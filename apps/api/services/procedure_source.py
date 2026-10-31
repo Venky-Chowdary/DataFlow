@@ -54,30 +54,25 @@ MODE_QUERY = "query"
 MODE_PROCEDURE = "procedure"
 CALLABLE_MODES = frozenset({MODE_QUERY, MODE_PROCEDURE})
 
-#: Dialects that can execute CALL/EXEC (or a set-returning function).
+#: Dialects that can execute CALL/EXEC (or a set-returning function). Keyed
+#: on engine family: a hosted tile is its family (:func:`procedure_dialect`).
 PROCEDURE_DIALECTS = frozenset({
     "postgresql",
-    "postgres",
-    "pgvector",
     "redshift",
     "mysql",
-    "mariadb",
     "sqlserver",
-    "mssql",
     "oracle",
     "snowflake",
     "generic_sql",
     "greenplum",
-    "cockroachdb",
-    "timescaledb",
-    "yugabytedb",
-    "alloydb",
-    "amazon_rds_postgresql",
-    "amazon_rds_mysql",
-    "amazon_rds_sql_server",
-    "azure_sql_database",
-    "microsoft_sql_server",
 })
+
+
+def procedure_dialect(dialect: str | None) -> str:
+    """The key the procedure dialect sets are looked up by."""
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(dialect)
 
 QUERY_ONLY_DIALECTS = frozenset({"sqlite", "duckdb"})
 
@@ -87,14 +82,7 @@ QUERY_ONLY_DIALECTS = frozenset({"sqlite", "duckdb"})
 # commits, MyISAM, SQL Server / Oracle autonomous work, Snowflake, PG-wire
 # lookalikes not proven here) is refused before confirm unless the operator
 # declares the result schema.
-PEEK_ROLLBACK_DIALECTS = frozenset({
-    "postgresql",
-    "postgres",
-    "pgvector",
-    "timescaledb",
-    "alloydb",
-    "amazon_rds_postgresql",
-})
+PEEK_ROLLBACK_DIALECTS = frozenset({"postgresql"})
 
 _IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
 _QUALIFIED = rf"(?:{_IDENT}\.){{0,2}}{_IDENT}"
@@ -573,7 +561,7 @@ def parse_callable_source(
             f"{dialect_n or 'This engine'} has no stored procedures — "
             "use Table or a read-only SELECT."
         )
-    if dialect_n and dialect_n not in PROCEDURE_DIALECTS and dialect_n != "generic_sql":
+    if dialect_n and procedure_dialect(dialect_n) not in PROCEDURE_DIALECTS:
         # generic_sql catalog tiles still flow as generic_sql; unknown leaf
         # dialects are allowed only when the operator typed CALL/EXEC explicitly.
         if not re.match(r"^\s*(CALL|EXEC|EXECUTE|SELECT)\b", stripped, re.IGNORECASE):
@@ -1394,7 +1382,10 @@ def _peek_without_executing(cfg: Mapping[str, Any], spec: CallableSpec) -> dict[
             spec.identifier, len(declared),
         )
         return declared
-    if dialect in PEEK_ROLLBACK_DIALECTS:
+    from src.transfer.engine_family import engine_flavour
+
+    # PostgreSQL itself, hosted or not; wire lookalikes (CockroachDB) are not proven.
+    if engine_flavour(dialect) in PEEK_ROLLBACK_DIALECTS:
         return None
     logger.warning(
         "procedure %s not executed before confirm: %s cannot guarantee a rollback of its side effects",

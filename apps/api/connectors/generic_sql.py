@@ -428,7 +428,9 @@ _DEFAULT_PORT_MAP: dict[str, int] = {
 
 
 def _drivername(db_type: str) -> str:
-    return _DRIVERNAME_MAP.get(db_type, db_type)
+    from src.transfer.engine_family import family_or_kind
+
+    return _DRIVERNAME_MAP.get(db_type) or _DRIVERNAME_MAP.get(family_or_kind(db_type), db_type)
 
 
 def _mssql_odbc_driver() -> str | None:
@@ -626,7 +628,9 @@ class _MssqlQmarkConnection:
 
 
 def _default_port(db_type: str) -> int:
-    return _DEFAULT_PORT_MAP.get(db_type, 0)
+    from src.transfer.engine_family import family_or_kind
+
+    return _DEFAULT_PORT_MAP.get(db_type) or _DEFAULT_PORT_MAP.get(family_or_kind(db_type), 0)
 
 
 def _normalize_sqlite_url(url: str) -> str:
@@ -1166,19 +1170,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
             # Before the first connect, so NUMBER is text+Decimal, not float64.
             install_oracle_exact_fetch()
         if (
-            db_type in {
-                "mssql",
-                "sql_server",
-                "sqlserver",
-                "microsoft_sql_server",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "synapse_analytics",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-            }
-            or "mssql" in driver
+            "mssql" in driver
         ):
             from connectors.sqlserver_datetime2 import install_sqlserver_datetime2_bind
 
@@ -1197,19 +1189,7 @@ def _build_engine(cfg: dict[str, Any]) -> Any:
 
         # SQL Server: refuse silent VARCHAR truncation at the session level.
         if (
-            db_type in {
-                "mssql",
-                "sql_server",
-                "sqlserver",
-                "microsoft_sql_server",
-                "azure_sql_database",
-                "amazon_rds_sql_server",
-                "google_cloud_sql_sql_server",
-                "synapse_analytics",
-                "azure_synapse_dedicated",
-                "azure_synapse_serverless",
-            }
-            or "mssql" in driver
+            "mssql" in driver
         ):
             from connectors.write_resilience import apply_mssql_session_guards
 

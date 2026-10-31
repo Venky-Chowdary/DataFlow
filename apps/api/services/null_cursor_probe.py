@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from services.source_duplicate_probe import SQLISH_SOURCE_TYPES
+from services.source_duplicate_probe import is_sqlish_source
 
 
 @dataclass
@@ -168,7 +168,7 @@ def probe_null_cursor_count(
                 cursor_column=col,
                 db_type=db_type,
             )
-        if db_type in SQLISH_SOURCE_TYPES:
+        if is_sqlish_source(db_type):
             n = _sql_null_count(cfg, source_table, col)
             return NullCursorProbeResult(
                 status="ran",

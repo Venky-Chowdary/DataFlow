@@ -174,8 +174,11 @@ CATALOG_ID_ALIASES: dict[str, str] = {
     "amazon_rds_mysql": "mysql",
     "google_cloud_sql_postgresql": "postgresql",
     "google_cloud_sql_mysql": "mysql",
-    "azure_database_postgresql": "postgresql",
-    "azure_database_mysql": "mysql",
+    "azure_database_for_postgresql": "postgresql",
+    "azure_database_for_mysql": "mysql",
+    "google_cloud_sql_sql_server": "sqlserver",
+    "amazon_rds_oracle": "oracle",
+    "oracle_autonomous_warehouse": "oracle",
     "supabase": "postgresql",
     "neon": "postgresql",
     "timescaledb": "postgresql",
@@ -979,12 +982,25 @@ def _catalog_transfer_ready(catalog_id: str, driver: str, caps: dict[str, bool])
         if any(b in catalog_id for b in ("oracle", "sql_server", "mssql", "db2", "teradata", "informix", "sybase")):
             return False
         return False
+    if caps.get("file_source"):
+        # File formats are live when the transfer registry routes them. The
+        # SKU frozenset listed ``csv___tsv`` but not ``csv``, so the CSV tile
+        # (and Avro, ORC, XML) read "Planned" while CSV transfers ran (QA
+        # round 11). One owner now: the registry's LIVE_SOURCE_FORMATS.
+        return driver in live_file_source_formats()
     if driver in TRANSFER_READY_CATALOG_IDS:
         return True
     # Caps membership alone is not enough — transfer_ready() already enforced
     # read+write / preflight / certified. Reaching here means the driver is
     # known but not yet in the SKU frozenset (or was filtered above).
     return False
+
+
+def live_file_source_formats() -> frozenset[str]:
+    """File formats the transfer registry routes as live sources."""
+    from src.transfer.registry import LIVE_SOURCE_FORMATS
+
+    return frozenset(f.lower() for f in LIVE_SOURCE_FORMATS)
 
 
 def _is_rest_api_brand_alias(catalog_id: str, driver: str) -> bool:

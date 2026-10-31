@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from collections.abc import Mapping
 from typing import Any, Literal
 
-from services.source_duplicate_probe import SQLISH_SOURCE_TYPES
+from services.source_duplicate_probe import is_sqlish_source
 from services.value_serializer import key_identity_text, present_cell_text
 
 logger = logging.getLogger(__name__)
@@ -469,7 +469,7 @@ def probe_append_key_collisions(
         destination_config
         and destination_table
         and len(target_columns) == 1
-        and (destination_db_type or "").strip().lower() in SQLISH_SOURCE_TYPES
+        and is_sqlish_source(destination_db_type)
     ):
         live_keys = live_single_column_unique_keys(
             destination_config, destination_table
@@ -620,7 +620,7 @@ def probe_destination_key_collisions(
             findings = _mongo_existing_keys(
                 cfg, destination_table, key, probe_values, limit
             )
-        elif db_type in SQLISH_SOURCE_TYPES:
+        elif is_sqlish_source(db_type):
             finished, findings = _bounded_destination_read(
                 f"checking the append batch's {key} values against destination "
                 f"{destination_table}",
@@ -710,7 +710,7 @@ def probe_destination_tuple_collisions(
     try:
         if db_type in ("mongodb", "mongodb_atlas"):
             findings = _mongo_existing_tuples(cfg, destination_table, names, batch, limit)
-        elif db_type in SQLISH_SOURCE_TYPES:
+        elif is_sqlish_source(db_type):
             finished, findings = _bounded_destination_read(
                 f"checking the append batch's ({key}) rows against destination "
                 f"{destination_table}",

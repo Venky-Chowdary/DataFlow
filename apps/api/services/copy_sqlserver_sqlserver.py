@@ -52,23 +52,11 @@ _INTEGER_PK_TYPES = frozenset({
     "bigint",
 })
 
-_SQLSERVER_FAMILY = frozenset({
-    "sqlserver",
-    "mssql",
-    "sql_server",
-    "microsoft_sql_server",
-    "azure_sql",
-    "azure_sql_database",
-    "amazon_rds_sql_server",
-    "google_cloud_sql_sql_server",
-})
-
-
 def sqlserver_family_name(engine: str | None) -> str:
-    raw = (engine or "").strip().lower()
-    if raw in _SQLSERVER_FAMILY:
-        return "sqlserver"
-    return raw
+    """Duplex family from the one resolver; any other kind as given."""
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(engine)
 
 
 def sqlserver_sqlserver_insert_select_enabled() -> bool:

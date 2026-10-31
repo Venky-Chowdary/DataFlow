@@ -78,6 +78,7 @@ def search_catalog(
     status: str = "",
     limit: int = 60,
     transfer_only: bool = False,
+    offset: int = 0,
 ) -> dict:
     data = load_catalog()
     connectors = _enriched_connectors()
@@ -151,7 +152,13 @@ def search_catalog(
             connectors = [c for c in connectors if c.get("status") == status or c.get("effective_status") == status]
 
     total = len(connectors)
-    page = connectors[:limit]
+    # ``offset`` pages the filtered list. It used to be ignored, so with 700+
+    # tiles and ``limit`` capped at 200 everything past the first page was
+    # unreachable (QA round 11). ``next_offset`` is None on the last page.
+    start = max(0, int(offset or 0))
+    size = max(0, int(limit))
+    page = connectors[start:start + size]
+    next_offset = start + size if start + size < total else None
 
     suggested = []
     ids = SUGGESTED_SOURCES if role == "source" else SUGGESTED_DESTINATIONS if role == "destination" else []
@@ -190,6 +197,9 @@ def search_catalog(
     return {
         "total": total,
         "filtered": total,
+        "offset": start,
+        "limit": size,
+        "next_offset": next_offset,
         "connectors": page,
         "suggested": suggested if not q else page[:16],
         "categories": categories,

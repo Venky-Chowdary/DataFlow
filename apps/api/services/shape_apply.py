@@ -197,19 +197,21 @@ class ShapeRunner:
         }
 
 
+# Keyed on engine family: every duplex SQL tile is typed (one resolver).
 TYPED_VALUE_SOURCES = frozenset({
-    "postgresql", "postgres", "mysql", "mariadb", "sqlite", "sqlserver",
-    "mssql", "oracle", "mongodb", "bigquery", "snowflake", "databricks",
-    "clickhouse", "redshift", "db2", "informix", "duckdb", "cassandra",
-    "cockroachdb", "greenplum", "teradata", "sybase", "hana", "vertica",
-    "db2i", "firebird", "timescaledb", "yugabytedb", "singlestore",
+    "postgresql", "mysql", "sqlite", "sqlserver", "oracle", "mongodb",
+    "bigquery", "snowflake", "databricks", "clickhouse", "redshift", "db2",
+    "informix", "duckdb", "cassandra", "greenplum", "teradata", "sybase",
+    "hana", "vertica", "db2i", "firebird",
 })
 
 
 def is_typed_value_source(fmt: str) -> bool:
     """True when the source is a typed database whose '' and whitespace-only
     text cells are stored values — not spreadsheet-empty cells (X-1)."""
-    return str(fmt or "").strip().lower() in TYPED_VALUE_SOURCES
+    from src.transfer.engine_family import family_or_kind
+
+    return family_or_kind(fmt) in TYPED_VALUE_SOURCES
 
 
 def build_shape_runner(

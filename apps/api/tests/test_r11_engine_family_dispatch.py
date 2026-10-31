@@ -320,3 +320,71 @@ def test_engine_family_is_the_execution_resolver():
     assert engine_family("redshift") == "redshift"
     assert engine_family("duckdb") == "duckdb"
     assert engine_family("") == ""
+
+
+# ------------------------------------------------------------- item 7: catalog
+
+
+def test_catalog_has_no_duplicate_ids_or_collision_suffixes():
+    import re
+
+    rows = json.loads(_CATALOG.read_text(encoding="utf-8"))["connectors"]
+    ids = [r["id"] for r in rows]
+    assert len(ids) == len(set(ids))
+    assert not [i for i in ids if re.search(r"_[0-9a-f]{6}$", i)], "random collision suffixes"
+    assert "snowflake_b1fcb2" not in ids
+
+
+def test_generator_drops_duplicates_instead_of_renaming():
+    import importlib.util
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "generate_connector_catalog.py"
+    spec = importlib.util.spec_from_file_location("gen_catalog", path)
+    gen = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(gen)
+    generated = gen.generate()
+    ids = [g["id"] for g in generated]
+    assert len(ids) == len(set(ids))
+    assert ids == [g["id"] for g in gen.generate()]  # deterministic, no uuid
+    existing = json.loads(_CATALOG.read_text(encoding="utf-8"))["connectors"]
+    assert gen.merge_catalog(existing, generated) == existing  # the JSON is regenerated
+
+
+def test_catalog_offset_pages_past_the_first_page():
+    from services.catalog_service import search_catalog
+
+    first = search_catalog(limit=200)
+    total = first["total"]
+    assert total > 200 and first["next_offset"] == 200
+    seen = [c["id"] for c in first["connectors"]]
+    offset = first["next_offset"]
+    while offset is not None:
+        page = search_catalog(limit=200, offset=offset)
+        assert page["offset"] == offset
+        seen += [c["id"] for c in page["connectors"]]
+        offset = page["next_offset"]
+    assert len(seen) == total == len(set(seen))
+
+
+def test_catalog_route_honours_offset():
+    from fastapi.testclient import TestClient
+    from src.main import app
+
+    with TestClient(app) as client:
+        a = client.get("/api/v1/catalog/connectors", params={"limit": 5}).json()
+        b = client.get("/api/v1/catalog/connectors", params={"limit": 5, "offset": 5}).json()
+    assert a["next_offset"] == 5
+    assert not {c["id"] for c in a["connectors"]} & {c["id"] for c in b["connectors"]}
+
+
+def test_file_format_readiness_is_the_registry_live_formats():
+    from services.catalog_service import _enriched_connectors
+    from src.transfer.registry import LIVE_SOURCE_FORMATS
+
+    by_id = {c["id"]: c for c in _enriched_connectors()}
+    for tile in ("csv", "csv___tsv", "tsv", "avro", "orc", "xml", "json", "parquet"):
+        assert by_id[tile]["transfer_ready"] is True, tile
+        assert by_id[tile]["effective_status"] == "live", tile
+    for row in by_id.values():
+        if row.get("category") == "file" and row.get("driver_type") in LIVE_SOURCE_FORMATS:
+            assert row["transfer_ready"] is True, row["id"]

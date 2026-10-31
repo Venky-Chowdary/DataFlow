@@ -64,9 +64,8 @@ _INSTANT_ONLY_ENGINES: frozenset[str] = frozenset(
     }
 )
 
-_SQLSERVER_FAMILY: frozenset[str] = frozenset(
-    {"sqlserver", "mssql", "azure_sql", "azure_sql_database", "synapse"}
-)
+# ``eng`` is ``_normalize_dest_db``'s answer: hosted tiles and Synapse fold here.
+_SQLSERVER_FAMILY: frozenset[str] = frozenset({"sqlserver"})
 
 _OFFSET_RE = re.compile(r"([+-])(\d{2}):?(\d{2})$")
 
@@ -193,7 +192,7 @@ def stores_originating_offset(engine: str, type_name: str) -> bool:
     if eng in _SQLSERVER_FAMILY:
         return "DATETIMEOFFSET" in collapsed
 
-    if eng in {"oracle", "oracledb", "oracle_autonomous"}:
+    if eng == "oracle":
         return (
             "WITH TIME ZONE" in collapsed
             and "LOCAL" not in collapsed

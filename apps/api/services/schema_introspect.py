@@ -240,10 +240,8 @@ def _refine_columns_by_samples(
 #: name has to be split before the lookup. Document stores are deliberately
 #: absent: a MongoDB collection name may legitimately contain a dot.
 _NAMESPACED_SQL_ENGINES = frozenset({
-    "postgresql", "redshift", "pgvector", "mysql", "mariadb", "snowflake",
-    "sqlserver", "mssql", "sql_server", "azure_sql", "oracle", "oracle_db",
-    "amazon_rds_oracle", "bigquery", "generic_sql", "duckdb", "clickhouse",
-    "trino", "presto",
+    "postgresql", "redshift", "mysql", "snowflake", "sqlserver", "oracle",
+    "bigquery", "generic_sql", "duckdb", "clickhouse", "trino", "presto",
 })
 
 
@@ -258,8 +256,10 @@ def split_object_namespace(
     asked for a table literally named ``public.vt_src`` and answered no rows.
     Existence must never depend on where a name sorts in a truncated page.
     """
-    name = (table or "").strip()
-    if not name or (db_type or "").lower() not in _NAMESPACED_SQL_ENGINES:
+    from src.transfer.engine_family import family_or_kind
+
+    name, db_type = (table or "").strip(), family_or_kind(db_type)
+    if not name or db_type not in _NAMESPACED_SQL_ENGINES:
         return schema, database, name
     parts = [p.strip().strip('"').strip("`").strip("[]") for p in name.split(".")]
     parts = [p for p in parts if p]
@@ -267,7 +267,7 @@ def split_object_namespace(
         return schema, database, name
     leaf = parts[-1]
     namespace = parts[-2]
-    if (db_type or "").lower() in {"mysql", "mariadb"}:
+    if db_type == "mysql":
         # MySQL has no schema layer: the qualifier is the database, and the
         # introspector prefers ``database`` over ``schema``.
         return schema, namespace, leaf
@@ -373,13 +373,10 @@ def _introspect_schema_unscoped(
     must report empty columns so Studio can honestly create-on-write — not
     claim ``users`` exists in ``railway`` because another DB on the host has it.
     """
-    # Timescale is the Postgres catalog. Cockroach stays unresolved here so a
-    # planned engine does not inherit a live schema probe.
-    if db_type in {"timescaledb", "timescale"}:
-        db_type = "postgresql"
-    # MariaDB is the MySQL catalog (same INFORMATION_SCHEMA, same driver).
-    if db_type in {"mariadb", "maria"}:
-        db_type = "mysql"
+    # A duplex SQL tile reads its engine family's catalog (one resolver).
+    from src.transfer.engine_family import family_or_kind
+
+    db_type = family_or_kind(db_type)
     if ssl is None:
         # A caller that never said anything about TLS must not make it mandatory.
         from services.connector_store import default_ssl
@@ -414,7 +411,7 @@ def _introspect_schema_unscoped(
     schema, database, table = split_object_namespace(
         db_type, table, schema=schema, database=database
     )
-    if db_type in {"postgresql", "redshift", "pgvector"}:
+    if db_type in {"postgresql", "redshift"}:
         return _introspect_postgresql(
             host=host,
             port=port,
@@ -462,7 +459,7 @@ def _introspect_schema_unscoped(
             introspect_purpose=introspect_purpose,
             **options,
         )
-    if db_type in ("oracle", "oracle_db", "amazon_rds_oracle"):
+    if db_type == "oracle":
         return _si._introspect_oracle(
             host=host,
             port=port,
@@ -476,7 +473,7 @@ def _introspect_schema_unscoped(
             strict_namespace=strict_namespace,
             **options,
         )
-    if db_type in ("sqlserver", "mssql", "sql_server", "azure_sql"):
+    if db_type == "sqlserver":
         return _si._introspect_sqlserver(
             host=host,
             port=port,

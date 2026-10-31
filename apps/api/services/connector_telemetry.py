@@ -234,7 +234,9 @@ def driver_family(raw: str) -> str:
         for descriptor in descriptors:
             if cid in {str(item).lower().strip() for item in descriptor.catalog_ids}:
                 return descriptor.id
-        alias = CATALOG_ID_ALIASES.get(cid)
+        from src.transfer.engine_family import sql_duplex_family
+
+        alias = sql_duplex_family(cid) or CATALOG_ID_ALIASES.get(cid)
         return alias if alias in allowed else "unknown"
     except Exception as exc:
         _LOG.debug("driver family resolution failed: %s", type(exc).__name__)
