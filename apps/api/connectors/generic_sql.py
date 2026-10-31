@@ -62,6 +62,7 @@ from connectors.schema_drift import (
     is_wider_type,
     raise_widen_refusal,
 )
+from connectors.contract_salvage import SALVAGE_POLICIES, salvage_policy
 from connectors.sql_temporal import (
     bind_time_clock,
     coerce_sql_temporal,
@@ -6122,10 +6123,9 @@ def write_mapped_rows(
                                 rollback_exc,
                                 exc_info=rollback_exc,
                             )
-                        if is_sql_data_error(chunk_exc) and policy in {
-                            "quarantine",
-                            "coerce_null",
-                        }:
+                        if is_sql_data_error(chunk_exc) and salvage_policy(
+                            policy, mappings
+                        ) in SALVAGE_POLICIES:
                             chunk_written = 0
                             for row_i, row in enumerate(batch):
                                 try:
