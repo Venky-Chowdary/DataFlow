@@ -152,8 +152,8 @@ export function MappingCinema() {
             <span className="lp-cinema-chip is-warn">review</span>
             <span>
               <code>cust_id → customer_key</code> · same customer entity, different identity
-              kind (CRM id ≠ warehouse surrogate) — Map confirms. The engine does not
-              auto-pin id onto key.
+              kind (CRM id ≠ warehouse surrogate) — Map asks you to confirm before it
+              pins.
             </span>
           </>
         ) : pinned ? (
@@ -172,7 +172,7 @@ export function MappingCinema() {
       </div>
 
       <figcaption>
-        Semantic mapping — qualifiers + review. Same amount role is not the same column.
+        Semantic mapping — qualifiers + review keep every amount on its own column.
       </figcaption>
     </figure>
   );
@@ -253,7 +253,7 @@ export function GateCinema() {
           </div>
           <p className="lp-cinema-quarantine-reason">
             <strong>Reason:</strong> currency symbol prevents lossless NUMERIC coerce.
-            Row isolates to quarantine with column + value + reason — never silently dropped.
+            Row isolates to quarantine with column + value + reason, ready to replay.
           </p>
           <div className={`lp-cinema-quarantine-final${active >= 7 ? " is-visible" : ""}`}>
             <span className="lp-cinema-chip is-ok">G8</span>
@@ -358,7 +358,7 @@ export function ProofCinema() {
       <div className="lp-cinema-proof-quarantine">
         <div className="lp-cinema-proof-quarantine-head">
           <span className="lp-cinema-chip is-warn">quarantine</span>
-          <span>Isolated with column + value + reason — never silently dropped.</span>
+          <span>Isolated with column + value + reason, ready to replay.</span>
         </div>
         <ul>
           {PROOF_QUARANTINE.map((row) => (
@@ -372,7 +372,7 @@ export function ProofCinema() {
       </div>
 
       <figcaption>
-        Checksum + row-count reconcile after every write — matched or failed, never assumed.
+        Read-back after every write — row counts, checksums, and a value and key census.
       </figcaption>
     </figure>
   );
@@ -409,7 +409,7 @@ export function CdcCinema() {
         <div className="lp-cinema-cdc-phase lp-cinema-cdc-phase--stream">
           <div className="lp-cinema-cdc-phase-head">
             <strong>Streaming upserts</strong>
-            <em>{handoff ? "at-least-once" : "idle"}</em>
+            <em>{handoff ? "idempotent" : "idle"}</em>
           </div>
           <ol className="lp-cinema-cdc-ticks">
             {Array.from({ length: 6 }, (_, i) => (
@@ -498,8 +498,8 @@ const DEFAULT_SURFACES = [
   { label: "Job Theater", route: "product-jobs", sub: "Live phases · quarantine · proof" },
   { label: "Pipelines", route: "product-pipelines", sub: "Schedules on the governed engine" },
   { label: "Query", route: "product-query", sub: "Safe preview · Studio handoff" },
-  { label: "Pilot", route: "product-pilot", sub: "NL triage on real evidence" },
-  { label: "MCP", route: "product-mcp", sub: "Agent tools · never raw passwords" },
+  { label: "Pilot", route: "product-pilot", sub: "Local-engine copilot on real evidence" },
+  { label: "MCP", route: "product-mcp", sub: "Agent tools · secret references only" },
 ] as const;
 
 export function ProductSurfaceStrip<Route extends string>({

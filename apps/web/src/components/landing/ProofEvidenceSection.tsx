@@ -12,9 +12,9 @@ export function ProofEvidenceSection({ onNavigate }: { onNavigate?: (route: Publ
         <p className="lp-section-kicker">Fidelity</p>
         <h2>Proof you can show finance</h2>
         <p>
-          Every production load maps, validates, quarantines bad rows, and returns a checksum.
-          The outcomes below were measured on live engines as of {EVIDENCE_AS_OF} — destination
-          re-read after write, not a slide.
+          Every load maps, validates, quarantines bad rows, and is verified against the
+          destination. The outcomes below were measured on live engines as of {EVIDENCE_AS_OF},
+          with the destination read back after every write.
         </p>
       </div>
       <div className="lp-testimonial-stack">
