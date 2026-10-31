@@ -385,7 +385,9 @@ def test_test_key_endpoint_accepts_a_working_key(client, monkeypatch):
 
 
 def test_test_key_endpoint_refuses_providers_without_cloud_keys(client):
-    res = client.post("/api/v1/workspace/ai-providers/ollama/test")
+    # Ollama's test now probes its server instead of refusing; that contract is
+    # pinned in test_r8_ai_provider_status_e2e. The local engine has nothing to test.
+    res = client.post("/api/v1/workspace/ai-providers/local/test")
     assert res.status_code == 400
 
 
