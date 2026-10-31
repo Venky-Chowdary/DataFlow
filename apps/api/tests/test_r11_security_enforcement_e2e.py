@@ -330,3 +330,90 @@ def test_https_from_the_proxy_chain_reaches_the_app(ent, monkeypatch):
                               headers={"X-Forwarded-For": INSIDE, "X-Forwarded-Proto": "https"})
     assert res.status_code == 200
     assert res.json()["endpoints"]["mcp"].startswith("https://"), res.json()["endpoints"]
+
+
+# ── Deploy safety: enforce only on a client address the server can trust ────
+
+
+@pytest.fixture
+def hops_unset(monkeypatch):
+    """First deploy: ops has not set the hop count yet."""
+    for name in ("DATAWRAP_TRUSTED_PROXY_COUNT", "DATAFLOW_TRUSTED_PROXY_COUNT", "TRUSTED_PROXY_COUNT",
+                 "DATAWRAP_TENANT_IP_ALLOWLIST_ENFORCE", "DATAFLOW_TENANT_IP_ALLOWLIST_ENFORCE"):
+        monkeypatch.delenv(name, raising=False)
+
+
+def _peer(ent, client, ip: str):
+    """The same identity, connecting from socket address ``ip``."""
+    from fastapi.testclient import TestClient
+
+    c = TestClient(ent.app, client=(ip, 5000))
+    c.headers.update({k: v for k, v in client.headers.items() if k.lower() in ("authorization", "x-workspace-id")})
+    return c
+
+
+def test_unset_hop_count_and_a_private_peer_never_block_and_say_not_enforced(ent, hops_unset):
+    ws = ent.workspace("R11 hops unset")
+    member = ent.member(email="r11-hops-unset@example.com", workspace_id=ws, role="editor")
+    key = ent.bearer(ent.api_key(role="viewer", workspace_id=ws), ws)
+    # Every caller looks like Railway's proxy (CGNAT / RFC 1918).
+    admin = _peer(ent, ent.admin, "100.64.0.9")
+    saved = admin.post("/api/v1/workspace/tenant", json={"workspace_id": ws, "name": "Hops", "ip_allowlist": LIST},
+                       headers={"X-Workspace-Id": ws})
+    # The lock-out guard does not refuse over the proxy's address...
+    assert saved.status_code == 200, saved.text
+    ip = saved.json()["enforcement"]["ip_allowlist"]
+    # ...and the response says the list is NOT enforced, and why.
+    assert ip["enforced"] is False and ip["status"] == "untrusted_client_ip"
+    assert ip["missing"] == ["the platform's proxy hop count is not configured; ask your platform administrator to set it"]
+    assert any("proxy hop count" in w for w in saved.json()["enforcement"]["warnings"])
+    _no_env_names(saved.text)
+
+    assert _peer(ent, member, "10.0.0.7").get(SETTINGS).status_code == 200
+    assert _peer(ent, key, "100.64.3.4").get(SETTINGS).status_code == 200
+    would = _events(ent, "tenant.ip_allowlist.would_block")
+    assert len(would) >= 2
+    assert {e["reason_code"] for e in would} == {"client_ip_untrusted"}
+    assert {e["details"]["enforcement"] for e in would} == {"proxy_hop_count_unset"}
+    assert not _events(ent, "workspace.ip_allowlist.blocked")
+
+    posture = admin.get("/api/v1/workspace/security/posture", headers={"X-Workspace-Id": ws})
+    assert posture.json()["ip_allowlist_enforced"] is False
+    report = admin.get("/api/v1/workspace/security/report", headers={"X-Workspace-Id": ws})
+    assert "saved, not enforced (missing: the platform's proxy hop count is not configured" in report.text
+    _no_env_names(posture.text + report.text)
+
+
+def test_a_configured_hop_count_blocks_as_before(ent, hops_unset, monkeypatch):
+    monkeypatch.setenv("DATAWRAP_TRUSTED_PROXY_COUNT", "0")  # set, even to 0: the socket peer is trusted
+    ws = ent.workspace("R11 hops set")
+    member = ent.member(email="r11-hops-set@example.com", workspace_id=ws, role="editor")
+    saved = _peer(ent, ent.admin, "203.0.113.5").post(
+        "/api/v1/workspace/tenant", json={"workspace_id": ws, "name": "Set", "ip_allowlist": LIST},
+        headers={"X-Workspace-Id": ws})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["enforcement"]["ip_allowlist"]["enforced"] is True
+    refused = _peer(ent, member, "10.0.0.7").get(SETTINGS)
+    assert refused.status_code == 403
+    assert refused.json()["ip"] == "10.0.0.7"
+    # The guard refuses again too: the address is trusted.
+    guard = _peer(ent, ent.admin, "10.0.0.8").patch(f"/api/v1/workspace/tenant/{saved.json()['id']}",
+                                                    json={"ip_allowlist": LIST}, headers={"X-Workspace-Id": ws})
+    assert guard.status_code == 403  # blocked by the list before the guard even runs
+
+
+def test_unset_hop_count_and_a_public_peer_blocks(ent, hops_unset):
+    ws = ent.workspace("R11 hops public")
+    member = ent.member(email="r11-hops-public@example.com", workspace_id=ws, role="editor")
+    saved = _peer(ent, ent.admin, "203.0.113.5").post(
+        "/api/v1/workspace/tenant", json={"workspace_id": ws, "name": "Public", "ip_allowlist": LIST},
+        headers={"X-Workspace-Id": ws})
+    assert saved.status_code == 200, saved.text
+    assert saved.json()["enforcement"]["ip_allowlist"]["status"] == "enforced"
+    assert _peer(ent, member, OUTSIDE).get(SETTINGS).status_code == 403
+    assert _peer(ent, member, INSIDE).get(SETTINGS).status_code == 200
+    # A public caller outside the list is still refused by the lock-out guard.
+    guard = _peer(ent, ent.admin, OUTSIDE).post(
+        "/api/v1/workspace/tenant", json={"workspace_id": ent.workspace("R11 hops guard"), "name": "G",
+                                          "ip_allowlist": LIST})
+    assert guard.status_code == 400 and OUTSIDE in guard.json()["detail"]
