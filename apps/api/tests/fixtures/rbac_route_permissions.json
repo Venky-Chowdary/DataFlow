@@ -79,6 +79,8 @@
   "GET /api/v1/health": "job.read",
   "GET /api/v1/iam/scim/group-mappings": "iam.manage",
   "GET /api/v1/iam/service-accounts": "iam.manage",
+  "GET /api/v1/jobs": "job.read",
+  "GET /api/v1/jobs/{job_id}": "job.read",
   "GET /api/v1/mcp": "PUBLIC",
   "GET /api/v1/mcp/": "PUBLIC",
   "GET /api/v1/mcp/logs": "ai.use",
