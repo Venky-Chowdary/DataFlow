@@ -3480,7 +3480,16 @@ export async function purgeJobRetention(body: { dry_run: boolean; confirm_token?
   return res.json();
 }
 
-export async function fetchWorkspaceSettings(): Promise<{
+/**
+ * Deployment-wide settings (General, SSO, AI providers) are one document for
+ * every workspace; only a platform admin changes them. Reads say so.
+ */
+export type PlatformEditability = {
+  editable?: boolean;
+  editable_reason?: string | null;
+};
+
+export async function fetchWorkspaceSettings(): Promise<PlatformEditability & {
   org_name: string;
   timezone: string;
   retention_days: number;
@@ -3646,11 +3655,14 @@ export function ssoStartUrl(type: SsoType): string {
   return `${resolveApiBase()}/auth/sso/${type}/start`;
 }
 
-export async function fetchSsoConfigs(): Promise<Record<SsoType, SsoConfig>> {
+export async function fetchSsoSettings(): Promise<PlatformEditability & { providers: Record<SsoType, SsoConfig> }> {
   const res = await apiFetch(`${API_BASE}/workspace/sso`);
   if (!res.ok) throw new Error("Failed to load SSO settings");
-  const data = await res.json();
-  return data.providers;
+  return res.json();
+}
+
+export async function fetchSsoConfigs(): Promise<Record<SsoType, SsoConfig>> {
+  return (await fetchSsoSettings()).providers;
 }
 
 export async function updateSsoConfig(type: SsoType, body: Partial<SsoConfig>): Promise<{ config: SsoConfig; validation: { ok: boolean; message: string; missing_fields: string[] } }> {
@@ -3706,7 +3718,7 @@ export async function updateAiProviderSettings(provider: string, body: {
 
 export type PilotEngineChoice = "auto" | "local" | "hybrid" | "cloud";
 
-export type PilotEngineStatus = {
+export type PilotEngineStatus = PlatformEditability & {
   preference: PilotEngineChoice;
   engine: string;
   source: string;

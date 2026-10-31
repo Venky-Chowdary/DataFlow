@@ -31,6 +31,14 @@ def client(tmp_path, monkeypatch):
     h.isolate(tmp_path, monkeypatch)
     monkeypatch.setenv("DATAFLOW_SEED_DEMO", "false")
     monkeypatch.setenv("DATAFLOW_TRAINING", "off")
+    # Gate-8 grades an engine copy (MySQL -> SQLite here) "verified" only on a
+    # two-sided population digest, and that digest runs only with
+    # DATAFLOW_ENGINE_DIGEST=1; without it the same correct run is "partial" by
+    # design (X-41b, tests/test_x41b_count_only_verdict.py). This test asserts
+    # the digest verdict, so it states the flag instead of inheriting it from
+    # the shell: CI does not export it, and the run there read "partial".
+    monkeypatch.delenv("DATAWRAP_ENGINE_DIGEST", raising=False)  # read first by getenv_brand
+    monkeypatch.setenv("DATAFLOW_ENGINE_DIGEST", "1")
     sqlite_root = tmp_path / "sqlite"
     sqlite_root.mkdir()
     monkeypatch.setenv("DATAFLOW_SQLITE_ROOT", str(sqlite_root))

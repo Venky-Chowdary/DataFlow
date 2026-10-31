@@ -6,7 +6,7 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import BaseModel, Field
 
@@ -21,6 +21,7 @@ from services.byok_key_manager import (
 )
 from services.admin_audit import record_admin_change
 from services.effective_principal import request_may_write_workspace
+from services.platform_settings import editability, platform_settings_guard
 from services.team_store import get_workspace
 from services.workspace_access import assert_resource_workspace, tenant_scope
 from services.tenant_store import (
@@ -184,11 +185,13 @@ def _named_workspace_id(request: Request) -> str:
 
 
 @router.get("/settings")
-async def get_settings():
+async def get_settings(request: Request):
     from services.workspace_store import get_workspace_settings
 
     return {
         **get_workspace_settings(),
+        # One document for the whole deployment: only a platform admin changes it.
+        **editability(request),
         # What retention_days does, stated by the API itself (QA enterprise #4).
         "retention_enforcement": {
             "applies_to": "finished jobs (completed, failed, cancelled) in the requesting workspace",
@@ -199,7 +202,7 @@ async def get_settings():
     }
 
 
-@router.patch("/settings")
+@router.patch("/settings", dependencies=[Depends(platform_settings_guard("general", "update"))])
 async def patch_settings(body: WorkspaceSettingsBody, request: Request):
     from services.workspace_store import update_workspace_settings
 
@@ -233,14 +236,14 @@ async def patch_settings(body: WorkspaceSettingsBody, request: Request):
 
 
 @router.get("/sso")
-async def get_sso():
+async def get_sso(request: Request):
     from services.integrations_store import get_sso_configs
 
     configs = get_sso_configs()
-    return {"providers": configs}
+    return {"providers": configs, **editability(request)}
 
 
-@router.patch("/sso/{sso_type}")
+@router.patch("/sso/{sso_type}", dependencies=[Depends(platform_settings_guard("sso", "update"))])
 async def patch_sso(sso_type: str, body: SsoConfigBody, request: Request):
     from services.integrations_store import update_sso_config, validate_sso_config
 
@@ -279,13 +282,16 @@ async def test_sso(sso_type: str):
 
 
 @router.get("/ai-providers")
-async def get_ai_providers():
+async def get_ai_providers(request: Request):
     from services.integrations_store import get_ai_provider_configs
 
-    return {"providers": get_ai_provider_configs()}
+    return {"providers": get_ai_provider_configs(), **editability(request)}
 
 
-@router.patch("/ai-providers/{provider}")
+@router.patch(
+    "/ai-providers/{provider}",
+    dependencies=[Depends(platform_settings_guard("ai_providers", "test_and_save"))],
+)
 def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
     # Sync on purpose: the live key check does blocking network I/O, so FastAPI
     # must run this in a worker thread instead of on the event loop.
@@ -320,7 +326,10 @@ def patch_ai_provider(provider: str, body: AiProviderBody, request: Request):
     return updated
 
 
-@router.delete("/ai-providers/{provider}/key")
+@router.delete(
+    "/ai-providers/{provider}/key",
+    dependencies=[Depends(platform_settings_guard("ai_providers", "clear_secret"))],
+)
 def delete_ai_provider_key_route(provider: str, request: Request):
     """Forget the saved key; on auto Pilot returns to the local engine."""
     from services.integrations_store import delete_ai_provider_key
@@ -405,16 +414,19 @@ def _test_ollama(get_model_capabilities) -> dict[str, Any]:
 
 
 @router.get("/pilot-engine")
-async def get_pilot_engine():
+async def get_pilot_engine(request: Request):
     from services.integrations_store import get_pilot_engine_preference
 
     from ..ai.llm.provider import pilot_engine_decision
 
     decision = pilot_engine_decision()
-    return {"preference": get_pilot_engine_preference(), **decision}
+    return {"preference": get_pilot_engine_preference(), **decision, **editability(request)}
 
 
-@router.patch("/pilot-engine")
+@router.patch(
+    "/pilot-engine",
+    dependencies=[Depends(platform_settings_guard("ai_providers", "set_pilot_engine"))],
+)
 async def patch_pilot_engine(body: PilotEngineBody, request: Request):
     from services.integrations_store import set_pilot_engine_preference
 

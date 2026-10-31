@@ -10,12 +10,14 @@ import { PageFrame } from "../components/ui/PageFrame";
 import { PageShell } from "../components/ui/PageShell";
 import { useToast } from "../components/Toast";
 import { useConfirm } from "../components/ui/ConfirmDialog";
-import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoConfigs, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, purgeJobRetention, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
+import { AuditChainVerification, AuditExportFormat, AuditRetentionPurgeResult, fetchAuditEvents, exportAuditLog, purgeAuditRetention, verifyAuditChain, fetchAiProviderSettings, fetchModelCapabilities, fetchPilotEngineStatus, PilotEngineChoice, PilotEngineStatus, removeAiProviderKey, testAiProviderKey, updatePilotEngine, fetchSsoSettings, fetchSecurityPosture, fetchTenant, downloadSecurityReport, fetchWorkspaceApiKeys, fetchWorkspaceSettings, fetchWorkspaces, purgeJobRetention, ModelCapabilities, createWorkspaceApiKey, resolveApiBase, revokeWorkspaceApiKey, SecurityPosture, SsoConfig, SsoType, testSsoConfig, updateAiProviderSettings, updateSsoConfig, updateWorkspaceSettings, WorkspaceApiKey, WorkspaceApiKeyLifetime, WorkspaceApiKeyRole,
   fetchSignupMetrics,
   type SignupMetrics,
 } from "../lib/api";
 import { PERMISSIONS, useWriteGate } from "../lib/PermissionsContext";
 import { PermissionNotice } from "../components/PermissionNotice";
+import { PlatformSettingsNotice } from "../components/PlatformSettingsNotice";
+import { type PlatformLock, platformLock, UNLOCKED } from "../lib/platformSettings";
 import { NotificationSettings } from "./settings/NotificationSettings";
 import { TeamSettings } from "./settings/TeamSettings";
 import { TenantSettings } from "./settings/TenantSettings";
@@ -101,6 +103,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const [aiTesting, setAiTesting] = useState<string | null>(null);
   const [aiRemoving, setAiRemoving] = useState<string | null>(null);
   const [engineStatus, setEngineStatus] = useState<PilotEngineStatus | null>(null);
+  // General, SSO and AI providers are each one document for the whole
+  // deployment: only a platform admin changes them; a workspace admin reads.
+  const [generalLock, setGeneralLock] = useState<PlatformLock>(UNLOCKED);
+  const [ssoLock, setSsoLock] = useState<PlatformLock>(UNLOCKED);
+  const [aiLock, setAiLock] = useState<PlatformLock>(UNLOCKED);
   const [engineSaving, setEngineSaving] = useState(false);
   const [apiKeys, setApiKeys] = useState<WorkspaceApiKey[]>([]);
   const [apiKeysLoading, setApiKeysLoading] = useState(false);
@@ -133,7 +140,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     || retentionResult.retention_days === null
     || (retentionResult.would_remove ?? 0) === 0;
   /** Only edit what was actually read: an unread value must not be re-saved. */
-  const generalEditable = workspaceManage.allowed && settingsLoaded;
+  const generalEditable = workspaceManage.allowed && settingsLoaded && !generalLock.locked;
+  const generalTitle = (generalLock.locked ? generalLock.reason : workspaceManage.reason) || undefined;
   const activeWorkspace = useActiveWorkspaceId();
   const generalDirtyRef = useRef(false);
 
@@ -178,6 +186,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
         setRetention(String(ws.retention_days));
         setStudioSchemaBrowser(ws.studio_schema_browser === true);
         setStudioCanvas(ws.studio_canvas === true);
+        setGeneralLock(platformLock(ws));
         setSettingsLoaded(true);
         setSettingsError("");
         generalDirtyRef.current = false;
@@ -217,15 +226,17 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     fetchPilotEngineStatus()
       .then((status) => {
         setEngineStatus(status);
+        setAiLock(platformLock(status));
         setEngineError("");
       })
       .catch((err: unknown) => {
         setEngineStatus(null);
         setEngineError(err instanceof Error ? err.message : "Could not read the Pilot engine setting.");
       });
-    fetchSsoConfigs()
-      .then((cfgs) => {
-        setSsoConfigs(cfgs);
+    fetchSsoSettings()
+      .then((sso) => {
+        setSsoConfigs(sso.providers);
+        setSsoLock(platformLock(sso));
         setSsoError("");
       })
       .catch((err: unknown) => {
@@ -331,6 +342,14 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
     return false;
   };
 
+  /** Deployment-wide settings: workspace administration is not enough. */
+  const mayChangePlatform = (lock: PlatformLock) => {
+    if (!mayAdminister()) return false;
+    if (!lock.locked) return true;
+    toast({ title: "Read-only", message: lock.reason, tone: "warning" });
+    return false;
+  };
+
   const [retentionBusy, setRetentionBusy] = useState(false);
   const runRetentionPurge = async () => {
     if (!mayAdminister()) return;
@@ -355,7 +374,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   const saveSsoConfig = async () => {
     if (!ssoEditor || !ssoDraft) return;
-    if (!mayAdminister()) return;
+    if (!mayChangePlatform(ssoLock)) return;
     if (ssoDraft.enabled) {
       const missing = missingForEnable(ssoEditor, ssoDraft, ssoConfigs?.[ssoEditor], ssoClearSecret);
       if (missing.length) {
@@ -408,7 +427,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
 
   const saveAiProvider = async () => {
     if (!aiEditor) return;
-    if (!mayAdminister()) return;
+    if (!mayChangePlatform(aiLock)) return;
     setAiSaving(true);
     try {
       await updateAiProviderSettings(aiEditor, aiDraft);
@@ -455,7 +474,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   };
 
   const removeProviderKey = async (provider: string, label: string) => {
-    if (aiRemoving || !mayAdminister()) return;
+    if (aiRemoving || !mayChangePlatform(aiLock)) return;
     const ok = await confirm({
       title: `Remove the ${label} key?`,
       message: "Pilot goes back to our local engine until you save a key again.",
@@ -483,7 +502,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   };
 
   const saveEngineChoice = async (engine: PilotEngineChoice) => {
-    if (!mayAdminister()) return;
+    if (!mayChangePlatform(aiLock)) return;
     setEngineSaving(true);
     try {
       const status = await updatePilotEngine(engine);
@@ -569,7 +588,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
   const saveWorkspaceSettings = async () => {
     // Never write back a value that was never read, and never pretend a
     // refusal was a save.
-    if (!mayAdminister()) return;
+    if (!mayChangePlatform(generalLock)) return;
     if (!settingsLoaded) {
       toast({
         title: "Settings not loaded",
@@ -774,6 +793,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                     reason={workspaceManage.reason}
                     what="Workspace settings are read-only for you."
                   />
+                  {workspaceManage.allowed && (
+                    <PlatformSettingsNotice lock={generalLock} what="The organization profile applies to every workspace." />
+                  )}
                   {settingsError && (
                     <div className="df2-permission-notice" role="alert" data-testid="settings-load-error">
                       <DtIcon name="alert" size={16} />
@@ -806,7 +828,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           className="df2-input"
                           value={orgName}
                           disabled={!generalEditable}
-                          title={workspaceManage.reason || undefined}
+                          title={generalTitle}
                           onChange={(e) => {
                             generalDirtyRef.current = true;
                             setOrgName(e.target.value);
@@ -823,7 +845,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           className="df2-select"
                           value={timezone}
                           disabled={!generalEditable}
-                          title={workspaceManage.reason || undefined}
+                          title={generalTitle}
                           onChange={(e) => {
                             generalDirtyRef.current = true;
                             setTimezone(e.target.value);
@@ -843,7 +865,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           type="number"
                           value={retention}
                           disabled={!generalEditable}
-                          title={workspaceManage.reason || undefined}
+                          title={generalTitle}
                           onChange={(e) => {
                             generalDirtyRef.current = true;
                             setRetention(e.target.value);
@@ -857,6 +879,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           type="checkbox"
                           checked={studioSchemaBrowser}
                           disabled={!generalEditable}
+                          title={generalTitle}
                           onChange={(e) => {
                             generalDirtyRef.current = true;
                             setStudioSchemaBrowser(e.target.checked);
@@ -873,6 +896,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           type="checkbox"
                           checked={studioCanvas}
                           disabled={!generalEditable}
+                          title={generalTitle}
                           onChange={(e) => {
                             generalDirtyRef.current = true;
                             setStudioCanvas(e.target.checked);
@@ -894,25 +918,27 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       </div>
                     </div>
                     <p className="df2-settings-hint">{RETENTION_HINT} Write targets stay on each connector.</p>
-                    {generalEditable && (
+                    {workspaceManage.allowed && settingsLoaded && (
                       <button type="button" className="df2-btn df2-btn-ghost" data-testid="job-retention-purge" disabled={retentionBusy} onClick={() => void runRetentionPurge()}>
                         {retentionBusy ? "Checking…" : "Purge old jobs…"}
                       </button>
                     )}
                   </div>
-                  <div className="df2-settings-section-footer">
-                    <Button
-                      variant="primary"
-                      data-testid="settings-general-save"
-                      disabled={settingsLoading || settingsSaving || !generalEditable}
-                      title={workspaceManage.reason || undefined}
-                      loading={settingsSaving}
-                      loadingLabel="Saving…"
-                      onClick={() => void saveWorkspaceSettings()}
-                    >
-                      Save changes
-                    </Button>
-                  </div>
+                  {!generalLock.locked && (
+                    <div className="df2-settings-section-footer">
+                      <Button
+                        variant="primary"
+                        data-testid="settings-general-save"
+                        disabled={settingsLoading || settingsSaving || !generalEditable}
+                        title={generalTitle}
+                        loading={settingsSaving}
+                        loadingLabel="Saving…"
+                        onClick={() => void saveWorkspaceSettings()}
+                      >
+                        Save changes
+                      </Button>
+                    </div>
+                  )}
                 </section>
               </>
             )}
@@ -1086,6 +1112,9 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                   reason={workspaceManage.reason}
                   what="Identity provider settings are administered by workspace admins."
                 />
+                {workspaceManage.allowed && (
+                  <PlatformSettingsNotice lock={ssoLock} what="Identity provider settings apply to every workspace." />
+                )}
                 {ssoError && workspaceManage.allowed && (
                   <div className="df2-permission-notice" role="alert" data-testid="sso-load-error">
                     <DtIcon name="alert" size={16} />
@@ -1118,7 +1147,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                           title={workspaceManage.reason || undefined}
                           onClick={() => openSsoEditor(provider.type)}
                         >
-                          {provider.action}
+                          {ssoLock.locked ? `View ${provider.name}` : provider.action}
                         </button>
                       </div>
                     );})}
@@ -1148,6 +1177,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                       <p>Datawrap is a data-movement product. With no key saved, Pilot runs entirely on-box — nothing is sent to OpenAI or Anthropic. Once you save a key, Pilot uses that provider to word its answers until you remove the key; tools, gates and facts still run here. Pick “Our engine only” to keep a key saved but idle.</p>
                     </div>
                   </div>
+                  <PlatformSettingsNotice lock={aiLock} what="AI provider settings apply to every workspace." />
                   <div className="df2-settings-section-body">
                     <div className="df2-model-ops">
                       <div>
@@ -1164,7 +1194,8 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                         <select
                           id="pilot-engine"
                           className="df2-select"
-                          disabled={engineSaving || !engineStatus}
+                          disabled={engineSaving || !engineStatus || aiLock.locked}
+                          title={aiLock.locked ? aiLock.reason : undefined}
                           value={engineStatus?.preference ?? "auto"}
                           onChange={(e) => void saveEngineChoice(e.target.value as PilotEngineChoice)}
                         >
@@ -1246,7 +1277,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                             className="df2-btn df2-btn-sm df2-btn-primary"
                             onClick={() => void openAiEditor(provider.provider, provider.default_model)}
                           >
-                            {provider.available ? "Update credentials" : "Configure"}
+                            {aiLock.locked ? "View settings" : provider.available ? "Update credentials" : "Configure"}
                           </button>
                           {providerHasTest(provider) && (
                             <button
@@ -1258,7 +1289,7 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                               {aiTesting === provider.provider ? "Testing…" : providerTestLabel(provider.provider)}
                             </button>
                           )}
-                          {provider.tier === "cloud" && provider.key_state && provider.key_state !== "none" && (
+                          {!aiLock.locked && provider.tier === "cloud" && provider.key_state && provider.key_state !== "none" && (
                             <button
                               type="button"
                               className="df2-btn df2-btn-sm df2-btn-danger"
@@ -1644,8 +1675,10 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
             <div className="dt-modal dt-modal-lg" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
               <div className="dt-modal-header">
                 <div>
-                  <h2 className="dt-modal-title">Configure {ssoEditor === "saml" ? "SAML 2.0" : ssoEditor === "oidc" ? "OpenID Connect" : "Azure AD"}</h2>
-                  <p className="dt-modal-subtitle">Settings are persisted and used for workspace sign-in.</p>
+                  <h2 className="dt-modal-title">{ssoLock.locked ? "View" : "Configure"} {ssoEditor === "saml" ? "SAML 2.0" : ssoEditor === "oidc" ? "OpenID Connect" : "Azure AD"}</h2>
+                  <p className="dt-modal-subtitle" data-testid={ssoLock.locked ? "sso-read-only-reason" : undefined}>
+                    {ssoLock.locked ? `Read-only. ${ssoLock.reason}.` : "Settings are persisted and used for workspace sign-in."}
+                  </p>
                 </div>
                 <button type="button" className="df2-close-btn" onClick={() => setSsoEditor(null)} aria-label="Close">
                   <DtIcon name="x" size={16} />
@@ -1654,44 +1687,44 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
               <div className="dt-modal-body">
                 <label className="df2-settings-policy-row">
                   <div><h3>Enable provider</h3><p>When enabled, this provider appears on the sign-in page.</p></div>
-                  <button type="button" role="switch" aria-checked={ssoDraft.enabled} className={`df2-switch ${ssoDraft.enabled ? "on" : ""}`} onClick={() => setSsoDraft({ ...ssoDraft, enabled: !ssoDraft.enabled })}>
+                  <button type="button" role="switch" aria-checked={ssoDraft.enabled} aria-label="Enable provider" disabled={ssoLock.locked} className={`df2-switch ${ssoDraft.enabled ? "on" : ""}`} onClick={() => setSsoDraft({ ...ssoDraft, enabled: !ssoDraft.enabled })}>
                     <span className="df2-switch-thumb" />
                   </button>
                 </label>
                 {ssoEditor === "saml" && (
                   <div className="df2-settings-grid df2-mt-md">
-                    <div className="df2-settings-field"><label>Entity ID</label><input className="df2-input" value={ssoDraft.entity_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, entity_id: e.target.value })} /></div>
-                    <div className="df2-settings-field"><label>SSO URL</label><input className="df2-input" value={ssoDraft.sso_url ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, sso_url: e.target.value })} /></div>
-                    <div className="df2-settings-field df2-settings-field--full"><label>IdP X.509 certificate</label><textarea className="df2-input" rows={4} placeholder="Paste certificate PEM" value={ssoDraft.x509_cert ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, x509_cert: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Entity ID</label><input className="df2-input" aria-label="Entity ID" disabled={ssoLock.locked} value={ssoDraft.entity_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, entity_id: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>SSO URL</label><input className="df2-input" aria-label="SSO URL" disabled={ssoLock.locked} value={ssoDraft.sso_url ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, sso_url: e.target.value })} /></div>
+                    <div className="df2-settings-field df2-settings-field--full"><label>IdP X.509 certificate</label><textarea className="df2-input" aria-label="IdP X.509 certificate" disabled={ssoLock.locked} rows={4} placeholder="Paste certificate PEM" value={ssoDraft.x509_cert ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, x509_cert: e.target.value })} /></div>
                   </div>
                 )}
                 {ssoEditor === "oidc" && (
                   <div className="df2-settings-grid df2-mt-md">
-                    <div className="df2-settings-field"><label>Issuer URL</label><input className="df2-input" placeholder="https://accounts.google.com" value={ssoDraft.issuer ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, issuer: e.target.value })} /></div>
-                    <div className="df2-settings-field"><label>Client ID</label><input className="df2-input" value={ssoDraft.client_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_id: e.target.value })} /></div>
-                    <div className="df2-settings-field"><label>Client secret</label><input className="df2-input" type="password" placeholder="Leave blank to keep existing" value={ssoDraft.client_secret ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_secret: e.target.value })} /></div>
-                    <div className="df2-settings-field df2-settings-field--full"><label>Redirect URI</label><input className="df2-input" value={ssoDraft.redirect_uri ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, redirect_uri: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Issuer URL</label><input className="df2-input" aria-label="Issuer URL" disabled={ssoLock.locked} placeholder="https://accounts.google.com" value={ssoDraft.issuer ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, issuer: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Client ID</label><input className="df2-input" aria-label="Client ID" disabled={ssoLock.locked} value={ssoDraft.client_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_id: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Client secret</label><input className="df2-input" aria-label="Client secret" disabled={ssoLock.locked} type="password" placeholder="Leave blank to keep existing" value={ssoDraft.client_secret ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_secret: e.target.value })} /></div>
+                    <div className="df2-settings-field df2-settings-field--full"><label>Redirect URI</label><input className="df2-input" aria-label="Redirect URI" disabled={ssoLock.locked} value={ssoDraft.redirect_uri ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, redirect_uri: e.target.value })} /></div>
                   </div>
                 )}
                 {ssoEditor === "azure_ad" && (
                   <div className="df2-settings-grid df2-mt-md">
-                    <div className="df2-settings-field"><label>Tenant ID</label><input className="df2-input" value={ssoDraft.tenant_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, tenant_id: e.target.value })} /></div>
-                    <div className="df2-settings-field"><label>Client ID</label><input className="df2-input" value={ssoDraft.client_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_id: e.target.value })} /></div>
-                    <div className="df2-settings-field"><label>Client secret</label><input className="df2-input" type="password" placeholder="Leave blank to keep existing" value={ssoDraft.client_secret ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_secret: e.target.value })} /></div>
-                    <div className="df2-settings-field df2-settings-field--full"><label>Redirect URI</label><input className="df2-input" value={ssoDraft.redirect_uri ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, redirect_uri: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Tenant ID</label><input className="df2-input" aria-label="Tenant ID" disabled={ssoLock.locked} value={ssoDraft.tenant_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, tenant_id: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Client ID</label><input className="df2-input" aria-label="Client ID" disabled={ssoLock.locked} value={ssoDraft.client_id ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_id: e.target.value })} /></div>
+                    <div className="df2-settings-field"><label>Client secret</label><input className="df2-input" aria-label="Client secret" disabled={ssoLock.locked} type="password" placeholder="Leave blank to keep existing" value={ssoDraft.client_secret ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, client_secret: e.target.value })} /></div>
+                    <div className="df2-settings-field df2-settings-field--full"><label>Redirect URI</label><input className="df2-input" aria-label="Redirect URI" disabled={ssoLock.locked} value={ssoDraft.redirect_uri ?? ""} onChange={(e) => setSsoDraft({ ...ssoDraft, redirect_uri: e.target.value })} /></div>
                   </div>
                 )}
                 {ssoEditor !== "saml" && ssoConfigs?.[ssoEditor]?.client_secret && (
                   <label className="df2-settings-field df2-mt-md" data-testid="sso-clear-secret">
                     <span>
-                      <input id="sso-clear-secret" type="checkbox" checked={ssoClearSecret} onChange={(e) => setSsoClearSecret(e.target.checked)} />{" "}
+                      <input id="sso-clear-secret" type="checkbox" disabled={ssoLock.locked} checked={ssoClearSecret} onChange={(e) => setSsoClearSecret(e.target.checked)} />{" "}
                       Remove the stored client secret
                     </span>
                   </label>
                 )}
                 <div className="df2-settings-field df2-settings-field--full df2-mt-md">
                   <label htmlFor="sso-email-domains">Email domains</label>
-                  <input id="sso-email-domains" className="df2-input" placeholder="example.com, corp.example.com" value={ssoDomainsText} onChange={(e) => setSsoDomainsText(e.target.value)} />
+                  <input id="sso-email-domains" className="df2-input" disabled={ssoLock.locked} placeholder="example.com, corp.example.com" value={ssoDomainsText} onChange={(e) => setSsoDomainsText(e.target.value)} />
                   <p className="df2-label-hint">Sign-ins from these domains are sent to this provider. A domain belongs to one provider.</p>
                 </div>
               </div>
@@ -1699,9 +1732,11 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <button type="button" className="df2-btn df2-btn-ghost" onClick={() => void testSsoConfig(ssoEditor).then((r) => toast({ title: r.ok ? "SSO ready" : "SSO incomplete", message: r.message, tone: r.ok ? "success" : "warning" }))}>
                   Test configuration
                 </button>
-                <button type="button" className="df2-btn df2-btn-primary" disabled={ssoSaving} onClick={() => void saveSsoConfig()}>
-                  {ssoSaving ? "Saving…" : "Save SSO settings"}
-                </button>
+                {!ssoLock.locked && (
+                  <button type="button" className="df2-btn df2-btn-primary" disabled={ssoSaving} onClick={() => void saveSsoConfig()}>
+                    {ssoSaving ? "Saving…" : "Save SSO settings"}
+                  </button>
+                )}
               </div>
             </div>
           </div>
@@ -1712,8 +1747,12 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
             <div className="dt-modal dt-modal-lg" onClick={(e) => e.stopPropagation()} role="dialog" aria-modal="true">
               <div className="dt-modal-header">
                 <div>
-                  <h2 className="dt-modal-title">Configure {aiEditor}</h2>
-                  <p className="dt-modal-subtitle">API keys are encrypted at rest. Leave key blank to keep the existing value.</p>
+                  <h2 className="dt-modal-title">{aiLock.locked ? "View" : "Configure"} {aiEditor}</h2>
+                  <p className="dt-modal-subtitle" data-testid={aiLock.locked ? "ai-read-only-reason" : undefined}>
+                    {aiLock.locked
+                      ? `Read-only. ${aiLock.reason}.`
+                      : "API keys are encrypted at rest. Leave key blank to keep the existing value."}
+                  </p>
                 </div>
                 <button type="button" className="df2-close-btn" onClick={() => setAiEditor(null)} aria-label="Close">
                   <DtIcon name="x" size={16} />
@@ -1723,27 +1762,29 @@ export function SettingsPage({ onOpenConnectors }: { onOpenConnectors?: () => vo
                 <div className="df2-settings-grid">
                   {aiEditor !== "ollama" && (
                     <div className="df2-settings-field df2-settings-field--full">
-                      <label>API key</label>
-                      <input className="df2-input" type="password" placeholder="sk-… or leave blank to keep existing" value={aiDraft.api_key} onChange={(e) => setAiDraft({ ...aiDraft, api_key: e.target.value })} />
+                      <label htmlFor="ai-provider-key">API key</label>
+                      <input id="ai-provider-key" className="df2-input" type="password" disabled={aiLock.locked} placeholder="sk-… or leave blank to keep existing" value={aiDraft.api_key} onChange={(e) => setAiDraft({ ...aiDraft, api_key: e.target.value })} />
                     </div>
                   )}
                   <div className="df2-settings-field">
-                    <label>Model</label>
-                    <input className="df2-input" value={aiDraft.model} onChange={(e) => setAiDraft({ ...aiDraft, model: e.target.value })} />
+                    <label htmlFor="ai-provider-model">Model</label>
+                    <input id="ai-provider-model" className="df2-input" disabled={aiLock.locked} value={aiDraft.model} onChange={(e) => setAiDraft({ ...aiDraft, model: e.target.value })} />
                   </div>
                   {aiEditor === "ollama" && (
                     <div className="df2-settings-field">
-                      <label>Base URL</label>
-                      <input className="df2-input" value={aiDraft.base_url} onChange={(e) => setAiDraft({ ...aiDraft, base_url: e.target.value })} />
+                      <label htmlFor="ai-provider-base-url">Base URL</label>
+                      <input id="ai-provider-base-url" className="df2-input" disabled={aiLock.locked} value={aiDraft.base_url} onChange={(e) => setAiDraft({ ...aiDraft, base_url: e.target.value })} />
                     </div>
                   )}
                 </div>
               </div>
-              <div className="df2-card-footer">
-                <button type="button" className="df2-btn df2-btn-primary" disabled={aiSaving} onClick={() => void saveAiProvider()}>
-                  {aiSaving ? "Saving…" : "Save provider settings"}
-                </button>
-              </div>
+              {!aiLock.locked && (
+                <div className="df2-card-footer">
+                  <button type="button" className="df2-btn df2-btn-primary" disabled={aiSaving} onClick={() => void saveAiProvider()}>
+                    {aiSaving ? "Saving…" : "Save provider settings"}
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         )}
