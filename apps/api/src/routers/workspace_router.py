@@ -19,10 +19,8 @@ from services.byok_key_manager import (
     public_key_dict,
     rotate_key,
 )
-from services.team_store import (
-    can_write_workspace,
-    get_workspace,
-)
+from services.effective_principal import request_may_write_workspace
+from services.team_store import get_workspace
 from services.workspace_access import tenant_scope
 from services.tenant_store import (
     Tenant,
@@ -513,7 +511,7 @@ async def get_notifications(workspace_id: str | None = None, request: Request = 
 async def post_notification(body: NotificationChannelCreate, request: Request):
     actor = _actor(request)
     ws_id = body.workspace_id or ""
-    if ws_id and not can_write_workspace(ws_id, actor):
+    if ws_id and not request_may_write_workspace(request, ws_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     from services.notification_store import create_channel
 
@@ -539,7 +537,7 @@ async def patch_notification(channel_id: str, body: NotificationChannelUpdate, r
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     updates = body.model_dump(exclude_none=True)
     updated = update_channel(channel_id, updates=updates)
@@ -556,7 +554,7 @@ async def delete_notification(channel_id: str, request: Request):
     channel = get_channel(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     if not delete_channel(channel_id):
         raise HTTPException(status_code=500, detail="Delete failed")
@@ -572,7 +570,7 @@ async def test_notification(channel_id: str, request: Request):
     channel = get_channel_decrypted(channel_id)
     if not channel:
         raise HTTPException(status_code=404, detail="Channel not found")
-    if channel.workspace_id and not can_write_workspace(channel.workspace_id, actor):
+    if channel.workspace_id and not request_may_write_workspace(request, channel.workspace_id):
         raise HTTPException(status_code=403, detail="Workspace access denied")
     payload = build_job_payload(
         job_id="test",
