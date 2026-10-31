@@ -373,6 +373,12 @@ def _read_destination_sample(
             )
             cur = conn.cursor()
             try:
+                from connectors.sqlserver_tick import full_precision_select_list
+
+                # DATETIME2(7): pymssql keeps six digits; read the seventh as text.
+                ss_col_sql = full_precision_select_list(
+                    cur, table_ref, None if cols == ["*"] else list(cols)
+                )
                 if keys and sort_key:
                     key_col = (
                         f"[{require_safe_identifier(sort_key, preserve_case=True).replace(']', ']]')}]"

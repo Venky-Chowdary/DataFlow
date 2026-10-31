@@ -962,7 +962,9 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, Decimal):
         return _decimal_to_json(value)
     if isinstance(value, datetime):
-        return value.isoformat()
+        from connectors.sqlserver_tick import temporal_iso_text
+
+        return temporal_iso_text(value)
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, time):
@@ -1140,7 +1142,12 @@ def cell_to_string(value: Any, *, preserve_sql_null: bool = False) -> str:
         return safe_decimal_text(value) or ""
 
     if isinstance(value, datetime):
-        return value.isoformat()
+        if type(value) is datetime:
+            return value.isoformat()
+        # SQL Server DATETIME2(7): keep the seventh fractional digit.
+        from connectors.sqlserver_tick import temporal_iso_text
+
+        return temporal_iso_text(value)
 
     if isinstance(value, date):
         return value.isoformat()

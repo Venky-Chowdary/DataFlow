@@ -25,6 +25,42 @@ ORACLE_LTZ_READ_FORMAT: Final = 'YYYY-MM-DD"T"HH24:MI:SS.FF6'
 
 _TZ = "tz"
 _LTZ = "ltz"
+#: A zoneless TIMESTAMP(7..9): python-oracledb hands back six digits, so the
+#: seventh (a SQL Server DATETIME2(7) tick DataFlow carried there) is read as
+#: text too (connectors.sqlserver_tick).
+_TS7 = "ts7"
+ORACLE_TS7_READ_FORMAT: Final = 'YYYY-MM-DD"T"HH24:MI:SS.FF7'
+#: Session format a TIMESTAMP bind given as text is converted with: the
+#: seventh-digit text ``sql_temporal`` binds for a TIMESTAMP(7..9) column.
+ORACLE_SESSION_TIMESTAMP_FORMAT: Final = "YYYY-MM-DD HH24:MI:SS.FF9"
+
+
+def oracle_physical_with_scale(physical: str, catalog: str | None) -> str:
+    """The catalog's ``TIMESTAMP(n)`` where SQLAlchemy reflected bare ``TIMESTAMP``.
+
+    SQLAlchemy's Oracle reflection drops the fractional precision, so a column
+    DataFlow created as ``TIMESTAMP(7)`` bound six digits on run 2. The
+    destination catalog (ALL_TAB_COLUMNS) still states it; only a zoneless
+    timestamp of the same family takes its precision from there.
+    """
+    phys = str(physical or "")
+    cat = str(catalog or "").strip()
+    if "(" in phys or "timestamp" not in phys.lower() or "(" not in cat:
+        return phys
+    if oracle_tz_kind(phys) or oracle_tz_kind(cat) or "TIMESTAMP" not in cat.upper():
+        return phys
+    return cat
+
+
+def pin_oracle_timestamp_format(dbapi_conn: Any) -> None:
+    """``NLS_TIMESTAMP_FORMAT`` for a text TIMESTAMP bind (ISO, nine digits)."""
+    cur = dbapi_conn.cursor()
+    try:
+        cur.execute(
+            f"ALTER SESSION SET NLS_TIMESTAMP_FORMAT = '{ORACLE_SESSION_TIMESTAMP_FORMAT}'"
+        )
+    finally:
+        cur.close()
 
 
 def oracle_tz_kind(type_name: Any) -> str | None:
@@ -48,6 +84,8 @@ def is_oracle_tz_type_name(type_name: Any) -> bool:
 
 def oracle_tz_to_char(quoted_column: str, kind: str = _TZ) -> str:
     """SQL rendering one zone-bearing column as ISO text that keeps its instant."""
+    if kind == _TS7:
+        return f"TO_CHAR({quoted_column}, '{ORACLE_TS7_READ_FORMAT}')"
     if kind == _LTZ:
         # Oracle's ``||`` treats NULL as '', so an unguarded suffix turns a NULL
         # cell into the text '+00:00' (D186): keep NULL as NULL explicitly.
@@ -64,9 +102,21 @@ def oracle_tz_kinds(description: Sequence[Any] | None) -> dict[int, str]:
     out: dict[int, str] = {}
     for idx, entry in enumerate(description or ()):
         kind = oracle_tz_kind(entry[1]) if len(entry) > 1 else None
+        if kind is None and len(entry) > 5 and _zoneless_beyond_micro(entry):
+            kind = _TS7
         if kind:
             out[idx] = kind
     return out
+
+
+def _zoneless_beyond_micro(entry: Sequence[Any]) -> bool:
+    """A driver description of a TIMESTAMP(7..9) column (no zone)."""
+    name = str(getattr(entry[1], "name", entry[1]) or "").upper()
+    try:
+        scale = int(entry[5] or 0)
+    except (TypeError, ValueError):
+        return False
+    return name in {"DB_TYPE_TIMESTAMP", "TIMESTAMP"} and scale > 6
 
 
 def oracle_tz_positions(description: Sequence[Any] | None) -> frozenset[int]:
@@ -132,7 +182,14 @@ def parse_oracle_tstz_text(value: Any) -> Any:
         parsed = datetime.fromisoformat(value.strip())
     except ValueError:
         return value
-    return parsed if parsed.tzinfo is not None else value
+    if parsed.tzinfo is None:
+        from connectors.sqlserver_tick import tick_from_text, with_tick
+
+        # TIMESTAMP(7..9) read as ORACLE_TS7_READ_FORMAT text: zoneless.
+        if len(value.strip()) == 27 and value.strip()[10] == "T":
+            return with_tick(parsed, tick_from_text(value))
+        return value
+    return parsed
 
 
 def parse_oracle_tz_row(row: Iterable[Any], positions: frozenset[int]) -> tuple[Any, ...]:

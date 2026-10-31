@@ -7014,11 +7014,14 @@ _BARE_TEMPORAL_DIGITS: dict[str, int] = {
     # SQLite has no temporal storage class: the writer binds ``isoformat`` text,
     # which keeps every microsecond a Python datetime carries. Reading its bare
     # TIMESTAMP as FSP 0 graded the column DataFlow itself created on run 1 as
-    # a narrowing on run 2 (QA MX3-09).
-    "sqlite": 6,
+    # a narrowing on run 2 (QA MX3-09). The text also keeps the seventh digit
+    # of a SQL Server DATETIME2(7) source (connectors.sqlserver_tick), so the
+    # carrier holds 7.
+    "sqlite": 7,
     # Redis JSON documents hold temporals as ISO text, which keeps every
-    # microsecond, so run 2's sampled TIMESTAMP is the carrier run 1 wrote.
-    "redis": 6,
+    # digit the writer renders, so run 2's sampled TIMESTAMP is the carrier
+    # run 1 wrote.
+    "redis": 7,
     **{
         e: 6
         for e in (
