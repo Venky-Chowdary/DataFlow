@@ -200,7 +200,12 @@ def probe_log_capture(
         from connectors.sqlserver_cdc_native import SqlServerNativeCdc
         from connectors.sqlserver_change_stream import SqlServerChangeTrackingCdc
 
-        ss_schema = schema or "dbo"
+        from services.cdc_table_name import split_cdc_table
+
+        # D223: 'dbo.t' names its schema; the connector default never doubles it.
+        ss_schema, bare = split_cdc_table(table, schema or "dbo", dialect="sqlserver")
+        ss_schema = ss_schema or "dbo"
+        common = {**common, "table": bare}
         native, _ = _try_reader(SqlServerNativeCdc, cfg, schema=ss_schema, **common)
         if native:
             return LogCaptureProbe(dialect, True, "sqlserver_native")
@@ -211,7 +216,7 @@ def probe_log_capture(
             return LogCaptureProbe(dialect, None)
         refusal = classify_log_capture_failure(
             "sqlserver",
-            f"change data capture is not enabled for {ss_schema}.{table} and Change Tracking is off",
+            f"change data capture is not enabled for {ss_schema}.{bare} and Change Tracking is off",
         )
         return LogCaptureProbe(dialect, False, "", refusal.cause, refusal.detail)
     from connectors.oracle_change_stream import OracleFlashbackCdc

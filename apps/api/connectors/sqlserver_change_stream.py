@@ -155,9 +155,13 @@ class SqlServerChangeTrackingCdc:
         columns: list[str] | None = None,
         cursor_key: str = "",
     ) -> None:
+        from services.cdc_table_name import split_cdc_table
+
         self.cfg = cfg
+        # D223: a qualified name carries its own schema, joined once.
+        resolved_schema, table = split_cdc_table(table, schema or "dbo", dialect="sqlserver")
         self.table = table
-        self.schema = schema or "dbo"
+        self.schema = resolved_schema or "dbo"
         from services.cdc_identity import require_cdc_primary_key
 
         self.primary_key = require_cdc_primary_key(primary_key, table=table)
@@ -202,7 +206,7 @@ class SqlServerChangeTrackingCdc:
         }
 
     def _conn(self):
-        from connectors.generic_sql import connection_options, get_connection
+        from connectors.generic_sql import connection_options, get_connection, with_connection_options
 
         return get_connection(
             host=self.cfg.get("host") or "localhost",
@@ -213,7 +217,9 @@ class SqlServerChangeTrackingCdc:
             connection_string=self.cfg.get("connection_string") or "",
             ssl=bool(self.cfg.get("ssl")),
             db_type="sqlserver",
-            **connection_options(self.cfg),
+            # TLS options may sit under ``extra`` (the resolved source config);
+            # a refused handshake read as "CDC not enabled" otherwise.
+            **connection_options(with_connection_options(self.cfg)),
         )
 
     def _qualified(self) -> str:
