@@ -188,6 +188,10 @@ def test_rbac_denial_audit_deduplicates_and_reports_suppressed_count(
 ):
     from services import audit_coverage, integrations_store
 
+    from r8_key_owner import ensure_key_owners
+
+    # Round 8: a key needs an accountable creator.
+    ensure_key_owners("viewer@example.test")
     viewer = integrations_store.create_api_key(
         "Viewer", "viewer@example.test", role="viewer"
     )

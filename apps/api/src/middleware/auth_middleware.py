@@ -185,6 +185,12 @@ def _attach_user_reason(request: Request, token: str) -> str | None:
 
     key_info = verify_workspace_api_key(token) if is_workspace_api_key(token) else None
     if key_info:
+        from services.effective_principal import api_key_creator_is_accountable
+
+        if not api_key_creator_is_accountable(
+            str(key_info.get("created_by") or ""), str(key_info.get("kind") or "api_key")
+        ):
+            return "api_key_owner_inactive"
         request.state.user_email = key_info.get("created_by") or "api-key"
         user = {
             "email": request.state.user_email,

@@ -51,6 +51,10 @@ def scim_client(monkeypatch, tmp_path):
 
     from src.main import app
 
+    from r8_key_owner import ensure_key_owners
+
+    # Round 8: a key needs an accountable creator.
+    ensure_key_owners('operator@example.test', 'editor@example.test')
     admin = integrations_store.create_api_key(
         "SCIM test administrator",
         "operator@example.test",
