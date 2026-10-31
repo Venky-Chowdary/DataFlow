@@ -57,6 +57,7 @@ const {
   WORKSPACE_DIRECTORY_EVENT,
   clearActiveWorkspaceId,
   getActiveWorkspaceId,
+  landingWorkspaceId,
   notifyWorkspaceDirectory,
   setActiveWorkspaceId,
 } = await import("./workspace.ts");
@@ -94,5 +95,21 @@ describe("active workspace SSOT", () => {
     window.removeEventListener(WORKSPACE_CHANGED_EVENT, onChange);
     assert.equal(directory, 1);
     assert.equal(changed, 0);
+  });
+});
+
+describe("landing workspace (D218)", () => {
+  const rows = [{ id: "ws-oldest" }, { id: "ws-own" }, { id: "ws-last-used" }];
+
+  it("lands where the API says, not in the oldest (first) row", () => {
+    assert.equal(landingWorkspaceId(rows, "ws-last-used"), "ws-last-used");
+    assert.equal(landingWorkspaceId(rows, "ws-own"), "ws-own");
+  });
+
+  it("falls back to the first row only when the API names nothing usable", () => {
+    assert.equal(landingWorkspaceId(rows, ""), "ws-oldest");
+    assert.equal(landingWorkspaceId(rows, "  "), "ws-oldest");
+    assert.equal(landingWorkspaceId(rows, "ws-gone"), "ws-oldest");
+    assert.equal(landingWorkspaceId([], "ws-own"), "");
   });
 });

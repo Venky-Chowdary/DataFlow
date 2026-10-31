@@ -3516,6 +3516,8 @@ export type EffectiveIdentity = {
   name: string;
   platform_role: string;
   workspace_id: string;
+  /** The API's landing workspace for this account: last used, else its own (D218). */
+  default_workspace_id?: string;
   workspace_role: string;
   effective_role: string;
   permissions: string[];
@@ -3906,11 +3908,22 @@ export type PlatformUser = {
   workspaces?: { workspace_id: string; role: WorkspaceRole }[];
 };
 
-export async function fetchWorkspaces(): Promise<{ workspaces: Workspace[]; platformAdmin: boolean; actor: string }> {
+export async function fetchWorkspaces(): Promise<{
+  workspaces: Workspace[];
+  platformAdmin: boolean;
+  actor: string;
+  /** Where this account lands when the browser names no workspace (D218). */
+  defaultWorkspaceId: string;
+}> {
   const res = await apiFetch(`${API_BASE}/team/workspaces`);
   if (!res.ok) throw new Error(await parseApiError(res, "Failed to load workspaces"));
   const data = await res.json();
-  return { workspaces: data.workspaces ?? [], platformAdmin: !!data.platform_admin, actor: data.actor ?? "" };
+  return {
+    workspaces: data.workspaces ?? [],
+    platformAdmin: !!data.platform_admin,
+    actor: data.actor ?? "",
+    defaultWorkspaceId: typeof data.default_workspace_id === "string" ? data.default_workspace_id : "",
+  };
 }
 
 export async function createWorkspace(name: string): Promise<Workspace> {

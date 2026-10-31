@@ -5,6 +5,7 @@ import {
   WORKSPACE_CHANGED_EVENT,
   WORKSPACE_DIRECTORY_EVENT,
   getActiveWorkspaceId,
+  landingWorkspaceId,
   setActiveWorkspaceId,
   useActiveWorkspaceId,
 } from "../../lib/workspace";
@@ -29,13 +30,13 @@ export function WorkspaceSwitcher({
 
   const reload = useCallback(() => {
     fetchWorkspaces()
-      .then(({ workspaces: rows }) => {
+      .then(({ workspaces: rows, defaultWorkspaceId }) => {
         setWorkspaces(rows);
         setLoadError("");
         const current = getActiveWorkspaceId();
         if (rows.length === 0) return;
         if (!current || !rows.some((w) => w.id === current)) {
-          setActiveWorkspaceId(rows[0].id);
+          setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId));
         }
       })
       .catch((err: unknown) => {

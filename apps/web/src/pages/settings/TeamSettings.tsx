@@ -22,6 +22,7 @@ import {
 } from "../../lib/api";
 import {
   getActiveWorkspaceId,
+  landingWorkspaceId,
   notifyWorkspaceDirectory,
   setActiveWorkspaceId,
   useActiveWorkspaceId,
@@ -102,12 +103,12 @@ export function TeamSettings() {
   const [issuedPassword, setIssuedPassword] = useState<{ email: string; password: string } | null>(null);
 
   const loadWorkspaces = useCallback(async () => {
-    const { workspaces: rows, platformAdmin: isAdmin } = await fetchWorkspaces();
+    const { workspaces: rows, platformAdmin: isAdmin, defaultWorkspaceId } = await fetchWorkspaces();
     setWorkspaces(rows);
     setPlatformAdmin(isAdmin);
     const current = getActiveWorkspaceId();
     if (rows.length && (!current || !rows.some((w) => w.id === current))) {
-      setActiveWorkspaceId(rows[0].id);
+      setActiveWorkspaceId(landingWorkspaceId(rows, defaultWorkspaceId));
     }
     return isAdmin;
   }, []);

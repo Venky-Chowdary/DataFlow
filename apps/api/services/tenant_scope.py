@@ -23,6 +23,8 @@ filter and keeps system scope.
 from __future__ import annotations
 
 import contextlib
+import logging
+import threading
 from dataclasses import dataclass
 from typing import Any, Iterator
 
@@ -42,6 +44,53 @@ from services.team_store import (
 
 _WRITE_ROLES = frozenset({"admin", "editor"})
 _STATE_KEY = "_tenant_scope_base"
+
+LEGACY_ADMIN_VIEW_FLAG = "DATAFLOW_LEGACY_UNSCOPED_ADMIN_VIEW"
+# (actor, workspace) pairs already audited in this process: one audit entry per
+# pair, not one per store read.
+_LEGACY_VIEW_AUDITED: set[tuple[str, str]] = set()
+_LEGACY_VIEW_LOCK = threading.Lock()
+
+
+def legacy_admin_view_enabled() -> bool:
+    """``DATAFLOW_LEGACY_UNSCOPED_ADMIN_VIEW`` — off by default (D218).
+
+    On, a platform admin's reads inside a named workspace also return the
+    unscoped legacy rows, so the owner can see that history before claiming
+    it with ``scripts/backfill_legacy_workspaces.py --workspace-id``. Nobody
+    else ever sees them while isolation is enforced. The supported fix is the
+    claim; this is a read-only bridge.
+    """
+    from services.brand_env import getenv_brand_bool
+
+    return getenv_brand_bool("LEGACY_UNSCOPED_ADMIN_VIEW", False)
+
+
+def _audit_legacy_view(actor: str, workspace_id: str) -> None:
+    key = (actor, workspace_id)
+    with _LEGACY_VIEW_LOCK:
+        if key in _LEGACY_VIEW_AUDITED:
+            return
+        _LEGACY_VIEW_AUDITED.add(key)
+    try:
+        from services import audit_log
+
+        audit_log.append_audit_event(
+            action="tenant_scope.legacy_admin_view.used",
+            resource=f"/workspaces/{workspace_id}",
+            actor=actor or "unknown",
+            level="warn",
+            workspace_id="",
+            details={
+                "flag": LEGACY_ADMIN_VIEW_FLAG,
+                "workspace_id": workspace_id,
+                "effect": "platform admin reads include unscoped legacy rows",
+            },
+        )
+    except Exception as exc:  # noqa: BLE001 - auditing must not change the read
+        logging.getLogger(__name__).error(
+            "legacy admin view audit failed (%s)", type(exc).__name__
+        )
 
 
 @dataclass(frozen=True)
@@ -83,6 +132,9 @@ class TenantScope:
         """Rows a list or count may return."""
         legacy = not self.enforced
         if self.requested_workspace_id:
+            if not legacy and self.unrestricted and legacy_admin_view_enabled():
+                _audit_legacy_view(self.actor, self.requested_workspace_id)
+                legacy = True
             return WorkspaceFilter(frozenset({self.requested_workspace_id}), legacy)
         if self.unrestricted:
             return WorkspaceFilter.everything()

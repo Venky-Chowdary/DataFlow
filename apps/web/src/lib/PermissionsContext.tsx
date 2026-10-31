@@ -6,6 +6,7 @@ import {
   WORKSPACE_CHANGED_EVENT,
   clearActiveWorkspaceId,
   getActiveWorkspaceId,
+  landingWorkspaceId,
   setActiveWorkspaceId,
 } from "./workspace";
 
@@ -93,14 +94,18 @@ export function PermissionsProvider({
       // The workspace the API resolved becomes the one the browser names, so
       // every later request is decided in the same workspace this answer
       // described instead of being re-resolved per request.
-      if (next.workspace_id && !getActiveWorkspaceId()) setActiveWorkspaceId(next.workspace_id);
-      else if (!next.workspace_id && !getActiveWorkspaceId()) {
-        // The API only resolves an unnamed workspace when the account has
-        // exactly one membership. With two, every workspace-scoped read ran
-        // against no workspace at all — the Enterprise tab reported a saved
-        // tenant as missing — so the client names one and the switcher moves it.
-        const { workspaces } = await fetchWorkspaces().catch(() => ({ workspaces: [] }));
-        if (workspaces.length) setActiveWorkspaceId(workspaces[0].id);
+      // With no workspace named, land where the API says: the workspace this
+      // account last used, else its own (D218) — not the oldest in the list.
+      const landing = next.workspace_id || next.default_workspace_id || "";
+      if (landing && !getActiveWorkspaceId()) setActiveWorkspaceId(landing);
+      else if (!landing && !getActiveWorkspaceId()) {
+        // An older API names neither. With two memberships every
+        // workspace-scoped read ran against no workspace at all — the
+        // Enterprise tab reported a saved tenant as missing — so the client
+        // names one and the switcher moves it.
+        const listing = await fetchWorkspaces().catch(() => null);
+        const id = listing ? landingWorkspaceId(listing.workspaces, listing.defaultWorkspaceId) : "";
+        if (id) setActiveWorkspaceId(id);
       }
     } catch (err) {
       setIdentity(null);

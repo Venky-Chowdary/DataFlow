@@ -203,8 +203,9 @@ def test_owner_claims_legacy_rows_dry_run_first_idempotent_and_isolated(legacy_w
 
 def test_legacy_admin_view_flag_is_off_by_default_admin_only_and_audited(legacy_world, monkeypatch):
     r9 = legacy_world
-    from services import audit_log
+    from services import audit_log, tenant_scope
 
+    monkeypatch.setattr(tenant_scope, "_LEGACY_VIEW_AUDITED", set())
     events = []
     real_append = audit_log.append_audit_event
 
@@ -225,3 +226,34 @@ def test_legacy_admin_view_flag_is_off_by_default_admin_only_and_audited(legacy_
         assert not (_job_ids(c) & set(legacy))
     flagged = [e for e in events if e.get("action") == "tenant_scope.legacy_admin_view.used"]
     assert flagged and flagged[0]["details"]["flag"] == "DATAFLOW_LEGACY_UNSCOPED_ADMIN_VIEW"
+
+
+def test_mongo_query_and_matches_agree_on_whitespace_ids(r9):
+    """Every spelling of "no workspace" is unscoped in Mongo too (no row nobody sees)."""
+    from services.workspace_filter import WorkspaceFilter
+
+    coll = r9.db["r9_filter_agreement"]
+    rows = [
+        {"_id": "missing"},
+        {"_id": "null", "workspace_id": None},
+        {"_id": "empty", "workspace_id": ""},
+        {"_id": "blank", "workspace_id": "   "},
+        {"_id": "tab", "workspace_id": "\t"},
+        {"_id": "a", "workspace_id": "ws-a"},
+        {"_id": "b", "workspace_id": "ws-b"},
+        {"_id": "unicode", "workspace_id": "ws-ü"},
+    ]
+    coll.insert_many(rows)
+    for wf in (
+        WorkspaceFilter.everything(),
+        WorkspaceFilter.nothing(),
+        WorkspaceFilter.only(""),
+        WorkspaceFilter.only("ws-a"),
+        WorkspaceFilter.only("ws-ü"),
+        WorkspaceFilter(None, False),
+        WorkspaceFilter(frozenset({"ws-a"}), True),
+        WorkspaceFilter(frozenset({"ws-a", "ws-b"}), False),
+    ):
+        in_mongo = {d["_id"] for d in coll.find(wf.mongo_query())}
+        in_memory = {r["_id"] for r in rows if wf.matches(r.get("workspace_id"))}
+        assert in_mongo == in_memory, wf
