@@ -286,12 +286,28 @@ def _proof_source_batches(
     qcols = ", ".join(quote_sql_identifier(c, q) for c in read_cols)
     with warehouse_sql_engine(src_type, src_cfg) as eng:
         with eng.connect() as conn:
+            if src_type == "snowflake":
+                qcols = _snowflake_projection(
+                    conn, source_endpoint, src_cfg, read_cols
+                )[0]
             for batch in iter_select_row_dicts(
                 conn,
                 sa.text(f"SELECT {qcols} FROM {table_ref}"),  # nosec B608
                 read_cols,
             ):
                 yield batch
+
+
+def _snowflake_projection(
+    sa_conn: Any, endpoint: EndpointConfig, cfg: dict[str, Any], cols: list[str]
+) -> tuple[str, Any]:
+    """Proof read-back projection over Snowflake's stored column names (D8)."""
+    from connectors.snowflake_conn import snowflake_sa_projection
+
+    schema = str(getattr(endpoint, "schema", "") or cfg.get("schema") or "")
+    return snowflake_sa_projection(
+        sa_conn, schema, str(endpoint.table or ""), list(cols)
+    )
 
 
 _PROOF_OBJECT_STORES = frozenset({"s3", "gcs", "adls", "azure_blob", "minio", "r2"})
@@ -1310,7 +1326,16 @@ def _transform_applied_proof_impl(
                 if not batch:
                     continue
             raw_count += len(batch)
-            outs = runner.records(batch)
+            # D9: shape row by row so each output keeps its own raw input. A
+            # cast with on_error=divert drops rows, and pairing outputs to
+            # inputs by batch position then judged row 3's output against
+            # row 2's raw value — the oracle "disagreed" and the job failed.
+            outs: list[dict[str, Any]] = []
+            origin: list[dict[str, Any] | None] = []
+            for row in batch:
+                produced = runner.records([row])
+                outs.extend(produced)
+                origin.extend([row if len(produced) == 1 else None] * len(produced))
             for row in batch:
                 trow = {
                     map_source_to_target(k, mappings): v
@@ -1368,11 +1393,11 @@ def _transform_applied_proof_impl(
                     _cv_buf.append(
                         (tc, "e", _vh(_val_norm(orow.get(tc), _val_ddl(tc))))
                     )
-                    if i < len(batch):
+                    if origin[i] is not None:
                         _eo_buf.append(
                             (
                                 tc,
-                                _vh(_key_norm(batch[i].get(sc))),
+                                _vh(_key_norm(origin[i].get(sc))),
                                 _vh(_val_norm(orow.get(tc), _val_ddl(tc))),
                             )
                         )
@@ -1800,6 +1825,11 @@ def _transform_applied_proof_impl(
                             c0 = c0.execution_options(
                                 isolation_level="READ COMMITTED"
                             )
+                        if dest_db_type == "snowflake":
+                            # D8: the writer's stored (folded) names.
+                            qc0 = _snowflake_projection(
+                                c0, endpoint, dst_cfg0, sel_cols0
+                            )[0]
                         actual_checksum = canonical_checksum_from_iter(
                             _scoped_gen(
                                 iter_select_row_dicts(
@@ -2157,6 +2187,22 @@ def _transform_applied_proof_impl(
             dest_scanned = True
             with warehouse_sql_engine(dest_db_type, dst_cfg) as deng:
                 with deng.connect() as dconn:
+                    if dest_db_type == "snowflake":
+                        # D8: the writer's stored (folded) names.
+                        qc, _sf_ref = _snowflake_projection(
+                            dconn, endpoint, dst_cfg, sel_cols
+                        )
+                        stmt = sa.text(  # nosec B608
+                            f"SELECT {qc} FROM {dest_ref}"
+                            + (
+                                " WHERE " + scd2_is_current_predicate(
+                                    dest_db_type,
+                                    _sf_ref(str(scd2_opts["is_current"])),
+                                )
+                                if scd2_opts
+                                else ""
+                            )
+                        )
                     for batch in iter_select_row_dicts(
                         dconn, stmt, sel_cols
                     ):

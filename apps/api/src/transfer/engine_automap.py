@@ -274,8 +274,57 @@ def _auto_map(
         })
         request.column_types = dict(schema)
         request.mappings = [dict(mapping) for mapping in mappings]
+    mappings = _fold_snowflake_names_for_postgres(request, mappings)
     _record_schema_and_lineage(request, mappings, schema, job_id)
     return mappings
+
+
+def _fold_snowflake_names_for_postgres(
+    request: TransferRequest, mappings: list[dict]
+) -> list[dict]:
+    """Snowflake's folded ``ID`` lands as PostgreSQL's ``id`` (QA r12 D3).
+
+    Snowflake stores an unquoted name UPPER; PostgreSQL stores it lower. Copied
+    verbatim, every new PostgreSQL table had quoted ``"ID"``/``"AMOUNT"``
+    columns no unquoted query can reach. An identity mapping of an all-upper
+    name targets the lower-case name, unless the existing table already has
+    that exact column (a table an earlier run made keeps working). A
+    mixed-case name was created quoted on purpose and keeps its case.
+    """
+    src_fmt = str(getattr(request.source, "format", "") or "").lower()
+    dst_fmt = str(getattr(request.destination, "format", "") or "").lower()
+    if src_fmt != "snowflake" or dst_fmt not in {"postgresql", "postgres"}:
+        return mappings
+
+    def _folded(m: dict) -> bool:
+        tgt = str(m.get("target") or "")
+        return (
+            bool(tgt)
+            and tgt == str(m.get("source") or "")
+            and tgt == tgt.upper()
+            and tgt != tgt.lower()
+        )
+
+    if not any(_folded(m) for m in mappings if isinstance(m, dict)):
+        return mappings
+    live: set[str] = set()
+    try:
+        live_schema, exists = _engine._destination_schema_probe(
+            request.destination,
+            sync_mode=resolve_effective_sync_mode(request.sync_mode),
+        )
+        if exists:
+            live = {str(c) for c in (live_schema or {})}
+    except Exception as exc:  # the default must not block the run
+        logger.warning("Destination column probe for case folding failed: %s", exc)
+    out: list[dict] = []
+    for m in mappings:
+        if isinstance(m, dict) and _folded(m) and m["target"] not in live:
+            m = {**m, "target": str(m["target"]).lower()}
+        out.append(m)
+    if request.mappings:
+        request.mappings = [dict(m) for m in out]
+    return out
 
 
 def _record_schema_and_lineage(

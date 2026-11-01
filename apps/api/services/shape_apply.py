@@ -442,7 +442,9 @@ def recipe_output_schema(
         declared = propagated.get(column) or inferred.get(column) or prior.get(column) or "VARCHAR"
         cast = cast_steps.get(column)
         if cast is not None:
-            declared = _cast_carrier(cast, declared, prior.get(column, ""))
+            declared = _cast_carrier(
+                cast, declared, prior.get(column, "") or prior.get(str(cast.column or ""), "")
+            )
         ceiling = ceilings.get(column)
         if ceiling is not None:
             declared = _capped_decimal(declared, ceiling)
@@ -457,9 +459,20 @@ def _final_cast_steps(recipe: ShapeRecipe) -> dict[str, Any]:
     can still read as another type (``1`` cast to text is the string "1"), so
     re-inferring the carrier from them undid the cast: PG -> MongoDB stored the
     id as an int and PG -> PG created BIGINT (QA r12 D3).
+
+    A ``rename_column`` after the cast carries it to the new name (the
+    renamed column is "touched", so the plain rename carry-over does not
+    apply); the step is keyed by the output column (QA r12 Snowflake D7).
     """
     last: dict[str, Any] = {}
     for step in recipe.enabled_steps:
+        if step.op == "rename_column":
+            to = str(step.options.get("to") or "")
+            moved = last.pop(step.column, None)
+            last.pop(to, None)
+            if moved is not None and to:
+                last[to] = moved
+            continue
         for column in step.writes:
             if column:
                 last[column] = step
