@@ -13,6 +13,12 @@ public landing page) but defended:
 - **Turnstile** — when the deployment configures both the Turnstile secret
   and the public site key (so the form can render the widget), a missing or
   refused token is a 400 ``turnstile_required``.
+- **signed form token** — ``GET /contact-sales/config`` also issues an
+  HMAC-signed, one-use form token (``services.form_token``) with a minimum
+  fill time: a post with no/forged/tampered token is accepted-and-dropped
+  like the honeypot, while ``expired``/``replayed`` answer 400
+  ``form_expired`` so a real visitor's stale page can retry. This is the
+  zero-config bot wall that works before Turnstile keys are set.
 - **persist before mail** — the lead lands in ``contact_sales_leads`` (with a
   JSONL fallback) before any mail is queued. The mail to sales@ goes through
   the same durable outbox and ``DATAWRAP_EMAIL_PROVIDER`` driver as every
@@ -29,6 +35,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
+from services import form_token as form_token_mod
 from services import turnstile
 from services.client_ip import client_ip_from_request
 from services.contact_leads import persist_lead
@@ -83,6 +90,7 @@ class ContactSalesIn(BaseModel):
     # Honeypot: real users never fill it (it is invisible in the UI).
     website: str = Field(default="", max_length=200)
     turnstile_token: str = Field(default="", max_length=4096)
+    form_token: str = Field(default="", max_length=4096)
 
 
 def _client_ip(request: Request) -> str:
@@ -112,13 +120,29 @@ def _turnstile_enforced() -> str:
 
 @router.get("/contact-sales/config")
 async def contact_sales_config():
-    return {"turnstile_site_key": _turnstile_enforced()}
+    return {
+        "turnstile_site_key": _turnstile_enforced(),
+        "form_token": form_token_mod.issue("contact_sales"),
+    }
 
 
 @router.post("/contact-sales")
 async def contact_sales(body: ContactSalesIn, request: Request):
     # Honeypot filled → bot. Return a normal success shape and do nothing.
     if body.website.strip():
+        return JSONResponse({"ok": True, "lead_id": None, "delivered": False})
+
+    # Signed one-use form token: missing/forged/too-fast posts are bots —
+    # accept-and-drop like the honeypot. Expired/replayed are real visitors
+    # with a stale page; the 400 lets the form refetch config and retry.
+    verdict_form = form_token_mod.check(
+        body.form_token, purpose="contact_sales")
+    if not verdict_form["ok"]:
+        if verdict_form["reason"] in ("expired", "replayed"):
+            return JSONResponse(
+                {"ok": False, "error": "form_expired"}, status_code=400
+            )
+        LOG.info("contact lead refused: form_token %s", verdict_form["reason"])
         return JSONResponse({"ok": True, "lead_id": None, "delivered": False})
 
     email = body.email.strip().lower()

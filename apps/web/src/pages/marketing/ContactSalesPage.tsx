@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { DtIcon } from "../../components/DtIcon";
 import { TurnstileWidget } from "../../components/TurnstileWidget";
 import { API_BASE } from "../../lib/types";
@@ -125,15 +125,26 @@ export function contactSalesError(status: number, data: { error?: string } | nul
   return "We could not send your request. Please email sales@datawrap.io directly.";
 }
 
-/** Turnstile site key the API enforces for this form ("" when it doesn't). */
-async function fetchContactSalesTurnstileKey(): Promise<string> {
+interface ContactSalesConfig {
+  siteKey: string;
+  formToken: string;
+}
+
+/** Turnstile site key the API enforces + the signed one-use form token. */
+async function fetchContactSalesConfig(): Promise<ContactSalesConfig> {
   try {
     const res = await fetch(`${API_BASE}/contact-sales/config`);
-    if (!res.ok) return "";
-    const data = (await res.json()) as { turnstile_site_key?: unknown };
-    return typeof data.turnstile_site_key === "string" ? data.turnstile_site_key : "";
+    if (!res.ok) return { siteKey: "", formToken: "" };
+    const data = (await res.json()) as {
+      turnstile_site_key?: unknown;
+      form_token?: unknown;
+    };
+    return {
+      siteKey: typeof data.turnstile_site_key === "string" ? data.turnstile_site_key : "",
+      formToken: typeof data.form_token === "string" ? data.form_token : "",
+    };
   } catch {
-    return "";
+    return { siteKey: "", formToken: "" };
   }
 }
 
@@ -159,8 +170,12 @@ export function ContactSalesPage({
 
   const [turnstileSiteKey, setTurnstileSiteKey] = useState("");
   const [turnstileToken, setTurnstileToken] = useState("");
+  const formTokenRef = useRef("");
   useEffect(() => {
-    void fetchContactSalesTurnstileKey().then(setTurnstileSiteKey);
+    void fetchContactSalesConfig().then((cfg) => {
+      setTurnstileSiteKey(cfg.siteKey);
+      formTokenRef.current = cfg.formToken;
+    });
   }, []);
 
   const canSubmit = Boolean(
@@ -169,6 +184,29 @@ export function ContactSalesPage({
   );
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
+
+  const postLead = async () =>
+    fetch(`${API_BASE}/contact-sales`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        first_name: firstName.trim(),
+        last_name: lastName.trim(),
+        email: email.trim(),
+        company: company.trim(),
+        role: role.trim(),
+        phone: phone.trim(),
+        message: message.trim().slice(0, 1200),
+        sources,
+        destinations,
+        volume,
+        region,
+        timeframe,
+        website: honeypot,
+        turnstile_token: turnstileToken || undefined,
+        form_token: formTokenRef.current || undefined,
+      }),
+    });
 
   const submit = async (e: FormEvent) => {
     e.preventDefault();
@@ -180,27 +218,17 @@ export function ContactSalesPage({
     setSubmitting(true);
     setError("");
     try {
-      const res = await fetch(`${API_BASE}/contact-sales`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          first_name: firstName.trim(),
-          last_name: lastName.trim(),
-          email: email.trim(),
-          company: company.trim(),
-          role: role.trim(),
-          phone: phone.trim(),
-          message: message.trim().slice(0, 1200),
-          sources,
-          destinations,
-          volume,
-          region,
-          timeframe,
-          website: honeypot,
-          turnstile_token: turnstileToken || undefined,
-        }),
-      });
-      const data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      let res = await postLead();
+      let data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      // A stale page (>1h) carries an expired/used token: refetch config and
+      // retry once — the visitor never sees it.
+      if (res.status === 400 && data?.error === "form_expired") {
+        const cfg = await fetchContactSalesConfig();
+        setTurnstileSiteKey(cfg.siteKey);
+        formTokenRef.current = cfg.formToken;
+        res = await postLead();
+        data = (await res.json().catch(() => null)) as { ok?: boolean; error?: string } | null;
+      }
       if (!res.ok || !data?.ok) {
         setError(contactSalesError(res.status, data));
         return;

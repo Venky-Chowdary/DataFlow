@@ -33,9 +33,14 @@ def _reset_rate_store():
 @pytest.fixture(autouse=True)
 def _mail_capture(monkeypatch, tmp_path):
     """Console mail capture on a private file-tier outbox; Turnstile off."""
-    from services import email_quota, mail_outbox
+    from services import email_quota, form_token, mail_outbox
     from services.email_sender import ConsoleEmailSender, reset_email_sender
 
+    # Most tests exercise the lead path, not the bot wall — stub the signed
+    # form-token check to "ok" here; the token tests below set their own.
+    monkeypatch.setattr(
+        form_token, "check", lambda *a, **k: {"ok": True, "reason": "ok"}
+    )
     monkeypatch.setenv("DATAWRAP_EMAIL_PROVIDER", "console")
     monkeypatch.setattr(mail_outbox, "data_dir", lambda: tmp_path)
     monkeypatch.setattr(mail_outbox, "mongo_database", lambda: None)
@@ -210,8 +215,7 @@ def _turnstile_on(monkeypatch, verdict):
 def test_turnstile_enforced_when_configured(client, monkeypatch):
     calls = _turnstile_on(monkeypatch, {"ok": False, "reason": "missing_token"})
     monkeypatch.setattr("src.routers.contact_router.persist_lead", _persisted([]))
-    assert client.get("/api/v1/contact-sales/config").json() == {
-        "turnstile_site_key": "ts-site-key"}
+    assert client.get("/api/v1/contact-sales/config").json()["turnstile_site_key"] == "ts-site-key"
     res = client.post("/api/v1/contact-sales", json=_payload())
     assert res.status_code == 400
     assert res.json()["error"] == "turnstile_required"
@@ -234,8 +238,66 @@ def test_turnstile_secret_without_site_key_is_not_enforced(client, monkeypatch):
     secret alone must not refuse every visitor."""
     monkeypatch.setenv("DATAWRAP_TURNSTILE_SECRET", "ts-secret")
     monkeypatch.setattr("src.routers.contact_router.persist_lead", _persisted([]))
-    assert client.get("/api/v1/contact-sales/config").json() == {"turnstile_site_key": ""}
+    assert client.get("/api/v1/contact-sales/config").json()["turnstile_site_key"] == ""
     assert client.post("/api/v1/contact-sales", json=_payload()).status_code == 200
+
+
+def test_missing_form_token_is_accepted_and_dropped(client, monkeypatch):
+    """A bot POSTing without fetching /config has no signed token: accept
+    the post, store nothing, mail nothing — it learns nothing."""
+    from services import form_token, mail_outbox
+
+    monkeypatch.setattr(
+        form_token,
+        "check",
+        lambda *a, **k: {"ok": False, "reason": "missing_token"},
+    )
+    persisted = []
+    monkeypatch.setattr("src.routers.contact_router.persist_lead", _persisted(persisted))
+    res = client.post("/api/v1/contact-sales", json=_payload())
+    assert res.status_code == 200 and res.json()["ok"] is True
+    assert not persisted and not mail_outbox.queued()
+
+
+def test_expired_form_token_asks_the_form_to_retry(client, monkeypatch):
+    """A stale page (token >1h old) is a real visitor, not a bot: 400
+    form_expired lets the form refetch config and resubmit."""
+    from services import form_token
+
+    monkeypatch.setattr(
+        form_token, "check", lambda *a, **k: {"ok": False, "reason": "expired"}
+    )
+    res = client.post("/api/v1/contact-sales", json=_payload())
+    assert res.status_code == 400 and res.json()["error"] == "form_expired"
+
+
+def test_config_issues_a_signed_form_token(client):
+    data = client.get("/api/v1/contact-sales/config").json()
+    token = data["form_token"]
+    assert isinstance(token, str) and token.count(".") == 1
+    assert token.startswith("contact_sales:")
+
+
+def test_real_issued_token_passes_the_wall(client, monkeypatch):
+    """End to end: a config-issued token + human-paced submit goes through.
+
+    Reloading drops the autouse fixture's stubbed check(); the real
+    issue/check pair then validates signature, purpose and one-use."""
+    import importlib
+
+    from services import form_token
+
+    importlib.reload(form_token)
+    monkeypatch.setattr(form_token, "MIN_FILL_MS", 0)
+    token = client.get("/api/v1/contact-sales/config").json()["form_token"]
+    persisted = []
+    monkeypatch.setattr("src.routers.contact_router.persist_lead", _persisted(persisted))
+    res = client.post("/api/v1/contact-sales", json=_payload(form_token=token))
+    assert res.status_code == 200, res.text
+    assert persisted
+    # And the same token cannot be replayed.
+    res = client.post("/api/v1/contact-sales", json=_payload(form_token=token))
+    assert res.status_code == 400 and res.json()["error"] == "form_expired"
 
 
 def test_validation_rejects_missing_and_bad_email(client):
