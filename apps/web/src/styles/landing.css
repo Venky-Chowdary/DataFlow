@@ -38,6 +38,7 @@
   --lp-grad-ink: linear-gradient(180deg, #0f2744, #07111f);
   --lp-grad-surface: linear-gradient(180deg, #ffffff, #f8fafc);
   --lp-hairline: color-mix(in srgb, var(--lp-accent) 28%, var(--lp-line));
+  --lp-video-ink: #050b14;
   --lp-ease-soft: var(--df-ease-soft, cubic-bezier(0.33, 1, 0.68, 1));
 
   min-height: 100vh;
@@ -400,9 +401,9 @@ html:has(.lp) {
 }
 
 .lp-btn--danger {
-  background: var(--df-danger, #dc2626);
+  background: var(--df-danger);
   color: #fff;
-  border-color: var(--df-danger, #dc2626);
+  border-color: var(--df-danger);
 }
 
 .lp-btn--danger:hover { filter: brightness(0.92); }
@@ -4367,7 +4368,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   align-self: flex-start;
   margin-bottom: 2px;
   padding: 3px 10px;
-  border-radius: 999px;
+  border-radius: var(--dt-radius-full);
   background: var(--lp-grad-brand);
   color: #fff;
   font-size: var(--df-fs-xs);
@@ -13423,9 +13424,9 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   width: 100%;
   aspect-ratio: 16 / 9;
   border: 1px solid var(--lp-line);
-  border-radius: 16px;
+  border-radius: var(--lp-radius-lg);
   overflow: hidden;
-  background: #050b14;
+  background: var(--lp-video-ink);
 }
 
 .lp-video-frame iframe {
@@ -13465,12 +13466,12 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 999px;
-  color: #fff;
+  border-radius: var(--dt-radius-full);
+  color: var(--dt-text-inverse);
   background: rgba(13, 148, 136, 0.95);
   box-shadow: 0 12px 32px rgba(5, 11, 20, 0.45);
   transition: transform 0.15s ease, background 0.15s ease;
-  z-index: 1;
+  z-index: var(--df-z-base);
 }
 
 .lp-video-facade:hover .lp-video-play,
@@ -13519,7 +13520,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   display: block;
   padding: 0;
   border: 1px solid var(--lp-line);
-  border-radius: 12px;
+  border-radius: var(--lp-radius);
   overflow: hidden;
   background: var(--lp-panel);
   text-align: left;
@@ -13590,7 +13591,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   font-weight: 700;
   letter-spacing: 0.05em;
   text-transform: uppercase;
-  color: var(--df-teal-600, #0d9488);
+  color: var(--df-teal-600);
   background: color-mix(in srgb, var(--lp-accent) 12%, transparent);
   border: 1px solid color-mix(in srgb, var(--lp-accent) 30%, transparent);
 }
@@ -13608,7 +13609,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-demos-filter {
   padding: 7px 14px;
-  border-radius: 999px;
+  border-radius: var(--dt-radius-full);
   border: 1px solid var(--lp-line);
   background: var(--lp-panel);
   color: var(--lp-muted);
@@ -13620,7 +13621,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 .lp-demos-filter.is-active {
   background: var(--lp-accent);
   border-color: var(--lp-accent);
-  color: #fff;
+  color: var(--dt-text-inverse);
 }
 
 .lp-demos-grid {
@@ -13634,7 +13635,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   flex-direction: column;
   padding: 0;
   border: 1px solid var(--lp-line);
-  border-radius: 14px;
+  border-radius: var(--lp-radius-lg);
   overflow: hidden;
   background: var(--lp-panel);
   text-align: left;
@@ -13657,7 +13658,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   position: relative;
   display: block;
   aspect-ratio: 16 / 9;
-  background: #050b14;
+  background: var(--lp-video-ink);
 }
 
 .lp-demos-thumb img {
@@ -13716,7 +13717,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 .lp-demos-hero-feature {
   position: relative;
-  border-radius: 14px;
+  border-radius: var(--lp-radius-lg);
   overflow: hidden;
   border: 1px solid rgba(94, 234, 212, 0.35);
   box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
@@ -13740,7 +13741,7 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   width: 100%;
   aspect-ratio: 16 / 9;
   object-fit: cover;
-  border-radius: 8px;
+  border-radius: var(--df-radius-md);
   border: 1px solid rgba(94, 234, 212, 0.2);
   opacity: 0.85;
 }

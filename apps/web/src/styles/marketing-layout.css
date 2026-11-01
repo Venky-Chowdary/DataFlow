@@ -369,7 +369,7 @@
   top: 0.55em;
   width: 4px;
   height: 4px;
-  border-radius: 999px;
+  border-radius: var(--dt-radius-full);
   background: var(--lp-teal);
 }
 
@@ -423,7 +423,7 @@
   border: 1px solid rgba(45, 212, 191, 0.28) !important;
   display: inline-flex;
   padding: 5px 12px;
-  border-radius: 999px;
+  border-radius: var(--dt-radius-full);
 }
 
 .lp-mkt-hero-band--ink h1,
