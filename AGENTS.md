@@ -11,18 +11,19 @@
 - `_FakeMongo` lacks `update_job_fields`; subclass it when a path needs it.
 
 ## Local environment facts (this workstation)
-- MongoDB 8.x on `localhost:27017` is live (live Mongo tests run).
-- A PostgreSQL on `:5432` is running but is NOT the project container: the
-  `dataflow/dataflow` credentials are rejected, so live-PG tests fail with
-  `password authentication failed`. These are environmental, not regressions —
-  compare against a `git stash` baseline before calling a failure new.
-- MySQL 3306, SQL Server 1433, Oracle 1521 are not running locally.
-- `pymssql` is not installed (one generic_sql driver-fallback test fails on that).
+- MongoDB on `localhost:27017` (`df-mongo`) runs as a single-node replica
+  set `rs0` — required: snapshot reads/change streams decline on a
+  standalone mongod. Recreated 2026-10-10 to match
+  `.github/scripts/start_ci_databases.sh`; `mongo-rs1` also runs on 27018.
+- PostgreSQL (`df-pg`), MySQL (`dataflow-ci-mysql`), Azurite, fake-gcs and
+  Redis (`df-redis`) are live in docker; live pair tests run.
+- SQL Server 1433, Oracle 1521 are not running locally — those legs skip.
+- `pymssql` is installed in `.venv`.
 
 ## Known pre-existing failures (fail identically on the base branch)
-- `tests/test_elasticsearch_decimal_mapping.py::test_writer_binds_decimal_as_fixed_point_text_not_float`
-- `tests/test_oracle_empty_string_bind.py::test_quarantine_cell_wire_preserves_sql_null_not_empty`
-- `tests/test_generic_sql_drivername.py::test_mssql_drivername_falls_back_to_pymssql_without_odbc_driver` (needs pymssql)
+- None currently: the elasticsearch decimal, oracle ''-bind and pymssql
+  drivername tests all pass as of `e9713a323`. Re-verify against a
+  `git stash` baseline before calling a new failure a regression.
 
 ## Verification habit
 - For a defect fix, prove the new test fails on the pre-fix code (temporarily
