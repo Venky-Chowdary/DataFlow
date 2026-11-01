@@ -790,6 +790,31 @@ const GUIDES: Record<string, ConnectorSetupGuide> = {
       { label: "Create an API key", url: "https://docs.sendgrid.com/ui/account-and-settings/api-keys" },
     ],
   },
+  monday: {
+    title: "Set up monday.com",
+    steps: [
+      "monday.com → your avatar → Developers → My Access Tokens → copy the personal API token.",
+      "The token is sent as a raw Authorization header to the GraphQL v2 endpoint.",
+      "For the items stream, paste the numeric Board ID from the board URL.",
+      "Test proves the GraphQL endpoint answers a boards query — 401 is the token.",
+    ],
+    links: [
+      { label: "monday.com API docs", url: "https://developer.monday.com/api-reference/docs" },
+      { label: "Get your API token", url: "https://developer.monday.com/api-reference/docs/authentication" },
+    ],
+  },
+  linear: {
+    title: "Set up Linear",
+    steps: [
+      "Linear → Settings → API → Personal API keys → Create key (read scope is enough).",
+      "The key (lin_api_…) is sent as a raw Authorization header — no Bearer prefix.",
+      "Test proves the GraphQL endpoint answers a teams query — 401 is the key.",
+    ],
+    links: [
+      { label: "Linear GraphQL API", url: "https://developers.linear.app/docs/graphql/working-with-the-graphql-api" },
+      { label: "Create an API key", url: "https://linear.app/settings/api" },
+    ],
+  },
   singer_tap: {
     title: "Set up a Singer tap",
     steps: [

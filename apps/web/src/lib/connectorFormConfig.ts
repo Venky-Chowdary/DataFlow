@@ -1005,6 +1005,27 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         (values) => required(values, "api_key", "API key"),
       ),
     );
+  } else if (resolved === "monday") {
+    authModes.push(
+      auth(
+        "api_key",
+        "monday.com API token",
+        [
+          password("api_key", "API token"),
+          text("board_id", "Board ID (for items)", { placeholder: "e.g. 123456789" }),
+        ],
+        (values) => required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "linear") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Linear API key",
+        [password("api_key", "API key", { placeholder: "lin_api_…" })],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
   } else if (resolved === "todoist") {
     authModes.push(
       auth(
@@ -1244,7 +1265,7 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (resolved === "github") return "pat";
   if (resolved === "servicenow") return "user_pass";
   if (resolved === "woocommerce") return "user_pass";
-  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm", "posthog", "confluence", "zendesk", "airtable", "clickup", "mailjet", "sendgrid"].includes(resolved)) return "api_key";
+  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm", "posthog", "confluence", "zendesk", "airtable", "clickup", "mailjet", "sendgrid", "monday", "linear"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";

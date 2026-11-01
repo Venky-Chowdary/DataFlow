@@ -32,6 +32,7 @@ class PaginatorSpec:
     initial_token: str | None = None
     stop_path: str = ""
     next_url_path: str = ""
+    has_more_path: str = ""
 
     def __post_init__(self) -> None:
         if self.type not in {"none", "cursor", "offset", "page", "link_header", "next_url"}:
@@ -63,6 +64,8 @@ class PaginatorSpec:
             raise ValueError("next_url paginator requires next_url_path")
         if self.next_url_path and self.type != "next_url":
             raise ValueError("next_url_path applies only to next_url pagination")
+        if self.has_more_path and self.type != "cursor":
+            raise ValueError("has_more_path applies only to cursor pagination")
 
 
 @dataclass(frozen=True)
@@ -392,6 +395,20 @@ def paginate(
                 stream,
             )
 
+        has_more: bool | None = None
+        if paginator.has_more_path:
+            has_more = _dig_path(result.payload, paginator.has_more_path)
+            if not isinstance(has_more, bool):
+                raise _pagination_error(
+                    f"pagination has_more_path={paginator.has_more_path!r} must resolve to a boolean",
+                    Page(
+                        records=records,
+                        headers=dict(result.response.headers),
+                        request_id=result.request_id,
+                        url=redact_url(current_url),
+                    ),
+                    stream,
+                )
         record_limit_reached = record_limit is not None and records_seen >= record_limit
         if (
             not record_limit_reached
@@ -471,7 +488,7 @@ def paginate(
             continue
 
         if paginator.type == "cursor":
-            if next_token in (None, ""):
+            if next_token in (None, "") or has_more is False:
                 return
             if page_count >= page_limit:
                 raise _pagination_error(

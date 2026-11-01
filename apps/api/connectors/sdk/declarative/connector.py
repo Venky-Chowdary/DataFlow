@@ -93,6 +93,44 @@ def _render_request_params(
     return params
 
 
+def _render_body_template(
+    template: Any,
+    config: Mapping[str, Any],
+    *,
+    path: str,
+) -> Any:
+    """Recursively substitute {config.X} placeholders inside request_body_template.
+
+    Raw (unquoted) substitution like request_params, and no leftover-brace
+    check — GraphQL/JSON bodies legitimately contain { } characters.
+    """
+    if isinstance(template, str):
+        if "{" not in template:
+            return template
+
+        def replace_config_value(match: re.Match[str]) -> str:
+            key = match.group(1)
+            value = config.get(key)
+            if value is None or isinstance(value, bool) or not str(value).strip():
+                raise ManifestError(
+                    f"{path}: missing non-empty config value {key!r}",
+                    path=path,
+                )
+            return str(value)
+
+        # GraphQL/JSON bodies legitimately contain { } — only {ident} tokens
+        # are placeholders, and every one must resolve or we fail loudly.
+        return _CONFIG_PLACEHOLDER.sub(replace_config_value, template)
+    if isinstance(template, Mapping):
+        return {
+            key: _render_body_template(value, config, path=path)
+            for key, value in template.items()
+        }
+    if isinstance(template, list):
+        return [_render_body_template(item, config, path=path) for item in template]
+    return template
+
+
 def _render_cursor_template(
     template: str,
     value: Any,
@@ -206,7 +244,11 @@ class DeclarativeSource(BaseConnector):
         if stream.cursor and stream.cursor.request_location == "query":
             if stream.cursor.request_param not in params:
                 params[stream.cursor.request_param] = ""
-        body = dict(stream.request_body_template or {})
+        body = _render_body_template(
+            dict(stream.request_body_template or {}),
+            self.config,
+            path=f"streams[{index}].request_body_template",
+        )
         if stream.cursor and stream.cursor.request_location == "body":
             if not body:
                 raise ManifestError(
@@ -351,7 +393,11 @@ class DeclarativeSource(BaseConnector):
         )
         headers = dict(self.auth.headers)
         headers.update(stream_spec.request_headers)
-        request_body = dict(stream_spec.request_body_template or {})
+        request_body = _render_body_template(
+            dict(stream_spec.request_body_template or {}),
+            self.config,
+            path=f"streams[{stream_index}].request_body_template",
+        )
         if stream_spec.cursor:
             cursor_value = cursor_for_request(
                 current_state,

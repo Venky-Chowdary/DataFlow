@@ -1962,6 +1962,33 @@
       "Test proves /lists answers — 401 is the private key."
     ]
   },
+  "linear": {
+    "label": "Linear",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Linear API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "lin_api_…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Linear → Settings → API → Personal API keys → Create key (read scope is enough).",
+      "The key (lin_api_…) is sent as a raw Authorization header — no Bearer prefix.",
+      "Test proves the GraphQL endpoint answers a teams query — 401 is the key."
+    ]
+  },
   "mailchimp": {
     "label": "Mailchimp",
     "default_auth_mode": "api_key",
@@ -2138,6 +2165,41 @@
     ],
     "common_fields": [],
     "setup_steps": []
+  },
+  "monday": {
+    "label": "monday.com",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "monday.com API token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "board_id",
+            "label": "Board ID (for items)",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "e.g. 123456789"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "monday.com → your avatar → Developers → My Access Tokens → copy the personal API token.",
+      "The token is sent as a raw Authorization header to the GraphQL v2 endpoint.",
+      "For the items stream, paste the numeric Board ID from the board URL.",
+      "Test proves the GraphQL endpoint answers a boards query — 401 is the token."
+    ]
   },
   "mongodb": {
     "label": "MongoDB",

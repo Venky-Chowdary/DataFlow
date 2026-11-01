@@ -132,6 +132,13 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
             "api_key",
             config.get("access_token") or config.get("token") or "",
         )
+    elif driver in {"monday", "linear"}:
+        config.setdefault(
+            "api_key",
+            config.get("access_token") or config.get("token") or "",
+        )
+        if driver == "monday":
+            config.setdefault("board_id", config.get("board") or "")
     elif driver in {"todoist", "typeform", "notion", "posthog"}:
         config.setdefault(
             "api_key",
@@ -168,7 +175,7 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
         # Templated manifests ({instance}/{domain}/{dc}/{store_hash}) take their
         # host piece from the named field above — feeding ``host`` into base_url
         # would bypass the template and drop the scheme.
-        if driver not in {"mailchimp", "pipedrive", "servicenow", "freshdesk", "freshservice", "woocommerce", "bigcommerce", "posthog", "confluence", "zendesk"}:
+        if driver not in {"mailchimp", "pipedrive", "servicenow", "freshdesk", "freshservice", "woocommerce", "bigcommerce", "posthog", "confluence", "zendesk", "monday", "linear"}:
             config["base_url"] = config.get("url") or config.get("host") or ""
         else:
             config["base_url"] = config.get("url") or ""

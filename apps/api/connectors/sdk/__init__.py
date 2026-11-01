@@ -973,7 +973,22 @@ def _load_builtin_connectors() -> None:
             "connectors.sdk.sendgrid",
             type(exc).__name__,
         )
-
+    try:
+        from connectors.sdk import monday  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.monday",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import linear  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.linear",
+            type(exc).__name__,
+        )
 
 
 _load_builtin_connectors()

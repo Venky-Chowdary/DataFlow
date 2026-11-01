@@ -1859,6 +1859,8 @@ export const CONNECTOR_CATALOG = [
   { id: "clickup", label: "ClickUp", port: 443, sourceOnly: true },
   { id: "mailjet", label: "Mailjet", port: 443, sourceOnly: true },
   { id: "sendgrid", label: "SendGrid", port: 443, sourceOnly: true },
+  { id: "monday", label: "monday.com", port: 443, sourceOnly: true },
+  { id: "linear", label: "Linear", port: 443, sourceOnly: true },
   { id: "typeform", label: "Typeform", port: 443, sourceOnly: true },
   { id: "notion", label: "Notion", port: 443, sourceOnly: true },
   { id: "zoho_crm", label: "Zoho CRM", port: 443, sourceOnly: true },

@@ -4516,6 +4516,20 @@
       "category": "saas",
       "status": "planned",
       "description": "Email delivery — contacts and messages via the Mailjet REST v3 API (API key + secret basic auth, offset pagination)."
+    },
+    {
+      "id": "monday",
+      "name": "monday.com",
+      "category": "saas",
+      "status": "planned",
+      "description": "Work OS — boards, users and board items via the monday.com GraphQL v2 API (API token, cursor pagination)."
+    },
+    {
+      "id": "linear",
+      "name": "Linear",
+      "category": "saas",
+      "status": "planned",
+      "description": "Issue tracking — issues, projects and teams via the Linear GraphQL API (API key, pageInfo cursor pagination)."
     }
   ]
 }

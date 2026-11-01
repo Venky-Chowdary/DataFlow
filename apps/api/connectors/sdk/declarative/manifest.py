@@ -292,7 +292,7 @@ def _parse_paginator(
         "type", "page_size", "page_size_param", "max_pages", "offset_param",
         "start_offset", "page_param", "start_index", "cursor_param",
         "cursor_location", "cursor_path", "cursor_header", "initial_token", "stop_path",
-        "next_url_path",
+        "next_url_path", "has_more_path",
     }
     _check_keys(obj, fields, path)
     obj.setdefault("page_size", default_page_size)
@@ -320,6 +320,7 @@ def _parse_paginator(
         "cursor_header",
         "stop_path",
         "next_url_path",
+        "has_more_path",
     ):
         if key in obj and not isinstance(obj[key], str):
             raise ManifestError(f"{path}.{key}: expected a string", path=f"{path}.{key}")

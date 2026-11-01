@@ -51,6 +51,12 @@ def _dig_path(data: Any, path: str) -> Any:
     for part in (path or "").split("."):
         if not part:
             continue
+        if isinstance(cur, list):
+            # Numeric segments index arrays (data.boards.0.items_page).
+            if part.isdigit() and int(part) < len(cur):
+                cur = cur[int(part)]
+                continue
+            return None
         if not isinstance(cur, dict):
             return None
         cur = cur.get(part)
