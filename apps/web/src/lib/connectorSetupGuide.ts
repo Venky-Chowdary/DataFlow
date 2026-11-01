@@ -367,6 +367,18 @@ const GUIDES: Record<string, ConnectorSetupGuide> = {
     ],
     links: [{ label: "Create an API token", url: "https://id.atlassian.com/manage-profile/security/api-tokens" }],
   },
+  intercom: {
+    title: "Set up Intercom",
+    steps: [
+      "Intercom Developer Hub (app.intercom.com/a/apps/_/developer-hub) → Your apps → create an app, then copy its Access Token.",
+      "Admins can also use a personal access token from Settings → Apps & integrations → Developer Hub.",
+      "The token scopes the workspace it was created in — enter just the token.",
+      "Test proves /me answers — 401 means the token is revoked or from another workspace.",
+    ],
+    links: [
+      { label: "Intercom authentication", url: "https://developers.intercom.com/docs/build-an-integration/learn-more/authentication" },
+    ],
+  },
   shopify: {
     title: "Set up Shopify",
     steps: [
