@@ -4460,6 +4460,20 @@
       "category": "file",
       "status": "live",
       "description": "Tab-separated values file format."
+    },
+    {
+      "id": "calendly",
+      "name": "Calendly",
+      "category": "saas",
+      "status": "planned",
+      "description": "Scheduling platform — event types and scheduled events via the Calendly API (personal access token)."
+    },
+    {
+      "id": "brevo",
+      "name": "Brevo (Sendinblue)",
+      "category": "saas",
+      "status": "planned",
+      "description": "Email marketing and CRM — contacts, lists and campaigns via the Brevo v3 API (api-key header)."
     }
   ]
 }

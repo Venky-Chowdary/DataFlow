@@ -83,11 +83,26 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
         )
         config.setdefault("password", "X")
         config.setdefault("domain", config.get("host") or "")
+    elif driver in {"slack", "asana", "calendly", "brevo"}:
+        config.setdefault(
+            "api_key",
+            config.get("access_token") or config.get("token") or "",
+        )
+    elif driver == "woocommerce":
+        config.setdefault("domain", config.get("host") or "")
+        config.setdefault("username", config.get("consumer_key") or "")
+        config.setdefault("password", config.get("consumer_secret") or "")
+    elif driver == "bigcommerce":
+        config.setdefault("api_key", config.get("token") or "")
+        config.setdefault(
+            "store_hash",
+            config.get("store") or config.get("store_id") or "",
+        )
     if not config.get("base_url"):
-        # Templated manifests ({instance}/{domain}/{dc}) take their host piece
-        # from the named field above — feeding ``host`` into base_url would
-        # bypass the template and drop the scheme.
-        if driver not in {"mailchimp", "pipedrive", "servicenow", "freshdesk"}:
+        # Templated manifests ({instance}/{domain}/{dc}/{store_hash}) take their
+        # host piece from the named field above — feeding ``host`` into base_url
+        # would bypass the template and drop the scheme.
+        if driver not in {"mailchimp", "pipedrive", "servicenow", "freshdesk", "woocommerce", "bigcommerce"}:
             config["base_url"] = config.get("url") or config.get("host") or ""
         else:
             config["base_url"] = config.get("url") or ""

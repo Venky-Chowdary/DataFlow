@@ -1,0 +1,81 @@
+{
+  "name": "calendly",
+  "docs": "https://developer.calendly.com/api-docs",
+  "base_url": "https://api.calendly.com",
+  "auth": {
+    "type": "bearer"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "event_types",
+      "path": "event_types",
+      "records_path": "collection",
+      "primary_key": ["uri"],
+      "request_params": {
+        "user": "{user_uri}",
+        "count": 100
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "page_token",
+        "cursor_path": "pagination.next_page_token",
+        "page_size": 100,
+        "page_size_param": "count"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "uri": {"type": "string"},
+          "name": {"type": "string"},
+          "active": {"type": "boolean"},
+          "duration": {"type": "integer"},
+          "created_at": {"type": "string", "format": "date-time"},
+          "updated_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "scheduled_events",
+      "path": "scheduled_events",
+      "records_path": "collection",
+      "primary_key": ["uri"],
+      "request_params": {
+        "user": "{user_uri}",
+        "sort": "start_time:asc",
+        "count": 100
+      },
+      "cursor": {
+        "field": "start_time",
+        "request_param": "min_start_time",
+        "format": "iso8601",
+        "lookback_s": 60
+      },
+      "paginator": {
+        "type": "cursor",
+        "cursor_param": "page_token",
+        "cursor_path": "pagination.next_page_token",
+        "page_size": 100,
+        "page_size_param": "count"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "uri": {"type": "string"},
+          "name": {"type": "string"},
+          "status": {"type": "string"},
+          "start_time": {"type": "string", "format": "date-time"},
+          "end_time": {"type": "string", "format": "date-time"},
+          "created_at": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  ]
+}

@@ -24,7 +24,7 @@ from connectors.sdk.declarative.incremental import (
     advance_stream_state,
     cursor_for_request,
 )
-from connectors.sdk.declarative.manifest import Manifest, parse_manifest
+from connectors.sdk.declarative.manifest import Manifest, StreamSpec, parse_manifest
 from connectors.sdk.declarative.pagination import (
     PaginatorSpec,
     _set_nested_request_value,
@@ -58,6 +58,39 @@ def _render_config_template(
     if "{" in rendered or "}" in rendered:
         raise ManifestError(f"{path}: invalid config placeholder", path=path)
     return rendered
+
+
+def _render_request_params(
+    stream_spec: StreamSpec,
+    config: Mapping[str, Any],
+    *,
+    path: str,
+) -> dict[str, Any]:
+    def replace_config_value(match: re.Match[str]) -> str:
+        key = match.group(1)
+        value = config.get(key)
+        if value is None or isinstance(value, bool) or not str(value).strip():
+            raise ManifestError(
+                f"{path}: missing non-empty config value {key!r}",
+                path=path,
+            )
+        # Query/body values are encoded by the requester — unlike path
+        # segments, placeholders here substitute the raw scalar.
+        return str(value)
+
+    params: dict[str, Any] = {}
+    for key, value in stream_spec.request_params.items():
+        if isinstance(value, str) and "{" in value:
+            rendered = _CONFIG_PLACEHOLDER.sub(replace_config_value, value)
+            if "{" in rendered or "}" in rendered:
+                raise ManifestError(
+                    f"{path}.request_params.{key}: invalid config placeholder",
+                    path=path,
+                )
+            params[key] = rendered
+        else:
+            params[key] = value
+    return params
 
 
 def _render_cursor_template(
@@ -167,7 +200,9 @@ class DeclarativeSource(BaseConnector):
         )
         url = urljoin(self._base_url, stream_path.lstrip("/"))
         params = dict(self.auth.params)
-        params.update(stream.request_params)
+        params.update(
+            _render_request_params(stream, self.config, path=f"streams[{index}]")
+        )
         if stream.cursor and stream.cursor.request_location == "query":
             if stream.cursor.request_param not in params:
                 params[stream.cursor.request_param] = ""
@@ -203,7 +238,9 @@ class DeclarativeSource(BaseConnector):
                 )
                 url = urljoin(self._base_url, stream_path.lstrip("/"))
                 params = dict(self.auth.params)
-                params.update(stream.request_params)
+                params.update(
+                    _render_request_params(stream, self.config, path=f"streams[{index}]")
+                )
                 headers = dict(self.auth.headers)
                 headers.update(stream.request_headers)
                 pages = paginate(
@@ -309,7 +346,9 @@ class DeclarativeSource(BaseConnector):
             paginator = replace(paginator, start_index=start_index)
 
         params = dict(self.auth.params)
-        params.update(stream_spec.request_params)
+        params.update(
+            _render_request_params(stream_spec, self.config, path=f"streams[{stream_index}]")
+        )
         headers = dict(self.auth.headers)
         headers.update(stream_spec.request_headers)
         request_body = dict(stream_spec.request_body_template or {})

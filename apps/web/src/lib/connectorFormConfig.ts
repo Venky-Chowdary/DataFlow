@@ -805,6 +805,85 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
           || required(values, "api_key", "API key"),
       ),
     );
+  } else if (resolved === "slack") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Slack bot token",
+        [
+          password("api_key", "Bot User OAuth Token", { placeholder: "xoxb-…" }),
+          text("channel", "Channel ID (optional — needed for message history)", { placeholder: "C0123456789", optional: true }),
+        ],
+        (values) => required(values, "api_key", "Bot User OAuth Token"),
+      ),
+    );
+  } else if (resolved === "asana") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Asana personal access token",
+        [
+          password("api_key", "Personal access token"),
+          text("workspace", "Workspace GID"),
+        ],
+        (values) =>
+          required(values, "api_key", "Personal access token")
+          || required(values, "workspace", "Workspace GID"),
+      ),
+    );
+  } else if (resolved === "calendly") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Calendly personal access token",
+        [
+          password("api_key", "Personal access token"),
+          text("user_uri", "User URI", { placeholder: "https://api.calendly.com/users/…" }),
+        ],
+        (values) =>
+          required(values, "api_key", "Personal access token")
+          || required(values, "user_uri", "User URI"),
+      ),
+    );
+  } else if (resolved === "woocommerce") {
+    authModes.push(
+      auth(
+        "user_pass",
+        "WooCommerce REST API keys",
+        [
+          text("domain", "Store domain", { placeholder: "shop.example.com" }),
+          text("username", "Consumer key", { placeholder: "ck_…" }),
+          password("password", "Consumer secret", { placeholder: "cs_…" }),
+        ],
+        (values) =>
+          required(values, "domain", "Store domain")
+          || required(values, "username", "Consumer key")
+          || required(values, "password", "Consumer secret"),
+      ),
+    );
+  } else if (resolved === "bigcommerce") {
+    authModes.push(
+      auth(
+        "api_key",
+        "BigCommerce API account",
+        [
+          text("store_hash", "Store hash", { placeholder: "abc123xyz" }),
+          password("api_key", "Access token (X-Auth-Token)"),
+        ],
+        (values) =>
+          required(values, "store_hash", "Store hash")
+          || required(values, "api_key", "Access token"),
+      ),
+    );
+  } else if (resolved === "brevo") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Brevo API key",
+        [password("api_key", "API key", { placeholder: "xkeysib-…" })],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
   }
 
   // Build auth modes for each connector
@@ -994,7 +1073,8 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (["bigquery", "gcs"].includes(resolved)) return "service_account";
   if (resolved === "github") return "pat";
   if (resolved === "servicenow") return "user_pass";
-  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk"].includes(resolved)) return "api_key";
+  if (resolved === "woocommerce") return "user_pass";
+  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";

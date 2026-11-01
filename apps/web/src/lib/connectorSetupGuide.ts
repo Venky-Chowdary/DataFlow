@@ -550,6 +550,84 @@ const GUIDES: Record<string, ConnectorSetupGuide> = {
       { label: "Where is my API key", url: "https://support.freshdesk.com/en/support/solutions/articles/215517" },
     ],
   },
+  slack: {
+    title: "Set up Slack",
+    steps: [
+      "api.slack.com/apps → your app → OAuth & Permissions → copy the Bot User OAuth Token (xoxb-…).",
+      "The bot needs scopes: users:read, channels:read, groups:read, and channels:history / groups:history for message reads.",
+      "Channel ID is only needed if you want the message-history stream — right-click a channel → View channel details → copy the ID (C…).",
+      "Test proves users.list answers — invalid_auth is the token, missing_scope is a permission the app still needs.",
+    ],
+    links: [
+      { label: "Slack app management", url: "https://api.slack.com/apps" },
+      { label: "Web API methods", url: "https://api.slack.com/methods" },
+    ],
+  },
+  asana: {
+    title: "Set up Asana",
+    steps: [
+      "Asana → Apps → Manage developer apps (or developers.asana.com) → Create a Personal Access Token.",
+      "Workspace GID: open the workspace in Asana and copy the numeric gid from the URL, or call /workspaces.",
+      "The token reads everything the owning user can see — use a service account for least privilege.",
+      "Test proves /workspaces answers — 401 is the token, 404 on tasks is a wrong workspace GID.",
+    ],
+    links: [
+      { label: "Asana developer console", url: "https://developers.asana.com/docs/personal-access-token" },
+      { label: "Asana API reference", url: "https://developers.asana.com/reference/rest-api-reference" },
+    ],
+  },
+  calendly: {
+    title: "Set up Calendly",
+    steps: [
+      "calendly.com → Integrations → API & webhooks → Generate a personal access token.",
+      "User URI: call GET /users/me with the token — the 'uri' field looks like https://api.calendly.com/users/ABCD…",
+      "The token sees the owning user's event types and scheduled events only (not the whole org).",
+      "Test proves event_types answers — 401 is the token; an empty collection means the User URI is wrong.",
+    ],
+    links: [
+      { label: "Calendly API docs", url: "https://developer.calendly.com/api-docs" },
+      { label: "Personal access tokens", url: "https://help.calendly.com/hc/en-us/articles/223448448-Integrating-with-APIs" },
+    ],
+  },
+  woocommerce: {
+    title: "Set up WooCommerce",
+    steps: [
+      "WordPress admin → WooCommerce → Settings → Advanced → REST API → Add key: Read permission, copy the consumer key (ck_…) and secret (cs_…).",
+      "Domain is your store host — shop.example.com (HTTPS required; the REST API refuses plain HTTP for basic auth).",
+      "Consumer key is the username field, consumer secret is the password field.",
+      "Test proves /orders answers — 401 is the keys, 404 is the domain or a missing REST API rewrite.",
+    ],
+    links: [
+      { label: "WooCommerce REST API docs", url: "https://woocommerce.github.io/woocommerce-rest-api-docs/" },
+      { label: "Generate API keys", url: "https://woocommerce.github.io/woocommerce-rest-api-docs/#authentication" },
+    ],
+  },
+  bigcommerce: {
+    title: "Set up BigCommerce",
+    steps: [
+      "BigCommerce admin → Settings → API accounts → Create API account (V2/V3 token) — grant read on Products, Customers, Orders.",
+      "Store hash: the alphanumeric segment in your admin URL — store-abc123.mybigcommerce.com → abc123 (or shown on the API accounts page).",
+      "Access token goes in the API key field — it is sent as the X-Auth-Token header.",
+      "Test proves v3 products answers — 401 is the token, 404 is a wrong store hash.",
+    ],
+    links: [
+      { label: "BigCommerce API accounts", url: "https://support.bigcommerce.com/s/article/Store-API-Accounts" },
+      { label: "REST Management API", url: "https://developer.bigcommerce.com/docs/rest-management" },
+    ],
+  },
+  brevo: {
+    title: "Set up Brevo",
+    steps: [
+      "Brevo → SMTP & API → API Keys → Generate a new API key (xkeysib-…).",
+      "The key sees contacts, lists, and campaigns for the account — restrict it in Brevo if you want read-only scope.",
+      "No domain or tenant field needed — the API key alone identifies the account.",
+      "Test proves /contacts answers — 401 is the key.",
+    ],
+    links: [
+      { label: "Brevo API reference", url: "https://developers.brevo.com/reference" },
+      { label: "Manage API keys", url: "https://help.brevo.com/hc/en-us/articles/209467485" },
+    ],
+  },
   singer_tap: {
     title: "Set up a Singer tap",
     steps: [

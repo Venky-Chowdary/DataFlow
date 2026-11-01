@@ -1,0 +1,120 @@
+{
+  "name": "bigcommerce",
+  "docs": "https://developer.bigcommerce.com/docs/rest-management",
+  "base_url": "https://api.bigcommerce.com/stores/{store_hash}",
+  "auth": {
+    "type": "api_key",
+    "location": "header",
+    "name": "X-Auth-Token"
+  },
+  "defaults": {
+    "page_size": 250,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "products",
+      "path": "v3/catalog/products",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 250
+      },
+      "cursor": {
+        "field": "date_modified",
+        "request_param": "date_modified:min",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "page",
+        "page_param": "page",
+        "page_size": 250,
+        "page_size_param": "limit",
+        "start_index": 1
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "sku": {"type": ["string", "null"]},
+          "price": {"type": "number"},
+          "date_created": {"type": "string", "format": "date-time"},
+          "date_modified": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "customers",
+      "path": "v3/customers",
+      "records_path": "data",
+      "primary_key": ["id"],
+      "request_params": {
+        "limit": 250
+      },
+      "cursor": {
+        "field": "date_modified",
+        "request_param": "date_modified:min",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "page",
+        "page_param": "page",
+        "page_size": 250,
+        "page_size_param": "limit",
+        "start_index": 1
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "email": {"type": "string"},
+          "first_name": {"type": "string"},
+          "last_name": {"type": "string"},
+          "date_created": {"type": "string", "format": "date-time"},
+          "date_modified": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "orders",
+      "path": "v2/orders",
+      "records_path": "$",
+      "primary_key": ["id"],
+      "request_params": {
+        "sort": "date_created:asc",
+        "limit": 250
+      },
+      "cursor": {
+        "field": "date_modified",
+        "request_param": "min_date_modified",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "page",
+        "page_param": "page",
+        "page_size": 250,
+        "page_size_param": "limit",
+        "start_index": 1
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "status": {"type": "string"},
+          "total_inc_tax": {"type": "string"},
+          "currency_code": {"type": "string"},
+          "date_created": {"type": "string", "format": "date-time"},
+          "date_modified": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  ]
+}

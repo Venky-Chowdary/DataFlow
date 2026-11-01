@@ -1,0 +1,120 @@
+{
+  "name": "woocommerce",
+  "docs": "https://woocommerce.github.io/woocommerce-rest-api-docs/",
+  "base_url": "https://{domain}/wp-json/wc/v3",
+  "auth": {
+    "type": "basic"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "orders",
+      "path": "orders",
+      "records_path": "$",
+      "primary_key": ["id"],
+      "request_params": {
+        "orderby": "date",
+        "order": "asc",
+        "per_page": 100
+      },
+      "cursor": {
+        "field": "date_modified",
+        "request_param": "modified_after",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "page",
+        "page_param": "page",
+        "page_size": 100,
+        "page_size_param": "per_page",
+        "start_index": 1
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "number": {"type": "string"},
+          "status": {"type": "string"},
+          "total": {"type": "string"},
+          "currency": {"type": "string"},
+          "date_created": {"type": "string", "format": "date-time"},
+          "date_modified": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "products",
+      "path": "products",
+      "records_path": "$",
+      "primary_key": ["id"],
+      "request_params": {
+        "orderby": "date",
+        "order": "asc",
+        "per_page": 100
+      },
+      "cursor": {
+        "field": "date_modified",
+        "request_param": "modified_after",
+        "format": "iso8601",
+        "lookback_s": 1
+      },
+      "paginator": {
+        "type": "page",
+        "page_param": "page",
+        "page_size": 100,
+        "page_size_param": "per_page",
+        "start_index": 1
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "name": {"type": "string"},
+          "slug": {"type": "string"},
+          "status": {"type": "string"},
+          "price": {"type": "string"},
+          "date_created": {"type": "string", "format": "date-time"},
+          "date_modified": {"type": "string", "format": "date-time"}
+        }
+      }
+    },
+    {
+      "name": "customers",
+      "path": "customers",
+      "records_path": "$",
+      "primary_key": ["id"],
+      "request_params": {
+        "orderby": "registered_date",
+        "order": "asc",
+        "per_page": 100
+      },
+      "paginator": {
+        "type": "page",
+        "page_param": "page",
+        "page_size": 100,
+        "page_size_param": "per_page",
+        "start_index": 1
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "id": {"type": "integer"},
+          "email": {"type": "string"},
+          "first_name": {"type": "string"},
+          "last_name": {"type": "string"},
+          "username": {"type": "string"},
+          "date_created": {"type": "string", "format": "date-time"},
+          "date_modified": {"type": "string", "format": "date-time"}
+        }
+      }
+    }
+  ]
+}

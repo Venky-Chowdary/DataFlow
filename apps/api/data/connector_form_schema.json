@@ -104,6 +104,40 @@
       "Test proves filesystem listing works — AuthorizationFailure is RBAC or the SAS scope."
     ]
   },
+  "asana": {
+    "label": "Asana",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Asana personal access token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "Personal access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "workspace",
+            "label": "Workspace GID",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Asana → Apps → Manage developer apps (or developers.asana.com) → Create a Personal Access Token.",
+      "Workspace GID: open the workspace in Asana and copy the numeric gid from the URL, or call /workspaces.",
+      "The token reads everything the owning user can see — use a service account for least privilege.",
+      "Test proves /workspaces answers — 401 is the token, 404 on tasks is a wrong workspace GID."
+    ]
+  },
   "avro": {
     "label": "Avro",
     "default_auth_mode": "file_path",
@@ -146,6 +180,41 @@
       "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
       "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
       "Test proves the file opens and parses — a missing path is not Connected."
+    ]
+  },
+  "bigcommerce": {
+    "label": "BigCommerce",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "BigCommerce API account",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "store_hash",
+            "label": "Store hash",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "abc123xyz"
+          },
+          {
+            "key": "api_key",
+            "label": "Access token (X-Auth-Token)",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "BigCommerce admin → Settings → API accounts → Create API account (V2/V3 token) — grant read on Products, Customers, Orders.",
+      "Store hash: the alphanumeric segment in your admin URL — store-abc123.mybigcommerce.com → abc123 (or shown on the API accounts page).",
+      "Access token goes in the API key field — it is sent as the X-Auth-Token header.",
+      "Test proves v3 products answers — 401 is the token, 404 is a wrong store hash."
     ]
   },
   "bigquery": {
@@ -191,6 +260,69 @@
       "Create a JSON key on the Keys tab and paste the whole JSON into Service account key.",
       "Enter the project ID that owns the datasets — the key carries the identity, the project routes billing/quota.",
       "Test proves the service account can list datasets — PERMISSION_DENIED means the roles, not the key file."
+    ]
+  },
+  "brevo": {
+    "label": "Brevo (Sendinblue)",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Brevo API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "xkeysib-…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Brevo → SMTP & API → API Keys → Generate a new API key (xkeysib-…).",
+      "The key sees contacts, lists, and campaigns for the account — restrict it in Brevo if you want read-only scope.",
+      "No domain or tenant field needed — the API key alone identifies the account.",
+      "Test proves /contacts answers — 401 is the key."
+    ]
+  },
+  "calendly": {
+    "label": "Calendly",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Calendly personal access token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "Personal access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "user_uri",
+            "label": "User URI",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "https://api.calendly.com/users/…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "calendly.com → Integrations → API & webhooks → Generate a personal access token.",
+      "User URI: call GET /users/me with the token — the 'uri' field looks like https://api.calendly.com/users/ABCD…",
+      "The token sees the owning user's event types and scheduled events only (not the whole org).",
+      "Test proves event_types answers — 401 is the token; an empty collection means the User URI is wrong."
     ]
   },
   "clickhouse": {
@@ -3120,6 +3252,42 @@
       "Test proves TCP reachability plus login — Access denied means the password or host grant (user@host) is wrong."
     ]
   },
+  "slack": {
+    "label": "Slack",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Slack bot token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "Bot User OAuth Token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "xoxb-…"
+          },
+          {
+            "key": "channel",
+            "label": "Channel ID (optional — needed for message history)",
+            "type": "text",
+            "optional": true,
+            "sensitive": false,
+            "placeholder": "C0123456789"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "api.slack.com/apps → your app → OAuth & Permissions → copy the Bot User OAuth Token (xoxb-…).",
+      "The bot needs scopes: users:read, channels:read, groups:read, and channels:history / groups:history for message reads.",
+      "Channel ID is only needed if you want the message-history stream — right-click a channel → View channel details → copy the ID (C…).",
+      "Test proves users.list answers — invalid_auth is the token, missing_scope is a permission the app still needs."
+    ]
+  },
   "snowflake": {
     "label": "Snowflake",
     "default_auth_mode": "user_pass",
@@ -3904,6 +4072,50 @@
     ],
     "common_fields": [],
     "setup_steps": []
+  },
+  "woocommerce": {
+    "label": "WooCommerce",
+    "default_auth_mode": "user_pass",
+    "auth_modes": [
+      {
+        "value": "user_pass",
+        "label": "WooCommerce REST API keys",
+        "description": "Host, username, and password for this system.",
+        "fields": [
+          {
+            "key": "domain",
+            "label": "Store domain",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "shop.example.com"
+          },
+          {
+            "key": "username",
+            "label": "Consumer key",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "ck_…"
+          },
+          {
+            "key": "password",
+            "label": "Consumer secret",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "cs_…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "WordPress admin → WooCommerce → Settings → Advanced → REST API → Add key: Read permission, copy the consumer key (ck_…) and secret (cs_…).",
+      "Domain is your store host — shop.example.com (HTTPS required; the REST API refuses plain HTTP for basic auth).",
+      "Consumer key is the username field, consumer secret is the password field.",
+      "Test proves /orders answers — 401 is the keys, 404 is the domain or a missing REST API rewrite."
+    ]
   },
   "xml": {
     "label": "XML",

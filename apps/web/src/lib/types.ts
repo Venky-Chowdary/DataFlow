@@ -1843,6 +1843,12 @@ export const CONNECTOR_CATALOG = [
   { id: "klaviyo", label: "Klaviyo", port: 443, sourceOnly: true },
   { id: "servicenow", label: "ServiceNow", port: 443, sourceOnly: true },
   { id: "freshdesk", label: "Freshdesk", port: 443, sourceOnly: true },
+  { id: "slack", label: "Slack", port: 443, sourceOnly: true },
+  { id: "asana", label: "Asana", port: 443, sourceOnly: true },
+  { id: "calendly", label: "Calendly", port: 443, sourceOnly: true },
+  { id: "woocommerce", label: "WooCommerce", port: 443, sourceOnly: true },
+  { id: "bigcommerce", label: "BigCommerce", port: 443, sourceOnly: true },
+  { id: "brevo", label: "Brevo (Sendinblue)", port: 443, sourceOnly: true },
   { id: "rest_api", label: "REST / OpenAPI", port: 443 },
   { id: "graphql", label: "GraphQL", port: 443 },
 ] as const;

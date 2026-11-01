@@ -819,6 +819,54 @@ def _load_builtin_connectors() -> None:
             "connectors.sdk.freshdesk",
             type(exc).__name__,
         )
+    try:
+        from connectors.sdk import slack  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.slack",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import asana  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.asana",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import calendly  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.calendly",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import woocommerce  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.woocommerce",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import bigcommerce  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.bigcommerce",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import brevo  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.brevo",
+            type(exc).__name__,
+        )
 
 
 _load_builtin_connectors()
