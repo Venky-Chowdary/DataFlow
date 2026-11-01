@@ -19,6 +19,7 @@ from connectors.object_store_incremental import (
     ObjectMergeRefused,
     prepare_incremental_export,
 )
+from connectors.object_store_leftover import object_append_backup_ops
 from connectors.object_store_materialize import (
     materialize_object_store_export,
     resolve_materialize_batch,
@@ -259,6 +260,13 @@ def write_mapped_rows(
                 rejected_details=list(rejected_details),
             )
         try:
+            # Same D116 rule as S3: clear any stale pre-append image, then
+            # snapshot the prior object before the merged file lands.
+            _backup_key, _backup_put, _backup_clear = object_append_backup_ops(
+                "gcs", cfg, bucket, key, content_type=export.content_type,
+                client=bucket_obj,
+            )
+            _backup_clear()
             export = prepare_incremental_export(
                 key=key,
                 export=export,
@@ -271,6 +279,7 @@ def write_mapped_rows(
                 dest_types=dest_types,
                 conflict_columns=conflict_columns,
                 spill_max_size=resolve_spill_max(extra),
+                backup_put=_backup_put,
             )
         except ObjectMergeRefused as exc:
             return WriteResult(

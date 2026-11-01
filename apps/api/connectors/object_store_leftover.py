@@ -262,11 +262,15 @@ def _put_object_key(
     obj_key: str,
     body: bytes,
     content_type: str,
+    client: Any = None,
 ) -> None:
+    """``client`` reuses the caller's handle: s3 service client, gcs Bucket,
+    adls BlobServiceClient. ``None`` builds one from ``cfg``."""
     if kind == "s3":
-        from connectors.aws_common import boto3_client
+        if client is None:
+            from connectors.aws_common import boto3_client
 
-        client = boto3_client("s3", dict(cfg))
+            client = boto3_client("s3", dict(cfg))
         client.put_object(
             Bucket=bucket,
             Key=obj_key,
@@ -275,40 +279,99 @@ def _put_object_key(
         )
         return
     if kind == "gcs":
-        from connectors.gcs_common import gcs_client
+        if client is None:
+            from connectors.gcs_common import gcs_client
 
-        blob = gcs_client(dict(cfg)).bucket(bucket).blob(obj_key)
+            client = gcs_client(dict(cfg)).bucket(bucket)
+        blob = client.blob(obj_key)
         blob.upload_from_string(body, content_type=content_type or "application/json")
         return
     if kind == "adls":
-        from connectors.adls_common import blob_service_client
+        if client is None:
+            from connectors.adls_common import blob_service_client
 
-        client = blob_service_client(dict(cfg)).get_blob_client(bucket, obj_key)
-        client.upload_blob(body, overwrite=True, content_type=content_type or "application/json")
+            client = blob_service_client(dict(cfg))
+        blob_client = client.get_blob_client(bucket, obj_key)
+        blob_client.upload_blob(body, overwrite=True, content_type=content_type or "application/json")
         return
     raise RuntimeError(f"object-store leftover PUT unsupported for {kind}")
 
 
-def _delete_object_key(kind: str, cfg: Mapping[str, Any], bucket: str, obj_key: str) -> None:
-    if kind == "s3":
-        from connectors.aws_common import boto3_client
+def object_append_backup_ops(
+    kind: str,
+    cfg: Mapping[str, Any],
+    bucket: str,
+    live_key: str,
+    *,
+    content_type: str = "",
+    client: Any = None,
+) -> tuple[str, Any, Any]:
+    """``(backup_key, put, clear)`` for the pre-append rollback image (D116).
 
-        boto3_client("s3", dict(cfg)).delete_object(Bucket=bucket, Key=obj_key)
+    ``put`` stores the live object's prior bytes at the deterministic
+    sibling key before the merged file is promoted; ``clear`` removes the
+    key so a stale image can never be restored over a later write that did
+    not merge (e.g. an overwrite following an append). Clear is best-effort.
+    """
+    from connectors.object_store_common import object_append_backup_key
+
+    backup_key = object_append_backup_key(live_key)
+
+    def _put(body: bytes) -> None:
+        _put_object_key(
+            kind,
+            cfg,
+            bucket,
+            backup_key,
+            body,
+            content_type or "application/octet-stream",
+            client,
+        )
+
+    def _clear() -> None:
+        try:
+            _delete_object_key(kind, cfg, bucket, backup_key, client=client)
+        except Exception:
+            logger.debug(
+                "append-backup clear skipped for %s/%s", bucket, backup_key,
+                exc_info=True,
+            )
+
+    return backup_key, _put, _clear
+
+
+def _delete_object_key(
+    kind: str,
+    cfg: Mapping[str, Any],
+    bucket: str,
+    obj_key: str,
+    client: Any = None,
+) -> None:
+    if kind == "s3":
+        if client is None:
+            from connectors.aws_common import boto3_client
+
+            client = boto3_client("s3", dict(cfg))
+        client.delete_object(Bucket=bucket, Key=obj_key)
         return
     if kind == "gcs":
-        from connectors.gcs_common import gcs_client
+        if client is None:
+            from connectors.gcs_common import gcs_client
 
+            client = gcs_client(dict(cfg)).bucket(bucket)
         try:
-            gcs_client(dict(cfg)).bucket(bucket).blob(obj_key).delete()
+            client.blob(obj_key).delete()
         except Exception as exc:
             if "404" not in str(exc) and "NotFound" not in type(exc).__name__:
                 raise
         return
     if kind == "adls":
-        from connectors.adls_common import blob_service_client
+        if client is None:
+            from connectors.adls_common import blob_service_client
 
+            client = blob_service_client(dict(cfg))
         try:
-            blob_service_client(dict(cfg)).get_blob_client(bucket, obj_key).delete_blob()
+            client.get_blob_client(bucket, obj_key).delete_blob()
         except Exception as exc:
             if "BlobNotFound" not in str(exc) and "404" not in str(exc):
                 raise

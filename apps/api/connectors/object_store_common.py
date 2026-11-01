@@ -195,6 +195,20 @@ def object_staging_key(write_key: str) -> str:
     return f"{key}.__df_staging__"
 
 
+def object_append_backup_key(write_key: str) -> str:
+    """Sibling key holding the pre-append object image for undo/restore.
+
+    An incremental append/deduped merge rewrites the live object with prior
+    rows plus the new batch. When verification fails after the promote, the
+    rollback is restoring this image — deleting the live object would drop
+    the pre-run rows too (D116).
+    """
+    key = (write_key or "").strip()
+    if not key:
+        return ".__df_append_backup__"
+    return f"{key}.__df_append_backup__"
+
+
 def refuse_empty_object_replace(
     *,
     rows_written: int,

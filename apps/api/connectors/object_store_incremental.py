@@ -89,11 +89,18 @@ def prepare_incremental_export(
     dest_types: dict[str, str] | None,
     conflict_columns: list[str] | None,
     spill_max_size: int,
+    backup_put: Callable[[bytes], None] | None = None,
 ) -> ObjectStoreExport:
     """Merge when this write would otherwise replace a populated key.
 
     Returns ``export`` unchanged when there is nothing to merge. Raises
     :class:`ObjectMergeRefused` when the live object must be left in place.
+
+    When a merge lands, ``backup_put`` receives the prior object bytes
+    before the merged export is returned — the rollback image a failed
+    verification restores so a failed append leaves no rows behind (D116).
+    If the snapshot cannot be stored the write is refused instead: the
+    live object is not replaced.
     """
     strategy = incremental_merge_strategy(
         sync_mode, total_chunks=total_chunks, protect_landed=protect_landed
@@ -118,6 +125,15 @@ def prepare_incremental_export(
         strategy=strategy,
         spill_max_size=spill_max_size,
     )
+    if backup_put is not None:
+        try:
+            backup_put(existing)
+        except Exception as exc:
+            merged.close()
+            raise ObjectMergeRefused(
+                f"Object {key!r} pre-append snapshot could not be stored "
+                f"({exc}); the existing object was not replaced."
+            ) from exc
     export.close()
     return merged
 

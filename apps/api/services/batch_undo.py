@@ -114,6 +114,12 @@ def undo_failed_batch_if_dest_was_empty(
         if decision == "clear":
             note = _clear(destination, dest_summary)
             decision = "cleared" if dest_summary.get("partial_batch_removed") else "retained"
+        elif decision == "restore":
+            note = _restore_object_store_append(destination, dest_summary)
+            if dest_summary.get("partial_batch_removed"):
+                decision = "restored"
+            else:
+                decision = "retained"
         dest_summary["partial_batch_undo"] = decision
         wm_note = restore_route_watermark_after_undo(dest_summary)
         if wm_note:
@@ -264,6 +270,13 @@ def _decide(
             "was left in place.",
         )
     if before != 0:
+        if store and _mode_merges_append(mode):
+            # An occupied object-store append rewrote the live object with
+            # prior rows plus this batch. The rollback is restoring the
+            # pre-append image the writer snapshotted, not deleting the
+            # object (D116). The restore itself decides: no snapshot means
+            # nothing safe to do and the batch is honestly retained.
+            return ("restore", "")
         return (
             "retained",
             f"Destination already held {before} row(s) before this run. "
@@ -271,6 +284,16 @@ def _decide(
             "list would not be a rollback.",
         )
     return ("clear", "")
+
+
+def _mode_merges_append(mode: str) -> bool:
+    """True when a single-chunk write could have merged into the live object."""
+    try:
+        from connectors.object_store_incremental import incremental_merge_strategy
+
+        return incremental_merge_strategy(mode or "", total_chunks=1) is not None
+    except Exception:  # noqa: BLE001 — unknown mode must not block undo
+        return False
 
 
 def _clear(destination: Any, dest_summary: dict[str, Any]) -> str:
@@ -458,6 +481,117 @@ def _object_store_kind(db_type: str) -> str:
     from services.dest_precount import _object_store_kind as family
 
     return family(db_type)
+
+
+def _restore_object_store_append(
+    destination: Any, dest_summary: dict[str, Any]
+) -> str:
+    """Restore the pre-append object image the writer snapshotted (D116).
+
+    The append merged prior rows plus this batch into the live object; the
+    rollback PUTs the pre-run bytes back over the live key and removes the
+    snapshot. No snapshot (an older writer, a multi-chunk append, or an
+    overwrite) means nothing provably safe to restore — the failed batch is
+    left in place and the note says so. Never raises.
+    """
+    from src.transfer.adapters import resolve_connector_config, resolve_dest_table
+
+    try:
+        cfg = resolve_connector_config(destination)
+        db_type = count_dialect(
+            str(cfg.get("type") or getattr(destination, "format", "") or "")
+        )
+        store = _object_store_kind(db_type)
+        if store not in {"s3", "gcs", "adls"}:
+            return "The failed batch was left in place."
+        table = str(
+            dest_summary.get("table")
+            or dest_summary.get("collection")
+            or resolve_dest_table(db_type, destination, "dt_import")
+            or ""
+        ).strip()
+        if not table:
+            return (
+                "The failed batch was left in place because the destination "
+                "object was not named."
+            )
+        from services.dialect_profiles import schema_from_cfg
+
+        schema = schema_from_cfg(db_type, cfg)
+        bucket = str(cfg.get("database") or schema or "").strip()
+        if not bucket:
+            return "The failed batch was left in place (no bucket configured)."
+
+        from connectors.object_store_common import (
+            normalize_object_base_key,
+            object_append_backup_key,
+            object_staging_key,
+        )
+        from connectors.object_store_leftover import (
+            _delete_object_key,
+            _put_object_key,
+        )
+        from services.object_streaming import open_object_store_binary
+
+        base = normalize_object_base_key(
+            table, schema, str(cfg.get("file_format") or "")
+        )
+        backup = object_append_backup_key(base)
+        opened = open_object_store_binary(store, cfg, bucket, backup)
+        if opened is False:
+            return (
+                f"Destination object {base} already held rows before this "
+                "run and no pre-append image was stored for it, so the "
+                "failed batch was left in place — a retry would duplicate "
+                "it. Re-run as overwrite or remove the appended rows "
+                "before retrying."
+            )
+        if opened is None:
+            return (
+                f"Could not read the pre-append image for {base}, so the "
+                "failed batch was left in place rather than guess a restore."
+            )
+        stream, closer = opened
+        try:
+            body = stream.read()
+        finally:
+            if closer is not None:
+                try:
+                    closer()
+                except Exception:
+                    pass
+        if not isinstance(body, (bytes, bytearray)) or not bytes(body).strip():
+            return (
+                f"The pre-append image for {base} is empty, so the failed "
+                "batch was left in place rather than replace it."
+            )
+        _put_object_key(
+            store, cfg, bucket, base, bytes(body), "application/octet-stream"
+        )
+        for stale in (backup, object_staging_key(base)):
+            try:
+                _delete_object_key(store, cfg, bucket, stale)
+            except Exception:  # noqa: BLE001 — leftover cleanup is best-effort
+                logger.debug(
+                    "append-backup cleanup skipped for %s", stale, exc_info=True
+                )
+        before = dest_summary.get(PRECOUNT_KEY)
+        dest_summary["partial_batch_removed"] = True
+        if isinstance(before, int):
+            dest_summary["partial_batch_rows_after_undo"] = before
+        return (
+            f"The failed append was removed: {base} was restored to its "
+            "pre-run content from the snapshot this run stored before "
+            "merging, so a retry appends this batch exactly once."
+        )
+    except Exception as exc:  # noqa: BLE001 — undo must not hide the failure
+        logger.warning(
+            "Object-store append restore did not run: %s", exc, exc_info=True
+        )
+        return (
+            "The failed batch was left in place because the pre-append "
+            f"restore could not run ({exc})."
+        )
 
 
 def _clear_object_store(
