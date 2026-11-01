@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import parse_qs, urlsplit
 
 from connectors.sdk import get_descriptor
 from connectors.sdk.confluence import ConfluenceSource
@@ -114,13 +114,18 @@ def test_confluence_pages_follow_links_next_relative_url() -> None:
     page_one = {
         "results": _full_page(
             100,
-            lambda i: {"id": str(i), "status": "current", "title": f"Page {i}"},
+            lambda i: {
+                "id": str(i),
+                "status": "current",
+                "title": f"Page {i}",
+                "version": {"when": "2026-01-02T00:00:00.000Z"},
+            },
         ),
-        "_links": {"next": "/wiki/api/v2/pages?cursor=page2&limit=100"},
+        "_links": {"next": "/wiki/rest/api/content/search?start=100&limit=100"},
     }
     with FixtureServer() as fixture:
         fixture.add_route(
-            "/wiki/api/v2/pages",
+            "/wiki/rest/api/content/search",
             responses=[FixtureResponse(body=page_one), FixtureResponse(body=page_two)],
         )
         # Fixture server has no /wiki prefix — override base_url to simulate.
@@ -138,6 +143,10 @@ def test_confluence_pages_follow_links_next_relative_url() -> None:
     assert records[-1]["id"] == "987654322"
     assert len(fixture.request_log) == 2
     assert _headers(fixture.request_log[0])["authorization"].startswith("Basic ")
+    first_query = parse_qs(urlsplit(fixture.request_log[0].target).query)
+    assert first_query["cql"] == [
+        'type=page AND lastmodified >= "1970-01-01 00:00" ORDER BY lastmodified ASC'
+    ]
 
 
 # ---------------------------------------------------------------- zendesk ---
@@ -168,8 +177,14 @@ def test_zendesk_tickets_follow_next_page_url() -> None:
     page_one = {
         "tickets": _full_page(
             100,
-            lambda i: {"id": i, "subject": f"ticket {i}", "status": "open"},
+            lambda i: {
+                "id": i,
+                "subject": f"ticket {i}",
+                "status": "open",
+                "generated_timestamp": 1700000000 + i,
+            },
         ),
+        "end_of_stream": False,
         "next_page": "NEXT_URL_PLACEHOLDER",
         "previous_page": None,
         "count": 101,
@@ -177,9 +192,10 @@ def test_zendesk_tickets_follow_next_page_url() -> None:
     with FixtureServer() as fixture:
         # Zendesk returns an absolute next_page URL — build it against the
         # fixture origin so the same-origin guard passes.
-        page_one["next_page"] = f"{fixture.base_url}/tickets?page=2&per_page=100"
+        page_one["next_page"] = f"{fixture.base_url}/incremental/tickets?page=2&per_page=100"
+        page_two["end_of_stream"] = True
         fixture.add_route(
-            "/tickets",
+            "/incremental/tickets",
             responses=[FixtureResponse(body=page_one), FixtureResponse(body=page_two)],
         )
         source = ZendeskSource(
