@@ -13554,26 +13554,6 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
 
 /* ---- Demos page ---- */
 
-.lp-demos-hero {
-  background:
-    radial-gradient(900px 420px at 18% -10%, rgba(20, 184, 166, 0.28), transparent 55%),
-    radial-gradient(700px 360px at 88% 20%, rgba(13, 148, 136, 0.16), transparent 50%),
-    linear-gradient(180deg, #0c1b2e 0%, #07111f 70%, #050b14 100%);
-  color: #fff;
-  padding: 36px 0 32px;
-}
-
-.lp-demos-hero h1 {
-  margin: 0 0 10px;
-  font-family: var(--lp-font-display);
-  font-size: var(--lp-fs-h1, clamp(1.75rem, 2.2vw, 2.125rem));
-}
-
-.lp-demos-hero .lp-sales-hero-lead {
-  color: rgba(255, 255, 255, 0.78);
-  max-width: 640px;
-  margin: 0;
-}
 
 .lp-demos-player {
   padding: 32px 0 8px;
@@ -13724,4 +13704,43 @@ html[data-theme="dark"] .lp-login--gate .lp-input-password-toggle:hover {
   .lp-demos-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* ---- Demos hero aside — video wall panel ---- */
+
+.lp-demos-hero-art {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.lp-demos-hero-feature {
+  position: relative;
+  border-radius: 14px;
+  overflow: hidden;
+  border: 1px solid rgba(94, 234, 212, 0.35);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.45);
+}
+
+.lp-demos-hero-feature img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+}
+
+.lp-demos-hero-strip {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+}
+
+.lp-demos-hero-strip img {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  border-radius: 8px;
+  border: 1px solid rgba(94, 234, 212, 0.2);
+  opacity: 0.85;
 }

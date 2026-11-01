@@ -1,4 +1,5 @@
 import { useMemo, useRef, useState } from "react";
+import { MarketingInkHero } from "../../components/marketing/MarketingInkHero";
 import { VideoPlayer, videoThumb } from "../../components/marketing/VideoPlayer";
 import {
   FEATURED_VIDEO_ID,
@@ -29,16 +30,59 @@ export function DemosPage({ onNavigate }: { onNavigate: (route: PublicRoute) => 
 
   return (
     <div className="lp-mkt-page lp-demos">
-      <section className="lp-demos-hero" aria-label="Video demos">
-        <div className="lp-mkt-wrap">
-          <p className="lp-sales-kicker">Video demos</p>
-          <h1>Watch the engine prove a transfer.</h1>
-          <p className="lp-sales-hero-lead">
-            Real runs on the production engine — quarantine, replay, drift review, CDC, and the
-            checksum match at the end. No slideware.
-          </p>
-        </div>
-      </section>
+      <MarketingInkHero
+        kicker="Video demos"
+        title={<>Watch the engine prove a transfer.</>}
+        lead={
+          <>
+            Real runs on the production engine — quarantine, replay, drift review, native CDC,
+            and the checksum match at the end. No slideware, no staged mock-ups.
+          </>
+        }
+        slas={[
+          { value: String(MARKETING_VIDEOS.length), label: "demos on the channel" },
+          { value: "Production", label: "engine, not a mock" },
+          { value: "Verified", label: "every run ends proven" },
+        ]}
+        actions={
+          <div className="lp-hero-cta">
+            <button
+              type="button"
+              className="lp-btn lp-btn--brand"
+              onClick={() => playerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            >
+              Watch the flagship demo
+            </button>
+            <a
+              className="lp-btn lp-btn--outline lp-btn--on-ink"
+              href={YOUTUBE_CHANNEL_URL}
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              @DatawrapCompany
+            </a>
+          </div>
+        }
+        aside={
+          <div className="lp-sales-hero-art lp-demos-hero-art" aria-hidden="true">
+            <div className="lp-demos-hero-feature">
+              <img src={videoThumb(FEATURED_VIDEO_ID, "hq")} alt="" loading="lazy" />
+              <span className="lp-video-play lp-video-play--sm">
+                <svg viewBox="0 0 24 24" width="18" height="18" fill="currentColor">
+                  <path d="M8 5v14l11-7z" />
+                </svg>
+              </span>
+            </div>
+            <div className="lp-demos-hero-strip">
+              {MARKETING_VIDEOS.filter((v) => v.id !== FEATURED_VIDEO_ID)
+                .slice(0, 3)
+                .map((v) => (
+                  <img key={v.id} src={videoThumb(v.id, "hq")} alt="" loading="lazy" />
+                ))}
+            </div>
+          </div>
+        }
+      />
 
       <section className="lp-demos-player" aria-label="Featured demo" ref={playerRef}>
         <div className="lp-mkt-wrap">
