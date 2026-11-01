@@ -862,7 +862,7 @@ def _fail_job_preflight(
         or "; ".join(str(x) for x in blocker_reasons if x)
         or "Preflight blocked transfer"
     )
-    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, QUARANTINE_REPLAN_FIX
+    from services.root_cause_engine import CAST_FAILURE_ROOT_TITLE, quarantine_retry_fix
 
     if any(
         isinstance(b, dict)
@@ -871,8 +871,11 @@ def _fail_job_preflight(
         for b in pf.get("blockers", [])
     ):
         # D170: the run was refused whole; say how to load the valid rows.
-        error_message = f"{error_message.rstrip('. ')}. {QUARANTINE_REPLAN_FIX}."
-        error_details["remediation"] = QUARANTINE_REPLAN_FIX
+        # QA r12 D2: the job is failing, so the way out is a retry — name the
+        # tool and REST field that accept the acceptance for a failed job.
+        fix = quarantine_retry_fix(job_id)
+        error_message = f"{error_message.rstrip('. ')}. {fix}."
+        error_details["remediation"] = fix
     lineage.emit_preflight_completed(
         run_id=job_id,
         passed=False,

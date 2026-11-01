@@ -1300,6 +1300,8 @@ async def run_universal_transfer(
     decision_artifact_json: str = Form(""),
     contract_id: str = Form(""),
     require_signed_contract: str = Form("false"),
+    risk_acceptance: str = Form(""),
+    risk_acceptance_json: str = Form(""),
     request: Request = None,
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
     idempotency_key: str = Header(default="", alias="Idempotency-Key"),
@@ -1307,6 +1309,12 @@ async def run_universal_transfer(
     """
     Execute universal transfer: file/db → db/file/warehouse.
     Auto-creates tables, collections, and typed schemas.
+
+    ``risk_acceptance`` (alias ``risk_acceptance_json``) is a JSON-encoded
+    ``{approved_by, reason, execution_policy, on_cast_failure?, columns?}``:
+    the same acceptance MCP ``start_transfer`` takes. It signs a
+    continue-policy Risk Contract on the mapped columns that need one, so rows
+    that fail to cast are quarantined and the valid rows load (QA r12 D2).
     """
     from services.execution_engine_contract import (
         DeliveryGuaranteeError,
@@ -1315,6 +1323,25 @@ async def run_universal_transfer(
     from ..transfer.background import run_transfer_async
     from ..transfer.engine import DuplicateTransferSubmission, get_transfer_engine
     from ..transfer.models import EndpointConfig, TransferRequest
+
+    # QA r12 D2: parse and shape-check the acceptance before anything runs.
+    from services.risk_acceptance import (
+        parse_risk_acceptance_form,
+        sign_request_risk_acceptance,
+    )
+
+    try:
+        if risk_acceptance.strip() and risk_acceptance_json.strip() and (
+            risk_acceptance.strip() != risk_acceptance_json.strip()
+        ):
+            raise ValueError(
+                "Send risk_acceptance or risk_acceptance_json, not two different values."
+            )
+        form_risk_acceptance = parse_risk_acceptance_form(
+            risk_acceptance or risk_acceptance_json
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     # Same 422 as the JSON routes; blank still means "inherit the plan".
     validation_mode = form_policy_value("validation_mode", validation_mode)
@@ -1599,6 +1626,20 @@ async def run_universal_transfer(
             logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
 
     _residency_check(request, destination, region)
+
+    if form_risk_acceptance:
+        try:
+            sign_request_risk_acceptance(
+                request_obj,
+                form_risk_acceptance,
+                no_mappings_hint=(
+                    "risk_acceptance signs the mapped columns, and this run has "
+                    "none: send mappings_json (or a plan_id whose plan has "
+                    "mappings) with the column's target type."
+                ),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     from src.transfer.contract_engine import stamp_request_contract
 

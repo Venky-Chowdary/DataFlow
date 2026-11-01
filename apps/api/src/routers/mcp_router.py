@@ -17,6 +17,10 @@ from pydantic import BaseModel, Field
 from services.brand import PRODUCT_SLUG
 from services.mcp_protocol import SERVER_INFO
 
+#: Every MCP path answers with or without a trailing slash. Behind the web
+#: proxy a slash redirect is a 307 to the API's own (http) origin, which an
+#: MCP client either refuses or follows out of the same-origin proxy
+#: (QA r12 Mongo D11).
 router = APIRouter(prefix="/mcp", tags=["MCP Server"])
 oauth_resource_router = APIRouter(tags=["MCP OAuth"])
 logger = logging.getLogger(__name__)
@@ -214,6 +218,7 @@ async def mcp_protected_resource_metadata():
 
 
 @router.get("/policy")
+@router.get("/policy/", include_in_schema=False)
 async def get_mcp_policy_route(http_request: Request):
     from services.integrations_store import get_mcp_policy
 
@@ -222,6 +227,7 @@ async def get_mcp_policy_route(http_request: Request):
 
 
 @router.put("/policy")
+@router.put("/policy/", include_in_schema=False)
 async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request):
     from services.audit_log import append_audit_event
     from services.integrations_store import get_mcp_policy, set_mcp_policy
@@ -242,6 +248,7 @@ async def set_mcp_policy_route(request: McpPolicyRequest, http_request: Request)
 
 
 @router.get("/manifest")
+@router.get("/manifest/", include_in_schema=False)
 async def mcp_manifest(http_request: Request):
     """MCP-compatible manifest for IDE and agent integrations."""
     from ..ai.copilot.tools import TOOL_DEFINITIONS
@@ -292,6 +299,7 @@ async def mcp_manifest(http_request: Request):
 
 
 @router.get("/tools")
+@router.get("/tools/", include_in_schema=False)
 async def list_mcp_tools():
     from ..ai.copilot.tools import TOOL_DEFINITIONS
     from services.mcp_policy import filter_tools
@@ -300,6 +308,7 @@ async def list_mcp_tools():
 
 
 @router.post("/tools/call")
+@router.post("/tools/call/", include_in_schema=False)
 async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
     """Execute a Datawrap Pilot tool — same surface external agents use."""
     _require_mcp_tool_auth(http_request, request.name)
@@ -444,6 +453,7 @@ async def call_mcp_tool(request: ToolCallRequest, http_request: Request):
 
 
 @router.get("/logs")
+@router.get("/logs/", include_in_schema=False)
 async def mcp_request_logs(http_request: Request, limit: int = 50):
     """Recent MCP tool invocations from persistent log."""
     _require_mcp_tool_auth(http_request)
@@ -454,6 +464,7 @@ async def mcp_request_logs(http_request: Request, limit: int = 50):
 
 
 @router.get("/status")
+@router.get("/status/", include_in_schema=False)
 async def mcp_status(http_request: Request):
     from services.connector_store import list_connectors
     from services.mcp_invocation_log import list_mcp_invocations

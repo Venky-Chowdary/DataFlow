@@ -77,6 +77,34 @@ Runtime SSOT: `execution_policy_semantics()` / `resolve_write_action_for_mapping
 - `ABORT_TRANSACTION` does not invent a transaction on sinks without one.
 - Quarantine DLQ is fail-closed durable; it is **not** destination 2PC.
 
+## Accepting the risk over MCP and REST
+
+The same `risk_acceptance` object is accepted on every surface and signed the
+same way (`apps/api/services/risk_acceptance.py`, which calls
+`_sign_required_risk_contracts`):
+
+```json
+{"approved_by": "ops@example.com", "reason": "hold out the bad rows",
+ "execution_policy": "CAST_AND_CONTINUE", "on_cast_failure": "quarantine",
+ "columns": ["amount"]}
+```
+
+| Surface | Where it goes |
+|---------|---------------|
+| MCP `plan_transfer` / `start_transfer` | `risk_acceptance` argument |
+| MCP `rerun_job` (completed / cancelled job) | `risk_acceptance` argument |
+| MCP `retry_job` (failed / cancelled job) | `risk_acceptance` argument |
+| REST `POST /api/v1/transfer/run` | form field `risk_acceptance` (alias `risk_acceptance_json`), JSON-encoded; needs `mappings_json` or a `plan_id` with mappings |
+| REST `POST /api/v1/connectors/jobs/{id}/retry` | JSON body `{"risk_acceptance": {...}}` (alias `risk_acceptance_json`, object or JSON string) |
+| REST `POST /api/v1/connectors/jobs/{id}/rerun` | JSON body `{"risk_acceptance": {...}}` (same alias) |
+
+Only mappings a gate already requires are signed. A malformed acceptance
+(missing `approved_by`, `reason` or `execution_policy`, a fail-closed policy,
+not an object) or one that signs nothing is refused with HTTP 400 before a job
+is created. A job that failed on sample cast failures names the retry route
+in its error: `retry_job` / `POST .../jobs/{id}/retry`, never `rerun_job`,
+which refuses a failed job.
+
 ## Code SSOT
 
 - `apps/api/services/migration_risk_contract.py`
