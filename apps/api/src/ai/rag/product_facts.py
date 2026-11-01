@@ -305,6 +305,10 @@ _SCHEMA_POLICY_BEHAVIOUR: dict[str, str] = {
         "rejects type changes outright — a column whose type moved fails the run "
         "instead of being cast"
     ),
+    "block_all": (
+        "blocks on any source change, even a nullable new column, until you "
+        "accept the drift for that run"
+    ),
 }
 
 

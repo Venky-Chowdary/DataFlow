@@ -98,14 +98,7 @@ def run_transfer_policy_gates(
     )
 
     schema_issues: list[str] = []
-    allowed_schema = {
-        "manual_review",
-        "propagate_columns",
-        "propagate_all",
-        "pause_on_change",
-        "type_locked",
-        "block_all",
-    }
+    from services.schema_drift import SCHEMA_POLICIES as allowed_schema
     if schema not in allowed_schema:
         schema_issues.append(
             f"Unknown schema policy '{schema}' — expected one of: "

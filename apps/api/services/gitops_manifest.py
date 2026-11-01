@@ -314,6 +314,27 @@ def _coerce_payload(payload: dict[str, Any] | list[Any] | str) -> dict[str, Any]
     return payload
 
 
+def _assert_policy_values(resources: list[dict[str, Any]]) -> None:
+    """Refuse the whole manifest on an unknown validation_mode / schema_policy.
+
+    QA r12 bugs 6/7. Checked before anything is created, so CD never half-applies
+    a manifest, and ``plan`` reports what ``apply`` would refuse. The route
+    turns the ``ValueError`` into a 422.
+    """
+    from services.transfer_policy_values import PolicyValueError, canonicalize_policy_fields
+
+    for resource in resources:
+        kind, ident = _resource_identity(resource)
+        if kind != "PipelineSchedule":
+            continue
+        spec = resource.get("spec") if isinstance(resource.get("spec"), dict) else {}
+        try:
+            canonicalize_policy_fields(spec)
+        except PolicyValueError as exc:
+            label = str(spec.get("name") or spec.get("id") or ident or "").strip()
+            raise ValueError(f"PipelineSchedule {label!r}: {exc}") from exc
+
+
 def plan_manifest(
     payload: dict[str, Any] | list[Any] | str,
     *,
@@ -330,6 +351,7 @@ def plan_manifest(
         from src.services.contract_store import get_contract_store
 
     resources = _normalize_resources(payload)
+    _assert_policy_values(resources)
     actions: list[dict[str, Any]] = []
     scope = (workspace_id or "").strip()
     visible_schedules = [
@@ -498,6 +520,7 @@ def apply_manifest(
         from src.services.data_contract import ContractStatus, DataContract
 
     resources = _normalize_resources(payload)
+    _assert_policy_values(resources)
     results: list[dict[str, Any]] = []
     store = get_contract_store()
 

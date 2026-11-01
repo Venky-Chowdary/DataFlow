@@ -358,6 +358,12 @@ def effective_port(driver_type: str, port: Any) -> int:
 _HISTORICAL_PORT_FALLBACK = 5432
 # This reader speaks HTTP Cypher. A saved Bolt port never answers a health check.
 _NEO4J_BOLT_PORT = 7687
+# SQL wires on which 5432 is evidence, not a stamp (QA r12 bug 8). An
+# ``amazon_aurora`` / MySQL connector saved with 5432 was "healed" to 3306, so
+# the Test dialed a port the operator never configured and answered "Cannot
+# reach the host" for a reachable PostgreSQL endpoint. The operator's 5432 is
+# dialed; a PostgreSQL answer there is named by services/wire_protocol_sniff.py.
+_PORT_5432_IS_A_CHOICE = frozenset({"mysql"})
 
 
 def _parse_port(raw: Any) -> int:
@@ -389,7 +395,11 @@ def port_was_chosen(driver_type: str, raw: Any) -> bool:
     driver = _driver_key(driver_type)
     if driver == "neo4j" and parsed == _NEO4J_BOLT_PORT:
         return False
-    if parsed == _HISTORICAL_PORT_FALLBACK and default_port(driver) != parsed:
+    if (
+        parsed == _HISTORICAL_PORT_FALLBACK
+        and default_port(driver) != parsed
+        and driver not in _PORT_5432_IS_A_CHOICE
+    ):
         return False
     return True
 
@@ -406,6 +416,8 @@ def stored_listen_port(driver_type: str, raw: Any) -> int:
     if driver == "neo4j" and parsed == _NEO4J_BOLT_PORT:
         return 7474
     driver_default = default_port(driver)
+    if parsed == _HISTORICAL_PORT_FALLBACK and driver in _PORT_5432_IS_A_CHOICE:
+        return parsed
     if parsed in (0, _HISTORICAL_PORT_FALLBACK) and driver_default != parsed:
         return driver_default
     return parsed or driver_default

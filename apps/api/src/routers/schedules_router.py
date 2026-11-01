@@ -8,6 +8,7 @@ from fastapi import APIRouter, Header, HTTPException, Request, Response
 from pydantic import BaseModel, Field, field_validator
 
 from services.acknowledgment_contract import MIN_ACTOR_LEN
+from services.transfer_policy_values import PolicyFieldsModel
 from services.api_errors import ApiError
 from services.audit_coverage import record_security_event
 from services.brand import PRODUCT_SLUG
@@ -60,16 +61,9 @@ SyncMode = Literal[
     "reverse_etl",
 ]
 IntervalPreset = Literal["hourly", "daily", "weekly"]
-SchemaPolicy = Literal[
-    "manual_review",
-    "propagate_columns",
-    "propagate_all",
-    "pause_on_change",
-    "type_locked",
-]
 
 
-class ScheduleCreate(BaseModel):
+class ScheduleCreate(PolicyFieldsModel):
     name: str = Field(..., min_length=1, max_length=120)
     source_connector_id: str
     source_table: str
@@ -80,7 +74,7 @@ class ScheduleCreate(BaseModel):
     timezone: str = "UTC"
     sync_mode: SyncMode = "full_refresh_overwrite"
     validation_mode: str = "strict"
-    schema_policy: SchemaPolicy = "manual_review"
+    schema_policy: str = "manual_review"
     backfill_new_fields: bool = False
     write_via_staging: bool = False
     priority_column: str = ""
@@ -143,7 +137,7 @@ class ScheduleCreate(BaseModel):
         )
 
 
-class ScheduleUpdate(BaseModel):
+class ScheduleUpdate(PolicyFieldsModel):
     name: Optional[str] = None
     source_connector_id: Optional[str] = None
     source_table: Optional[str] = None
@@ -156,7 +150,7 @@ class ScheduleUpdate(BaseModel):
     timezone: Optional[str] = None
     sync_mode: Optional[SyncMode] = None
     validation_mode: Optional[str] = None
-    schema_policy: Optional[SchemaPolicy] = None
+    schema_policy: Optional[str] = None
     backfill_new_fields: Optional[bool] = None
     write_via_staging: Optional[bool] = None
     priority_column: Optional[str] = None

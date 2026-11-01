@@ -1746,9 +1746,9 @@ def _bind_tool_arguments(
     try:
         params = inspect.signature(handler).parameters
     except (TypeError, ValueError):
-        return dict(args), ""
+        return _canonical_policy_arguments(name, dict(args))
     if any(param.kind == inspect.Parameter.VAR_KEYWORD for param in params.values()):
-        return dict(args), ""
+        return _canonical_policy_arguments(name, dict(args))
     accepted = {
         key for key, param in params.items()
         if key != "self" and param.kind in {
@@ -1769,7 +1769,22 @@ def _bind_tool_arguments(
         bound[target] = value
     if unknown:
         return {}, _tool_argument_error(name, "unexpected keyword argument")
-    return bound, ""
+    return _canonical_policy_arguments(name, bound)
+
+
+def _canonical_policy_arguments(name: str, bound: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """QA r12 bugs 6/7: one check for every tool taking validation_mode / schema_policy.
+
+    plan_transfer, start_transfer, create_schedule, ... Blank means "not given"
+    (the tool's own default applies); a legacy alias becomes its canonical id;
+    an unknown word is refused with the allowed values.
+    """
+    from services.transfer_policy_values import PolicyValueError, canonicalize_policy_fields
+
+    try:
+        return canonicalize_policy_fields(bound), ""
+    except PolicyValueError as exc:
+        return {}, f"{name} refused: {exc}"
 
 
 def _preview_endpoint(draft: dict[str, Any]) -> tuple[str, int | None, bool]:
