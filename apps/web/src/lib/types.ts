@@ -87,6 +87,8 @@ export interface Connector {
   private_key?: string;
   endpoint_url?: string;
   path_style?: boolean;
+  /** Connector-specific fields (SaaS domain/email/site/board ids, extra auth keys). */
+  extra?: Record<string, unknown>;
   created_at: string;
   last_test_ok?: boolean;
   last_tested_at?: string | null;

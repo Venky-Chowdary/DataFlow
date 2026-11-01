@@ -918,6 +918,14 @@ def _run_probe_impl(db_type: str, cfg: dict[str, Any]) -> tuple[bool, str]:
         return False, humanize_connection_error(db_type, exc, auth_mode=_attempted_auth_mode)
     sig = inspect.signature(probe_fn)
     accepts_var_kw = any(p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values())
+    if "cfg" in sig.parameters and "driver" in sig.parameters:
+        # SDK manifest probes own the whole resolved cfg (site/email/api_token
+        # and other per-driver fields never fit the legacy kwarg surface).
+        try:
+            result = probe_fn(cfg, resolved)
+        except Exception as exc:
+            return False, humanize_connection_error(db_type, exc, auth_mode=_attempted_auth_mode)
+        return result if isinstance(result, tuple) else (bool(result), str(result))
     if not accepts_var_kw:
         probe_kwargs = {k: v for k, v in probe_kwargs.items() if k in sig.parameters}
     else:

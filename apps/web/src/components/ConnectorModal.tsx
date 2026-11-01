@@ -42,6 +42,17 @@ interface ConnectorModalProps {
   onSaved: () => void;
 }
 
+/**
+ * Extra keys with dedicated form state/payload handling — they must not be
+ * carried in the generic SaaS field map or they would be stored twice.
+ */
+const DEDICATED_EXTRA_KEYS = new Set([
+  "host_key",
+  "known_hosts",
+  "host_key_policy",
+  "trust_server_certificate",
+]);
+
 function isFileFormat(type: string): boolean {
   return [
     "csv", "tsv", "json", "jsonl", "ndjson", "parquet", "excel",
@@ -134,6 +145,19 @@ export function ConnectorModal({
   );
   const [authMode, setAuthMode] = useState<AuthMode>(inferConnectorAuthMode(editing, startType));
   const [helpOpen, setHelpOpen] = useState(false);
+  // SaaS/SDK connectors ask for fields outside the canonical set (site, email,
+  // api_token, board_id, dc, ...). Without this map those inputs were dead
+  // controls: typing never updated state, validation always failed, and the
+  // connector could never be saved. They persist under `extra`.
+  const [customValues, setCustomValues] = useState<Record<string, string>>(() => {
+    const raw = (editing as { extra?: Record<string, unknown> } | null)?.extra ?? {};
+    const out: Record<string, string> = {};
+    for (const [k, v] of Object.entries(raw)) {
+      if (DEDICATED_EXTRA_KEYS.has(k) || v === null || v === undefined) continue;
+      out[k] = typeof v === "string" ? v : String(v);
+    }
+    return out;
+  });
 
   const resolvedType = useMemo(() => resolveCatalogIdToType(type), [type]);
   const isMongo = resolvedType === "mongodb";
@@ -219,6 +243,7 @@ export function ConnectorModal({
     setHostKey("");
     setTrustServerCertificate(false);
     setAuthMode(cfg.defaultAuthMode);
+    setCustomValues({});
     setTestResult(null);
     setStep("configure");
     if (!name.trim()) {
@@ -254,6 +279,7 @@ export function ConnectorModal({
 
   const values = useMemo(
     () => ({
+      ...customValues,
       name,
       host,
       port,
@@ -274,7 +300,7 @@ export function ConnectorModal({
       hostKey,
       trustServerCertificate,
     }),
-    [name, host, port, database, username, password, connectionString, schema, warehouse, authRole, authSource, apiKey, serviceAccount, privateKey, endpointUrl, pathStyle, ssl, hostKey, trustServerCertificate]
+    [customValues, name, host, port, database, username, password, connectionString, schema, warehouse, authRole, authSource, apiKey, serviceAccount, privateKey, endpointUrl, pathStyle, ssl, hostKey, trustServerCertificate]
   );
 
   const [testing, setTesting] = useState(false);
@@ -387,6 +413,17 @@ export function ConnectorModal({
     if (resolvedType === "snowflake" || resolvedType === "iceberg") {
       payload.warehouse = warehouse || undefined;
     }
+    // Connector-specific form fields ride under `extra` — the store persists
+    // them and the SDK transfer path merges them into the driver config.
+    const extra: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(customValues)) {
+      if (DEDICATED_EXTRA_KEYS.has(k)) continue;
+      if (v === "" || v === null || v === undefined) continue;
+      extra[k] = v;
+    }
+    if (Object.keys(extra).length > 0) {
+      payload.extra = extra;
+    }
     if (resolvedType === "sftp" && hostKey.trim()) {
       payload.host_key = hostKey.trim();
     }
@@ -430,6 +467,7 @@ export function ConnectorModal({
         ssl: Boolean(built.ssl),
         host_key: built.host_key as string | undefined,
         trust_server_certificate: built.trust_server_certificate as boolean | undefined,
+        extra: built.extra as Record<string, unknown> | undefined,
       });
       setTestResult(result);
       if (resolvedType === "mongodb" && result.success) {
@@ -532,6 +570,10 @@ export function ConnectorModal({
         break;
       case "trustServerCertificate":
         setTrustServerCertificate(Boolean(value));
+        break;
+      default:
+        // Connector-specific field (SaaS email/site/api_token/board ids, …).
+        setCustomValues((v) => ({ ...v, [key]: String(value ?? "") }));
         break;
     }
   };

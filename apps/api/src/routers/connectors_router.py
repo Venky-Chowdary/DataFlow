@@ -197,6 +197,10 @@ class TestConnectionRequest(BaseModel):
     known_hosts: Optional[str] = None
     host_key_policy: Optional[str] = None
     trust_server_certificate: Optional[bool] = None
+    # Connector-specific fields the canonical payload cannot carry — SaaS/SDK
+    # drivers (site, email, api_token, dc, board_id, …). Merged into the probe
+    # cfg so Test sees exactly what a saved transfer would see.
+    extra: Optional[dict] = None
 
 
 class TransferRequest(BaseModel):
@@ -246,14 +250,27 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
 
         from services.connector_auth import engine_login_role, infer_auth_mode, validate_probe_auth
 
+        # SaaS/SDK connectors carry their credential fields under ``extra``
+        # (zendesk api_key, jira api_token+site, mailjet secret_key, …) —
+        # they must satisfy auth validation exactly like canonical fields.
+        extra_flat = {
+            k: v
+            for k, v in (request.extra or {}).items()
+            if isinstance(request.extra, dict) and v not in (None, "")
+        }
+
+        def _field(name: str) -> str:
+            value = getattr(request, name, None) or ""
+            return str(value) if value else str(extra_flat.get(name, "") or "")
+
         auth_mode = infer_auth_mode(
             auth_mode=request.auth_mode or "",
-            connection_string=request.connection_string or "",
-            service_account=request.service_account or "",
-            api_key=request.api_key or "",
-            username=request.username or "",
-            password=request.password or "",
-            private_key=getattr(request, "private_key", None) or "",
+            connection_string=_field("connection_string"),
+            service_account=_field("service_account"),
+            api_key=_field("api_key"),
+            username=_field("username"),
+            password=_field("password"),
+            private_key=_field("private_key"),
             driver=driver,
         )
         auth_error = validate_probe_auth(
@@ -262,12 +279,12 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             host=request.host or "",
             port=int(request.port or 0),
             database=request.database or "",
-            username=request.username or "",
-            password=request.password or "",
-            connection_string=request.connection_string or "",
-            service_account=request.service_account or "",
-            api_key=request.api_key or "",
-            private_key=getattr(request, "private_key", None) or "",
+            username=_field("username"),
+            password=_field("password"),
+            connection_string=_field("connection_string"),
+            service_account=_field("service_account"),
+            api_key=_field("api_key"),
+            private_key=_field("private_key"),
         )
         if auth_error:
             op.failed(category="auth_config")
@@ -303,6 +320,7 @@ async def _test_connection_impl(request: TestConnectionRequest, op):
             "host_key_policy": request.host_key_policy or "",
             "trust_server_certificate": bool(request.trust_server_certificate),
         }
+        cfg.update(extra_flat)
         ok, msg = run_probe(driver, cfg)
         payload: dict[str, Any] = {
             "success": ok,

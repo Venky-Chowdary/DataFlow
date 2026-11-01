@@ -2368,6 +2368,8 @@ export async function testConnection(payload: {
   host_key?: string;
   host_key_policy?: string;
   trust_server_certificate?: boolean;
+  /** Connector-specific fields (SaaS domain/email/site/board ids, extra auth keys). */
+  extra?: Record<string, unknown>;
 }): Promise<{ success: boolean; message: string; source_ha?: Record<string, unknown> }> {
   const res = await apiFetch(`${API_BASE}/connectors/test`, {
     method: "POST",
@@ -2417,6 +2419,8 @@ export async function saveConnector(payload: {
   trust_server_certificate?: boolean;
   /** Persist form Test result so the list matches (true/false). */
   last_test_ok?: boolean;
+  /** Connector-specific fields (SaaS domain/email/site/board ids, extra auth keys). */
+  extra?: Record<string, unknown>;
 }): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };
   const res = await apiFetch(`${API_BASE}/connectors/saved`, {
@@ -2464,6 +2468,8 @@ export async function updateConnector(
     endpoint_url?: string;
     path_style?: boolean;
     last_test_ok?: boolean;
+    /** Connector-specific fields (SaaS domain/email/site/board ids, extra auth keys). */
+    extra?: Record<string, unknown>;
   },
 ): Promise<Connector> {
   const body = { role: "both", ssl: false, ...payload };

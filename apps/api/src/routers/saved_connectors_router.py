@@ -72,6 +72,10 @@ class ConnectorSaveDTO(BaseModel):
     trust_server_certificate: bool | None = None
     # Kafka source consumer group (D84). Empty = a group per route.
     group_id: str = ""
+    # Connector-specific fields outside the canonical set — SaaS/SDK drivers
+    # (site, email, api_token, dc, board_id, …). The store persists them under
+    # ``extra`` and the transfer engine merges them into the driver config.
+    extra: dict[str, Any] = Field(default_factory=dict)
     # Optional: persist an in-form Test result so the list matches on first save.
     last_test_ok: bool | None = None
 
@@ -130,6 +134,8 @@ class ConnectorPatchDTO(BaseModel):
     host_key_policy: str | None = None
     trust_server_certificate: bool | None = None
     group_id: str | None = None
+    # Connector-specific fields (SaaS/SDK extras) — replaces the stored set.
+    extra: dict[str, Any] | None = None
 
 
 def _actor_email(request: Request) -> str:
@@ -195,6 +201,17 @@ def _preserve_masked_secrets(data: dict[str, Any], existing: Any) -> dict[str, A
             out[field] = getattr(existing, field)
     if _is_masked_value(out.get("connection_string")) and getattr(existing, "connection_string", None):
         out["connection_string"] = existing.connection_string
+    # Masked secrets inside ``extra`` (SaaS api_token, secret_key, …) are
+    # placeholders too — restore the stored value or the re-save overwrites
+    # the real credential with ``****``.
+    extra = out.get("extra")
+    existing_extra = getattr(existing, "extra", None) or {}
+    if isinstance(extra, dict) and isinstance(existing_extra, dict):
+        out_extra = dict(extra)
+        for key, item in out_extra.items():
+            if _is_masked_value(item) and existing_extra.get(key):
+                out_extra[key] = existing_extra[key]
+        out["extra"] = out_extra
     return out
 
 
