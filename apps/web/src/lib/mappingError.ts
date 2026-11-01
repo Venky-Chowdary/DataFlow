@@ -31,12 +31,12 @@ export function withEgressHint(
   if (!EGRESS_PATTERN.test(msg)) return msg;
   // The probe refusal already carries the allowlist instruction — appending
   // the hint a second time duplicated it in the same message (D-BP-16).
-  if (/DATAFLOW_EGRESS_ALLOWLIST/i.test(msg)) return msg;
+  if (/_EGRESS_ALLOWLIST\b/i.test(msg)) return msg;
   const host = destHost || sourceHost || "";
   return (
     `${msg} — the destination host${host ? ` “${host}”` : ""} is blocked by ` +
     "the API's egress allowlist. Add the host to " +
-    "DATAFLOW_EGRESS_ALLOWLIST on the API service, or pick a reachable host."
+    "DATAWRAP_EGRESS_ALLOWLIST on the API service, or pick a reachable host."
   );
 }
 

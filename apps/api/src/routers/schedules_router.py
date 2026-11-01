@@ -444,13 +444,18 @@ async def schedule_intervals():
     }
 
 
-@router.get("/export/dataflow")
+@router.get("/export/manifest")
+@router.get("/export/dataflow")  # pre-rename path, kept for API and CLI clients
 def export_dataflow_manifest(
     request: Request,
     format: Literal["yaml", "json"] = "yaml",
     workspace_id: str = Header(default="", alias="X-Workspace-Id"),
 ):
-    """Export schedules (+ contracts) visible in this workspace as dataflow.yaml."""
+    """Export schedules (+ contracts) visible in this workspace as a GitOps manifest.
+
+    ``/export/manifest`` is the path the web app calls (QA r12 #4b: no old
+    brand in the bundle); ``/export/dataflow`` answers the same for older clients.
+    """
     from services.gitops_manifest import build_dataflow_manifest
     from services.team_store import require_workspace_isolation
 

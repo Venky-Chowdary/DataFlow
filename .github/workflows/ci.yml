@@ -507,6 +507,12 @@ jobs:
         working-directory: apps/web
         run: node scripts/check_chunk_budgets.mjs
 
+      - name: Bundle carries no old brand or hosting hostname (QA r12 #4b)
+        id: bundle_brand
+        if: ${{ !cancelled() && steps.web_build.outcome == 'success' }}
+        working-directory: apps/web
+        run: node scripts/check_bundle_brand.mjs
+
       - name: "!important ratchet (cascade budget)"
         id: important_budget
         if: ${{ !cancelled() && (success() || failure()) }}
@@ -541,9 +547,11 @@ jobs:
           chunks="${{ steps.chunk_budgets.outcome }}"
           imp="${{ steps.important_budget.outcome }}"
           a11y="${{ steps.a11y_hex.outcome }}"
+          brand="${{ steps.bundle_brand.outcome }}"
+          echo "bundle_brand=$brand"
           echo "api_tests=$api cdc_matrix=$cdc warehouse_sku=$wh transfer_ready_matrix=$trm frontend=$fe web_build=$web chunk_budgets=$chunks important_budget=$imp a11y_hex=$a11y"
           fail=0
-          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y"; do
+          for name_out in "api_tests:$api" "cdc_matrix:$cdc" "warehouse_sku:$wh" "transfer_ready_matrix:$trm" "frontend_tests:$fe" "web_build:$web" "chunk_budgets:$chunks" "important_budget:$imp" "a11y_hex:$a11y" "bundle_brand:$brand"; do
             name="${name_out%%:*}"
             out="${name_out##*:}"
             # skipped only acceptable when job cancelled mid-flight; otherwise require success
@@ -561,6 +569,7 @@ jobs:
           echo "- chunk_budgets: \`$chunks\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- important_budget: \`$imp\`" >> "$GITHUB_STEP_SUMMARY"
           echo "- a11y_hex: \`$a11y\`" >> "$GITHUB_STEP_SUMMARY"
+          echo "- bundle_brand: \`$brand\`" >> "$GITHUB_STEP_SUMMARY"
           if [ "$fail" -ne 0 ]; then
             echo "Red CI blocks merge — fix failing gates before claiming production readiness." >> "$GITHUB_STEP_SUMMARY"
             exit 1

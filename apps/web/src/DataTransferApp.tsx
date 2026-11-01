@@ -278,7 +278,7 @@ function AppShell({
         if (notifyOnError) {
           toast({
             title: "Control plane offline",
-            message: "Check the API URL (VITE_API_BASE / DATAFLOW_API_BASE) and deployment health.",
+            message: "Check the API URL (VITE_API_BASE / DATAWRAP_API_BASE) and deployment health.",
             tone: "error",
           });
         }

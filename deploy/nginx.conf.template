@@ -24,7 +24,7 @@ server {
     }
 
     # Same-origin API proxy so the browser can use /api/v1 without CORS.
-    # Upstream host comes from DATAFLOW_API_BASE / VITE_API_BASE at container start.
+    # Upstream host comes from DATAWRAP_API_BASE at container start (start-nginx.sh).
     location /api/ {
         proxy_pass ${API_PROXY_PASS};
         proxy_http_version 1.1;
