@@ -436,3 +436,38 @@ def test_failed_validation_keeps_destination_and_names_the_column(
     finally:
         _source_sql(engine, f"DROP TABLE IF EXISTS `{src_t}`, `{src_t}_wiki`")
         h.drop_table("postgresql", dst_t)
+
+
+def test_keep_is_limited_to_overwrite_and_can_be_turned_off(monkeypatch):
+    """An append keeps the old undo (its watermark assumes the batch is gone);
+    the operator flag restores drop-and-clear for an overwrite."""
+    from types import SimpleNamespace
+
+    from services.batch_undo import keep_failed_validation_for_inspection
+
+    dest = SimpleNamespace(kind="database", format="postgresql", extra={})
+    summary = {"dest_rows_before": 0, "dest_table_existed_before": False}
+    assert keep_failed_validation_for_inspection(
+        destination=dest, dest_summary=dict(summary), sync_mode="incremental_append",
+    ) == ""
+    monkeypatch.setenv("DATAFLOW_DROP_ON_VALIDATION_FAILURE", "1")
+    assert keep_failed_validation_for_inspection(
+        destination=dest, dest_summary=dict(summary), sync_mode="full_refresh_overwrite",
+    ) == ""
+
+
+def test_column_digests_name_only_the_differing_column():
+    from services.column_digest import ColumnDigests, differing_columns
+
+    src, dst = ColumnDigests(), ColumnDigests()
+    for i in range(500):
+        cell = "38" if i != 321 else "38.00"  # one cell rendered differently
+        src.add(f"a={i}\x1fb={cell}\x1fc=x")
+        dst.add(f"a={i}\x1fb=38\x1fc=x")
+    summary = {
+        "source_column_digests": {"checksum": "s", "columns": src.snapshot()},
+        "dest_column_digests": {"checksum": "t", "columns": dst.snapshot()},
+    }
+    assert differing_columns(summary, source_checksum="s", target_checksum="t") == ["b"]
+    # Digests of a different pair of row digests are never compared.
+    assert differing_columns(summary, source_checksum="other", target_checksum="t") is None

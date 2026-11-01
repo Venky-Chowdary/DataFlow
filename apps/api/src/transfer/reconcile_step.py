@@ -4055,13 +4055,46 @@ def _localize_checksum_mismatch(
         "keyed_sample_cells_without_mismatch": compared,
     }
     scope = f"{rows:,} row(s) / {compared:,} cell(s)" if rows else f"{compared:,} cell(s)"
-    report["mismatch_class"] = "comparison_basis_or_population_scope"
+    population = int(report.get("source_rows") or 0)
+    covered = (
+        f" — the sample covers {rows or compared:,} of {population:,} row(s), so it "
+        "cannot see a cell outside them"
+        if population > (rows or compared)
+        else ""
+    )
+    from services.column_digest import differing_columns
+
+    columns = differing_columns(
+        summary,
+        source_checksum=str(report.get("source_checksum") or ""),
+        target_checksum=str(report.get("target_checksum") or ""),
+    )
     report["digest_basis"] = basis
-    report["message"] = (
+    head = (
         f"{str(report.get('message') or '').rstrip()} No differing cell was found "
-        f"in {scope} of key-aligned data, so the two digests differ in how or "
-        f"over what they were taken, not in a sampled value — source digest "
-        f"{basis['source_digest'] or 'unknown'}"
+        f"in {scope} of key-aligned data{covered}."
+    )
+    if columns:
+        # Named from the same canonical cells the two digests hashed.
+        report["mismatch_class"] = "column_digest_difference"
+        report["digest_differing_columns"] = columns
+        report["message"] = (
+            f"{head} Per-column digests over the whole population differ on "
+            f"column(s) {', '.join(columns)}; every other column holds the same "
+            "values on both sides. Gate-8 still fails."
+        )
+        return report
+    report["mismatch_class"] = "comparison_basis_or_population_scope"
+    if columns == []:
+        report["digest_differing_columns"] = []
+        why = (
+            " Every column holds the same multiset of values on both sides, so "
+            "the digests differ in how cells pair into rows"
+        )
+    else:
+        why = " The two digests differ in how or over what they were taken"
+    report["message"] = (
+        f"{head}{why} — source digest {basis['source_digest'] or 'unknown'}"
         + (f", scope {basis['source_scope']}" if basis["source_scope"] else "")
         + ". Gate-8 still fails: an unexplained digest difference is not proof."
     )
@@ -4266,6 +4299,9 @@ def _report_culprit_keys(
                 f"({len(culprits[label])}{'+' if len(keys) > _CULPRIT_KEYS_LIMIT else ''} key(s))"
             )
     if not culprits:
+        # The census ran over both whole tables and every key matched. That
+        # is evidence, not an unreadable side — say so on the failure path.
+        report["culprit_census_clean"] = True
         return
     report["culprit_keys"] = culprits
     msg = str(report.get("message") or "")
@@ -4643,6 +4679,16 @@ def _attach_match_summary(
                 f"{first.get('source_value')!r} vs destination "
                 f"{first.get('target_value')!r} — a value that changed on write is "
                 "a transform or type decision, not a digest artefact."
+            ),
+        })
+    if report.get("digest_differing_columns"):
+        named = ", ".join(str(c) for c in report["digest_differing_columns"][:8])
+        actions.append({
+            "action": "open_map",
+            "label": f"Inspect column(s) {named}",
+            "why": (
+                "Per-column digests over every row differ only there: that "
+                "column's values were written or canonicalized differently."
             ),
         })
     if report.get("mismatch_class") == "comparison_basis_or_population_scope":
@@ -6942,6 +6988,9 @@ def _run_reconciliation_impl(
         # Always full-table first for SQL. Keyed batch proof is a fallback when the
         # sink legitimately has extras (upsert/append into non-empty) — never for a
         # first load where target_rows == source_rows (would fingerprint a sample).
+        from services.column_digest import clear_readback, stamp_readback
+
+        clear_readback()
         target_rows, target_checksum = verify_target(
             db_type,
             cfg,
@@ -6955,6 +7004,8 @@ def _run_reconciliation_impl(
             written_ids=None,
             pk_column=None,
         )
+        if isinstance(dest_summary, dict):
+            stamp_readback(dest_summary, target_checksum)
 
     if db_type == "pgvector":
         # Physical embedding COUNT(*) is chunk cardinality, not source-row
@@ -8222,7 +8273,18 @@ def run_reconciliation(
                 # census itself names the gate it hit (no recorded
                 # single-column PK, missing table names, no mappings); this
                 # fallback only covers an unreadable census driver.
-                if not recon.get("culprit_keys_unavailable_reason"):
+                if recon.get("culprit_census_clean"):
+                    # QA round 12: the census DID run and found every key
+                    # equal; claiming an unreadable driver sent the operator
+                    # after the wrong problem.
+                    recon["culprit_keys_unavailable_reason"] = (
+                        "no culprit key — a key census of every row on both "
+                        "sides found each key present with equal values under "
+                        "its own comparison, so the destination rows match the "
+                        "source and the digests differ in how a value was "
+                        "rendered"
+                    )
+                elif not recon.get("culprit_keys_unavailable_reason"):
                     recon["culprit_keys_unavailable_reason"] = (
                         "culprit keys could not be named — destination key "
                         "census requires both sides readable by a census "
