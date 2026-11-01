@@ -12,13 +12,15 @@ import {
   type MfaReauth,
 } from "../lib/mfaApi";
 import { Button } from "./ui/Button";
+import { QrCodeImage } from "./QrCode";
 
 /**
  * Set up an authenticator app: get a setup key, prove it with a code, save
  * the recovery codes. Shared by Settings → Security and the sign-in hold.
  *
- * No QR library ships with the web app, so the key is shown as text and as an
- * ``otpauth://`` link (which phone authenticator apps open directly).
+ * The ``otpauth://`` URI is rendered as a QR code generated in the browser —
+ * the secret never leaves the page. Manual entry stays as the fallback for
+ * password managers and apps without a camera.
  */
 export function TwoFactorSetup({
   proof,
@@ -104,9 +106,11 @@ export function TwoFactorSetup({
       <div>
         <h3>Add Datawrap to your authenticator app</h3>
         <p>
-          On your phone, <a href={enrollment.otpauth_uri}>open this setup link</a> or choose “Enter a setup key” in
-          your app and type the key below (account: <strong>{enrollment.account}</strong>, time-based).
+          Scan the QR code with your authenticator app (Google/Microsoft Authenticator, 1Password,
+          Authy), <a href={enrollment.otpauth_uri}>open this setup link</a> on your phone, or choose
+          “Enter a setup key” and type the key below (account: <strong>{enrollment.account}</strong>, time-based).
         </p>
+        <QrCodeImage value={enrollment.otpauth_uri} label={`Scan to add ${enrollment.account} to your authenticator app`} />
         <p className="df2-mono" aria-label="Setup key">{formatSetupKey(enrollment.secret)}</p>
         <label className="df2-label" htmlFor={`${idPrefix}-code`}>6-digit code from the app</label>
         <input

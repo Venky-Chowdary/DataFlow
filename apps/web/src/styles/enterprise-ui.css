@@ -1355,6 +1355,22 @@
   font-size: 11px;
 }
 
+.df2-qr {
+  display: block;
+  border: 1px solid var(--df-border, #e2e8f0);
+  border-radius: 8px;
+  padding: 8px;
+  background: #fff;
+  margin: 8px 0;
+}
+
+.df2-qr-placeholder {
+  border: 1px dashed var(--df-border, #e2e8f0);
+  border-radius: 8px;
+  background: var(--df-surface-subtle, #f8fafc);
+  margin: 8px 0;
+}
+
 .df2-gate8-proof {
   border: 1px solid #d1fae5;
   background: var(--df-success-bg);

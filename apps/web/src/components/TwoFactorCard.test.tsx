@@ -36,7 +36,7 @@ describe("TwoFactorCard", () => {
 });
 
 describe("TwoFactorSetup", () => {
-  it("shows the setup key, the otpauth link and a labelled code field", () => {
+  it("shows the QR placeholder, setup key, the otpauth link and a labelled code field", () => {
     const markup = renderToStaticMarkup(createElement(TwoFactorSetup, {
       onDone: () => undefined,
       initial: { enrollment: {
@@ -46,6 +46,9 @@ describe("TwoFactorSetup", () => {
     }));
     assert.match(markup, /JBSW Y3DP EHPK 3PXP JBSW/);
     assert.match(markup, /href="otpauth:\/\/totp\//);
+    // SSR has no effect loop, so the QR slot renders as its placeholder; the
+    // browser effect swaps in the generated image.
+    assert.match(markup, /df2-qr-placeholder/);
     assert.match(markup, /<label[^>]*for="mfa-setup-code"/);
     assert.match(markup, /id="mfa-setup-code"/);
     assert.match(markup, /autoComplete="one-time-code"|autocomplete="one-time-code"/);
