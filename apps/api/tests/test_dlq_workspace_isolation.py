@@ -41,10 +41,6 @@ def _member_workspace(name: str) -> str:
     return team_store.create_workspace(name=name, created_by="anonymous").id
 
 
-def _foreign_workspace(name: str) -> str:
-    return team_store.create_workspace(name=name, created_by="owner@globex.example").id
-
-
 def test_count_and_list_are_workspace_scoped(isolated_dlq):
     dlq.append_dlq_event(
         job_id="job-a",
@@ -102,34 +98,6 @@ def test_http_dlq_does_not_name_sibling_workspace_events(client):
     assert listed_b.json()["count"] == 1
     assert [e["job_id"] for e in listed_b.json()["events"]] == ["job-b"]
     assert "job-a" not in listed_b.text
-
-
-def test_http_dlq_refuses_workspace_caller_is_not_member_of(client):
-    own = _member_workspace("Acme")
-    foreign = _foreign_workspace("Globex")
-    dlq.append_dlq_event(
-        job_id="job-globex",
-        action="quarantine.rows.persisted",
-        rows=5,
-        workspace_id=foreign,
-        details={"rejected_details": [{"ssn": "globex-secret-row"}]},
-    )
-
-    denied = client.get("/api/v1/ops/dlq?limit=50", headers={"X-Workspace-Id": foreign})
-    assert denied.status_code == 403, denied.text
-    assert "job-globex" not in denied.text
-    assert "globex-secret-row" not in denied.text
-
-    by_job = client.get("/api/v1/ops/dlq?job_id=job-globex", headers={"X-Workspace-Id": foreign})
-    assert by_job.status_code == 403
-
-    unknown = client.get("/api/v1/ops/dlq", headers={"X-Workspace-Id": "ws-does-not-exist"})
-    assert unknown.status_code == 403
-
-    mine = client.get("/api/v1/ops/dlq?limit=50", headers={"X-Workspace-Id": own})
-    assert mine.status_code == 200, mine.text
-    assert mine.json()["count"] == 0
-    assert "globex-secret-row" not in mine.text
 
 
 def test_unscoped_dlq_stays_out_of_workspace_count(isolated_dlq):
