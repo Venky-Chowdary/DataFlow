@@ -12,6 +12,9 @@ no index, collection or file is created.
 
     # also recompute each record's HMAC with the keys in this shell's env
     # (DATAFLOW_AUDIT_HMAC_KEY, DATAFLOW_AUDIT_HMAC_RETIRED_KEYS, DATAFLOW_AUTH_SECRET)
+    # and the deployment's persisted keyring (``audit_chain_keys``, decrypted
+    # with this shell's DATAFLOW_SECRETS_KEY / AUTH_SECRET, read like any other
+    # collection: through the read-only wrapper)
     python scripts/audit_chain_check.py --db datatransfer --hmac --json
 
 The Mongo URI comes from ``--uri`` or, like the API, from ``MONGODB_URI`` /
@@ -86,6 +89,34 @@ def _keys_from_env() -> dict[str, Any]:
     return {"current": current, "retired": retired, "login": legacy}
 
 
+def _keys_from_keyring(coll: ReadOnlyCollection) -> dict[str, Any]:
+    """The persisted keyring (QA r12 #3), read-only: one ``find``, decrypt in memory.
+
+    Returns ``{"current_key_id", "keys": {key_id: key}, "unreadable": [key_id]}``.
+    An entry that cannot be decrypted (another secrets key) or whose material
+    does not match its id is listed as unreadable, never guessed.
+    """
+    from services.audit_chain_keystore import DOC_ID
+    from services.secret_vault import decrypt_secret
+
+    out: dict[str, Any] = {"current_key_id": None, "keys": {}, "unreadable": []}
+    doc = next(iter(coll.find({"_id": DOC_ID}).limit(1)), None)
+    if not isinstance(doc, dict):
+        return out
+    out["current_key_id"] = doc.get("current_key_id")
+    for entry in doc.get("keys") or []:
+        kid = str(entry.get("key_id") or "")
+        try:
+            plain = decrypt_secret(str(entry.get("key_enc") or "")).encode("utf-8")
+        except Exception:  # noqa: BLE001 - reported, not fatal
+            plain = b""
+        if plain and key_id_for(plain) == kid:
+            out["keys"][kid] = plain
+        else:
+            out["unreadable"].append(kid)
+    return out
+
+
 def _count_groups(coll: ReadOnlyCollection, field: str, match: dict[str, Any]) -> dict[str, Any]:
     rows = list(
         coll.aggregate(
@@ -146,11 +177,15 @@ def hmac_report(coll: ReadOnlyCollection, keys: dict[str, Any]) -> dict[str, Any
     """Which key, if any, reproduces each record's stored HMAC."""
     current = keys["current"]
     ring = {key_id_for(k): k for k in keys["retired"]}
+    kept = dict((keys.get("keyring") or {}).get("keys") or {})
+    for kid, key in kept.items():
+        ring.setdefault(kid, key)
     if current:
         ring[key_id_for(current)] = current
     counts = {
         "verified_under_current_key": 0,
         "verified_under_retired_key": 0,
+        "verified_under_keyring_key": 0,
         "verified_under_legacy_login_secret": 0,
         "verified_under_no_configured_key": 0,
         "key_id_not_held": 0,
@@ -168,8 +203,10 @@ def hmac_report(coll: ReadOnlyCollection, keys: dict[str, Any]) -> dict[str, Any
                 counts["key_id_not_held"] += 1
             elif hmac_hex(doc, key) != stored:
                 counts["verified_under_no_configured_key"] += 1
-            elif current and key == current:
+            elif key == current:
                 counts["verified_under_current_key"] += 1
+            elif str(kid) in kept and key not in keys["retired"]:
+                counts["verified_under_keyring_key"] += 1
             else:
                 counts["verified_under_retired_key"] += 1
             continue
@@ -192,6 +229,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--uri", default="", help="Mongo URI (default: MONGODB_URI / MONGO_URL env)")
     parser.add_argument("--db", default="datatransfer", help="database name (default: datatransfer)")
     parser.add_argument("--collection", default="audit_events")
+    parser.add_argument(
+        "--keyring-collection", default="audit_chain_keys",
+        help="persisted audit keyring collection (read-only; default: audit_chain_keys)",
+    )
     parser.add_argument("--hmac", action="store_true", help="also recompute HMACs with env keys")
     parser.add_argument("--json", action="store_true", help="print JSON only")
     args = parser.parse_args(argv)
@@ -212,12 +253,22 @@ def main(argv: list[str] | None = None) -> int:
     )
     coll = ReadOnlyCollection(db[args.collection])
     keys = _keys_from_env()
-    current_kid = key_id_for(keys["current"]) if keys["current"] else None
+    keyring = _keys_from_keyring(ReadOnlyCollection(db[args.keyring_collection]))
+    keys["keyring"] = keyring
+    if not keys["current"]:
+        # No configured key: the deployment signs with the keyring's current key.
+        keys["current"] = keyring["keys"].get(str(keyring["current_key_id"] or ""))
+    current_kid = key_id_for(keys["current"]) if keys["current"] else keyring["current_key_id"]
     report: dict[str, Any] = {
         "read_only": True,
         "database": args.db,
         "collection": args.collection,
         **structure_report(coll, current_kid),
+        "keyring": {
+            "current_key_id": keyring["current_key_id"],
+            "held_key_ids": sorted(keyring["keys"]),
+            "unreadable_key_ids": keyring["unreadable"],
+        },
     }
     if args.hmac:
         report["hmac"] = hmac_report(coll, keys)

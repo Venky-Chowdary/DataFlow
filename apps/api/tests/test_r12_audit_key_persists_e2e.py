@@ -321,3 +321,90 @@ def test_records_under_a_lost_key_are_reported_apart_from_tampering_never_as_ver
     assert report["verified"] is True, report["findings"][:3]
     assert report["status"] == "verified"
     assert report["unverifiable_key_lost"]["count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# Owner tooling: the read-only production check and the rotation script
+# ---------------------------------------------------------------------------
+
+
+def _script_env(ent) -> dict:
+    env = {
+        k: v for k, v in os.environ.items()
+        if not k.endswith(("_AUDIT_HMAC_KEY", "_AUDIT_HMAC_RETIRED_KEYS"))
+    }
+    env.update(
+        {
+            "MONGODB_URI": MONGO_URI,
+            "PYTHONPATH": os.pathsep.join([str(REPO_ROOT / "packages" / "preflight" / "src"), str(API_ROOT)]),
+        }
+    )
+    return env
+
+
+def _run(ent, script: str, *args: str) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        [sys.executable, str(API_ROOT / "scripts" / script), "--db", ent.db.name, *args],
+        cwd=str(API_ROOT), env=_script_env(ent), capture_output=True, text=True, timeout=120,
+    )
+
+
+def _snapshot(ent) -> dict:
+    db = ent.db
+    return {
+        "collections": sorted(db.list_collection_names()),
+        "audit": sorted(map(str, db["audit_events"].find({}))),
+        "keyring": sorted(map(str, db["audit_chain_keys"].find({}))),
+        "indexes": {
+            name: sorted(i["name"] for i in db[name].list_indexes())
+            for name in ("audit_events", "audit_chain_keys")
+        },
+    }
+
+
+def test_rotation_script_is_admin_only_audited_and_the_check_holds_keyring_keys(ent, monkeypatch):
+    import json
+
+    _write(2, action="r12.before.script.rotation")
+    old_kid = _records(ent, "r12.before.script.rotation")[0]["key_id"]
+
+    # Not a platform admin: refused, and the refusal is on the chain.
+    member = f"r12-member-{uuid.uuid4().hex[:6]}@example.com"
+    ent.member(email=member, workspace_id=ent.workspace("R12 script"), role="admin")
+    refused = _run(ent, "rotate_audit_chain_key.py", "--actor", member, "--reason", "routine rotation test")
+    assert refused.returncode == 3, refused.stderr
+    assert ent.db["audit_events"].count_documents({"action": "audit.chain_key.rotate.denied"}) == 1
+    short = _run(ent, "rotate_audit_chain_key.py", "--actor", "root-admin@example.com", "--reason", "x")
+    assert short.returncode == 2
+
+    done = _run(ent, "rotate_audit_chain_key.py", "--actor", "root-admin@example.com",
+                "--reason", "Quarterly rotation – naïve ✓")
+    assert done.returncode == 0, done.stderr
+    out = json.loads(done.stdout)
+    assert out["previous_key_id"] == old_kid and out["new_key_id"] != old_kid
+    event = ent.db["audit_events"].find_one({"action": "audit.chain_key.rotated"})
+    assert event["actor"] == "root-admin@example.com"
+    assert event["details"]["reason"] == "Quarterly rotation – naïve ✓"
+    assert event["details"]["new_key_id"] == out["new_key_id"]
+
+    _forget_process_keys()
+    _write(2, action="r12.after.script.rotation")
+    assert {r["key_id"] for r in _records(ent, "r12.after.script.rotation")} == {out["new_key_id"]}
+
+    # The production check, with no key in its env: keyring keys are held.
+    before = _snapshot(ent)
+    check = _run(ent, "audit_chain_check.py", "--json", "--hmac")
+    assert check.returncode == 0, check.stderr
+    report = json.loads(check.stdout)
+    assert report["read_only"] is True
+    assert report["keyring"]["current_key_id"] == out["new_key_id"]
+    assert {old_kid, out["new_key_id"]} <= set(report["keyring"]["held_key_ids"])
+    assert report["keyring"]["unreadable_key_ids"] == []
+    hmac = report["hmac"]
+    assert hmac["key_id_not_held"] == 0, hmac
+    assert hmac["verified_under_no_configured_key"] == 0, hmac
+    assert hmac["verified_under_keyring_key"] >= 2, hmac   # the old key's records
+    assert hmac["verified_under_current_key"] >= 3, hmac   # rotation event + 2 writes
+    for doc in ent.db["audit_chain_keys"].find({}):
+        assert doc["keys"][0]["key_enc"] not in check.stdout
+    assert _snapshot(ent) == before, "the check wrote to the database"
