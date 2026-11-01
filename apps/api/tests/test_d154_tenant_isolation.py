@@ -138,7 +138,8 @@ def tenants(tmp_path, monkeypatch):
     usage_metering.record_transfer_usage(job_id=legacy_job, workspace_id="", rows_written=11)
     audit_log.append_audit_event(action=f"a.action.{tag}", resource="x", actor=a_email, workspace_id=ws_a)
     audit_log.append_audit_event(action=f"legacy.action.{tag}", resource="x", actor=a_email)
-    quarantine_dlq.append_dlq_event(job_id=a_job, action="quarantine.fail", rows=3, workspace_id=ws_a)
+    quarantine_dlq.append_dlq_event(job_id=a_job, action="quarantine.fail", rows=3, workspace_id=ws_a,
+                                    details={"rejected_details": [{"ssn": f"a-secret-row-{tag}"}]})
     quarantine_dlq.append_dlq_event(job_id=legacy_job, action="quarantine.fail", rows=5)
     ops_metrics.record_cdc_poll(lag_seconds=500.0, job_id=a_job, schedule_id=a_schedule,
                                 stream="orders", workspace_id=ws_a)
@@ -205,6 +206,12 @@ def test_fresh_account_sees_none_of_another_accounts_data(tenants):
                  "/api/v1/ops/dlq", "/api/v1/ops/freshness"):
         assert b.get(path, headers=forced).status_code == 403, path
     assert b.get(f"/api/v1/usage/summary?workspace_id={t['ws_a']}").status_code == 403
+    # A job_id filter on the DLQ does not get around the membership check.
+    by_job = b.get(f"/api/v1/ops/dlq?job_id={t['a_job']}", headers=forced)
+    assert by_job.status_code == 403
+    assert f"a-secret-row-{t['tag']}" not in by_job.text
+    assert b.get("/api/v1/ops/dlq", headers={"X-Workspace-Id": "ws-does-not-exist"}).status_code == 403
+    assert b.get("/api/v1/ops/freshness", headers={"X-Workspace-Id": "ws-does-not-exist"}).status_code == 403
 
     # Id-addressed reads of A's and of the legacy resources.
     for headers in ({}, {"X-Workspace-Id": t["ws_b"]}):
