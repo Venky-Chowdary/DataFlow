@@ -30,6 +30,7 @@ from services.copy_mysql_pg import (
     _pg_range_count,
     fast_copy_text_value,
 )
+from services.copy_sql_pairs import pg_ident as _pg_ident
 from services.copy_pg_mysql import (
     _jsonable_bound,
     _pg_quoted_literal,
@@ -83,10 +84,6 @@ def sqlserver_type_is_copy_safe(declared: str) -> bool:
         return False
     base = raw.split("(")[0].strip()
     return base not in _UNSAFE_SS_BASES
-
-
-def _pg_ident(name: str) -> str:
-    return _quote(name)
 
 
 def _close_ss(conn: Any) -> None:

@@ -29,6 +29,7 @@ from services.copy_pg_mysql import (
     mapping_is_plain_carry,
     pg_type_is_load_safe,
 )
+from services.copy_sql_pairs import pg_ident as _pg_ident
 from services.copy_s3_common import (
     commit_local_object,
     s3_delete_keys,
@@ -49,12 +50,6 @@ def pg_s3_copy_enabled() -> bool:
 
 def pg_s3_type_is_copy_safe(declared: str) -> bool:
     return pg_type_is_load_safe(declared)
-
-
-def _pg_ident(name: str) -> str:
-    from services.copy_fast_path import _quote
-
-    return _quote(name)
 
 
 def _pg_csv_export_expr(source: str, declared: str, target: str) -> str:

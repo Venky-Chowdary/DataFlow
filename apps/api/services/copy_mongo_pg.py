@@ -35,6 +35,7 @@ from services.copy_pg_mongo import mongo_collection, pg_mongo_type_is_copy_safe
 from services.copy_pg_mysql import mapping_is_plain_carry
 
 logger = logging.getLogger(__name__)
+from services.copy_sql_pairs import pg_ident as _pg_ident
 
 _READ_CHUNK = 1 << 20
 _FIND_BATCH = 4096
@@ -83,10 +84,6 @@ def mongo_type_is_copy_safe(declared: str) -> bool:
         "integer",
         "number",
     }
-
-
-def _pg_ident(name: str) -> str:
-    return _quote(name)
 
 
 def _bson_to_copy_cell(value: Any, ddl: str) -> str:

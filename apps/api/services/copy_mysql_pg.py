@@ -48,6 +48,12 @@ from services.copy_pg_mysql import (
 )
 
 from services.copy_range_proof import range_keys_match  # noqa: E402
+from services.copy_sql_pairs import (  # noqa: E402
+    mysql_ident as _mysql_ident,
+    mysql_write_conn as _mysql_connect,
+    pg_ident as _pg_ident,
+    pg_write_conn as _pg_connect,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -121,16 +127,6 @@ def mysql_time_column_out_of_range(
         if int(src_cur.fetchone()[0]) > 0:
             return src_col
     return None
-
-
-def _mysql_ident(name: str) -> str:
-    from connectors.sql_identifiers import quote_sql_identifier
-
-    return quote_sql_identifier(name, "`")
-
-
-def _pg_ident(name: str) -> str:
-    return _quote(name)
 
 
 def _pg_create_sql(
@@ -267,39 +263,6 @@ def _fifo_mysql_into_pg(
     stream_between_cursors(
         prefix="df_mysql_pg_", producer=_produce, consumer=_consume
     )
-
-
-def _mysql_connect(cfg: dict[str, Any]) -> Any:
-    from connectors.mysql_conn import get_connection as mysql_connect
-
-    conn = mysql_connect(
-        host=cfg.get("host", ""),
-        port=int(cfg.get("port") or 3306),
-        database=cfg.get("database", ""),
-        username=cfg.get("username") or cfg.get("user") or "",
-        password=cfg.get("password", ""),
-        connection_string=cfg.get("connection_string", ""),
-        ssl=bool(cfg.get("ssl", False)),
-        purpose="write",
-    )
-    conn.autocommit = False
-    return conn
-
-
-def _pg_connect(cfg: dict[str, Any]) -> Any:
-    from connectors.postgresql_conn import get_connection as pg_connect
-
-    conn = pg_connect(
-        host=cfg.get("host", ""),
-        port=int(cfg.get("port") or 5432),
-        database=cfg.get("database") or cfg.get("dbname") or "",
-        username=cfg.get("username") or cfg.get("user") or "",
-        password=cfg.get("password", ""),
-        connection_string=cfg.get("connection_string", ""),
-        ssl=bool(cfg.get("ssl", False)),
-    )
-    conn.autocommit = False
-    return conn
 
 
 def fetch_mysql_pk_interior_cuts(

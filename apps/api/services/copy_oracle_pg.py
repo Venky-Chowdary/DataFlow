@@ -33,6 +33,7 @@ from services.copy_mysql_pg import (
     _pg_create_sql,
     _pg_range_count,
 )
+from services.copy_sql_pairs import pg_ident as _pg_ident
 from services.copy_oracle_oracle import (
     _count as _ora_count,
     _ident as _ora_ident,
@@ -89,10 +90,6 @@ def oracle_type_is_copy_safe(declared: str) -> bool:
         return False
     base = raw.split("(")[0].strip().replace(" ", "")
     return base not in _UNSAFE_ORA_BASES
-
-
-def _pg_ident(name: str) -> str:
-    return _quote(name)
 
 
 def _select_sql(table_ref: str, source_cols: list[str], clause: str) -> str:

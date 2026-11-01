@@ -31,6 +31,7 @@ from services.copy_pg_iceberg import iceberg_copy_endpoint
 from services.copy_pg_mysql import mapping_is_plain_carry
 
 logger = logging.getLogger(__name__)
+from services.copy_sql_pairs import pg_ident as _pg_ident
 
 _READ_CHUNK = 1 << 20
 _ARROW_BATCH = 8192
@@ -91,10 +92,6 @@ def iceberg_type_is_copy_safe(declared: str) -> bool:
         "doubleprecision",
         "bool",
     }
-
-
-def _pg_ident(name: str) -> str:
-    return _quote(name)
 
 
 class _ArrowCopyReader:

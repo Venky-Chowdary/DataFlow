@@ -32,6 +32,7 @@ from services.copy_s3_common import (
     s3_file_has_legacy_null,
     s3_list_keys,
 )
+from services.copy_sql_pairs import pg_ident as _pg_ident
 
 logger = logging.getLogger(__name__)
 
@@ -39,10 +40,6 @@ logger = logging.getLogger(__name__)
 def s3_pg_copy_enabled() -> bool:
     raw = (getenv_brand("S3_PG_COPY", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
-
-
-def _pg_ident(name: str) -> str:
-    return _quote(name)
 
 
 def _census_csv_cells(path: str, ext: str, key: str, pg_ddls: list[str]) -> None:

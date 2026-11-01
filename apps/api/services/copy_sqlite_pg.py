@@ -31,6 +31,7 @@ from services.copy_fast_path import (
     _quote,
     settle_fast_path_create_on,
 )
+from services.copy_sql_pairs import pg_ident as _pg_ident
 from services.copy_fast_path import _table_ref as _pg_table_ref
 from services.copy_mysql_pg import _pg_connect, _pg_create_sql, fast_copy_text_value
 from services.copy_pg_mysql import mapping_is_plain_carry
@@ -57,10 +58,6 @@ _FETCH_BATCH = 8192
 def sqlite_pg_copy_enabled() -> bool:
     raw = (getenv_brand("SQLITE_PG_COPY", "1") or "1").strip().lower()
     return raw not in {"0", "false", "no", "off"}
-
-
-def _pg_ident(name: str) -> str:
-    return _quote(name)
 
 
 def _pg_ddl_is_timestamptz(ddl: str) -> bool:

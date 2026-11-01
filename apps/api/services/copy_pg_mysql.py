@@ -49,7 +49,12 @@ from services.copy_fast_path import (
 )
 from services.engine_checksum import _NO_OP_TYPE_TRANSFORMS
 
-from services.copy_range_proof import range_keys_match  # noqa: E402
+from services.copy_range_proof import range_keys_match
+from services.copy_sql_pairs import (
+    mysql_ident as _mysql_ident,
+    mysql_write_conn as _mysql_connect,
+    pg_write_conn as _pg_connect,
+)  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
@@ -383,12 +388,6 @@ def _pg_copy_select_expr(column: str, declared: str) -> str:
     return ident
 
 
-def _mysql_ident(name: str) -> str:
-    from connectors.writer_common import quote_sql_identifier
-
-    return quote_sql_identifier(name, "`")
-
-
 def _mysql_create_sql(
     table: str,
     pairs: list[tuple[str, str]],
@@ -486,37 +485,6 @@ def _fifo_copy_into_mysql(
     stream_between_cursors(
         prefix="df_pg_mysql_", producer=_produce, consumer=_consume
     )
-
-
-def _pg_connect(cfg: dict[str, Any]) -> Any:
-    from connectors.postgresql_conn import get_connection as pg_connect
-
-    return pg_connect(
-        host=cfg.get("host", ""),
-        port=int(cfg.get("port") or 5432),
-        database=cfg.get("database") or cfg.get("dbname") or "",
-        username=cfg.get("username") or cfg.get("user") or "",
-        password=cfg.get("password", ""),
-        connection_string=cfg.get("connection_string", ""),
-        ssl=bool(cfg.get("ssl", False)),
-    )
-
-
-def _mysql_connect(cfg: dict[str, Any]) -> Any:
-    from connectors.mysql_conn import get_connection as mysql_connect
-
-    conn = mysql_connect(
-        host=cfg.get("host", ""),
-        port=int(cfg.get("port") or 3306),
-        database=cfg.get("database", ""),
-        username=cfg.get("username") or cfg.get("user") or "",
-        password=cfg.get("password", ""),
-        connection_string=cfg.get("connection_string", ""),
-        ssl=bool(cfg.get("ssl", False)),
-        purpose="write",
-    )
-    conn.autocommit = False
-    return conn
 
 
 def _heap_relpages(cur: Any, schema: str, table: str) -> int:
