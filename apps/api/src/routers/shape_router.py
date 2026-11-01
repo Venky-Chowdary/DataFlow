@@ -19,7 +19,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Header, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from services.canvas_capability import canvas_capability
@@ -29,6 +29,11 @@ from services.shape_expr import ExpressionError, compile_expression, describe_fu
 from services.shape_models import MAX_STEPS, ShapeError, ShapeRecipe, describe_catalog
 from services.shape_preflight import shaped_column_types
 from services.shape_suggest import profile_columns, suggest_steps
+from services.workspace_access import (
+    assert_resource_workspace,
+    resolve_read_workspace,
+    resolve_write_workspace,
+)
 
 router = APIRouter(prefix="/shape", tags=["Shape"])
 
@@ -587,21 +592,34 @@ class _DraftBody(BaseModel):
 
 
 @router.get("/drafts")
-async def get_shape_draft(route_key: str = "") -> dict[str, Any]:
+async def get_shape_draft(
+    request: Request,
+    route_key: str = "",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
     from services.shape_draft_store import load_shape_draft
 
-    found = load_shape_draft(route_key)
+    ws = resolve_read_workspace(request, workspace_id)
+    found = load_shape_draft(route_key, workspace_id=ws)
+    if found is not None:
+        assert_resource_workspace(request, str(found.get("workspace_id") or ""))
     return {"draft": found}
 
 
 @router.put("/drafts")
-async def put_shape_draft(body: _DraftBody) -> dict[str, Any]:
+async def put_shape_draft(
+    body: _DraftBody,
+    request: Request,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
     from services.shape_draft_store import save_shape_draft
 
+    ws = resolve_write_workspace(request, workspace_id)
     try:
         draft = save_shape_draft(
             route_key=body.route_key,
             recipe=body.recipe,
+            workspace_id=ws,
             source_columns=body.source_columns,
             canvas_layout=body.canvas_layout,
         )
@@ -611,10 +629,15 @@ async def put_shape_draft(body: _DraftBody) -> dict[str, Any]:
 
 
 @router.delete("/drafts")
-async def delete_shape_draft(route_key: str = "") -> dict[str, Any]:
+async def delete_shape_draft(
+    request: Request,
+    route_key: str = "",
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+) -> dict[str, Any]:
     from services.shape_draft_store import delete_shape_draft as drop
 
-    drop(route_key)
+    ws = resolve_write_workspace(request, workspace_id)
+    drop(route_key, workspace_id=ws)
     return {"deleted": True}
 
 
