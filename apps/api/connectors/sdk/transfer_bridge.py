@@ -34,6 +34,17 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
     extra = config.get("extra")
     if isinstance(extra, Mapping):
         config.update(extra)
+    # resolve_connector_config seeds every field (username/password/api_key/...)
+    # with None or "" when the endpoint leaves it unset. setdefault() only fills
+    # MISSING keys, so a stored empty value would block every credential
+    # derivation below — e.g. zendesk's api_key→password mapping could never
+    # fire and the connector died with "credentials are not configured"
+    # despite a valid key.
+    config = {
+        key: value
+        for key, value in config.items()
+        if value is not None and value != ""
+    }
     if driver == "jira":
         if not config.get("email"):
             config["email"] = config.get("username", "")

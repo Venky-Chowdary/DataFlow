@@ -364,7 +364,7 @@ class DeclarativeSource(BaseConnector):
         request_url = endpoint
         if paginator.type == "cursor" and current_state.page_token is not None:
             paginator = replace(paginator, initial_token=str(current_state.page_token))
-        elif paginator.type == "link_header" and current_state.page_token:
+        elif paginator.type in {"link_header", "next_url"} and current_state.page_token:
             request_url = str(current_state.page_token)
             base, resumed = urlsplit(endpoint), urlsplit(request_url)
             if (base.scheme.lower(), base.netloc.lower()) != (
@@ -488,7 +488,7 @@ class DeclarativeSource(BaseConnector):
             for page in page_iterator:
                 page_token: Any = (
                     page.next_url
-                    if paginator.type == "link_header"
+                    if paginator.type in {"link_header", "next_url"}
                     else page.next_token
                 )
                 if stream_spec.cursor:

@@ -57,6 +57,26 @@ def _records(kind: str, start: int, count: int) -> list[dict]:
                     },
                 }
             )
+        elif kind == "slack":
+            records.append(
+                {
+                    "id": f"U{value:05d}",
+                    "name": f"slack-user-{value}",
+                    "real_name": f"Slack User {value}",
+                    "is_bot": False,
+                    "deleted": False,
+                    "updated": 1767225600,
+                }
+            )
+        elif kind == "zendesk":
+            records.append(
+                {
+                    "id": value,
+                    "subject": f"Zendesk ticket {value}",
+                    "status": "open",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }
+            )
         else:
             records.append(
                 {
@@ -87,6 +107,17 @@ def _endpoint(kind: str, base_url: str, destination: Path) -> EndpointConfig:
             "api_token": _SECRET,
         }
         stream = "issues"
+    elif kind == "slack":
+        extra = {"base_url": base_url, "access_token": _SECRET}
+        stream = "users"
+    elif kind == "zendesk":
+        extra = {
+            "base_url": base_url,
+            "domain": "synthetic",
+            "username": "fixture@example.test",
+            "api_key": _SECRET,
+        }
+        stream = "tickets"
     else:
         extra = {"base_url": base_url, "access_token": _SECRET}
         stream = "contacts"
@@ -138,6 +169,38 @@ def _configure_route(
             body={"issues": pages[1], "nextPageToken": "jira-page-3"}
         )
         last = FixtureResponse(body={"issues": pages[2], "isLast": True})
+    elif kind == "slack":
+        route = "/users.list"
+        first = FixtureResponse(
+            body={
+                "members": pages[0],
+                "response_metadata": {"next_cursor": "slack-cur-2"},
+            }
+        )
+        second = FixtureResponse(
+            body={
+                "members": pages[1],
+                "response_metadata": {"next_cursor": "slack-cur-3"},
+            }
+        )
+        last = FixtureResponse(
+            body={"members": pages[2], "response_metadata": {}}
+        )
+    elif kind == "zendesk":
+        route = "/tickets"
+        first = FixtureResponse(
+            body={
+                "tickets": pages[0],
+                "next_page": f"{fixture.base_url}/tickets?page=2",
+            }
+        )
+        second = FixtureResponse(
+            body={
+                "tickets": pages[1],
+                "next_page": f"{fixture.base_url}/tickets?page=3",
+            }
+        )
+        last = FixtureResponse(body={"tickets": pages[2], "next_page": None})
     else:
         route = "/contacts"
         first = FixtureResponse(
@@ -182,11 +245,17 @@ def _seed_nonempty_destination(
         "github": "/repos/acme/widgets/issues",
         "jira": "/rest/api/3/search/jql",
         "intercom": "/contacts",
+        "slack": "/users.list",
+        "zendesk": "/tickets",
     }[kind]
     if kind == "github":
         body = record
     elif kind == "jira":
         body = {"issues": record, "isLast": True}
+    elif kind == "slack":
+        body = {"members": record, "response_metadata": {}}
+    elif kind == "zendesk":
+        body = {"tickets": record, "next_page": None}
     else:
         body = {"data": record, "pages": {}}
     fixture.add_route(route, responses=[FixtureResponse(body=body)])
@@ -223,7 +292,7 @@ def _sample_row(path: Path, table: str, row_id: int | str) -> str:
     return json.dumps(row, default=str)
 
 
-@pytest.mark.parametrize("kind", ["github", "jira"])
+@pytest.mark.parametrize("kind", ["github", "jira", "slack", "zendesk"])
 def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
     kind: str,
     tmp_path: Path,
@@ -238,7 +307,9 @@ def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
     monkeypatch.setenv("RETRY_MAX_DELAY_SECONDS", "0")
     monkeypatch.setenv("RETRY_JITTER", "false")
 
-    stream = "contacts" if kind == "intercom" else "issues"
+    stream = {"intercom": "contacts", "slack": "users", "zendesk": "tickets"}.get(
+        kind, "issues"
+    )
     pages = [
         _records(kind, 1, 100),
         _records(kind, 101, 100),
@@ -304,22 +375,32 @@ def test_sdk_transfer_engine_pages_full_reread_upsert_without_duplicates(
             assert "page=2" not in first_retry_request
         elif kind == "jira":
             assert "nextPageToken" not in first_retry_request
+        elif kind == "slack":
+            assert "cursor=" not in first_retry_request
+        elif kind == "zendesk":
+            assert "?page=" not in first_retry_request
         else:
             assert "starting_after" not in first_retry_request
         rows = _table_rows(destination_path, stream)
         assert len(rows) == expected_count
         assert len(set(rows)) == expected_count
-        assert int(rows[0][0]) == 1
-        assert int(rows[-1][0]) == 250
+        if kind == "slack":
+            assert rows[0][0] == "U00001"
+            assert rows[-1][0] == "U00250"
+        else:
+            assert int(rows[0][0]) == 1
+            assert int(rows[-1][0]) == 250
         sample = _sample_row(
             destination_path,
             stream,
-            1 if kind == "github" else "1",
+            1 if kind in {"github", "zendesk"} else ("U00001" if kind == "slack" else "1"),
         )
         expected_sample = {
             "github": "GitHub issue 1",
             "jira": "Jira issue 1",
             "intercom": "Intercom contact 1",
+            "slack": "Slack User 1",
+            "zendesk": "Zendesk ticket 1",
         }[kind]
         assert expected_sample in sample
 
