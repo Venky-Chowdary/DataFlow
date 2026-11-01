@@ -148,6 +148,126 @@ def test_live_pg_not_null_holdout_dest_count(tmp_path, monkeypatch):
         _pg_drop(src, model_name, q_table)
 
 
+MYSQL = dict(
+    host="localhost",
+    port=3306,
+    database="dataflow",
+    username="dataflow",
+    password="dataflow",
+)
+
+
+def _my_connect():
+    import pymysql
+
+    conn = pymysql.connect(
+        host=MYSQL["host"],
+        port=MYSQL["port"],
+        user=MYSQL["username"],
+        password=MYSQL["password"],
+        database=MYSQL["database"],
+        autocommit=True,
+    )
+    return conn
+
+
+def _my_count(table: str) -> int:
+    conn = _my_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT COUNT(*) FROM information_schema.tables "
+                "WHERE table_schema = DATABASE() AND table_name = %s",
+                (table,),
+            )
+            if int(cur.fetchone()[0]) == 0:
+                return 0
+            cur.execute(f"SELECT COUNT(*) FROM `{table}`")
+            return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _my_nulls(table: str, column: str) -> int:
+    conn = _my_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"SELECT COUNT(*) FROM `{table}` WHERE `{column}` IS NULL")
+            return int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+
+def _my_drop(*tables: str) -> None:
+    conn = _my_connect()
+    try:
+        with conn.cursor() as cur:
+            for table in tables:
+                cur.execute(f"DROP TABLE IF EXISTS `{table}`")
+    finally:
+        conn.close()
+
+
+@pytest.mark.skipif(not _reachable("127.0.0.1", 3306), reason="MySQL not reachable")
+def test_live_mysql_not_null_holdout_dest_count(tmp_path, monkeypatch):
+    """Same hold-out contract on a live MySQL mart: violators land in the
+    dest DLQ table and are DELETEed from the mart only after the DLQ write."""
+    import services.quarantine_dlq as dlq
+
+    monkeypatch.setattr(dlq, "DLQ_PATH", tmp_path / "q.jsonl")
+    suffix = uuid.uuid4().hex[:8]
+    src = f"xf_src_{suffix}"
+    model_name = f"stg_xf_{suffix}"
+    q_table = f"{model_name}_df_quarantine"
+    conn = _my_connect()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(f"DROP TABLE IF EXISTS `{src}`")
+            cur.execute(f"CREATE TABLE `{src}` (id INTEGER, email TEXT)")
+            cur.execute(
+                f"INSERT INTO `{src}` (id, email) VALUES "
+                "(1, 'a@example.com'), (2, NULL), (3, 'c@example.com')"
+            )
+    finally:
+        conn.close()
+
+    runner = TransformRunner(
+        {"type": "mysql", **MYSQL},
+        dialect="mysql",
+        project_id=f"mysql-holdout-{suffix}",
+        workspace_id="ws-mysql-holdout",
+    )
+    try:
+        result = runner.run(
+            [
+                TransformModel(
+                    name=model_name,
+                    sql=f"SELECT id, email FROM {{{{ source('{src}') }}}}",
+                    materialization="table",
+                    tests=[DataTest(test_type="not_null", column="email")],
+                )
+            ]
+        )
+        ledger = result.row_accounting()
+        mart = _my_count(model_name)
+        nulls = _my_nulls(model_name, "email")
+        q_count = _my_count(q_table)
+        assert result.status == "partial", result.error
+        assert mart == 2
+        assert nulls == 0
+        assert q_count == 1
+        assert ledger["rows_written"] == 2
+        assert ledger["rows_quarantined"] == 1
+        assert mart + ledger["rows_quarantined"] == 3
+        events = dlq.list_dlq_events(job_id=f"xform-mysql-holdout-{suffix}")
+        assert events
+        finding = events[0]["details"]["rejected_details"][0]
+        assert finding.get("values")
+        assert str(finding["values"].get("id")) in {"2", "2.0"}
+    finally:
+        _my_drop(src, model_name, q_table)
+
+
 @pytest.mark.parametrize(
     "label,host,port",
     (
