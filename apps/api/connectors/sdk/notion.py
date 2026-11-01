@@ -23,8 +23,7 @@ class NotionSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developers.notion.com/reference",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Reads use POST /search (pages, databases) and POST "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Reads use POST /search (pages, databases) and POST "
             "databases/{id}/query with start_cursor in the request body; "
             "database_rows requires the database_id field. The workspace must "
             "share each page/database with the integration or the API returns "

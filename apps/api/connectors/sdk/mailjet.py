@@ -22,8 +22,7 @@ class MailjetSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://dev.mailjet.com/email/reference/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Basic auth uses the public API key + private secret "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Basic auth uses the public API key + private secret "
             "key pair; REST v3 lists are offset-paginated full refresh."
         ),
         catalog_ids=("mailjet",),

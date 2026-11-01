@@ -22,8 +22,7 @@ class BrevoSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developers.brevo.com/reference",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Contacts increment on modifiedSince; lists and "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Contacts increment on modifiedSince; lists and "
             "campaigns re-read in full."
         ),
         catalog_ids=("brevo",),

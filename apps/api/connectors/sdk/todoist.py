@@ -22,8 +22,7 @@ class TodoistSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.todoist.com/rest/v2/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Todoist REST v2 offers no updated-since filter on "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Todoist REST v2 offers no updated-since filter on "
             "list endpoints, so streams are honestly full-refresh (the Sync API's "
             "sync_token is a different contract)."
         ),

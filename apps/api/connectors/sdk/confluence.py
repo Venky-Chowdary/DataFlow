@@ -24,8 +24,7 @@ class ConfluenceSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.atlassian.com/cloud/confluence/rest/v2/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Atlassian basic auth is account email + API token. "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Atlassian basic auth is account email + API token. "
             "domain is the site subdomain (acme for acme.atlassian.net). "
             "Confluence v2 embeds the next page in _links.next — the next_url "
             "paginator follows it on the same origin only."

@@ -22,8 +22,7 @@ class MondaySource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.monday.com/api-reference/docs",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. GraphQL v2 API (raw Authorization token). Boards and "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). GraphQL v2 API (raw Authorization token). Boards and "
             "users stream top-level; items require a board id in the config."
         ),
         catalog_ids=("monday",),

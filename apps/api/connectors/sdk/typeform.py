@@ -23,8 +23,7 @@ class TypeformSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.typeform.com/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Responses run incrementally on 'since' "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Responses run incrementally on 'since' "
             "(submitted_at) and require the form_id field; forms re-read in full."
         ),
         catalog_ids=("typeform",),

@@ -23,8 +23,7 @@ class AsanaSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developers.asana.com/reference/rest-api-reference",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Tasks run incrementally on modified_since; other "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Tasks run incrementally on modified_since; other "
             "streams re-read in full."
         ),
         catalog_ids=("asana",),

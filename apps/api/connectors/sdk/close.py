@@ -22,8 +22,7 @@ class CloseSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.close.com/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Close basic auth sends the API key as username "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Close basic auth sends the API key as username "
             "(password is ignored by the API). Incremental leads use "
             "at-least-once date_updated__gte with a 60-second lookback."
         ),

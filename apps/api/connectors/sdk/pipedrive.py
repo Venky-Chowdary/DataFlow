@@ -23,8 +23,7 @@ class PipedriveSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developers.pipedrive.com/docs/api/v1",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Pipedrive v1 has no updated-since filter on entity "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Pipedrive v1 has no updated-since filter on entity "
             "endpoints, so streams are honest full-refresh reads paginated by "
             "additional_data.pagination.next_start."
         ),

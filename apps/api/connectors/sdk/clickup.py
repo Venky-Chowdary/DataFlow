@@ -22,8 +22,7 @@ class ClickUpSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.clickup.com/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. The personal API token is sent as a raw Authorization "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). The personal API token is sent as a raw Authorization "
             "header (pk_...); tasks stream requires a list id."
         ),
         catalog_ids=("clickup",),

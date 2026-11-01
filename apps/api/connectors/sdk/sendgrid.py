@@ -21,8 +21,7 @@ class SendGridSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://docs.sendgrid.com/api-reference/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Streams lists, segments and templates via the v3 API "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Streams lists, segments and templates via the v3 API "
             "(full refresh; contacts export is an async job, out of scope)."
         ),
         catalog_ids=("sendgrid",),

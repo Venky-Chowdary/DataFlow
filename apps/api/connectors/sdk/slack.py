@@ -23,8 +23,7 @@ class SlackSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://api.slack.com/methods",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. The messages stream requires the channel field and "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). The messages stream requires the channel field and "
             "uses at-least-once delivery with a one-second lookback on oldest."
         ),
         catalog_ids=("slack",),

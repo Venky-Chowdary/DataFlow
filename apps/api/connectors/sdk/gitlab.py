@@ -23,8 +23,7 @@ class GitLabSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://docs.gitlab.com/ee/api/rest/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Incremental issues/merge_requests use at-least-once "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Incremental issues/merge_requests use at-least-once "
             "delivery with a one-second lookback on updated_after."
         ),
         catalog_ids=("gitlab",),

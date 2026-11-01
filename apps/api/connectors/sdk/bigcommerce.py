@@ -23,8 +23,7 @@ class BigCommerceSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.bigcommerce.com/docs/rest-management",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Products/customers increment on date_modified:min; "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Products/customers increment on date_modified:min; "
             "orders on min_date_modified (v2 API)."
         ),
         catalog_ids=("bigcommerce",),

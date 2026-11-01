@@ -24,8 +24,7 @@ class ServiceNowSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://www.servicenow.com/docs/bundle/zurich-api-reference/page/integrate/inbound-rest/concept/c_TableAPI.html",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Incremental table reads use at-least-once "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Incremental table reads use at-least-once "
             "sysparm_query sys_updated_on filters with a 60-second lookback."
         ),
         catalog_ids=("servicenow",),

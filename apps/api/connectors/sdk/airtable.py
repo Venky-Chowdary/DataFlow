@@ -23,8 +23,7 @@ class AirtableSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://airtable.com/developers/web/api/introduction",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Records stream follows the response-carried offset "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Records stream follows the response-carried offset "
             "token; Airtable has no updated-since filter so records are honestly "
             "full-refresh."
         ),

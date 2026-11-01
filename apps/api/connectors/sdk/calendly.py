@@ -23,8 +23,7 @@ class CalendlySource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.calendly.com/api-docs",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. scheduled_events increments on min_start_time with "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). scheduled_events increments on min_start_time with "
             "a sixty-second lookback."
         ),
         catalog_ids=("calendly",),

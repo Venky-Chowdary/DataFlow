@@ -23,8 +23,7 @@ class GitHubSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://docs.github.com/en/rest/issues/issues#list-repository-issues",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Issue records preserve GitHub's pull_request field."
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Issue records preserve GitHub's pull_request field."
         ),
         catalog_ids=("github",),
     )

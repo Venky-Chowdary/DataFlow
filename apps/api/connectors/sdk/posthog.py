@@ -24,8 +24,7 @@ class PosthogSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://posthog.com/docs/api",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. domain is the full host (app.posthog.com for US "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). domain is the full host (app.posthog.com for US "
             "cloud, eu.posthog.com for EU, or your self-hosted host); every "
             "stream needs project_id. Posthog list APIs embed the next page "
             "URL in the body ('next') — the next_url paginator follows it on "

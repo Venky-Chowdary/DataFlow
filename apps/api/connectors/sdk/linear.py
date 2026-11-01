@@ -21,8 +21,7 @@ class LinearSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developers.linear.app/docs/graphql/working-with-the-graphql-api",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. GraphQL API (raw Authorization key, no Bearer prefix). "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). GraphQL API (raw Authorization key, no Bearer prefix). "
             "Streams issues, projects and teams with pageInfo endCursor pagination."
         ),
         catalog_ids=("linear",),

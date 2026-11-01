@@ -26,8 +26,7 @@ class IntercomSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.intercom.com/docs/references/rest-api/api.intercom.io/contacts",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Incremental conversations use at-least-once delivery "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Incremental conversations use at-least-once delivery "
             "with a one-second overlap on epoch-second cursors."
         ),
         catalog_ids=("intercom",),

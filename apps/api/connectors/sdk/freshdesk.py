@@ -23,8 +23,7 @@ class FreshdeskSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developers.freshdesk.com/api/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Freshdesk basic auth takes the API key as username "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Freshdesk basic auth takes the API key as username "
             "with password X. Incremental tickets use at-least-once "
             "updated_since with a 60-second lookback."
         ),

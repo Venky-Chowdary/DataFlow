@@ -24,8 +24,7 @@ class WooCommerceSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://woocommerce.github.io/woocommerce-rest-api-docs/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Orders and products increment on modified_after; "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Orders and products increment on modified_after; "
             "customers re-read in full (the v3 customers list has no modified "
             "filter)."
         ),

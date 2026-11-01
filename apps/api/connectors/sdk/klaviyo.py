@@ -22,8 +22,7 @@ class KlaviyoSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developers.klaviyo.com/en/reference/api-overview",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Klaviyo accepts its links.next URL as the next "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Klaviyo accepts its links.next URL as the next "
             "page[cursor]; incremental profiles/events use at-least-once "
             "greater-than filters with a one-second lookback."
         ),

@@ -23,8 +23,7 @@ class MailchimpSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://mailchimp.com/developer/marketing/api/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Mailchimp's Marketing API accepts any basic-auth "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Mailchimp's Marketing API accepts any basic-auth "
             "username; the API key is the password. Incremental lists/campaigns/"
             "templates use at-least-once since_* filters."
         ),

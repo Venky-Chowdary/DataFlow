@@ -24,8 +24,7 @@ class JiraCloudSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.atlassian.com/cloud/jira/platform/rest/v3/api-group-issue-search/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Incremental reads use at-least-once delivery with a "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Incremental reads use at-least-once delivery with a "
             "60-second lookback for Jira's minute-granularity JQL timestamps."
         ),
         catalog_ids=("jira",),

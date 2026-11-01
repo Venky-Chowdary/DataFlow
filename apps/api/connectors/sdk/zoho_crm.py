@@ -24,8 +24,7 @@ class ZohoCrmSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://www.zoho.com/crm/developer/docs/api/v2/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. OAuth2 refresh grant against accounts.zoho.com — "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). OAuth2 refresh grant against accounts.zoho.com — "
             "other Zoho datacenters need their regional token URL (set the "
             "manifest token_url in an override config). Zoho's delta reads need "
             "an If-Modified-Since header, which the SDK cursor does not emit — "

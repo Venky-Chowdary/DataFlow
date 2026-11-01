@@ -25,8 +25,7 @@ class ZendeskSource(ManifestConnector):
         evidence="synthetic-fixture",
         docs="https://developer.zendesk.com/api-reference/",
         description=(
-            "certified as SDK source on synthetic fixtures; not yet wired into the "
-            "transfer engine. Zendesk token auth is {email}/token + API token as "
+            "wired into the transfer engine; certified on synthetic fixtures (beta evidence). Zendesk token auth is {email}/token + API token as "
             "the basic-auth pair; domain is the subdomain (acme for "
             "acme.zendesk.com). ticket_comments requires the ticket_id field. "
             "Ticket-export incremental needs the cursor-based export endpoint — "
