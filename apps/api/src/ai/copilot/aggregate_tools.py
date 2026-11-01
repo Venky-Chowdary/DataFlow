@@ -1555,10 +1555,11 @@ def aggregate_connector_data(
         query_text = sql
 
     try:
+        from services.connector_access import caller_workspace_id
         from services.connector_store import get_connector
         from src.routers.query_router import QueryExecuteRequest, _is_safe_sql, _run_query
 
-        saved = get_connector(cid)
+        saved = get_connector(cid, workspace_id=caller_workspace_id() or None)
         if not saved:
             return _tool_result(tool, success=False, error="Connector not found in store.")
         if dialect != "mongodb" and not _is_safe_sql(query_text):

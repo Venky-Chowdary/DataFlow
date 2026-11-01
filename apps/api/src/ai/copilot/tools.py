@@ -2011,9 +2011,10 @@ class DataPilotTools:
         summary = []
         errors: list[str] = []
         try:
+            from services.connector_access import caller_workspace_id
             from services.connector_store import list_connectors as store_list
 
-            for c in store_list():
+            for c in store_list(workspace_id=caller_workspace_id() or None):
                 if hasattr(c, "to_dict"):
                     d = c.to_dict()
                 elif isinstance(c, dict):

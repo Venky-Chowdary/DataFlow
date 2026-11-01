@@ -1359,7 +1359,7 @@ def update_connector(  # nosec B107
         taken = any(
             str(getattr(existing, "name", "") or "").strip().casefold() == target
             and str(getattr(existing, "id", "") or "") != brief["connector_id"]
-            for existing in list_connectors()
+            for existing in list_connectors(workspace_id=conn.get("workspace_id") or None)
         )
         if taken:
             return _tool_result(

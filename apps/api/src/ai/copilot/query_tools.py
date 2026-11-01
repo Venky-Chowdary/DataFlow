@@ -508,10 +508,11 @@ def sample_connector_object(
     cid = str(conn.get("id") or conn.get("_id") or "")
     resolve_note = None
     try:
+        from services.connector_access import caller_workspace_id
         from services.connector_store import get_connector
         from src.routers.query_router import QueryExecuteRequest, _run_query
 
-        saved = get_connector(cid)
+        saved = get_connector(cid, workspace_id=caller_workspace_id() or None)
         if not saved:
             return _tool_result(tool, success=False, error="Connector not found in store.")
 
@@ -690,6 +691,7 @@ def run_connector_query(
     clipped = requested > limit
 
     try:
+        from services.connector_access import caller_workspace_id
         from services.connector_store import get_connector
         from src.routers.query_router import (
             QueryExecuteRequest,
@@ -698,7 +700,7 @@ def run_connector_query(
             sql_refusal_message,
         )
 
-        saved = get_connector(cid)
+        saved = get_connector(cid, workspace_id=caller_workspace_id() or None)
         if not saved:
             return _tool_result(tool, success=False, error="Connector not found in store.")
 

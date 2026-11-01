@@ -342,11 +342,14 @@ def _connector_dict(
     cid = (connector_id or "").strip()
     needle = (name or "").strip().lower()
 
+    from services.connector_access import caller_workspace_id, visible, visible_items
+
+    scope = caller_workspace_id() or None
     try:
         from services.connector_store import get_connector, list_connectors
 
         if cid:
-            c = get_connector(cid)
+            c = get_connector(cid, workspace_id=scope)
             if c:
                 return c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
             if not needle:
@@ -366,7 +369,7 @@ def _connector_dict(
                     )
         if needle:
             pool: list[dict[str, Any]] = []
-            for c in list_connectors():
+            for c in list_connectors(workspace_id=scope):
                 d = c.to_dict() if hasattr(c, "to_dict") else dict(c.__dict__)
                 pool.append(d)
             return _pick_connector(needle, pool, exact_name=exact_name)
@@ -380,11 +383,13 @@ def _connector_dict(
 
         mongo = get_mongodb_service()
         if cid:
-            found = mongo.get_connector(cid)
+            found = visible(_in_scope(mongo.get_connector(cid), scope))
             if found:
                 return found
         if needle:
-            pool = list(mongo.list_connectors() or [])
+            pool = visible_items(
+                c for c in (mongo.list_connectors() or []) if _in_scope(c, scope)
+            )
             return _pick_connector(
                 needle, [c for c in pool if isinstance(c, dict)], exact_name=exact_name
             )
@@ -430,12 +435,21 @@ def _safe_connector(
     return conn, None
 
 
+def _in_scope(doc: Any, scope: str | None) -> Any:
+    """``doc`` when it is unscoped or in ``scope`` (``None`` = no narrowing)."""
+    if not isinstance(doc, dict) or not scope:
+        return doc
+    ws = str(doc.get("workspace_id") or "").strip()
+    return doc if ws in ("", scope) else None
+
+
 def _only_saved_connector() -> dict[str, Any] | None:
     """The single saved connector, or None when there are zero or several."""
     try:
+        from services.connector_access import caller_workspace_id
         from services.connector_store import list_connectors
 
-        saved = list(list_connectors() or [])
+        saved = list(list_connectors(workspace_id=caller_workspace_id() or None) or [])
     except Exception as exc:
         logging.getLogger(__name__).warning("Exception suppressed: %s", exc, exc_info=exc)
         return None
