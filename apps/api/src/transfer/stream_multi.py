@@ -293,27 +293,74 @@ def run_non_cdc_multi_stream_sequential(
                 with patched_endpoint_extra(source, source_patch), patched_endpoint_extra(
                     destination, dest_patch
                 ):
-                    rows, stream_ddl, summary, headers = stream_database_transfer(
-                        source,
-                        destination,
-                        use_mappings,
-                        {},
-                        on_checkpoint,
-                        sync_mode=sync_mode,
-                        stream_contracts=single_contracts,
-                        job_id=job_id,
-                        checkpoint=stream_checkpoint,
-                        checkpoint_service=checkpoint_service,
-                        retry_budget=retry_budget,
-                        backfill_new_fields=backfill_new_fields,
-                        validation_mode=validation_mode,
-                        source_filter=source_filter,
-                        limit=stream_limit,
-                        skip_preflight=skip_preflight,
-                        shape_steps=_steps_for(stream_name),
-                        mappings_inherited=not declared_maps,
-                        workspace_id=workspace_id,
-                    )
+                    stream_sync = resolve_effective_sync_mode(
+                        sync_mode, single_contracts[0].get("sync_mode")
+                    ).lower()
+                    if stream_sync in ("full_refresh_mirror", "mirror", "scd2"):
+                        # SCD2/mirror per stream: the endpoints above are already
+                        # remapped to this stream's table/collection, so the
+                        # staging-merge path runs once per stream like the
+                        # full/incremental branches. Recipe SCD2 contracts are
+                        # refused upstream (one recipe can't name N streams).
+                        # Real per-stream types are introspected here — passing
+                        # {} would stamp every staging column TEXT.
+                        from .adapters import resolve_connector_config
+                        from .connector_capabilities import resolve_driver_type
+                        from .adapters_introspect import _introspect_table_schema
+                        from .stream_scd2 import stream_scd2_mirror_transfer
+
+                        stream_schema = _introspect_table_schema(
+                            resolve_driver_type(source.format),
+                            resolve_connector_config(source),
+                            stream_name,
+                            [
+                                str(m.get("source") or "")
+                                for m in use_mappings
+                                if isinstance(m, dict) and m.get("source")
+                            ],
+                        )
+                        rows, stream_ddl, summary, headers = (
+                            stream_scd2_mirror_transfer(
+                                source,
+                                destination,
+                                use_mappings,
+                                stream_schema,
+                                on_checkpoint,
+                                sync_mode=stream_sync,
+                                stream_contracts=single_contracts,
+                                job_id=job_id,
+                                backfill_new_fields=backfill_new_fields,
+                                validation_mode=validation_mode,
+                                limit=stream_limit,
+                                key_columns=(
+                                    [single_contracts[0]["primary_key"]]
+                                    if single_contracts[0].get("primary_key")
+                                    else None
+                                ),
+                            )
+                        )
+                    else:
+                        rows, stream_ddl, summary, headers = stream_database_transfer(
+                            source,
+                            destination,
+                            use_mappings,
+                            {},
+                            on_checkpoint,
+                            sync_mode=sync_mode,
+                            stream_contracts=single_contracts,
+                            job_id=job_id,
+                            checkpoint=stream_checkpoint,
+                            checkpoint_service=checkpoint_service,
+                            retry_budget=retry_budget,
+                            backfill_new_fields=backfill_new_fields,
+                            validation_mode=validation_mode,
+                            source_filter=source_filter,
+                            limit=stream_limit,
+                            skip_preflight=skip_preflight,
+                            shape_steps=_steps_for(stream_name),
+                            mappings_inherited=not declared_maps,
+                            workspace_id=workspace_id,
+                        )
                 ddl_log.extend(stream_ddl)
                 total_rows += rows
                 last_summary = summary
@@ -349,6 +396,12 @@ def run_non_cdc_multi_stream_sequential(
                         sync_mode, single_contracts[0].get("sync_mode")
                     ),
                     "error": error,
+                    # Per-stream SCD2/mirror proof surfaces for operators:
+                    # key-diff verdicts live on the staging-merge summary.
+                    "scd2": summary.get("scd2"),
+                    "mirror": summary.get("mirror"),
+                    "missing_keys": summary.get("missing_keys"),
+                    "extra_keys": summary.get("extra_keys"),
                 },
                 sync_mode=sync_mode,
                 source=source,

@@ -79,6 +79,13 @@ def _stream_dest_counts(streams: list[Any]) -> tuple[int, int, list[str]]:
         ledger = row.get("row_accounting")
         if not isinstance(ledger, dict):
             continue
+        if str(ledger.get("conservation_kind") or "") == "scd2":
+            # SCD2 dest COUNT(*) includes closed history rows, so it can never
+            # be a population proof. The ledger's balanced=False is its honest
+            # "unproven by count" marker — SCD2 identity is proven by its own
+            # key-diff merge, not here. Excluding the stream keeps the job
+            # qualified instead of failed.
+            continue
         if ledger.get("balanced") is False:
             unbalanced.append(name)
         count = ledger.get("dest_count")

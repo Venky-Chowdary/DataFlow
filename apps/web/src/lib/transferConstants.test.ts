@@ -27,16 +27,27 @@ describe("availableSyncModes", () => {
     assert.ok(modes.includes("cdc"));
   });
 
-  it("hides SCD2/mirror for multi-stream even on Postgres", () => {
+  it("offers SCD2/mirror for multi-stream on SQL destinations", () => {
     const modes = availableSyncModes({
       destDriver: "postgresql",
       sourceDriver: "postgresql",
       sourceKind: "database",
       isMultiStream: true,
     }).map((m) => m.id);
+    assert.ok(modes.includes("scd2"));
+    assert.ok(modes.includes("mirror"));
+    assert.ok(modes.includes("cdc"));
+  });
+
+  it("still hides SCD2/mirror multi-stream on non-SQL destinations", () => {
+    const modes = availableSyncModes({
+      destDriver: "mongodb",
+      sourceDriver: "postgresql",
+      sourceKind: "database",
+      isMultiStream: true,
+    }).map((m) => m.id);
     assert.ok(!modes.includes("scd2"));
     assert.ok(!modes.includes("mirror"));
-    assert.ok(modes.includes("cdc"));
   });
 
   it("hides CDC for dest stored-procedure / dest query writes", () => {

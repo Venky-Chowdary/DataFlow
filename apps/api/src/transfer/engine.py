@@ -3671,101 +3671,135 @@ class UniversalTransferEngine:
             ).lower()
             if effective_sync in ("full_refresh_mirror", "mirror", "scd2"):
                 if multi_non_cdc:
-                    raise RuntimeError(
-                        "Multi-stream SCD2/mirror is not supported yet — "
-                        "select a single stream or use full/incremental/CDC"
-                    )
-                _scd2_opts_stream = None
-                _scd2_keys_stream: list[str] | None = None
-                if effective_sync == "scd2" and getattr(
-                    request, "shape_recipe", None
-                ):
-                    # The recipe scd2 step IS the history contract (B1):
-                    # keys/tracked are source-space, translated to target
-                    # names through the mappings. A malformed contract is a
-                    # refusal — silently falling back to default stamps
-                    # would run history the operator did not approve.
-                    from services.shape_models import ShapeRecipe
-
-                    _rcp = (
-                        shape_runner.recipe
-                        if shape_runner is not None
-                        else ShapeRecipe.parse(
-                            request.shape_recipe,
-                            source_columns=columns,
+                    # Per-stream staging merges run through the sequential
+                    # orchestrator (endpoints remapped per stream). A recipe
+                    # SCD2 step is single-stream history — one recipe cannot
+                    # name N streams, so that combination stays refused.
+                    if effective_sync == "scd2" and getattr(
+                        request, "shape_recipe", None
+                    ):
+                        raise RuntimeError(
+                            "Multi-stream SCD2 with a shape recipe is not "
+                            "supported — apply one recipe per stream or run "
+                            "them separately."
+                        )
+                    rows_written, ddl_log, dest_summary, _ = (
+                        run_non_cdc_multi_stream_sequential(
+                            request.source,
+                            request.destination,
+                            mappings,
+                            schema,
+                            on_checkpoint=throttled_checkpoint,
+                            sync_mode=request.sync_mode,
+                            stream_contracts=request.stream_contracts,
+                            selected=selected_streams,
+                            job_id=job_id,
+                            checkpoint=checkpoint,
+                            checkpoint_service=checkpoint_service,
+                            backfill_new_fields=backfill_fields,
+                            validation_mode=request.validation_mode,
+                            source_filter=request.source_filter,
+                            limit=request.limit,
+                            skip_preflight=request.skip_preflight,
+                            shape_by_stream=shape_by_stream or None,
+                            approved_shape_hash=approved_shape_hash,
+                            workspace_id=str(
+                                getattr(request, "workspace_id", "") or ""
+                            ),
                         )
                     )
-                    if _rcp.scd2_step is not None:
-                        _scd2_opts_stream = _rcp.scd2_column_names() or {}
-                        _src2tgt = {
-                            str(m.get("source") or ""): str(
-                                m.get("target") or ""
+                else:
+                    _scd2_opts_stream = None
+                    _scd2_keys_stream: list[str] | None = None
+                    if effective_sync == "scd2" and getattr(
+                        request, "shape_recipe", None
+                    ):
+                        # The recipe scd2 step IS the history contract (B1):
+                        # keys/tracked are source-space, translated to target
+                        # names through the mappings. A malformed contract is a
+                        # refusal — silently falling back to default stamps
+                        # would run history the operator did not approve.
+                        from services.shape_models import ShapeRecipe
+
+                        _rcp = (
+                            shape_runner.recipe
+                            if shape_runner is not None
+                            else ShapeRecipe.parse(
+                                request.shape_recipe,
+                                source_columns=columns,
                             )
-                            for m in (mappings or [])
-                            if isinstance(m, dict)
-                        }
-                        _rkeys = [
-                            str(_src2tgt.get(k) or k)
-                            for k in _scd2_opts_stream.get("keys") or []
-                        ]
-                        if _rkeys:
-                            _scd2_keys_stream = _rkeys
-                        if _scd2_opts_stream.get("tracked"):
-                            _scd2_opts_stream["tracked"] = [
-                                str(_src2tgt.get(t) or t)
-                                for t in _scd2_opts_stream["tracked"]
+                        )
+                        if _rcp.scd2_step is not None:
+                            _scd2_opts_stream = _rcp.scd2_column_names() or {}
+                            _src2tgt = {
+                                str(m.get("source") or ""): str(
+                                    m.get("target") or ""
+                                )
+                                for m in (mappings or [])
+                                if isinstance(m, dict)
+                            }
+                            _rkeys = [
+                                str(_src2tgt.get(k) or k)
+                                for k in _scd2_opts_stream.get("keys") or []
                             ]
-                rows_written, ddl_log, dest_summary, _ = stream_scd2_mirror_transfer(
-                    request.source,
-                    request.destination,
-                    mappings,
-                    schema,
-                    on_checkpoint=throttled_checkpoint,
-                    sync_mode=request.sync_mode,
-                    stream_contracts=request.stream_contracts,
-                    job_id=job_id,
-                    checkpoint=checkpoint,
-                    checkpoint_service=checkpoint_service,
-                    backfill_new_fields=backfill_fields,
-                    validation_mode=request.validation_mode,
-                    limit=request.limit,
-                    scd2_opts=_scd2_opts_stream,
-                    key_columns=_scd2_keys_stream,
-                    shape_runner=shape_runner,
-                )
-                if isinstance(dest_summary, dict) and dest_summary.get("ok") is False:
-                    block_msg = str(
-                        dest_summary.get("error")
-                        or "SCD2 map/Risk Contract blocked history merge"
-                    )
-                    _persist_job_quarantine(
-                        job_id,
-                        dest_summary,
-                        request,
-                        already_persisted=_quarantine_persisted,
-                    )
-                    mongo.update_job_status(
-                        job_id,
-                        "failed",
-                        phase="failed",
-                        error=block_msg,
-                        message=block_msg,
-                        records_processed=0,
-                        rejected_rows=int(dest_summary.get("rejected_rows") or 0),
-                        rejected_details=(
-                            dest_summary.get("rejected_details") or []
-                        )[:2000],
-                        destination_summary=dest_summary,
-                        ddl_log=list(ddl_log or [])[:500],
-                    )
-                    return TransferResult(
-                        success=False,
-                        error=block_msg,
+                            if _rkeys:
+                                _scd2_keys_stream = _rkeys
+                            if _scd2_opts_stream.get("tracked"):
+                                _scd2_opts_stream["tracked"] = [
+                                    str(_src2tgt.get(t) or t)
+                                    for t in _scd2_opts_stream["tracked"]
+                                ]
+                    rows_written, ddl_log, dest_summary, _ = stream_scd2_mirror_transfer(
+                        request.source,
+                        request.destination,
+                        mappings,
+                        schema,
+                        on_checkpoint=throttled_checkpoint,
+                        sync_mode=request.sync_mode,
+                        stream_contracts=request.stream_contracts,
                         job_id=job_id,
-                        operation=request.operation,
-                        destination_summary=dest_summary,
-                        ddl_executed=list(ddl_log or []),
+                        checkpoint=checkpoint,
+                        checkpoint_service=checkpoint_service,
+                        backfill_new_fields=backfill_fields,
+                        validation_mode=request.validation_mode,
+                        limit=request.limit,
+                        scd2_opts=_scd2_opts_stream,
+                        key_columns=_scd2_keys_stream,
+                        shape_runner=shape_runner,
                     )
+                    if isinstance(dest_summary, dict) and dest_summary.get("ok") is False:
+                        block_msg = str(
+                            dest_summary.get("error")
+                            or "SCD2 map/Risk Contract blocked history merge"
+                        )
+                        _persist_job_quarantine(
+                            job_id,
+                            dest_summary,
+                            request,
+                            already_persisted=_quarantine_persisted,
+                        )
+                        mongo.update_job_status(
+                            job_id,
+                            "failed",
+                            phase="failed",
+                            error=block_msg,
+                            message=block_msg,
+                            records_processed=0,
+                            rejected_rows=int(dest_summary.get("rejected_rows") or 0),
+                            rejected_details=(
+                                dest_summary.get("rejected_details") or []
+                            )[:2000],
+                            destination_summary=dest_summary,
+                            ddl_log=list(ddl_log or [])[:500],
+                        )
+                        return TransferResult(
+                            success=False,
+                            error=block_msg,
+                            job_id=job_id,
+                            operation=request.operation,
+                            destination_summary=dest_summary,
+                            ddl_executed=list(ddl_log or []),
+                        )
             elif effective_sync == "cdc":
                 rows_written, ddl_log, dest_summary, _ = run_cdc_database_transfer(
                     request.source,

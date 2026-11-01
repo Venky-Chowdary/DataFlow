@@ -131,8 +131,6 @@ import {
   type SchemaPolicyId,
   type SyncModeId,
   type ValidationModeId,
-  multiStreamScd2MirrorBlockCopy,
-  MULTI_STREAM_SCD2_MIRROR_BLOCK,
   schemaPolicyHonestyLine,
   syncModeHonestyLine,
 } from "../lib/transferConstants";
@@ -1165,9 +1163,6 @@ export function TransferPage({
   /** First named stream — API table/collection field (never the raw CSV string). */
   const primarySourceStream = primaryStreamName(sourceStreamInputRaw);
   const isMultiStreamSource = multiStreamNames.length > 1;
-  /** SCD2/mirror multi-stream not supported yet — full/incremental/CDC are. */
-  const multiStreamUnsupportedMode =
-    isMultiStreamSource && (syncMode === "scd2" || syncMode === "mirror");
   const advancedStreamNames = isMultiStreamSource ? multiStreamNames : [sourceStreamName];
   const routeSyncModes = useMemo(
     () =>
@@ -4547,14 +4542,6 @@ export function TransferPage({
       });
       return;
     }
-    if (multiStreamUnsupportedMode) {
-      toast({
-        title: "Sync mode not supported",
-        message: "SCD2 and Mirror are not available for multi-stream transfers. Switch to full refresh, incremental, or CDC.",
-        tone: "error",
-      });
-      return;
-    }
     if (!routeSyncModes.some((m) => m.id === syncMode)) {
       toast({
         title: "Sync mode not supported",
@@ -5221,15 +5208,6 @@ export function TransferPage({
       toast({ title: "No write permission", message: jobRun.reason, tone: "warning" });
       return;
     }
-    if (multiStreamUnsupportedMode) {
-      toast({
-        title: "Multi-stream not supported for this mode",
-        message: multiStreamScd2MirrorBlockCopy("toast"),
-        tone: "error",
-      });
-      setStep(STEP_DESTINATION);
-      return;
-    }
     const needsDbTarget = destKindMode === "database";
     if (sourceKind === "file" && !file && !parsed?.file_id) {
       toast({ title: "Source file required", message: "Upload a file before executing.", tone: "warning" });
@@ -5716,14 +5694,6 @@ export function TransferPage({
    */
   const handleScheduleRoute = async (opts: { quiet?: boolean } = {}): Promise<boolean> => {
     const quiet = Boolean(opts.quiet);
-    if (multiStreamUnsupportedMode) {
-      toast({
-        title: "Multi-stream not supported for this mode",
-        message: multiStreamScd2MirrorBlockCopy("schedule"),
-        tone: "error",
-      });
-      return false;
-    }
     if (destKindMode !== "database" || !connectorId) {
       toast({
         title: "Saved destination required",
@@ -6015,7 +5985,7 @@ export function TransferPage({
     mappingReviewCount,
     riskAckPendingCount,
     transferLaunch: routeScopedLaunch,
-    executeBlocked: multiStreamUnsupportedMode || Boolean(contractBlockReason),
+    executeBlocked: Boolean(contractBlockReason),
     hasPrimaryFix: Boolean(primaryFix.onPrimaryFix && primaryFix.primaryFixLabel),
     primaryFixLabel: primaryFix.primaryFixLabel,
     hasHoldOut: true,
@@ -7830,16 +7800,12 @@ export function TransferPage({
                 (Postgres / MySQL / SQL Server / Oracle); otherwise streams run sequentially.
               </p>
             )}
-            {isMultiStreamSource && syncMode !== "cdc" && !multiStreamUnsupportedMode && (
+            {isMultiStreamSource && syncMode !== "cdc" && (
               <p className="df2-label-hint" role="status">
-                Multi-stream full/incremental runs each table/collection{" "}
-                <strong>sequentially</strong> with its own watermark and mappings
-                ({multiStreamNames.length} streams). Prefer CDC when you need one shared log consumer.
-              </p>
-            )}
-            {multiStreamUnsupportedMode && (
-              <p className="df2-label-hint df2-dest-sync-warning" role="alert">
-                {MULTI_STREAM_SCD2_MIRROR_BLOCK}
+                Multi-stream runs each table/collection{" "}
+                <strong>sequentially</strong> with its own watermark, staging
+                merge, and mappings ({multiStreamNames.length} streams). Prefer
+                CDC when you need one shared log consumer.
               </p>
             )}
           </div>
@@ -8167,12 +8133,8 @@ export function TransferPage({
                 : undefined
             }
             savingContract={savingContract}
-            executeBlocked={multiStreamUnsupportedMode || Boolean(contractBlockReason)}
-            executeBlockedReason={
-              multiStreamUnsupportedMode
-                ? MULTI_STREAM_SCD2_MIRROR_BLOCK
-                : contractBlockReason || undefined
-            }
+            executeBlocked={Boolean(contractBlockReason)}
+            executeBlockedReason={contractBlockReason || undefined}
             contractSlot={(
               <ContractBindField
                 idPrefix="studio"
@@ -8368,13 +8330,11 @@ export function TransferPage({
                 type="button"
                 className="df2-btn df2-btn-primary"
                 onClick={() => void executeTransfer()}
-                disabled={!canExecute || multiStreamUnsupportedMode}
+                disabled={!canExecute}
                 title={
-                  multiStreamUnsupportedMode
-                    ? MULTI_STREAM_SCD2_MIRROR_BLOCK
-                    : !canExecute
-                      ? "Requires API Validate with decision approve"
-                      : undefined
+                  !canExecute
+                    ? "Requires API Validate with decision approve"
+                    : undefined
                 }
               >
                 <DtIcon name="transfer" size={16} /> Execute Transfer
