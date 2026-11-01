@@ -181,13 +181,13 @@ export const NOT_PROVEN: UnprovenRow[] = [
   },
   {
     area: "Scheduled backfill / catch-up",
-    status: "planned",
-    reason: "Missed windows are counted and surfaced. Historical windows are never silently replayed.",
+    status: "unaudited",
+    reason: "Operator-approved bounded replay is measured: POST /schedules/{id}/catch-up queues up to 24 runs — one per missed window, oldest first, each tagged catch_up (test_schedule_catch_up.py). Historical windows are still never silently replayed. Warehouse-scale backfill certification is not claimed.",
   },
   {
     area: "Multi-replica scheduler failover on MongoDB",
-    status: "planned",
-    reason: "Same-schedule and connector-pair overlap are proven; conditional claims under real replica failover are not.",
+    status: "unaudited",
+    reason: "Same-schedule and connector-pair overlap are proven; the exact-claim CAS stale-reclaim race is measured on live MongoDB (test_scheduler_replica_failover.py — live-claim block, exact-match reclaim, two-beats-one-winner, fresh-claim-not-stolen, counter survival). A real Railway replica crash mid-transfer is not a test fixture.",
   },
   {
     area: "Transform row ledger and quarantine",

@@ -869,6 +869,8 @@ def _run_entry(job_id: str, status: str, attempt: int, started_at: datetime, job
         "error": (doc.get("error") or "")[:500],
         "row_accounting": dict(ledger),
     }
+    if doc.get("catch_up"):
+        entry["catch_up"] = True
     if doc.get("_run_reason_code"):
         entry["reason_code"] = doc["_run_reason_code"]
     elif doc.get("error_code") and not _is_success(status):
@@ -1783,6 +1785,19 @@ def _dispatch_transfer(
             claimed = mark_schedule_running(
                 schedule_id, _scheduler_instance_id(), job_id
             )
+            if claimed is not None and getattr(claimed, "claimed_catch_up", False):
+                # The claim consumed an operator-approved catch-up window —
+                # stamp the job so the run record can say it was a replay.
+                try:
+                    from services.mongodb_service import get_mongodb_service
+
+                    get_mongodb_service().update_job_fields(
+                        job_id, {"catch_up": True}, touch_updated_at=False
+                    )
+                except Exception:
+                    logger.debug(
+                        "could not tag catch-up job %s", job_id, exc_info=True
+                    )
             if claimed is None:
                 fresh = _reload_schedule(schedule_id)
                 bound = str(getattr(fresh, "running_job_id", "") or "") if fresh else ""

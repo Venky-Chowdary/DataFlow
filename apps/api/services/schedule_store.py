@@ -283,6 +283,15 @@ class PipelineSchedule:
     #: run that finishes. Counting them only at completion saw the already
     #: advanced next_run_at and stored 0 (R3-H2).
     claimed_missed_windows: int = 0
+    #: Operator-approved replay of missed cadence windows. While positive,
+    #: each claim advances next_run_at by exactly ONE boundary (one run per
+    #: overdue window) and the counter drains at claim time. When it reaches
+    #: 0, the next claim jumps to the current cadence boundary. Set only via
+    #: request_schedule_catch_up — never silently replayed.
+    catch_up_windows_left: int = 0
+    #: True on the claim consumed by a catch-up run, so the run record can
+    #: say it was a replayed window rather than a normal fire.
+    claimed_catch_up: bool = False
     #: Operator accepted additive schema drift when the schedule was staged.
     #: Hard-breaking drift still blocks. Standing authorization can also ack.
     schema_drift_acknowledged: bool = False
@@ -443,6 +452,8 @@ class PipelineSchedule:
             missed_window_count=max(0, int(data.get("missed_window_count", 0) or 0)),
             last_missed_windows=max(0, int(data.get("last_missed_windows", 0) or 0)),
             claimed_missed_windows=max(0, int(data.get("claimed_missed_windows", 0) or 0)),
+            catch_up_windows_left=max(0, int(data.get("catch_up_windows_left", 0) or 0)),
+            claimed_catch_up=bool(data.get("claimed_catch_up", False)),
             schema_drift_acknowledged=bool(data.get("schema_drift_acknowledged", False)),
             compliance_acknowledged=bool(data.get("compliance_acknowledged", False)),
             file_wait_seconds=max(0, int(data.get("file_wait_seconds") or 0)),
@@ -2193,6 +2204,8 @@ def _claim_running_mongo(
     stale: PipelineSchedule | None = None,
     missed_windows: int = 0,
     job_id: str = "",
+    catch_up_windows_left: int | None = None,
+    claimed_catch_up: bool = False,
 ) -> PipelineSchedule | None:
     """CAS the running flag on the per-schedule Mongo document.
 
@@ -2228,6 +2241,12 @@ def _claim_running_mongo(
                 "running_started_at": now,
                 "running_job_id": str(job_id or ""),
                 "claimed_missed_windows": max(0, int(missed_windows or 0)),
+                "claimed_catch_up": bool(claimed_catch_up),
+                **(
+                    {"catch_up_windows_left": max(0, int(catch_up_windows_left))}
+                    if catch_up_windows_left is not None
+                    else {}
+                ),
                 **({"next_run_at": next_run_at} if next_run_at else {}),
             },
             "$inc": {"version": 1},
@@ -2267,18 +2286,37 @@ def mark_schedule_running(
             current = _parse_ts(now) or datetime.now(timezone.utc)
             advanced = s.next_run_at
             missed = 0
+            catching_up = False
+            catch_up_left = 0
             if nxt is None or nxt <= current:
-                if nxt is not None:
-                    missed = count_missed_windows(
-                        cron=s.cron,
-                        interval=s.interval,
-                        tz=s.timezone,
-                        next_run_at=s.next_run_at,
-                        now=current,
+                if int(getattr(s, "catch_up_windows_left", 0) or 0) > 0 and nxt is not None:
+                    # Operator-approved replay: this run covers exactly ONE
+                    # overdue window. next_run_at advances a single boundary
+                    # (still <= now while windows remain), the counter drains
+                    # at claim so a crash cannot replay the same window twice.
+                    advanced = compute_next_run(
+                        s.interval, nxt, cron=s.cron, tz=s.timezone
                     )
-                advanced = compute_next_run(
-                    s.interval, current, cron=s.cron, tz=s.timezone
-                )
+                    catch_up_left = int(s.catch_up_windows_left) - 1
+                    catching_up = True
+                else:
+                    if nxt is not None:
+                        missed = count_missed_windows(
+                            cron=s.cron,
+                            interval=s.interval,
+                            tz=s.timezone,
+                            next_run_at=s.next_run_at,
+                            now=current,
+                        )
+                    advanced = compute_next_run(
+                        s.interval, current, cron=s.cron, tz=s.timezone
+                    )
+            elif int(getattr(s, "catch_up_windows_left", 0) or 0) > 0:
+                # The queued windows were consumed — next_run_at already sits
+                # on a future boundary, so no catch-up is owed for this claim.
+                # A leftover counter here would tag a normal run as a replay
+                # and freeze next_run_at at completion.
+                catch_up_left = 0
             if _mongo_backend() is not None:
                 # The CAS is the only claim on a shared store. Falling back to a
                 # snapshot write when it lost let two beats both "win" a stale
@@ -2291,6 +2329,8 @@ def mark_schedule_running(
                     stale=s,
                     missed_windows=missed,
                     job_id=job_id,
+                    catch_up_windows_left=catch_up_left,
+                    claimed_catch_up=catching_up,
                 )
                 if claimed is None:
                     live = get_schedule(schedule_id)
@@ -2322,6 +2362,8 @@ def mark_schedule_running(
                 "running_job_id": str(job_id or ""),
                 "next_run_at": advanced,
                 "claimed_missed_windows": missed,
+                "catch_up_windows_left": catch_up_left,
+                "claimed_catch_up": catching_up,
             })
             schedules[i] = updated
             _save_all(schedules)
@@ -2438,7 +2480,13 @@ def _mark_schedule_run_locked(
         # schedule due at a time that is not a cadence boundary, and the
         # following ticks never advanced (DEF-A-010). The run that just
         # finished is the catch-up for the overdue slot.
-        next_at = compute_next_run(s.interval, _parse_ts(now), cron=s.cron, tz=s.timezone)
+        if int(getattr(s, "catch_up_windows_left", 0) or 0) > 0 and _parse_ts(s.next_run_at):
+            # Mid catch-up replay: the claim already placed next_run_at on the
+            # NEXT overdue boundary — keep it. Advancing it again here would
+            # skip a slot, so the queued windows drain exactly one per run.
+            next_at = s.next_run_at
+        else:
+            next_at = compute_next_run(s.interval, _parse_ts(now), cron=s.cron, tz=s.timezone)
         history = list(s.run_history)
         if run_entry:
             entry = dict(run_entry)
@@ -2457,6 +2505,7 @@ def _mark_schedule_run_locked(
             "missed_window_count": s.missed_window_count + missed,
             "last_missed_windows": missed,
             "claimed_missed_windows": 0,
+            "claimed_catch_up": False,
             "retry_at": None,
             "retry_attempt": 0,
             "running": False,
@@ -2505,6 +2554,56 @@ def _pinned_to_completion(sched: PipelineSchedule, *, now: datetime | None = Non
     if current.tzinfo is None:
         current = current.replace(tzinfo=timezone.utc)
     return nxt <= current
+
+
+#: Most missed windows one catch-up request may queue. A cron outage of months
+#: can have thousands of overdue slots; replaying them all as individual runs
+#: is a flood, not a backfill — the operator asks for a bounded count and the
+#: remaining windows stay counted on the schedule.
+CATCH_UP_WINDOW_CAP = 24
+
+
+def request_schedule_catch_up(
+    schedule_id: str,
+    windows: int = 0,
+) -> tuple[PipelineSchedule | None, int]:
+    """Queue an operator-approved replay of missed cadence windows.
+
+    ``windows`` is how many overdue slots to replay (0 = all outstanding, still
+    capped at CATCH_UP_WINDOW_CAP). While the counter is positive, every claim
+    advances next_run_at by exactly one cadence boundary and fires one run per
+    missed window — each visible in run history tagged ``catch_up``. Returns
+    (updated schedule, windows queued); windows > 0 also means the schedule is
+    due, so the next claim fires immediately.
+    """
+    sched = get_schedule(schedule_id)
+    if sched is None:
+        return None, 0
+    current = datetime.now(timezone.utc)
+    nxt = _parse_ts(sched.next_run_at)
+    outstanding = 0
+    if nxt is not None and nxt <= current:
+        outstanding = count_missed_windows(
+            cron=sched.cron,
+            interval=sched.interval,
+            tz=sched.timezone,
+            next_run_at=sched.next_run_at,
+            now=current,
+        ) or 1
+    requested = outstanding if windows <= 0 else min(windows, outstanding)
+    queued = min(requested, CATCH_UP_WINDOW_CAP)
+    queued = max(int(sched.catch_up_windows_left or 0), queued)
+    updated = update_schedule(schedule_id, {"catch_up_windows_left": queued})
+    if updated is not None and queued:
+        emit_event(
+            logger,
+            "schedule.catch_up.request",
+            outcome="queued",
+            schedule_id=schedule_id,
+            missed_count=outstanding,
+            windows_queued=queued,
+        )
+    return updated, queued
 
 
 def unstick_completion_pinned_schedules(now: datetime | None = None) -> int:

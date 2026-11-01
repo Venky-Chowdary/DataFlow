@@ -263,6 +263,8 @@ class ScheduleResponse(BaseModel):
     retry_attempt: int = 0
     missed_window_count: int = 0
     last_missed_windows: int = 0
+    #: Operator-approved catch-up replays still queued (POST /{id}/catch-up).
+    catch_up_windows_left: int = 0
     running: bool = False
     created_at: str
     # Pipeline Detail needs schema map without a second Transfer Studio hop.
@@ -378,6 +380,7 @@ class ScheduleSummaryResponse(BaseModel):
     retry_attempt: int = 0
     missed_window_count: int = 0
     last_missed_windows: int = 0
+    catch_up_windows_left: int = 0
     running: bool = False
     created_at: str
     mapping_count: int = 0
@@ -1238,6 +1241,45 @@ async def run_pipeline_now(
         )
     updated = get_schedule(schedule_id)
     return {"success": True, "job_id": job_id, "schedule": ScheduleResponse.from_schedule(updated)}
+
+
+class CatchUpRequest(BaseModel):
+    #: How many overdue cadence windows to replay as individual runs.
+    #: 0 = every outstanding window, still capped (server-side) per request.
+    windows: int = Field(default=0, ge=0, le=24)
+
+
+@router.post("/{schedule_id}/catch-up")
+async def request_schedule_catch_up(
+    schedule_id: str,
+    request: Request,
+    body: CatchUpRequest | None = None,
+    workspace_id: str = Header(default="", alias="X-Workspace-Id"),
+):
+    """Replay missed cadence windows — operator-approved, bounded, audited.
+
+    An outage or a long-running window leaves skipped slots counted on the
+    schedule but never replayed; for schedules where each window is a distinct
+    batch (e.g. daily file drops) that is a real coverage gap. This queues up
+    to 24 runs — one per missed window, oldest first — each tagged ``catch_up``
+    in run history. The claim path still serializes them: one writer at a time.
+    """
+    from services.schedule_store import (
+        CATCH_UP_WINDOW_CAP,
+        request_schedule_catch_up as _queue_catch_up,
+    )
+
+    resolve_write_workspace(request, workspace_id)
+    _bound_schedule(request, schedule_id, write=True)
+    updated, queued = _queue_catch_up(schedule_id, (body.windows if body else 0))
+    if updated is None:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return {
+        "success": True,
+        "windows_queued": queued,
+        "cap": CATCH_UP_WINDOW_CAP,
+        "schedule": ScheduleResponse.from_schedule(updated),
+    }
 
 
 # --- Autopilot: the approval inbox -------------------------------------------
