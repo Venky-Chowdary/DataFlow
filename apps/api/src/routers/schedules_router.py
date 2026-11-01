@@ -290,6 +290,13 @@ class ScheduleResponse(BaseModel):
     #: Why the store saved this schedule differently from the request (e.g.
     #: "Created disabled: ..."); empty once it no longer applies.
     enabled_note: str = ""
+    #: One word for whether this schedule will fire: ``paused`` (disabled),
+    #: ``running``, ``scheduled`` (next_run_at is set) or ``stalled`` (enabled
+    #: but nothing will fire until a human acts). ``stalled_reason`` says why
+    #: and what clears it — enabled=true with next_run_at=null was the only
+    #: signal before (QA r12 Mongo D9).
+    state: str = ""
+    stalled_reason: str = ""
     #: What this write must tell the caller without refusing it (draft saved
     #: disabled, source table unverifiable). Empty on reads.
     warnings: list[str] = Field(default_factory=list)
@@ -309,6 +316,9 @@ class ScheduleResponse(BaseModel):
         from services.schedule_store import visible_next_run_at
 
         data["next_run_at"] = visible_next_run_at(s)
+        from services.schedule_store import schedule_run_state
+
+        data["state"], data["stalled_reason"] = schedule_run_state(s)
         data["warnings"] = list(warnings or [])
         # run_history / running_instance stay on the history endpoint.
         allowed = set(cls.model_fields)
@@ -384,6 +394,8 @@ class ScheduleSummaryResponse(BaseModel):
     approval_finding: str = ""
     approvable: bool = False
     authorized: bool = False
+    state: str = ""
+    stalled_reason: str = ""
     # Due but not started: how late, and exactly what holds the one-writer
     # claim (schedule + job). "Next run in the past" alone was a dead end.
     overdue_seconds: int = 0
