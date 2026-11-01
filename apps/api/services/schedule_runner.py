@@ -15,7 +15,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from services.brand_env import getenv_brand
-from services.failure_retry_policy import DETERMINISTIC
+from services.failure_retry_policy import DETERMINISTIC, TRANSIENT
 from services.ops_events import emit_event
 from services.schedule_store import due_schedules
 from services.standing_authorization import (
@@ -70,6 +70,13 @@ LOCK_TTL_SECONDS = int(getenv_brand("SCHEDULER_LOCK_TTL", "300"))
 # failure was classified as. Two is the benefit of the doubt; the third is a
 # pattern, and every beat after it only costs the operator another identical row.
 _CONSECUTIVE_FAILURE_PARK = 3
+# A transient fault (connection reset, timeout, 5xx) is never parked on a human
+# decision: nothing a person approves changes it, and an approval park nulls
+# the visible next run until someone notices (QA r12 Mongo D4). It backs off
+# instead — doubling from this base per failed beat in a row, capped — so the
+# cadence neither grinds nor stalls.
+_TRANSIENT_BACKOFF_BASE_SECONDS = 60
+_TRANSIENT_BACKOFF_CAP_SECONDS = 3600
 
 
 def _scheduler_instance_id() -> str:
@@ -1189,6 +1196,58 @@ def _park_reason(sched: Any, decision: dict[str, Any], entry: dict[str, Any]) ->
     return ""
 
 
+def _failure_kind(decision: dict[str, Any]) -> str:
+    failure_class = decision.get("failure_class") or {}
+    if isinstance(failure_class, dict):
+        return str(failure_class.get("kind") or "")
+    return str(failure_class or "")
+
+
+def _back_off_transient(schedule_id: str, sched: Any, park: str) -> None:
+    """Push the next beat out instead of parking a transient fault for approval.
+
+    ``next_run_at`` stays set (the API shows when it fires next) and no approval
+    request opens; the first success resets the run of failures.
+    """
+    from services.schedule_store import get_schedule, next_run_for, update_schedule
+
+    current = get_schedule(schedule_id) or sched
+    consecutive = 0
+    for run in reversed(getattr(current, "run_history", None) or []):
+        if not isinstance(run, dict) or str(run.get("status") or "") in (
+            "skipped", "pending", "running",
+        ):
+            continue
+        if _is_success(run.get("status")):
+            break
+        consecutive += 1
+    delay = min(
+        _TRANSIENT_BACKOFF_CAP_SECONDS,
+        _TRANSIENT_BACKOFF_BASE_SECONDS * (2 ** max(0, consecutive - 1)),
+    )
+    now = datetime.now(timezone.utc)
+    slot = next_run_for(current, now)
+    backoff_at = now + timedelta(seconds=delay)
+    due = slot
+    try:
+        slot_dt = datetime.fromisoformat(str(slot)) if slot else None
+        if slot_dt is not None and slot_dt.tzinfo is None:
+            slot_dt = slot_dt.replace(tzinfo=timezone.utc)
+        if slot_dt is None or slot_dt < backoff_at:
+            due = backoff_at.isoformat()
+    except ValueError:
+        due = backoff_at.isoformat()
+    update_schedule(schedule_id, {"next_run_at": due, "retry_at": None, "retry_attempt": 0})
+    emit_event(
+        logger,
+        "schedule.run.backoff",
+        outcome="backing_off",
+        schedule_id=schedule_id,
+        reason_code=park,
+        delay_seconds=delay,
+    )
+
+
 def _append_replay_blocked(sched: Any) -> str | None:
     """Why a from-zero start would duplicate committed append rows, or None.
 
@@ -1356,6 +1415,12 @@ def _finalize_run(schedule_id: str, job_id: str, attempt: int, started_at: datet
                 ),
             )
         park = _park_reason(sched, decision, entry)
+        if park and _failure_kind(decision) == TRANSIENT and park in (
+            "identical_failure_repeated",
+            "consecutive_failures",
+        ):
+            _back_off_transient(schedule_id, sched, park)
+            park = ""
         if park:
             # This beat's verdict will not change by itself, and the next beat
             # would either replay it or — on an append with nothing to collapse

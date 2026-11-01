@@ -303,7 +303,11 @@ def test_snowflake_keyset_seed_inclusive_vs_edge(monkeypatch, inclusive, op):
         assert any(">= %s" in s for s in sqls), sqls
         assert not any("(%s, %s)" in s for s in sqls)
     else:
-        assert any("(%s, %s)" in s and "> (%s, %s)" in s for s in sqls), sqls
+        # Exclusive (cursor, pk) edge seek, written out (QA r12 Snowflake D4:
+        # a text-bound row value does not cast onto (TIMESTAMP, NUMBER)).
+        assert any(
+            '"ts" > %s OR ("ts" = %s AND "id" > %s)' in s and ">=" not in s for s in sqls
+        ), sqls
 
 
 # --- append boundary dedupe -------------------------------------------------

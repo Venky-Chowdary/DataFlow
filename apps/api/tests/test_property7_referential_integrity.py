@@ -369,8 +369,9 @@ def test_orphan_source_rows_are_an_ri_finding_not_a_green_checksum(tmp_path: Pat
     )
     try:
         # Gate-8 G22 fails closed on destination orphans: the FK is not
-        # claimed, the run is not certified, the overwrite undo restores the
-        # pre-run (empty) table, and the evidence still names the orphan row.
+        # claimed, the run is not certified, and the evidence still names the
+        # orphan row. The rows this overwrite landed are kept for inspection
+        # rather than dropped (QA round 12) and the job says where.
         assert not result.success, "orphans must not certify a run"
         assert "referential integrity failed" in str(result.error).lower()
         assert "1 orphan row(s)" in str(result.error)
@@ -378,7 +379,7 @@ def test_orphan_source_rows_are_an_ri_finding_not_a_green_checksum(tmp_path: Pat
         g22 = (result.reconciliation or {}).get("g22_dest_referential_integrity") or {}
         assert "11 -> 999" in (g22.get("details") or {}).get("orphan_samples", []), g22
         dsum = result.destination_summary or {}
-        assert dsum.get("partial_batch_undo") == "cleared", dsum
+        assert dsum.get("partial_batch_undo") == "retained_for_inspection", dsum
         assert dsum.get("partial_batch_undo_note"), dsum
         assert str(dsum["partial_batch_undo_note"]) in str(result.error)
         summary = _fk_summary(result)
@@ -396,13 +397,11 @@ def test_orphan_source_rows_are_an_ri_finding_not_a_green_checksum(tmp_path: Pat
         conn.autocommit = True
         try:
             with conn.cursor() as cur:
-                # The child did not exist before the run — the overwrite undo
-                # must restore that pre-run state exactly (X-41 existence
-                # snapshot): no leftover table, no rows, no FK constraint.
-                cur.execute("SELECT to_regclass(%s)", (f"public.{child}",))
-                assert cur.fetchone()[0] is None, (
-                    "undo must restore the pre-run state: child did not exist"
-                )
+                # The child table this run created stays for inspection, with
+                # the rows it landed, and no FK constraint is claimed on it.
+                assert f"Data kept at public.{child}" in str(result.error)
+                cur.execute(f'SELECT COUNT(*) FROM public."{child}"')
+                assert cur.fetchone()[0] == 2
                 cur.execute(
                     """
                     SELECT 1 FROM information_schema.table_constraints

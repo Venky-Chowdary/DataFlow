@@ -336,6 +336,58 @@ def _contract_lookback_days(data: dict[str, Any]) -> int:
     return days if days > 0 else 0
 
 
+def _catalog_spelling(name: str, columns: list[str]) -> str:
+    """``name`` as the source catalog spells it: exact, else a unique case fold."""
+    if not name or name in columns:
+        return name
+    folded = [c for c in columns if str(c).casefold() == name.casefold()]
+    return folded[0] if len(folded) == 1 else name
+
+
+def bind_contract_columns_to_source(
+    stream_contracts: list[dict[str, Any]] | None,
+    source_columns: list[str] | None,
+) -> list[dict[str, Any]] | None:
+    """Spell each contract's cursor and key the way the source catalog does.
+
+    QA r12 Snowflake D4: a contract typed ``updated_at``/``id`` against a
+    Snowflake table whose catalog holds ``UPDATED_AT``/``ID`` was used
+    verbatim. Every owner that looks the cursor up by name (the pre-write key
+    probe's watermark bound, the boundary tie-set read, the delta walk's column
+    list) missed, failed open onto the whole table, and the second
+    incremental_append was refused with "Destination already stores these
+    keys" — or re-appended the boundary row. Binding the names once, here, is
+    what makes them one column for every owner. Only a unique case-folded
+    match is adopted; an exact match (Postgres ``Orders`` vs ``orders``) or an
+    ambiguous one keeps the operator's spelling. The stored watermark's column
+    guard is case-insensitive, so a rebound name keeps its watermark.
+    """
+    cols = [str(c) for c in (source_columns or []) if str(c)]
+    if not stream_contracts or not cols:
+        return stream_contracts
+    out: list[dict[str, Any]] = []
+    for raw in stream_contracts:
+        if not isinstance(raw, dict):
+            out.append(raw)
+            continue
+        item = dict(raw)
+        for key in ("cursor_field", "cursor_column", "cursor"):
+            if isinstance(item.get(key), str) and item[key].strip():
+                item[key] = _catalog_spelling(item[key].strip(), cols)
+        for key in ("primary_key", "primary_keys"):
+            pk = item.get(key)
+            if isinstance(pk, (list, tuple)):
+                item[key] = [_catalog_spelling(str(p).strip(), cols) for p in pk]
+            elif isinstance(pk, str) and pk.strip():
+                item[key] = ",".join(
+                    _catalog_spelling(p.strip(), cols)
+                    for p in pk.replace(";", ",").split(",")
+                    if p.strip()
+                )
+        out.append(item)
+    return out
+
+
 def resolve_sync_contract(stream_contracts: list[dict[str, Any]] | None) -> SyncContract | None:
     """Pick the first selected stream contract."""
     selected = resolve_selected_sync_contracts(stream_contracts)

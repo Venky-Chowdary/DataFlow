@@ -29,6 +29,7 @@ import tempfile
 from collections.abc import Iterable
 
 from services.brand_env import getenv_brand
+from services.column_digest import ColumnDigests
 from services.reconcile_progress import note_hashed_rows
 
 SPILL_THRESHOLD = int(getenv_brand("FINGERPRINT_SPILL_THRESHOLD", "100000"))
@@ -54,6 +55,9 @@ class FingerprintAccumulator:
         self._progress_noted = 0
         self._additive_sum = 0
         self._tempdir: tempfile.TemporaryDirectory | None = None
+        # Per-column multiset digests of the same canonical cells — they name
+        # the column when two row digests disagree (diagnostic only).
+        self.columns = ColumnDigests()
 
     def _flush_progress(self) -> None:
         pending = self.total - self._progress_noted
@@ -65,6 +69,7 @@ class FingerprintAccumulator:
     def add(self, key: str, fingerprint: str) -> None:
         self.buffer.append((key, fingerprint))
         self.total += 1
+        self.columns.add(fingerprint)
         # Order-independent additive digest: sum of per-row fingerprint
         # hashes mod 2^256. An append into an occupied table is then
         # value-verifiable — post-write sum minus pre-write sum must equal

@@ -1005,6 +1005,11 @@ def run_file_preflight(
         drift_dest_types = {}
         ddl_dest_types = hinted_dest_types
 
+    # One spelling for the cursor and key: the source catalog's (QA r12
+    # Snowflake D4). Execute binds the same way after its peek.
+    from services.sync_cursor import bind_contract_columns_to_source
+
+    stream_contracts = bind_contract_columns_to_source(stream_contracts, list(columns or []))
     read_scope = _resolve_read_scope(
         sync_mode=sync_mode,
         stream_contracts=stream_contracts,

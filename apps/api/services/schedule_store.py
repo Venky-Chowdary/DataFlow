@@ -1823,8 +1823,67 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
             released = _release_empty_mapping_if_mapped(updated)
             if released:
                 return released
+            released = _release_finding_on_plan_change(updated, data)
+            if released:
+                return released
         return updated
     return None
+
+
+#: Schedule fields an operator edits to fix what a parked run refused. Only a
+#: PATCH that touches one of these can resolve a finding; run bookkeeping and
+#: the source-baseline Accept (which closes its own finding) never do.
+_PLAN_FIX_KEYS = frozenset({
+    "mappings", "sync_mode", "primary_key", "cursor_column", "stream_contracts",
+    "source_table", "dest_table", "source_connector_id", "dest_connector_id",
+    "source_read_mode", "source_query", "procedure_call", "procedure_params",
+    "schema_policy", "validation_mode", "delivery_guarantee", "backfill_new_fields",
+    "contract_id", "require_signed_contract",
+})
+
+
+def _release_finding_on_plan_change(
+    sched: PipelineSchedule, data: dict[str, Any]
+) -> PipelineSchedule | None:
+    """Re-arm a parked schedule whose plan the operator just changed.
+
+    QA r12 Mongo D9: a PATCH that fixed the mappings left ``enabled=true`` with
+    ``next_run_at=null`` until a disable/enable toggle, because only the empty-
+    mapping park was released by a plan edit. A finding is raised against one
+    binding (mapping + source shape + policies, hashed). Once the PATCH moves
+    the binding the finding no longer describes this plan, so it is closed as a
+    plan change and the refused beat runs again — a refusal that is still true
+    parks again on the new binding.
+
+    A park over committed append rows stays a human decision: re-running it
+    from zero would write those rows twice whatever the mapping says.
+    """
+    if not (set(data) & _PLAN_FIX_KEYS) or not has_open_approval(sched):
+        return None
+    request = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+    evidence = request.get("evidence") if isinstance(request.get("evidence"), dict) else {}
+    if str(evidence.get("park_reason") or "") == "committed_rows_cannot_be_replayed":
+        return None
+    from services.standing_authorization import binding_from_schedule
+
+    raised_on = str((request.get("binding") or {}).get("binding_hash") or "")
+    now_hash = str(binding_from_schedule(sched).get("binding_hash") or "")
+    if not raised_on or raised_on == now_hash:
+        return None
+    from services.schedule_approvals import resolve_plan_change
+
+    changed = sorted(set(data) & _PLAN_FIX_KEYS)
+    result = resolve_plan_change(
+        sched.id,
+        actor="operator:plan_change",
+        reason=(
+            "The schedule's plan changed (" + ", ".join(changed) + ") after this "
+            "finding was raised, so it no longer describes the plan. The next run "
+            "re-decides on the new plan; a refusal that is still true parks again."
+        ),
+    )
+    released = result.get("schedule") if result else None
+    return released if isinstance(released, PipelineSchedule) else None
 
 
 def _release_empty_mapping_if_mapped(sched: PipelineSchedule) -> PipelineSchedule | None:
@@ -2649,6 +2708,42 @@ def visible_next_run_at(sched: Any) -> str | None:
     if has_open_approval(sched):
         return None
     return getattr(sched, "next_run_at", None) or None
+
+
+def schedule_run_state(sched: Any) -> tuple[str, str]:
+    """``(state, stalled_reason)`` for the schedule API (QA r12 Mongo D9).
+
+    ``stalled`` is an enabled schedule that will not fire on its own: an open
+    finding holds the cadence, or the mapping contract is empty. (A stored
+    ``next_run_at`` of None is due now, not stalled.) The reason names the
+    finding and the action that clears it.
+    """
+    from services.schedule_mapping_contract import persisted_mapping_rows
+
+    if not getattr(sched, "enabled", True):
+        return "paused", ""
+    if getattr(sched, "running", False) and not _is_running_stale(sched):
+        return "running", ""
+    if has_open_approval(sched):
+        req = sched.approval_request if isinstance(sched.approval_request, dict) else {}
+        code = str(req.get("code") or "").strip()
+        finding = str(req.get("finding") or "").strip()
+        corrective = str(req.get("corrective_action") or "").strip()
+        clears = (
+            "Approve the finding, or change the plan (a PATCH that changes it re-arms the schedule)"
+            if req.get("approvable")
+            else "Fix the plan (a PATCH that changes it re-arms the schedule), or resume it"
+        )
+        parts = [f"Parked on a finding{f' ({code})' if code else ''}"]
+        if finding:
+            parts.append(finding)
+        if corrective:
+            parts.append(corrective)
+        parts.append(clears + ".")
+        return "stalled", ": ".join(parts[:2]) + (" " + " ".join(parts[2:]) if parts[2:] else "")
+    if not persisted_mapping_rows(getattr(sched, "mappings", None)):
+        return "stalled", "No mapping contract is stored; save mappings to arm the schedule."
+    return "scheduled", ""
 
 
 def _slot_due(sched: PipelineSchedule, current: datetime) -> bool:

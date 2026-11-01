@@ -915,7 +915,11 @@ def canonical_checksum_from_iter(
         if limit and i >= limit:
             break
         acc.add(row_key, fp)
-    return acc.digest()
+    digest = acc.digest()
+    from services.column_digest import note_readback
+
+    note_readback(digest, acc.columns.snapshot())
+    return digest
 
 
 #: Hits per Elasticsearch read-back page while paging a whole index.
