@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "id": "987654322",
+      "status": "current",
+      "title": "Fixture Page Two",
+      "spaceId": "123456",
+      "createdAt": "2024-01-02T00:00:00.000Z",
+      "version": { "number": 1, "createdAt": "2024-01-02T00:00:00.000Z" }
+    }
+  ],
+  "_links": {
+    "base": "https://acme.atlassian.net/wiki"
+  }
+}

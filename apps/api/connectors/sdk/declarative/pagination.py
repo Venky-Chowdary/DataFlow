@@ -12,7 +12,7 @@ from connectors.sdk.declarative.requester import HttpRequester
 from services.json_tabular import _dig_path, extract_json_records
 from services.secret_config import redact_url
 
-PaginatorType = Literal["none", "cursor", "offset", "page", "link_header"]
+PaginatorType = Literal["none", "cursor", "offset", "page", "link_header", "next_url"]
 
 
 @dataclass(frozen=True)
@@ -31,9 +31,10 @@ class PaginatorSpec:
     cursor_header: str = ""
     initial_token: str | None = None
     stop_path: str = ""
+    next_url_path: str = ""
 
     def __post_init__(self) -> None:
-        if self.type not in {"none", "cursor", "offset", "page", "link_header"}:
+        if self.type not in {"none", "cursor", "offset", "page", "link_header", "next_url"}:
             raise ValueError(f"unsupported paginator type {self.type!r}")
         if self.cursor_location not in {"query", "body"}:
             raise ValueError("cursor_location must be query or body")
@@ -58,6 +59,10 @@ class PaginatorSpec:
             raise ValueError("page paginator requires page_param")
         if self.stop_path and self.type != "offset":
             raise ValueError("stop_path applies only to offset pagination")
+        if self.type == "next_url" and not self.next_url_path:
+            raise ValueError("next_url paginator requires next_url_path")
+        if self.next_url_path and self.type != "next_url":
+            raise ValueError("next_url_path applies only to next_url pagination")
 
 
 @dataclass(frozen=True)
@@ -234,7 +239,7 @@ def paginate(
 
     while True:
         page_body = deepcopy(dict(json_body)) if json_body is not None else None
-        if paginator.type == "link_header":
+        if paginator.type in {"link_header", "next_url"}:
             key = _canonical_url(current_url)
             if key in seen_urls:
                 raise _pagination_error(
@@ -243,7 +248,19 @@ def paginate(
                     stream,
                 )
             seen_urls.add(key)
+        if paginator.type == "link_header" or (
+            paginator.type == "next_url" and page_count > 0
+        ):
             page_params: dict[str, Any] | None = base_params if page_count == 0 else None
+        elif paginator.type == "next_url":
+            # First page only: base params + page size; later pages follow the
+            # returned URL verbatim (Confluence/Posthog/Zendesk embed the cursor).
+            page_params = dict(base_params)
+            if paginator.page_size_param:
+                request_page_size = paginator.page_size
+                if record_limit is not None:
+                    request_page_size = min(paginator.page_size, record_limit)
+                page_params[paginator.page_size_param] = request_page_size
         else:
             page_params = dict(base_params)
             remaining = (
@@ -331,9 +348,22 @@ def paginate(
             next_token = offset + len(records)
         elif paginator.type == "page" and records:
             next_token = page_number + 1
-        elif paginator.type == "link_header":
-            link_value = _header(result.response.headers, "Link")
-            next_link = _next_link(link_value) if link_value else None
+        elif paginator.type in {"link_header", "next_url"}:
+            if paginator.type == "link_header":
+                link_value = _header(result.response.headers, "Link")
+                next_link = _next_link(link_value) if link_value else None
+            else:
+                candidate = _dig_path(result.payload, paginator.next_url_path)
+                if candidate in (None, ""):
+                    next_link = None
+                elif not isinstance(candidate, str):
+                    raise _pagination_error(
+                        f"pagination next_url_path={paginator.next_url_path!r} must resolve to a string",
+                        page_preview,
+                        stream,
+                    )
+                else:
+                    next_link = candidate
             if next_link:
                 next_url = urljoin(current_url, next_link)
                 resolved = urlsplit(next_url)
@@ -389,7 +419,7 @@ def paginate(
                     page,
                     stream,
                 )
-        elif not record_limit_reached and paginator.type == "link_header" and next_url:
+        elif not record_limit_reached and paginator.type in {"link_header", "next_url"} and next_url:
             if not records:
                 raise _pagination_error(
                     "pagination received an empty page with a next URL",

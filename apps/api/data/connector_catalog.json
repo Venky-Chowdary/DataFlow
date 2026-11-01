@@ -4495,6 +4495,13 @@
       "category": "saas",
       "status": "planned",
       "description": "Task management — tasks, projects and sections via the Todoist REST v2 API (bearer token, cursor pagination)."
+    },
+    {
+      "id": "posthog",
+      "name": "Posthog",
+      "category": "saas",
+      "status": "planned",
+      "description": "Product analytics — events, persons, cohorts and feature flags via the Posthog project API (personal API key)."
     }
   ]
 }

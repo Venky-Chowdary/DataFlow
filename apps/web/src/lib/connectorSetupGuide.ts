@@ -706,6 +706,42 @@ const GUIDES: Record<string, ConnectorSetupGuide> = {
       { label: "OAuth 2.0 overview", url: "https://www.zoho.com/crm/developer/docs/api/v2/oauth-overview.html" },
     ],
   },
+  posthog: {
+    title: "Set up Posthog",
+    steps: [
+      "Posthog → Settings → Project settings → Personal API keys → create a key with read access.",
+      "Host is your Posthog base (app.posthog.com or self-hosted); Project ID is the numeric project id.",
+      "Test proves /api/projects/{id}/persons answers — 401/403 is the key.",
+    ],
+    links: [
+      { label: "Posthog API docs", url: "https://posthog.com/docs/api" },
+      { label: "Personal API keys", url: "https://posthog.com/docs/api#private-endpoint-authentication" },
+    ],
+  },
+  confluence: {
+    title: "Set up Confluence",
+    steps: [
+      "id.atlassian.com → Security → API tokens → Create API token.",
+      "Site name is your subdomain (acme for acme.atlassian.net); the credential is your account email + API token.",
+      "Test proves /wiki/api/v2/spaces answers — 401/403 is the email/token pair.",
+    ],
+    links: [
+      { label: "Confluence Cloud REST v2", url: "https://developer.atlassian.com/cloud/confluence/rest/v2/intro/" },
+      { label: "Create an API token", url: "https://id.atlassian.com/manage-profile/security/api-tokens" },
+    ],
+  },
+  zendesk: {
+    title: "Set up Zendesk",
+    steps: [
+      "Admin Center → Apps and integrations → APIs → Zendesk API → enable token access → Add token.",
+      "Subdomain is your subdomain (acme for acme.zendesk.com); the credential is your account email + API token.",
+      "Test proves /api/v2/users/me answers — 401/403 is the email/token pair.",
+    ],
+    links: [
+      { label: "Zendesk API docs", url: "https://developer.zendesk.com/api-reference/introduction/" },
+      { label: "Generate an API token", url: "https://developer.zendesk.com/api-reference/sales-crm/authentication/#generate-an-api-token" },
+    ],
+  },
   singer_tap: {
     title: "Set up a Singer tap",
     steps: [

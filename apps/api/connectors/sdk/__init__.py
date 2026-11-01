@@ -916,6 +916,31 @@ def _load_builtin_connectors() -> None:
             type(exc).__name__,
         )
 
+    try:
+        from connectors.sdk import posthog  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.posthog",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import confluence  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.confluence",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import zendesk  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.zendesk",
+            type(exc).__name__,
+        )
+
 
 _load_builtin_connectors()
 

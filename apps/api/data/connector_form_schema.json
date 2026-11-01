@@ -434,6 +434,47 @@
       "Test proves /api/v1/lead/ answers — 401 is the key."
     ]
   },
+  "confluence": {
+    "label": "Confluence",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Confluence email + API token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Site name",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "acme (acme.atlassian.net)"
+          },
+          {
+            "key": "email",
+            "label": "Atlassian account email",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "api_key",
+            "label": "API token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Create an API token at id.atlassian.com → Security → API tokens.",
+      "Set Host to your site name (e.g. acme), Email to your Atlassian account email, and API token as the credential.",
+      "Streams sync pages, blog posts, spaces and attachments via the v2 API (full refresh)."
+    ]
+  },
   "couchbase": {
     "label": "Couchbase",
     "default_auth_mode": "user_pass",
@@ -2700,6 +2741,49 @@
       "Test proves the driver can reach the host and log in — a role error is still 'connected', it just means grants are missing."
     ]
   },
+  "posthog": {
+    "label": "Posthog",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Posthog personal API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Posthog host",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "app.posthog.com"
+          },
+          {
+            "key": "project_id",
+            "label": "Project ID",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "42"
+          },
+          {
+            "key": "api_key",
+            "label": "Personal API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "phx_…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "In Posthog open Settings → Project settings → Personal API keys and create a key with read access.",
+      "Set Host to your Posthog base (e.g. app.posthog.com or your self-hosted URL) and Project ID to the numeric project id.",
+      "Streams sync events, persons, cohorts and feature flags (full refresh)."
+    ]
+  },
   "qdrant": {
     "label": "Qdrant",
     "default_auth_mode": "user_pass",
@@ -4364,6 +4448,47 @@
       "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
       "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
       "Test proves the file opens and parses — a missing path is not Connected."
+    ]
+  },
+  "zendesk": {
+    "label": "Zendesk",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Zendesk email + API token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "host",
+            "label": "Subdomain",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "acme (acme.zendesk.com)"
+          },
+          {
+            "key": "email",
+            "label": "Account email",
+            "type": "text",
+            "optional": false,
+            "sensitive": false
+          },
+          {
+            "key": "api_key",
+            "label": "API token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "In Zendesk Admin Center → Apps and integrations → APIs → Zendesk API enable token access and add a token.",
+      "Set Host to your subdomain (e.g. acme), Email to your account email, and the API token as the credential.",
+      "Streams sync tickets, users, organizations and ticket comments (full refresh)."
     ]
   },
   "zoho_crm": {

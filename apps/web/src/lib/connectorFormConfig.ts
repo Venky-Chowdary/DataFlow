@@ -907,6 +907,54 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
         (values) => required(values, "api_key", "API key"),
       ),
     );
+  } else if (resolved === "posthog") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Posthog personal API key",
+        [
+          text("host", "Posthog host", { placeholder: "app.posthog.com" }),
+          text("project_id", "Project ID", { placeholder: "42" }),
+          password("api_key", "Personal API key", { placeholder: "phx_…" }),
+        ],
+        (values) =>
+          required(values, "host", "Posthog host")
+          || required(values, "project_id", "Project ID")
+          || required(values, "api_key", "Personal API key"),
+      ),
+    );
+  } else if (resolved === "confluence") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Confluence email + API token",
+        [
+          text("host", "Site name", { placeholder: "acme (acme.atlassian.net)" }),
+          text("email", "Atlassian account email"),
+          password("api_key", "API token"),
+        ],
+        (values) =>
+          required(values, "host", "Site name")
+          || required(values, "email", "Atlassian account email")
+          || required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "zendesk") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Zendesk email + API token",
+        [
+          text("host", "Subdomain", { placeholder: "acme (acme.zendesk.com)" }),
+          text("email", "Account email"),
+          password("api_key", "API token"),
+        ],
+        (values) =>
+          required(values, "host", "Subdomain")
+          || required(values, "email", "Account email")
+          || required(values, "api_key", "API token"),
+      ),
+    );
   } else if (resolved === "todoist") {
     authModes.push(
       auth(
@@ -1146,7 +1194,7 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (resolved === "github") return "pat";
   if (resolved === "servicenow") return "user_pass";
   if (resolved === "woocommerce") return "user_pass";
-  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm"].includes(resolved)) return "api_key";
+  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm", "posthog", "confluence", "zendesk"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";
