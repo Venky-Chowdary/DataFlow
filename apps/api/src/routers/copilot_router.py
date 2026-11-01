@@ -7,7 +7,7 @@ Customer-facing chat + separate training agent endpoints.
 import asyncio
 import logging
 
-from typing import Optional
+from typing import Any, Optional
 
 from fastapi import APIRouter, BackgroundTasks, HTTPException, Request
 from pydantic import BaseModel, Field
@@ -793,11 +793,16 @@ async def copilot_confirm(
 
     if kind == "create_schedule":
         try:
+            schedule_payload = _confirm_schedule_workspace(dict(payload), http_request)
+        except HTTPException:
+            ledger.release_claim(ack_id)
+            raise
+        try:
             from services.schedule_store import create_schedule as store_create_schedule
 
             # The store owns cadence, sync-mode and signed-contract validation —
             # chat supplies the payload, it does not get its own rule set.
-            sched = store_create_schedule(dict(payload))
+            sched = store_create_schedule(schedule_payload)
         except ValueError as exc:
             ledger.release_claim(ack_id)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -815,7 +820,17 @@ async def copilot_confirm(
             "sync_mode": sched.sync_mode,
             "enabled": sched.enabled,
             "next_run_at": sched.next_run_at or "",
+            "workspace_id": sched.workspace_id or "",
         }
+        # Same audit trail as POST /schedules (QA Snowflake D12: an MCP-created
+        # schedule left no create event at all).
+        from services.schedule_audit import (
+            audit_schedule_acknowledgment,
+            record_schedule_created,
+        )
+
+        record_schedule_created(sched, request=http_request, via="pilot_confirm")
+        audit_schedule_acknowledgment(sched, request=http_request, via="pilot_confirm")
         ledger.finalize(
             ack_id,
             actor=actor,
@@ -849,6 +864,47 @@ async def copilot_confirm(
 
     ledger.release_claim(ack_id)
     raise HTTPException(status_code=400, detail=f"Unsupported approval kind: {kind}")
+
+
+def _confirm_schedule_workspace(payload: dict[str, Any], http_request: Request) -> dict[str, Any]:
+    """Bind a staged schedule to the workspace the confirming caller writes to.
+
+    QA Snowflake D12: the staged payload carried no ``workspace_id``, so the
+    confirmed schedule was stored unscoped — run by the scheduler and counted
+    by the destination-conflict check, but 404 on GET, list and DELETE for its
+    own workspace. The staging call now records its workspace; Confirm refuses
+    a caller who cannot write there, and stamps the caller's workspace on an
+    older approval that has none. Under workspace isolation an approval that
+    resolves to no workspace is refused rather than saved invisible.
+    """
+    from services.team_store import require_workspace_isolation
+    from services.tenant_scope import resolve_tenant_scope
+
+    staged = str(payload.get("workspace_id") or "").strip()
+    scope = resolve_tenant_scope(http_request)
+    if staged:
+        if not scope.can_write(staged):
+            raise HTTPException(
+                status_code=403,
+                detail="This schedule approval belongs to a workspace you cannot write to.",
+            )
+        return payload
+    try:
+        target = scope.target_workspace_id(write=True)
+    except HTTPException:
+        target = ""
+    if target:
+        return {**payload, "workspace_id": target}
+    if require_workspace_isolation():
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "This schedule would belong to no workspace, so nobody but a platform "
+                "admin could see or delete it. Confirm with X-Workspace-Id set to the "
+                "workspace that owns it."
+            ),
+        )
+    return payload
 
 
 @router.get("/datasets")

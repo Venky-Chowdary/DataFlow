@@ -1749,14 +1749,22 @@ def run_file_preflight(
         try:
             from services.schedule_store import (
                 conflicting_dest_writers,
-                describe_dest_conflict,
+                describe_dest_conflicts,
             )
+            from services.workspace_filter import current_workspace_filter
 
             _owners = conflicting_dest_writers(
                 destination_connector_id, destination_table
             )
             if _owners:
-                _names = [describe_dest_conflict(s) for s in _owners]
+                # One sentence per caller scope (QA Snowflake D12): a pipeline
+                # outside the caller's workspace is counted, not named.
+                _names = [
+                    describe_dest_conflicts(
+                        [s], current_workspace_filter()
+                    )
+                    for s in _owners
+                ]
                 for _b in result.blockers or []:
                     _d = (
                         _b.get("details")

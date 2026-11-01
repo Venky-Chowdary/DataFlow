@@ -61,7 +61,10 @@ _NAME_PATTERN_GROUPS: dict[str, tuple[tuple[str, ...], float]] = {
         r"postal",
         r"country(?:_?code)?\b",
     ), 0.18),
-    "dob": ((r"\bdob\b", r"birth", r"date_of_birth"), 0.42),
+    # ``birth`` must start a word: ``rebirth_count`` / ``childbirth_ward`` are
+    # not a date of birth (QA Snowflake D2). ``birth_date``, ``birthday``,
+    # ``BirthDate`` and ``date_of_birth`` still are.
+    "dob": ((r"\bdob\b", r"(?:^|_|\b)birth", r"date_of_birth"), 0.42),
     # Online identifier under GDPR. ``ip`` must be a whole snake_case token:
     # ``zip`` / ``tip`` / ``skip_count`` are not addresses.
     "ip_address": ((
@@ -119,15 +122,119 @@ _HIGH_RISK_CATEGORIES = frozenset({"ssn", "passport", "dob", "account", "salary"
 # category via user_name and must stay a medium signal — forcing review on
 # every login column is a different policy.
 _HIGH_RISK_NAME_RE = re.compile(
-    r"(?:^|_)(?:full_?name|first_?name|last_?name|contact_?name|customer_?name|display_?name)(?:_|$)"
+    r"(?:^|_)(?:full_?name|first_?name|last_?name|contact_?name|customer_?name)(?:_|$)"
 )
+
+# QA Snowflake D2 — value-pattern checks where a column name alone is weak.
+# Each rule clears a column only on what its *values* show, and only for the
+# ambiguous names; an explicit person/date name keeps flagging by name.
+
+#: A column the schema names a quantity or measure. A phone number is never
+#: stored under these words, and their bare digit runs (``qty = 1234567``) are
+#: counts, so they are not phone evidence. Formatted phones (``+1 555 …``)
+#: still are, whatever the column is called.
+_QUANTITY_NAME_RE = re.compile(
+    r"(?:^|_)(?:qty|qtys|quantity|quantities|count|counts|cnt|units?|amount|amt|"
+    r"total|totals|sum|stock|inventory|balance|price|cost|score|weight|volume|"
+    r"size|rank|seq|sequence|num|nbr)(?:_|$)|^n_"
+)
+
+#: Names that are ``name`` only by word, not by person: the name of a table,
+#: file, product... ``display_name`` is here too — it is as often an app's or
+#: a device's label as a person's — so it is judged by its values instead of
+#: being a high-risk personal name by spelling alone.
+_AMBIGUOUS_NAME_RE = re.compile(r"^(?:name|display_?name)$")
+
+#: A person's name as it is written: one to five words of letters with the
+#: punctuation names carry (O'Brien, Jean-Luc, J. R. R.), no digits, no
+#: underscores/slashes/@ — those are identifiers, paths and handles.
+_PERSON_NAME_VALUE_RE = re.compile(r"^[^\W\d_]+(?:[ '\-.,]+[^\W\d_]+){0,4}\.?$")
+
+
+def _snake(name: str) -> str:
+    """``orderQty`` → ``order_qty``; ``TABLE NAME`` → ``table_name``."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name or ""))
+    return re.sub(r"[\s\-.]+", "_", spaced).lower()
+
+
+def _quantity_column(col: str) -> bool:
+    return bool(_QUANTITY_NAME_RE.search(_snake(col)))
+
+
+def _non_person_name(col: str, values: list[str]) -> bool:
+    """An ambiguous ``name`` column whose values are not people's names.
+
+    Only ``name`` / ``display_name`` are judged this way, and only on a sample:
+    with nothing sampled the name rule stands (fail closed). The column is
+    cleared when most values carry digits, underscores, slashes or other
+    identifier marks — ``orders_2024``, ``widget-3000``, ``s3://bucket``.
+    """
+    if not _AMBIGUOUS_NAME_RE.search(_snake(col)):
+        return False
+    non_empty = [v for v in values if v]
+    if not non_empty:
+        return False
+    person_like = sum(1 for v in non_empty if _PERSON_NAME_VALUE_RE.match(v))
+    return person_like * 2 < len(non_empty)
+
+
+def _not_a_birth_date(col: str, values: list[str], raw_values: list[Any]) -> bool:
+    """A ``birth…`` column whose sampled values are plain numbers, not dates.
+
+    ``births = 12``, ``birth_rate = 11.4`` and ``birth_year = 1990`` hold no
+    date of birth: HIPAA Safe Harbor's date elements exclude the year alone,
+    and a count or rate is not a date at all. A date, a timestamp or a
+    date-shaped digit run (``19900520`` under a date name) keeps the flag, as
+    does an unsampled column.
+    """
+    non_empty = [v for v in values if v]
+    if not non_empty or _temporal_column(col, values):
+        return False
+    numeric = _numeric_column(raw_values) or all(
+        re.fullmatch(r"[+-]?\d+(?:\.\d+)?", v) for v in non_empty
+    )
+    if not numeric:
+        return False
+    # yyyymmdd / epoch digit runs are dates written as numbers.
+    return all(len(v.lstrip("+-").split(".")[0]) <= 4 for v in non_empty)
+
+
+def _decode_cell(value: Any) -> Any:
+    """A sampled cell as its value: wire NULL/missing sentinels are ``None``.
+
+    Preflight samples arrive as wire text, where SQL NULL is the
+    ``__DF_SQL_NULL__`` sentinel. Read as a string it made every nullable
+    numeric column look non-numeric, so the value rules never cleared it
+    (QA Snowflake D2: ``births`` with a NULL row stayed a date of birth).
+    """
+    from services.value_serializer import (
+        SQL_NULL_SENTINEL,
+        WireLiteral,
+        is_missing_sentinel,
+        unescape_wire_text,
+    )
+
+    if isinstance(value, WireLiteral):
+        return str(value)
+    if isinstance(value, str):
+        if value == SQL_NULL_SENTINEL or is_missing_sentinel(value):
+            return None
+        decoded = unescape_wire_text(value)
+        return str(decoded) if isinstance(decoded, str) else decoded
+    if is_missing_sentinel(value):
+        return None
+    return value
 
 
 def _field_hits(name: str) -> list[str]:
     lowered = name.lower()
+    # camelCase word starts (``patientBirthDate``) for the word-anchored
+    # ``birth`` rule; every other rule keeps reading the plain lowercase name.
+    snaked = _snake(name)
     hits: list[str] = []
     for field, (patterns, _) in _NAME_PATTERN_GROUPS.items():
-        if any(re.search(pat, lowered) for pat in patterns):
+        forms = (lowered, snaked) if field == "dob" else (lowered,)
+        if any(re.search(pat, form) for pat in patterns for form in forms):
             hits.append(field)
     return hits
 
@@ -181,7 +288,11 @@ def _numeric_column(raw_values: list[Any], declared_type: str = "") -> bool:
 
 
 def _bare_digits_may_be_phone(
-    name_hits: list[str], values: list[str], raw_values: list[Any], declared_type: str
+    name_hits: list[str],
+    values: list[str],
+    raw_values: list[Any],
+    declared_type: str,
+    col: str = "",
 ) -> bool:
     """Whether a bare digit run in this column is evidence of a phone number.
 
@@ -191,10 +302,16 @@ def _bare_digits_may_be_phone(
     under a phone-hinting name, or when most non-empty values look like a phone
     and the column does not hold numbers. Formatted values (``+1 555 …``,
     ``(555) 123-4567``) are phones on their own.
+
+    A column named as a quantity (``qty``, ``units``, ``total``…) never reads
+    its bare digits as phones, even when the sample carries them as text — a
+    CSV/text source, or a ``qty`` cast to text (QA Snowflake D2).
     """
     if "phone" in name_hits:
         return True
     if _numeric_column(raw_values, declared_type):
+        return False
+    if _quantity_column(col):
         return False
     non_empty = [v for v in values if v]
     if not non_empty:
@@ -314,16 +431,34 @@ def detect_pii_fields(
 
     for col in columns:
         name_hits = _field_hits(col)
-        raw_values = [row.get(col) for row in sample_rows if col in row]
+        raw_values = [_decode_cell(row.get(col)) for row in sample_rows if col in row]
         sample_values = [
             "" if value is None else str(value).strip() for value in raw_values
         ]
         value_hits = _value_hits(
             sample_values,
             bare_digit_phones=_bare_digits_may_be_phone(
-                name_hits, sample_values, raw_values, str((column_types or {}).get(col) or "")
+                name_hits,
+                sample_values,
+                raw_values,
+                str((column_types or {}).get(col) or ""),
+                col,
             ),
         )
+        if "name" in name_hits and _non_person_name(col, sample_values):
+            _logger.info(
+                "Column %r: 'name' by spelling, but its sampled values are not "
+                "people's names — not flagged as a personal name",
+                col,
+            )
+            name_hits = [h for h in name_hits if h != "name"]
+        if "dob" in name_hits and _not_a_birth_date(col, sample_values, raw_values):
+            _logger.info(
+                "Column %r: 'birth' by spelling, but every sampled value is a "
+                "plain number (count, rate or year) — not a date of birth",
+                col,
+            )
+            name_hits = [h for h in name_hits if h != "dob"]
         if value_hits and _temporal_column(col, sample_values):
             _logger.info(
                 "PII value pattern(s) %s on column %r ignored: every sampled value "

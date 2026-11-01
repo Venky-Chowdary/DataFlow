@@ -206,7 +206,18 @@ def build_preflight_proof_bundle(
     quality_score = _quality_score(columns, sample_rows, source_schemas=source_schemas)
 
     from services.compliance_guard import score_compliance_risk
-    compliance = score_compliance_risk(columns, sample_rows)
+    # The declared source types reach the detector, so a numeric column whose
+    # sample arrives as text is still read as numbers (QA Snowflake D2: the
+    # round-11 numeric rule had no types on the preflight path).
+    compliance = score_compliance_risk(
+        columns,
+        sample_rows,
+        column_types={
+            str(s.get("name")): str(s.get("inferred_type") or "")
+            for s in (source_schemas or [])
+            if isinstance(s, dict) and s.get("name")
+        },
+    )
     compliance["acknowledged"] = bool(compliance_acknowledged)
     if compliance_acknowledged:
         from datetime import datetime, timezone

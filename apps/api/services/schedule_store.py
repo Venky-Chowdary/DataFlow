@@ -177,6 +177,13 @@ class PipelineSchedule:
     dest_table: str
     interval: str  # hourly | daily | weekly (preset cadence)
     enabled: bool = True
+    #: Destination namespace the runs write into. Empty is the destination
+    #: connector's own default (its saved schema / database). A REST schedule
+    #: used to drop these, so a pipeline aimed at ``DST`` wrote into the
+    #: connector's default schema instead (QA Snowflake D11). ``dest_database``
+    #: is also the catalog for engines that name it so (Databricks, Trino).
+    dest_schema: str = ""
+    dest_database: str = ""
     #: Why the schedule sits disabled when the caller asked for enabled — e.g.
     #: a create with ``enabled:true`` but no persisted mappings is stored
     #: disabled rather than silently downgraded. Empty means no downgrade
@@ -302,6 +309,9 @@ class PipelineSchedule:
     in_file_dedupe: str = "block"
     acknowledgment_actor: str = ""
     acknowledgment_reason: str = ""
+    #: When the stored acknowledgement was given (ISO-8601 UTC); empty when
+    #: nothing is acknowledged (QA Snowflake D10).
+    acknowledgment_at: str = ""
     #: A pending retry is durable state, not an in-process timer: a redeploy
     #: between attempt 1 and attempt 2 must not drop the retry on the floor.
     retry_at: str | None = None
@@ -340,6 +350,8 @@ class PipelineSchedule:
             dest_table=data["dest_table"],
             interval=data.get("interval", "daily"),
             enabled=bool(data.get("enabled", True)),
+            dest_schema=str(data.get("dest_schema") or "").strip(),
+            dest_database=str(data.get("dest_database") or "").strip(),
             enabled_note=str(data.get("enabled_note") or ""),
             cron=(data.get("cron") or "").strip(),
             timezone=(data.get("timezone") or "UTC").strip() or "UTC",
@@ -455,6 +467,7 @@ class PipelineSchedule:
             ),
             acknowledgment_actor=str(data.get("acknowledgment_actor") or ""),
             acknowledgment_reason=str(data.get("acknowledgment_reason") or ""),
+            acknowledgment_at=str(data.get("acknowledgment_at") or ""),
             retry_at=data.get("retry_at"),
             retry_attempt=max(0, int(data.get("retry_attempt", 0) or 0)),
             running=bool(data.get("running", False)),
@@ -1340,10 +1353,14 @@ def _assert_dest_pipeline_ownership(
         dst,
         table,
         exclude_schedule_id=str(exclude_id or ""),
+        dest_schema=str(payload.get("dest_schema") or ""),
+        dest_database=str(payload.get("dest_database") or ""),
     )
     if not owners:
         return
-    names = ", ".join(describe_dest_conflict(s) for s in owners)
+    from services.workspace_filter import current_workspace_filter
+
+    names = describe_dest_conflicts(owners, current_workspace_filter(), limit=len(owners))
     raise ValueError(
         f"Destination table '{table}' is already written by enabled "
         f"pipeline(s) {names}: a second pipeline on one destination "
@@ -1394,6 +1411,25 @@ def _assert_schedule_connectors_allowed(data: Mapping[str, Any], *, require_taps
     )
 
 
+def _stamp_request_workspace(data: dict[str, Any]) -> dict[str, Any]:
+    """Give a schedule created inside a request the workspace that request writes to.
+
+    The MCP ``create_schedule`` → ``confirm_action`` path handed the store a
+    payload with no ``workspace_id``. The row was saved unscoped: the scheduler
+    (system scope) ran it and the destination-conflict check (every row) saw
+    it, while GET, list and DELETE — scoped to the caller's workspace — all
+    answered 404 (QA Snowflake D12). A request-bound write now lands in the
+    workspace the request resolved; system writers (no bound scope) keep
+    whatever the payload says.
+    """
+    if str(data.get("workspace_id") or "").strip():
+        return data
+    from services.workspace_filter import current_workspace_stamp
+
+    stamp = str(current_workspace_stamp() or "").strip()
+    return {**data, "workspace_id": stamp} if stamp else data
+
+
 def create_schedule(
     data: dict[str, Any],
     *,
@@ -1416,6 +1452,7 @@ def create_schedule(
     # QA r12 bugs 6/7: refuse an unknown validation_mode / schema_policy at the
     # store every route shares (REST, MCP create_schedule, GitOps apply).
     data = canonicalize_policy_fields(data)
+    data = _stamp_request_workspace(data)
     _assert_schedule_connectors_allowed(data, require_taps=bool(data.get("enabled", True)))
     payload = dict(data)
     from services.duplicate_policy import validate_schedule_file_policy
@@ -1561,6 +1598,8 @@ _STAMPED_ROUTE_KEYS = (
     "source_table",
     "dest_connector_id",
     "dest_table",
+    "dest_schema",
+    "dest_database",
     "mappings",
     "stream_contracts",
     "sync_mode",
@@ -1749,7 +1788,10 @@ def _update_schedule_locked(schedule_id: str, data: dict[str, Any]) -> PipelineS
                 str(merged.get("dest_connector_id") or ""),
                 str(merged.get("dest_table") or ""),
             )
-        if any(key in data for key in ("dest_table", "dest_connector_id", "enabled")):
+        if any(
+            key in data
+            for key in ("dest_table", "dest_connector_id", "dest_schema", "dest_database", "enabled")
+        ):
             _assert_dest_pipeline_ownership(merged, exclude_id=schedule_id)
         merged["contract_id"] = contract_id
         merged["require_signed_contract"] = require_signed
@@ -2782,11 +2824,38 @@ def seconds_until_next_schedule(
     return float(min(cap, max(1.0, delta)))
 
 
+def _connector_default_location(connector_id: str) -> tuple[str, str]:
+    """The (schema, database) a schedule with no explicit location writes into."""
+    try:
+        from services.connector_store import get_connector
+        from services.workspace_filter import bound_workspace_filter
+
+        # The writers being compared run in system scope; so does this read.
+        with bound_workspace_filter(None):
+            conn = get_connector(connector_id)
+    except Exception:  # noqa: BLE001 — an unreadable connector has no default
+        conn = None
+    if conn is None:
+        return "", ""
+    if isinstance(conn, Mapping):
+        return str(conn.get("schema") or ""), str(conn.get("database") or "")
+    return str(getattr(conn, "schema", "") or ""), str(getattr(conn, "database", "") or "")
+
+
+def _location_key(schema: str, database: str, default: tuple[str, str]) -> tuple[str, str]:
+    return (
+        (str(schema or "").strip() or default[0]).strip().casefold(),
+        (str(database or "").strip() or default[1]).strip().casefold(),
+    )
+
+
 def conflicting_dest_writers(
     dest_connector_id: str,
     dest_table: str,
     *,
     exclude_schedule_id: str = "",
+    dest_schema: str = "",
+    dest_database: str = "",
 ) -> list[PipelineSchedule]:
     """Enabled pipelines already writing the same destination table (D104).
 
@@ -2795,13 +2864,21 @@ def conflicting_dest_writers(
     collision. The comparison folds case (Snowflake uppercases unquoted
     identifiers) so ``hq1200_shared`` and ``HQ1200_SHARED`` are one table.
     Disabled schedules hold no write claim and are not conflicts.
+
+    The table is located by schema and database too (QA Snowflake D11): an
+    empty location is the connector's default, so ``DST.T`` and ``SRC.T`` on
+    one connector are two tables, while ``T`` and ``<default schema>.T`` are one.
+
+    This reads the same store, unfiltered, as the scheduler that will run
+    these writers; :func:`describe_dest_conflicts` decides what the caller may
+    be shown about each one (QA Snowflake D12).
     """
     dst = str(dest_connector_id or "").strip()
     tbl = str(dest_table or "").strip()
     if not dst or not tbl:
         return []
     exclude = str(exclude_schedule_id or "").strip()
-    return [
+    candidates = [
         s
         for s in _load_all()
         if getattr(s, "enabled", False)
@@ -2809,6 +2886,63 @@ def conflicting_dest_writers(
         and str(getattr(s, "dest_connector_id", "") or "").strip() == dst
         and str(getattr(s, "dest_table", "") or "").strip().casefold() == tbl.casefold()
     ]
+    if not candidates:
+        return []
+    explicit = any(
+        str(getattr(s, "dest_schema", "") or "").strip()
+        or str(getattr(s, "dest_database", "") or "").strip()
+        for s in candidates
+    ) or bool(str(dest_schema or "").strip() or str(dest_database or "").strip())
+    if not explicit:
+        return candidates
+    default = _connector_default_location(dst)
+    wanted = _location_key(dest_schema, dest_database, default)
+    return [
+        s
+        for s in candidates
+        if _location_key(
+            str(getattr(s, "dest_schema", "") or ""),
+            str(getattr(s, "dest_database", "") or ""),
+            default,
+        )
+        == wanted
+    ]
+
+
+#: Where a platform admin lists and reconciles pipeline registrations that no
+#: workspace can see (``services.schedule_orphans``).
+ORPHAN_ADMIN_ROUTE = "/api/v1/schedules/admin/orphans"
+
+
+def describe_dest_conflicts(
+    writers: Sequence[PipelineSchedule],
+    workspace_filter: WorkspaceFilter | None = None,
+    *,
+    limit: int = 3,
+) -> str:
+    """The conflict sentence for a caller in ``workspace_filter``.
+
+    A writer the caller's schedules API can read is named, so it can be opened
+    and paused or deleted. A writer outside that scope still blocks — the
+    scheduler runs it regardless — but only its count is told, with the admin
+    route that can reconcile it: naming another workspace's pipeline would
+    leak it, and naming nothing left QA with "1 enabled pipeline" that GET,
+    list and DELETE all answered 404 for (QA Snowflake D12). ``None`` is
+    system scope: every writer is visible.
+    """
+    visible = [
+        s for s in writers
+        if workspace_filter is None or workspace_filter.matches(getattr(s, "workspace_id", ""))
+    ]
+    hidden = len(writers) - len(visible)
+    parts = [describe_dest_conflict(s) for s in visible[:limit]]
+    if hidden:
+        parts.append(
+            f"{hidden} pipeline registration(s) not visible in this workspace "
+            "(orphaned, or owned by another workspace) — a platform admin can "
+            f"list and reconcile them at {ORPHAN_ADMIN_ROUTE}"
+        )
+    return "; ".join(parts)
 
 
 def describe_dest_conflict(schedule: PipelineSchedule) -> str:

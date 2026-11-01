@@ -251,6 +251,15 @@ async def lifespan(app: FastAPI):
             if imported:
                 print(f"[+] Imported {imported} pipeline schedule(s) from schedules.json → MongoDB")
 
+            # QA Snowflake D12: report schedules no workspace can see (dry run
+            # unless DATAFLOW_SCHEDULE_ORPHAN_REPAIR=apply). Never fatal.
+            try:
+                from services.schedule_orphans import startup_orphan_scan
+
+                await asyncio.to_thread(startup_orphan_scan)
+            except Exception as orphan_exc:  # noqa: BLE001
+                print(f"[!] Schedule orphan scan skipped: {orphan_exc}")
+
             if schedule_loop_enabled():
                 from .services.schedule_runner import run_schedule_loop
 

@@ -15,6 +15,12 @@ from services.brand import PRODUCT_SLUG
 from services.cdc_capture_release import release_schedule_cdc_capture
 from services.gitops_yaml import dump_artifact_yaml
 from services.schedule_approvals import STATUS_OPEN
+from services.schedule_audit import (
+    audit_schedule_acknowledgment,
+    record_schedule_created,
+    record_schedule_deleted,
+    schedule_acknowledgment_fields,
+)
 from services.schedule_store import (
     INTERVALS,
     SYNC_MODES,
@@ -34,6 +40,20 @@ from services.workspace_access import (
 )
 
 router = APIRouter(prefix="/schedules", tags=["Scheduled Pipelines"])
+
+
+def _acknowledgment_fields(
+    request: Request, payload: dict[str, Any], *, previous: Any = None
+) -> dict[str, Any]:
+    """Validate and stamp a schedule's PII acknowledgement (QA Snowflake D10).
+
+    The actor defaults to the authenticated caller, as on ``/transfer/run``.
+    """
+    from services.workspace_access import actor_email
+
+    return schedule_acknowledgment_fields(
+        payload, default_actor=actor_email(request), previous=previous
+    )
 
 
 def _schedule_or_404(schedule_id: str) -> PipelineSchedule:
@@ -69,6 +89,14 @@ class ScheduleCreate(PolicyFieldsModel):
     source_table: str
     dest_connector_id: str
     dest_table: str
+    #: Destination namespace; empty is the connector's default (QA Snowflake D11).
+    dest_schema: str = Field(default="", max_length=255)
+    dest_database: str = Field(default="", max_length=255)
+    #: PII/compliance acknowledgement carried by every run, exactly as a
+    #: one-off ``/transfer/run`` accepts it (QA Snowflake D10).
+    compliance_acknowledged: bool = False
+    acknowledgment_actor: str = Field(default="", max_length=320)
+    acknowledgment_reason: str = Field(default="", max_length=2000)
     interval: str = "daily"
     cron: str = ""
     timezone: str = "UTC"
@@ -143,6 +171,11 @@ class ScheduleUpdate(PolicyFieldsModel):
     source_table: Optional[str] = None
     dest_connector_id: Optional[str] = None
     dest_table: Optional[str] = None
+    dest_schema: Optional[str] = Field(default=None, max_length=255)
+    dest_database: Optional[str] = Field(default=None, max_length=255)
+    compliance_acknowledged: Optional[bool] = None
+    acknowledgment_actor: Optional[str] = Field(default=None, max_length=320)
+    acknowledgment_reason: Optional[str] = Field(default=None, max_length=2000)
     interval: Optional[str] = None
     #: Runner token when ``interval`` is the displayed cadence label.
     interval_preset: Optional[str] = None
@@ -201,6 +234,12 @@ class ScheduleResponse(BaseModel):
     source_table: str
     dest_connector_id: str
     dest_table: str
+    dest_schema: str = ""
+    dest_database: str = ""
+    compliance_acknowledged: bool = False
+    acknowledgment_actor: str = ""
+    acknowledgment_reason: str = ""
+    acknowledgment_at: str = ""
     interval: str
     #: hourly | daily | weekly | cron | every_Nm. Present even when
     #: ``interval`` is a label; ``cron`` whenever a cron expression is set.
@@ -323,6 +362,9 @@ class ScheduleSummaryResponse(BaseModel):
     source_table: str
     dest_connector_id: str
     dest_table: str
+    dest_schema: str = ""
+    dest_database: str = ""
+    compliance_acknowledged: bool = False
     interval: str
     interval_preset: str = ""
     cadence_label: str = ""
@@ -570,6 +612,68 @@ async def gitops_apply_manifest(
     return result
 
 
+class OrphanReconcileRequest(BaseModel):
+    #: Dry run is the default: report what an apply would do, change nothing.
+    dry_run: bool = True
+    #: schedule id -> "adopt" | "disable" | "delete" | "none", or
+    #: {"action": "adopt", "workspace_id": "<ws>"}.
+    actions: dict[str, Any] = Field(default_factory=dict)
+    #: Limit the run to these schedule ids (default: every orphan).
+    schedule_ids: Optional[list[str]] = None
+
+
+def _require_platform_admin(request: Request) -> str:
+    from services.tenant_scope import resolve_tenant_scope
+    from services.workspace_access import actor_email
+
+    if not resolve_tenant_scope(request, "").unrestricted:
+        raise HTTPException(status_code=403, detail="Platform administrator role required")
+    return actor_email(request)
+
+
+@router.get("/admin/orphans")
+async def list_orphaned_schedules(request: Request):
+    """Pipeline registrations no workspace can see (QA Snowflake D12). Platform admin."""
+    import asyncio
+
+    from services.schedule_orphans import find_orphans
+
+    actor = _require_platform_admin(request)
+    orphans = await asyncio.to_thread(find_orphans)
+    record_security_event(
+        "schedule.orphan.list",
+        outcome="succeeded",
+        request=request,
+        actor=actor,
+        resource="schedules:orphans",
+        status=200,
+        workspace_id="",
+        details={"orphan_count": len(orphans), "ids": [o.id for o in orphans]},
+    )
+    return {"orphans": [o.to_dict() for o in orphans], "count": len(orphans)}
+
+
+@router.post("/admin/orphans/reconcile")
+async def reconcile_orphaned_schedules(body: OrphanReconcileRequest, request: Request):
+    """Adopt, disable or delete orphaned registrations. Dry run unless asked."""
+    import asyncio
+
+    from services.schedule_orphans import reconcile_orphans
+
+    actor = _require_platform_admin(request)
+    try:
+        return await asyncio.to_thread(
+            reconcile_orphans,
+            dry_run=body.dry_run,
+            actions=body.actions,
+            only_ids=body.schedule_ids,
+            actor=actor,
+            request=request,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @router.get("/", response_model=list[ScheduleSummaryResponse])
 async def list_pipeline_schedules(
     request: Request,
@@ -610,8 +714,11 @@ async def create_pipeline_schedule(
         payload["workspace_id"] = ws
     elif payload.get("workspace_id"):
         assert_resource_workspace(request, str(payload.get("workspace_id") or ""), write=True)
+    for key in ("dest_schema", "dest_database"):
+        payload[key] = str(payload.get(key) or "").strip()
     warnings: list[str] = []
     try:
+        payload.update(_acknowledgment_fields(request, payload))
         sched = create_schedule(
             payload,
             # Only an explicit enabled:true is a request to arm (QA SC7); an
@@ -625,22 +732,8 @@ async def create_pipeline_schedule(
         raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
-    record_security_event(
-        "schedule.definition.create",
-        outcome="succeeded",
-        request=request,
-        resource=f"schedule:{sched.id}",
-        status=201,
-        details={
-            "id": sched.id,
-            "source_connector_id": sched.source_connector_id,
-            "source_table": sched.source_table,
-            "dest_connector_id": sched.dest_connector_id,
-            "dest_table": sched.dest_table,
-            "sync_mode": sched.sync_mode,
-            "enabled": bool(sched.enabled),
-        },
-    )
+    record_schedule_created(sched, request=request, via="rest")
+    audit_schedule_acknowledgment(sched, request=request, via="rest")
     return ScheduleResponse.from_schedule(sched, warnings=warnings)
 
 
@@ -660,10 +753,22 @@ async def patch_pipeline_schedule(
     data = {k: v for k, v in body.model_dump().items() if v is not None}
     # A PATCH must not re-home a schedule into another workspace.
     data.pop("workspace_id", None)
+    for key in ("dest_schema", "dest_database"):
+        if key in data:
+            data[key] = str(data[key] or "").strip()
     if not data:
         return ScheduleResponse.from_schedule(existing)
     warnings: list[str] = []
     try:
+        if "compliance_acknowledged" in data or (
+            {"acknowledgment_actor", "acknowledgment_reason"} & set(data)
+            and existing.compliance_acknowledged
+        ):
+            data.setdefault("compliance_acknowledged", bool(existing.compliance_acknowledged))
+            data.update(_acknowledgment_fields(request, data, previous=existing))
+        else:
+            data.pop("acknowledgment_actor", None)
+            data.pop("acknowledgment_reason", None)
         updated = update_schedule(schedule_id, data, warnings=warnings)
     except ApiError:
         raise
@@ -687,8 +792,14 @@ async def patch_pipeline_schedule(
             "dest_table": updated.dest_table,
             "sync_mode": updated.sync_mode,
             "enabled": bool(updated.enabled),
+            "dest_schema": updated.dest_schema,
+            "dest_database": updated.dest_database,
         },
     )
+    if updated.compliance_acknowledged and (
+        updated.acknowledgment_at != existing.acknowledgment_at
+    ):
+        audit_schedule_acknowledgment(updated, request=request, via="rest")
     return ScheduleResponse.from_schedule(updated, warnings=warnings)
 
 
@@ -801,22 +912,7 @@ async def remove_pipeline_schedule(
     capture = release_schedule_cdc_capture(sched)
     if not delete_schedule(schedule_id):
         raise HTTPException(status_code=404, detail="Schedule not found")
-    record_security_event(
-        "schedule.definition.delete",
-        outcome="succeeded",
-        request=request,
-        resource=f"schedule:{schedule_id}",
-        status=200,
-        details={
-            "id": sched.id,
-            "source_connector_id": sched.source_connector_id,
-            "source_table": sched.source_table,
-            "dest_connector_id": sched.dest_connector_id,
-            "dest_table": sched.dest_table,
-            "sync_mode": sched.sync_mode,
-            "enabled": bool(sched.enabled),
-        },
-    )
+    record_schedule_deleted(sched, request=request, via="rest")
     return {"success": True, "capture_release": capture}
 
 

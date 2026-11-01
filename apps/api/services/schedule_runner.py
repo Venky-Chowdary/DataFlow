@@ -299,6 +299,35 @@ def _endpoint_from_connector(conn: dict, table: str):
     )
 
 
+def _apply_schedule_dest_location(destination: Any, sched: Any) -> Any:
+    """Write where the schedule says, not where the connector defaults to.
+
+    ``dest_schema`` / ``dest_database`` are the schedule's own destination
+    namespace (empty = the saved connector's). An explicit value is inline on
+    the endpoint, and inline values win over the saved connector when the
+    engine resolves it (``adapters.resolve_connector_config``) — the same rule
+    a one-off ``/transfer/run`` with ``dest_schema`` follows. Without this the
+    runs of a REST schedule aimed at ``DST`` landed in the connector's default
+    schema (QA Snowflake D11).
+    """
+    import dataclasses
+
+    from services.dialect_profiles import schema_from_cfg
+
+    schema = str(getattr(sched, "dest_schema", "") or "").strip()
+    database = str(getattr(sched, "dest_database", "") or "").strip()
+    changes: dict[str, Any] = {}
+    if schema:
+        # The dialect's own spelling (Snowflake folds ``dst`` to ``DST``); a
+        # dialect with no schema layer (MySQL, SQLite) keeps none.
+        folded = schema_from_cfg(destination.format, None, schema=schema)
+        if folded:
+            changes["schema"] = folded
+    if database:
+        changes["database"] = database
+    return dataclasses.replace(destination, **changes) if changes else destination
+
+
 def _normalize_sync_mode(sync_mode: str, primary_key: str) -> str:
     """Map the schedule's coarse sync_mode onto the engine's contract vocabulary."""
     mode = (sync_mode or "full_refresh_overwrite").strip().lower().replace("-", "_").replace(" ", "_")
@@ -325,7 +354,9 @@ def build_schedule_request(
     from src.transfer.models import TransferRequest
 
     source = _endpoint_from_connector(src, sched.source_table)
-    destination = _endpoint_from_connector(dst, sched.dest_table)
+    destination = _apply_schedule_dest_location(
+        _endpoint_from_connector(dst, sched.dest_table), sched
+    )
     src_extra = dict(getattr(source, "extra", None) or {})
     src_extra["file_wait_seconds"] = int(getattr(sched, "file_wait_seconds", 0) or 0)
     from services.duplicate_policy import normalize_duplicate_policy

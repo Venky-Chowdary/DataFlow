@@ -999,8 +999,9 @@ def plan_transfer(
         try:
             from services.schedule_store import (
                 conflicting_dest_writers,
-                describe_dest_conflict,
+                describe_dest_conflicts,
             )
+            from services.workspace_filter import current_workspace_filter
 
             _writers = conflicting_dest_writers(
                 str(dst_conn.get("id") or ""), dst_table
@@ -1008,9 +1009,8 @@ def plan_transfer(
         except Exception:  # noqa: BLE001 — a store outage must not block plans
             _writers = []
         if _writers:
-            listed = "; ".join(
-                describe_dest_conflict(s) for s in _writers[:3]
-            )
+            # QA Snowflake D12: name what the caller can open; count the rest.
+            listed = describe_dest_conflicts(_writers, current_workspace_filter())
             return _tool_result(
                 tool,
                 success=False,

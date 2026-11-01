@@ -69,6 +69,10 @@ _SCHEDULE_DECLARATIVE_KEYS = frozenset(
         "source_table",
         "dest_connector_id",
         "dest_table",
+        # Where the table lives (QA Snowflake D11): a manifest without it
+        # re-applies the pipeline into the connector's default schema.
+        "dest_schema",
+        "dest_database",
         "interval",
         "enabled",
         "cron",
