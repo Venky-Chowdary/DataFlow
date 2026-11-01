@@ -4978,14 +4978,30 @@ def sample_artifact_records(
     )
     lim = max(1, int(limit or 50))
     projection = None if not columns or columns == ["*"] else list(columns)
+    if wanted and sort_key:
+        # Keyed read-back must compare the rows this run appended, not the
+        # older copy of the same key that an append left earlier in the file
+        # (D116). The later record in stream order is the newer write, so the
+        # last occurrence per key wins; an early ``out[:lim]`` truncated the
+        # appended copy and compared the batch against the stale row.
+        latest: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for rec in _iter_artifact_records(source, name=name):
+            k = present_cell_text(rec.get(sort_key))
+            if k not in wanted:
+                continue
+            if projection is not None:
+                rec = {c: rec.get(c) for c in projection}
+            if k not in latest:
+                order.append(k)
+            latest[k] = rec
+        return [latest[k] for k in order[:lim]]
     out: list[dict[str, Any]] = []
     for rec in _iter_artifact_records(source, name=name):
-        if wanted and sort_key and present_cell_text(rec.get(sort_key)) not in wanted:
-            continue
         if projection is not None:
             rec = {k: rec.get(k) for k in projection}
         out.append(rec)
-        if len(out) >= lim and not wanted:
+        if len(out) >= lim:
             break
     return out[:lim]
 
@@ -5052,6 +5068,19 @@ def sample_object_store(
                     closer()
                 except Exception:
                     pass
+    if wanted and sort_key:
+        # A key can repeat across part objects; the later part's copy is the
+        # newer write (same last-wins rule as sample_artifact_records, D116).
+        latest: dict[str, dict[str, Any]] = {}
+        order: list[str] = []
+        for rec in out:
+            k = present_cell_text(rec.get(sort_key))
+            if k is None:
+                continue
+            if k not in latest:
+                order.append(k)
+            latest[k] = rec
+        return [latest[k] for k in order[:lim]]
     return out[:lim]
 
 
