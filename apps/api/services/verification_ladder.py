@@ -1290,7 +1290,10 @@ def run_five_layer_verification(
         )
         layers["L5"] = l5.to_dict()
         localization = {
-            "columns": focus,
+            # Only columns L4 actually found divergent. Falling back to every
+            # column here made the summary claim all 35 columns mismatched on
+            # a run where L4 found none (QA round 12).
+            "columns": list(l4.details.get("mismatched_columns") or []),
             "rows": (l5.details.get("mismatches") or [])[:16],
         }
     elif run_localize:

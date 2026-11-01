@@ -509,9 +509,16 @@ def _failed_batch_undo_note_impl(
         dest_summary["partial_batch_undo_note"] = note
         base = message or "Reconciliation failed"
         return base if note in base else f"{base} {note}"
-    from services.batch_undo import undo_failed_batch_if_dest_was_empty
+    from services.batch_undo import (
+        keep_failed_validation_for_inspection,
+        undo_failed_batch_if_dest_was_empty,
+    )
 
-    note = undo_failed_batch_if_dest_was_empty(
+    note = keep_failed_validation_for_inspection(
+        destination=getattr(request, "destination", None),
+        dest_summary=dest_summary,
+        sync_mode=str(getattr(request, "sync_mode", "") or ""),
+    ) or undo_failed_batch_if_dest_was_empty(
         destination=getattr(request, "destination", None),
         dest_summary=dest_summary,
         sync_mode=str(getattr(request, "sync_mode", "") or ""),
