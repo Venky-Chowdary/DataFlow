@@ -61,7 +61,10 @@ def test_freshservice_manifest_contract() -> None:
         assert stream.paginator.start_index == 1
     assert tickets.cursor is not None
     assert tickets.cursor.request_param == "updated_since"
-    assert requesters.cursor is None and groups.cursor is None
+    assert requesters.cursor is not None
+    assert requesters.cursor.request_param == "updated_since"
+    # Freshservice groups has no updated_since filter — honest full re-read.
+    assert groups.cursor is None
     assert get_descriptor("freshservice").catalog_ids == ("freshservice",)
 
 

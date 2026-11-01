@@ -1,63 +1,90 @@
 {
-  "name": "clickup",
-  "docs": "https://developer.clickup.com/",
-  "base_url": "https://api.clickup.com/api/v2",
-  "auth": {
-    "type": "api_key",
-    "location": "header",
-    "name": "Authorization"
-  },
-  "defaults": {
+ "name": "clickup",
+ "docs": "https://developer.clickup.com/",
+ "base_url": "https://api.clickup.com/api/v2",
+ "auth": {
+  "type": "api_key",
+  "location": "header",
+  "name": "Authorization"
+ },
+ "defaults": {
+  "page_size": 100,
+  "retry": {
+   "max_attempts": 3,
+   "base_delay": 1,
+   "max_delay": 30
+  }
+ },
+ "streams": [
+  {
+   "name": "tasks",
+   "path": "list/{list_id}/task",
+   "records_path": "tasks",
+   "primary_key": [
+    "id"
+   ],
+   "request_params": {
+    "include_closed": "true",
+    "subtasks": "true",
+    "order_by": "updated"
+   },
+   "paginator": {
+    "type": "page",
+    "page_param": "page",
     "page_size": 100,
-    "retry": {
-      "max_attempts": 3,
-      "base_delay": 1,
-      "max_delay": 30
+    "page_size_param": "",
+    "start_index": 0
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "status": {
+      "type": "object"
+     },
+     "date_created": {
+      "type": "string"
+     },
+     "date_updated": {
+      "type": "string"
+     },
+     "date_closed": {
+      "type": "string"
+     }
     }
+   },
+   "cursor": {
+    "field": "date_updated",
+    "request_param": "date_updated_gt",
+    "format": "epoch_ms"
+   }
   },
-  "streams": [
-    {
-      "name": "tasks",
-      "path": "list/{list_id}/task",
-      "records_path": "tasks",
-      "primary_key": ["id"],
-      "request_params": {
-        "include_closed": "true",
-        "subtasks": "true",
-        "order_by": "updated"
-      },
-      "paginator": {
-        "type": "page",
-        "page_param": "page",
-        "page_size": 100,
-        "page_size_param": "",
-        "start_index": 0
-      },
-      "json_schema": {
-        "type": "object",
-        "properties": {
-          "id": {"type": "string"},
-          "name": {"type": "string"},
-          "status": {"type": "object"},
-          "date_created": {"type": "string"},
-          "date_updated": {"type": "string"},
-          "date_closed": {"type": "string"}
-        }
-      }
-    },
-    {
-      "name": "teams",
-      "path": "team",
-      "records_path": "teams",
-      "primary_key": ["id"],
-      "json_schema": {
-        "type": "object",
-        "properties": {
-          "id": {"type": "string"},
-          "name": {"type": "string"},
-          "color": {"type": "string"}
-        }
-      }
+  {
+   "name": "teams",
+   "path": "team",
+   "records_path": "teams",
+   "primary_key": [
+    "id"
+   ],
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "name": {
+      "type": "string"
+     },
+     "color": {
+      "type": "string"
+     }
     }
-  ]
+   }
+  }
+ ]
 }

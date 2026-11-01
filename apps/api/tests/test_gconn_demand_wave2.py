@@ -281,8 +281,9 @@ def test_woocommerce_manifest_declares_basic_auth_page_pagination_and_modified_a
         assert stream.paginator.start_index == 1
     assert orders.cursor is not None and products.cursor is not None
     assert orders.cursor.request_param == "modified_after"
-    # v3 customers list has no modified filter — honest full re-read.
-    assert customers.cursor is None
+    # v3 customers supports the same modified_after filter as orders/products.
+    assert customers.cursor is not None
+    assert customers.cursor.request_param == "modified_after"
 
     descriptor = get_descriptor("woocommerce")
     assert descriptor is not None
