@@ -29,6 +29,41 @@ def _decode_cursor_state(token: str | None) -> dict[str, Any] | None:
     return state
 
 
+def sdk_manifest_stream_identity(driver: str, stream: str) -> dict[str, Any]:
+    """Vendor-declared stream identity from the connector manifest.
+
+    Same role as a source-catalog primary key — authoritative evidence the
+    connector already ships (``primary_key``/``cursor.field``), used to fill
+    contract fields the operator left empty. Returns {} for non-declarative
+    SDK connectors, unknown streams, or unreadable manifests.
+    """
+    from pathlib import Path
+
+    from connectors.sdk.declarative.manifest import parse_manifest
+
+    driver = str(driver or "").strip().lower()
+    stream_name = str(stream or "").strip()
+    if not driver or not stream_name or get_sdk_connector(driver) is None:
+        return {}
+    manifest_path = (
+        Path(__file__).parent / "declarative" / "manifests" / f"{driver}.json"
+    )
+    try:
+        manifest = parse_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+    except Exception:  # noqa: BLE001 — no manifest ⇒ nothing to seed
+        return {}
+    spec = next((s for s in manifest.streams if s.name == stream_name), None)
+    if spec is None:
+        return {}
+    identity: dict[str, Any] = {}
+    if spec.primary_key:
+        identity["primary_key"] = list(spec.primary_key)
+    if spec.cursor:
+        identity["cursor_field"] = spec.cursor.field
+        identity["cursor_format"] = spec.cursor.format
+    return identity
+
+
 def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
     config = dict(cfg)
     extra = config.get("extra")

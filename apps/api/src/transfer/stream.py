@@ -505,10 +505,18 @@ def _stream_database_transfer_impl(
         resolve_effective_sync_mode,
         resolve_incremental_read_scope,
         resolve_sync_contract,
+        seed_sdk_contract_defaults,
         set_watermark,
         source_bounds_cursor_reads,
     )
 
+    stream_contracts = list(
+        seed_sdk_contract_defaults(
+            run.cfg.src_type, _source_name(run.cfg.source), stream_contracts
+        )
+        or stream_contracts
+        or []
+    )
     contract = resolve_sync_contract(stream_contracts)
     run.cfg.effective_sync = resolve_effective_sync_mode(
         sync_mode,

@@ -50,3 +50,53 @@ def test_sdk_transfer_bridge_reads_one_page_and_encodes_resume_state() -> None:
         assert second.rows[0][second.headers.index("title")] == "second"
         assert second.meta["sdk_done"] is True
         assert len(fixture.request_log) == 2
+
+
+def test_manifest_identity_seeds_contract_defaults() -> None:
+    """Vendor-declared pk/cursor fills empty contract fields (catalog parity)."""
+    from services.sync_cursor import seed_sdk_contract_defaults
+
+    contracts = [{"name": "tickets", "sync_mode": "incremental_append"}]
+    seeded = seed_sdk_contract_defaults("zendesk", "tickets", contracts)
+
+    assert seeded[0]["primary_key"] == "id"
+    assert seeded[0]["cursor_field"] == "generated_timestamp"
+    # Epoch export cursor is a monotonic sequence, not a row update timestamp.
+    assert seeded[0]["cursor_semantics"] == "monotonic_sequence"
+
+
+def test_manifest_identity_never_overrides_operator_declarations() -> None:
+    from services.sync_cursor import seed_sdk_contract_defaults
+
+    contracts = [
+        {
+            "name": "tickets",
+            "primary_key": "external_id",
+            "cursor_field": "my_bookmark",
+        }
+    ]
+    seeded = seed_sdk_contract_defaults("zendesk", "tickets", contracts)
+
+    assert seeded[0]["primary_key"] == "external_id"
+    assert seeded[0]["cursor_field"] == "my_bookmark"
+    # Operator-declared cursor is not the manifest field — semantics untouched.
+    assert "cursor_semantics" not in seeded[0]
+
+
+def test_manifest_identity_noop_for_non_sdk_sources() -> None:
+    from services.sync_cursor import seed_sdk_contract_defaults
+
+    contracts = [{"name": "orders", "sync_mode": "incremental_append"}]
+    seeded = seed_sdk_contract_defaults("postgresql", "orders", contracts)
+    assert "cursor_field" not in seeded[0]
+    assert "primary_key" not in seeded[0]
+
+
+def test_manifest_identity_seeds_named_stream_only() -> None:
+    """A contract naming a different stream does not take this stream's key."""
+    from services.sync_cursor import seed_sdk_contract_defaults
+
+    contracts = [{"name": "users", "sync_mode": "incremental_append"}]
+    seeded = seed_sdk_contract_defaults("zendesk", "users", contracts)
+    # users stream exists in the manifest and declares the same identity.
+    assert seeded[0]["cursor_field"] == "generated_timestamp"

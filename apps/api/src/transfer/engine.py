@@ -1512,6 +1512,17 @@ class UniversalTransferEngine:
             )
         src_fmt = request.source.format or "csv"
         dst_fmt = request.destination.format or "mongodb"
+        from services.sync_cursor import seed_sdk_contract_defaults
+
+        request.stream_contracts = list(
+            seed_sdk_contract_defaults(
+                src_fmt,
+                request.source.table or request.source.collection or "",
+                request.stream_contracts,
+            )
+            or request.stream_contracts
+            or []
+        )
         ok, msg = validate_transfer(
             request.source.kind,
             src_fmt,

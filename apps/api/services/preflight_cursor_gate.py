@@ -431,6 +431,9 @@ def build_sync_contract_gate(
     cursor *means* decides whether the read can lose rows, so both are judged
     here and reported as one gate with one primary action per cause.
     """
+    from services.sync_cursor import seed_sdk_contract_defaults
+
+    contracts = list(seed_sdk_contract_defaults(src, source_table, contracts) or [])
     multi_stream = len(contracts) > 1
     requires_cursor = sync in MODES_REQUIRING_CURSOR
     requires_primary_key = sync in MODES_REQUIRING_PRIMARY_KEY

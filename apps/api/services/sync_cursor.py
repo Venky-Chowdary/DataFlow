@@ -388,6 +388,67 @@ def bind_contract_columns_to_source(
     return out
 
 
+def seed_sdk_contract_defaults(
+    source_type: str,
+    stream_name: str,
+    stream_contracts: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]] | None:
+    """Fill unset contract fields from the SDK connector's manifest identity.
+
+    An SDK manifest already declares the vendor's stream primary key and
+    incremental cursor field — the same class of evidence as a source-catalog
+    PK. When the operator's contract leaves ``primary_key``/``cursor_field``
+    empty for that stream, the manifest value is seeded so preflight and the
+    engine resolve the vendor-declared identity instead of refusing (Airbyte
+    catalog parity). Operator-declared values always win. Non-SDK sources and
+    unknown streams pass through untouched.
+    """
+    if not stream_contracts:
+        return stream_contracts
+    from connectors.sdk.transfer_bridge import sdk_manifest_stream_identity
+
+    name = str(stream_name or "").strip()
+    out: list[dict[str, Any]] = []
+    for raw in stream_contracts:
+        if not isinstance(raw, dict):
+            out.append(raw)
+            continue
+        contract = dict(raw)
+        contract_stream = str(
+            contract.get("name") or contract.get("stream") or ""
+        ).strip()
+        # Unnamed contracts apply to the run's only stream, matching the
+        # resolve_sync_contract "first selected" pick.
+        lookup = contract_stream or name
+        if not lookup:
+            out.append(contract)
+            continue
+        identity = sdk_manifest_stream_identity(source_type, lookup)
+        if identity:
+            if identity.get("primary_key") and not str(
+                contract.get("primary_key") or ""
+            ).strip():
+                contract["primary_key"] = ",".join(identity["primary_key"])
+            seeded_cursor = False
+            if identity.get("cursor_field") and not contract_cursor_field(contract):
+                contract["cursor_field"] = identity["cursor_field"]
+                seeded_cursor = True
+            if (
+                seeded_cursor
+                or contract_cursor_field(contract) == identity.get("cursor_field")
+            ) and not str(contract.get("cursor_semantics") or "").strip():
+                # Vendor-maintained modified-time field. Epoch-formatted
+                # export cursors (e.g. Zendesk generated_timestamp) are
+                # monotonic sequences, not update timestamps.
+                contract["cursor_semantics"] = (
+                    "monotonic_sequence"
+                    if identity.get("cursor_format") in ("epoch_s", "epoch_ms")
+                    else "modification_timestamp"
+                )
+        out.append(contract)
+    return out
+
+
 def resolve_sync_contract(stream_contracts: list[dict[str, Any]] | None) -> SyncContract | None:
     """Pick the first selected stream contract."""
     selected = resolve_selected_sync_contracts(stream_contracts)
