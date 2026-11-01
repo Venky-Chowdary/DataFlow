@@ -1,126 +1,270 @@
 {
-  "name": "zoho_crm",
-  "docs": "https://www.zoho.com/crm/developer/docs/api/v2/",
-  "base_url": "https://www.zohoapis.com/crm/v2",
-  "auth": {
-    "type": "oauth2_refresh",
-    "token_url": "https://accounts.zoho.com/oauth/v2/token"
-  },
-  "defaults": {
+ "name": "zoho_crm",
+ "docs": "https://www.zoho.com/crm/developer/docs/api/v2/",
+ "base_url": "https://www.zohoapis.com/crm/v2",
+ "auth": {
+  "type": "oauth2_refresh",
+  "token_url": "https://accounts.zoho.com/oauth/v2/token"
+ },
+ "defaults": {
+  "page_size": 200,
+  "retry": {
+   "max_attempts": 3,
+   "base_delay": 1,
+   "max_delay": 30
+  }
+ },
+ "streams": [
+  {
+   "name": "leads",
+   "path": "Leads",
+   "records_path": "data",
+   "primary_key": [
+    "id"
+   ],
+   "request_params": {
+    "per_page": 200
+   },
+   "paginator": {
+    "type": "page",
     "page_size": 200,
-    "retry": {
-      "max_attempts": 3,
-      "base_delay": 1,
-      "max_delay": 30
+    "page_size_param": "per_page",
+    "page_param": "page",
+    "start_index": 1
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "First_Name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Last_Name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Email": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Created_Time": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "Modified_Time": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
     }
+   },
+   "cursor": {
+    "field": "Modified_Time",
+    "request_param": "If-Modified-Since",
+    "format": "http_date",
+    "request_location": "header"
+   }
   },
-  "streams": [
-    {
-      "name": "leads",
-      "path": "Leads",
-      "records_path": "data",
-      "primary_key": ["id"],
-      "request_params": {
-        "per_page": 200
-      },
-      "paginator": {
-        "type": "page",
-        "page_size": 200,
-        "page_size_param": "per_page",
-        "page_param": "page",
-        "start_index": 1
-      },
-      "json_schema": {
-        "type": "object",
-        "properties": {
-          "id": {"type": "string"},
-          "First_Name": {"type": ["string", "null"]},
-          "Last_Name": {"type": ["string", "null"]},
-          "Email": {"type": ["string", "null"]},
-          "Created_Time": {"type": ["string", "null"], "format": "date-time"},
-          "Modified_Time": {"type": ["string", "null"], "format": "date-time"}
-        }
-      }
-    },
-    {
-      "name": "contacts",
-      "path": "Contacts",
-      "records_path": "data",
-      "primary_key": ["id"],
-      "request_params": {
-        "per_page": 200
-      },
-      "paginator": {
-        "type": "page",
-        "page_size": 200,
-        "page_size_param": "per_page",
-        "page_param": "page",
-        "start_index": 1
-      },
-      "json_schema": {
-        "type": "object",
-        "properties": {
-          "id": {"type": "string"},
-          "First_Name": {"type": ["string", "null"]},
-          "Last_Name": {"type": ["string", "null"]},
-          "Email": {"type": ["string", "null"]},
-          "Created_Time": {"type": ["string", "null"], "format": "date-time"},
-          "Modified_Time": {"type": ["string", "null"], "format": "date-time"}
-        }
-      }
-    },
-    {
-      "name": "accounts",
-      "path": "Accounts",
-      "records_path": "data",
-      "primary_key": ["id"],
-      "request_params": {
-        "per_page": 200
-      },
-      "paginator": {
-        "type": "page",
-        "page_size": 200,
-        "page_size_param": "per_page",
-        "page_param": "page",
-        "start_index": 1
-      },
-      "json_schema": {
-        "type": "object",
-        "properties": {
-          "id": {"type": "string"},
-          "Account_Name": {"type": ["string", "null"]},
-          "Created_Time": {"type": ["string", "null"], "format": "date-time"},
-          "Modified_Time": {"type": ["string", "null"], "format": "date-time"}
-        }
-      }
-    },
-    {
-      "name": "deals",
-      "path": "Deals",
-      "records_path": "data",
-      "primary_key": ["id"],
-      "request_params": {
-        "per_page": 200
-      },
-      "paginator": {
-        "type": "page",
-        "page_size": 200,
-        "page_size_param": "per_page",
-        "page_param": "page",
-        "start_index": 1
-      },
-      "json_schema": {
-        "type": "object",
-        "properties": {
-          "id": {"type": "string"},
-          "Deal_Name": {"type": ["string", "null"]},
-          "Amount": {"type": ["number", "null"]},
-          "Stage": {"type": ["string", "null"]},
-          "Closing_Date": {"type": ["string", "null"], "format": "date"},
-          "Created_Time": {"type": ["string", "null"], "format": "date-time"},
-          "Modified_Time": {"type": ["string", "null"], "format": "date-time"}
-        }
-      }
+  {
+   "name": "contacts",
+   "path": "Contacts",
+   "records_path": "data",
+   "primary_key": [
+    "id"
+   ],
+   "request_params": {
+    "per_page": 200
+   },
+   "paginator": {
+    "type": "page",
+    "page_size": 200,
+    "page_size_param": "per_page",
+    "page_param": "page",
+    "start_index": 1
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "First_Name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Last_Name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Email": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Created_Time": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "Modified_Time": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
     }
-  ]
+   },
+   "cursor": {
+    "field": "Modified_Time",
+    "request_param": "If-Modified-Since",
+    "format": "http_date",
+    "request_location": "header"
+   }
+  },
+  {
+   "name": "accounts",
+   "path": "Accounts",
+   "records_path": "data",
+   "primary_key": [
+    "id"
+   ],
+   "request_params": {
+    "per_page": 200
+   },
+   "paginator": {
+    "type": "page",
+    "page_size": 200,
+    "page_size_param": "per_page",
+    "page_param": "page",
+    "start_index": 1
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "Account_Name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Created_Time": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "Modified_Time": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   },
+   "cursor": {
+    "field": "Modified_Time",
+    "request_param": "If-Modified-Since",
+    "format": "http_date",
+    "request_location": "header"
+   }
+  },
+  {
+   "name": "deals",
+   "path": "Deals",
+   "records_path": "data",
+   "primary_key": [
+    "id"
+   ],
+   "request_params": {
+    "per_page": 200
+   },
+   "paginator": {
+    "type": "page",
+    "page_size": 200,
+    "page_size_param": "per_page",
+    "page_param": "page",
+    "start_index": 1
+   },
+   "json_schema": {
+    "type": "object",
+    "properties": {
+     "id": {
+      "type": "string"
+     },
+     "Deal_Name": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Amount": {
+      "type": [
+       "number",
+       "null"
+      ]
+     },
+     "Stage": {
+      "type": [
+       "string",
+       "null"
+      ]
+     },
+     "Closing_Date": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date"
+     },
+     "Created_Time": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     },
+     "Modified_Time": {
+      "type": [
+       "string",
+       "null"
+      ],
+      "format": "date-time"
+     }
+    }
+   },
+   "cursor": {
+    "field": "Modified_Time",
+    "request_param": "If-Modified-Since",
+    "format": "http_date",
+    "request_location": "header"
+   }
+  }
+ ]
 }

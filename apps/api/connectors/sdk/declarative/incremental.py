@@ -6,6 +6,7 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
+from email.utils import format_datetime
 from typing import Any, Literal
 
 from connectors.sdk import RecordBatch
@@ -13,7 +14,9 @@ from services.json_tabular import _dig_path
 
 logger = logging.getLogger(__name__)
 
-CursorFormat = Literal["iso8601", "epoch_s", "epoch_ms"]
+# "http_date" keeps ISO-8601 storage/record parsing but renders the
+# request value as an RFC 1123 HTTP date (e.g. Zoho If-Modified-Since).
+CursorFormat = Literal["iso8601", "epoch_s", "epoch_ms", "http_date"]
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,7 @@ class StreamState:
 
 
 def _parse_cursor(value: Any, cursor_format: str) -> datetime | Decimal:
-    if cursor_format == "iso8601":
+    if cursor_format in {"iso8601", "http_date"}:
         try:
             parsed = (
                 value
@@ -112,7 +115,7 @@ def cursor_for_request(
 ) -> Any:
     """Return the inclusive lower-bound cursor, subtracting the configured lookback."""
     current_state = StreamState.from_dict(state)
-    if cursor_format not in {"iso8601", "epoch_s", "epoch_ms"}:
+    if cursor_format not in {"iso8601", "epoch_s", "epoch_ms", "http_date"}:
         raise ValueError(f"unsupported cursor_format {cursor_format!r}")
     if isinstance(lookback_s, bool):
         raise ValueError("lookback_s must be a non-negative finite number")
@@ -126,12 +129,13 @@ def cursor_for_request(
         return None
 
     parsed = _parse_cursor(current_state.cursor, str(cursor_format))
-    if lookback == 0:
+    if lookback == 0 and cursor_format != "http_date":
         return current_state.cursor
     if isinstance(parsed, datetime):
-        return (parsed - timedelta(seconds=float(lookback))).isoformat().replace(
-            "+00:00", "Z"
-        )
+        shifted = parsed - timedelta(seconds=float(lookback))
+        if cursor_format == "http_date":
+            return format_datetime(shifted, usegmt=True)
+        return shifted.isoformat().replace("+00:00", "Z")
     if cursor_format == "epoch_ms":
         return _decimal_request_value(parsed - lookback * 1000, current_state.cursor)
     return _decimal_request_value(parsed - lookback, current_state.cursor)
@@ -153,7 +157,7 @@ def advance_stream_state(
     should use an idempotent upsert or equivalent deduplication strategy.
     """
     current_state = StreamState.from_dict(state)
-    if cursor_format not in {"iso8601", "epoch_s", "epoch_ms"}:
+    if cursor_format not in {"iso8601", "epoch_s", "epoch_ms", "http_date"}:
         raise ValueError(f"unsupported cursor_format {cursor_format!r}")
     if not cursor_field:
         raise ValueError("cursor_field must not be empty")

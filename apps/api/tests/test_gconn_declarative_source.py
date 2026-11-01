@@ -308,3 +308,52 @@ def test_cursor_initial_sent_on_first_run_and_cursor_on_resume() -> None:
         list(source.read("tickets", state=batches[0].state, limit=10))
         resume_target = fixture.request_log[-1].target
         assert parse_qs(urlsplit(resume_target).query)["start_time"] == ["1700000100"]
+
+
+def test_header_location_http_date_cursor_renders_rfc1123() -> None:
+    """Zoho-style If-Modified-Since: stored cursor stays ISO-8601, the wire
+    value is an RFC 1123 HTTP date header."""
+    manifest = {
+        "name": "fixture",
+        "base_url": "{BASE}",
+        "auth": {"type": "none"},
+        "streams": [
+            {
+                "name": "leads",
+                "path": "Leads",
+                "records_path": "data",
+                "primary_key": ["id"],
+                "cursor": {
+                    "field": "Modified_Time",
+                    "request_param": "If-Modified-Since",
+                    "format": "http_date",
+                    "request_location": "header",
+                },
+                "paginator": {"type": "none"},
+            }
+        ],
+    }
+    with FixtureServer() as fixture:
+        manifest["base_url"] = fixture.base_url
+        fixture.add_route(
+            "/Leads",
+            FixtureResponse(
+                body={"data": [{"id": 1, "Modified_Time": "2026-01-05T10:30:00+00:00"}]}
+            ),
+        )
+        source = DeclarativeSource({"manifest": manifest, "credentials": {}})
+        batches = list(source.read("leads", limit=10))
+
+        assert "If-Modified-Since" not in fixture.request_log[0].headers
+        assert str(batches[0].state["cursor"]) == "2026-01-05T10:30:00Z"
+
+        fixture.add_route(
+            "/Leads",
+            FixtureResponse(
+                body={"data": [{"id": 2, "Modified_Time": "2026-01-06T11:00:00+00:00"}]}
+            ),
+        )
+        list(source.read("leads", state=batches[0].state, limit=10))
+        assert fixture.request_log[-1].headers["If-Modified-Since"] == (
+            "Mon, 05 Jan 2026 10:30:00 GMT"
+        )

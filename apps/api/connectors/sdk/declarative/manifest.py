@@ -59,10 +59,10 @@ class AuthSpec:
 class CursorSpec:
     field: str
     request_param: str
-    format: Literal["iso8601", "epoch_s", "epoch_ms"] = "iso8601"
+    format: Literal["iso8601", "epoch_s", "epoch_ms", "http_date"] = "iso8601"
     lookback_s: float = 0.0
     request_template: str = ""
-    request_location: Literal["query", "body"] = "query"
+    request_location: Literal["query", "body", "header"] = "query"
     # Sent on the first run when no cursor state exists yet (e.g. Zendesk
     # incremental export requires start_time; "0" = full export from epoch).
     initial: str = ""
@@ -497,7 +497,7 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                 if not isinstance(cursor_raw.get(key), str) or not cursor_raw[key]:
                     raise ManifestError(f"{cursor_path}.{key}: must be non-empty", path=f"{cursor_path}.{key}")
             cursor_format = str(cursor_raw.get("format", "iso8601"))
-            if cursor_format not in {"iso8601", "epoch_s", "epoch_ms"}:
+            if cursor_format not in {"iso8601", "epoch_s", "epoch_ms", "http_date"}:
                 raise ManifestError(f"{cursor_path}.format: unsupported format", path=f"{cursor_path}.format")
             lookback = _positive_number(cursor_raw.get("lookback_s", 0), f"{cursor_path}.lookback_s", allow_zero=True)
             request_template = cursor_raw.get("request_template", "")
@@ -518,9 +518,9 @@ def parse_manifest(raw: dict[str, Any]) -> Manifest:
                         path=f"{cursor_path}.request_template",
                     )
             request_location = cursor_raw.get("request_location", "query")
-            if not isinstance(request_location, str) or request_location not in {"query", "body"}:
+            if not isinstance(request_location, str) or request_location not in {"query", "body", "header"}:
                 raise ManifestError(
-                    f"{cursor_path}.request_location: expected query or body",
+                    f"{cursor_path}.request_location: expected query, body, or header",
                     path=f"{cursor_path}.request_location",
                 )
             if request_location == "body" and (

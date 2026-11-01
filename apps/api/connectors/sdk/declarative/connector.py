@@ -422,6 +422,8 @@ class DeclarativeSource(BaseConnector):
                 )
                 if stream_spec.cursor.request_location == "query":
                     params[stream_spec.cursor.request_param] = request_value
+                elif stream_spec.cursor.request_location == "header":
+                    headers[stream_spec.cursor.request_param] = str(request_value)
                 else:
                     try:
                         _set_nested_request_value(
