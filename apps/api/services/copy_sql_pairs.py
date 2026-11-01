@@ -137,19 +137,25 @@ def plan_pk_range_partitions(
     src_ident: str,
     cuts: list[Any],
     source_count: int,
-    render_predicate: Callable[[Any, Any], str],
+    render_predicate: Callable[..., Any],
+    *,
+    with_params: bool = False,
 ) -> list[dict[str, Any]]:
-    """PK range-partition plan shared by the pg↔mysql bulk paths.
+    """PK range-partition plan shared by the pg↔mysql bulk paths and the
+    same-engine copy modules (sqlserver→sqlserver, oracle→oracle).
 
     ``cuts`` are interior cut values already sampled by the caller's dialect
     helper (empty when the table does not parallelise).  The plan is a
     leading ``IS NULL`` shard when the key column holds NULLs, then one
     partition per range from ``key_ranges_from_cuts``.  ``render_predicate``
-    turns ``(lo, hi)`` bounds into SQL text for the source dialect; an empty
-    or ``1=1`` predicate renders the unbounded partition.  Each partition's
-    ``source_count`` is the real source COUNT(*) for its predicate and the
-    counts must re-add to the caller's ``source_count`` snapshot — a
-    mismatch means the table changed under the plan, so we fail closed.
+    turns ``(lo, hi)`` bounds into the source dialect's predicate — a plain
+    SQL string, or a ``(sql, params)`` tuple when ``with_params`` is set
+    (dialects that bind range values, e.g. ``%s`` / ``:1`` placeholders).
+    An empty or ``1=1`` predicate renders the unbounded partition.  Each
+    partition's ``source_count`` is the real source COUNT(*) for its
+    predicate and the counts must re-add to the caller's ``source_count``
+    snapshot — a mismatch means the table changed under the plan, so we
+    fail closed.
     """
     key_ranges = key_ranges_from_cuts(cuts or [])
     src_cur.execute(
@@ -158,26 +164,38 @@ def plan_pk_range_partitions(
     )
     nulls = int(src_cur.fetchone()[0])
     unbounded = len(key_ranges) == 1 and key_ranges[0] == (None, None)
-    plan: list[tuple[str, Any, Any, bool]] = []
+    plan: list[tuple[Any, Any, Any, bool]] = []
     if nulls and not unbounded:
         plan.append((f"{src_ident} IS NULL", None, None, True))
     for lo, hi in key_ranges:
         plan.append((render_predicate(lo, hi), lo, hi, False))
     partitions: list[dict[str, Any]] = []
-    for pred, lo, hi, is_null in plan:
+    for rendered, lo, hi, is_null in plan:
+        if with_params:
+            pred, params = rendered if isinstance(rendered, tuple) else (rendered, [])
+        else:
+            pred, params = rendered, []
         if pred and pred != "1=1":
-            src_cur.execute(
-                f"SELECT COUNT(*) FROM {source_ref} WHERE {pred}"  # nosec B608
-            )
+            if params:
+                src_cur.execute(
+                    f"SELECT COUNT(*) FROM {source_ref} WHERE {pred}",  # nosec B608
+                    params,
+                )
+            else:
+                src_cur.execute(
+                    f"SELECT COUNT(*) FROM {source_ref} WHERE {pred}"  # nosec B608
+                )
         else:
             src_cur.execute(f"SELECT COUNT(*) FROM {source_ref}")  # nosec B608
             pred = ""
+            params = []
         partitions.append({
             "lo": lo,
             "hi": hi,
             "null_shard": is_null,
             "source_count": int(src_cur.fetchone()[0]),
             "predicate": pred,
+            "params": params,
             "action": "load",
         })
     accounted = sum(int(p["source_count"]) for p in partitions)

@@ -31,10 +31,10 @@ from services.copy_fast_path import (
 from services.copy_pg_mysql import (
     _jsonable_bound,
     integer_pk_cuts,
-    key_ranges_from_cuts,
     mapped_single_pk,
     pg_mysql_copy_partitions,
     pg_mysql_copy_workers,
+    plan_pk_range_partitions,
 )
 
 from services.copy_range_proof import range_keys_match  # noqa: E402
@@ -373,7 +373,7 @@ def _plan_pk_partitions(
     source_count: int,
 ) -> list[dict[str, Any]]:
     if n_parts <= 1:
-        key_ranges: list[tuple[Any | None, Any | None]] = [(None, None)]
+        cuts: list[Any] = []
     elif _pk_is_integer(pk_declared):
         src_cur.execute(
             f"SELECT MIN({src_ident}), MAX({src_ident}) FROM {table_q} "  # nosec B608
@@ -385,49 +385,17 @@ def _plan_pk_partitions(
             if row and row[0] is not None and row[1] is not None
             else []
         )
-        key_ranges = key_ranges_from_cuts(cuts)
     else:
         cuts = _fetch_ora_pk_interior_cuts(src_cur, table_q, src_ident, n_parts)
-        key_ranges = key_ranges_from_cuts(cuts)
-    src_cur.execute(
-        f"SELECT COUNT(*) FROM {table_q} WHERE {src_ident} IS NULL"  # nosec B608
+    return plan_pk_range_partitions(
+        src_cur,
+        table_q,
+        src_ident,
+        cuts,
+        source_count,
+        lambda lo, hi: oracle_pk_range_clause(src_ident, lo, hi),
+        with_params=True,
     )
-    nulls = int(src_cur.fetchone()[0])
-    unbounded = len(key_ranges) == 1 and key_ranges[0] == (None, None)
-    plan: list[tuple[str, list[Any], Any, Any, bool]] = []
-    if nulls and not unbounded:
-        plan.append((f"{src_ident} IS NULL", [], None, None, True))
-    for lo, hi in key_ranges:
-        clause, params = oracle_pk_range_clause(src_ident, lo, hi)
-        plan.append((clause, list(params), lo, hi, False))
-    partitions: list[dict[str, Any]] = []
-    for clause, params, lo, hi, is_null in plan:
-        if clause and clause != "1=1":
-            _exec(
-                src_cur,
-                f"SELECT COUNT(*) FROM {table_q} WHERE {clause}",  # nosec B608
-                params,
-            )
-        else:
-            src_cur.execute(f"SELECT COUNT(*) FROM {table_q}")  # nosec B608
-            clause = ""
-            params = []
-        expected = int(src_cur.fetchone()[0])
-        partitions.append({
-            "lo": lo,
-            "hi": hi,
-            "null_shard": is_null,
-            "source_count": expected,
-            "predicate": clause,
-            "params": params,
-            "action": "load",
-        })
-    accounted = sum(int(p["source_count"]) for p in partitions)
-    if accounted != source_count:
-        raise ValueError(
-            f"PK range source COUNTs {accounted} != snapshot {source_count}"
-        )
-    return partitions
 
 
 def copy_oracle_to_oracle(
