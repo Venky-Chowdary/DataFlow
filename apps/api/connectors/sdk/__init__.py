@@ -941,8 +941,39 @@ def _load_builtin_connectors() -> None:
             type(exc).__name__,
         )
 
+    try:
+        from connectors.sdk import airtable  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.airtable",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import clickup  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.clickup",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import mailjet  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.mailjet",
+            type(exc).__name__,
+        )
+    try:
+        from connectors.sdk import sendgrid  # noqa: F401
+    except Exception as exc:
+        logger.warning(
+            "built-in connector module %s failed to load (%s)",
+            "connectors.sdk.sendgrid",
+            type(exc).__name__,
+        )
 
-_load_builtin_connectors()
 
 
 if __name__ == "__main__":  # pragma: no cover

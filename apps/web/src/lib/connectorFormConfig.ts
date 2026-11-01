@@ -955,6 +955,56 @@ export function getConnectorFormConfig(type: string): ConnectorFormConfig {
           || required(values, "api_key", "API token"),
       ),
     );
+  } else if (resolved === "airtable") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Airtable personal access token",
+        [
+          password("api_key", "Personal access token", { placeholder: "pat…" }),
+          text("base_id", "Base ID", { placeholder: "app…" }),
+          text("table_id", "Table ID or name", { placeholder: "tbl…" }),
+        ],
+        (values) =>
+          required(values, "api_key", "Personal access token")
+          || required(values, "base_id", "Base ID"),
+      ),
+    );
+  } else if (resolved === "clickup") {
+    authModes.push(
+      auth(
+        "api_key",
+        "ClickUp personal API token",
+        [
+          password("api_key", "API token", { placeholder: "pk_…" }),
+          text("list_id", "List ID (for tasks)", { placeholder: "9001…" }),
+        ],
+        (values) => required(values, "api_key", "API token"),
+      ),
+    );
+  } else if (resolved === "mailjet") {
+    authModes.push(
+      auth(
+        "api_key",
+        "Mailjet API key + secret key",
+        [
+          password("api_key", "API key (public)"),
+          password("secret_key", "Secret key (private)"),
+        ],
+        (values) =>
+          required(values, "api_key", "API key")
+          || required(values, "secret_key", "Secret key"),
+      ),
+    );
+  } else if (resolved === "sendgrid") {
+    authModes.push(
+      auth(
+        "api_key",
+        "SendGrid API key",
+        [password("api_key", "API key", { placeholder: "SG.…" })],
+        (values) => required(values, "api_key", "API key"),
+      ),
+    );
   } else if (resolved === "todoist") {
     authModes.push(
       auth(
@@ -1194,7 +1244,7 @@ function inferDefaultAuthMode(resolved: string): AuthMode {
   if (resolved === "github") return "pat";
   if (resolved === "servicenow") return "user_pass";
   if (resolved === "woocommerce") return "user_pass";
-  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm", "posthog", "confluence", "zendesk"].includes(resolved)) return "api_key";
+  if (["jira", "intercom", "gitlab", "mailchimp", "pipedrive", "klaviyo", "freshdesk", "slack", "asana", "calendly", "bigcommerce", "brevo", "freshservice", "close", "todoist", "typeform", "notion", "zoho_crm", "posthog", "confluence", "zendesk", "airtable", "clickup", "mailjet", "sendgrid"].includes(resolved)) return "api_key";
   if (["salesforce", "hubspot", "stripe", "rest_api"].includes(resolved)) return "api_key";
   if (resolved === "elasticsearch") return "api_key";
   if (["weaviate", "pinecone"].includes(resolved)) return "api_key";

@@ -111,6 +111,27 @@ def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
             config.get("api_key") or config.get("token") or "",
         )
         config.setdefault("password", "X")
+    elif driver == "airtable":
+        config.setdefault(
+            "api_key",
+            config.get("access_token") or config.get("token") or "",
+        )
+        config.setdefault("base_id", config.get("base") or config.get("base_id") or "")
+        config.setdefault("table_id", config.get("table") or config.get("table_id") or "")
+    elif driver == "clickup":
+        config.setdefault(
+            "api_key",
+            config.get("token") or config.get("access_token") or "",
+        )
+        config.setdefault("list_id", config.get("list") or config.get("list_id") or "")
+    elif driver == "mailjet":
+        config.setdefault("username", config.get("api_key") or "")
+        config.setdefault("password", config.get("secret_key") or "")
+    elif driver == "sendgrid":
+        config.setdefault(
+            "api_key",
+            config.get("access_token") or config.get("token") or "",
+        )
     elif driver in {"todoist", "typeform", "notion", "posthog"}:
         config.setdefault(
             "api_key",

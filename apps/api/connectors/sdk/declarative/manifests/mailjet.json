@@ -1,0 +1,62 @@
+{
+  "name": "mailjet",
+  "docs": "https://dev.mailjet.com/email/reference/",
+  "base_url": "https://api.mailjet.com",
+  "auth": {
+    "type": "basic",
+    "username": "api_key"
+  },
+  "defaults": {
+    "page_size": 100,
+    "retry": {
+      "max_attempts": 3,
+      "base_delay": 1,
+      "max_delay": 30
+    }
+  },
+  "streams": [
+    {
+      "name": "contacts",
+      "path": "v3/REST/contact",
+      "records_path": "Data",
+      "primary_key": ["ID"],
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "limit",
+        "offset_param": "offset"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "ID": {"type": "integer"},
+          "Email": {"type": "string"},
+          "Name": {"type": "string"},
+          "CreatedAt": {"type": "string", "format": "date-time"},
+          "IsExcludedFromCampaigns": {"type": "boolean"}
+        }
+      }
+    },
+    {
+      "name": "messages",
+      "path": "v3/REST/message",
+      "records_path": "Data",
+      "primary_key": ["ID"],
+      "paginator": {
+        "type": "offset",
+        "page_size": 100,
+        "page_size_param": "limit",
+        "offset_param": "offset"
+      },
+      "json_schema": {
+        "type": "object",
+        "properties": {
+          "ID": {"type": "integer"},
+          "Status": {"type": "string"},
+          "ArrivedAt": {"type": "string", "format": "date-time"},
+          "SenderID": {"type": "integer"}
+        }
+      }
+    }
+  ]
+}

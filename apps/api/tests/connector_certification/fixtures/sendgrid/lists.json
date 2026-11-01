@@ -1,0 +1,8 @@
+{
+  "result": [
+    {"id": 5001, "name": "Fixture List", "recipient_count": 12}
+  ],
+  "lists": [
+    {"id": 5001, "name": "Fixture List", "recipient_count": 12}
+  ]
+}

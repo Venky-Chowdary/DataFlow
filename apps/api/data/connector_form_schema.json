@@ -104,6 +104,49 @@
       "Test proves filesystem listing works — AuthorizationFailure is RBAC or the SAS scope."
     ]
   },
+  "airtable": {
+    "label": "Airtable",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Airtable personal access token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "Personal access token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "pat…"
+          },
+          {
+            "key": "base_id",
+            "label": "Base ID",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "app…"
+          },
+          {
+            "key": "table_id",
+            "label": "Table ID or name",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "tbl…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Airtable → Builder hub → Personal access tokens → Create token with data.records:read.",
+      "Base ID comes from the URL (app…) or the API docs page for your base; Table ID is the tbl… id or table name.",
+      "Test proves /v0/{base}/{table} answers — 401/403 is the token or missing scope."
+    ]
+  },
   "asana": {
     "label": "Asana",
     "default_auth_mode": "api_key",
@@ -407,6 +450,41 @@
       "Test proves the HTTP interface answers — a refused connection is the bind/firewall, not auth."
     ]
   },
+  "clickup": {
+    "label": "ClickUp",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "ClickUp personal API token",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API token",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "pk_…"
+          },
+          {
+            "key": "list_id",
+            "label": "List ID (for tasks)",
+            "type": "text",
+            "optional": false,
+            "sensitive": false,
+            "placeholder": "9001…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "ClickUp → Profile → Apps → API Token → copy your pk_ token.",
+      "List ID comes from the list's URL or the share link; needed to sync tasks.",
+      "Test proves /api/v2/team answers — 401 is the token."
+    ]
+  },
   "close": {
     "label": "Close",
     "default_auth_mode": "api_key",
@@ -470,9 +548,9 @@
     ],
     "common_fields": [],
     "setup_steps": [
-      "Create an API token at id.atlassian.com → Security → API tokens.",
-      "Set Host to your site name (e.g. acme), Email to your Atlassian account email, and API token as the credential.",
-      "Streams sync pages, blog posts, spaces and attachments via the v2 API (full refresh)."
+      "id.atlassian.com → Security → API tokens → Create API token.",
+      "Site name is your subdomain (acme for acme.atlassian.net); the credential is your account email + API token.",
+      "Test proves /wiki/api/v2/spaces answers — 401/403 is the email/token pair."
     ]
   },
   "couchbase": {
@@ -1919,6 +1997,39 @@
       "Test proves /lists answers — 401 is the key, not the data center."
     ]
   },
+  "mailjet": {
+    "label": "Mailjet",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "Mailjet API key + secret key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API key (public)",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          },
+          {
+            "key": "secret_key",
+            "label": "Secret key (private)",
+            "type": "password",
+            "optional": false,
+            "sensitive": true
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "Mailjet → Account settings → REST API → Master API Key & Sub API key management → copy the API key and Secret key.",
+      "Both are required — the API key is the username, the Secret key is the password.",
+      "Test proves /v3/REST/contact answers — 401 is the key pair."
+    ]
+  },
   "milvus": {
     "label": "Milvus",
     "default_auth_mode": "user_pass",
@@ -2779,9 +2890,9 @@
     ],
     "common_fields": [],
     "setup_steps": [
-      "In Posthog open Settings → Project settings → Personal API keys and create a key with read access.",
-      "Set Host to your Posthog base (e.g. app.posthog.com or your self-hosted URL) and Project ID to the numeric project id.",
-      "Streams sync events, persons, cohorts and feature flags (full refresh)."
+      "Posthog → Settings → Project settings → Personal API keys → create a key with read access.",
+      "Host is your Posthog base (app.posthog.com or self-hosted); Project ID is the numeric project id.",
+      "Test proves /api/projects/{id}/persons answers — 401/403 is the key."
     ]
   },
   "qdrant": {
@@ -3206,6 +3317,33 @@
       "Or create a Connected App (Setup → App Manager → New Connected App) with OAuth scopes api and refresh_token for client-credentials login.",
       "Enter the instance URL — https://yourorg.salesforce.com (or .sandbox for sandboxes).",
       "Test proves OAuth login works — LOGIN_MUST_USE_SECURITY_TOKEN means append the token to the password."
+    ]
+  },
+  "sendgrid": {
+    "label": "SendGrid",
+    "default_auth_mode": "api_key",
+    "auth_modes": [
+      {
+        "value": "api_key",
+        "label": "SendGrid API key",
+        "description": "API token issued by this service.",
+        "fields": [
+          {
+            "key": "api_key",
+            "label": "API key",
+            "type": "password",
+            "optional": false,
+            "sensitive": true,
+            "placeholder": "SG.…"
+          }
+        ]
+      }
+    ],
+    "common_fields": [],
+    "setup_steps": [
+      "SendGrid → Settings → API Keys → Create API Key with read access to Contact DB.",
+      "The key starts with SG. and is shown once — store it immediately.",
+      "Test proves /v3/contactdb/lists answers — 401/403 is the key or missing scope."
     ]
   },
   "servicenow": {
@@ -4486,9 +4624,9 @@
     ],
     "common_fields": [],
     "setup_steps": [
-      "In Zendesk Admin Center → Apps and integrations → APIs → Zendesk API enable token access and add a token.",
-      "Set Host to your subdomain (e.g. acme), Email to your account email, and the API token as the credential.",
-      "Streams sync tickets, users, organizations and ticket comments (full refresh)."
+      "Admin Center → Apps and integrations → APIs → Zendesk API → enable token access → Add token.",
+      "Subdomain is your subdomain (acme for acme.zendesk.com); the credential is your account email + API token.",
+      "Test proves /api/v2/users/me answers — 401/403 is the email/token pair."
     ]
   },
   "zoho_crm": {

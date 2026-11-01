@@ -742,6 +742,54 @@ const GUIDES: Record<string, ConnectorSetupGuide> = {
       { label: "Generate an API token", url: "https://developer.zendesk.com/api-reference/sales-crm/authentication/#generate-an-api-token" },
     ],
   },
+  airtable: {
+    title: "Set up Airtable",
+    steps: [
+      "Airtable → Builder hub → Personal access tokens → Create token with data.records:read.",
+      "Base ID comes from the URL (app…) or the API docs page for your base; Table ID is the tbl… id or table name.",
+      "Test proves /v0/{base}/{table} answers — 401/403 is the token or missing scope.",
+    ],
+    links: [
+      { label: "Airtable Web API", url: "https://airtable.com/developers/web/api/introduction" },
+      { label: "Create a personal access token", url: "https://support.airtable.com/docs/creating-personal-access-tokens" },
+    ],
+  },
+  clickup: {
+    title: "Set up ClickUp",
+    steps: [
+      "ClickUp → Profile → Apps → API Token → copy your pk_ token.",
+      "List ID comes from the list's URL or the share link; needed to sync tasks.",
+      "Test proves /api/v2/team answers — 401 is the token.",
+    ],
+    links: [
+      { label: "ClickUp API docs", url: "https://developer.clickup.com/" },
+      { label: "Personal API token", url: "https://developer.clickup.com/docs/authentication" },
+    ],
+  },
+  mailjet: {
+    title: "Set up Mailjet",
+    steps: [
+      "Mailjet → Account settings → REST API → Master API Key & Sub API key management → copy the API key and Secret key.",
+      "Both are required — the API key is the username, the Secret key is the password.",
+      "Test proves /v3/REST/contact answers — 401 is the key pair.",
+    ],
+    links: [
+      { label: "Mailjet API reference", url: "https://dev.mailjet.com/email/reference/" },
+      { label: "API key management", url: "https://app.mailjet.com/account/api_keys" },
+    ],
+  },
+  sendgrid: {
+    title: "Set up SendGrid",
+    steps: [
+      "SendGrid → Settings → API Keys → Create API Key with read access to Contact DB.",
+      "The key starts with SG. and is shown once — store it immediately.",
+      "Test proves /v3/contactdb/lists answers — 401/403 is the key or missing scope.",
+    ],
+    links: [
+      { label: "SendGrid API reference", url: "https://docs.sendgrid.com/api-reference/" },
+      { label: "Create an API key", url: "https://docs.sendgrid.com/ui/account-and-settings/api-keys" },
+    ],
+  },
   singer_tap: {
     title: "Set up a Singer tap",
     steps: [
