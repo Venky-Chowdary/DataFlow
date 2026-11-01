@@ -18,11 +18,26 @@ Now:
 * Records written before D221 carry no ``key_id``. They verify under the
   legacy key — the login secret, read exactly as before — or under any key in
   the retired list (which is where a rotated-away login secret goes).
-* **Unset key:** the login secret is *not* used. The process generates a
-  random key once and keeps it at ``<data dir>/audit_chain.key`` (mode 0600),
-  so processes sharing that data volume share it. Processes on other hosts
-  generate their own, and verification then reports their records as a
-  ``key_mismatch`` — never as tampering. A warning is logged once per process.
+* **Unset key, control-plane database configured** (QA r12 #3): the key is
+  generated once and kept, encrypted, in the database's ``audit_chain_keys``
+  keyring (``services.audit_chain_keystore``). Every process on every host
+  signs with it, and it survives deploys. Each key ever used stays in the
+  keyring by ``key_id``; :func:`rotate_signing_key` starts a new one. A key
+  file left by the scheme below is imported on first use.
+* **Unset key, no database:** the login secret is *not* used. The process
+  generates a random key once and keeps it at ``<data dir>/audit_chain.key``
+  (mode 0600), so processes sharing that data volume share it. Processes on
+  other hosts generate their own, and verification then reports their records
+  as ``unverifiable_key_lost`` — never as tampering. A warning is logged once
+  per process.
+
+Verification looks a record's ``key_id`` up in: the configured key, the
+retired keys, the persisted keyring, this node's key file. A record whose key
+is in none of them cannot be checked; it is reported as
+``unverifiable_key_lost``, separately from tampering, and the report is
+``verified_with_exceptions``, never ``verified``. If the lost key turns up (an
+old data volume, a copied ``audit_chain.key``), the owner adds its contents to
+``DATAFLOW_AUDIT_HMAC_RETIRED_KEYS`` and those records verify again.
 """
 
 from __future__ import annotations
@@ -133,12 +148,33 @@ def _generated_key(*, create: bool) -> bytes | None:
     return key
 
 
+def _persisted_current() -> tuple[str, bytes] | None:
+    """The shared keyring's current key, or ``None`` when there is no database."""
+    from services import audit_chain_keystore as store
+
+    try:
+        local = _generated_key(create=False)
+    except OSError:
+        local = None
+    try:
+        return store.current_key(local)
+    except store.KeystoreUnavailable as exc:
+        logger.warning("audit chain keyring unavailable, using the node-local key: %s", exc)
+        return None
+
+
 def signing_key() -> tuple[str, bytes, str]:
-    """``(key_id, key, source)`` for new records; ``source`` is ``env`` or ``generated_local``."""
+    """``(key_id, key, source)`` for new records.
+
+    ``source`` is ``env``, ``persisted`` (the shared keyring) or ``generated_local``.
+    """
     configured = _env(KEY_ENV)
     if configured:
         key = configured.encode("utf-8")
         return key_id_for(key), key, "env"
+    persisted = _persisted_current()
+    if persisted is not None:
+        return persisted[0], persisted[1], "persisted"
     try:
         key = _generated_key(create=True)
     except OSError as exc:  # read-only data dir: never fail the audit write over it
@@ -146,26 +182,53 @@ def signing_key() -> tuple[str, bytes, str]:
         logger.warning("audit chain key file could not be written: %s", exc)
     if key is None:
         # Process-local last resort; its records verify only in this process
-        # and show elsewhere as key_mismatch — still never the login secret.
+        # and show elsewhere as unverifiable — still never the login secret.
         key = _generated.setdefault("<process>", secrets.token_urlsafe(48).encode("utf-8"))
     path = str(_generated_key_path(create=False))
     if path not in _warned:
         _warned.add(path)
         logger.warning(
-            "DATAFLOW_AUDIT_HMAC_KEY is not set: the audit chain is signed with a key "
-            "generated on this node (%s). Set the same DATAFLOW_AUDIT_HMAC_KEY on every "
-            "process that writes audit records so their records verify everywhere.",
+            "DATAFLOW_AUDIT_HMAC_KEY is not set and no control-plane database holds the "
+            "audit keyring: the audit chain is signed with a key generated on this node "
+            "(%s). Set the same DATAFLOW_AUDIT_HMAC_KEY on every process that writes "
+            "audit records so their records verify everywhere.",
             path,
         )
     return key_id_for(key), key, "generated_local"
 
 
-def keyring() -> dict[str, bytes]:
-    """Every key this deployment can verify a keyed record with, by key id."""
+def rotate_signing_key(*, actor: str) -> dict[str, Any]:
+    """Start a new chain key in the shared keyring; the old one keeps verifying.
+
+    With a configured key the configured key keeps signing: rotate it by
+    setting a new ``..._AUDIT_HMAC_KEY`` and moving the old value to
+    ``..._AUDIT_HMAC_RETIRED_KEYS``. The result says which applies.
+    """
+    from services import audit_chain_keystore as store
+
+    try:
+        local = _generated_key(create=False)
+    except OSError:
+        local = None
+    out = store.rotate(actor=actor, local_key=local)
+    out["signing_unchanged_configured_key"] = bool(_env(KEY_ENV))
+    return out
+
+
+def keyring(*, missing: str | None = None) -> dict[str, bytes]:
+    """Every key this deployment can verify a keyed record with, by key id.
+
+    ``missing``: a key id the caller looked for and did not find; the shared
+    keyring is then re-read (rate-limited) in case another process rotated.
+    """
+    from services import audit_chain_keystore as store
+
     ring: dict[str, bytes] = {}
     configured = _env(KEY_ENV)
     if configured:
         ring[key_id_for(configured.encode("utf-8"))] = configured.encode("utf-8")
+    for kid, key in store.all_keys(missing=missing).items():
+        ring.setdefault(kid, key)
     generated = _generated_key(create=False)
     if generated:
         ring.setdefault(key_id_for(generated), generated)
@@ -174,6 +237,14 @@ def keyring() -> dict[str, bytes]:
     for key in retired_keys():
         ring.setdefault(key_id_for(key), key)
     return ring
+
+
+def key_for(key_id: str) -> bytes | None:
+    """The key named ``key_id``, re-reading the shared keyring once on a miss."""
+    key = keyring().get(key_id)
+    if key is None:
+        key = keyring(missing=key_id).get(key_id)
+    return key
 
 
 def legacy_keys() -> list[bytes]:
@@ -190,15 +261,15 @@ def check_signature(record: dict[str, Any], hmac_of: Any = None) -> tuple[str, s
 
     Returns ``(verdict, key_id)``: ``ok``; ``mismatch`` (the key is held and
     the HMAC disagrees: the content changed); or ``unknown_key`` (the record
-    names a key this deployment does not hold, so it cannot be checked — a key
-    mismatch, not evidence of tampering). Records with no ``key_id`` are tried
+    names a key this deployment does not hold, so it cannot be checked — a
+    lost key, not evidence of tampering). Records with no ``key_id`` are tried
     against every legacy key.
     """
     compute = hmac_of or hmac_hex
     stored = str(record.get("event_hash") or "")
     kid = record.get("key_id")
     if kid:
-        key = keyring().get(str(kid))
+        key = key_for(str(kid))
         if key is None:
             return "unknown_key", str(kid)
         return ("ok" if compute(record, key) == stored else "mismatch"), str(kid)
@@ -225,7 +296,7 @@ def side_record_keys(record: dict[str, Any]) -> list[bytes]:
     """
     kid = record.get("key_id")
     if kid:
-        key = keyring().get(str(kid))
+        key = key_for(str(kid))
         return [key] if key is not None else []
     return legacy_keys()
 
@@ -255,14 +326,22 @@ def describe() -> dict[str, Any]:
         current = key_id_for(_env(KEY_ENV).encode("utf-8"))
         source = "configured"
     else:
-        generated = _generated_key(create=False) or _generated.get("<process>")
-        if generated:
-            current = key_id_for(generated)
-            source = "generated_local"
+        persisted = _persisted_current()
+        if persisted is not None:
+            current = persisted[0]
+            source = "persisted"
+        else:
+            generated = _generated_key(create=False) or _generated.get("<process>")
+            if generated:
+                current = key_id_for(generated)
+                source = "generated_local"
+    from services import audit_chain_keystore as store
+
     return {
         "current_key_id": current,
         "source": source,
         "known_key_ids": sorted(keyring()),
+        "persisted_key_count": len(store.all_keys()),
         "retired_key_count": len(retired_keys()),
         "legacy_records_verify_under": "login secret, then retired keys",
     }
