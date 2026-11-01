@@ -35,6 +35,26 @@ def actor_email(request: Request) -> str:
     return getattr(request.state, "user_email", None) or "anonymous"
 
 
+def actor_is_platform_admin(request: Request) -> bool:
+    """Whether the caller administers the whole deployment, not one workspace.
+
+    With authentication off there is no identity to authorize, so the single
+    local operator is the admin (same rule as team administration). With it on,
+    the signed-in account must hold the platform ``admin`` role and the
+    credential itself must carry it, so a viewer key minted by an admin stays a
+    viewer.
+    """
+    from src.services.auth_service import auth_required, lookup_user
+
+    if not auth_required():
+        return True
+    user = getattr(request.state, "user", None) or {}
+    if str(user.get("role") or "").strip().lower() != "admin":
+        return False
+    account = lookup_user(actor_email(request))
+    return bool(account) and str(account.get("role") or "").strip().lower() == "admin"
+
+
 def requested_workspace_id(request: Request) -> str:
     """Return the requested header scope without authorizing it."""
     try:
