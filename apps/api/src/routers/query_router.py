@@ -17,6 +17,7 @@ from fastapi import APIRouter, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from services import connector_store
+import services.query_extract as services_query_extract
 from services.connector_telemetry import connector_operation, driver_family
 from services.log_redaction import redact_log_text
 from services.safe_errors import public_error, safe_http_exception, user_query_error
@@ -697,7 +698,9 @@ async def query_execute(
 
     started = time.perf_counter()
     try:
-        rows, columns, schema, truncated = _run_query(connector, body)
+        rows, columns, schema, truncated = _run_query(
+            connector, body, workspace_id=workspace_id
+        )
         return QueryResult(
             columns=columns,
             rows=rows,
@@ -747,6 +750,7 @@ async def query_export(
             body,
             surface="query_export",
             json_engine_text=True,
+            workspace_id=workspace_id,
         )
     except HTTPException:
         raise
@@ -1106,6 +1110,7 @@ def _run_query(
     *,
     surface: str = "query",
     json_engine_text: bool = False,
+    workspace_id: str = "",
 ):
     ctype = (connector.type or "").lower().strip()
     with connector_operation(
@@ -1120,6 +1125,15 @@ def _run_query(
                 result = _run_mongodb_query(connector, body)
             elif ctype == "snowflake":
                 result = _run_snowflake_query(connector, body)
+            elif services_query_extract.connector_queryable_via_extract(ctype):
+                # Non-SQL connectors (s3, SaaS, SDK sources, stores) have no
+                # SQLAlchemy dialect — extract a bounded snapshot into DuckDB
+                # and run the same guarded SQL path instead of hard-failing.
+                # Unknown/other types keep the SQL path and its honest dialect
+                # error (kafka is a stream, not a queryable snapshot).
+                result = services_query_extract.run_extract_query(
+                    connector, body, workspace_id=workspace_id
+                )
             else:
                 # MySQL-wire family must use pymysql dialect (handled in generic_sql._DRIVERNAME_MAP).
                 result = _run_sql_query(connector, body, json_engine_text=json_engine_text)

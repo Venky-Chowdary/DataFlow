@@ -976,5 +976,8 @@ def _load_builtin_connectors() -> None:
 
 
 
+_load_builtin_connectors()
+
+
 if __name__ == "__main__":  # pragma: no cover
     print("sdk connectors:", list_sdk_connectors(), file=sys.stderr)
