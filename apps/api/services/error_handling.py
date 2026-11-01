@@ -51,6 +51,28 @@ class TransferCancelled(Exception):
         super().__init__(text)
 
 
+class HeldScanInterrupted(Exception):
+    """A held snapshot scan failed after it had already served pages.
+
+    The scan is one server cursor (``find().sort(_id)`` + getMore, or one
+    ``SELECT`` + ``fetchmany``). Once it has handed pages to the writer, a
+    retry can neither resume that cursor nor reopen it at the top without
+    re-sending the rows already written. Deliberately non-retriable: the job
+    fails and resumes from its checkpoint. Retrying used to re-enter the dead
+    cursor, which pymongo reports as exhausted — a silent truncation, or on
+    the first page "Source table has no columns or is empty" (QA r12 D1).
+    """
+
+    def __init__(self, pages_served: int, cause: BaseException) -> None:
+        self.pages_served = int(pages_served)
+        self.cause_class = type(cause).__name__
+        super().__init__(
+            f"The source scan stopped after {self.pages_served} page(s) and "
+            "cannot continue in place; resume the job to continue from its "
+            "last committed checkpoint."
+        )
+
+
 class FullRefreshDropFailed(Exception):
     """A ``full_refresh`` could not clear the destination before loading.
 
@@ -181,6 +203,10 @@ NON_RETRIABLE_PATTERNS: set[str] = {
     "lock wait timeout exceeded",
     "1205",  # InnoDB lock wait timeout
     "metadata lock",
+    # MongoDB Atlas free / Flex tiers refuse noTimeout cursors (AtlasError
+    # 8000). The word "timeout" inside "noTimeout" matched the retriable
+    # signal, so every read retried a refusal that never clears (QA r12 D1).
+    "notimeout cursors are disallowed",
     # Source format — will not self-heal on retry without a new file.
     "json file must be an array",
     "json must be an array of objects",
@@ -1222,6 +1248,15 @@ def classify_error(error: Exception | str) -> dict[str, Any]:
             "message": text,
             "class": exc_name,
             "table": error.table_name,
+        }
+
+    # A held scan that already served pages cannot be retried in place.
+    if isinstance(error, HeldScanInterrupted):
+        return {
+            "retriable": False,
+            "evidence": ["held_scan_interrupted"],
+            "message": text,
+            "class": exc_name,
         }
 
     # Already refused a replay once; an outer wrapper must not undo that call.

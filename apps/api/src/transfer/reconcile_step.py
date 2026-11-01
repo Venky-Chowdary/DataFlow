@@ -355,10 +355,16 @@ def _proof_mongo_source_batches(
     from connectors.mongodb_common import _mongo_client
     from connectors.mongodb_reader import _connection_string, _page_docs_to_batch
 
-    database = str(src_cfg.get("database") or "")
-    coll = _mongo_client(_connection_string(src_cfg))[database][
-        str(source_endpoint.table or "")
-    ]
+    # The stream reader's resolution (stream.py src_db / _source_table): a
+    # database named on the run wins over the connector's, and a collection
+    # named in ``collection`` is the same source as one named in ``table``.
+    database = str(
+        getattr(source_endpoint, "database", "") or src_cfg.get("database") or "test"
+    )
+    collection = str(
+        source_endpoint.table or getattr(source_endpoint, "collection", "") or ""
+    )
+    coll = _mongo_client(_connection_string(src_cfg))[database][collection]
     docs: list[dict[str, Any]] = []
     for doc in coll.find({}).sort("_id", 1).batch_size(page):
         docs.append(doc)
@@ -367,6 +373,45 @@ def _proof_mongo_source_batches(
             docs = []
     if docs:
         yield _mongo_page_dicts(docs, src_cfg, read_cols, _page_docs_to_batch)
+
+
+def _proof_mongo_dest_batches(
+    *,
+    endpoint: EndpointConfig,
+    dst_cfg: dict[str, Any],
+    read_cols: list[str],
+    page: int = 5000,
+):
+    """The written Mongo collection, projected the way the Mongo reader does.
+
+    A missing field and an explicit null both read back as NULL, the same as
+    a SQL destination's read-back.
+    """
+    from connectors.mongodb_common import _mongo_client
+    from connectors.mongodb_reader import _connection_string, _page_docs_to_batch
+    from services.value_serializer import DF_MISSING_SENTINEL, SQL_NULL_SENTINEL
+
+    database = str(
+        getattr(endpoint, "database", "") or dst_cfg.get("database") or "test"
+    )
+    collection = str(endpoint.table or getattr(endpoint, "collection", "") or "")
+    coll = _mongo_client(_connection_string(dst_cfg))[database][collection]
+    absent = {SQL_NULL_SENTINEL, DF_MISSING_SENTINEL}
+
+    def _page(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        return [
+            {c: (None if v in absent else v) for c, v in row.items()}
+            for row in _mongo_page_dicts(docs, dst_cfg, read_cols, _page_docs_to_batch)
+        ]
+
+    docs: list[dict[str, Any]] = []
+    for doc in coll.find({}).sort("_id", 1).batch_size(page):
+        docs.append(doc)
+        if len(docs) >= page:
+            yield _page(docs)
+            docs = []
+    if docs:
+        yield _page(docs)
 
 
 def _mongo_page_dicts(docs, cfg, read_cols, to_batch) -> list[dict[str, Any]]:  # type: ignore[no-untyped-def]
@@ -1386,7 +1431,9 @@ def _transform_applied_proof_impl(
         qs = "["
     else:
         qs = '"'
-    src_ref_sql = warehouse_sql_table_ref(
+    # A Mongo source has no SQL table: the SQL oracle and the tracked-equality
+    # join below are SQL-source only and already skip on an empty ref.
+    src_ref_sql = "" if src_type == "mongodb" else warehouse_sql_table_ref(
         src_type,
         src_cfg,
         str(
@@ -1567,7 +1614,8 @@ def _transform_applied_proof_impl(
         actual_rows = 0
         try:
             dst_cfg0 = resolve_connector_config(endpoint)
-            dest_ref0 = warehouse_sql_table_ref(
+            _mongo_dest = dest_db_type == "mongodb"
+            dest_ref0 = "" if _mongo_dest else warehouse_sql_table_ref(
                 dest_db_type,
                 dst_cfg0,
                 str(
@@ -1631,6 +1679,19 @@ def _transform_applied_proof_impl(
                 actual_checksum = canonical_checksum_from_iter(
                     _scoped_gen(
                         _proof_file_dest_batches(endpoint, dest_summary, dst_cfg0)
+                    ),
+                    digest_cols,
+                    dest_db_type=dest_db_type,
+                    dest_types=dest_types,
+                )
+            elif _mongo_dest:
+                # MongoDB has no SQL dialect: re-read the written collection
+                # through the Mongo reader (QA r12 D8).
+                actual_checksum = canonical_checksum_from_iter(
+                    _scoped_gen(
+                        _proof_mongo_dest_batches(
+                            endpoint=endpoint, dst_cfg=dst_cfg0, read_cols=sel_cols0
+                        )
                     ),
                     digest_cols,
                     dest_db_type=dest_db_type,

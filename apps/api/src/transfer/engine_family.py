@@ -85,6 +85,22 @@ def engine_family(kind: str | None) -> str:
     return _engine_family(raw) if raw else ""
 
 
+def is_schemaless_family(kind: str | None) -> bool:
+    """True when the engine behind ``kind`` declares no column schema.
+
+    Answered from the capability registry (``requires_schema``) for the
+    resolved family, so every Mongo tile (Atlas, DocumentDB, Cosmos DB for
+    MongoDB) answers like ``mongodb``. A field such a destination has never
+    held has no physical type to contradict a Map stamp.
+    """
+    family = engine_family(kind)
+    if not family:
+        return False
+    from services.connector_capability_registry import is_schemaless
+
+    return is_schemaless(family)
+
+
 def sql_duplex_family(kind: str | None) -> str:
     """``engine_family`` when it is a duplex SQL engine, else ``""``."""
     family = engine_family(kind)

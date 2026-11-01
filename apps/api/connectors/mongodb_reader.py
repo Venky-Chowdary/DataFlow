@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,8 @@ from services.json_intelligence import expand_mongo_documents
 from services.value_serializer import cell_to_string
 
 from .mongodb_common import _mongo_client, _new_mongo_client
+
+logger = logging.getLogger(__name__)
 
 
 def _cursor_boolean(value: str) -> bool | None:
@@ -420,6 +423,40 @@ def read_collection_cursor_batch(
     )
 
 
+def _open_scan_cursor(coll: Any, limit: int, *, no_timeout: bool) -> Any:
+    cursor = coll.find({}, no_cursor_timeout=no_timeout).sort("_id", 1)
+    try:
+        cursor = cursor.batch_size(max(1, int(limit)))
+    except Exception:
+        pass
+    return cursor
+
+
+def _next_scan_page(cursor: Any, n: int) -> list[dict[str, Any]]:
+    page: list[dict[str, Any]] = []
+    try:
+        for _ in range(n):
+            page.append(dict(next(cursor)))
+    except StopIteration:
+        pass
+    return page
+
+
+def _no_timeout_refused(exc: BaseException) -> bool:
+    """True when the server refused a ``noCursorTimeout`` find.
+
+    Atlas free (M0) and Flex clusters answer ``AtlasError`` 8000 "noTimeout
+    cursors are disallowed in this atlas tier" (QA r12 D1).
+    """
+    from pymongo.errors import OperationFailure
+
+    if not isinstance(exc, OperationFailure):
+        return False
+    details = getattr(exc, "details", None) or {}
+    text = f"{details.get('errmsg') or ''} {exc}".lower().replace(" ", "")
+    return "notimeoutcursor" in text
+
+
 def read_collection_scan_batch(
     *,
     cfg: dict[str, Any],
@@ -454,28 +491,37 @@ def read_collection_scan_batch(
             total = known_total_rows
         else:
             total = coll.count_documents({})
-        cursor = coll.find({}, no_cursor_timeout=True).sort("_id", 1)
-        try:
-            cursor = cursor.batch_size(max(1, int(limit)))
-        except Exception:
-            pass
         state.update(
             started=True,
             client=client,
-            cur=cursor,
+            coll=coll,
+            cur=_open_scan_cursor(coll, limit, no_timeout=True),
+            no_timeout=True,
             total=total,
             headers=list(columns or []),
             cfg=cfg,
         )
         publish_scan_order(state, ["_id"])
-    cursor = state["cur"]
-    page: list[dict[str, Any]] = []
     n = max(1, int(limit))
     try:
-        for _ in range(n):
-            page.append(dict(next(cursor)))
-    except StopIteration:
-        pass
+        page = _next_scan_page(state["cur"], n)
+    except Exception as exc:
+        # Atlas free / Flex tiers reject noTimeout cursors on the first find.
+        # Nothing has been read yet, so reopen the same scan without it.
+        if not (state.get("no_timeout") and _no_timeout_refused(exc)):
+            raise
+        logger.warning(
+            "MongoDB refused a noTimeout cursor on %s.%s (%s); scanning with "
+            "the server's idle cursor timeout instead",
+            database,
+            collection,
+            exc,
+        )
+        state["no_timeout"] = False
+        state["cur"] = _open_scan_cursor(state["coll"], limit, no_timeout=False)
+        page = _next_scan_page(state["cur"], n)
+    # Only the first find can be refused for noTimeout; later pages are getMores.
+    state["no_timeout"] = False
     if not page:
         headers = list(state.get("headers") or columns or [])
         total = state.get("total")

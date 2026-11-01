@@ -4990,6 +4990,8 @@ def require_physical_types_for_existing_table(
     physical: dict[str, str] | None,
     dialect_label: str = "destination",
     target_cols: list[str] | None = None,
+    destination_kind: str = "",
+    physical_sampled: bool = False,
 ) -> str | None:
     """Error when an existing table yields empty or incomplete physical DDL.
 
@@ -4997,8 +4999,19 @@ def require_physical_types_for_existing_table(
     Partial introspect (some cols missing) leaves Map stamps on those cols —
     refuse so overlay cannot soft-green empties into live DATE/INT.
     New / create-new tables may pass empty physical (Map stamps are physical).
+
+    A schemaless ``destination_kind`` (engine-family resolver) has no DDL: a
+    mapped field its sampled documents do not hold is a new field (additive
+    drift, or a field only ever NULL so far), not a missing carrier, so it is
+    not refused (QA r12 D10). An empty sample still refuses unless the caller
+    read it successfully (``physical_sampled``).
     """
     if not table_existed:
+        return None
+    from src.transfer.engine_family import is_schemaless_family
+
+    schemaless = bool(destination_kind) and is_schemaless_family(destination_kind)
+    if schemaless and (physical or physical_sampled):
         return None
     label = (dialect_label or "destination").strip() or "destination"
     if not physical:

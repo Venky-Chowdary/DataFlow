@@ -209,8 +209,13 @@ def _read_batch(*args, **kwargs):
         jitter=True,
     )
     source_type = args[0] if args else kwargs.get("src_type", "")
+    scan_state = kwargs.get("scan_state")
+    if not isinstance(scan_state, dict):
+        attempt = lambda: _read_batch_impl(*args, **kwargs)  # noqa: E731
+    else:
+        attempt = partial(_read_held_scan_page, scan_state, args, kwargs)
     return with_retry(
-        lambda: _read_batch_impl(*args, **kwargs),
+        attempt,
         budget=budget,
         on_transient=log_retry(
             "read_batch",
@@ -218,6 +223,34 @@ def _read_batch(*args, **kwargs):
             budget=budget,
         ),
     )
+
+
+def _read_held_scan_page(scan_state: dict, args: tuple, kwargs: dict):
+    """One attempt at a held snapshot scan page, safe to retry.
+
+    A failed attempt leaves ``scan_state`` holding a dead cursor. The next
+    attempt used to page that cursor, and pymongo reports a cursor whose find
+    failed as exhausted: the scan "ended" with zero rows. On the first page
+    that is "Source table has no columns or is empty" with every row unread
+    (QA r12 D1, Atlas refusing the noTimeout cursor); mid-scan it is a silent
+    truncation. A scan that has served nothing is closed so the retry reopens
+    it from the top; one that has served pages refuses to continue.
+    """
+    from connectors.sql_snapshot_scan import close_table_scan
+    from services.error_handling import HeldScanInterrupted
+
+    try:
+        batch = _read_batch_impl(*args, **kwargs)
+    except Exception as exc:
+        if scan_state.get("started"):
+            served = int(scan_state.get("pages_served") or 0)
+            close_table_scan(scan_state)
+            if served:
+                raise HeldScanInterrupted(served, exc) from exc
+        raise
+    if scan_state.get("started"):
+        scan_state["pages_served"] = int(scan_state.get("pages_served") or 0) + 1
+    return batch
 
 
 def _unwrap_read(result):
