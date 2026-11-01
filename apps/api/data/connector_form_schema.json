@@ -97,7 +97,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Same credentials as Blob: storage account access key, connection string, or a container-scoped SAS token.",
+      "Enter the filesystem (container) name — ADLS calls buckets filesystems.",
+      "For service-principal auth instead of keys: App registrations → client ID + secret, then give it Storage Blob Data Contributor on the account.",
+      "Test proves filesystem listing works — AuthorizationFailure is RBAC or the SAS scope."
+    ]
   },
   "avro": {
     "label": "Avro",
@@ -135,7 +140,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "bigquery": {
     "label": "BigQuery",
@@ -174,7 +185,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "In Google Cloud console → IAM & Admin → Service Accounts, create (or pick) a service account.",
+      "Grant it BigQuery Data Viewer on the source dataset, or BigQuery Data Editor + BigQuery Job User on the destination project.",
+      "Create a JSON key on the Keys tab and paste the whole JSON into Service account key.",
+      "Enter the project ID that owns the datasets — the key carries the identity, the project routes billing/quota.",
+      "Test proves the service account can list datasets — PERMISSION_DENIED means the roles, not the key file."
+    ]
   },
   "clickhouse": {
     "label": "ClickHouse",
@@ -251,7 +268,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get host and HTTP port (default 8123, or 8443 for TLS). ClickHouse Cloud: service → Connect shows the HTTPS endpoint.",
+      "Use the default user or a user with SELECT on source tables / INSERT on the destination database.",
+      "Self-hosted: open the port in the firewall — ClickHouse listens on 8123 only on localhost unless configured.",
+      "Test proves the HTTP interface answers — a refused connection is the bind/firewall, not auth."
+    ]
   },
   "couchbase": {
     "label": "Couchbase",
@@ -318,7 +340,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get the cluster host (couchbase://host or host:8091) plus a bucket-scoped user + password.",
+      "Capella: cluster → Connect shows the connection string; Database Access holds the credentials.",
+      "The user needs Bucket Read on sources or Bucket Write on the destination.",
+      "Test proves the cluster manager answers."
+    ]
   },
   "csv": {
     "label": "CSV",
@@ -356,7 +383,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "databricks": {
     "label": "Databricks",
@@ -433,7 +466,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Workspace URL is your host: https://<workspace>.cloud.databricks.com.",
+      "SQL warehouse → Connection details gives the HTTP path (e.g. /sql/1.0/warehouses/abc123) — paste it in HTTP path.",
+      "User profile → Settings → Developer → Access tokens → Generate new token. PATs expire — copy it immediately.",
+      "Test proves the token and HTTP path work against the warehouse."
+    ]
   },
   "docx": {
     "label": "Word (DOCX)",
@@ -471,7 +509,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "druid": {
     "label": "Apache Druid",
@@ -625,7 +669,11 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the .duckdb/.ddb file — a local path or an object-store URI.",
+      "No host, port, or credentials exist — DuckDB is an embedded database.",
+      "Test proves the file opens as a DuckDB database."
+    ]
   },
   "dynamodb": {
     "label": "Amazon DynamoDB",
@@ -678,7 +726,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Create an IAM access key pair in the AWS console (IAM → Users → Security credentials → Access keys).",
+      "Enter Access Key ID, Secret Access Key, and the region your tables live in (e.g. us-east-1).",
+      "The IAM policy needs dynamodb:Scan/Query/GetItem on source tables or PutItem/BatchWriteItem on the destination.",
+      "Least privilege: scope the policy to the specific table ARNs.",
+      "Test proves a list/describe call succeeds — InvalidClientTokenId is a bad key, not a table problem."
+    ]
   },
   "elasticsearch": {
     "label": "Elasticsearch",
@@ -782,7 +836,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get the endpoint URL (https://host:9200) plus an API key or elastic user + password.",
+      "Elastic Cloud: deployment → Manage → copy the endpoint, then Security → API keys to mint a key.",
+      "The API key needs read on source indices or create/write on the destination index.",
+      "Test proves the cluster answers — 401 is a bad key, a certificate error means TLS/self-signed needs attention."
+    ]
   },
   "email": {
     "label": "Email (SMTP)",
@@ -867,7 +926,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get the SMTP host, port (587 starttls or 465 TLS), user, and password/app-password from the mail provider.",
+      "Gmail needs an app password (account requires 2-Step Verification first) — the normal password is rejected.",
+      "Microsoft 365: smtp.office365.com — ask the admin whether SMTP AUTH is enabled for the mailbox.",
+      "Test proves a real authenticated login — 535 is auth, timeout is the port."
+    ]
   },
   "excel": {
     "label": "Excel",
@@ -906,7 +970,7 @@
     ],
     "common_fields": [],
     "setup_steps": [
-      "Pick Excel for a workbook file — not Snowflake.",
+      "Pick Excel for a workbook file — not a database.",
       "Provide a .xlsx path or object-store URI. Prefer .xlsx over legacy .xls.",
       "Test proves the file is readable. A missing path is not Connected."
     ]
@@ -1024,7 +1088,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "gcs": {
     "label": "Google Cloud Storage",
@@ -1055,7 +1125,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Console → IAM & Admin → Service Accounts → create a service account.",
+      "Grant Storage Object Viewer (read) or Storage Object Admin (write) on the bucket or project.",
+      "Keys tab → Add key → JSON — paste the whole JSON into Service account key.",
+      "Enter the bucket name exactly as the console shows it.",
+      "Test proves bucket listing works — 403 means the role is missing, invalid key JSON means the file was edited."
+    ]
   },
   "github": {
     "label": "GitHub",
@@ -1091,7 +1167,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "GitHub → Settings → Developer settings → Personal access tokens → fine-grained token.",
+      "Scope it to the repositories you sync with contents:read and metadata:read.",
+      "Enter the token and the owner/repo or organization to read.",
+      "Test proves the token answers — 401 is a bad token, 404 means the repo is not in scope."
+    ]
   },
   "html": {
     "label": "HTML",
@@ -1129,7 +1210,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "hubspot": {
     "label": "HubSpot",
@@ -1169,7 +1256,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Settings → Integrations → Private Apps → create a private app.",
+      "Give it the scopes the sync needs: crm.objects.contacts.read (and .write for destinations), plus companies/deals as required.",
+      "Copy the access token it shows — paste it in the token field.",
+      "Test proves the token answers — 401 is a revoked or mistyped token, 403 is a missing scope."
+    ]
   },
   "iceberg": {
     "label": "Apache Iceberg",
@@ -1235,7 +1327,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Iceberg tables live in a catalog — pick the one your platform issues credentials for: AWS Glue, a REST catalog, or Hadoop (warehouse path).",
+      "Glue: IAM access keys with glue:GetTable/GetDatabase plus S3 read/write on the warehouse location.",
+      "REST catalog (e.g. Polaris, Nessie, Tabular): catalog URI + bearer token or client credentials.",
+      "Enter the warehouse location (s3://bucket/warehouse/) and the namespace the tables live in.",
+      "Test proves the catalog lists namespaces — a 404 is the URI, a 403 is IAM."
+    ]
   },
   "intercom": {
     "label": "Intercom",
@@ -1294,7 +1392,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "id.atlassian.com → Security → API tokens → Create API token.",
+      "Enter your Atlassian email + the API token + site (yoursite.atlassian.net).",
+      "The account needs Browse projects permission on the projects you read.",
+      "Test proves /rest/api/3/myself answers — 401 is email/token, not the site URL."
+    ]
   },
   "json": {
     "label": "JSON",
@@ -1332,7 +1435,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "jsonl": {
     "label": "JSON Lines",
@@ -1370,7 +1479,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "kafka": {
     "label": "Apache Kafka",
@@ -1429,7 +1544,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get the bootstrap server list (host:9092) from your platform team — Confluent Cloud shows it under Cluster settings.",
+      "Auth: PLAIN/SCRAM username+password (Confluent API key + secret), or TLS certs for mTLS clusters.",
+      "The principal needs Read/Describe on source topics or Write/Create on destination topics.",
+      "Test proves a metadata call answers — SASL authentication failed is the key, timeout is the listener/VPC."
+    ]
   },
   "milvus": {
     "label": "Milvus",
@@ -1640,7 +1760,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Atlas: cluster → Connect → Drivers → copy the connection string (mongodb+srv://user:pass@cluster.mongodb.net/db).",
+      "Self-hosted: use mongodb://host:27017/database and the user's credentials.",
+      "The user needs read on the source databases (find/listCollections) or readWrite on the destination.",
+      "Atlas also needs your server's egress IP in Network Access — a timeout usually means the IP is not whitelisted, not bad credentials.",
+      "CDC and snapshot-consistent reads need a replica set — standalone mongod cannot do them."
+    ]
   },
   "mysql": {
     "label": "MySQL",
@@ -1717,7 +1843,14 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get host, port (default 3306), database, user, and password from your DBA or console (RDS → Connectivity, Cloud SQL, PlanetScale → Connect, Aiven → Service).",
+      "MariaDB, Percona, PlanetScale, SingleStore, and Aurora MySQL share this driver — same fields.",
+      "Grant the user SELECT on source tables or INSERT/CREATE on the destination schema.",
+      "Or paste a connection string: mysql://user:pass@host:3306/db.",
+      "For CDC or incremental syncs the user also needs REPLICATION privileges on MySQL.",
+      "Test proves TCP reachability plus login — Access denied means the password or host grant (user@host) is wrong."
+    ]
   },
   "neo4j": {
     "label": "Neo4j",
@@ -1784,7 +1917,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get the Bolt endpoint (host:7687) — Aura shows it under Connection URI.",
+      "Use the neo4j user or a user with read access on the source database.",
+      "Aura requires TLS — keep encryption on.",
+      "Test proves the Bolt handshake answers — unauthorized is credentials, timeout is routing."
+    ]
   },
   "oracle": {
     "label": "Oracle",
@@ -1843,7 +1981,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get host, port (default 1521), service name (or SID), user, and password from your DBA — the service name is usually in tnsnames.ora.",
+      "Autonomous Database: download the wallet and use the full connect descriptor or service name it defines.",
+      "The user needs SELECT on the source tables (or the destination schema privileges).",
+      "Test proves the listener answers and the login works — ORA-01017 is bad credentials, ORA-12541 is host/port."
+    ]
   },
   "orc": {
     "label": "ORC",
@@ -1881,7 +2024,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "parquet": {
     "label": "Parquet",
@@ -1919,7 +2068,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "pdf": {
     "label": "PDF",
@@ -1957,7 +2112,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "pgvector": {
     "label": "pgvector (PostgreSQL)",
@@ -2017,7 +2178,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get host, port (default 5432), database, user, and password from your DBA or cloud console (RDS → Connectivity, Cloud SQL → Connections, Neon/Supabase → Dashboard).",
+      "Hosted twins (Neon, Supabase, RDS, Aurora Postgres, TimescaleDB, CockroachDB, CNPG) use this same login — paste the host they show, SSL on.",
+      "The user needs CONNECT plus SELECT on the source tables, or CREATE/INSERT on the destination schema.",
+      "Or paste a connection string: postgresql://user:pass@host:5432/db?sslmode=require.",
+      "Test proves the driver can reach the host and log in — a role error is still 'connected', it just means grants are missing."
+    ]
   },
   "pinecone": {
     "label": "Pinecone",
@@ -2127,7 +2294,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get host, port (default 5432), database, user, and password from your DBA or cloud console (RDS → Connectivity, Cloud SQL → Connections, Neon/Supabase → Dashboard).",
+      "Hosted twins (Neon, Supabase, RDS, Aurora Postgres, TimescaleDB, CockroachDB, CNPG) use this same login — paste the host they show, SSL on.",
+      "The user needs CONNECT plus SELECT on the source tables, or CREATE/INSERT on the destination schema.",
+      "Or paste a connection string: postgresql://user:pass@host:5432/db?sslmode=require.",
+      "Test proves the driver can reach the host and log in — a role error is still 'connected', it just means grants are missing."
+    ]
   },
   "qdrant": {
     "label": "Qdrant",
@@ -2250,7 +2423,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get host, port (default 6379), and password (or username+password on Redis 6+ ACLs).",
+      "Valkey, KeyDB, and Dragonfly share this driver — same fields.",
+      "Cloud: Elasticache → Endpoint, Redis Cloud → Database endpoint, Upstash → console shows TLS URL.",
+      "Enable SSL/TLS if your provider requires it (most managed Redis does).",
+      "Test proves PING answers — WRONGPASS is auth, timeout is network/VPC."
+    ]
   },
   "redshift": {
     "label": "Amazon Redshift",
@@ -2372,7 +2551,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Console → cluster → Properties: copy the endpoint host (no port suffix) and port (default 5439).",
+      "Use the master user or a database user with SELECT on source schemas or CREATE/INSERT on the destination schema.",
+      "The endpoint is private inside a VPC by default — enable Publicly accessible or run Datawrap in the same VPC, and open the security group to our egress IP.",
+      "Test proves TCP + login — connection refused is the security group, password authentication failed is the user."
+    ]
   },
   "rest_api": {
     "label": "REST / OpenAPI",
@@ -2420,7 +2604,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Enter the base URL the vendor documents for API access — it is usually different from the app login page.",
+      "Pick the auth style the vendor issues: Bearer token, API key (header or query), Basic auth, or OAuth client credentials.",
+      "Get the credential from the vendor's developer console — every SaaS issues keys under Settings → Developers/API.",
+      "If the API paginates, name the page/next-cursor parameter in the advanced fields.",
+      "Test proves one authenticated GET answers — a 401 is the credential, a 404 is the URL."
+    ]
   },
   "s3": {
     "label": "Amazon S3",
@@ -2481,7 +2671,14 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Create an IAM access key pair (IAM → Users → Security credentials → Access keys) or use an instance role.",
+      "Enter Access Key ID, Secret Access Key, region, and the bucket name.",
+      "Policy needs s3:ListBucket + s3:GetObject to read, s3:PutObject (+ DeleteObject for overwrite) to write.",
+      "Least privilege: scope Resource to arn:aws:s3:::bucket and arn:aws:s3:::bucket/*.",
+      "S3-compatible stores (MinIO, Wasabi, R2, Spaces): same fields plus the endpoint URL.",
+      "Test proves ListBucket works — SignatureDoesNotMatch is the secret key, AccessDenied is the policy."
+    ]
   },
   "salesforce": {
     "label": "Salesforce",
@@ -2522,7 +2719,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Use your Salesforce username + password plus the security token (My Settings → Reset My Security Token — it arrives by email).",
+      "Or create a Connected App (Setup → App Manager → New Connected App) with OAuth scopes api and refresh_token for client-credentials login.",
+      "Enter the instance URL — https://yourorg.salesforce.com (or .sandbox for sandboxes).",
+      "Test proves OAuth login works — LOGIN_MUST_USE_SECURITY_TOKEN means append the token to the password."
+    ]
   },
   "sftp": {
     "label": "SFTP",
@@ -2617,8 +2819,10 @@
     ],
     "common_fields": [],
     "setup_steps": [
-      "Pick SFTP for a remote file host — not Snowflake.",
-      "Enter host, user, and the remote path to the CSV, Excel, or Parquet file.",
+      "Pick SFTP for a remote file host — not a database.",
+      "Enter host, port (default 22), username, and either the password or the private key file.",
+      "Key auth: the public key must already be in the server's authorized_keys — ask the host admin which they issued.",
+      "Enter the remote path to the CSV, Excel, or Parquet file (or directory for folder syncs).",
       "Test before you save. Then use Transfer to write into Postgres or Snowflake."
     ]
   },
@@ -2697,7 +2901,14 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get host, port (default 3306), database, user, and password from your DBA or console (RDS → Connectivity, Cloud SQL, PlanetScale → Connect, Aiven → Service).",
+      "MariaDB, Percona, PlanetScale, SingleStore, and Aurora MySQL share this driver — same fields.",
+      "Grant the user SELECT on source tables or INSERT/CREATE on the destination schema.",
+      "Or paste a connection string: mysql://user:pass@host:3306/db.",
+      "For CDC or incremental syncs the user also needs REPLICATION privileges on MySQL.",
+      "Test proves TCP reachability plus login — Access denied means the password or host grant (user@host) is wrong."
+    ]
   },
   "snowflake": {
     "label": "Snowflake",
@@ -2952,7 +3163,11 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the .db/.sqlite file — a local path or an object-store URI.",
+      "No host, port, or credentials exist — SQLite is a file.",
+      "Test proves the file exists and opens as a SQLite database."
+    ]
   },
   "sqlserver": {
     "label": "SQL Server",
@@ -3011,7 +3226,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Get server host, port (default 1433), database, and a login — SQL authentication (user + password) works on-premises and on Azure SQL.",
+      "RDS: use the master user or a login you created. Azure SQL: use the server admin or a contained database user — server name is like myserver.database.windows.net.",
+      "The login needs db_datareader on source databases or db_datawriter/db_ddladmin on the destination.",
+      "If your org uses Windows/Kerberos auth only, ask the DBA for a SQL-authenticated service account.",
+      "Test proves the TDS port and login — Login failed for user is auth, not network."
+    ]
   },
   "stripe": {
     "label": "Stripe",
@@ -3051,7 +3272,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Developers → API keys → copy a secret key (sk_live_… or sk_test_… for sandbox data).",
+      "Prefer a restricted key with read access on only the resources you sync (charges, customers, invoices).",
+      "Paste it in the API key field — treat it like a password, it moves money.",
+      "Test proves the key answers — a 401 means the key was rolled or mistyped."
+    ]
   },
   "synapse": {
     "label": "Azure Synapse",
@@ -3328,7 +3554,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "vertica": {
     "label": "Vertica",
@@ -3499,7 +3731,13 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   },
   "yaml": {
     "label": "YAML",
@@ -3537,6 +3775,12 @@
       }
     ],
     "common_fields": [],
-    "setup_steps": []
+    "setup_steps": [
+      "Provide the path to the file — a local path or an object-store URI (s3://, gs://, az://).",
+      "CSV/TSV: delimiter and header row are detected; set them explicitly if detection guesses wrong.",
+      "JSON/JSONL: JSON Lines is one object per line — use it for exports larger than memory.",
+      "Parquet/Avro/ORC carry their own schema — mapping is automatic.",
+      "Test proves the file opens and parses — a missing path is not Connected."
+    ]
   }
 }

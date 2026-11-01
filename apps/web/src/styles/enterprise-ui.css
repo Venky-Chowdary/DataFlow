@@ -8515,6 +8515,40 @@ details.df2-theater-v3-mapping-proof[open] .df2-theater-v3-mapping-proof-actions
   padding-right: 4px;
 }
 
+.df2-conn-help-links {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--df-border);
+}
+
+.df2-conn-help-links-label {
+  margin: 0 0 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--df-text-tertiary);
+}
+
+.df2-conn-help-link-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  gap: 6px;
+}
+
+.df2-conn-help-link-list a {
+  font-size: 13px;
+  color: var(--df-brand);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.df2-conn-help-link-list a:hover {
+  text-decoration: underline;
+}
+
 @media (max-width: 800px) {
   .df2-modal.df2-conn-setup {
     width: min(96vw, 1120px);

@@ -33,7 +33,7 @@ describe("connector form schema export", () => {
     assert.ok(schema.bigquery.auth_modes.some((m) => m.value === "service_account"));
     assert.ok(schema.mongodb.auth_modes[0].fields.some((f) => f.key === "authSource"));
     assert.ok(schema.snowflake.setup_steps.length >= 3);
-    assert.deepEqual(schema.postgresql.setup_steps, [], "generic guide is not exported as engine guidance");
+    assert.ok(schema.postgresql.setup_steps.length >= 3, "first-class engines export their own setup guidance");
     const sqlserverPort = schema.sqlserver.auth_modes[0].fields.find((f) => f.key === "port");
     assert.equal(sqlserverPort?.placeholder, "1433");
   });

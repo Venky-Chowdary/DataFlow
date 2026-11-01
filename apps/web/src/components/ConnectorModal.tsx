@@ -610,7 +610,7 @@ export function ConnectorModal({
     return mode.description || AUTH_MODE_DETAIL[mode.value];
   };
 
-  const setupGuide = getConnectorSetupGuide(resolvedType || type);
+  const setupGuide = getConnectorSetupGuide(type, resolvedType);
 
   const fieldSpan = (field: FormField): "full" | "half" => {
     if (
@@ -851,6 +851,26 @@ export function ConnectorModal({
                 <li key={stepText}>{stepText}</li>
               ))}
             </ol>
+            {setupGuide.links && setupGuide.links.length > 0 && (
+              <div className="df2-conn-help-links">
+                <p className="df2-conn-help-links-label">Where to get these credentials</p>
+                <ul className="df2-conn-help-link-list">
+                  {setupGuide.links.map((link) =>
+                    link.url.startsWith("#") ? (
+                      <li key={link.url}>
+                        <a href={link.url}>{link.label}</a>
+                      </li>
+                    ) : (
+                      <li key={link.url}>
+                        <a href={link.url} target="_blank" rel="noopener noreferrer">
+                          {link.label} ↗
+                        </a>
+                      </li>
+                    ),
+                  )}
+                </ul>
+              </div>
+            )}
           </aside>
         )}
 
