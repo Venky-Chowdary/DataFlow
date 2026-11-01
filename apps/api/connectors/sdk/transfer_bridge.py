@@ -64,6 +64,81 @@ def sdk_manifest_stream_identity(driver: str, stream: str) -> dict[str, Any]:
     return identity
 
 
+def _sdk_manifest(driver: str):
+    """Parsed declarative manifest for a registered SDK connector, else None."""
+    from pathlib import Path
+
+    from connectors.sdk.declarative.manifest import parse_manifest
+
+    driver = str(driver or "").strip().lower()
+    if not driver or get_sdk_connector(driver) is None:
+        return None
+    manifest_path = (
+        Path(__file__).parent / "declarative" / "manifests" / f"{driver}.json"
+    )
+    try:
+        return parse_manifest(json.loads(manifest_path.read_text(encoding="utf-8")))
+    except Exception:  # noqa: BLE001 — no manifest ⇒ nothing to list
+        return None
+
+
+def sdk_manifest_streams(driver: str) -> list[dict[str, Any]]:
+    """Every declared stream of a manifest connector: name, columns, native
+    types, primary key and cursor — for object pickers and introspection.
+
+    Streams are *declared*, not discovered: the list needs no credentials and
+    no network. Schema types go through the same JSON→native map as
+    ``read_object`` so a picker's columns agree with what the read stamps.
+    """
+    manifest = _sdk_manifest(driver)
+    if manifest is None:
+        return []
+    streams: list[dict[str, Any]] = []
+    for spec in manifest.streams:
+        schema = spec.json_schema if isinstance(spec.json_schema, dict) else {}
+        properties = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        entry: dict[str, Any] = {
+            "name": spec.name,
+            "columns": [str(name) for name in properties],
+            "schema": _native_types_props(properties),
+            "primary_key": list(spec.primary_key),
+        }
+        if spec.cursor:
+            entry["cursor_field"] = spec.cursor.field
+            entry["cursor_format"] = spec.cursor.format
+            entry["supported_sync_modes"] = ["full_refresh", "incremental"]
+        else:
+            entry["supported_sync_modes"] = ["full_refresh"]
+        streams.append(entry)
+    return streams
+
+
+def _native_types_props(properties: Any) -> dict[str, str]:
+    """Native-type map for a manifest json_schema properties object."""
+    result: dict[str, str] = {}
+    type_map = {
+        "array": "JSON",
+        "boolean": "BOOLEAN",
+        "integer": "INTEGER",
+        "number": "NUMERIC",
+        "object": "JSON",
+        "string": "TEXT",
+    }
+    if not isinstance(properties, Mapping):
+        return result
+    for name, definition in properties.items():
+        declared = (
+            definition.get("type") if isinstance(definition, Mapping) else definition
+        )
+        candidates = declared if isinstance(declared, list) else [declared]
+        for candidate in candidates:
+            native_type = type_map.get(str(candidate or ""))
+            if native_type:
+                result[str(name)] = native_type
+                break
+    return result
+
+
 def _connector_config(cfg: dict[str, Any], driver: str) -> dict[str, Any]:
     config = dict(cfg)
     extra = config.get("extra")

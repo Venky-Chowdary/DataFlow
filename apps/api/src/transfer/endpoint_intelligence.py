@@ -916,6 +916,18 @@ def _introspect_endpoint_impl(
             out["message"] = list_error or f"{fmt.title()} object list failed"
         return out
 
+    # SDK manifest connectors: streams are declared in the manifest, so the
+    # object picker works without credentials or network. check() still runs
+    # so the tile reports honest connectivity.
+    try:
+        from connectors.sdk import get_sdk_connector
+
+        _sdk_cls = get_sdk_connector(fmt)
+    except Exception:  # noqa: BLE001
+        _sdk_cls = None
+    if _sdk_cls is not None:
+        return _sdk_introspect(out, endpoint, cfg, fmt, _sdk_cls)
+
     if fmt in _SAAS_INTROSPECT_DRIVERS:
         return _saas_introspect(out, endpoint, cfg, fmt)
 
@@ -1698,6 +1710,57 @@ def _saas_introspect(
     for key in ("primary_key_columns", "unique_keys"):
         if info.get(key):
             out[key] = info[key]
+    return out
+
+
+def _sdk_introspect(
+    out: dict, endpoint: EndpointConfig, cfg: dict, fmt: str, sdk_cls: Any
+) -> dict:
+    """Manifest-declared introspection for SDK connectors.
+
+    Streams are declared in the connector manifest — the object picker lists
+    them without credentials or network. Connectivity is still probed through
+    ``check()`` when instantiation succeeds, so the tile reports honestly.
+    """
+    from connectors.sdk.transfer_bridge import sdk_manifest_streams
+
+    streams = sdk_manifest_streams(fmt)
+    if not streams:
+        out["message"] = f"Introspection for `{fmt}` not yet implemented"
+        return out
+
+    obj = (endpoint.table or endpoint.collection or "").strip()
+    names = [s["name"] for s in streams]
+    out["objects"] = _operator_visible_objects(names, "table")
+    if obj and obj not in set(names):
+        # check() needs credentials; a wrong stream name is a different failure
+        # than a bad key — name it for the operator either way.
+        out["message"] = (
+            f"`{obj}` is not a declared {fmt} stream — pick from {len(names)}: "
+            + ", ".join(names[:10])
+            + ("…" if len(names) > 10 else "")
+        )
+        return out
+
+    try:
+        instance = sdk_cls({**cfg, "type": fmt})
+        ok, message = instance.check()
+        out["connected"] = bool(ok)
+        out["message"] = message or (
+            f"{fmt} connected — {len(names)} stream(s)" if ok else f"{fmt} probe failed"
+        )
+    except Exception as exc:  # noqa: BLE001 — bad creds/config, streams still list
+        out["connected"] = False
+        out["message"] = f"{fmt} probe failed: {exc}"
+
+    if obj:
+        spec = next((s for s in streams if s["name"] == obj), None)
+        if spec:
+            out["table_exists"] = True
+            out["columns"] = list(spec["columns"])
+            out["schema"] = dict(spec["schema"])
+            if spec.get("primary_key"):
+                out["primary_key_columns"] = list(spec["primary_key"])
     return out
 
 
